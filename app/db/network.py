@@ -43,6 +43,35 @@ def _load(value: Any, default=None):
 # Schema
 # ---------------------------------------------------------------------------
 
+def drop_legacy_sync_ops_index(cursor) -> bool:
+    """Best-effort index retirement; busy shared databases retry on next boot."""
+    import psycopg2
+
+    if not isinstance(cursor, psycopg2.extensions.cursor):
+        cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+        return True
+    cursor.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
+    if cursor.fetchone()["name"] is None:
+        return True
+    cursor.execute("SAVEPOINT sp_sync_ops_record_index")
+    try:
+        cursor.execute("SHOW lock_timeout")
+        previous = cursor.fetchone()["lock_timeout"]
+        cursor.execute("SET LOCAL lock_timeout = '1s'")
+        cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
+    except psycopg2.errors.LockNotAvailable:
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        logger.warning("Deferring legacy sync-op index removal until next boot: table busy")
+        return False
+    except Exception:
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        raise
+    finally:
+        cursor.execute("RELEASE SAVEPOINT sp_sync_ops_record_index")
+    return True
+
+
 def create_schema(cursor) -> None:
     # Owner-produced display state only: never runner leases or executable work.
     cursor.execute("""
@@ -127,8 +156,8 @@ def create_schema(cursor) -> None:
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record_ingest ON sync_ops(collection, record_id, ingest_id)")
     # The covering index also serves its leading (collection, record_id) prefix.
-    # This idempotent migration runs in a transaction, just like CREATE above.
-    cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+    # This migration is transactional; do not wait indefinitely for its lock.
+    drop_legacy_sync_ops_index(cursor)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_records (
             collection TEXT NOT NULL,

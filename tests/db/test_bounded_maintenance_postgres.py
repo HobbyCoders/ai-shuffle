@@ -206,6 +206,50 @@ def test_general_maintenance_retention_each_delete(pg, target, stopping):
     assert len(queries) == before
 
 
+def test_notification_cap_pages_owners_and_keeps_timestamp_ties_and_nulls(pg):
+    sql, queries, commits, stop, state, _ = pg
+    sql("CREATE TABLE notifications(id TEXT PRIMARY KEY, user_id TEXT, created_at TIMESTAMPTZ)")
+    for owner in (None, "a", "b", "c"):
+        for i in range(7):
+            sql("INSERT INTO notifications VALUES (%s,%s,%s)",
+                (f"{owner}-{i}", owner, f"2998-01-0{i + 1}"))
+    for i in range(7):
+        sql("INSERT INTO notifications VALUES (%s,'ties','2998-01-01')", (f"tie-{i}",))
+        sql("INSERT INTO notifications VALUES (%s,'nulls',NULL)", (f"null-{i}",))
+    sql("INSERT INTO notifications VALUES ('older-than-null','nulls','2999-01-01')")
+    assert database._prune_notifications_cap(3, stop=stop) == 25
+    assert max(commits) == 2
+    for owner in (None, "a", "b", "c"):
+        rows = sql("SELECT id FROM notifications WHERE user_id IS NOT DISTINCT FROM %s", (owner,))
+        assert {r["id"] for r in rows} == {f"{owner}-{i}" for i in (4, 5, 6)}
+    assert len(sql("SELECT id FROM notifications WHERE user_id='ties'")) == 3
+    assert len(sql("SELECT id FROM notifications WHERE user_id='nulls' AND created_at IS NULL")) == 3
+    assert not sql("SELECT id FROM notifications WHERE id='older-than-null'")
+    assert not any("ROW_NUMBER" in q for q in queries)
+    # One bounded newest-row lookup per owner, not one whole-table window per batch.
+    assert sum("ORDER BY created_at DESC LIMIT" in q for q in queries) == 6
+    stop.set()
+    before = len(queries)
+    assert database._prune_notifications_cap(3, stop=stop) == 0
+    assert len(queries) == before
+
+
+def test_notification_cap_uses_fixed_cutoff_and_preserves_refreshed_rows(pg, monkeypatch):
+    sql, queries, commits, stop, state, _ = pg
+    sql("CREATE TABLE notifications(id TEXT PRIMARY KEY, user_id TEXT, created_at TIMESTAMPTZ)")
+    for i in range(7):
+        sql("INSERT INTO notifications VALUES (%s,'owner',%s)", (str(i), f"2998-01-0{i + 1}"))
+    original = retention.mutate_batches
+    def concurrent_refresh(*args, **kwargs):
+        sql("UPDATE notifications SET created_at='2999-01-01' WHERE id='0'")
+        sql("INSERT INTO notifications VALUES ('new','owner','2999-01-02')")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(retention, "mutate_batches", concurrent_refresh)
+    assert database._prune_notifications_cap(3, stop=stop) == 3
+    assert {r["id"] for r in sql("SELECT id FROM notifications")} == {"0", "4", "5", "6", "new"}
+    assert sum("ORDER BY created_at DESC LIMIT" in q for q in queries) == 2  # NULL and owner
+
+
 @pytest.mark.parametrize("kind", ["age", "warning", "cap"])
 @pytest.mark.parametrize("stopping", [False, True])
 def test_error_log_retention(pg, monkeypatch, kind, stopping):
@@ -223,6 +267,51 @@ def test_error_log_retention(pg, monkeypatch, kind, stopping):
     before = len(queries)
     assert error_logs.prune_errors(stop=stop) == 0
     assert len(queries) == before
+
+
+def test_index_retirement_defers_busy_table_and_restores_lock_timeout(pg):
+    sql, queries, commits, stop, state, connect = pg
+    with connect(False) as conn:
+        network.create_schema(conn.cursor())
+    sql("CREATE INDEX idx_sync_ops_record ON sync_ops(collection, record_id)")
+    with connect(False) as reader:
+        reader.cursor().execute("SELECT ingest_id FROM sync_ops")
+        with connect(False) as upgrade:
+            cur = upgrade.cursor()
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            assert not network.drop_legacy_sync_ops_index(cur)
+            cur.execute("SHOW lock_timeout")
+            assert cur.fetchone()["lock_timeout"] == "5s"
+            cur.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
+            assert cur.fetchone()["name"] is not None  # outer transaction usable
+    with connect(False) as retry:
+        cur = retry.cursor()
+        cur.execute("SET LOCAL lock_timeout = '5s'")
+        assert network.drop_legacy_sync_ops_index(cur)
+        cur.execute("SHOW lock_timeout")
+        assert cur.fetchone()["lock_timeout"] == "5s"
+    assert not sql("SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_sync_ops_record'")
+
+
+def test_boot_retries_deferred_index_even_with_matching_migration_fingerprint(pg, monkeypatch):
+    sql, queries, commits, stop, state, connect = pg
+    sql("CREATE TABLE schema_version(version INTEGER PRIMARY KEY)")
+    sql("INSERT INTO schema_version VALUES (%s)", (database.SCHEMA_VERSION,))
+    sql("CREATE TABLE system_settings(key TEXT PRIMARY KEY, value TEXT)")
+    sql("INSERT INTO system_settings VALUES (%s,%s)",
+        (database.MIGRATIONS_FINGERPRINT_KEY, database.migrations_fingerprint()))
+    with connect(False) as conn:
+        network.create_schema(conn.cursor())
+    sql("CREATE INDEX idx_sync_ops_record ON sync_ops(collection, record_id)")
+    def unexpected_migration(*args):
+        pytest.fail("a matching fingerprint must not replay all column migrations")
+    monkeypatch.setattr(database, "_run_column_migrations", unexpected_migration)
+    with connect(False) as reader:
+        reader.cursor().execute("SELECT ingest_id FROM sync_ops")
+        database.init_database()  # timeout is nonfatal and the index remains
+        assert sql("SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_sync_ops_record'")
+    database.init_database()  # next boot, same fingerprint, now no blocking reader
+    assert not sql("SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_sync_ops_record'")
 
 
 def test_index_upgrade_and_real_explain(pg):
@@ -296,11 +385,13 @@ def test_assistant_retains_per_pass_budget_and_protected_rows(pg, step, stopping
         else:
             sql(f"INSERT INTO {table} VALUES (%s,'a',%s)", (str(i), age))
     state["stop_after_commit"] = stopping
-    assert assistant.retention_sweep("a", stop=stop)[step] == 2
+    drains = step in {"remote_costs_deleted", "limit_stops_deleted"}
+    assert assistant.retention_sweep("a", stop=stop)[step] == (5 if drains and not stopping else 2)
     assert max(commits) == 2
     if not stopping:
-        assert assistant.retention_sweep("a", stop=stop)[step] == 2
-        assert assistant.retention_sweep("a", stop=stop)[step] == 1
+        if not drains:
+            assert assistant.retention_sweep("a", stop=stop)[step] == 2
+            assert assistant.retention_sweep("a", stop=stop)[step] == 1
         assert assistant.retention_sweep("a", stop=stop)[step] == 0
     stop.set()
     before = len(queries)

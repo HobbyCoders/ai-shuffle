@@ -782,11 +782,13 @@ def retention_sweep(assistant_id, at=None, *, stop=None):
         f"assistant_id=%s AND status NOT IN ({held_sql}) AND observed_at < %s AND payload <> %s",
         (assistant_id, *held, scrub_before, SCRUBBED_PAYLOAD),
         update="payload=%s", update_params=(SCRUBBED_PAYLOAD,), **common)
-    # Hygiene is not on remote-cost booking or turn-stop admission's critical path.
+    # Hygiene formerly drained on every booking/stop. Drain it off-loop rather
+    # than applying the event-history budget and falling behind busy assistants.
+    hygiene = dict(stop=stop, batch_size=RETENTION_BATCH)
     counts["remote_costs_deleted"] = mutate_batches("assistant_remote_costs",
-        "assistant_id=%s AND booked_at < %s", (assistant_id, at - REMOTE_COST_RETENTION), **common)
+        "assistant_id=%s AND booked_at < %s", (assistant_id, at - REMOTE_COST_RETENTION), **hygiene)
     from app.db.assistant_limits import STOP_RETENTION
     counts["limit_stops_deleted"] = mutate_batches("assistant_limit_stops",
         "assistant_id=%s AND created_at < %s", (assistant_id, at - STOP_RETENTION),
-        keys=("turn_id",), **common)
+        keys=("turn_id",), **hygiene)
     return counts

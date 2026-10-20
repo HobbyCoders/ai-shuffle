@@ -152,14 +152,16 @@ def test_peer_schema_upgrade_preserves_ops_pending_and_sequence_scope(pg):
         store.set_watermark(cursor, "origin", 2, 3)
         store.set_watermark(cursor, "other", 1, 7)
         store.stash_pending(cursor, envelope(5))
-        # Recreate an absent index as on an older installation, without losing queued work.
-        cursor.execute("DROP INDEX idx_sync_ops_record")
+        # Upgrade an older installation without losing queued work.
+        cursor.execute("CREATE INDEX idx_sync_ops_record ON sync_ops(collection, record_id)")
         store.create_schema(cursor)
         store.create_schema(cursor)
     with connect(schema) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
-        assert cursor.fetchone()["name"] == "idx_sync_ops_record"
+        assert cursor.fetchone()["name"] is None
+        cursor.execute("SELECT to_regclass('idx_sync_ops_record_ingest') AS name")
+        assert cursor.fetchone()["name"] == "idx_sync_ops_record_ingest"
         cursor.execute("SELECT envelope FROM sync_ops")
         assert cursor.fetchone()["envelope"] == envelope(1)
         assert store.local_watermarks(conn) == {"origin": {"1": 1, "2": 3}, "other": {"1": 7}}

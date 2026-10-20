@@ -3346,6 +3346,10 @@ def init_database():
         )
 
         if up_to_date:
+            # Optional index retirement may have hit lock_timeout during the
+            # migration. Retry on boot even with a current source fingerprint.
+            from app.db.network import drop_legacy_sync_ops_index
+            drop_legacy_sync_ops_index(cursor)
             logger.debug(
                 "Schema already at version %d with matching migration "
                 "fingerprint — skipping the column-migration pass",
@@ -3367,6 +3371,59 @@ def init_database():
 #: Days of ``usage_log`` the maintenance pass keeps. The Stats page's longest
 #: range is 90 days; owner decision 2026-10-01: keep 400, delete older.
 USAGE_LOG_RETENTION_DAYS = 400
+
+
+def _prune_notifications_cap(cap, *, stop=None):
+    """Fix each owner's retention cutoff once, then page deletes by primary key.
+
+    The existing (user_id, created_at DESC) index supplies the newest ``cap``
+    rows without re-ranking the whole table for every batch. Keep that exact
+    bounded set at timestamp ties (including PostgreSQL's DESC NULLS FIRST).
+    Newer/refreshed rows cannot match the fixed cutoff; concurrent new history
+    may temporarily leave more than ``cap`` until the next pass.
+    """
+    from app.db.retention import BATCH_SIZE, mutate_batches, set_timeout
+
+    total = 0
+    after = None
+    while stop is None or not stop.is_set():
+        with get_db() as conn:
+            cur = conn.cursor()
+            set_timeout(cur)
+            boundary = " AND user_id > %s" if after is not None else ""
+            params = (after,) if after is not None else ()
+            cur.execute("SELECT DISTINCT user_id FROM notifications WHERE user_id IS NOT NULL"
+                        + boundary + " ORDER BY user_id LIMIT %s", (*params, BATCH_SIZE))
+            owners = [row["user_id"] for row in cur.fetchall()]
+        # NULL is a separate owner bucket, just as in the old PARTITION BY.
+        page = ([None] if after is None else []) + owners
+        for owner in page:
+            if stop is not None and stop.is_set():
+                return total
+            owner_sql = "user_id IS NULL" if owner is None else "user_id = %s"
+            owner_params = () if owner is None else (owner,)
+            with get_db() as conn:
+                cur = conn.cursor()
+                set_timeout(cur)
+                cur.execute("SELECT id, created_at FROM notifications WHERE " + owner_sql
+                            + " ORDER BY created_at DESC LIMIT %s", (*owner_params, cap))
+                kept = cur.fetchall()
+            if len(kept) < cap:
+                continue
+            cutoff = kept[-1]["created_at"]
+            predicate = owner_sql
+            params = owner_params
+            if cutoff is not None:
+                predicate += " AND created_at <= %s"
+                params += (cutoff,)
+            # At a NULL cutoff all non-NULL dates are older as well.
+            predicate += " AND id NOT IN (" + ", ".join(["%s"] * len(kept)) + ")"
+            params += tuple(row["id"] for row in kept)
+            total += mutate_batches("notifications", predicate, params, stop=stop)
+        if len(owners) < BATCH_SIZE:
+            break
+        after = owners[-1]
+    return total
 
 
 def run_database_maintenance(skip_vacuum: bool = False, *, stop=None) -> dict:
@@ -3406,16 +3463,17 @@ def run_database_maintenance(skip_vacuum: bool = False, *, stop=None) -> dict:
         "git_ops": ("git_ops", "status IN ('done', 'error') AND updated_at < %s", (cutoff_7d,)),
         "upload_blobs": ("upload_blobs", "created_at < %s", (cutoff_7d,)),
         "notifications_age": ("notifications", "created_at < %s", (cutoff_30d,)),
-        "notifications_cap": ("notifications", """id IN (
-            SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
-                PARTITION BY user_id ORDER BY created_at DESC) AS rn
-                FROM notifications) ranked WHERE rn > %s)""", (NOTIFICATIONS_PER_USER_CAP,)),
     }
     for name, (table, predicate, params) in jobs.items():
         try:
             results[f"cleaned_{name}"] = mutate_batches(table, predicate, params, stop=stop)
         except Exception as e:
             results[f"cleaned_{name}"] = f"error: {e}"
+    try:
+        results["cleaned_notifications_cap"] = _prune_notifications_cap(
+            NOTIFICATIONS_PER_USER_CAP, stop=stop)
+    except Exception as e:
+        results["cleaned_notifications_cap"] = f"error: {e}"
 
     try:
         from app.core.config import settings as _settings
