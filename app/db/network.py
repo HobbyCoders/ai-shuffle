@@ -60,7 +60,7 @@ def drop_legacy_sync_ops_index(cursor) -> bool:
         cursor.execute("SET LOCAL lock_timeout = '1s'")
         cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
         cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
-    except psycopg2.errors.LockNotAvailable:
+    except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected):
         cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
         logger.warning("Deferring legacy sync-op index removal until next boot: table busy")
         return False
