@@ -165,7 +165,7 @@ class PlayWorkflowTests(unittest.TestCase):
         full = (listing / "full-description.txt").read_text()
         self.assertIn("Local use stays free", full)
         self.assertIn("two remote workers", full)
-        self.assertIn("three remote-worker seats", full)
+        self.assertIn("four remote-worker seats", full)
         self.assertNotIn("sold separately", full)
         self.assertIn("https://hobbycoders.com/delete-account", full)
 
