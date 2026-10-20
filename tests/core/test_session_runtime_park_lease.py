@@ -400,6 +400,106 @@ async def test_finalizing_tick_before_the_write_keeps_renewing_or_exits_quietly(
     assert turns_db.get_turn(turn["id"])["state"] == outcome
 
 
+@pytest.mark.parametrize("phase", ["background", "adapter"])
+@pytest.mark.parametrize("renewal", ["rejected", "expired", "error"])
+async def test_stop_during_slow_teardown_does_not_lose_the_lease_again(
+    mock_db, monkeypatch, caplog, phase, renewal,
+):
+    """Stop intent precedes teardown, not just the eventual finalize write."""
+    sid = "stop-heartbeat"
+    turn = turns_db.enqueue_turn(sid, "provider_agent", prompt="work")
+    runtime = session_runtime.SessionRuntime(turn)
+    pumping = asyncio.Event()
+    stopping = asyncio.Event()
+    heartbeat_done = asyncio.Event()
+    finish_pump = asyncio.Event()
+    real_loop = runtime._renew_loop
+    rejected = []
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.001)
+    if renewal == "expired":
+        monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.001)
+        monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.01)
+    elif renewal == "error":
+        monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.02)
+
+    async def pump(**kwargs):
+        pumping.set()
+        await finish_pump.wait()
+        yield {"type": "interrupted", "metadata": {}}
+
+    async def heartbeat(*args):
+        await stopping.wait()
+        try:
+            await real_loop(*args)
+        finally:
+            heartbeat_done.set()
+
+    async def renew(fn, *args):
+        assert runtime._interrupt_driving
+        assert not runtime._lease_finalizing
+        if renewal == "error":
+            await asyncio.sleep(0.03)
+            raise RuntimeError("SQL timeout during stop")
+        ok = await asyncio.to_thread(fn, *args)
+        rejected.append(ok)
+        return ok
+
+    async def slow_stop():
+        assert runtime._interrupt_driving
+        assert not runtime._lease_finalizing
+        if renewal == "rejected":
+            # The supervisor's killed-worker settlement can beat execute's
+            # finalize. Exercise the real producer of a rejected renewal.
+            assert turns_db.settle_turn(turn["id"], "aborted", "agent_stopped")
+        stopping.set()
+        await asyncio.wait_for(heartbeat_done.wait(), 2)
+        assert runtime._abort_reason is None
+        assert not runtime._unowned
+        finish_pump.set()
+
+    async def background(*args, **kwargs):
+        if phase == "background":
+            await slow_stop()
+
+    async def adapter(*args, **kwargs):
+        if phase == "adapter":
+            await slow_stop()
+
+    with _runtime_env(pump=pump) as env, patch.object(
+        runtime, "_renew_loop", new=heartbeat,
+    ), patch.object(session_runtime, "run_lease", new=renew), patch.object(
+        runtime, "_on_lease_lost", wraps=runtime._on_lease_lost,
+    ) as lost, patch.object(runtime, "_stop_unowned", wraps=runtime._stop_unowned) as unowned, patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", side_effect=background,
+    ), patch("app.core.query_session_lifecycle.interrupt_session", side_effect=adapter) as interrupt:
+        execution = asyncio.create_task(runtime.execute())
+        try:
+            await asyncio.wait_for(pumping.wait(), 2)
+            assert turns_db.interrupt_turn(sid, "stop", True, source="agent_stopped")
+            assert await asyncio.wait_for(runtime.interrupt("stop"), 3) == "aborted"
+            assert await asyncio.wait_for(execution, 3) == "aborted"
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+
+    assert heartbeat_done.is_set()
+    assert rejected == ([False] if renewal == "rejected" else [])
+    lost.assert_not_called()
+    unowned.assert_not_called()
+    interrupt.assert_awaited_once_with(sid)
+    assert runtime._abort_reason is None
+    assert not runtime._unowned
+    settled = turns_db.get_turn(turn["id"])
+    assert settled["state"] == "aborted"
+    assert settled["stop_reason"] == ("agent_stopped" if renewal == "rejected" else "interrupted")
+    assert settled["payload"]["interrupt_source"] == "agent_stopped"
+    assert runs_db.get_active_run(sid) is None
+    env["record_parked"].assert_not_awaited()
+    assert "lease lost" not in caplog.text
+    assert "lease renewal lost" not in caplog.text
+    assert "past the" not in caplog.text
+
+
 async def test_finalizing_tick_after_local_ttl_exits_quietly(mock_db, monkeypatch):
     turn = turns_db.enqueue_turn("final-expired-heartbeat", "user", prompt="finish")
     runtime = session_runtime.SessionRuntime(turn)
