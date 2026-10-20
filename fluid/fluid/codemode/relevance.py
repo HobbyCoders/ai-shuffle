@@ -2,7 +2,7 @@
 
 No model call, embedding service or persistent query log. Stop words keep short
 continuations from retrieving spurious matches; whole words avoid matching
-substrings in unrelated prose. Recall's explicit substring search remains unchanged.
+substrings in unrelated prose. Explicit Recall also preserves short acronyms.
 """
 from __future__ import annotations
 
@@ -24,6 +24,17 @@ def query_terms(text: str) -> frozenset[str]:
     return frozenset(
         list(dict.fromkeys(w for w in words if len(w) >= 3 and w not in _STOP))[:64]
     )
+
+
+def recall_terms(text: str) -> frozenset[str]:
+    """Bounded distinct Recall keywords, including short names such as uv/UI.
+
+    Unlike automatic task matching, an explicit search may intentionally name
+    a two-character tool. Punctuation separates key/path components; stop words
+    never earn relevance merely by appearing in ordinary prose.
+    """
+    words = re.findall(r"[^\W_]+", text[:4000].casefold())
+    return frozenset(list(dict.fromkeys(w for w in words if w not in _STOP))[:64])
 
 
 def relevance(text: str, terms: frozenset[str]) -> int:
