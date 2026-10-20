@@ -46,12 +46,12 @@ def test_archived_scope_and_conflict_screens_still_apply(tmp_path):
 
 async def test_skill_results_rank_before_limit_and_do_not_match_build_for_ui(tmp_path):
     store = SkillStore(tmp_path)
-    # Handler fixture exercises the index consumer without persisting fake code.
-    store.list = lambda: [SimpleNamespace(name="build", description="Build a binary", uses=0),
-                         SimpleNamespace(name="theme", description="Theme palette", uses=0),
-                         SimpleNamespace(name="ui_theme", description="UI theme colors", uses=0)]
-    store.archived_skills = lambda: []
-    ctx = ToolCtx(extra={"recall_store": store})
+    for name, description in (("build", "Build a binary"), ("theme", "Theme palette"),
+                              ("ui_theme", "UI theme colors")):
+        store.save(name, f'"""{description}."""\ndef helper():\n    return 1\n')
+    # Drive persistence and index production, not a pre-ranked fake skill list.
+    reopened = SkillStore(tmp_path)
+    ctx = ToolCtx(extra={"recall_store": reopened})
     result = await handler({"query": "UI theme colors", "limit": 1}, ctx)
     assert "- ui_theme:" in result.text
     assert "- build:" not in result.text and "- theme:" not in result.text
