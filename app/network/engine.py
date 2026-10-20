@@ -1010,6 +1010,8 @@ class ApplyResult:
     reasons: List[str] = field(default_factory=list)
     blocked: List[dict] = field(default_factory=list)
     touched: List[Tuple[str, str, str]] = field(default_factory=list)
+    # Private, post-commit continuations; never advertised as applied frontiers.
+    _pending_drains: set[Tuple[str, int]] = field(default_factory=set, repr=False)
 
     def retry_operation(self, data: Mapping[str, Any], reason: str) -> None:
         self.retry += 1
@@ -1079,8 +1081,8 @@ def _verify_recovery_origin(ctx: NetworkContext, env: Envelope) -> Member:
 
 
 def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None,
-                   result: Optional[ApplyResult] = None, _draining: bool = False) -> str:
-    """Apply one envelope.
+                   result: Optional[ApplyResult] = None) -> str:
+    """Apply one envelope; ``apply_batch`` drains buffered successors after commit.
 
     Returns ``applied`` | ``duplicate`` | ``pending`` | ``lost`` | ``rejected``.
     ``rejected`` means the op was refused for good and, when it was the next
@@ -1143,6 +1145,8 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
         raise ApplyError("stale incarnation")
     watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
     if env.origin_seq <= watermark:
+        # A previous catch-up may have stopped between committed chunks.
+        result._pending_drains.add((env.origin_device_id, env.origin_incarnation))
         return "duplicate"
     if env.origin_seq > watermark + 1:
         if env.origin_seq > watermark + PENDING_WINDOW:
@@ -1157,36 +1161,9 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     store.drop_pending_upto(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
     if env.origin_incarnation > highest and highest:
         store.clear_pending_stream(cursor, env.origin_device_id, highest)
-    # Drain buffered successors.
-    if not _draining:
-        next_seq = env.origin_seq + 1
-        while True:
-            buffered = store.pop_pending(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
-            if buffered is None:
-                break
-            try:
-                inner = apply_envelope(cursor, buffered, ctx=ctx, result=result, _draining=True)
-            except TransientApplyError as exc:
-                # Not applicable yet (a key or certificate from another stream
-                # is still on its way). Keep it buffered; the stream resumes
-                # here once it can be opened.
-                store.stash_pending(cursor, buffered)
-                result.retry_operation(buffered, str(exc))
-                break
-            except ApplyError as exc:
-                result.rejected += 1
-                result.reasons.append(str(exc))
-                store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
-                next_seq += 1
-                continue
-            if inner == "applied":
-                result.applied += 1
-            elif inner == "lost":
-                result.lost += 1
-            elif inner == "rejected":
-                result.rejected += 1
-            store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
-            next_seq += 1
+    # Continue only after this transaction commits, not recursively under its
+    # state lock. A legacy pending buffer can contain thousands of successors.
+    result._pending_drains.add((env.origin_device_id, env.origin_incarnation))
     return outcome
 
 
@@ -1716,6 +1693,62 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into.reasons.extend(part.reasons)
     into.blocked.extend(part.blocked[:max(0, 20 - len(into.blocked))])
     into.touched.extend(part.touched)
+    into._pending_drains.update(part._pending_drains)
+
+
+def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
+                         result: ApplyResult) -> None:
+    """Drain at most APPLY_CHUNK successors under one state lock.
+
+    Re-read the committed frontier after locking: another inbound request may
+    have drained this stream since the continuation was queued. The pending
+    rows and watermark move atomically; a failed commit leaves both retryable.
+    """
+    part = ApplyResult()
+    box = [0]
+    _deferred_clock.box = box
+    next_seq = 0
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            store.lock_state(cursor)
+            next_seq = store.get_watermark(cursor, origin, incarnation) + 1
+            for _ in range(APPLY_CHUNK):
+                buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
+                if buffered is None:
+                    break
+                _savepoint(cursor, "SAVEPOINT pending_envelope")
+                try:
+                    outcome = apply_envelope(cursor, buffered, ctx=ctx, result=part)
+                except ApplyError as exc:
+                    _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_envelope")
+                    _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
+                    if isinstance(exc, TransientApplyError):
+                        store.stash_pending(cursor, buffered)
+                        part.retry_operation(buffered, str(exc))
+                        break
+                    part.rejected += 1
+                    part.reasons.append(str(exc))
+                    store.set_watermark(cursor, origin, incarnation, next_seq)
+                else:
+                    _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
+                    _count_outcome(part, outcome)
+                part._pending_drains.discard((origin, incarnation))
+                next_seq += 1
+            else:
+                # A full chunk may have more successors; yield the lock first.
+                part._pending_drains.add((origin, incarnation))
+            if box[0]:
+                store.observe_clock(cursor, box[0])
+    except Exception:  # noqa: BLE001 - peer can resend from the committed frontier
+        logger.warning("Applying buffered operations failed", exc_info=True)
+        result.retry_operation({"origin_device_id": origin,
+                                "origin_incarnation": incarnation,
+                                "origin_seq": next_seq}, "buffered apply failed")
+        return
+    finally:
+        _deferred_clock.box = None
+    _merge_result(result, part)
 
 
 class _ChunkAbandoned(Exception):
@@ -1937,6 +1970,11 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                     continue
                 for data in chunk:
                     _apply_one(data, ctx, result)
+        while result._pending_drains:
+            streams = sorted(result._pending_drains)
+            result._pending_drains.clear()
+            for origin, incarnation in streams:
+                _apply_pending_chunk(origin, incarnation, ctx, result)
     finally:
         _batch_agent_deletions.ids = None
     if result.own_ahead:
