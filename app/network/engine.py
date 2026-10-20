@@ -246,6 +246,7 @@ def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext
     if publish:
         with _lock:
             previous = _context
+            retry_count = len(previous._pending_retries) if previous is not None else 0
             if (previous is not None and previous.network_id == ctx.network_id
                     and previous.device_id == ctx.device_id
                     and previous.identity.incarnation == ctx.identity.incarnation):
@@ -259,6 +260,9 @@ def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext
                         if previous.member(stream[0]) != ctx.member(stream[0]):
                             ctx._pending_retries.pop(stream, None)
             _context = ctx
+            retries_dropped = len(ctx._pending_retries) < retry_count
+        if retries_dropped:
+            _wake_pending()
     return ctx
 
 
@@ -321,6 +325,14 @@ def set_pending_kick(callback: Optional[Callable[[], None]]) -> None:
     """Wake only local catch-up, without triggering a new network exchange."""
     global _pending_kick
     _pending_kick = callback
+
+
+def _wake_pending() -> None:
+    if _pending_kick is not None:
+        try:
+            _pending_kick()
+        except Exception:  # noqa: BLE001 - durable work is still found at the next pass
+            logger.debug("Pending catch-up wake failed", exc_info=True)
 
 
 def set_kick(callback: Optional[Callable[[], None]]) -> None:
@@ -1730,8 +1742,27 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into._pending_drains.update(part._pending_drains)
 
 
+def _append_pending(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext) -> Optional[ApplyResult]:
+    """Use the existing validated append path, or retry under per-op savepoints."""
+    part = ApplyResult()
+    _savepoint(cursor, "SAVEPOINT pending_append")
+    try:
+        appended = _apply_event_append(cursor, chunk, ctx, part, _from_pending=True)
+    except Exception as exc:  # noqa: BLE001 - a failed batch must not poison good predecessors
+        logger.debug("Buffered bulk append failed; falling back to per-op apply", exc_info=True)
+        if not type(cursor).__module__.startswith("psycopg2"):
+            # The shim has no savepoints: roll back the whole attempt first.
+            raise _ChunkAbandoned() from exc
+        _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_append")
+        _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
+        return None
+    _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
+    return part if appended else None
+
+
 PENDING_RETRY_BASE = 30.0
 PENDING_RETRY_MAX = 600.0
+PENDING_DEPENDENCY_RETRY_MAX = 60.0
 
 
 def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int, error: Exception) -> None:
@@ -1741,7 +1772,11 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
         old = ctx._pending_retries.get((origin, incarnation))
         if old is not None and old.seq == seq and now < old.until:
             return
-        delay = (min(PENDING_RETRY_MAX, old.delay * 2)
+        # These dependencies can recover without a membership/key change.
+        short_retry = isinstance(error, TransientApplyError) and str(error).startswith(
+            ("Referenced record has not arrived yet", "Credential storage is locked"))
+        ceiling = PENDING_DEPENDENCY_RETRY_MAX if short_retry else PENDING_RETRY_MAX
+        delay = (min(ceiling, old.delay * 2)
                  if old is not None and old.seq == seq else PENDING_RETRY_BASE)
         ctx._pending_retries[(origin, incarnation)] = _PendingRetry(seq, delay, now + delay)
     if not isinstance(error, ApplyError):
@@ -1750,8 +1785,8 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
 
 
 def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
-                         result: ApplyResult) -> None:
-    """Drain at most APPLY_CHUNK successors under one state lock.
+                         result: ApplyResult, *, _try_append: bool = True) -> bool:
+    """Drain at most APPLY_CHUNK successors; return whether the state lock was taken.
 
     Re-read the committed frontier after locking: another inbound request may
     have drained this stream since the continuation was queued. The pending
@@ -1761,6 +1796,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
     box = [0]
     _deferred_clock.box = box
     first_seq = next_seq = 0
+    locked = False
     failure = None
     try:
         with get_db() as conn:
@@ -1768,44 +1804,68 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             if not store.pending_ready(cursor, origin, incarnation):
                 with _lock:
                     ctx._pending_retries.pop((origin, incarnation), None)
-                return
+                return False
             store.lock_state(cursor)
+            locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
-            for _ in range(APPLY_CHUNK):
-                buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
-                if buffered is None:
-                    break
-                _savepoint(cursor, "SAVEPOINT pending_envelope")
-                try:
-                    outcome = apply_envelope(cursor, buffered, ctx=ctx, result=part)
-                except Exception as exc:  # noqa: BLE001 - isolate a bad buffered op
-                    _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_envelope")
-                    _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
-                    if not isinstance(exc, ApplyError) or isinstance(exc, TransientApplyError):
-                        failure = exc
-                        store.stash_pending(cursor, buffered)
-                        reason = str(exc) if isinstance(exc, TransientApplyError) else "buffered apply failed"
-                        part.retry_operation(buffered, reason)
-                        break
-                    part.rejected += 1
-                    part.reasons.append(str(exc))
-                    store.set_watermark(cursor, origin, incarnation, next_seq)
-                else:
-                    _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
-                    _count_outcome(part, outcome)
-                part._pending_drains.discard((origin, incarnation))
-                next_seq += 1
+            window = (store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
+                      if _try_append else [])
+            # Alternate event runs with general per-op runs, leaving the rest
+            # buffered for the next transaction. One metadata update must not
+            # send all the neighboring transcript events down the slow path.
+            events, run = next(groupby(window, key=lambda data: isinstance(data, Mapping)
+                                      and data.get("collection") == "session_events"
+                                      and data.get("op") == "upsert"), (False, ()))
+            pending = list(run)
+            more = len(window) == APPLY_CHUNK or len(pending) < len(window)
+            appended = _append_pending(cursor, pending, ctx) if events else None
+            if appended is not None:
+                part = appended
+                store.delete_pending_prefix(cursor, origin, incarnation, next_seq, len(pending))
+                box[0] = max(int(data["clock"]) for data in pending)
+                if more:
+                    part._pending_drains.add((origin, incarnation))
             else:
-                # A full chunk may have more successors; yield the lock first.
-                part._pending_drains.add((origin, incarnation))
+                for _ in range(len(pending) or APPLY_CHUNK):
+                    buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
+                    if buffered is None:
+                        break
+                    _savepoint(cursor, "SAVEPOINT pending_envelope")
+                    try:
+                        outcome = apply_envelope(cursor, buffered, ctx=ctx, result=part)
+                    except Exception as exc:  # noqa: BLE001 - isolate a bad buffered op
+                        _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_envelope")
+                        _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
+                        if not isinstance(exc, ApplyError) or isinstance(exc, TransientApplyError):
+                            failure = exc
+                            store.stash_pending(cursor, buffered)
+                            reason = str(exc) if isinstance(exc, TransientApplyError) else "buffered apply failed"
+                            part.retry_operation(buffered, reason)
+                            break
+                        part.rejected += 1
+                        part.reasons.append(str(exc))
+                        store.set_watermark(cursor, origin, incarnation, next_seq)
+                    else:
+                        _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
+                        _count_outcome(part, outcome)
+                    part._pending_drains.discard((origin, incarnation))
+                    next_seq += 1
+                else:
+                    # A full window or a following run needs another turn;
+                    # the shim's no-peek fallback also yields after 64 ops.
+                    if more or not pending:
+                        part._pending_drains.add((origin, incarnation))
             if box[0]:
                 store.observe_clock(cursor, box[0])
+    except _ChunkAbandoned:
+        _apply_pending_chunk(origin, incarnation, ctx, result, _try_append=False)
+        return locked
     except Exception as exc:  # noqa: BLE001 - peer can resend from the committed frontier
         _pending_failed(ctx, origin, incarnation, first_seq, exc)
         result.retry_operation({"origin_device_id": origin,
                                 "origin_incarnation": incarnation,
                                 "origin_seq": first_seq}, "buffered apply failed")
-        return
+        return locked
     finally:
         _deferred_clock.box = None
     if failure is not None:
@@ -1814,10 +1874,11 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
         with _lock:
             ctx._pending_retries.pop((origin, incarnation), None)
     _merge_result(result, part)
+    return locked
 
 
 class _ChunkAbandoned(Exception):
-    """Roll the chunk back and apply its envelopes one transaction each."""
+    """Roll back a batch attempt before retrying through the general per-op path."""
 
 
 def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult) -> None:
@@ -1845,13 +1906,14 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
 
 
 def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
-                        result: ApplyResult) -> bool:
+                        result: ApplyResult, *, _from_pending: bool = False) -> bool:
     """Batch only fresh, contiguous events from a known remote session owner.
 
     Rewrites, holes, revocations, conflicts and malformed input use the normal
     savepoint path. No SQL write happens until the whole chunk is checked.
     The surrounding chunk transaction rolls back a failed bulk insert before
-    retrying envelopes individually.
+    retrying envelopes individually. Only the locked pending-drain path may
+    bypass the wire path's pending guard, after selecting a contiguous prefix.
     """
     if any(data.get("collection") != "session_events" or data.get("op") != OP_UPSERT for data in chunk):
         return False
@@ -1867,7 +1929,7 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
             return False
         highest = store.highest_incarnation(cursor, origin)
         watermark = store.get_watermark(cursor, origin, incarnation)
-        if incarnation < highest or store.count_pending(cursor, origin, incarnation):
+        if incarnation < highest or (not _from_pending and store.count_pending(cursor, origin, incarnation)):
             return False
         rows = []
         for index, env in enumerate(envs):
@@ -2005,11 +2067,8 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
     try:
         result = _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams,
                               _pending_chunk_limit=_pending_chunk_limit)
-        if result._pending_more and _pending_kick is not None:
-            try:
-                _pending_kick()
-            except Exception:  # noqa: BLE001 - durable work is still found at the next pass
-                logger.debug("Pending catch-up wake failed", exc_info=True)
+        if result._pending_more:
+            _wake_pending()
         return result
     finally:
         with _lock:
@@ -2088,8 +2147,8 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 if chunks >= _pending_chunk_limit:
                     result._pending_drains.update(streams[index:])
                     break
-                _apply_pending_chunk(origin, incarnation, ctx, result)
-                chunks += 1
+                if _apply_pending_chunk(origin, incarnation, ctx, result):
+                    chunks += 1
         # One background chunk per selected stream preserves fairness. The
         # loop yields without a timed sleep while a continuation is ready.
         for origin, incarnation in _pending_streams:

@@ -1003,6 +1003,28 @@ def pending_ready(cursor, origin: str, incarnation: int) -> bool:
     return cursor.fetchone() is not None
 
 
+def pending_prefix(cursor, origin: str, incarnation: int, seq: int, *, limit: int) -> List[dict]:
+    """Read a bounded contiguous prefix without consuming it before validation."""
+    cursor.execute(
+        """SELECT seq, envelope FROM sync_pending
+           WHERE origin_device_id=%s AND incarnation=%s AND seq>=%s AND seq<%s
+           ORDER BY seq""", (origin, incarnation, seq, seq + limit))
+    prefix = []
+    for row in cursor.fetchall():
+        if int(row["seq"]) != seq + len(prefix):
+            break
+        prefix.append(_load(row["envelope"], {}))
+    return prefix
+
+
+def delete_pending_prefix(cursor, origin: str, incarnation: int, seq: int, count: int) -> None:
+    """Consume only the prefix validated and applied in this transaction."""
+    cursor.execute(
+        """DELETE FROM sync_pending
+           WHERE origin_device_id=%s AND incarnation=%s AND seq>=%s AND seq<%s""",
+        (origin, incarnation, seq, seq + count))
+
+
 def pop_pending(cursor, origin: str, incarnation: int, seq: int) -> Optional[dict]:
     cursor.execute("SELECT envelope FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
                    (origin, incarnation, seq))

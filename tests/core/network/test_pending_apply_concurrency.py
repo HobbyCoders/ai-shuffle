@@ -51,10 +51,11 @@ def test_concurrent_same_stream_apply_is_exactly_once(pg_workers, private_cluste
     real_chunk = engine._apply_pending_chunk
 
     def chunk(*args):
-        real_chunk(*args)
+        locked = real_chunk(*args)
         if getattr(role, "name", "") == "drain" and not first_chunk_done.is_set():
             first_chunk_done.set()
             assert second_started.wait(10)
+        return locked
 
     monkeypatch.setattr(engine, "_apply_pending_chunk", chunk)
     try:
