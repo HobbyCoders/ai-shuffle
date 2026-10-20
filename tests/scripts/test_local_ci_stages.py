@@ -524,6 +524,7 @@ def test_repeated_kills_split_even_when_the_budget_exceeds_the_monitor(gate, mon
 
 def test_second_invocation_refuses_while_another_process_holds_the_lock(gate, tmp_path):
     import subprocess
+    import time
     _calls, args = gate
     lock = ci.records_path().with_name("full-stages.lock")
     holder = subprocess.Popen(
@@ -540,7 +541,18 @@ def test_second_invocation_refuses_while_another_process_holds_the_lock(gate, tm
     finally:
         holder.kill()  # an outright kill: the system drops its lock
         holder.wait()
-    assert step(args) == 0
+    # Windows may release a killed process's byte-range lock after wait()
+    # returns. Still require release, but allow a bounded delay under load.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            result = step(args)
+            break
+        except ci.Failure as error:
+            if "Another full --step invocation" not in str(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+    assert result == 0
     held = stages._claim(ci, lock)  # released at the end of the invocation
     stages._release(held)
 

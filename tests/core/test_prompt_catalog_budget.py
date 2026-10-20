@@ -89,7 +89,9 @@ def test_private_access_guidance_has_one_owner(native):
     request = next(s for s in specs if s.name.endswith("__RequestChatAccess")).description
     for rule in (
         "saved IDs, kinds and owner-chosen labels, never addresses or credentials",
-        "Reuse via saved_id; each session needs its own grant",
+        "Reuse via saved_id; unrelated sessions need their own grant",
+        "Local Task descendants reuse ancestor handles with unchanged scope, expiry and revocation",
+        "under their own confirmation mode; never across workers",
         "Scope, expiry and revocation apply in every permission mode",
         "skip confirmation only in bypass mode",
         "otherwise each needs a one-shot card decision",

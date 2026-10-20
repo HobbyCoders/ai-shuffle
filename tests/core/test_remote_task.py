@@ -63,6 +63,9 @@ class FakeNetwork:
         self.device_id = PARENT
         self.status = {PARENT: membership.STATUS_ACTIVE, TARGET: membership.STATUS_ACTIVE}
         self.runner = {"id": LOCAL_ME}
+        # Routing-only network double: shared membership stays locally pending
+        # until bootstrap supplies the signing state.
+        self.bootstrap_state = engine.BOOTSTRAP_SYNCING
 
     def member(self, device_id):
         if device_id not in self.status:
@@ -637,6 +640,7 @@ def test_the_child_runs_at_the_ceiling(world, monkeypatch):
     followup_id = turn_manager.submit(child_id, "user", prompt="continue", explicit_permission=True,
                                       overrides={"permission_mode": "bypassPermissions"}, no_kick=True)
     followup = turns.get_turn(followup_id)
+    assert database.get_session(child_id)["is_active"]
     assert followup["payload"]["worker_bound"]
     assert not followup["overrides"].get("_permission_explicit")
     assert followup["overrides"]["_permission_ceiling"] == "acceptEdits"

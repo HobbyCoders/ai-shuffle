@@ -135,6 +135,12 @@ def _kick(session_id: str) -> None:
 # carries no prompt of its own.
 _WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
 
+# Explicit sends (including REST/worktree intake) resume sidebar membership.
+# API keys belong to the owner, so an API send counts as an owner action too.
+# Background work must not undo a person's decision to settle a chat. Keep
+# this separate from wake cancellation / Stop: those source policies are unchanged.
+_REACTIVATING_SOURCES = (*_WAKEUP_SUPERSEDING_SOURCES, "api", "worktree")
+
 # Turns whose text the OWNER wrote (typed, or a spoken transcript). Only these
 # may answer a yes/no question the assistant is waiting on.
 _OWNER_ANSWER_SOURCES = ("user", "queue")
@@ -288,9 +294,10 @@ def _submit_blocking(
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     window_pin: Optional[Dict[str, int]] = None,
+    reactivated: dict[str, Any] | None = None,
 ) -> str:
-    """Every BLOCKING part of :func:`submit` — up to three DB round trips (run
-    binding, wakeup supersede, enqueue) — and nothing else.
+    """Every BLOCKING part of :func:`submit` (reactivation, run binding,
+    wakeup supersede, enqueue) — and nothing else.
 
     Split out so :func:`submit_async` can pay ONE thread hop for the whole
     logical operation instead of one per write, while the kick (which needs a
@@ -303,6 +310,10 @@ def _submit_blocking(
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
     work is never lost — a later kick or the periodic reap sweep starts it.
+
+    Explicit sends reactivate settled membership before admission. When given,
+    ``reactivated`` receives the owning user id for the async caller's fan-out.
+    This does not revive old turns or change the wake/Stop source policies.
 
     A turn from a human-facing source also PERSISTS its model / effort /
     permission overrides onto the session row. Agents do not pin a
@@ -327,6 +338,7 @@ def _submit_blocking(
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
+    _reactivate_for_send(session_id, source, payload, reactivated)
     if command_id and (payload or {}).get("compact_first"):
         from app.db import turns as turns_db
         existing = turns_db.get_turn_by_command(session_id, command_id)
@@ -486,10 +498,10 @@ def submit(
     """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
 
     See :func:`_submit_blocking` for the full contract. This does the DB work on
-    the CALLING thread; every production caller is a coroutine and uses
-    :func:`submit_async` (three sync DB round trips on the event loop stall
-    every WebSocket, SSE stream and HTTP request on the worker). Tests use this
-    form to queue turns from synchronous code.
+    the CALLING thread; coroutine callers use :func:`submit_async` so the DB
+    work never blocks their event loop. Synchronous handoff release uses this
+    form in a worker thread and announces membership through the thread-safe
+    lifecycle bus.
 
     ``no_kick=True`` skips the in-process kick entirely — used by the
     placement submit seam when the session is placed on ANOTHER
@@ -499,20 +511,29 @@ def submit(
     The skip is an optimization, not a correctness gate — the execute-side
     placement check is the backstop either way.
     """
-    turn_id = _submit_blocking(
-        session_id,
-        source,
-        prompt=prompt,
-        profile_id=profile_id,
-        project_id=project_id,
-        worktree_id=worktree_id,
-        overrides=overrides,
-        explicit_permission=explicit_permission,
-        payload=payload,
-        command_id=command_id,
-        parent_turn_id=parent_turn_id,
-        instance_id=instance_id,
-    )
+    reactivated: dict[str, Any] = {}
+    try:
+        turn_id = _submit_blocking(
+            session_id,
+            source,
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+            overrides=overrides,
+            explicit_permission=explicit_permission,
+            payload=payload,
+            command_id=command_id,
+            parent_turn_id=parent_turn_id,
+            instance_id=instance_id,
+            reactivated=reactivated,
+        )
+    finally:
+        if reactivated:
+            # Sync handoff release runs in a worker thread. The lifecycle bus
+            # marshals delivery to each subscriber's loop without creating a
+            # foreign event loop for sync_engine's locks and connection writers.
+            _announce_reactivated_sync(session_id, reactivated)
     if not no_kick:
         _kick(session_id)
     return turn_id
@@ -536,7 +557,7 @@ async def submit_async(
 ) -> str:
     """:func:`submit` for async callers — identical semantics, off the loop.
 
-    ONE thread hop covers all three DB writes; the kick then fires HERE, on the
+    ONE thread hop covers the blocking DB work; the kick then fires HERE, on the
     caller's event loop, because the registered kick
     (``turn_scheduler.kick``) needs ``asyncio.get_running_loop()`` to schedule
     the start and silently drops the nudge from a worker thread. Ordering is
@@ -550,27 +571,93 @@ async def submit_async(
 
         await assistant_confirm.on_owner_message(session_id, prompt)
     window_pin: Dict[str, int] = {}
-    turn_id = await asyncio.to_thread(
-        _submit_blocking,
-        session_id,
-        source,
-        prompt=prompt,
-        profile_id=profile_id,
-        project_id=project_id,
-        worktree_id=worktree_id,
-        overrides=overrides,
-        explicit_permission=explicit_permission,
-        payload=payload,
-        command_id=command_id,
-        parent_turn_id=parent_turn_id,
-        instance_id=instance_id,
-        window_pin=window_pin,
-    )
+    reactivated: dict[str, Any] = {}
+    try:
+        turn_id = await asyncio.to_thread(
+            _submit_blocking,
+            session_id,
+            source,
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+            overrides=overrides,
+            explicit_permission=explicit_permission,
+            payload=payload,
+            command_id=command_id,
+            parent_turn_id=parent_turn_id,
+            instance_id=instance_id,
+            window_pin=window_pin,
+            reactivated=reactivated,
+        )
+    finally:
+        if reactivated:
+            await _announce_reactivated(session_id, reactivated["user_id"])
     if not no_kick:
         _kick(session_id)
     if window_pin:
         await _announce_window_pin(session_id, window_pin["context_window"])
     return turn_id
+
+
+def _reactivate_for_send(
+    session_id: str, source: str, payload: Optional[Dict[str, Any]],
+    reactivated: dict[str, Any] | None,
+) -> None:
+    """Shared membership write for a local intake OR a forwarding sender."""
+    if source not in _REACTIVATING_SOURCES or (payload or {}).get(VOICE_DELEGATION):
+        return
+    from app.core import archive_guard
+    from app.db import database
+
+    if archive_guard.is_archived(session_id):
+        raise archive_guard.SessionArchived(session_id)
+    row = database.get_session(session_id)
+    if row and not row.get("is_active", True):
+        # On the sending worker this supersedes its own possibly unreplicated
+        # settle with a newer membership clock. The runner still does this too.
+        database.set_session_active(session_id, True)
+        if reactivated is not None:
+            reactivated.update(user_id=row.get("api_user_id") or "admin",
+                               user_type="api_user" if row.get("api_user_id") is not None else "admin")
+
+
+async def reactivate_for_send(
+    session_id: str, source: str = "user", payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Reactivate and notify HERE before forwarding an explicit owner's send."""
+    reactivated: dict[str, Any] = {}
+    try:
+        await asyncio.to_thread(_reactivate_for_send, session_id, source, payload, reactivated)
+    finally:
+        if reactivated:
+            await _announce_reactivated(session_id, reactivated["user_id"])
+
+
+def _announce_reactivated_sync(session_id: str, reactivated: dict[str, Any]) -> None:
+    from app.core.global_events import global_events
+
+    try:
+        global_events.lifecycle(reactivated["user_id"], {
+            "type": "user_session_updated", "session_id": session_id, "updates": {"is_active": True},
+        }, user_type=reactivated["user_type"])
+    except Exception:  # noqa: BLE001 — a durable membership write still needs its turn.
+        logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
+
+
+async def _announce_reactivated(session_id: str, user_id: str) -> None:
+    """Reach watchers and unopened sidebars, including the sending device."""
+    from app.core.sync_engine import sync_engine
+
+    try:
+        await sync_engine.broadcast_session_updated(
+            session_id=session_id, updates={"is_active": True}, source_device_id=None,
+        )
+        await sync_engine.broadcast_user_session_updated(
+            user_id=user_id, session_id=session_id, updates={"is_active": True}, source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — membership and the queued turn are durable.
+        logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
 
 
 async def _announce_window_pin(session_id: str, window: int) -> None:

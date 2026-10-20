@@ -59,6 +59,46 @@ describe('account expansion preferences', () => {
 		expect(JSON.parse(localStorage.getItem('ai-shuffle:context_usage_hidden_providers')!)).toEqual({});
 		expect(save).not.toHaveBeenCalled();
 	});
+	it('keeps the running-tasks collapse as one account choice, cached for the first paint', () => {
+		const { runningTasks, adapters, save } = fixture();
+		expect(runningTasks.current).toBe(true);
+		runningTasks.set(false);
+		expect(save).toHaveBeenLastCalledWith('ui:running_tasks_open', false);
+		// A fresh client (reload, another chat's mount) starts collapsed from the cache.
+		expect(fixture().runningTasks.current).toBe(false);
+		save.mockClear();
+		adapters.get('ui:running_tasks_open')!.apply(true);
+		expect(runningTasks.current).toBe(true);
+		adapters.get('ui:running_tasks_open')!.apply('closed');
+		expect(runningTasks.current).toBe(true);
+		expect(save).not.toHaveBeenCalled();
+	});
+	it('syncs the running-tasks collapse between two clients of one account', async () => {
+		const server: Record<string, unknown> = {};
+		const transport = {
+			all: async () => structuredClone(server),
+			get: async (key: string) => key in server ? { value: structuredClone(server[key]) } : null,
+			put: vi.fn(async (key: string, value: unknown, onlyIfMissing?: boolean) => {
+				if (!onlyIfMissing || !(key in server)) server[key] = structuredClone(value);
+				return { value: structuredClone(server[key]) };
+			})
+		};
+		const syncA = new PreferenceSync(transport);
+		const syncB = new PreferenceSync(transport);
+		const a = createExpansionPreferences(syncA).runningTasks;
+		const b = createExpansionPreferences(syncB).runningTasks;
+		syncA.start(false, 'account:A');
+		syncB.start(false, 'account:A');
+		await syncA.reconnect();
+		await syncB.reconnect();
+		expect(b.current).toBe(true);
+		a.set(false);
+		await vi.waitFor(() => expect(server['ui:running_tasks_open']).toBe(false));
+		await syncB.refresh('ui:running_tasks_open');
+		expect(b.current).toBe(false);
+		syncA.stop();
+		syncB.stop();
+	});
 	it('migrates all legacy sections before any component or provider catalog mounts', () => {
 		localStorage.setItem('aihub.contextBreakdownOpen', '0');
 		localStorage.setItem('aihub.usageSectionOpen:plan', '0');
@@ -68,7 +108,7 @@ describe('account expansion preferences', () => {
 		expect(breakdown.current).toBe(false);
 		expect(sections.current).toEqual({ plan: false, 'provider:not-loaded-yet': false });
 		expect(groups.current).toEqual({ active: true, settled: false });
-		expect([...adapters.keys()]).toEqual(['context_breakdown_open', 'context_usage_sections', 'sidebar_collapsed_groups', 'context_usage_hidden_providers']);
+		expect([...adapters.keys()]).toEqual(['context_breakdown_open', 'context_usage_sections', 'sidebar_collapsed_groups', 'context_usage_hidden_providers', 'ui:running_tasks_open']);
 	});
 	it('applies remote state without echo, removes stale cache and resets for another account', () => {
 		const { breakdown, sections, groups, adapters, save } = fixture();
@@ -117,7 +157,8 @@ describe('account expansion preferences', () => {
 	it('ignores a previous account snapshot after resetting and hydrating the next account', async () => {
 		const old = deferred<Record<string, unknown>>();
 		const all = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue({
-			context_breakdown_open: true, context_usage_sections: { plan: true }, sidebar_collapsed_groups: { settled: false }, context_usage_hidden_providers: {}
+			context_breakdown_open: true, context_usage_sections: { plan: true }, sidebar_collapsed_groups: { settled: false }, context_usage_hidden_providers: {},
+			'ui:running_tasks_open': true
 		});
 		const put = vi.fn();
 		const sync = new PreferenceSync({ all, get: async () => null, put });

@@ -1726,7 +1726,12 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
     """One envelope in its own transaction (the fallback for a chunk that failed)."""
     try:
         with get_db() as conn:
-            outcome = apply_envelope(conn.cursor(), data, ctx=ctx, result=result)
+            cursor = conn.cursor()
+            # Like _apply_chunk's clock observation, serialize BEFORE reading
+            # the frontier. Otherwise a slow single-op apply can replay an old
+            # owner-ordered row after a concurrent batch has advanced it.
+            store.lock_state(cursor)
+            outcome = apply_envelope(cursor, data, ctx=ctx, result=result)
     except TransientApplyError as exc:
         result.retry_operation(data, str(exc))
         return

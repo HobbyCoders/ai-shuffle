@@ -17,9 +17,11 @@
 	 * scrim; the caller unmounts it.
 	 *
 	 * Reads the session store's activeTasks and the swarms store; it keeps no
-	 * copy of either. The only local state is UI: filter, search, which swarms
-	 * are open, stops in flight, and rows the user stopped here (so they read
-	 * "Stopped" and name the worker until the list closes).
+	 * copy of either. Whether the inline list is collapsed is an account
+	 * preference (runningTasksOpen), the same in every chat. The only local
+	 * state is UI: filter, search, which swarms are open, stops in flight, and
+	 * rows the user stopped here (so they read "Stopped" and name the worker
+	 * until the list closes).
 	 */
 	import { onDestroy, tick, untrack } from 'svelte';
 	import {
@@ -36,6 +38,7 @@
 		X
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 	import { swarms } from '$lib/stores/swarms';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { stopSessionTask } from '$lib/api/sessions';
@@ -99,7 +102,11 @@
 	let expanded = $state<Record<string, boolean>>({});
 	let stopping = $state<Set<string>>(new Set());
 	let stopped = $state<Record<string, StoppedRecord>>({});
-	let inlineOpen = $state(true);
+	// Collapsed or open is the owner's choice for every chat, kept with the
+	// account (ui:running_tasks_open): a session switch, a remount or a task
+	// starting or ending never reopens a list they collapsed.
+	const inlineOpen = $derived($runningTasksOpen);
+	const toggleInline = () => runningTasksOpen.set(!runningTasksOpen.current);
 	let ownSheetOpen = $state(false);
 	let sheetOpener: HTMLElement | null = null;
 
@@ -672,7 +679,7 @@
 	{:else}
 		<div class="inline" data-open={inlineOpen}>
 			<div class="inline-head">
-				<button type="button" class="inline-toggle" onclick={() => (inlineOpen = !inlineOpen)} aria-expanded={inlineOpen}
+				<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
 					data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>
 					<span class="spinner" aria-hidden="true"></span>
 					<span class="inline-label">{plural(counts.running, 'running task')}</span>

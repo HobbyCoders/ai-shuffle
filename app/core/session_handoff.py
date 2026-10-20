@@ -316,8 +316,8 @@ def _submit_here(session_id: str, held: List[Dict[str, Any]]) -> Released:
     unsent: List[Dict[str, Any]] = []
     for entry in held:
         try:
-            turn_manager._submit_blocking(session_id, str(entry.get("source") or "user"),
-                                          **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
+            turn_manager.submit(session_id, str(entry.get("source") or "user"), no_kick=True,
+                                **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
             sent += 1
         except Exception:  # noqa: BLE001 — one refused message must not stop the rest
             logger.warning("Could not send a held message of %s here", session_id, exc_info=True)

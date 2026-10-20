@@ -2993,6 +2993,9 @@ class SessionRuntime:
         if self._interrupt_driving:
             return "interrupting"
         self._interrupt_driving = True
+        # Also tells the heartbeat that any later rejection is expected. This
+        # must precede the first await: background teardown can settle the turn
+        # while it is still closing adapters, workers, or locked worktrees.
         # The moment the kill was asked for. Stamped BEFORE the first await, and
         # read against the stamps ``_on_steer_delivered`` writes: it separates a
         # message the model was already answering (absorbed earlier — the user
@@ -3411,8 +3414,10 @@ class SessionRuntime:
         TTL, which is when the DB lets the lease lapse. Either way the turn
         stops itself (``_on_lease_lost``) instead of running on unowned.
         Finalization keeps renewing (and retrying transient errors) until the
-        parked/terminal write lands; a rejected renewal or an exhausted TTL then
-        exits quietly, because the pump is finished.
+        parked/terminal write lands. Once an interrupt is being driven, teardown
+        can also settle/fence the run before finalization starts. In either case
+        rejection or an exhausted TTL exits quietly: the turn is already ending,
+        and lease-loss handling must not replace its reason or interrupt it again.
         """
         loop = asyncio.get_running_loop()
         renewed_at = loop.time()
@@ -3423,7 +3428,7 @@ class SessionRuntime:
             try:
                 remaining = RUN_LEASE_TTL_SECONDS - (attempt_at - renewed_at)
                 if remaining <= 0:
-                    if not self._lease_finalizing:
+                    if not (self._lease_finalizing or self._interrupt_driving):
                         self._on_lease_lost()
                     return
                 ok = await asyncio.wait_for(
@@ -3446,6 +3451,8 @@ class SessionRuntime:
                         "SessionRuntime: renew_run raised for run %s", run_id, exc_info=True,
                     )
                     continue
+                if self._lease_finalizing or self._interrupt_driving:
+                    return
                 logger.warning(
                     "SessionRuntime: renew_run kept failing for run %s past the "
                     "%ss lease TTL", run_id, RUN_LEASE_TTL_SECONDS, exc_info=True,
@@ -3455,7 +3462,7 @@ class SessionRuntime:
                 renewed_at = attempt_at
                 delay = RUN_LEASE_RENEW_SECONDS
                 continue
-            if self._lease_finalizing:
+            if self._lease_finalizing or self._interrupt_driving:
                 return
             logger.warning(
                 "SessionRuntime: lease renewal lost for run %s — stopping heartbeat",

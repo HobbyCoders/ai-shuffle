@@ -117,10 +117,14 @@ async def pair(workers, monkeypatch):
 
     async def record_push(key, saved):
         pushes.append((key, saved))
+        # Simulate delivery without overlapping Worker.active global patches
+        # across awaits. The real authenticated push is exercised separately.
+        routing.invalidate_snapshot(a.device_id, key[0], saved=saved)
 
     monkeypatch.setattr(routing, "_push", record_push)
     routing._watchers.clear()
     routing._scheduled.clear()
+    routing._snapshots.clear()
     yield SimpleNamespace(a=a, b=b, broker=owner_broker, pushes=pushes, real_push=real_push)
     for grant in list(owner_broker.grants.values()):
         owner_broker.revoke(grant.session_id, grant.id)
@@ -357,10 +361,14 @@ async def test_owner_push_refreshes_the_viewer_only_from_the_real_owner(pair, mo
     # The owner's waiting count travels with the push, so the viewer's sidebar
     # can mark the mirrored session as needing the owner (#1807).
     monkeypatch.setattr(chat_access.broker, "pending_count", lambda session_id: 1)
+    with pair.b.active():
+        await routing.forward(pair.a.device_id, SESSION, "snapshot")
+    assert (pair.a.device_id, SESSION) in routing._snapshots
     with pair.a.active():
         routing.watch(SESSION, pair.b.device_id)
         await pair.real_push((SESSION, pair.b.device_id), True)
     assert published == [(SESSION, None, True, 1)]
+    assert (pair.a.device_id, SESSION) not in routing._snapshots
     assert (SESSION, pair.b.device_id) in routing._watchers
     # Only the device that runs the session may ask a viewer to refresh.
     with pair.b.active():

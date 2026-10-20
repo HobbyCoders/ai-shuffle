@@ -485,7 +485,7 @@ class TestSubmitPersistsTheBinding:
             self, mock_db, saved, sent, base, pushed):
         """#1895 follow-up: after a send changes the saved pin, open clients
         learn it, or their next send carries an outdated base and is dropped."""
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock, call
         from app.core.sync_engine import sync_engine
 
         make_profile("agent", {})
@@ -496,12 +496,12 @@ class TestSubmitPersistsTheBinding:
                 overrides={"model": "opus", "context_window": sent, "context_window_base": base},
                 no_kick=True,
             )
-        if pushed is None:
-            broadcast.assert_not_awaited()
-        else:
-            broadcast.assert_awaited_once_with(
-                session_id="s-push", updates={"context_window": pushed}, source_device_id=None)
+        expected = [call(session_id="s-push", updates={"is_active": True}, source_device_id=None)]
+        if pushed is not None:
+            expected.append(call(session_id="s-push", updates={"context_window": pushed}, source_device_id=None))
             assert db.get_session("s-push")["context_window"] == pushed
+        assert broadcast.await_args_list == expected
+        assert db.get_session("s-push")["is_active"]
 
     def test_zero_base_means_no_pin_seen(self, mock_db):
         make_profile("agent", {})

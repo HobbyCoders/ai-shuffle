@@ -196,6 +196,7 @@ def test_actual_hook_bounds_a_new_ref_by_the_remote_pushed_to(hook_version, push
                                      "LOCAL_CI_PYTHON": sys.executable, "LOCAL_CI_PUSH_REMOTE": "public"},
                                 text=True, capture_output=True, check=False)
         assert scope in result.stdout, result.stdout + result.stderr
+        assert ("git fetch <remote> main" in result.stdout) is (push_remote == "fork")
         assert (result.returncode != 0) is blocked, result.stdout + result.stderr
         assert ("aws-access-key" in result.stdout) is blocked
         assert token not in result.stdout + result.stderr
@@ -226,6 +227,50 @@ def test_unknown_remote_cannot_select_a_tracking_ref(tmp_path, remote):
     git(tmp_path, "update-ref", "refs/remotes/not-configured/main", tip)
     git(tmp_path, "update-ref", "refs/remotes/origin/main", tip)
     assert secret_scan.new_ref_boundary(tmp_path, remote) is None
+
+
+@pytest.mark.parametrize("remote", [None, "fork", "https://example.invalid/repo.git"])
+def test_full_history_hint_precedes_revision_walk(tmp_path, monkeypatch, capsys, remote):
+    init(tmp_path)
+    tip = commit(tmp_path)
+    if remote == "fork":
+        git(tmp_path, "remote", "add", remote, "https://example.invalid/repo.git")
+    real_git = secret_scan.git
+
+    def timeout_on_walk(root, *args):
+        if args[0] == "rev-list":
+            assert "git fetch <remote> main" in capsys.readouterr().out
+            raise subprocess.TimeoutExpired("git rev-list", 15)
+        return real_git(root, *args)
+
+    monkeypatch.setattr(secret_scan, "git", timeout_on_walk)
+    with pytest.raises(subprocess.TimeoutExpired):
+        list(secret_scan.commit_files(tmp_path, tip, "0" * 40, remote))
+
+
+@pytest.mark.parametrize("change", ["add", "update", "file_to_gitlink", "gitlink_to_file"])
+def test_commit_scan_skips_gitlinks_but_not_replacement_blobs(tmp_path, change):
+    init(tmp_path)
+    initial = commit(tmp_path)
+    name = "sub module"
+    if change in {"update", "gitlink_to_file"}:
+        git(tmp_path, "update-index", "--add", "--cacheinfo", "160000", initial, name)
+    elif change == "file_to_gitlink":
+        (tmp_path / name).write_text("ordinary file")
+        git(tmp_path, "add", name)
+    git(tmp_path, "commit", "--allow-empty", "-qm",
+        "Base fixture\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>")
+    base = git(tmp_path, "rev-parse", "HEAD")
+    if change == "gitlink_to_file":
+        blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=tmp_path,
+                                       input=b"ghp_" + b"A" * 36).decode().strip()
+        git(tmp_path, "update-index", "--cacheinfo", "100644", blob, name)
+    else:
+        git(tmp_path, "update-index", "--add", "--cacheinfo", "160000", base, name)
+    git(tmp_path, "commit", "-qm",
+        "Gitlink fixture\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>")
+    tip = git(tmp_path, "rev-parse", "HEAD")
+    assert secret_scan.scan(tmp_path, tip, base) == (1 if change == "gitlink_to_file" else 0)
 
 
 def test_commit_scan_handles_binary_and_unusual_names(tmp_path):

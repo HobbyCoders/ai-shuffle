@@ -1338,7 +1338,10 @@ def _moving(gaming, call, move=None):
     stack.enter_context(patch.object(sh, "FORWARD_RETRY_S", 0))
     stack.enter_context(patch("app.api.sessions.move_session_to", move or AsyncMock()))
     stack.enter_context(patch("app.network.runners.find", side_effect=_runners(gaming)))
-    context = SimpleNamespace(device_id="dev-unraid", member=lambda device: SimpleNamespace(kind="worker", status="active"))
+    from app.network.engine import BOOTSTRAP_SYNCING
+    # Routing-only network double: membership writes are locally pending.
+    context = SimpleNamespace(device_id="dev-unraid", bootstrap_state=BOOTSTRAP_SYNCING,
+                              member=lambda device: SimpleNamespace(kind="worker", status="active"))
     stack.enter_context(patch("app.network.engine.context", return_value=context))
     stack.enter_context(patch("app.network.control.call", call))
     return stack
@@ -1383,6 +1386,8 @@ async def test_2012_held_messages_go_first_then_the_resume():
         await sh.run_pending("s1")
     assert [body["prompt"] for body in turns_sent] == ["one", "two", RESUME_PROMPT]
     assert _queued() == [("user", "one"), ("queue", "two"), ("wakeup", RESUME_PROMPT)]
+    from app.db import database
+    assert database.get_session("s1")["is_active"]
 
 
 async def test_2012_the_owners_own_move_of_an_idle_chat_gets_no_resume():
