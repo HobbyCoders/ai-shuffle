@@ -36,7 +36,7 @@ class StreamingGrpc(FakeGrpc):
 def manager(tmp_path, monkeypatch):
     from app.core.android_emulator import manager as manager_mod
 
-    monkeypatch.setattr(manager_mod, "check_host", lambda: LINUX)
+    monkeypatch.setattr(manager_mod, "check_host", lambda **kwargs: LINUX)
     layout = SdkLayout(tmp_path / "android-sdk")
     _installed(layout)
     mgr = EmulatorManager(layout)

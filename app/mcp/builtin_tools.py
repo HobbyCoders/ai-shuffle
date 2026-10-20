@@ -1671,7 +1671,7 @@ def create_builtin_tools_server(
     all_tools.extend([android_devices, android_action])
 
     # This worker's Android emulator (app/mcp/emulator_tools.py); listed only
-    # where the platform has an emulator backend (Linux x86_64 today).
+    # where the platform has an emulator backend (Linux or Windows x86_64).
     try:
         from app.mcp.emulator_tools import build_emulator_tools
 

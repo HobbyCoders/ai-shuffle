@@ -40,7 +40,10 @@ Refusals return a JSON error body, shown to the owner as is:
 
 - When more than one reason applies, `reason` is the first match in this order:
   `unsupported_arch`, `installing`, `no_kvm` / `kvm_permission`, `error` (the last
-  install failed), `sdk_missing`, `ready`.
+  install failed), `sdk_missing`, `ready`. On Windows x86_64 a bounded
+  `emulator.exe -accel-check` replaces the KVM check; unusable acceleration
+  returns `error` with WHPX/AEHD setup instructions. A missing emulator binary
+  returns `sdk_missing`, so the owner can install before configuring acceleration.
 - `install` is `null` until this process starts an install. After that it holds
   the last install's state until the app restarts.
 - `devices` is empty until the SDK is installed. After that it always lists

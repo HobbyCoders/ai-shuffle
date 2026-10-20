@@ -1,9 +1,8 @@
 """Can this worker run the Android emulator? Detection with reason codes.
 
-Linux x86_64 with KVM is the only backend today. The host check is the seam
-where Windows (WHPX/AEHD) and macOS (HVF) backends plug in later: each returns
-the manifest's ``host-os``/``host-arch`` pair the SDK archives are chosen by,
-or a reason the panel and the agent can show as it is.
+Linux x86_64 uses KVM; Windows x86_64 uses the emulator's WHPX/AEHD probe.
+Each backend returns the manifest's ``host-os``/``host-arch`` archive pair,
+or an actionable reason the panel and the agent can show as it is.
 """
 
 from __future__ import annotations
@@ -11,7 +10,9 @@ from __future__ import annotations
 import errno
 import os
 import platform
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 #: The Android Software Development Kit License Agreement the owner accepts.
@@ -35,7 +36,7 @@ KVM_PERMISSION = (
 
 @dataclass(frozen=True)
 class HostSupport:
-    """``reason`` is ``ready``, ``no_kvm``, ``kvm_permission`` or ``unsupported_arch``."""
+    """A panel reason; Windows acceleration failures use ``error`` with guidance."""
 
     reason: str
     message: str = ""
@@ -66,15 +67,54 @@ def _linux_x86_64(kvm_path: str = KVM_PATH) -> HostSupport:
     return HostSupport("ready", "", **host)
 
 
-def check_host(kvm_path: str = KVM_PATH) -> HostSupport:
-    """This worker's emulator support. Cheap (one open of /dev/kvm); never raises."""
+WINDOWS_ACCEL_HELP = (
+    "Android emulator hardware acceleration is unavailable. Enable Intel VT-x or AMD-V "
+    "in BIOS/UEFI, enable Windows Hypervisor Platform in Windows Features, then reboot. "
+    "Alternatively, install the Android Emulator Hypervisor Driver (AEHD) using Android "
+    "Studio's SDK Manager if Hyper-V is disabled. Run emulator.exe -accel-check from "
+    "the SDK's emulator folder to diagnose the driver."
+)
+
+
+def _windows_x86_64(emulator_bin: Optional[Path], env: Optional[dict]) -> HostSupport:
+    host = {"host_os": "windows", "host_arch": "x64"}
+    if emulator_bin is None:
+        from app.core.android_emulator.layout import SdkLayout
+
+        layout = SdkLayout()
+        emulator_bin, env = layout.emulator_bin, layout.env()
+    if not emulator_bin.is_file():
+        return HostSupport("sdk_missing", "Install the Android SDK from the Phone panel first.", **host)
+    try:
+        # The emulator checks usable WHPX/AEHD, not just a registry feature or
+        # CPU flag. A driver can be installed but unusable until after reboot.
+        result = subprocess.run(
+            [str(emulator_bin), "-accel-check"], capture_output=True,
+            timeout=10, env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return HostSupport("error", f"{WINDOWS_ACCEL_HELP} Acceleration check failed: {type(exc).__name__}.", **host)
+    if result.returncode != 0:
+        return HostSupport("error", WINDOWS_ACCEL_HELP, **host)
+    return HostSupport("ready", "", **host)
+
+
+def supports_platform() -> bool:
+    """Backend eligibility only; tool registration must not run an SDK process."""
+    return platform.system() in ("Linux", "Windows") and platform.machine().lower() in ("x86_64", "amd64")
+
+
+def check_host(kvm_path: str = KVM_PATH, *, emulator_bin: Optional[Path] = None,
+               env: Optional[dict] = None) -> HostSupport:
+    """Worker support; Windows runs a bounded acceleration probe (call off-loop)."""
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Linux" and machine in ("x86_64", "amd64"):
         return _linux_x86_64(kvm_path)
-    # Windows (WHPX/AEHD) and macOS (HVF) backends will answer here.
+    if system == "Windows" and machine in ("x86_64", "amd64"):
+        return _windows_x86_64(emulator_bin, env)
     return HostSupport(
         "unsupported_arch",
-        f"The Android emulator runs on Linux x86_64 workers with KVM for now; "
+        f"The Android emulator needs Linux x86_64 with KVM or Windows x86_64 with WHPX/AEHD; "
         f"this worker is {system or 'unknown'} {machine or 'unknown'}.",
     )

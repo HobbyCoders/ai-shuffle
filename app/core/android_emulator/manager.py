@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,9 +29,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.core.android_emulator import adb as adb_mod
 from app.core.android_emulator import avd, frames, sdk_repo
 from app.core.android_emulator.grpc_control import KEY_VALUES, RGB888, GrpcControl
-from app.core.android_emulator.host import LICENSE_URL, HostSupport, check_host
+from app.core.android_emulator.host import LICENSE_URL, check_host
 from app.core.android_emulator.installer import InstallProgress, run_install
 from app.core.android_emulator.layout import SdkLayout
+from app.core.process_tree import kill_process_tree, spawn_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +225,7 @@ class EmulatorManager:
         return self._install_task is not None and not self._install_task.done()
 
     def _status_sync(self) -> Dict[str, Any]:
-        host = check_host()
+        host = check_host(emulator_bin=self.layout.emulator_bin, env=self.layout.env())
         image = self.system_image
         installed = host.host_os is not None and self.layout.installed(image)
         install = self.progress.snapshot()
@@ -231,7 +233,7 @@ class EmulatorManager:
             reason, message = host.reason, host.message
         elif self._installing():
             reason, message = "installing", install["message"] or "Installing the Android emulator"
-        elif not host.ok:
+        elif not host.ok and host.reason != "sdk_missing":
             reason, message = host.reason, host.message
             if not installed:
                 message += " The Android SDK is not installed yet either."
@@ -265,12 +267,11 @@ class EmulatorManager:
     async def status(self) -> Dict[str, Any]:
         return await asyncio.to_thread(self._status_sync)
 
-    async def _require_ready(self) -> HostSupport:
+    async def _require_ready(self) -> None:
         status = await self.status()
         if not status["available"]:
             raise EmulatorError(status["message"] or "The Android emulator is not available.",
                                 409, status["reason"])
-        return check_host()
 
     # ── SDK install ────────────────────────────────────────────────────────
     async def setup(self, accept_license: bool, system_image: Optional[str] = None) -> Dict[str, Any]:
@@ -279,7 +280,7 @@ class EmulatorManager:
                 f"Installing the Android emulator needs the owner to accept the Android SDK "
                 f"License ({LICENSE_URL}). Send accept_license: true once they have.",
                 400, "license_required")
-        host = await asyncio.to_thread(check_host)
+        host = await asyncio.to_thread(check_host, emulator_bin=self.layout.emulator_bin, env=self.layout.env())
         if host.host_os is None:
             raise EmulatorError(host.message, 409, host.reason)
         image = system_image or _settings().emulator_system_image
@@ -381,6 +382,9 @@ class EmulatorManager:
             "-skip-adb-auth", "-netdelay", "none", "-netspeed", "full",
             "-port", str(port),
         ]
+        if sys.platform == "win32":
+            # Never fall back to a many-minute software CPU boot on Windows.
+            argv += ["-accel", "on"]
         if grpc_port:
             # With a token the emulator listens on loopback only; without one
             # its control port is open on every interface, unauthenticated.
@@ -389,7 +393,7 @@ class EmulatorManager:
         try:
             dev.proc = await asyncio.create_subprocess_exec(
                 *argv, stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=asyncio.subprocess.STDOUT,
-                env=layout.env(), start_new_session=True,
+                env=layout.env(), **spawn_kwargs(),
             )
         finally:
             log.close()
@@ -544,18 +548,10 @@ class EmulatorManager:
         try:
             await asyncio.wait_for(proc.wait(), STOP_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
-            try:
-                os.killpg(proc.pid, 15)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), 10)
-            except asyncio.TimeoutError:
-                try:
-                    os.killpg(proc.pid, 9)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                await proc.wait()
+            survivors = await kill_process_tree(proc, own_process_group=True, grace=10)
+            if survivors:
+                dev.set_state("error", "Could not stop emulator processes: " + ", ".join(map(str, survivors)))
+                raise EmulatorError(dev.message, 500, "stop_failed")
         if dev.exit_task is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(dev.exit_task), 5)

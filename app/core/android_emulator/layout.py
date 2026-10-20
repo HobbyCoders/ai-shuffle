@@ -1,8 +1,9 @@
 """Where the emulator's SDK, devices and logs live on this worker.
 
-Everything sits under one root (``<data dir>/android-sdk`` unless
-``ANDROID_SDK_DIR`` says otherwise) in sdkmanager's own layout, so a build
-pointed at it with ``ANDROID_HOME`` finds the same packages.
+Everything sits under one root in sdkmanager's own layout. ``ANDROID_SDK_DIR``
+overrides discovery; Windows also checks the standard Android SDK environment
+and Android Studio path. Otherwise use ``<data dir>/android-sdk``. Builds
+pointed at it with ``ANDROID_HOME`` find the same packages.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +26,15 @@ def sdk_root() -> Path:
     configured = getattr(settings, "android_sdk_dir", None)
     if configured:
         return Path(configured)
+    if sys.platform == "win32":
+        for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+            if os.environ.get(name):
+                return Path(os.environ[name])
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidate = Path(local) / "Android" / "Sdk"
+            if candidate.is_dir():
+                return candidate
     return Path(settings.data_dir) / "android-sdk"
 
 
@@ -37,11 +48,11 @@ class SdkLayout:
 
     @property
     def emulator_bin(self) -> Path:
-        return self.root / "emulator" / "emulator"
+        return self.root / "emulator" / ("emulator.exe" if sys.platform == "win32" else "emulator")
 
     @property
     def adb(self) -> Path:
-        return self.root / "platform-tools" / "adb"
+        return self.root / "platform-tools" / ("adb.exe" if sys.platform == "win32" else "adb")
 
     # State the app owns.
     @property
@@ -126,8 +137,14 @@ class SdkLayout:
 
     def discovery_dirs(self) -> List[Path]:
         """Where a running emulator may write ``pid_<pid>.ini`` (by version)."""
-        return [self.runtime_dir / "avd" / "running", self.user_home / "avd" / "running",
-                self.user_home / ".android" / "avd" / "running"]
+        folders = [self.runtime_dir / "avd" / "running", self.user_home / "avd" / "running",
+                   self.user_home / ".android" / "avd" / "running"]
+        if sys.platform == "win32":
+            if os.environ.get("TEMP"):
+                folders.append(Path(os.environ["TEMP"]) / "avd" / "running")
+            if os.environ.get("LOCALAPPDATA"):
+                folders.append(Path(os.environ["LOCALAPPDATA"]) / "Temp" / "avd" / "running")
+        return folders
 
     def discovery(self, pid: int) -> Dict[str, str]:
         """A running emulator's discovery file (``grpc.port``, ``grpc.token``...), or {}."""
@@ -155,6 +172,8 @@ class SdkLayout:
 
         keep = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR",
                 "XDG_RUNTIME_DIR", RUN_MARKER)
+        if sys.platform == "win32":
+            keep += ("SystemRoot", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE")
         env = {key: os.environ[key] for key in keep if key in os.environ}
         env.update({
             # The emulator keeps its console/gRPC token in ~ and adb reads it
