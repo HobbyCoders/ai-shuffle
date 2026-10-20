@@ -584,10 +584,16 @@ def _migrate_task_assignment_owner(cursor, migrations_applied):
         # Every pre-flag resume used the worker id as its synthetic tool id,
         # including a real parent's resume. Preserve its durable ancestry; only
         # non-ancestor resumes are reporting relationships, not assignments.
+        # context_session_id is a dispatch argument, NOT a durable sessions
+        # column. Legacy nested callers whose dispatch tool id was overwritten
+        # cannot be distinguished from siblings: demote them, never infer trust.
+        # Remote dispatches use synthetic ids too; their worker's remote_parent
+        # transport, not this local ancestry, establishes assignment authority.
         cursor.execute("SELECT task_id, session_id FROM background_tasks "
-                       "WHERE kind='agent' AND tool_use_id=task_id")
+                       "WHERE kind='agent' AND tool_use_id=task_id AND remote_device_id IS NULL")
         candidates = cursor.fetchall()
         parents = {}
+        demoted = []
         for row in candidates:
             current = row["task_id"]
             seen = {current}
@@ -603,9 +609,10 @@ def _migrate_task_assignment_owner(cursor, migrations_applied):
                 seen.add(current)
                 ancestors.add(current)
             if row["session_id"] not in ancestors:
-                cursor.execute("UPDATE background_tasks SET assignment_owner=FALSE "
-                               "WHERE task_id=%s AND session_id=%s",
-                               (row["task_id"], row["session_id"]))
+                demoted.append((row["task_id"], row["session_id"]))
+        if demoted:
+            cursor.executemany("UPDATE background_tasks SET assignment_owner=FALSE "
+                               "WHERE task_id=%s AND session_id=%s", demoted)
         migrations_applied.append("background_tasks_assignment_owner")
 
 
