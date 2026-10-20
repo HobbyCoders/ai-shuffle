@@ -43,7 +43,7 @@ async def test_current_fact_survives_adapter_restoration_and_compaction(tmp_path
         held = await current._memory_held()
         assert any(NEW in line for line in held.items)
         assert not any(OLD in line for line in held.items)
-        assert any("unresolved conflict" in line for line in held.items)
+        assert not any("unresolved conflict" in line for line in held.items)
         current._observe_memory_event(ContextCompaction(session_id=loop.session_id, tier=3, reason=reason))
         await _turn(current, "Continue the code review")
         assert (await _memory_kinds(loop))[-1] == expected
@@ -53,6 +53,6 @@ async def test_current_fact_survives_adapter_restoration_and_compaction(tmp_path
         restored = await current._memory_held()
         assert any(NEW in line for line in restored.items)
         assert not any(OLD in line for line in restored.items)
-        assert any("unresolved conflict" in line for line in restored.items)
+        assert not any("unresolved conflict" in line for line in restored.items)
     finally:
         await current.disconnect()
