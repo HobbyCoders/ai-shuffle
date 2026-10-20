@@ -70,10 +70,10 @@ def test_contractions_do_not_add_single_letter_neighbors(tmp_path):
 
 def test_ipv4_is_one_exact_keyword_not_shared_components(tmp_path):
     store = SkillStore(tmp_path)
-    expected = store.save_memory("The fixture endpoint is 10.0.0.251.")
-    store.save_memory("The other fixture endpoint is 10.0.0.1.")
-    assert recall_terms("10.0.0.251") == frozenset({"10.0.0.251"})
-    assert [e.id for e, _ in store.search_memories("10.0.0.251")] == [expected.id]
+    expected = store.save_memory("The fixture endpoint is 192.0.2.10.")
+    store.save_memory("The other fixture endpoint is 192.0.2.1.")
+    assert recall_terms("192.0.2.10") == frozenset({"192.0.2.10"})
+    assert [e.id for e, _ in store.search_memories("192.0.2.10")] == [expected.id]
 
 
 @pytest.mark.parametrize("query,text", [

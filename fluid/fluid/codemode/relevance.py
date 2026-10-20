@@ -6,6 +6,7 @@ substrings in unrelated prose. Explicit Recall also preserves short acronyms.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
 import re
 import unicodedata
@@ -94,31 +95,47 @@ def _recall_index(text: str) -> tuple[str, frozenset[str], tuple[str, ...]]:
             tuple(word for word in words if _NO_SPACES.search(word)))
 
 
-def recall_relevance(text: str, terms: frozenset[str]) -> int:
-    """Exact short names, long prefixes, CamelCase parts and non-space scripts.
+def recall_scorer(terms: frozenset[str]) -> Callable[[str], int]:
+    """Prepare exact short names, long prefixes and non-space script matching.
 
-    Keep whole names as well as their parts, so FactStore/store, GitHub/hub
-    and BuildPC/PC work without matching UI inside build. Substring search
-    is limited to words with non-space scripts, including mixed Latin text.
+    Keep whole names and CamelCase parts; UI must not match inside build.
+    Query classification stays local: no query cache or persisted history.
     """
-    folded, words, unsegmented = _recall_index(text)
-    score = 0
+    prepared = []
     for term in terms:
         if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", term):
-            matched = bool(re.search(r"(?<![\d.])" + re.escape(term) + r"(?!\d|\.\d)", folded))
+            prepared.append((term, "pattern", re.compile(r"(?<![\d.])" + re.escape(term) + r"(?!\d|\.\d)")))
         elif term in {"c++", "c#"}:
-            matched = bool(re.search(r"(?<!\w)" + re.escape(term) + r"(?![a-z_])", folded))
+            prepared.append((term, "pattern", re.compile(r"(?<!\w)" + re.escape(term) + r"(?![a-z_])")))
         elif _NO_SPACES.search(term):
-            matched = term in folded
+            prepared.append((term, "unsegmented", None))
         elif len(term) <= 2:
-            # A mixed Japanese/Latin word can contain UI, but not via build.
-            matched = term in words or any(re.search(
-                r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])", word
-            ) for word in unsegmented)
+            prepared.append((term, "short", re.compile(r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])")))
         else:
-            matched = any(word.startswith(term) for word in words) or any(term in word for word in unsegmented)
-        score += matched
+            prepared.append((term, "prefix", None))
+    query = tuple(prepared)
+
+    def score(text: str) -> int:
+        folded, words, unsegmented = _recall_index(text)
+        total = 0
+        for term, kind, pattern in query:
+            if kind == "pattern":
+                matched = bool(pattern.search(folded))
+            elif kind == "unsegmented":
+                matched = term in folded
+            elif kind == "short":
+                matched = term in words or any(pattern.search(word) for word in unsegmented)
+            else:
+                matched = any(word.startswith(term) for word in words) or any(term in word for word in unsegmented)
+            total += bool(matched)
+        return total
+
     return score
+
+
+def recall_relevance(text: str, terms: frozenset[str]) -> int:
+    """Convenience scorer; retrieval prepares once per query with recall_scorer."""
+    return recall_scorer(terms)(text)
 
 
 

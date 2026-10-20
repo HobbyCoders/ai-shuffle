@@ -14,13 +14,13 @@ def empty_index():
 def test_cached_and_uncached_scores_are_identical(monkeypatch):
     texts = (
         "Workers deploy with FactStore, GitHub and BuildPC; UI is separate from build.",
-        "C++ and C# clients connect to 10.0.0.251, not 10.0.0.1.",
+        "C++ and C# clients connect to 192.0.2.10, not 192.0.2.1.",
         "日本語でpytestを実行する。 टेबल पर किताब है। यह सर्वर तैयार है।",
         "ทดสอบทุกวัน សាកល្បងរាល់ថ្ងៃ ທົດສອບທຸກມື້ စမ်းသပ်မှုနေ့တိုင်း",
         "می‌خواهم کتاب بخوانم. ශ්‍රී ලංකා.",
         "Don't confuse Donation with a negative instruction. A café serves lunch.",
     )
-    queries = ("worker", "deploy", "store", "hub", "PC", "UI", "C++", "C#", "10.0.0.251",
+    queries = ("worker", "deploy", "store", "hub", "PC", "UI", "C++", "C#", "192.0.2.10",
                "pytest", "तैयार", "ทุก", "រាល់", "ທຸກ", "တိုင်း", "می‌خواهم", "ශ්‍රී", "cafe\u0301", "don't")
     terms = [matcher.recall_terms(query) for query in queries]
     def scores():

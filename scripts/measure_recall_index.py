@@ -16,22 +16,23 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fluid"))
 from fluid.codemode import relevance as matcher
 
-QUERIES = ("worker", "deploy", "skill", "store", "hub", "UI", "pytest", "C++", "C#", "テスト", "तैयार", "10.0.0.251")
+QUERIES = ("worker", "deploy", "skill", "store", "hub", "UI", "pytest", "C++", "C#", "テスト", "तैयार", "192.0.2.10")
 
 
 def corpus(count, mixed):
     tail = " 日本語のテスト設定。 यह सर्वर तैयार है। ทดสอบทุกวัน។" if mixed else ""
     return [f"Fixture {i}: workers deploy with FactStore and GitHub. UI helpers use pytest, C++ and C#. "
-            f"The local endpoint is 10.0.0.{i % 256}; keep service{i} isolated. "
+            f"The local endpoint is 192.0.2.{i % 256}; keep service{i} isolated. "
             + "Stable build conventions and deployment checks. " * 3 + tail for i in range(count)]
 
 
-def sample(texts, queries, repeats):
+def sample(texts, queries, repeats, *, prepared=True):
     elapsed, scores = [], []
     for _ in range(repeats):
         for terms in queries:
             start = time.perf_counter()
-            scores = [matcher.recall_relevance(text, terms) for text in texts]
+            score = matcher.recall_scorer(terms) if prepared else lambda text: matcher.recall_relevance(text, terms)
+            scores = [score(text) for text in texts]
             elapsed.append((time.perf_counter() - start) * 1000)
     ordered = sorted(elapsed)
     return {"median_ms": round(statistics.median(elapsed), 4),
@@ -60,9 +61,11 @@ def run(repeats):
         if actual != expected:
             raise AssertionError("Cached index changed relevance scores")
         after = sample(texts, queries, repeats)
+        per_fact = sample(texts, queries, repeats, prepared=False)
         info = cache.cache_info()
         result["cases"][name] = {"facts": count, "queries": len(queries), "scores_equal": True,
                                   "uncached": before, "warm_cached": after,
+                                  "warm_per_fact_classification": per_fact,
                                   "cache_hits": info.hits, "cache_misses": info.misses,
                                   "cache_maxsize": info.maxsize}
     return result
