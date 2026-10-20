@@ -172,6 +172,14 @@ def test_mixed_buffered_transcript_uses_bulk_for_event_runs(pg_workers, monkeypa
     monkeypatch.setattr(store, "insert_event_batch", insert)
     with b.active(), measured_apply(monkeypatch, b) as (transactions, statements):
         result = engine.apply_batch(ops[:1])
+        assert result._pending_more
+        part = result
+        for _ in range(len(ops)):
+            if not part._pending_more:
+                break
+            part = engine.resume_pending()
+            engine._merge_result(result, part)
+        assert not part._pending_more
     print("MIXED_BULK_METRICS " + json.dumps({"ops": len(ops), "rounds": rounds,
           "events": rounds * 40, "bulk_events": sum(chunks), "bulk_chunks": len(chunks)}))
     assert result.applied == len(ops) and result.retry == result.rejected == 0

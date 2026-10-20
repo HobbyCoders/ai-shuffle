@@ -228,7 +228,7 @@ def test_background_resumes_interrupted_buffer_without_peer_traffic(request, use
         calls += 1
         if calls == 2:
             raise RuntimeError("interrupted between committed chunks")
-        real_drain(*args)
+        return real_drain(*args)
 
     with b.active():
         # A real hole must not look ready just because later ops are buffered.

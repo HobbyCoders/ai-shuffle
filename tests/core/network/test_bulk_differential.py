@@ -100,6 +100,16 @@ def test_bulk_matches_per_op(request, monkeypatch, scenario, use_postgres):
                 patch.setattr(engine, "_append_pending", lambda *a_, **k_: None)
             first = engine.apply_batch(ops[1:])
             r = engine.apply_batch(ops[:1])
+            # The request has a four-chunk budget; mixed/compacted runs can
+            # require more chunks even with fewer than 256 envelopes.
+            part = r
+            for _ in range(len(ops)):
+                if not part._pending_more:
+                    break
+                part = engine.resume_pending()
+                engine._merge_result(r, part)
+            assert not part._pending_more
+            assert r.applied + r.lost == len(ops)
             results[w.name] = dict(pending=first.pending, applied=r.applied, dup=r.duplicate, lost=r.lost,
                                    rejected=r.rejected, retry=r.retry, touched=sorted(map(list, r.touched)))
             with store.get_db() as conn:

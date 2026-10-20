@@ -246,6 +246,7 @@ def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext
     if publish:
         with _lock:
             previous = _context
+            retry_count = len(previous._pending_retries) if previous is not None else 0
             if (previous is not None and previous.network_id == ctx.network_id
                     and previous.device_id == ctx.device_id
                     and previous.identity.incarnation == ctx.identity.incarnation):
@@ -259,6 +260,9 @@ def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext
                         if previous.member(stream[0]) != ctx.member(stream[0]):
                             ctx._pending_retries.pop(stream, None)
             _context = ctx
+            retries_dropped = len(ctx._pending_retries) < retry_count
+        if retries_dropped:
+            _wake_pending()
     return ctx
 
 
@@ -321,6 +325,14 @@ def set_pending_kick(callback: Optional[Callable[[], None]]) -> None:
     """Wake only local catch-up, without triggering a new network exchange."""
     global _pending_kick
     _pending_kick = callback
+
+
+def _wake_pending() -> None:
+    if _pending_kick is not None:
+        try:
+            _pending_kick()
+        except Exception:  # noqa: BLE001 - durable work is still found at the next pass
+            logger.debug("Pending catch-up wake failed", exc_info=True)
 
 
 def set_kick(callback: Optional[Callable[[], None]]) -> None:
@@ -1746,8 +1758,11 @@ def _append_pending(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkCont
         return None
     _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
     return part if appended else None
+
+
 PENDING_RETRY_BASE = 30.0
 PENDING_RETRY_MAX = 600.0
+PENDING_DEPENDENCY_RETRY_MAX = 60.0
 
 
 def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int, error: Exception) -> None:
@@ -1757,7 +1772,11 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
         old = ctx._pending_retries.get((origin, incarnation))
         if old is not None and old.seq == seq and now < old.until:
             return
-        delay = (min(PENDING_RETRY_MAX, old.delay * 2)
+        # These dependencies can recover without a membership/key change.
+        short_retry = isinstance(error, TransientApplyError) and str(error).startswith(
+            ("Referenced record has not arrived yet", "Credential storage is locked"))
+        ceiling = PENDING_DEPENDENCY_RETRY_MAX if short_retry else PENDING_RETRY_MAX
+        delay = (min(ceiling, old.delay * 2)
                  if old is not None and old.seq == seq else PENDING_RETRY_BASE)
         ctx._pending_retries[(origin, incarnation)] = _PendingRetry(seq, delay, now + delay)
     if not isinstance(error, ApplyError):
@@ -1766,8 +1785,8 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
 
 
 def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
-                         result: ApplyResult, *, _try_append: bool = True) -> None:
-    """Drain at most APPLY_CHUNK successors under one state lock.
+                         result: ApplyResult, *, _try_append: bool = True) -> bool:
+    """Drain at most APPLY_CHUNK successors; return whether the state lock was taken.
 
     Re-read the committed frontier after locking: another inbound request may
     have drained this stream since the continuation was queued. The pending
@@ -1777,6 +1796,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
     box = [0]
     _deferred_clock.box = box
     first_seq = next_seq = 0
+    locked = False
     failure = None
     try:
         with get_db() as conn:
@@ -1784,8 +1804,9 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             if not store.pending_ready(cursor, origin, incarnation):
                 with _lock:
                     ctx._pending_retries.pop((origin, incarnation), None)
-                return
+                return False
             store.lock_state(cursor)
+            locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = (store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
                       if _try_append else [])
@@ -1838,13 +1859,13 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                 store.observe_clock(cursor, box[0])
     except _ChunkAbandoned:
         _apply_pending_chunk(origin, incarnation, ctx, result, _try_append=False)
-        return
+        return locked
     except Exception as exc:  # noqa: BLE001 - peer can resend from the committed frontier
         _pending_failed(ctx, origin, incarnation, first_seq, exc)
         result.retry_operation({"origin_device_id": origin,
                                 "origin_incarnation": incarnation,
                                 "origin_seq": first_seq}, "buffered apply failed")
-        return
+        return locked
     finally:
         _deferred_clock.box = None
     if failure is not None:
@@ -1853,6 +1874,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
         with _lock:
             ctx._pending_retries.pop((origin, incarnation), None)
     _merge_result(result, part)
+    return locked
 
 
 class _ChunkAbandoned(Exception):
@@ -2045,11 +2067,8 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
     try:
         result = _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams,
                               _pending_chunk_limit=_pending_chunk_limit)
-        if result._pending_more and _pending_kick is not None:
-            try:
-                _pending_kick()
-            except Exception:  # noqa: BLE001 - durable work is still found at the next pass
-                logger.debug("Pending catch-up wake failed", exc_info=True)
+        if result._pending_more:
+            _wake_pending()
         return result
     finally:
         with _lock:
@@ -2128,8 +2147,8 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 if chunks >= _pending_chunk_limit:
                     result._pending_drains.update(streams[index:])
                     break
-                _apply_pending_chunk(origin, incarnation, ctx, result)
-                chunks += 1
+                if _apply_pending_chunk(origin, incarnation, ctx, result):
+                    chunks += 1
         # One background chunk per selected stream preserves fairness. The
         # loop yields without a timed sleep while a continuation is ready.
         for origin, incarnation in _pending_streams:

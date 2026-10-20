@@ -1403,6 +1403,8 @@ async def sync_loop() -> None:
 
 async def pending_loop() -> None:
     """Resume committed pending heads at startup, even with every peer offline."""
+    dirty = False
+    next_exchange = 0.0
     while True:
         if _pending_wake is not None:
             _pending_wake.clear()
@@ -1411,8 +1413,12 @@ async def pending_loop() -> None:
             result = await asyncio.to_thread(engine.resume_pending)
             progressed = bool(result.applied or result.lost or result.rejected)
             more = result._pending_more
-            if progressed:
+            dirty = dirty or progressed
+            now = time.monotonic()
+            if dirty and (not more or now >= next_exchange):
                 engine.kick()
+                dirty = False
+                next_exchange = now + 1.0
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - local catch-up must survive transient DB errors
