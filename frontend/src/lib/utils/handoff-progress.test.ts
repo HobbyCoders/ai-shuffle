@@ -3,11 +3,13 @@ import {
 	GENERIC_STEP_LABEL,
 	HANDOFF_PROGRESS_MAX_EXTRAPOLATE_SECONDS,
 	HANDOFF_SLOW_STEP_SECONDS,
+	advanceHandoffClock,
 	extrapolatedSeconds,
 	formatHandoffElapsed,
 	handoffStepLabel,
 	isSlowHandoffStep,
 	progressForEpisode,
+	readHandoffClock,
 	readHandoffProgress
 } from './handoff-progress';
 
@@ -113,5 +115,44 @@ describe('timing helpers', () => {
 		expect(extrapolatedSeconds(-500)).toBe(0);
 		expect(extrapolatedSeconds(2500)).toBe(2.5);
 		expect(extrapolatedSeconds(10 * 60_000)).toBe(HANDOFF_PROGRESS_MAX_EXTRAPOLATE_SECONDS);
+	});
+});
+
+describe('advanceHandoffClock', () => {
+	const at = (step: string, elapsed: number, stepElapsed: number) => ({ step, elapsed_seconds: elapsed, step_elapsed_seconds: stepElapsed });
+
+	it('is null for null progress', () => {
+		expect(advanceHandoffClock(null, null, 1_000)).toBeNull();
+		const clock = advanceHandoffClock(null, at('decode', 4, 1), 1_000);
+		expect(advanceHandoffClock(clock, null, 2_000)).toBeNull();
+	});
+
+	it('keeps counting from when a report was first seen when the same report is read again', () => {
+		const first = advanceHandoffClock(null, at('install_history.session_events', 20, 5), 0)!;
+		const again = advanceHandoffClock(first, at('install_history.session_events', 20, 5), 3_000)!;
+		expect(again).toBe(first);
+		expect(readHandoffClock(again, 3_000)).toEqual({ elapsed: 23, stepElapsed: 8 });
+	});
+
+	it('never runs the clock backwards on a fresh report', () => {
+		const first = advanceHandoffClock(null, at('install_history.session_events', 20, 5), 0)!;
+		// Counted to 30 s; the next report says 27 s in the same step.
+		const next = advanceHandoffClock(first, at('install_history.session_events', 27, 12), 10_000)!;
+		expect(readHandoffClock(next, 10_000)).toEqual({ elapsed: 30, stepElapsed: 15 });
+		// A later report runs ahead again and is taken as is.
+		const later = advanceHandoffClock(next, at('install_history.session_events', 40, 25), 12_000)!;
+		expect(readHandoffClock(later, 12_000)).toEqual({ elapsed: 40, stepElapsed: 25 });
+	});
+
+	it('restarts the step time on a new step, and keeps the label between steps', () => {
+		const first = advanceHandoffClock(null, at('install_history.session_events', 80, 70), 0)!;
+		const between = advanceHandoffClock(first, at('next step', 81, 0), 1_000)!;
+		expect(between.step).toBe('install_history.session_events');
+		expect(readHandoffClock(between, 1_000)).toEqual({ elapsed: 81, stepElapsed: 0 });
+		const nextStep = advanceHandoffClock(between, at('install_history.fluid_session_nodes', 82, 1), 2_000)!;
+		expect(nextStep.step).toBe('install_history.fluid_session_nodes');
+		expect(readHandoffClock(nextStep, 2_000)).toEqual({ elapsed: 82, stepElapsed: 1 });
+		// With nothing to keep, a between-steps report shows the generic label.
+		expect(advanceHandoffClock(null, at('next step', 3, 0), 0)!.step).toBe('next step');
 	});
 });

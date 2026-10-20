@@ -111,6 +111,20 @@ describe('HandoffCard', () => {
 			expect(clock()).toBe('0:25');
 		});
 
+		it('does not snap back when the same report is read again', async () => {
+			vi.useFakeTimers();
+			const first = at('decode', 10, 2);
+			const { container, rerender } = render(HandoffCard, { props: { episode: episode({ phase: 'sending', sent: true }), progress: first } });
+			const clock = () => container.querySelector('[data-testid="handoff-progress"] time')?.textContent;
+			await vi.advanceTimersByTimeAsync(3_000);
+			expect(clock()).toBe('0:13');
+			// A poll hands the card a new object with the same values.
+			await rerender({ episode: episode({ phase: 'sending', sent: true }), progress: { ...first } });
+			expect(clock()).toBe('0:13');
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(clock()).toBe('0:14');
+		});
+
 		it('leaves settled, queued and cancelling states as they were', () => {
 			const p = at('install_history', 40, 30);
 			expect(read({ phase: 'starting' }, p).step).toBeUndefined();
@@ -120,6 +134,7 @@ describe('HandoffCard', () => {
 			expect(read({ phase: 'failed', sent: true, outcome: 'Hand-off to DesktopWorker failed: boom' }, p).step).toBeUndefined();
 			const cancelling = read({ phase: 'sending', sent: true, cancelling: true }, p);
 			expect(cancelling.detail).toContain('Cancelling');
+			expect(cancelling.step).toBeUndefined();
 			expect(cancelling.card.querySelector('.badge')?.textContent).toBe('cancelling');
 		});
 	});

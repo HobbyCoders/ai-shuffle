@@ -135,3 +135,53 @@ export function extrapolatedSeconds(sinceMs: number): number {
 	if (!Number.isFinite(sinceMs) || sinceMs <= 0) return 0;
 	return Math.min(sinceMs / 1000, HANDOFF_PROGRESS_MAX_EXTRAPOLATE_SECONDS);
 }
+
+/** The step id the receiver reports for the instant between two named steps. */
+const BETWEEN_STEPS = 'next step';
+
+/**
+ * What the card's clock counts from: the latest distinct report, the time it
+ * was first seen, and the values the clock was showing then.
+ */
+export interface HandoffClock {
+	/** The step shown (a between-steps report keeps the previous one). */
+	step: string;
+	elapsed: number;
+	stepElapsed: number;
+	/** `Date.now()` when this report was first seen. */
+	at: number;
+	report: HandoffProgress;
+}
+
+const sameReport = (a: HandoffProgress, b: HandoffProgress) =>
+	a.step === b.step && a.elapsed_seconds === b.elapsed_seconds && a.step_elapsed_seconds === b.step_elapsed_seconds;
+
+/** The clock's reading at `nowMs`: the report plus the capped time since it was seen. */
+export function readHandoffClock(clock: HandoffClock, nowMs: number): { elapsed: number; stepElapsed: number } {
+	const extra = extrapolatedSeconds(nowMs - clock.at);
+	return { elapsed: clock.elapsed + extra, stepElapsed: clock.stepElapsed + extra };
+}
+
+/**
+ * Fold a new read into the clock. The owning worker answers from its last poll
+ * of the receiver, so the page often reads the same report twice: that keeps
+ * the clock running from when it was first seen instead of snapping back. A
+ * fresh report never moves the elapsed time backwards either (the clock may
+ * have counted a little past it), and within the same step neither does the
+ * step time. Null progress clears the clock.
+ */
+export function advanceHandoffClock(prev: HandoffClock | null, next: HandoffProgress | null, nowMs: number): HandoffClock | null {
+	if (!next) return null;
+	if (prev && sameReport(prev.report, next)) return prev;
+	const shown = prev ? readHandoffClock(prev, nowMs) : null;
+	const between = next.step === BETWEEN_STEPS && !!prev;
+	const step = between ? prev!.step : next.step;
+	const sameStep = !!prev && !!shown && prev.step === step && !between;
+	return {
+		step,
+		elapsed: Math.max(next.elapsed_seconds, shown?.elapsed ?? 0),
+		stepElapsed: sameStep ? Math.max(next.step_elapsed_seconds, shown!.stepElapsed) : next.step_elapsed_seconds,
+		at: nowMs,
+		report: next
+	};
+}

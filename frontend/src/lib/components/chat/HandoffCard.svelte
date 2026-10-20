@@ -16,12 +16,15 @@
 	 * the generic detail with the step it is on and the time so far, aligned
 	 * with the route. There is no percentage: the backend reports none.
 	 */
+	import { untrack } from 'svelte';
 	import type { HandoffEpisode } from '$lib/utils/handoff-episodes';
 	import {
-		extrapolatedSeconds,
+		advanceHandoffClock,
 		formatHandoffElapsed,
 		handoffStepLabel,
 		isSlowHandoffStep,
+		readHandoffClock,
+		type HandoffClock,
 		type HandoffProgress
 	} from '$lib/utils/handoff-progress';
 
@@ -39,21 +42,28 @@
 	const timedOut = $derived(episode.reason === 'timeout');
 
 	// ── Receiver progress ───────────────────────────────────────────────
-	// Between reads the clock counts on from the last report (capped, see
-	// extrapolatedSeconds), so it ticks each second instead of jumping.
-	const live = $derived(episode.phase === 'sending' && progress ? progress : null);
-	const report = $derived(live ? { progress: live, at: Date.now() } : null);
+	// Between reads the clock counts on from the last distinct report (capped,
+	// see advanceHandoffClock), so it ticks each second, a re-read of the same
+	// report does not snap it back, and it never runs backwards.
+	// A cancelling move keeps its own detail line, exactly as before.
+	const live = $derived(episode.phase === 'sending' && !episode.cancelling && progress ? progress : null);
+	let report = $state<HandoffClock | null>(null);
+	$effect.pre(() => {
+		const next = live;
+		untrack(() => (report = advanceHandoffClock(report, next, Date.now())));
+	});
 	let now = $state(Date.now());
+	const ticking = $derived(!!report);
 	$effect(() => {
-		if (!report) return;
+		if (!ticking) return;
 		now = Date.now();
 		const ticker = setInterval(() => (now = Date.now()), 1000);
 		return () => clearInterval(ticker);
 	});
-	const extra = $derived(report ? extrapolatedSeconds(now - report.at) : 0);
-	const stepLabel = $derived(report ? handoffStepLabel(report.progress.step, target) : '');
-	const elapsed = $derived(report ? report.progress.elapsed_seconds + extra : 0);
-	const slow = $derived(report ? isSlowHandoffStep(report.progress.step_elapsed_seconds + extra) : false);
+	const reading = $derived(report ? readHandoffClock(report, Math.max(now, report.at)) : null);
+	const stepLabel = $derived(report ? handoffStepLabel(report.step, target) : '');
+	const elapsed = $derived(reading?.elapsed ?? 0);
+	const slow = $derived(reading ? isSlowHandoffStep(reading.stepElapsed) : false);
 
 	const title = $derived.by(() => {
 		switch (episode.phase) {
@@ -181,7 +191,7 @@
 			<div class="progress" data-slow={slow} data-testid="handoff-progress">
 				<span class="pulse" aria-hidden="true"></span>
 				<!-- Polite: a new step is announced once; the ticking clock is not. -->
-				<span class="step" aria-live="polite" title={report.progress.step}>{stepLabel}</span>
+				<span class="step" aria-live="polite" title={report.report.step}>{stepLabel}</span>
 				<span class="clock">
 					<time datetime="PT{Math.floor(elapsed)}S">{formatHandoffElapsed(elapsed)}</time><span class="clock-unit">elapsed</span>
 				</span>
