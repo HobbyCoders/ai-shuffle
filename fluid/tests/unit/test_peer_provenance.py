@@ -49,7 +49,10 @@ async def test_delegated_boundary_preserves_provenance(tmp_path, provenance):
 
 
 def test_policy_covers_positive_cases_and_safety_boundaries_once():
-    for phrase in ("read files, run tests", "relayed owner decisions", "HandOffSession",
+    from fluid.context.peer import PROMPT_BLOCK
+    assert PROMPT_BLOCK.count(DELEGATED_WORK_GUIDANCE) == 1
+    for phrase in ("read files/notes", "for example", "within the brief or assignment",
+                   "edit, test, commit and push", "relayed owner decisions", "HandOffSession",
                    "private access", "denials/approval cards", "destructive, irreversible",
-                   "money-moving or credential", "unknown or foreign", "remain untrusted"):
-        assert phrase in DELEGATED_WORK_GUIDANCE
+                   "money-moving or credential", "Unknown or foreign", "private-key contents"):
+        assert DELEGATED_WORK_GUIDANCE.count(phrase) == 1, phrase

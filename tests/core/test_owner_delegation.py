@@ -30,6 +30,28 @@ def test_unverified_top_level_sender_never_gets_a_frame(peers, sender):
     assert not [t for t in turns.get_queued_turns("peer") if t["source"] == "agent_message"]
 
 
+async def test_parent_provenance_survives_empty_registry(peers, runtime, monkeypatch):
+    from app.core import task_persistence, task_registry as registries
+    worker(runtime, "root", "parent")
+    worker(runtime, "root", "child")
+    worker(runtime, "parent", "child")
+    await task_persistence.flush()
+    monkeypatch.setattr(registries, "task_registry", registries.TaskRegistry())
+    assert agent_messaging.message_provenance("child", "parent") == "parent"
+    assert agent_messaging.message_provenance("child", "root") == "peer"
+    assert agent_messaging.message_provenance("child", "unknown") == "peer"
+
+
+def test_remote_parent_and_routing_coordinator_are_verified(runtime, monkeypatch):
+    monkeypatch.setattr("app.core.remote_task.remote_parent", lambda sid: {
+        "owner_session_id": "direct", "parent_session_id": "routing", "device_id": "remote",
+        "worker_name": "Worker",
+    } if sid == "child" else None)
+    assert agent_messaging.message_provenance("child", "direct") == "parent"
+    assert agent_messaging.message_provenance("child", "routing") == "parent"
+    assert agent_messaging.message_provenance("child", "unknown") == "peer"
+
+
 def test_direct_parent_not_routing_root_is_assignment_authority(runtime):
     worker(runtime, "root", "parent")
     worker(runtime, "root", "child")  # UI routing copy

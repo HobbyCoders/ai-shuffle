@@ -13,6 +13,20 @@ from app.core import swarm
 logger = logging.getLogger(__name__)
 
 
+def _persisted_parents(child: str) -> list[str]:
+    """Host-written Task relationships survive an empty registry on restart."""
+    try:
+        from app.db.base import get_db
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT session_id FROM background_tasks "
+                           "WHERE task_id=%s AND kind='agent'", (child,))
+            return [row["session_id"] for row in cursor.fetchall()]
+    except Exception:  # noqa: BLE001 - missing/old store never establishes trust
+        logger.debug("Could not read persisted Task parents", exc_info=True)
+        return []
+
+
 def peer_rows(session_id: str | None) -> list[dict]:
     """Use the same authorized identities for discovery and delivery.
 
@@ -42,6 +56,12 @@ def peer_rows(session_id: str | None) -> list[dict]:
             "description": f"The conversation that started you, on {parent['worker_name']}",
             "remote_parent": parent["device_id"],
         })
+        # Both host-recorded parents may send assignment updates. `owner` is
+        # the direct caller; `parent` is the root used for routing on nesting.
+        routing_parent = parent.get("parent_session_id")
+        if routing_parent and routing_parent != parent["owner_session_id"]:
+            rows.append({**rows[0], "name": "coordinator",
+                         "worker_session_id": routing_parent})
 
     # Nested dispatch records a worker on both the root (UI routing) and the
     # direct caller. The root also knows that caller as a worker; exclude that
@@ -51,12 +71,16 @@ def peer_rows(session_id: str | None) -> list[dict]:
         for owner in task_registry.sessions_with_task(session_id)
         if (task_registry.get_task(owner, session_id) or {}).get("kind") == "agent"
     ] if parent is None else []
+    persisted = parent is None and not owners
+    if persisted:
+        owners = _persisted_parents(session_id)
     direct_owners = [
         owner
         for owner in owners
         if not any(
             owner != other
-            and (task_registry.get_task(owner, other) or {}).get("kind") == "agent"
+            and ((task_registry.get_task(owner, other) or {}).get("kind") == "agent"
+                 or (persisted and owner in _persisted_parents(other)))
             for other in owners
         )
     ]

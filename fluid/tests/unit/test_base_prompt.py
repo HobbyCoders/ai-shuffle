@@ -73,7 +73,7 @@ def test_prompt_is_identical_across_compilations(tmp_path, monkeypatch) -> None:
 
 # Verified delegation adds relationship-specific action rules and retains the
 # permission boundary. Measured after the deliberate golden snapshot update.
-MEASURED_BASE_PROMPT = 14_296
+MEASURED_BASE_PROMPT = 14_161
 
 
 def test_base_prompt_is_static_and_bounded() -> None:
