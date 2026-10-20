@@ -13,8 +13,8 @@ from fluid.codemode.skills import SkillStore
     ("测试", "项目测试配置保存在本地。"),
     ("store", "FactStore retains memory revisions."),
     ("hub", "GitHub hosts this repository."),
-    ("lab", "HomeLab has a dedicated runner."),
-    ("PC", "GamingPC has a dedicated runner."),
+    ("lab", "WorkshopLab has a dedicated runner."),
+    ("PC", "BuildPC has a dedicated runner."),
     ("pytest", "日本語でpytestを実行する。"),
     ("ทดสอบ", "การทดสอบภายในระบบ"),
     ("ທົດສອບ", "ການທົດສອບລະບົບ"),
@@ -61,11 +61,11 @@ def test_tool_stopwords_and_all_filtered_queries_have_literal_fallback(tmp_path)
 
 def test_contractions_do_not_add_single_letter_neighbors(tmp_path):
     store = SkillStore(tmp_path)
-    expected = store.save_memory("GamingPC has a dedicated runner.")
+    expected = store.save_memory("BuildPC has a dedicated runner.")
     store.save_memory("The worker can't access that host.")
-    assert recall_terms("GamingPC's") == frozenset({"gamingpc"})
+    assert recall_terms("BuildPC's") == frozenset({"buildpc"})
     assert "t" not in recall_terms("can't find runner")
-    assert [e.id for e, _ in store.search_memories("GamingPC's")] == [expected.id]
+    assert [e.id for e, _ in store.search_memories("BuildPC's")] == [expected.id]
 
 
 def test_ipv4_is_one_exact_keyword_not_shared_components(tmp_path):

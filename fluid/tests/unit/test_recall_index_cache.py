@@ -13,7 +13,7 @@ def empty_index():
 
 def test_cached_and_uncached_scores_are_identical(monkeypatch):
     texts = (
-        "Workers deploy with FactStore, GitHub and GamingPC; UI is separate from build.",
+        "Workers deploy with FactStore, GitHub and BuildPC; UI is separate from build.",
         "C++ and C# clients connect to 10.0.0.251, not 10.0.0.1.",
         "日本語でpytestを実行する。 टेबल पर किताब है। यह सर्वर तैयार है।",
         "ทดสอบทุกวัน សាកល្បងរាល់ថ្ងៃ ທົດສອບທຸກມື້ စမ်းသပ်မှုနေ့တိုင်း",

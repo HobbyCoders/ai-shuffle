@@ -98,7 +98,7 @@ def recall_relevance(text: str, terms: frozenset[str]) -> int:
     """Exact short names, long prefixes, CamelCase parts and non-space scripts.
 
     Keep whole names as well as their parts, so FactStore/store, GitHub/hub
-    and GamingPC/PC work without matching UI inside build. Substring search
+    and BuildPC/PC work without matching UI inside build. Substring search
     is limited to words with non-space scripts, including mixed Latin text.
     """
     folded, words, unsegmented = _recall_index(text)
