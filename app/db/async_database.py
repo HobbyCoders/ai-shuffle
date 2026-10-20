@@ -41,3 +41,14 @@ async def run_sync(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         session = await run_sync(database.get_session, session_id)
     """
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+async def run_maintenance(function, *args, **kwargs):
+    """Cancellation signals the off-loop worker before it can borrow again."""
+    import threading
+
+    stop = threading.Event()
+    try:
+        return await asyncio.to_thread(function, *args, stop=stop, **kwargs)
+    finally:
+        stop.set()

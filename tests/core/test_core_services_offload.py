@@ -167,11 +167,14 @@ async def test_schedule_trigger_gate_and_claim_run_off_the_loop(
         lambda automation: (True, "elected"), "should_run_scheduled_here"
     )
     claim_spy = _ThreadSpy(lambda aid, bucket: True, "claim_automation_fire")
-    prune_spy = _ThreadSpy(lambda: None, "prune_automation_fires")
+    prune_spy = _ThreadSpy(lambda *, stop: None, "prune_automation_fires")
     task_threads = []
 
     def _spy_task(coro, *, name):
+        import asyncio
         task_threads.append(threading.get_ident())
+        if name == "auto-fire-retention":
+            return asyncio.create_task(coro)
         coro.close()  # never actually execute the run
         return MagicMock()
 
@@ -180,13 +183,14 @@ async def test_schedule_trigger_gate_and_claim_run_off_the_loop(
          patch.object(database, "prune_automation_fires", prune_spy), \
          patch.object(manager, "_create_tracked_task", _spy_task):
         await manager._on_schedule_trigger("auto-tick", "cron", {})
+        await manager._retention_task
 
     assert election_spy.threads and loop_thread not in election_spy.threads
     assert claim_spy.threads and loop_thread not in claim_spy.threads
-    # claim + prune are one logical operation → one hop.
-    assert prune_spy.threads and set(prune_spy.threads) == set(claim_spy.threads)
-    # ...and the fire is still dispatched ON the loop.
-    assert task_threads == [loop_thread]
+    # Hygiene has its own task; both DB calls remain off the event loop.
+    assert prune_spy.threads and loop_thread not in prune_spy.threads
+    # ...and retention + fire are still dispatched ON the loop.
+    assert task_threads == [loop_thread, loop_thread]
 
 
 async def test_schedule_trigger_skips_when_the_fire_is_already_claimed(

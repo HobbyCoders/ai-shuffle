@@ -363,7 +363,7 @@ def claim_automation_fire(automation_id: str, fire_bucket: str) -> bool:
         return cursor.rowcount == 1
 
 
-def prune_automation_fires(older_than_days: int = 7) -> int:
+def prune_automation_fires(older_than_days: int = 7, *, stop=None) -> int:
     """Delete fire-claim rows older than *older_than_days*; returns rows removed.
 
     A claim only has to outlive the window in which installs could still
@@ -371,10 +371,8 @@ def prune_automation_fires(older_than_days: int = 7) -> int:
     beyond any clock skew and keeps the table tiny.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM automation_fires WHERE claimed_at < %s", (cutoff,))
-        return cursor.rowcount
+    from app.db.retention import mutate_batches
+    return mutate_batches("automation_fires", "claimed_at < %s", (cutoff,), stop=stop, keys=("automation_id", "fire_bucket"))
 
 
 # ---- Automation Runs ----

@@ -125,8 +125,10 @@ def create_schema(cursor) -> None:
             UNIQUE (origin_device_id, incarnation, seq)
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record ON sync_ops(collection, record_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record_ingest ON sync_ops(collection, record_id, ingest_id)")
+    # The covering index also serves its leading (collection, record_id) prefix.
+    # This idempotent migration runs in a transaction, just like CREATE above.
+    cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_records (
             collection TEXT NOT NULL,
@@ -1056,11 +1058,9 @@ def delete_conflict(conflict_id: int) -> bool:
         return bool(cursor.rowcount)
 
 
-def expire_conflicts() -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sync_conflicts WHERE expires_at <= %s", (_now(),))
-        return cursor.rowcount or 0
+def expire_conflicts(*, stop=None) -> int:
+    from app.db.retention import mutate_batches
+    return mutate_batches("sync_conflicts", "expires_at <= %s", (_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------
@@ -1169,12 +1169,12 @@ def delete_join(join_id: str) -> bool:
         return bool(cursor.rowcount)
 
 
-def expire_joins() -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE network_joins SET status = 'expired', updated_at = %s WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < %s",
-                       (_now(), _now()))
-        return cursor.rowcount or 0
+def expire_joins(*, stop=None) -> int:
+    from app.db.retention import mutate_batches
+    return mutate_batches("network_joins",
+                          "status = 'pending' AND expires_at IS NOT NULL AND expires_at < %s",
+                          (_now(),), update="status = 'expired', updated_at = %s",
+                          update_params=(_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------

@@ -736,8 +736,6 @@ def record_remote_usage(assistant_id, session_id, total_usd, *, active, at=None)
         if added:
             cursor.execute("INSERT INTO assistant_remote_costs (id,assistant_id,session_id,cost_usd,booked_at) "
                            "VALUES (%s,%s,%s,%s,%s)", (str(uuid.uuid4()), assistant_id, session_id, added, at))
-            cursor.execute("DELETE FROM assistant_remote_costs WHERE assistant_id=%s AND booked_at < %s",
-                           (assistant_id, at - REMOTE_COST_RETENTION))
         return added
 
 
@@ -756,7 +754,7 @@ def wake_remote_job(assistant_id, session_id):
                               "AND session_id=%s", (assistant_id, session_id))
 
 
-def retention_sweep(assistant_id, at=None):
+def retention_sweep(assistant_id, at=None, *, stop=None):
     """Bounded retention pass; returns per-step row counts.
 
     Linked-activity rows tolerate a missing event (event_ids is plain JSON and
@@ -769,23 +767,26 @@ def retention_sweep(assistant_id, at=None):
     held = ("pending",) + IN_FLIGHT
     held_sql = ",".join(["%s"] * len(held))
     in_flight_sql = ",".join(["%s"] * len(IN_FLIGHT))
+    from app.db.retention import mutate_batches
+    common = dict(stop=stop, batch_size=RETENTION_BATCH, max_batches=1)
     counts = {}
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # Delete past the horizon first so nothing is scrubbed only to be deleted.
-        cursor.execute(f"""DELETE FROM assistant_events WHERE id IN (
-            SELECT id FROM assistant_events WHERE assistant_id=%s AND status NOT IN ({held_sql})
-            AND observed_at < %s LIMIT %s)""", (assistant_id, *held, delete_before, RETENTION_BATCH))
-        counts["events_deleted"] = cursor.rowcount
-        cursor.execute(f"""DELETE FROM assistant_runs WHERE id IN (
-            SELECT r.id FROM assistant_runs r WHERE r.assistant_id=%s AND r.created_at < %s
-            AND ((r.kind='proactive' AND r.status NOT IN ({in_flight_sql})) OR (r.kind<>'proactive' AND r.session_id IS NULL))
-            AND NOT EXISTS (SELECT 1 FROM assistant_events e WHERE e.run_id=r.id AND e.status IN ({held_sql}))
-            LIMIT %s)""", (assistant_id, delete_before, *IN_FLIGHT, *held, RETENTION_BATCH))
-        counts["runs_deleted"] = cursor.rowcount
-        cursor.execute(f"""UPDATE assistant_events SET payload=%s WHERE id IN (
-            SELECT id FROM assistant_events WHERE assistant_id=%s AND status NOT IN ({held_sql})
-            AND observed_at < %s AND payload <> %s LIMIT %s)""",
-            (SCRUBBED_PAYLOAD, assistant_id, *held, scrub_before, SCRUBBED_PAYLOAD, RETENTION_BATCH))
-        counts["events_scrubbed"] = cursor.rowcount
+    counts["events_deleted"] = mutate_batches("assistant_events",
+        f"assistant_id=%s AND status NOT IN ({held_sql}) AND observed_at < %s",
+        (assistant_id, *held, delete_before), **common)
+    counts["runs_deleted"] = mutate_batches("assistant_runs", f"""id IN (
+        SELECT r.id FROM assistant_runs r WHERE r.assistant_id=%s AND r.created_at < %s
+        AND ((r.kind='proactive' AND r.status NOT IN ({in_flight_sql})) OR (r.kind<>'proactive' AND r.session_id IS NULL))
+        AND NOT EXISTS (SELECT 1 FROM assistant_events e WHERE e.run_id=r.id AND e.status IN ({held_sql})))""",
+        (assistant_id, delete_before, *IN_FLIGHT, *held), **common)
+    counts["events_scrubbed"] = mutate_batches("assistant_events",
+        f"assistant_id=%s AND status NOT IN ({held_sql}) AND observed_at < %s AND payload <> %s",
+        (assistant_id, *held, scrub_before, SCRUBBED_PAYLOAD),
+        update="payload=%s", update_params=(SCRUBBED_PAYLOAD,), **common)
+    # Hygiene is not on remote-cost booking or turn-stop admission's critical path.
+    counts["remote_costs_deleted"] = mutate_batches("assistant_remote_costs",
+        "assistant_id=%s AND booked_at < %s", (assistant_id, at - REMOTE_COST_RETENTION), **common)
+    from app.db.assistant_limits import STOP_RETENTION
+    counts["limit_stops_deleted"] = mutate_batches("assistant_limit_stops",
+        "assistant_id=%s AND created_at < %s", (assistant_id, at - STOP_RETENTION),
+        keys=("turn_id",), **common)
     return counts

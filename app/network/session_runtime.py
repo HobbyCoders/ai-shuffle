@@ -12,6 +12,19 @@ from app.network import engine
 STATES = frozenset({"working", "parked", "permission", "question", "idle"})
 
 
+def prune_owned(*, stop=None):
+    """Retract our orphan summaries off the catalog publisher's critical path."""
+    from app.db.retention import mutate_batches
+    if stop is not None and stop.is_set():
+        return 0
+    ctx = engine.context()
+    if ctx is None:
+        return 0
+    return mutate_batches("network_session_runtime", """owner_device_id = %s AND NOT EXISTS
+        (SELECT 1 FROM sessions s WHERE s.id = network_session_runtime.session_id)""",
+        (ctx.device_id,), keys=("session_id",), stop=stop)
+
+
 def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]] = None) -> int:
     """Refresh and publish owned runtime summaries (only ``session_ids``, if given)."""
     from app.network.catalog import _my_instance_id
@@ -25,12 +38,6 @@ def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]
 
     with get_db() as conn:
         cursor = conn.cursor()
-        # Network tables are bootstrapped before sessions, so this table has no
-        # FK. Retract only our own deleted sessions; scans emit their tombstones.
-        cursor.execute("""DELETE FROM network_session_runtime
-            WHERE owner_device_id = %s AND NOT EXISTS
-                (SELECT 1 FROM sessions s WHERE s.id = network_session_runtime.session_id)
-        """ + only("session_id"), (ctx.device_id, *only_params))
         cursor.execute("""
             SELECT s.id, CASE
                 WHEN EXISTS (SELECT 1 FROM pending_interactions p

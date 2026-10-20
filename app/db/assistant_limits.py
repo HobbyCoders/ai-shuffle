@@ -121,8 +121,6 @@ def record_stop(assistant_id, session_id, turn_id, reason, label):
     """Remember a stopped turn; False when it was already recorded."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM assistant_limit_stops WHERE assistant_id=%s AND created_at < %s",
-                       (assistant_id, datetime.now(timezone.utc) - STOP_RETENTION))
         cursor.execute("""INSERT INTO assistant_limit_stops (turn_id, assistant_id, session_id, reason, label)
             VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING turn_id""",
                        (turn_id, assistant_id, session_id, reason, label))

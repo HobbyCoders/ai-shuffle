@@ -3,13 +3,13 @@
 Call init_schema() from database startup after mobile_devices exists. No payload
 is logged. Expired payloads are scrubbed by a periodic sweep (at most once per
 _PURGE_INTERVAL_S per process) plus a targeted scrub whenever an expired command
-is touched. Every read decides expiry from ``expires_at`` rather than from the
+is touched. Queue accesses only request the sweep; they never run it inline.
+Every read decides expiry from ``expires_at`` rather than from the
 stored status, so a command that the sweep has not reached yet is still never
 claimed, counted or reported as live.
 """
 import json
 import threading
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -47,32 +47,28 @@ def init_schema():
             ON mobile_tool_commands(device_id, status, expires_at)""")
 
 
-# The sweep below is table-wide, so running it on every queue access (including
-# each device's claim() poll) made every poll write the whole table. It carries
-# no correctness weight — the queries below all filter on expires_at — so it is
-# throttled to one run per process per interval.
+# Queue accesses request coalesced work; the delayed 60s task owns the sweep.
+# Reads below still enforce expires_at and scrub individual expired commands.
 _PURGE_INTERVAL_S = 60
-_last_purge_monotonic = None
-_purge_lock = threading.Lock()
+_purge_requested = threading.Event()
 
 
 def _reset_purge_throttle():
-    """Test hook: make the next _purge() call run instead of being skipped."""
-    global _last_purge_monotonic
-    _last_purge_monotonic = None
+    """Test hook: clear coalesced maintenance work."""
+    _purge_requested.clear()
 
 
-def _purge(cur, at, force=False):
-    global _last_purge_monotonic
-    with _purge_lock:
-        clock = time.monotonic()
-        if (not force and _last_purge_monotonic is not None
-                and clock - _last_purge_monotonic < _PURGE_INTERVAL_S):
-            return
-        cur.execute("""UPDATE mobile_tool_commands SET status='expired', arguments='{}', result=NULL
-            WHERE expires_at <= %s AND status != 'expired'""", (at,))
-        cur.execute("DELETE FROM mobile_tool_commands WHERE expires_at < %s", (at - timedelta(days=1),))
-        _last_purge_monotonic = clock
+def purge_requested_commands(*, stop=None):
+    if not _purge_requested.is_set():
+        return 0
+    _purge_requested.clear()
+    from app.db.retention import mutate_batches
+    at = now()
+    expired = mutate_batches("mobile_tool_commands", "expires_at <= %s AND status != 'expired'",
+        (at,), update="status='expired', arguments='{}', result=NULL", stop=stop)
+    deleted = mutate_batches("mobile_tool_commands", "expires_at < %s",
+        (at - timedelta(days=1),), stop=stop)
+    return expired + deleted
 
 
 def _scrub_expired(cur, command_id):
@@ -85,7 +81,7 @@ def capabilities(device_id, enabled, tools):
     at = now()
     with get_db() as conn:
         cur = conn.cursor()
-        _purge(cur, at)
+        _purge_requested.set()
         cur.execute("""INSERT INTO mobile_tool_devices(device_id, enabled, tools, updated_at)
             VALUES (%s,%s,%s,%s) ON CONFLICT(device_id) DO UPDATE SET
             enabled=EXCLUDED.enabled, tools=EXCLUDED.tools, updated_at=EXCLUDED.updated_at,
@@ -112,7 +108,7 @@ def enqueue(device_id, session_id, name, arguments, ttl):
     at = now()
     with get_db() as conn:
         cur = conn.cursor()
-        _purge(cur, at)
+        _purge_requested.set()
         # Serialize enqueue/capability updates/claims per device, and bound queue depth.
         cur.execute("SELECT * FROM mobile_tool_devices WHERE device_id=%s FOR UPDATE", (device_id,))
         row = cur.fetchone()
@@ -141,7 +137,7 @@ def claim(device_id):
     at = now()
     with get_db() as conn:
         cur = conn.cursor()
-        _purge(cur, at)
+        _purge_requested.set()
         cur.execute("""UPDATE mobile_tool_devices SET heartbeat_at=%s
             WHERE device_id=%s AND enabled=TRUE RETURNING tools""", (at, device_id))
         row = cur.fetchone()
@@ -157,7 +153,7 @@ def submit_result(device_id, command_id, result):
     at = now()
     with get_db() as conn:
         cur = conn.cursor()
-        _purge(cur, at)
+        _purge_requested.set()
         cur.execute("SELECT * FROM mobile_tool_commands WHERE id=%s AND device_id=%s FOR UPDATE", (command_id, device_id))
         row = cur.fetchone()
         if not row:
@@ -180,7 +176,7 @@ def outcome(command_id, session_id):
     at = now()
     with get_db() as conn:
         cur = conn.cursor()
-        _purge(cur, at)
+        _purge_requested.set()
         cur.execute("SELECT status,result,expires_at FROM mobile_tool_commands WHERE id=%s AND session_id=%s", (command_id, session_id))
         row = cur.fetchone()
         if not row:

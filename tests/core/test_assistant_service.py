@@ -288,6 +288,45 @@ def test_dedicated_connector_credential_revocation_and_agent_scope(assistant_fix
 
 
 @pytest.mark.asyncio
+async def test_slow_assistant_retention_does_not_stall_reconciliation_and_stops(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.core import assistant_manager as module, assistant_limits
+
+    manager = module.AssistantManager()
+    monkeypatch.setattr(module, "RETENTION_STARTUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(manager, "run_once", AsyncMock())
+    monkeypatch.setattr(manager, "detect_owner", lambda *a: None)
+    monkeypatch.setattr(module.service, "reconcile", lambda: None)
+    monkeypatch.setattr(assistant_limits, "enforce", AsyncMock())
+    entered, reconciled, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def sweep(assistant_id, *, stop):
+        loop.call_soon_threadsafe(entered.set)
+        assert stop.wait(3)
+        loop.call_soon_threadsafe(finished.set)
+        return {}
+
+    def activity(*a):
+        if entered.is_set():
+            loop.call_soon_threadsafe(reconciled.set)
+        loop.call_soon_threadsafe(manager._wake.set)
+        return []
+
+    monkeypatch.setattr(store, "retention_sweep", sweep)
+    monkeypatch.setattr(store, "get_activity", activity)
+    manager._task = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(reconciled.wait(), 2)
+        assert not manager._retention_task.done()
+    finally:
+        await manager.shutdown()
+    await asyncio.wait_for(finished.wait(), 2)
+
+
+@pytest.mark.asyncio
 async def test_manager_loop_sweeps_retention_at_most_once_per_interval(monkeypatch):
     import asyncio
     from types import SimpleNamespace
@@ -295,12 +334,14 @@ async def test_manager_loop_sweeps_retention_at_most_once_per_interval(monkeypat
     from app.core import assistant_manager as module
 
     manager = module.AssistantManager()
+    monkeypatch.setattr(module, "RETENTION_STARTUP_DELAY_SECONDS", 0)
     monkeypatch.setattr(manager, "run_once", AsyncMock())
     clock = SimpleNamespace(now=1000.0)
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock.now))
     sweeps = []
 
-    def sweep(assistant_id):
+    def sweep(assistant_id, *, stop):
+        assert not stop.is_set()
         sweeps.append(assistant_id)
         raise RuntimeError("database unavailable")  # Logged; never stops the loop.
     monkeypatch.setattr(store, "retention_sweep", sweep)
@@ -316,10 +357,12 @@ async def test_manager_loop_sweeps_retention_at_most_once_per_interval(monkeypat
     task = asyncio.create_task(manager._loop())
     try:
         await asyncio.wait_for(done.wait(), timeout=3)
+        await asyncio.wait_for(manager._retention_task, 2)
         assert len(sweeps) == 1 and not task.done()
         clock.now += module.RETENTION_INTERVAL_SECONDS
         await manager._maybe_retention_sweep()
         await manager._maybe_retention_sweep()
+        await asyncio.wait_for(manager._retention_task, 2)
         assert len(sweeps) == 2
     finally:
         task.cancel()

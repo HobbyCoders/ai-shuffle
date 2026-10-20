@@ -3369,7 +3369,7 @@ def init_database():
 USAGE_LOG_RETENTION_DAYS = 400
 
 
-def run_database_maintenance(skip_vacuum: bool = False) -> dict:
+def run_database_maintenance(skip_vacuum: bool = False, *, stop=None) -> dict:
     """Run periodic database maintenance to prevent progressive slowdown.
 
     Should be called every few hours. Handles:
@@ -3396,35 +3396,54 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     NOTIFICATIONS_PER_USER_CAP = 500
 
-    # High-volume retention gets its own short transactions, returning the pool
-    # connection between batches rather than sharing the maintenance transaction.
-    from app.db.retention import BATCH_SIZE, delete_batches
+    from app.db.retention import mutate_batches
 
-    try:
-        results["cleaned_usage_log"] = delete_batches(
-            "DELETE FROM usage_log WHERE id IN ("
-            "SELECT id FROM usage_log WHERE created_at < %s LIMIT %s)",
-            (cutoff_usage, BATCH_SIZE),
-        )
-    except Exception as e:
-        results["cleaned_usage_log"] = f"error: {e}"
+    jobs = {
+        "usage_log": ("usage_log", "created_at < %s", (cutoff_usage,)),
+        "audit_log": ("audit_log", "created_at < %s", (cutoff_7d,)),
+        "sync_log": ("sync_log", "created_at < %s", (cutoff_7d,)),
+        "connector_event_log": ("connector_event_log", "created_at < %s", (cutoff_7d,)),
+        "git_ops": ("git_ops", "status IN ('done', 'error') AND updated_at < %s", (cutoff_7d,)),
+        "upload_blobs": ("upload_blobs", "created_at < %s", (cutoff_7d,)),
+        "notifications_age": ("notifications", "created_at < %s", (cutoff_30d,)),
+        "notifications_cap": ("notifications", """id IN (
+            SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY user_id ORDER BY created_at DESC) AS rn
+                FROM notifications) ranked WHERE rn > %s)""", (NOTIFICATIONS_PER_USER_CAP,)),
+    }
+    for name, (table, predicate, params) in jobs.items():
+        try:
+            results[f"cleaned_{name}"] = mutate_batches(table, predicate, params, stop=stop)
+        except Exception as e:
+            results[f"cleaned_{name}"] = f"error: {e}"
 
-    # Only reconstructible deltas from idle sessions, never accounting evidence.
     try:
         from app.core.config import settings as _settings
         from app.db.fluid_events import prune_fluid_delta_events
-
         retention_days = int(getattr(_settings, "fluid_event_retention_days", 7) or 0)
         results["cleaned_fluid_delta_events"] = (
-            prune_fluid_delta_events(retention_days) if retention_days > 0 else "disabled"
+            prune_fluid_delta_events(retention_days, stop=stop) if retention_days > 0 else "disabled"
         )
     except Exception as e:
         results["cleaned_fluid_delta_events"] = f"error: {e}"
 
+    # Compaction is already row/run capped; do not share the log transaction.
+    try:
+        from app.db.session_events import DELTA_COMPACTION_IDLE_HOURS, compact_idle_session_deltas
+        results["compacted_session_event_deltas"] = compact_idle_session_deltas(
+            older_than_hours=DELTA_COMPACTION_IDLE_HOURS, stop=stop
+        )["rows"]
+    except Exception as e:
+        results["compacted_session_event_deltas"] = f"error: {e}"
+
+    if stop is not None and stop.is_set():
+        return results
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 1. Update query planner statistics.
+        from app.db.retention import set_timeout
+        set_timeout(cursor)
         try:
             with _savepoint(cursor, "sp_maint_analyze"):
                 cursor.execute("ANALYZE")
@@ -3432,103 +3451,8 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         except Exception as e:
             results["analyze"] = f"error: {e}"
 
-        # 2. Cleanup unbounded log tables (older than 7 days).
-        # ``usage_log`` is NOT one of them: it is the usage ledger behind the
-        # Stats page's 30/90-day ranges and the per-turn cost footers, and
-        # pruning it at 7 days made every longer range silently report one
-        # week of usage. It has its own, much longer cutoff just below.
-        log_tables = {
-            "audit_log": "created_at",
-            "sync_log": "created_at",
-            "connector_event_log": "created_at",
-        }
-        for table, ts_col in log_tables.items():
-            try:
-                with _savepoint(cursor, "sp_maint_logs"):
-                    cursor.execute(f"DELETE FROM {table} WHERE {ts_col} < %s", (cutoff_7d,))
-                    cleaned = cursor.rowcount
-                results[f"cleaned_{table}"] = cleaned
-            except Exception as e:
-                results[f"cleaned_{table}"] = f"error: {e}"
-
-        # 2a. Cross-install carrier tables (D5/D8). Both are transport, not
-        # history: a terminal git_op has already been executed and its result
-        # read, and an upload blob is materialized (data NULLed) at spawn. The
-        # 7-day cutoff bounds growth without touching in-flight work —
-        # queued/running ops are never swept, only done/error rows.
-        try:
-            with _savepoint(cursor, "sp_maint_git_ops"):
-                cursor.execute(
-                    "DELETE FROM git_ops WHERE status IN ('done', 'error') "
-                    "AND updated_at < %s",
-                    (cutoff_7d,),
-                )
-                cleaned = cursor.rowcount
-            results["cleaned_git_ops"] = cleaned
-        except Exception as e:
-            results["cleaned_git_ops"] = f"error: {e}"
-        try:
-            with _savepoint(cursor, "sp_maint_upload_blobs"):
-                cursor.execute("DELETE FROM upload_blobs WHERE created_at < %s", (cutoff_7d,))
-                cleaned = cursor.rowcount
-            results["cleaned_upload_blobs"] = cleaned
-        except Exception as e:
-            results["cleaned_upload_blobs"] = f"error: {e}"
-
-        # 2d. session_events delta compaction (finding B6). Streaming deltas are
-        # the bulk of that table and are already coalesced by the replay reader;
-        # for sessions idle past the window this merges each run's consecutive
-        # delta rows into the exact row that coalescer builds, so replay output
-        # is byte-identical and nothing renderable is lost. The window is short
-        # (DELTA_COMPACTION_IDLE_HOURS) so recently used sessions stop paying a
-        # row per streaming flush on every open; active runs and the retained
-        # tail are still skipped. Round-robin cursor inside, so a large install
-        # is covered across passes rather than in one long transaction. Shares
-        # this maintenance transaction's cursor.
-        try:
-            with _savepoint(cursor, "sp_maint_compact_deltas"):
-                from app.db.session_events import (
-                    DELTA_COMPACTION_IDLE_HOURS,
-                    compact_idle_session_deltas,
-                )
-
-                compacted = compact_idle_session_deltas(
-                    older_than_hours=DELTA_COMPACTION_IDLE_HOURS, cursor=cursor
-                )["rows"]
-            results["compacted_session_event_deltas"] = compacted
-        except Exception as e:
-            results["compacted_session_event_deltas"] = f"error: {e}"
-
-        # 2b. Notifications retention: drop anything older than 30 days, then cap
-        # each user to the most recent N rows so the table can't grow unbounded.
-        try:
-            with _savepoint(cursor, "sp_maint_notif_age"):
-                cursor.execute("DELETE FROM notifications WHERE created_at < %s", (cutoff_30d,))
-                cleaned = cursor.rowcount
-            results["cleaned_notifications_age"] = cleaned
-        except Exception as e:
-            results["cleaned_notifications_age"] = f"error: {e}"
-        try:
-            with _savepoint(cursor, "sp_maint_notif_cap"):
-                cursor.execute(
-                    """
-                    DELETE FROM notifications
-                    WHERE id IN (
-                        SELECT id FROM (
-                            SELECT id, ROW_NUMBER() OVER (
-                                PARTITION BY user_id ORDER BY created_at DESC
-                            ) AS rn
-                            FROM notifications
-                        ) ranked
-                        WHERE rn > %s
-                    )
-                    """,
-                    (NOTIFICATIONS_PER_USER_CAP,),
-                )
-                cleaned = cursor.rowcount
-            results["cleaned_notifications_cap"] = cleaned
-        except Exception as e:
-            results["cleaned_notifications_cap"] = f"error: {e}"
+    if stop is not None and stop.is_set():
+        return results
 
     # 3. VACUUM — reclaims disk space. Must run outside a transaction.
     # Skipped when sessions are actively streaming to avoid an exclusive lock

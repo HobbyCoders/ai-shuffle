@@ -154,6 +154,7 @@ SERVER_RESTART_REASON = "server_restart"
 
 def mark_stale_background_tasks_killed(
     summary: Optional[str] = None,
+    *, stop=None,
 ) -> List[Dict[str, Any]]:
     """Boot reconcile: mark THIS install's non-terminal rows killed.
 
@@ -172,25 +173,20 @@ def mark_stale_background_tasks_killed(
     ``task.updated`` frame per row, settle the UI chip, rebuild the registry
     and tell each parent what was interrupted.
     """
-    _ph = ph()
     instance_id = settings.effective_instance_id
     # Safe literal join: TERMINAL_STATUSES is a module constant of trusted
     # string literals, never user input.
     terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""UPDATE background_tasks
-                   SET status = 'killed', updated_at = CURRENT_TIMESTAMP,
-                       reason = {_ph}, summary = COALESCE({_ph}, summary)
-                 WHERE instance_id = {_ph}
-                   AND status NOT IN ({terminal_list})
-                   AND remote_device_id IS NULL
-             RETURNING task_id, session_id, tool_use_id, title, kind, agent,
-                       roster_name, model, started_at, terminal_notified""",
-            (SERVER_RESTART_REASON, summary, instance_id),
-        )
-        return rows_to_list(cursor.fetchall())
+    from app.db.retention import mutate_batches
+    rows = []
+    mutate_batches("background_tasks",
+        f"instance_id = %s AND status NOT IN ({terminal_list}) AND remote_device_id IS NULL",
+        (instance_id,), keys=("task_id", "session_id"),
+        update="status = 'killed', updated_at = CURRENT_TIMESTAMP, reason = %s, summary = COALESCE(%s, summary)",
+        update_params=(SERVER_RESTART_REASON, summary),
+        returning="task_id, session_id, tool_use_id, title, kind, agent, roster_name, model, started_at, terminal_notified",
+        consume=rows.extend, stop=stop)
+    return rows
 
 
 def list_session_terminal_background_tasks(
