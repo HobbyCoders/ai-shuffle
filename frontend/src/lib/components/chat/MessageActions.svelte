@@ -596,11 +596,6 @@
 	.msg-menu-item:active {
 		background: color-mix(in oklch, var(--destructive) 12%, transparent);
 	}
-	/* The phone app is touch at every width (tablets included): 44px rows. */
-	:global(html[data-platform='mobile']) .msg-menu-item {
-		min-height: 44px;
-		font-size: 0.875rem;
-	}
 
 	.msg-action-btn:hover {
 		background: var(--hover-overlay);

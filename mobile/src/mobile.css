@@ -371,6 +371,14 @@ html:root[data-platform='mobile'] .dock-left .voice-btn-wrapper {
 }
 
 /* ── frontend/src/lib/components/chat/MessageActions.svelte ────────────────── */
+
+/* The phone app is touch at every width (tablets included): 44px rows in the
+   message ⋯ menu (Report message on Android). */
+html:root[data-platform='mobile'] .msg-menu-item {
+	min-height: 44px;
+	font-size: 0.875rem;
+}
+
 /* ── frontend/src/lib/components/chat/AssistantMessage.svelte ──────────────── */
 /* ── frontend/src/lib/components/chat/UserMessage.svelte ───────────────────── */
 
