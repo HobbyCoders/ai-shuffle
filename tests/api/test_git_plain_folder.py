@@ -248,22 +248,26 @@ def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
     )
 
 
-@pytest.mark.parametrize("diagnostic,is_plain", [
+@pytest.mark.parametrize("diagnostic,is_plain,reason", [
     ("fatal: not a git repository (or any parent up to mount point /home/appuser)\n"
-     "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", True),
-    ("fatal: cannot change to directory: Permission denied\n", False),
-    ("fatal: detected dubious ownership in repository at '/project'\n", False),
+     "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", True, None),
+    ("fatal: cannot change to directory '/private/checkout': Permission denied\n", False, "Permission denied."),
+    ("fatal: detected dubious ownership in repository at '/private/checkout'\n", False, "Dubious ownership."),
 ])
-def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, monkeypatch, diagnostic, is_plain):
+def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, monkeypatch, caplog, diagnostic, is_plain, reason):
     project, folder, client = plain_project
     monkeypatch.setattr(git.git_service, "_run_git", lambda *args, **kwargs:
                         subprocess.CompletedProcess(["git", "rev-parse"], 128, stdout="", stderr=diagnostic))
-    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    with caplog.at_level("DEBUG", logger="app.api.git_owner"):
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
     assert response.status_code == (200 if is_plain else 503)
     if is_plain:
         assert response.json()["is_git_repo"] is False
     else:
-        assert response.json()["detail"] == f"Git checkout probe failed (exit code 128). {diagnostic.strip()}"
+        assert response.json()["detail"] == f"Git checkout probe failed (exit code 128). {reason}"
+        assert "/private/checkout" not in response.text
+        assert any(diagnostic in r.message for r in caplog.records if r.name == "app.api.git_owner" and r.levelname == "DEBUG")
+        assert all("/private/checkout" not in r.message for r in caplog.records if r.levelname == "WARNING")
 
 
 def test_non_english_environment_uses_c_locale_for_confirmation(plain_project, monkeypatch):

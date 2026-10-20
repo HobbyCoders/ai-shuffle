@@ -165,7 +165,7 @@ A git or GitHub route given a subagent's `session_id` (a Task or Swarm child's c
 
 ### GET /api/v1/projects/{project_id}/git/status
 
-Get git status for a project.
+Get git status for a project. A missing project or session checkout returns `409` (previously `503`), with a detail explaining how to restore or select a checkout. A failed Git probe or unreadable repository metadata still returns `503`, with a cause-specific detail.
 
 For an unbound project subfolder inside an enclosing repository, status returns `200` with `is_git_repo: true`, `enclosing_repository_root` naming that root, and `mutations_blocked: true`. Its file lists are empty: parent-wide changes are not exposed through the subfolder. Open the named repository root as a project to use Git controls. Other checkout-scoped Git actions on that subfolder return `409`. A project with its own nested repository behaves like any repository root (`enclosing_repository_root: null`). Plain folders return `is_git_repo: false`; unavailable checkouts still return an error.
 

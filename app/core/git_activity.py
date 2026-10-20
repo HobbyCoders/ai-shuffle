@@ -1,4 +1,5 @@
 """Owner-side preconditions for user-requested Git mutations."""
+import logging
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -13,8 +14,13 @@ from app.db.sessions import list_sessions_for_cleanup
 from app.network import control
 
 
+logger = logging.getLogger(__name__)
+
+
 class GitActivityUnavailable(RuntimeError):
-    pass
+    def __init__(self, message, *, public_reason="repository activity could not be checked"):
+        super().__init__(message)
+        self.public_reason = public_reason
 
 def _live_session_ids():
     # Uncached leases plus draining turns; one query rather than N guard reads.
@@ -81,7 +87,10 @@ def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=(), *
             if remote:
                 if branch and wanted:
                     continue  # Known unrelated branch on another worker.
-                raise GitActivityUnavailable(f"Unknown branch of an active remote session (session {session['id']})")
+                raise GitActivityUnavailable(
+                    f"Unknown branch of an active remote session (session {session['id']})",
+                    public_reason="an active session's branch is unknown",
+                )
             if session.get('worktree_id'):
                 from app.core.project_utils import get_worktree_working_dir
                 row = database.get_worktree(session['worktree_id'])
@@ -89,7 +98,10 @@ def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=(), *
             else:
                 cwd = resolve_existing_cwd(session)
             if not cwd:
-                raise GitActivityUnavailable(f"Unknown cwd of an active session (session {session['id']})")
+                raise GitActivityUnavailable(
+                    f"Unknown cwd of an active session (session {session['id']})",
+                    public_reason="an active session's checkout location is unknown",
+                )
             if target and Path(cwd).resolve() == target:
                 busy.append(session['id'])
             else:
@@ -97,7 +109,10 @@ def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=(), *
                 if branch in wanted or actual_branch in wanted:
                     busy.append(session['id'])
                 elif wanted and not branch and not actual_branch:
-                    raise GitActivityUnavailable(f"Unknown branch of an active session (session {session['id']})")
+                    raise GitActivityUnavailable(
+                        f"Unknown branch of an active session (session {session['id']})",
+                        public_reason="an active session's branch is unknown",
+                    )
         return busy
     except GitActivityUnavailable:
         raise
@@ -109,7 +124,8 @@ def require_idle_git_target(project_id, working_dir, branches=(), *, include_rem
     try:
         busy = busy_git_target_sessions(project_id, working_dir, branches, include_remote=include_remote)
     except GitActivityUnavailable as exc:
-        raise HTTPException(503, f'Cannot verify worktree/branch activity: {exc}. Git changes are blocked until activity can be verified.') from exc
+        logger.debug("Cannot verify Git activity for project %s: %s", project_id, exc, exc_info=True)
+        raise HTTPException(503, f'Cannot verify worktree/branch activity: {exc.public_reason}. Git changes are blocked until activity can be verified.') from exc
     if busy:
         raise HTTPException(409, 'A session using this worktree or branch is active. Stop it or wait before changing Git state.')
 

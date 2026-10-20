@@ -9,6 +9,7 @@ import logging
 import os
 import stat
 import subprocess
+from collections import OrderedDict
 from functools import wraps
 from typing import get_type_hints
 
@@ -22,18 +23,19 @@ from app.network import control
 
 _actions = {}
 logger = logging.getLogger(__name__)
-# Process-lifetime, bounded suppression: a persistent missing checkout should
-# not produce a warning on every client poll (nor after a brief recovery).
-_forward_failures = set()
+# Suppress repeated polling failures without silencing new causes at capacity.
+_forward_failures = OrderedDict()
 _FORWARD_FAILURE_LIMIT = 2048
 
 
 def _warn_forward_failure(target, action, values, status, detail):
     reason = str(detail)
     key = (target, action, values.get("project_id"), values.get("session_id"), status, reason)
-    repeat = key in _forward_failures or len(_forward_failures) >= _FORWARD_FAILURE_LIMIT
-    if not repeat:
-        _forward_failures.add(key)
+    repeat = key in _forward_failures
+    _forward_failures[key] = None
+    _forward_failures.move_to_end(key)
+    if len(_forward_failures) > _FORWARD_FAILURE_LIMIT:
+        _forward_failures.popitem(last=False)
     log = logger.debug if repeat else logger.warning
     log("Forwarded Git action %s to %s: inner status=%s reason=%s", action, target, status, reason)
 
@@ -50,8 +52,16 @@ def checkout_probe_error(exc):
         reason = "Git executable was not found while probing the checkout."
     elif isinstance(exc, subprocess.CalledProcessError):
         reason = f"Git checkout probe failed (exit code {exc.returncode})."
-        if exc.stderr:
-            reason += " " + str(exc.stderr).strip()[:500]
+        # Raw Git diagnostics can contain private paths and safe.directory
+        # hints. Retain them only on the worker that actually ran the probe.
+        logger.debug("Git checkout probe failed (exit code %s), stderr: %s", exc.returncode, exc.stderr)
+        diagnostic = str(exc.stderr or "").strip().lower()
+        if diagnostic.startswith("fatal: detected dubious ownership"):
+            reason += " Dubious ownership."
+        elif diagnostic.startswith(("fatal:", "error:", "permission denied")) and "permission denied" in diagnostic:
+            reason += " Permission denied."
+        elif diagnostic.startswith("fatal: not a git repository"):
+            reason += " Not a Git repository."
     elif isinstance(exc, OSError):
         reason = f"Git checkout probe failed: {exc.strerror or type(exc).__name__}."
     else:
