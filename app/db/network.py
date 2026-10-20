@@ -993,6 +993,16 @@ def stash_pending(cursor, env: dict) -> None:
         (env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], _json(env), _now()))
 
 
+def pending_ready(cursor, origin: str, incarnation: int) -> bool:
+    """One lock-free primary-key probe before opening a drain's state lock."""
+    cursor.execute(
+        """SELECT 1 FROM sync_pending WHERE origin_device_id=%s AND incarnation=%s
+           AND seq=COALESCE((SELECT last_seq FROM sync_watermarks
+               WHERE origin_device_id=%s AND incarnation=%s), 0)+1""",
+        (origin, incarnation, origin, incarnation))
+    return cursor.fetchone() is not None
+
+
 def pop_pending(cursor, origin: str, incarnation: int, seq: int) -> Optional[dict]:
     cursor.execute("SELECT envelope FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
                    (origin, incarnation, seq))
@@ -1002,6 +1012,21 @@ def pop_pending(cursor, origin: str, incarnation: int, seq: int) -> Optional[dic
     cursor.execute("DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
                    (origin, incarnation, seq))
     return _load(row["envelope"], {})
+
+
+def ready_pending_streams(cursor, *, limit: int = 4) -> List[Tuple[str, int]]:
+    """Streams whose next op is already buffered, oldest frontier first.
+
+    Probe the pending primary key once per watermark instead of scanning or
+    aggregating every buffered payload. No row locks or writes at idle.
+    """
+    cursor.execute(
+        """SELECT w.origin_device_id, w.incarnation FROM sync_watermarks w
+           WHERE EXISTS (SELECT 1 FROM sync_pending p
+               WHERE p.origin_device_id=w.origin_device_id AND p.incarnation=w.incarnation
+                 AND p.seq=w.last_seq+1)
+           ORDER BY w.updated_at, w.origin_device_id, w.incarnation LIMIT %s""", (limit,))
+    return [(row["origin_device_id"], int(row["incarnation"])) for row in cursor.fetchall()]
 
 
 def pending_holes(_conn=None) -> List[dict]:

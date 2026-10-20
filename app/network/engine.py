@@ -32,6 +32,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 import zlib
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -142,6 +143,13 @@ def outbox_held() -> bool:
 
 
 @dataclass
+class _PendingRetry:
+    seq: int
+    delay: float
+    until: float
+
+
+@dataclass
 class NetworkContext:
     identity: identity_mod.DeviceIdentity
     network_id: str
@@ -156,6 +164,9 @@ class NetworkContext:
     key_candidates: Dict[int, Dict[str, bytes]] = field(default_factory=dict)
     key_recipients: Dict[str, set] = field(default_factory=dict)
     key_generations: Dict[str, int] = field(default_factory=dict)
+    # Shared across equivalent context reloads; only real key/member changes
+    # invalidate cooldowns. Never retain exceptions or tracebacks here.
+    _pending_retries: Dict[Tuple[str, int], _PendingRetry] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def device_id(self) -> str:
@@ -234,6 +245,19 @@ def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext
         logger.error("Network key version %d is not available on this device", ctx.key_version)
     if publish:
         with _lock:
+            previous = _context
+            if (previous is not None and previous.network_id == ctx.network_id
+                    and previous.device_id == ctx.device_id
+                    and previous.identity.incarnation == ctx.identity.incarnation):
+                # Usage polls and remote claims routinely refresh the context.
+                # Share the map so in-flight readers of the old context agree.
+                ctx._pending_retries = previous._pending_retries
+                if previous.keyring != ctx.keyring:
+                    ctx._pending_retries.clear()
+                else:
+                    for stream in list(ctx._pending_retries):
+                        if previous.member(stream[0]) != ctx.member(stream[0]):
+                            ctx._pending_retries.pop(stream, None)
             _context = ctx
     return ctx
 
@@ -288,6 +312,15 @@ def on_applied(listener: Callable[[List[Tuple[str, str, str]]], None]) -> Callab
                 return
 
     return unsubscribe
+
+
+_pending_kick: Optional[Callable[[], None]] = None
+
+
+def set_pending_kick(callback: Optional[Callable[[], None]]) -> None:
+    """Wake only local catch-up, without triggering a new network exchange."""
+    global _pending_kick
+    _pending_kick = callback
 
 
 def set_kick(callback: Optional[Callable[[], None]]) -> None:
@@ -1010,6 +1043,9 @@ class ApplyResult:
     reasons: List[str] = field(default_factory=list)
     blocked: List[dict] = field(default_factory=list)
     touched: List[Tuple[str, str, str]] = field(default_factory=list)
+    # Private, post-commit continuations; never advertised as applied frontiers.
+    _pending_drains: set[Tuple[str, int]] = field(default_factory=set, repr=False)
+    _pending_more: bool = field(default=False, repr=False)
 
     def retry_operation(self, data: Mapping[str, Any], reason: str) -> None:
         self.retry += 1
@@ -1079,8 +1115,8 @@ def _verify_recovery_origin(ctx: NetworkContext, env: Envelope) -> Member:
 
 
 def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None,
-                   result: Optional[ApplyResult] = None, _draining: bool = False) -> str:
-    """Apply one envelope.
+                   result: Optional[ApplyResult] = None) -> str:
+    """Apply one envelope; ``apply_batch`` drains buffered successors after commit.
 
     Returns ``applied`` | ``duplicate`` | ``pending`` | ``lost`` | ``rejected``.
     ``rejected`` means the op was refused for good and, when it was the next
@@ -1143,6 +1179,8 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
         raise ApplyError("stale incarnation")
     watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
     if env.origin_seq <= watermark:
+        # A previous catch-up may have stopped between committed chunks.
+        result._pending_drains.add((env.origin_device_id, env.origin_incarnation))
         return "duplicate"
     if env.origin_seq > watermark + 1:
         if env.origin_seq > watermark + PENDING_WINDOW:
@@ -1157,36 +1195,9 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     store.drop_pending_upto(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
     if env.origin_incarnation > highest and highest:
         store.clear_pending_stream(cursor, env.origin_device_id, highest)
-    # Drain buffered successors.
-    if not _draining:
-        next_seq = env.origin_seq + 1
-        while True:
-            buffered = store.pop_pending(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
-            if buffered is None:
-                break
-            try:
-                inner = apply_envelope(cursor, buffered, ctx=ctx, result=result, _draining=True)
-            except TransientApplyError as exc:
-                # Not applicable yet (a key or certificate from another stream
-                # is still on its way). Keep it buffered; the stream resumes
-                # here once it can be opened.
-                store.stash_pending(cursor, buffered)
-                result.retry_operation(buffered, str(exc))
-                break
-            except ApplyError as exc:
-                result.rejected += 1
-                result.reasons.append(str(exc))
-                store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
-                next_seq += 1
-                continue
-            if inner == "applied":
-                result.applied += 1
-            elif inner == "lost":
-                result.lost += 1
-            elif inner == "rejected":
-                result.rejected += 1
-            store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, next_seq)
-            next_seq += 1
+    # Continue only after this transaction commits, not recursively under its
+    # state lock. A legacy pending buffer can contain thousands of successors.
+    result._pending_drains.add((env.origin_device_id, env.origin_incarnation))
     return outcome
 
 
@@ -1716,6 +1727,93 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into.reasons.extend(part.reasons)
     into.blocked.extend(part.blocked[:max(0, 20 - len(into.blocked))])
     into.touched.extend(part.touched)
+    into._pending_drains.update(part._pending_drains)
+
+
+PENDING_RETRY_BASE = 30.0
+PENDING_RETRY_MAX = 600.0
+
+
+def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int, error: Exception) -> None:
+    """One retry schedule and at most one unexpected traceback per retry step."""
+    now = time.monotonic()
+    with _lock:
+        old = ctx._pending_retries.get((origin, incarnation))
+        if old is not None and old.seq == seq and now < old.until:
+            return
+        delay = (min(PENDING_RETRY_MAX, old.delay * 2)
+                 if old is not None and old.seq == seq else PENDING_RETRY_BASE)
+        ctx._pending_retries[(origin, incarnation)] = _PendingRetry(seq, delay, now + delay)
+    if not isinstance(error, ApplyError):
+        logger.warning("Applying buffered operations failed; retry backoff %.0fs", delay,
+                       exc_info=(type(error), error, error.__traceback__))
+
+
+def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
+                         result: ApplyResult) -> None:
+    """Drain at most APPLY_CHUNK successors under one state lock.
+
+    Re-read the committed frontier after locking: another inbound request may
+    have drained this stream since the continuation was queued. The pending
+    rows and watermark move atomically; a failed commit leaves both retryable.
+    """
+    part = ApplyResult()
+    box = [0]
+    _deferred_clock.box = box
+    first_seq = next_seq = 0
+    failure = None
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            if not store.pending_ready(cursor, origin, incarnation):
+                with _lock:
+                    ctx._pending_retries.pop((origin, incarnation), None)
+                return
+            store.lock_state(cursor)
+            first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
+            for _ in range(APPLY_CHUNK):
+                buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
+                if buffered is None:
+                    break
+                _savepoint(cursor, "SAVEPOINT pending_envelope")
+                try:
+                    outcome = apply_envelope(cursor, buffered, ctx=ctx, result=part)
+                except Exception as exc:  # noqa: BLE001 - isolate a bad buffered op
+                    _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_envelope")
+                    _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
+                    if not isinstance(exc, ApplyError) or isinstance(exc, TransientApplyError):
+                        failure = exc
+                        store.stash_pending(cursor, buffered)
+                        reason = str(exc) if isinstance(exc, TransientApplyError) else "buffered apply failed"
+                        part.retry_operation(buffered, reason)
+                        break
+                    part.rejected += 1
+                    part.reasons.append(str(exc))
+                    store.set_watermark(cursor, origin, incarnation, next_seq)
+                else:
+                    _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
+                    _count_outcome(part, outcome)
+                part._pending_drains.discard((origin, incarnation))
+                next_seq += 1
+            else:
+                # A full chunk may have more successors; yield the lock first.
+                part._pending_drains.add((origin, incarnation))
+            if box[0]:
+                store.observe_clock(cursor, box[0])
+    except Exception as exc:  # noqa: BLE001 - peer can resend from the committed frontier
+        _pending_failed(ctx, origin, incarnation, first_seq, exc)
+        result.retry_operation({"origin_device_id": origin,
+                                "origin_incarnation": incarnation,
+                                "origin_seq": first_seq}, "buffered apply failed")
+        return
+    finally:
+        _deferred_clock.box = None
+    if failure is not None:
+        _pending_failed(ctx, origin, incarnation, next_seq, failure)
+    else:
+        with _lock:
+            ctx._pending_retries.pop((origin, incarnation), None)
+    _merge_result(result, part)
 
 
 class _ChunkAbandoned(Exception):
@@ -1893,14 +1991,26 @@ def applying_batch() -> bool:
         return bool(ctx is not None and _applying.get(ctx.device_id))
 
 
+INBOUND_PENDING_CHUNKS = 4
+
+
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
-                ctx: NetworkContext | None = None) -> ApplyResult:
+                ctx: NetworkContext | None = None,
+                _pending_streams: Sequence[Tuple[str, int]] = (),
+                _pending_chunk_limit: int = INBOUND_PENDING_CHUNKS) -> ApplyResult:
     """Expose inbound catch-up work too, including pushes without a local peer link."""
     ctx = ctx or require_context()
     with _lock:
         _applying[ctx.device_id] = _applying.get(ctx.device_id, 0) + 1
     try:
-        return _apply_batch(envelopes, ctx=ctx)
+        result = _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams,
+                              _pending_chunk_limit=_pending_chunk_limit)
+        if result._pending_more and _pending_kick is not None:
+            try:
+                _pending_kick()
+            except Exception:  # noqa: BLE001 - durable work is still found at the next pass
+                logger.debug("Pending catch-up wake failed", exc_info=True)
+        return result
     finally:
         with _lock:
             remaining = _applying[ctx.device_id] - 1
@@ -1910,8 +2020,41 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 _applying.pop(ctx.device_id, None)
 
 
+def resume_pending() -> ApplyResult:
+    """One bounded background pass, including leftovers from a previous process.
+
+    No peer replay is required. The indexed readiness probe takes no state
+    lock; each selected stream is rechecked under its own chunk transaction.
+    """
+    ctx = cached_context()
+    if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY:
+        return ApplyResult()
+    now = time.monotonic()
+    with _lock:
+        for stream, retry in list(ctx._pending_retries.items()):
+            if now >= retry.until + PENDING_RETRY_MAX:
+                ctx._pending_retries.pop(stream, None)
+        retrying = dict(ctx._pending_retries)
+    # Every skipped/deprioritized stream gets an extra probe slot. A fixed
+    # overscan cap would merely move starvation to the stream after that cap.
+    with get_db() as conn:
+        # One sentinel beyond the four slots detects unattempted ready work.
+        candidates = store.ready_pending_streams(conn.cursor(), limit=5 + len(retrying))
+    with _lock:
+        streams = [stream for stream in candidates
+                   if stream not in ctx._pending_retries or now >= ctx._pending_retries[stream].until]
+    streams.sort(key=lambda stream: stream in retrying)
+    if not streams:
+        return ApplyResult()  # Do not flash applying_batch() for skipped heads.
+    result = apply_batch((), ctx=ctx, _pending_streams=streams[:4])
+    result._pending_more |= len(streams) > 4
+    return result
+
+
 def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
-                 ctx: NetworkContext | None = None) -> ApplyResult:
+                 ctx: NetworkContext | None = None,
+                 _pending_streams: Sequence[Tuple[str, int]] = (),
+                 _pending_chunk_limit: int = INBOUND_PENDING_CHUNKS) -> ApplyResult:
     """Apply a batch in chunks of ``APPLY_CHUNK`` envelopes per transaction.
 
     One bad op cannot poison the rest: each envelope applies under its own
@@ -1937,6 +2080,24 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                     continue
                 for data in chunk:
                     _apply_one(data, ctx, result)
+        chunks = 0
+        while result._pending_drains and chunks < _pending_chunk_limit:
+            streams = sorted(result._pending_drains)
+            result._pending_drains.clear()
+            for index, (origin, incarnation) in enumerate(streams):
+                if chunks >= _pending_chunk_limit:
+                    result._pending_drains.update(streams[index:])
+                    break
+                _apply_pending_chunk(origin, incarnation, ctx, result)
+                chunks += 1
+        # One background chunk per selected stream preserves fairness. The
+        # loop yields without a timed sleep while a continuation is ready.
+        for origin, incarnation in _pending_streams:
+            _apply_pending_chunk(origin, incarnation, ctx, result)
+        # Durable pending rows are the continuation; do not hold HTTP requests
+        # open for the whole offline backlog or retain an in-memory work queue.
+        result._pending_more = bool(result._pending_drains)
+        result._pending_drains.clear()
     finally:
         _batch_agent_deletions.ids = None
     if result.own_ahead:
