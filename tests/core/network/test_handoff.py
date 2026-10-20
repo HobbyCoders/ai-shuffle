@@ -173,6 +173,49 @@ async def test_two_peer_deferred_handoff_finishes_as_soon_as_source_is_ready(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["begin", "receive"])
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_refusal_logs_once_even_when_deferred_status_is_replayed(
+    monkeypatch, caplog, phase, deferred,
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    reason = "Wait for this session's queued or active turn to finish before resuming here."
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(engine, "require_context", lambda: SimpleNamespace(member=lambda peer: member))
+    monkeypatch.setattr(handoff, "_operations", {})
+    monkeypatch.setattr(handoff.database, "get_session", lambda sid: {"id": sid})
+    monkeypatch.setattr("app.core.streaming_status.has_active_run", lambda sid: False)
+    monkeypatch.setattr(handoff, "_wake_queued", lambda: None)
+    if phase == "begin":
+        # begin is synchronous; exercise its real thread offload.
+        def refuse(*args):
+            raise ValueError(reason)
+        monkeypatch.setattr(handoff, "begin", refuse)
+    else:
+        work = AsyncMock(side_effect=control.ControlRefused(reason))
+        monkeypatch.setattr(handoff, "receive", work)
+    payload = {"session_id": "s1", "phase": phase, "deferred": deferred}
+    if deferred:
+        receipt = await handoff.handle(payload, "source")
+        status = {"session_id": "s1", "phase": "status", **receipt}
+        # A ten-second status wait must return immediately on terminal refusal.
+        for _ in range(2):
+            assert await asyncio.wait_for(handoff.handle(status, "source"), 2) == {"error": reason}
+        assert all(task.done() for task in handoff._operations.values())
+    else:
+        with pytest.raises(ValueError, match="queued or active turn"):
+            await handoff.handle(payload, "source")
+    if phase == "receive":
+        work.assert_awaited_once()
+    messages = [record.getMessage() for record in caplog.records
+                if record.name == handoff.__name__ and "Refused hand-off" in record.getMessage()]
+    assert messages == [f"Refused hand-off {phase} for session s1: {reason}"]
+
+
+@pytest.mark.asyncio
 async def test_deferred_client_retries_only_status_and_surfaces_terminal_failure(monkeypatch):
     from unittest.mock import AsyncMock
     from app.network import runners

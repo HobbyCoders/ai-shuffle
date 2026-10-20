@@ -888,9 +888,97 @@ async def test_wait_logs_reason_without_question_contents(caplog):
     assert "the turn and 1 queued message, Build and a scheduled wake-up" in caplog.text
 
 
+async def test_wait_logs_busy_reason_once_per_minute(caplog):
+    import logging
+
+    clock = SimpleNamespace(now=1000.0)
+    pending = sh.PendingHandoff(
+        "dev-gaming", "DesktopWorker", "private handoff note", clock.now,
+        expires_at=clock.now + 121,
+    )
+    state = {"running": True, "tasks": ["Build"], "queued": 0, "wake": True}
+
+    async def tick(delay):
+        clock.now += delay
+
+    with (
+        patch.object(sh, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now)),
+        patch.object(sh, "busy_state", return_value=state),
+        patch.object(sh, "_prepare_questions", AsyncMock(return_value=True)),
+        patch.object(sh, "POLL_S", 1),
+        patch.object(sh.asyncio, "sleep", tick),
+        caplog.at_level(logging.INFO, logger=sh.__name__),
+    ):
+        assert not await sh._wait_idle("s1", pending)
+    messages = [record.getMessage() for record in caplog.records if record.name == sh.__name__]
+    assert messages == ["Hand-off waiting for session s1: the turn, Build and a scheduled wake-up"] * 3
+    assert "private handoff note" not in caplog.text
+
+
+@pytest.mark.parametrize("by", ["agent", "owner"])
+async def test_queued_move_waits_for_finalizing_lease_without_needing_new_input(by):
+    from app.core import session_runtime
+    from app.db import runs
+    from tests.core.test_session_runtime import _runtime_env
+
+    _chat()
+    turn = turns.enqueue_turn("s1", "user", prompt="move when done")
+    runtime = session_runtime.SessionRuntime(turn)
+    finalizing, release = asyncio.Event(), asyncio.Event()
+    original_finalize = runtime._finalize
+
+    async def pump(**kwargs):
+        if by == "owner":
+            await sh.queue_move("s1", "dev-gaming")
+        else:
+            sh.request("s1", "DesktopWorker")
+            sh.schedule("s1")
+        yield {"type": "done"}
+
+    async def finalize(*args, **kwargs):
+        result = await original_finalize(*args, **kwargs)
+        # Settlement is fenced to this runtime's run, but teardown still owns
+        # the live lease. A handoff must not steal it, even with a terminal turn.
+        assert result == ("completed", True)
+        assert runtime._lease_finalizing
+        active = runs.get_active_run("s1")
+        assert active and turns.get_turn(turn["id"])["run_id"] == active["id"]
+        finalizing.set()
+        await release.wait()
+        return result
+
+    move = AsyncMock()
+    with (
+        _runtime_env(pump=pump),
+        patch.object(runtime, "_finalize", finalize),
+        patch("app.api.sessions.move_session_to", move),
+        patch.object(sh, "POLL_S", 0.01),
+        patch.object(sh, "_record", AsyncMock()),
+    ):
+        execution = asyncio.create_task(runtime.execute())
+        try:
+            await asyncio.wait_for(finalizing.wait(), 3)
+            assert turns.get_turn(turn["id"])["state"] == "completed"
+            assert await asyncio.to_thread(sh._busy, "s1")
+            move.assert_not_awaited()
+            release.set()
+            assert await asyncio.wait_for(execution, 3) == "completed"
+            assert await _settle(lambda: move.await_count)
+            assert await _settle(lambda: "s1" not in sh._running)
+            assert runs.get_active_run("s1") is None
+            move.assert_awaited_once()
+        finally:
+            release.set()
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+            session_runtime.register_scheduler(None)
+            session_runtime.register_broadcaster(None)
+
+
+@pytest.mark.parametrize("by", ["agent", "owner"])
 @pytest.mark.parametrize("draining", [False, True])
-async def test_queued_agent_move_runs_after_runtime_releases_lease_without_new_input(
-    draining,
+async def test_queued_move_runs_after_runtime_releases_lease_without_new_input(
+    draining, by,
 ):
     from app.core import idle_reader, session_runtime
     from app.db import runs
@@ -899,9 +987,14 @@ async def test_queued_agent_move_runs_after_runtime_releases_lease_without_new_i
     _chat()
     turn = turns.enqueue_turn("s1", "user", prompt="move when done")
     runtime = session_runtime.SessionRuntime(turn)
-    sh.request("s1", "DesktopWorker")
 
     async def pump(**kwargs):
+        if by == "owner":
+            await sh.queue_move("s1", "dev-gaming")
+        else:
+            # Also cover a durable agent request with no eager waiter (e.g.
+            # restored state): the post-release seam must arm it after drain.
+            sh.request("s1", "DesktopWorker")
         if draining:
             turns.interrupt_turn("s1", "stop", turn_id=turn["id"])
             turns.escalate_to_draining(turn["id"])

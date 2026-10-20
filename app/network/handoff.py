@@ -898,6 +898,17 @@ async def handle(payload, peer_device_id):
 
 
 async def _handle(payload, peer_device_id):
+    # Deferred failures travel in a 200 status receipt, bypassing peer_control's
+    # HTTP-refusal logger. Log at execution, not on every replayed status read.
+    try:
+        return await _handle_phase(payload, peer_device_id)
+    except (ValueError, PermissionError, LookupError) as exc:
+        logger.warning("Refused hand-off %s for session %s: %s",
+                       payload.get("phase"), payload.get("session_id"), exc)
+        raise
+
+
+async def _handle_phase(payload, peer_device_id):
     sid = str(payload.get("session_id") or "")
     if payload.get("phase") == "finalize-wakes":
         rows = await run_sync(_finalize_wakes, sid, peer_device_id, payload)
@@ -936,9 +947,7 @@ async def _handle(payload, peer_device_id):
         try:
             return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note,
                                   payload.get("wake_barrier") is True)
-        except BaseException as exc:
-            if isinstance(exc, (ValueError, PermissionError, LookupError)):
-                logger.warning("Refused hand-off begin for session %s: %s", sid, exc)
+        except BaseException:
             _wake_queued()
             raise
     if payload.get("phase") in ("commit", "cancel"):
