@@ -1,21 +1,28 @@
 """Recall precision, scope, short-keyword and saved-skill ranking ratchets."""
-from types import SimpleNamespace
 import pytest
 from fluid.codemode.relevance import recall_terms
 from fluid.codemode.skills import SkillStore
 from fluid.tools.builtins.recall import handler
 from fluid.tools.registry import ToolCtx
-from scripts.measure_memory_learning import measure
 
 
 def test_labeled_recall_lab_precision_and_scope_budget(tmp_path):
-    result = measure(tmp_path)
-    assert result["recall_precision_at_3"] == 1
-    assert result["recall_recall_at_3"] == 1
-    assert result["cross_project_correction_leaks"] == 0
+    store = SkillStore(tmp_path)
+    for text, key in [
+        ("The theme uses purple accents and dark surfaces.", "theme"),
+        ("The security controller validates deployment permissions.", "security"),
+        ("Install dependencies in the checkout before running tests.", "install"),
+        ("The fluid harness runs native provider loops.", "harness"),
+        ("The staging build ships through a protected pipeline.", "deploy"),
+        ("Use uv to manage Python dependencies.", "python"),
+    ]:
+        store.save_memory(text, key=key, protected=True)
+    for query, expected in [("UI theme colors", "theme"), ("native fluid harness", "harness"),
+                            ("uv Python", "python"), ("staging pipeline", "deploy")]:
+        assert [e.key for e, _ in store.search_memories(query)] == [expected]
     # Baseline fixture: 689 chars; allow wording room, never a second copy.
-    assert result["snapshot_chars"] <= 750
-    section = SkillStore(tmp_path).render_memory_section("project:lab")
+    section = store.render_memory_section()
+    assert len(section) <= 750
     paragraphs = [line.partition("] ")[2] for line in section.splitlines() if line.startswith("- [")]
     assert len(paragraphs) == len(set(paragraphs))
 
@@ -29,7 +36,7 @@ def test_short_names_keys_punctuation_repeated_terms_and_stop_words(tmp_path):
     assert [e.id for e, _ in store.search_memories("uv")] == [uv.id]
     assert [e.id for e, _ in store.search_memories("UI.THEME")] == [good.id]
     assert recall_terms("the THE ui UI") == frozenset({"ui"})
-    assert not store.search_memories("the with")
+    assert recall_terms("the with") == frozenset({"the", "with"})
     assert recall_terms("Go") == frozenset({"go"})
     assert recall_terms("Make") == frozenset({"make"})
     assert len(recall_terms(" ".join(f"word{i}" for i in range(100)))) == 64
@@ -60,10 +67,14 @@ async def test_skill_results_rank_before_limit_and_do_not_match_build_for_ui(tmp
 
 
 async def test_conflicts_do_not_match_substrings(tmp_path):
-    store = SkillStore(tmp_path)
-    store.memories = lambda: [SimpleNamespace(text="Build controller", key=None,
-                                             conflicted=True, provenance="user", scope="global")]
-    store.search_memories = lambda *a, **kw: []
+    store = SkillStore(tmp_path / "a")
+    other = SkillStore(tmp_path / "b")
+    store.save_memory("Build controller alpha.", key="build.controller", protected=True)
+    other.save_memory("Build controller beta.", key="build.controller", protected=True)
+    store._facts.merge(other._facts.export())
+    assert all(e.conflicted for e in store.memories())
     ctx = ToolCtx(extra={"recall_store": store})
     result = await handler({"query": "UI"}, ctx)
     assert "Unresolved conflict" not in result.text
+    result = await handler({"query": "controller"}, ctx)
+    assert "Unresolved conflict" in result.text

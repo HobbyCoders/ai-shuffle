@@ -86,7 +86,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         )
 
     from fluid.context.screening import screen_findings
-    from fluid.codemode.relevance import recall_terms, relevance
+    from fluid.codemode.relevance import recall_terms, recall_relevance as relevance
 
     terms = recall_terms(query)
     lines: list[str] = []

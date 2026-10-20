@@ -33,10 +33,38 @@ def recall_terms(text: str) -> frozenset[str]:
     a two-character tool. Punctuation separates key/path components; stop words
     never earn relevance merely by appearing in ordinary prose.
     """
-    words = list(dict.fromkeys(re.findall(r"[^\W_]+", text[:4000].casefold())))
-    # A literal one-keyword search may intentionally name Go or Make. Do not
-    # erase it merely because it is also an English stop word.
-    return frozenset((words if len(words) == 1 else [w for w in words if w not in _STOP])[:64])
+    text = re.sub(r"['’](?:s|t|d|m|re|ve|ll)\b", "", text[:4000].casefold())
+    addresses = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text)
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", " ", text)
+    words = list(dict.fromkeys(addresses + [w for w in re.findall(r"[^\W_]+", text)
+                                          if len(w) > 1 or len(text.strip()) == 1]))
+    # Go and Make are explicit tool names even in multi-keyword queries. If
+    # every word is filtered, retain the literal query rather than returning
+    # nothing. Automatic task matching still uses the stricter query_terms.
+    filtered = [w for w in words if w not in (_STOP - {"go", "make"})]
+    return frozenset((filtered or words)[:64])
+
+
+def recall_relevance(text: str, terms: frozenset[str]) -> int:
+    """Exact short names, long word prefixes, and unsegmented CJK substrings.
+
+    Preserve explicit keyword/stem recall without matching UI inside build or
+    splitting IP addresses into common numeric components.
+    """
+    folded = text.casefold()
+    words = re.findall(r"[^\W_]+", folded)
+    score = 0
+    for term in terms:
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", term):
+            matched = bool(re.search(r"(?<![\d.])" + re.escape(term) + r"(?!\d|\.\d)", folded))
+        elif re.search(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]", term):
+            matched = term in folded
+        elif len(term) <= 2:
+            matched = term in words
+        else:
+            matched = any(word.startswith(term) for word in words)
+        score += matched
+    return score
 
 
 def relevance(text: str, terms: frozenset[str]) -> int:

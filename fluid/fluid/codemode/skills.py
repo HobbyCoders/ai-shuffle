@@ -1407,7 +1407,7 @@ class SkillStore:
 
     def search_memories(self, query: str, *, limit: int = 3,
                         project: str | None = None) -> list[tuple[MemoryEntry, bool]]:
-        from fluid.codemode.relevance import recall_terms, relevance
+        from fluid.codemode.relevance import recall_terms, recall_relevance as relevance
         tokens = recall_terms(query or "")
         if not tokens:
             return []
