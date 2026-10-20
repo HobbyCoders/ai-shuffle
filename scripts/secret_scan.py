@@ -95,6 +95,10 @@ def commit_files(root: Path, local: str, remote: str, push_remote: str | None = 
         boundary = new_ref_boundary(root, push_remote)
         if boundary is not None:
             revisions += ["^" + boundary]
+        else:
+            print("Secret scan: scanning all reachable history; fetch the push remote's main first "
+                  "(git fetch <remote> main) to establish a boundary. For a URL/path push, "
+                  "configure and fetch a named remote, then push to that name.", flush=True)
     commits = git(root, "rev-list", *revisions, "--").decode().splitlines()
     scope = f"not on {revisions[1][1:]}" if len(revisions) > 1 else "all reachable history"
     print(f"Secret scan: {len(commits)} outgoing commit(s), {scope}", flush=True)
@@ -102,9 +106,12 @@ def commit_files(root: Path, local: str, remote: str, push_remote: str | None = 
         # Inspect changed blobs for every commit, including each merge parent.
         # Unlike a final-tree diff this catches add-then-delete leaks, and unlike
         # text patches it handles binary-marked files and quoted paths safely.
-        names = git(root, "diff-tree", "--root", "-m", "-r", "--no-commit-id",
-                    "--name-only", "--diff-filter=AMT", "--no-renames", "-z", commit, "--")
-        for name in sorted(set(names.split(b"\0")) - {b""}):
+        changes = git(root, "diff-tree", "--root", "-m", "-r", "--no-commit-id",
+                      "--raw", "--diff-filter=AMT", "--no-renames", "-z", commit, "--").split(b"\0")
+        # Gitlinks point at submodule commits, not blobs in this repository.
+        names = {changes[i + 1] for i in range(0, len(changes) - 1, 2)
+                 if changes[i].split()[1] != b"160000"}
+        for name in sorted(names):
             path = name.decode("utf-8", "surrogateescape")
             text = git(root, "cat-file", "blob", f"{commit}:{path}").decode("utf-8", "replace")
             yield path, text, commit[:12]

@@ -32,12 +32,12 @@ from fluid.store.base import MemoryStore
 # docs or schemas). Measured ~8.4k (code mode) / ~9.6k (JSON path, which
 # also keeps the frequently used tools loaded: NATIVE_JSON_EAGER_TOOLS).
 TOOL_ROWS_BUDGET = 10_000
-# Whole first request, prompt + schemas + first user message, with an empty
-# cwd and home. Measured ~24.6k (code mode) / ~23.3k (JSON path) before the
-# core-only eager tier, ~14.8k / ~14.7k after it, ~13.5k / ~13.6k after the
-# wording pass; the margin absorbs host-dependent sections (workspace facts,
-# environment).
-FIRST_REQUEST_BUDGET = 14_300
+# Budget the priced prefix separately from the first turn's own content.
+# The latter contains host paths, so measure its real producers with fixed
+# path inputs rather than making a whole-request ceiling depend on the host.
+# Together these retain the previous 14.3k ceiling without a path-length margin.
+FIRST_REQUEST_BUDGET = 13_800
+TURN_REMINDERS_BUDGET = 500
 # The breakdown before the first turn prices everything the first request
 # carries except the turn itself: the user's text, the host's note appended to
 # it (memory snapshot, Away mode, harness scratch) and fluid's per-turn
@@ -223,7 +223,7 @@ async def test_unpriced_unknown_reminder_is_rejected(monkeypatch, tmp_path, appe
     else:
         content.append(Text(unknown))
     request = replace(request, messages=[*history, replace(turn, content=content)])
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="Unexpected reminder"):
         _priced_before_the_turn(request, "hello")
 
 
@@ -236,13 +236,30 @@ def _rows(reported) -> dict[str, int]:
 async def test_default_profile_first_request_stays_under_budget(
     monkeypatch, tmp_path, code_mode
 ):
+    import fluid.context.runtime_facts as runtime
+    import fluid.state as state
+    from pathlib import Path
+
+    # Exercise the reminder producers, not canned reminder text. Fix only the
+    # path inputs: scratch repeats its directory, and runtime facts names both
+    # executables. The long-path test below still drives their real variable
+    # paths and checks the priced prefix independently.
+    monkeypatch.setattr(state, "scratch_dir", lambda ctx: Path("/harness/scratch/session"))
+    monkeypatch.setattr(runtime, "sys", SimpleNamespace(executable="/venv/bin/python"))
+    which = runtime.shutil.which
+    monkeypatch.setattr(runtime, "shutil", SimpleNamespace(
+        which=lambda name: "/venv/bin/pytest" if name == "pytest" else which(name),
+    ))
     _engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
     rows = _rows(reported)
     tool_rows = rows.get("System tools", 0) + rows.get("MCP tools", 0)
     assert tool_rows <= TOOL_ROWS_BUDGET, rows
-    assert _request_tokens(request) <= FIRST_REQUEST_BUDGET, rows
+    priced = _priced_before_the_turn(request, "hello")
+    assert priced <= FIRST_REQUEST_BUDGET, (priced, rows)
+    reminders = _request_tokens(request) - priced
+    assert reminders <= TURN_REMINDERS_BUDGET, reminders
 
 
 @pytest.mark.asyncio
@@ -292,6 +309,7 @@ async def test_reported_breakdown_matches_the_first_request(
         whole = _request_tokens(request)
         assert abs(reported["totalTokens"] - whole) > whole * 0.03
     actual = _priced_before_the_turn(request, "hello")
+    assert actual <= FIRST_REQUEST_BUDGET, (actual, _rows(reported))
     assert abs(reported["totalTokens"] - actual) <= actual * REPORT_TOLERANCE, (
         reported["totalTokens"], actual, _request_tokens(request), _rows(reported),
     )
