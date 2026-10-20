@@ -39,6 +39,46 @@ def test_fixture_size_and_duplicate_paragraph_allowance(tmp_path):
     assert len(texts) == len(set(texts))
 
 
+
+
+def test_profile_key_cannot_demote_a_matching_coding_preference(tmp_path, monkeypatch):
+    import fluid.codemode.facts as facts
+    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 220)
+    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", 0)
+    store = SkillStore(tmp_path)
+    coding = store.save_memory("Prefer pytest fixtures for backend tests.", key="profile.coding_style", protected=True)
+    career = store.save_memory("Career biography: looking for a new job. " * 3, key="profile.career", protected=True)
+    for i in range(6):
+        store.save_memory(f"Recent unrelated observation number {i}: keep this ordinary general fact.", protected=True)
+    plan = store.memory_snapshot_plan(task_query="backend pytest fixtures")
+    assert coding.id in plan["shown_ids"]
+    assert career.id not in plan["shown_ids"]
+
+
+def test_business_key_can_match_task_through_text(tmp_path, monkeypatch):
+    import fluid.codemode.facts as facts
+    monkeypatch.setattr(facts, "MAX_PROMPT_CHARS", 180)
+    monkeypatch.setattr(facts, "RESERVED_INFERRED_CHARS", 0)
+    store = SkillStore(tmp_path)
+    relevant = store.save_memory("Invoices require billing currency validation.", key="business.policy", protected=True)
+    for i in range(6):
+        store.save_memory(f"Unrelated recent fact number {i} for the general conversation.", protected=True)
+    assert relevant.id in store.memory_snapshot_plan(task_query="billing currency validation")["shown_ids"]
+
+
+def test_identity_render_is_bounded_without_editing_stored_fact(tmp_path):
+    store = SkillStore(tmp_path)
+    name = store.save_memory("Alex Example. " + "Career biography details and background. " * 10,
+                             key="profile.name", protected=True)
+    original = next(e for e in store.memories() if e.id == name.id)
+    plan = store.memory_snapshot_plan(task_query="backend pytest fixtures")
+    rendered = next(line.partition("] ")[2] for line in plan["lines"] if line.startswith(f"- [{name.id} "))
+    assert len(rendered) <= 120
+    assert rendered.endswith("…")
+    stored = next(e for e in store.memories() if e.id == name.id)
+    assert (stored.text, stored.revision) == (original.text, original.revision)
+
+
 def test_career_facts_remain_available_for_a_career_task(tmp_path):
     store, labels = seeded(tmp_path)
     plan = store.memory_snapshot_plan("project:fixture", task_query="career biography")

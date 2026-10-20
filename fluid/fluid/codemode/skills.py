@@ -1615,13 +1615,15 @@ class SkillStore:
         identity_keys = {"profile.name", "profile.preferred_name", "profile.pronouns", "profile.language"}
         def off_domain(entry: MemoryEntry) -> bool:
             key = entry.key or ""
-            # Stable namespaces are useful domain evidence. Incidental words in
-            # a long biography/pricing policy do not make it a coding preference.
+            # A namespace is a hint, not a veto: Remember recommends profile.*
+            # for preferences too. Two task words in the text beat a key miss.
             domain = set(re.findall(r"[^\W_]+", key.casefold())) - {"profile"}
-            return key.startswith(("profile.", "business.")) and not domain.intersection(terms)
+            return (key.startswith(("profile.", "business."))
+                    and not domain.intersection(terms)
+                    and relevance(entry.text, terms) < 2)
 
         def task_match(entry: MemoryEntry) -> bool:
-            return not off_domain(entry) and relevance(f"{entry.key or ''} {entry.text}", terms) >= 2
+            return relevance(f"{entry.key or ''} {entry.text}", terms) >= 2
         # Saturate lexical matches: verbosity/keyword repetition must not beat
         # useful corrections merely because the fact happens to be longer.
         topic = {e.id: int(task_match(e)) for e in entries}
@@ -1684,7 +1686,12 @@ class SkillStore:
                     "with Remember if still true)"
                     if entry.provenance == "tool" else ""
                 )
-                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}{hint}"
+                # Bound only the rendered identity, never the stored fact or
+                # Recall result. An ellipsis makes the omitted tail explicit.
+                text = entry.text
+                if entry.key in identity_keys and len(text) > 120:
+                    text = text[:119].rstrip() + "…"
+                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {text}{hint}"
                 candidates.append((entry, line, True))
         # Explicit (user-requested) facts rank first, and they alone can fill
         # the budget: on the desktop store 92 protected facts (about 28 KB)

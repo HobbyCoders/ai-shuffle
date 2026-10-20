@@ -152,6 +152,36 @@ async def test_delegated_compaction_resends_same_ranked_base(tmp_path, monkeypat
 
 
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["automation", "peer", "unpark"])
+async def test_restore_task_without_any_full_snapshot(tmp_path, monkeypatch, source):
+    from app.core import fluid_memory
+    seed(tmp_path)
+    monkeypatch.setattr(fluid_memory, "session_memory", lambda sid, cwd: (SkillStore(tmp_path), "project:fixture"))
+    loop = NativeLoop(provider=FakeProvider(REPLY), store=MemoryStore(), model="fake")
+    await loop._ensure_session()
+    adapter = adapter_for(loop, monkeypatch)
+    # The producing path writes real TurnStarted sources, but no snapshot.
+    monkeypatch.setattr(adapter, "_memory_section", lambda: None)
+    try:
+        adapter.set_turn_source(source)
+        await adapter.send_query("career biography")
+        await _collect(adapter)
+        await adapter.send_query("memory backend delegated approval")
+        await _collect(adapter)
+        from app.core.memory_reminder import newest_full_node
+        assert newest_full_node(await loop.store.load_path(loop.session_id)) is None
+        restored = adapter_for(loop, monkeypatch)
+        await restored.send_query("continue")
+        await _collect(restored)
+        assert restored._memory_initial_task == "memory backend delegated approval"
+        assert "Career biography detail" not in restored._memory_section()
+    finally:
+        await adapter.disconnect()
+
+
 @pytest.mark.parametrize("prefix", ["", "/compact\n"])
 def test_initial_task_uses_unpinned_owner_text_only(prefix):
     from types import SimpleNamespace

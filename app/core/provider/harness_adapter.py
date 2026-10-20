@@ -2049,7 +2049,10 @@ class HarnessAdapter(ProviderAdapter):
             if not self._memory_rehydrated:
                 self._memory_rehydrated = True
                 node_id = newest_full_node(nodes)
-                if node_id and not await self._memory_folded_since(store, sid, node_id, nodes=nodes):
+                # Recover the owner task even without a full snapshot (an
+                # automation/wake may have started the session, or it was folded).
+                folded = await self._memory_folded_since(store, sid, node_id, nodes=nodes)
+                if node_id and not folded:
                     self._memory_trusted_node = node_id
             held = held_from_path(nodes, self._memory_trusted_node)
             if held is None and self._memory_trusted_node is None:
@@ -2059,10 +2062,10 @@ class HarnessAdapter(ProviderAdapter):
             logger.warning("[HarnessAdapter] memory held lookup failed", exc_info=True)
             return None
 
-    async def _memory_folded_since(self, store: Any, sid: str, node_id: str,
+    async def _memory_folded_since(self, store: Any, sid: str, node_id: Optional[str],
                                    *, nodes: Optional[List[Any]] = None) -> bool:
-        """Whether a compaction that can fold user text ran after the turn
-        whose user node is ``node_id``. True when that cannot be told."""
+        """Recover the owner task and check snapshot trust with one event scan.
+        True when ``node_id`` is absent or its snapshot may have been folded."""
         from app.core.memory_reminder import compaction_may_fold_snapshot
 
         rows: Optional[List[Dict[str, Any]]] = None
@@ -2098,6 +2101,8 @@ class HarnessAdapter(ProviderAdapter):
                          if row.get("_cls") == "TurnStarted" and row.get("source") == "user"}
             self._memory_initial_task = initial_task_query(
                 [node for node in nodes if getattr(node, "node_id", None) in owner_ids])
+        if not node_id:
+            return True
         started = False
         for row in rows:
             if row.get("_cls") == "TurnStarted" and row.get("node_id") == node_id:
