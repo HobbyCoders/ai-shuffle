@@ -133,7 +133,7 @@ def test_legacy_message_reconciliation_is_batched_and_retains_unchanged_versions
 
 
 
-def test_marked_staging_survives_lease_then_requires_explicit_receipt(chat, monkeypatch):
+def test_receipt_capable_staging_survives_lease_then_requires_explicit_receipt(chat, monkeypatch):
     from types import SimpleNamespace
     from psycopg2.extras import Json
 
@@ -160,6 +160,35 @@ def test_marked_staging_survives_lease_then_requires_explicit_receipt(chat, monk
     assert handoff.recover_history_staging() == 1
     assert database.get_session(chat)["sdk_session_id"] == sdk
     assert not handoff.admission_held(chat)
+
+
+def test_legacy_receipt_recovers_latest_context_and_retires_older_staging(chat, monkeypatch):
+    from types import SimpleNamespace
+    from psycopg2.extras import Json
+
+    ctx = SimpleNamespace(device_id="target")
+    monkeypatch.setattr(handoff.engine, "context", lambda: ctx)
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: ctx)
+    data = snapshot()
+    data.update(token="older-legacy", _prepare_history=True)
+    old_sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
+    handoff._mark_commit_sent(chat, data["token"], "source", receipt_required=False)
+    data["token"] = "newer-legacy"
+    sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
+    handoff._mark_commit_sent(chat, data["token"], "source", receipt_required=False)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE sessions SET owner_device_id='target',placement=%s WHERE id=%s",
+                    (Json({"where": "runner:target"}), chat))
+    assert handoff.recover_history_staging() == 1
+    assert database.get_session(chat)["sdk_session_id"] == sdk
+    assert not handoff.admission_held(chat)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (chat,))
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT count(*) AS n FROM fluid_session_nodes WHERE session_id=%s", (old_sdk,))
+        assert cur.fetchone()["n"] == 0
 
 
 def test_receipt_rewind_removes_only_portable_rows(chat):

@@ -97,20 +97,24 @@ def test_commit_marker_cleanup_requires_positive_ownership_evidence(pair, owner,
                 assert cur.fetchone()["n"] == 0
 
 
-def test_missing_ownership_receipt_never_authorizes_staged_publication(pair):
+@pytest.mark.parametrize("receipt_required", [None, True, False])
+def test_tokenless_recovery_requires_a_marked_legacy_source(pair, receipt_required):
     a, b, _, _ = pair
     sid = "handoff-test"
     with a.active():
         data = {"token": "no-receipt", "sdk_session_id": "ses_source",
                 "history": handoff._history(database.get_session(sid)), "_prepare_history": True}
     with b.active():
-        handoff.install_history(sid, data, ".")
+        sdk = handoff.install_history(sid, data, ".")
+        if receipt_required is not None:
+            handoff._mark_commit_sent(sid, data["token"], a.device_id, receipt_required)
         with get_db() as conn:
             conn.cursor().execute("UPDATE sessions SET owner_device_id=%s,placement=%s WHERE id=%s",
                                   (b.device_id, json.dumps({"where": "runner:" + b.device_id}), sid))
-        assert handoff.recover_history_staging() == 0
+        assert handoff.recover_history_staging() == (1 if receipt_required is False else 0)
         handoff._accept_owner(sid, b.device_id, token=data["token"], recovering=True)
-        assert database.get_session(sid)["sdk_session_id"] is None
+        assert database.get_session(sid)["sdk_session_id"] == (sdk if receipt_required is False else None)
+        assert handoff.admission_held(sid) is (receipt_required is True)
 
 
 @pytest.mark.asyncio

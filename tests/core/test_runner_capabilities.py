@@ -20,7 +20,7 @@ def test_shape_has_all_keys_and_types():
     caps = rc.detect_capabilities()
     assert set(caps.keys()) == {"os", "has_display", "computer_use", "has_chrome", "docker",
                                 "claude_cli_signed_in", "provider_kinds", "remote_task", "move_wakes",
-                                "terminal", "handoff_poll", "move_questions", "handoff_target_resume"}
+                                "terminal", "handoff_poll", "move_questions", "handoff_target_resume", "handoff_receipt"}
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
     assert isinstance(caps["computer_use"], bool)
@@ -33,6 +33,7 @@ def test_shape_has_all_keys_and_types():
     assert caps["handoff_poll"] == 1
     assert caps["move_questions"] == 1
     assert caps["handoff_target_resume"] == 1
+    assert caps["handoff_receipt"] == 1
     assert caps["terminal"] in (0, 1)
 
 
