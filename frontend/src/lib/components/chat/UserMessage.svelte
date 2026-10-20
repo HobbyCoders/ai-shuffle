@@ -8,7 +8,7 @@
 	 * mobile, alongside copy/rewind actions.
 	 */
 	import MessageActions from './MessageActions.svelte';
-	import { formatMessageTime } from '$lib/utils/message-time';
+	import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from '$lib/utils/message-time';
 	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
 
 	interface Props {
@@ -42,7 +42,7 @@
 	role="article"
 >
 	<div class="usercol">
-		<div class="bubble" title={formatMessageTime(timestamp)}>
+		<div class="bubble" title={formatMessageTimeFull(timestamp)}>
 			{#if notSent}<div class="not-sent-label">Not sent (stopped)</div>{/if}
 			<div class="bubble-text" class:is-collapsed={collapsed}>{content}</div>
 			{#if collapsible}
@@ -61,7 +61,7 @@
 			{/if}
 		</div>
 		<div class="useractions" class:is-visible={showActions}>
-			{#if timestamp}<span class="user-time">{formatMessageTime(timestamp)}{#if midTurn}{' · mid-turn'}{/if}</span>{/if}
+			{#if timestamp}<span class="user-time"><time datetime={messageTimeISO(timestamp)} title={formatMessageTimeFull(timestamp)}>{formatMessageTime(timestamp)}</time>{#if midTurn}{' · mid-turn'}{/if}</span>{/if}
 			<MessageActions
 				{sessionId}
 				messageContent={content}
@@ -119,6 +119,7 @@
 		font-family: var(--font-mono);
 		font-size: 10.5px;
 		color: var(--subtle-foreground);
+		white-space: nowrap;
 	}
 
 	.bubble {
