@@ -241,25 +241,33 @@ def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
         checkouts.upsert_checkout(project["id"], "worker-b", str(other))
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == "Selected checkout is missing or ambiguous on this worker"
+    assert response.json()["detail"] == (
+        "No matching Git checkout exists on the selected worker. Restore the checkout or select another worker or branch."
+        if state == "missing" else
+        "Multiple Git checkouts match on the selected worker. Select a specific checkout branch."
+    )
 
 
-@pytest.mark.parametrize("diagnostic,is_plain", [
+@pytest.mark.parametrize("diagnostic,is_plain,reason", [
     ("fatal: not a git repository (or any parent up to mount point /home/appuser)\n"
-     "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", True),
-    ("fatal: cannot change to directory: Permission denied\n", False),
-    ("fatal: detected dubious ownership in repository at '/project'\n", False),
+     "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", True, None),
+    ("fatal: cannot change to directory '/private/checkout': Permission denied\n", False, "Permission denied."),
+    ("fatal: detected dubious ownership in repository at '/private/checkout'\n", False, "Dubious ownership."),
 ])
-def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, monkeypatch, diagnostic, is_plain):
+def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, monkeypatch, caplog, diagnostic, is_plain, reason):
     project, folder, client = plain_project
     monkeypatch.setattr(git.git_service, "_run_git", lambda *args, **kwargs:
                         subprocess.CompletedProcess(["git", "rev-parse"], 128, stdout="", stderr=diagnostic))
-    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    with caplog.at_level("DEBUG", logger="app.api.git_owner"):
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
     assert response.status_code == (200 if is_plain else 503)
     if is_plain:
         assert response.json()["is_git_repo"] is False
     else:
-        assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+        assert response.json()["detail"] == f"Git checkout probe failed (exit code 128). {reason}"
+        assert "/private/checkout" not in response.text
+        assert any(diagnostic in r.message for r in caplog.records if r.name == "app.api.git_owner" and r.levelname == "DEBUG")
+        assert all("/private/checkout" not in r.message for r in caplog.records if r.levelname == "WARNING")
 
 
 def test_non_english_environment_uses_c_locale_for_confirmation(plain_project, monkeypatch):
@@ -316,7 +324,8 @@ def test_probe_failure_is_never_a_positive_non_repo(plain_project, monkeypatch, 
     monkeypatch.setattr(git.git_service, "_run_git", fail)
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
     assert response.status_code == 503
-    assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+    from app.api.git_owner import checkout_probe_error
+    assert response.json()["detail"] == checkout_probe_error(failure).detail
 
 
 @pytest.mark.parametrize("action,body", [("commit", {"message": "no"}),
@@ -410,11 +419,13 @@ def test_existing_session_status_only_confirms_readable_plain_folder(plain_proje
         assert warm.json()["is_git_repo"] is True
         deny_read_access(monkeypatch, folder / ".git")
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
-    assert response.status_code == (200 if state == "plain" else 503), response.text
+    assert response.status_code == {"plain": 200, "missing": 409, "unreadable-git": 503}[state], response.text
     if state == "plain":
         assert response.json()["is_git_repo"] is False
+    elif state == "missing":
+        assert "checkout is not available" in response.json()["detail"]
     else:
-        assert "unavailable" in response.json()["detail"].lower()
+        assert response.json()["detail"] == "Permission denied while probing the Git checkout."
 
 
 @pytest.mark.parametrize("scope", ["project", "session", "worker"])
@@ -438,7 +449,7 @@ def test_real_repo_with_failed_status_never_becomes_plain(plain_project, monkeyp
         query = "?worker_id=local"
     response = client.get(f"/api/v1/projects/{target_id}/git/status{query}")
     assert response.status_code == 503, response.text
-    assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+    assert response.json()["detail"] == "Git could not read the checkout's repository status. Check its Git metadata and access permissions."
     failed_status.assert_called_once_with(str(folder))
 
 
@@ -454,7 +465,7 @@ async def test_branch_bound_plain_checkout_never_uses_plain_fallback(plain_proje
         "params": {"project_id": project["id"]},
     }, from_device="viewer")
     assert result["status"] == 409
-    assert result["detail"] == "Selected checkout is missing or ambiguous on this worker"
+    assert result["detail"] == "No matching Git checkout exists on the selected worker. Restore the checkout or select another worker or branch."
     # A named checkout must be refused before any non-repository fallback,
     # even if later branch-identity guards would also reject the folder.
     classify.assert_not_called()

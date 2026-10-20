@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -46,25 +47,59 @@ def _aad(sid, target):
     return ("shuffle-session-handoff-v1:" + sid + ":" + target).encode()
 
 
-class _Timing:
-    """Where one side of a move spent its time, logged once when it ends.
+_progress_loop = contextvars.ContextVar("handoff_progress_loop", default=None)
+_PROGRESS_LOG_S = 60.0
 
-    A move polls status every ten seconds while the work runs, so the access
-    log shows only those polls, not which step was slow (#2305).
+
+class _Timing:
+    """Step timings, including the current step while a move is still pending.
+
+    The export runs in a thread; its copied control-request context supplies
+    the event loop. Timer callbacks are diagnostics only, not background work
+    that could itself hold the session busy. No extra threads or task launches.
     """
 
-    def __init__(self, role, sid):
+    def __init__(self, role, sid, *, loop=None):
         self.role, self.sid = role, sid
         self.start = self.last = monotonic()
         self.steps = []
+        self.current = ("admission", self.start)
+        self.finished = False
+        self.loop = loop or _progress_loop.get()
+        self.progress_handle = None
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self._arm_progress)
+
+    def _arm_progress(self):
+        if not self.finished:
+            self.progress_handle = self.loop.call_later(_PROGRESS_LOG_S, self._log_progress)
+
+    def _log_progress(self):
+        if self.finished:
+            return
+        name, since = self.current
+        now = monotonic()
+        logger.info("Hand-off %s for session %s waiting on %s for %.1fs (total %.1fs): %s",
+                    self.role, self.sid, name, now - since, now - self.start,
+                    ", ".join(self.steps) or "no completed steps")
+        self._arm_progress()
+
+    def waiting(self, name):
+        self.current = (name, monotonic())
 
     def step(self, name, **facts):
         now = monotonic()
         detail = "".join(f" {key}={value}" for key, value in facts.items())
         self.steps.append(f"{name}={now - self.last:.1f}s{detail}")
         self.last = now
+        self.current = ("next step", now)
 
-    def log(self, outcome):
+    def log(self, outcome, *, quiet=False):
+        self.finished = True
+        if self.progress_handle is not None:
+            self.loop.call_soon_threadsafe(self.progress_handle.cancel)
+        if quiet:
+            return
         logger.info("Hand-off %s for session %s %s after %.1fs: %s", self.role, self.sid, outcome,
                     monotonic() - self.start, ", ".join(self.steps) or "no steps")
 
@@ -631,8 +666,20 @@ def _lease(cur, sid, target, token):
 
 
 def begin(sid, target, remote=None, note=None, wake_barrier=False):
-    """Owner: export the chat for ``target``. ``note`` runs once every check passed,
-    before the history is read, so what it records travels with the chat."""
+    """Owner: export the chat for ``target``. ``note`` travels with its history."""
+    timing = _Timing("export", sid)
+    try:
+        reply = _begin(sid, target, remote, note, wake_barrier, timing)
+    except BaseException:
+        # Admission refusals are already logged by the control boundary. Still
+        # cancel the progress timer, but don't add a second "failed: no steps".
+        timing.log("failed", quiet=not timing.steps and timing.current[0] == "admission")
+        raise
+    timing.log("exported")
+    return reply
+
+
+def _begin(sid, target, remote, note, wake_barrier, timing):
     control._require_owned(sid)
     session = database.get_session(sid)
     project = project_resolver.resolve_project_v2(session)
@@ -661,20 +708,23 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
     if not run:
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
     held = {}
-    timing = _Timing("export", sid)
     try:
         if project:
+            timing.waiting("checkout_guard")
             # Publication commits and pushes the shared checkout. Exclude other
             # sessions working there; they keep their files and work.
             _hold_checkout(session, project, cwd, branch, HOLD + run["id"], held)
             timing.step("checkout_guard", holds=len(held))
+        timing.waiting("git_publish")
         state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
         if project:
             timing.step("git_publish")
         if note is not None:
+            timing.waiting("wake_note")
             note()
         from app.db import session_moves
 
+        timing.waiting("history")
         wakes = _session_wakes(sid)
         queued = session_moves.get(sid)
         if queued and wakes and not wake_barrier:
@@ -688,13 +738,13 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
         raw = json.dumps(data, default=str).encode()
         timing.step("history", rows=sum(len(rows) for rows in data["history"].values()),
                     mb=f"{len(raw) / 1e6:.1f}")
+        timing.waiting("encrypt")
         ctx = engine.require_context()
         reply = {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
         timing.step("encrypt")
-        timing.log("exported")
         return reply
     except BaseException:
-        timing.log("failed")
+        timing.waiting("release_failed_export")
         _release(held)
         runs.release_run(run["id"], run["fence_token"])
         raise
@@ -898,6 +948,26 @@ async def handle(payload, peer_device_id):
 
 
 async def _handle(payload, peer_device_id):
+    # Deferred failures travel in a 200 status receipt, bypassing peer_control's
+    # HTTP-refusal logger. Log at execution, not on every replayed status read.
+    token = _progress_loop.set(asyncio.get_running_loop())
+    try:
+        return await _handle_phase(payload, peer_device_id)
+    except (ValueError, PermissionError, LookupError) as exc:
+        if payload.get("deferred") is True:
+            logger.warning("Refused hand-off %s for session %s: %s",
+                           payload.get("phase"), payload.get("session_id"), exc)
+        raise
+    except Exception:
+        if payload.get("deferred") is True:
+            logger.exception("Hand-off %s failed for session %s",
+                             payload.get("phase"), payload.get("session_id"))
+        raise
+    finally:
+        _progress_loop.reset(token)
+
+
+async def _handle_phase(payload, peer_device_id):
     sid = str(payload.get("session_id") or "")
     if payload.get("phase") == "finalize-wakes":
         rows = await run_sync(_finalize_wakes, sid, peer_device_id, payload)
@@ -936,9 +1006,7 @@ async def _handle(payload, peer_device_id):
         try:
             return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note,
                                   payload.get("wake_barrier") is True)
-        except BaseException as exc:
-            if isinstance(exc, (ValueError, PermissionError, LookupError)):
-                logger.warning("Refused hand-off begin for session %s: %s", sid, exc)
+        except BaseException:
             _wake_queued()
             raise
     if payload.get("phase") in ("commit", "cancel"):
@@ -1101,6 +1169,17 @@ async def receive(session):
 
     Project-less sessions skip the Git steps and transfer history only.
     """
+    timing = _Timing("import", session["id"], loop=asyncio.get_running_loop())
+    try:
+        cwd = await _receive(session, timing)
+    except BaseException:
+        timing.log("failed")
+        raise
+    timing.log("committed")
+    return cwd
+
+
+async def _receive(session, timing):
     owner = control.owner_of(session)
     ctx = engine.context()
     if owner is None:
@@ -1109,6 +1188,7 @@ async def receive(session):
         return None
     if ctx is None:
         raise ValueError("The owning worker must be online on this network to resume here.")
+    timing.waiting("resolve_checkout")
     project = await run_sync(project_resolver.resolve_project_v2, session)
     base = remote = None
     if project:
@@ -1119,9 +1199,11 @@ async def receive(session):
         remote = await run_sync(checkout_transfer.remote_identity, base)
     held = {}
     try:
-        return await _pull(session, owner, ctx, project, base, remote, held, HOLD + str(uuid.uuid4()))
+        return await _pull_steps(session, owner, ctx, project, base, remote, held,
+                                 HOLD + str(uuid.uuid4()), timing)
     finally:
         if held:
+            timing.waiting("release_checkout_holds")
             await run_sync(_release, held)
             _wake_queued()
 
@@ -1151,17 +1233,6 @@ def _reserve_mirror(sid, holder, held):
         raise ValueError("Stop this session's active run before moving it.")
 
 
-async def _pull(session, owner, ctx, project, base, remote, held, holder):
-    timing = _Timing("import", session["id"])
-    try:
-        cwd = await _pull_steps(session, owner, ctx, project, base, remote, held, holder, timing)
-    except BaseException:
-        timing.log("failed")
-        raise
-    timing.log("committed")
-    return cwd
-
-
 def _open_export(ctx, reply, sid):
     blob = reply.get("payload", "")
     raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
@@ -1172,13 +1243,16 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
     sid = session["id"]
     expected_branch = project_resolver._effective_branch(session) if project else None
     if expected_branch:
+        timing.waiting("early_checkout_guard")
         # Refuse a busy receiving checkout before the owner commits or pushes.
         _, path = await run_sync(_receiving_path, base, expected_branch)
         await run_sync(_hold_checkout, session, project, str(path), expected_branch, holder, held)
         timing.step("early_checkout_guard", holds=len(held))
+    timing.waiting("owner_export")
     reply = await _call(owner, {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}, timeout=600)
     timing.step("owner_export")
     # A long chat's export is tens of megabytes; never decode it on the event loop.
+    timing.waiting("decode")
     data, size = await run_sync(_open_export, ctx, reply, sid)
     timing.step("decode", mb=f"{size / 1e6:.1f}")
     token = data["token"]
@@ -1194,10 +1268,12 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
             if state is not None:
                 raise ValueError("Unexpected checkout for a project-less session.")
             cwd = str(settings.effective_workspace_dir)
+            timing.waiting("install_history")
             await run_sync(install_history, sid, data, cwd)
             if data.get("wake_barrier"):
                 await run_sync(_stage_wakes, sid, owner, data, None)
             timing.step("install_history")
+            timing.waiting("owner_commit")
             result = await control.call(owner, "handoff", {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
@@ -1207,22 +1283,28 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
             if not result.get("committed"):
                 raise ValueError("The owning worker did not confirm the transfer.")
             committed = True
+            timing.waiting("accept_owner")
             await run_sync(_accept_owner, sid, ctx.device_id, None)
             if not data.get("wake_barrier"):
+                timing.waiting("arm_wakes")
                 await _arm_moved_wakes(sid, data.get("wakes"))
             return cwd
         if not state or (expected_branch and state["branch"] != expected_branch):
             raise ValueError("The owning worker's branch changed; refresh before resuming.")
+        timing.waiting("checkout_guard")
         dest, path = await run_sync(_receiving_path, base, state["branch"])
         # Exclude other sessions working in the checkout this import changes.
         await run_sync(_reserve_mirror, sid, holder, held)
         await run_sync(_hold_checkout, session, project, str(path), state["branch"], holder, held)
         timing.step("checkout_guard", holds=len(held))
+        timing.waiting("git_fetch")
         cwd = await run_sync(checkout_transfer.import_checkout, base, dest, state)
         timing.step("git_fetch")
         # Keep placement on the original owner while preparing local context.
+        timing.waiting("install_history")
         await run_sync(install_history, sid, data, cwd)
         timing.step("install_history")
+        timing.waiting("verify_checkout")
         await run_sync(checkout_transfer._branch, cwd, state["branch"])
         if await run_sync(checkout_transfer.fingerprint, cwd) != state["head"]:
             raise ValueError("The receiving checkout changed during context sync; ownership was not moved.")
@@ -1234,6 +1316,7 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
                        branch=session_branch or "", head_sha=state["head"], dirty=False, status="active")
         if data.get("wake_barrier"):
             await run_sync(_stage_wakes, sid, owner, data, session_branch)
+        timing.waiting("owner_commit")
         result = await control.call(owner, "handoff", {"session_id": sid,
             "phase": "commit", "token": token,
             "fingerprint": state["fingerprint"],
@@ -1245,8 +1328,10 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         if not result.get("committed"):
             raise ValueError("The owning worker did not confirm the transfer.")
         committed = True
+        timing.waiting("accept_owner")
         await run_sync(_accept_owner, sid, ctx.device_id, session_branch)
         if not data.get("wake_barrier"):
+            timing.waiting("arm_wakes")
             await _arm_moved_wakes(sid, data.get("wakes"))
         return cwd
     finally:
@@ -1254,6 +1339,7 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
             # Best effort. A lost response/worker restart leaves a bounded lease,
             # not a permanent block; never force ownership after a timeout.
             try:
+                timing.waiting("cancel")
                 cancelled = await control.call(owner, "handoff", {"session_id": sid,"phase": "cancel", "token": token})
                 if cancelled.get("cancelled") and data.get("wake_barrier"):
                     await run_sync(_discard_staged_wakes, sid, owner, token)

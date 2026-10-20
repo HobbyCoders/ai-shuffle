@@ -333,8 +333,8 @@ class TestGetGitStatus:
                 client = TestClient(app)
                 response = client.get("/api/v1/projects/nonexistent/git/status")
 
-        assert response.status_code == 503
-        assert "unavailable" in response.json()["detail"].lower()
+        assert response.status_code == 409
+        assert "no local checkout" in response.json()["detail"]
 
     def test_get_status_not_a_git_repo(
         self, app, mock_database, mock_git_service, mock_settings, sample_project, tmp_path

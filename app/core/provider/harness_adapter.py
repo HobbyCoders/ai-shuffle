@@ -78,6 +78,7 @@ import os
 import re
 import ssl
 import time
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, cast
@@ -323,7 +324,11 @@ def _context_overhead_tokens(breakdown: Any) -> Optional[int]:
 class HarnessAdapter(ProviderAdapter):
     """ProviderAdapter implementation backed by the fluid harness."""
 
+    # Diagnostics must not themselves keep disconnected adapters alive.
+    _instances: weakref.WeakSet[HarnessAdapter] = weakref.WeakSet()
+
     def __init__(self) -> None:
+        self._instances.add(self)
         self._engine: Optional[Any] = None  # NativeLoop | DelegatedLoop
         self._store: Optional[Any] = None
         self._registry: Optional[ToolRegistry] = None
@@ -1421,10 +1426,9 @@ class HarnessAdapter(ProviderAdapter):
     ) -> None:
         """Close only the engine; Task and Swarm jobs belong to the app session."""
         engine = self._engine
-        if engine is None:
-            return
         try:
-            await asyncio.wait_for(engine.aclose(), timeout=grace_period)
+            if engine is not None:
+                await asyncio.wait_for(engine.aclose(), timeout=grace_period)
         except asyncio.TimeoutError:
             logger.warning("[HarnessAdapter] engine.aclose() timed out after %.1fs", grace_period)
         except Exception as exc:  # never let teardown raise
@@ -1457,6 +1461,12 @@ class HarnessAdapter(ProviderAdapter):
             # rebuilds instead of reusing. connect() reassigns it, so an
             # adapter that is disconnected and reconnected is unaffected.
             self._engine = None
+            # A pool/reader/callback can keep the adapter alive after eviction.
+            # Do not let that owner also retain the transcript/event cache or
+            # closed registry's handlers. Never clear the store in-place: a
+            # timed-out engine close may still be finishing durable writes.
+            self._store = None
+            self._registry = None
 
     def is_alive(self) -> bool:
         """Whether the engine exists, is connected, and can still send.
