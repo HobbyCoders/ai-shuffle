@@ -178,3 +178,20 @@ def test_global_replacement_does_not_retire_an_older_task_exception(tmp_path):
     old = store.save_memory("For this task, " + OLD, scope="project:fixture", protected=True)
     store.save_memory(NEW, protected=True)
     assert not next(e for e in store.memories() if e.id == old.id).superseded_by
+
+
+
+def test_recently_curated_legacy_store_repairs_once_without_shifting_lifecycle(tmp_path, monkeypatch):
+    import time
+    store = SkillStore(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(store._facts, "_apply_supersessions", lambda *a, **kw: [])
+        pair(store)
+    now = time.time()
+    store._save_meta({"last_curated_at": now})
+    assert OLD in store.render_memory_section("project:fixture")
+    assert store.curate(now=now + 60)
+    assert OLD not in store.render_memory_section("project:fixture")
+    assert store._load_meta()["last_curated_at"] == now
+    assert store._load_meta()["supersession_repair_version"] == 1
+    assert not store.curate(now=now + 61)

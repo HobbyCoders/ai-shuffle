@@ -1761,10 +1761,17 @@ class SkillStore:
         now = time.time() if now is None else now
         meta = self._load_meta()
         last = float(meta.get("last_curated_at", 0.0))
-        if not force and now - last < self.CURATE_INTERVAL_DAYS * 86_400:
+        interval_due = force or now - last >= self.CURATE_INTERVAL_DAYS * 86_400
+        # Repair pre-feature stores once at startup, without waiting a week or
+        # running unrelated skill lifecycle transitions early.
+        if not interval_due and meta.get("supersession_repair_version") == 1:
             return []
-        meta["last_curated_at"] = now
         actions: list[str] = [f"superseded memory:{mid}" for mid in self._facts.reconcile_supersessions()]
+        meta["supersession_repair_version"] = 1
+        if not interval_due:
+            self._save_meta(meta)
+            return actions
+        meta["last_curated_at"] = now
         archive_dir = self.archive_dir
         for name, info in sorted((meta.get("skills") or {}).items()):
             if not isinstance(info, dict) or info.get("pinned"):
