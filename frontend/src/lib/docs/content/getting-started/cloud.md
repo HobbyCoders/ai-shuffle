@@ -10,11 +10,11 @@ AI Shuffle is free and open source. Everything in the app works on your own hard
 
 ## Free account
 
-An optional free AI Shuffle Cloud account gives you **1 remote worker**, with no card and no time limit. A worker is a machine running AI Shuffle, such as a Docker install or the desktop app. You do not need a Cloud account for local use or same-LAN sync.
+An optional free AI Shuffle Cloud account gives you **2 remote workers**, with no card and no time limit. A worker is a machine running AI Shuffle, such as a Docker install or the desktop app. You do not need a Cloud account for local use or same-LAN sync.
 
 ## Paid plan
 
-The paid plan includes **3 remote workers**, worker-to-worker sync across different networks, public connector endpoints, the OAuth relay for one-click plugin sign-ins, and support through in-app reports and the support inbox.
+The paid plan includes **4 remote workers**, worker-to-worker sync across different networks, public connector endpoints, the OAuth relay for one-click plugin sign-ins, and support through in-app reports and the support inbox.
 
 - **Founder:** $14/month or $140/year.
 - **Regular:** $20/month or $200/year.
@@ -41,7 +41,7 @@ Local use has no lease deadline. Your AI provider may still need internet access
 
 ## When a plan ends
 
-Nothing in the app stops working when a plan ends. Agents, chats, projects, files, settings, exports, backups, LAN or VPN access and free updates remain available. Your free account keeps one remote worker; the hub stops serving extra tunnels.
+Nothing in the app stops working when a plan ends. Agents, chats, projects, files, settings, exports, backups, LAN or VPN access and free updates remain available. Your free account keeps two remote workers; the hub stops serving extra tunnels.
 
 Cancel any time from your account on hobbycoders.com. The paid plan stays active until the end of the period you paid for.
 
