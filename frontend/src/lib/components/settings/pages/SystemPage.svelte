@@ -237,7 +237,7 @@
 	// The Android app's "Report message" (a chat reply's ⋯ menu) lands here with
 	// the message filled in. Nowhere else offers AI content reports.
 	$effect(() => {
-		if (!aiContentPrefill.value) return;
+		if (!aiContentPrefill.value || supportCaps.status === 'idle' || supportCaps.status === 'loading') return;
 		const prefill = aiContentPrefill.take();
 		if (!prefill || !canReportAiContent()) return;
 		reportKind = 'ai_content';
@@ -444,7 +444,7 @@
 	</RowGroup>
 	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
 
-	{#if canSendSupportReport()}
+	{#if canSendSupportReport() || (canReportAiContent() && reportKind === 'ai_content' && reportOpen)}
 		<RowGroup title="Help">
 			<SettingRow id="system.reportProblem" expanded={reportOpen ? reportForm : undefined}>
 				<ExpandToggle value="Describe it" bind:open={reportOpen} />

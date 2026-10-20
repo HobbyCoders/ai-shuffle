@@ -1,14 +1,17 @@
 /**
  * "Send report to HobbyCoders support" — client for /api/v1/support.
  *
- * Reference: docs/content/api-reference/support-reports.md. Every endpoint is
- * owner only. Building a draft, the known-issue check and polling are free;
+ * Reference: docs/content/api-reference/support-reports.md. AI content reporting
+ * is available to any authenticated user; other support stays owner only.
+ * Building a draft, the known-issue check and polling are free;
  * starting a diagnosis spends the owner's AI usage (`acknowledge_ai_usage`),
  * and `sendReport` is the only call that sends a report.
  */
 import { api } from './client';
 
 export interface SupportCapabilities {
+	/** Any authenticated user can report AI output, independently of owner-only support. */
+	can_report_ai_content?: boolean;
 	basic_report: boolean;
 	ai_diagnosis: boolean;
 	signed_in: boolean;

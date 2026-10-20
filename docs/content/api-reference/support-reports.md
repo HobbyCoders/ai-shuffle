@@ -15,7 +15,9 @@ There are two kinds of report:
 
 Each of those can be a report of a **problem** with the app (`kind: "problem"`, the default) or of **offensive or harmful AI content** (`kind: "ai_content"`). An AI content report carries the AI output being reported (`excerpt`), the user's reason (`user_note`) and optionally the session it came from; it has no error, logs, known-issue check or AI diagnosis. HobbyCoders support reviews AI content reports by hand for its content policy. In the app, **Settings → System → Help → Report a problem** opens a problem report; an AI content report is offered only in the Android app, from **⋯ → Report message** on an assistant reply.
 
-Every endpoint on this page is **Owner only**. Agent previews (a preview cookie) can read drafts and check fingerprints, but get `403` when they try to start a diagnosis or send.
+Any authenticated client, including a non-owner paired phone, can fetch capabilities and build, update the reason on, and send its own **AI content** reports. All other report kinds, reading reports, known-issue checks and AI diagnoses remain **Owner only**. There is no report-list endpoint. Agent previews (a preview cookie) can read drafts, but cannot build, edit or send reports or start a diagnosis.
+
+AI content draft creation and send attempts are each limited to **5 per hour per user** on this worker (shared across phones belonging to the same account). These in-memory limits reset when the worker restarts; the hub's worker/account limits also apply. Draft payloads are capped at **64 KiB**, in addition to the field limits below. The worker derives `reporter_user_id` from the authenticated identity, never from the payload; it is kept on the draft and local saved record and included in the previewed body sent to support.
 
 ## Flow
 
@@ -57,12 +59,13 @@ A fingerprint is a 32-character id for a kind of error. The same bug on two inst
 
 What this worker can offer.
 
-**Auth:** Owner only
+**Auth:** Any authenticated client
 
 **Response:**
 ```json
 {
   "basic_report": true,
+  "can_report_ai_content": true,
   "ai_diagnosis": true,
   "signed_in": true,
   "report_kinds": ["problem", "ai_content"],
@@ -74,6 +77,7 @@ What this worker can offer.
 }
 ```
 
+- `can_report_ai_content`: whether this client may submit AI content reports. Android gates **Report message** on this flag, independently of `basic_report`. Non-owners receive `basic_report`, `ai_diagnosis` and `fix_with_ai` as `false`, `default_model` as `null`, and only `ai_content` in `report_kinds`.
 - `signed_in`: whether `/check` and `/send` can reach HobbyCoders. Building drafts and diagnoses works either way.
 - `default_model`: the model a diagnosis uses when the request names none, in the same form a model picker sends (`prov:<provider id>:<model id>` or a Claude model id). It is the text-generation model from **Settings → Default models**.
 - `fix_with_ai`: whether to offer the older **Fix with AI** action, which opens a chat whose agent edits code. It is `true` only when this install runs from a git checkout of the source (`fix_with_ai_reason: "source_checkout"`). Customer installs (Docker images and desktop installs) have no checkout and get `false`.
@@ -83,7 +87,7 @@ What this worker can offer.
 
 Build a basic report draft. No AI is used and nothing leaves the worker.
 
-**Auth:** Owner only
+**Auth:** Any authenticated client for `ai_content`; owner only for `problem`.
 
 For a problem, send exactly one of `error_id` or `error`. For AI content, send `kind: "ai_content"` and `excerpt`, and neither `error_id` nor `error`.
 
@@ -146,7 +150,7 @@ The preview of a draft or sent report (basic or AI). `404` once it has expired.
 
 Replace the user's note on a draft and get the updated preview. `{"user_note": "..."}`; `null` or an empty string removes it, except on an AI content report, whose reason cannot be removed (`400`). `409` after the report was sent.
 
-**Auth:** Owner only
+**Auth:** Owner, or the authenticated reporter of an `ai_content` draft.
 
 ### POST /api/v1/support/check
 
@@ -219,7 +223,7 @@ Poll a run. `status` is `running`, `done` or `failed`.
 
 Send a draft to HobbyCoders support. The only endpoint that sends a report. Call it only from an explicit user action.
 
-**Auth:** Owner only
+**Auth:** Owner, or the authenticated reporter of an `ai_content` draft.
 
 **Request:** `{"confirm": true}` (required).
 

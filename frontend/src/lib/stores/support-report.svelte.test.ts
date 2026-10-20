@@ -129,6 +129,8 @@ describe('AI content helpers', () => {
 		expect(sent.startsWith('x'.repeat(1499) + '😀')).toBe(true);
 		expect(clipCodePoints('ab😀cd', 3)).toBe('ab😀');
 		expect(clipCodePoints('short', 10)).toBe('short');
+		supportCaps.status = 'ready';
+		supportCaps.current = { basic_report: false, can_report_ai_content: true } as any;
 		window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.example', token: 'shc_test', native: { platform: 'android', bridge: 1, capabilities: [] } };
 		try {
 			reportAiContent('x'.repeat(7999) + '😀😀', 's1');
@@ -141,7 +143,9 @@ describe('AI content helpers', () => {
 		expect(() => encodeURIComponent(prefill.excerpt)).not.toThrow();
 	});
 
-	it('offers AI content reports only in the Android app', () => {
+	it('offers AI content reports only in the Android app with the dedicated capability', () => {
+		supportCaps.status = 'ready';
+		supportCaps.current = { basic_report: false, can_report_ai_content: true } as any;
 		const app = (native?: { platform?: string; bridge: number; capabilities: string[] }) => {
 			window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.example', token: 'shc_test', ...(native ? { native } : {}) };
 		};
@@ -154,7 +158,13 @@ describe('AI content helpers', () => {
 			app({ platform: 'ios', bridge: 1, capabilities: [] });
 			expect(canReportAiContent()).toBe(false);
 			app({ platform: 'android', bridge: 1, capabilities: [] });
+			expect(canSendSupportReport()).toBe(false);
 			expect(canReportAiContent()).toBe(true);
+			supportCaps.current = { basic_report: true } as any;
+			expect(canReportAiContent()).toBe(false); // missing flag fails closed
+			supportCaps.current = { basic_report: true, can_report_ai_content: false } as any;
+			expect(canReportAiContent()).toBe(false);
+			supportCaps.current = { basic_report: false, can_report_ai_content: true } as any;
 			app(); // an Android app from before the bridge
 			expect(canReportAiContent()).toBe(true);
 

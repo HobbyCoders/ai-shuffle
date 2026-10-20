@@ -318,6 +318,8 @@ def _render_ai_content(report: dict[str, Any]) -> str:
         f"App version: {report['app_version']}",
         f"Platform: {report['platform']}",
     ]
+    if report.get("reporter_user_id"):
+        lines.append(f"Reporter user ID: {report['reporter_user_id']}")
     if report.get("session_ref"):
         lines.append(f"Session reference: {report['session_ref']}")
     lines += ["", "## Reported AI output", report["excerpt"],
@@ -480,7 +482,7 @@ def _session_ref(value: Optional[str]) -> Optional[str]:
 
 
 def build_ai_content(*, excerpt: Optional[str], user_note: Optional[str] = None,
-                     session_id: Optional[str] = None) -> dict[str, Any]:
+                     session_id: Optional[str] = None, reporter_user_id: Optional[str] = None) -> dict[str, Any]:
     """Build and keep a report of offensive or harmful AI output. No AI and no network."""
     if not str(excerpt or "").strip():
         raise ReportError(400, "Paste the AI output you are reporting.")
@@ -492,6 +494,7 @@ def build_ai_content(*, excerpt: Optional[str], user_note: Optional[str] = None,
         # The hub takes "basic" or "ai" only; report_kind routes it.
         "kind": "basic",
         "report_kind": "ai_content",
+        "reporter_user_id": reporter_user_id,
         "fingerprint": AI_CONTENT_FINGERPRINT,
         "fingerprint_parts": {"type": "ai_content", "message": "Offensive or harmful AI content", "frames": []},
         "title": AI_CONTENT_TITLE,
@@ -811,6 +814,7 @@ def save_local(report: dict[str, Any], body: str) -> dict[str, Any]:
         "report_id": report["report_id"], "report_kind": report.get("report_kind") or "problem",
         "title": report["title"], "fingerprint": report["fingerprint"], "app_version": report["app_version"],
         "platform": report["platform"], "created_at": _iso(report["created"]), "saved_at": saved_at, "body": body,
+        "reporter_user_id": report.get("reporter_user_id"),
     }
     # One writer at a time: a prune must not delete a file another save is
     # enumerating, and the cap must hold with concurrent sends.

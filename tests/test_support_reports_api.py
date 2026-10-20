@@ -2,11 +2,11 @@
 import time
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.api import support_reports as api
-from app.api.auth import require_admin
+from app.api.auth import require_admin, require_auth
 from app.core import account_hub
 from app.core import support_report as reports
 
@@ -18,6 +18,8 @@ TRACE = 'Traceback (most recent call last):\n  File "/app/app/api/sessions.py", 
 def env(monkeypatch, tmp_path):
     from app.db import error_logs, mobile_hub
     reports.reset_for_tests()
+    api._build_limiter.reset()
+    api._send_limiter.reset()
     monkeypatch.setattr(reports, "_local_dir", lambda: tmp_path / "support-reports")
     errors = {"e1": {"id": "e1", "source": "backend", "level": "ERROR", "message": "IndexError: list index out of range",
                      "detail": TRACE + "\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz012345", "occurrence_count": 3,
@@ -39,9 +41,139 @@ def env(monkeypatch, tmp_path):
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[require_admin] = lambda: "owner"
+
+    def owner(request: Request):
+        request.state.is_admin = True
+        return "owner"
+
+    app.dependency_overrides[require_auth] = owner
     with TestClient(app) as client:
         yield client, state, monkeypatch
     reports.reset_for_tests()
+
+
+
+
+@pytest.fixture
+def paired_env(env, monkeypatch):
+    from app.api import auth
+    from app.db import mobile_hub
+    client, state, _ = env
+    client.app.dependency_overrides.clear()
+    clients = {
+        "phone-a": {"id": "phone-a", "scopes": ["controller"]},
+        "phone-b": {"id": "phone-b", "scopes": ["controller"]},
+        "other-user": {"id": "other-user", "scopes": ["controller"]},
+    }
+    # Exercise require_auth / require_admin and real request-state attribution.
+    monkeypatch.setattr(auth, "get_paired_client_from_token", lambda token, **kw: clients.get(token))
+    monkeypatch.setattr(auth.owner_auth, "local_access", lambda request: False)
+    monkeypatch.setattr(auth.owner_auth, "owner_session", lambda *args: False)
+    monkeypatch.setattr(auth.db, "get_api_user_by_key_hash", lambda key: None)
+    monkeypatch.setattr(mobile_hub, "ownership", lambda **kw: {
+        "account_id": "user-2" if kw["paired_client_id"] == "other-user" else "user-1"})
+    state["hub"] = lambda suffix, body: {"report_id": "hub-ai", "delivered": {"email": "sent"}}
+    client.headers["Authorization"] = "Bearer phone-a"
+    return client, state
+
+
+AI_INPUT = {"kind": "ai_content", "excerpt": "Harmful output", "user_note": "Hate speech"}
+
+
+def test_non_owner_can_build_edit_and_send_ai_content_with_reporter(paired_env):
+    client, state = paired_env
+    caps = client.get("/api/v1/support/capabilities").json()
+    assert caps["can_report_ai_content"] is True
+    assert caps["basic_report"] is False and caps["ai_diagnosis"] is False
+    assert caps["fix_with_ai"] is False and caps["default_model"] is None
+    response = client.post("/api/v1/support/reports", json=AI_INPUT)
+    assert response.status_code == 200
+    draft = response.json()
+    stored = reports.get_draft(draft["report_id"])
+    assert stored["reporter_user_id"].endswith("#user-1")
+    assert f"Reporter user ID: {stored['reporter_user_id']}" in draft["body"]
+    assert client.post(f"/api/v1/support/reports/{draft['report_id']}/note",
+                       json={"user_note": "Harassment"}).status_code == 200
+    sent = client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True})
+    assert sent.status_code == 200 and sent.json()["state"] == "ok"
+    assert stored["reporter_user_id"] in state["calls"][-1][2]["body"]
+
+
+def test_non_owner_local_report_keeps_reporter_id(paired_env, tmp_path):
+    import json
+    client, state = paired_env
+    state["binding"] = None
+    draft = client.post("/api/v1/support/reports", json=AI_INPUT).json()
+    result = client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True})
+    assert result.status_code == 200 and result.json()["state"] == "not_signed_in"
+    saved = json.loads((tmp_path / "support-reports" / f"{draft['report_id']}.json").read_text())
+    assert saved["reporter_user_id"].endswith("#user-1")
+    assert saved["reporter_user_id"] in saved["body"]
+
+
+def test_non_owner_cannot_report_problems_read_or_access_others_drafts(paired_env):
+    client, _ = paired_env
+    assert client.post("/api/v1/support/reports", json={"error": {"message": "boom"}}).status_code == 403
+    draft = client.post("/api/v1/support/reports", json=AI_INPUT).json()
+    path = f"/api/v1/support/reports/{draft['report_id']}"
+    assert client.get(path).status_code == 403
+    assert client.get("/api/v1/support/reports").status_code == 405  # no list endpoint
+    assert client.post("/api/v1/support/check", json={"report_id": draft["report_id"]}).status_code == 403
+    assert client.post("/api/v1/support/diagnoses", json={"report_id": draft["report_id"],
+                       "acknowledge_ai_usage": True}).status_code == 403
+    # Even knowing another user's draft ID grants neither edit nor send access.
+    client.headers["Authorization"] = "Bearer other-user"
+    assert client.post(path + "/note", json={"user_note": "changed"}).status_code == 403
+    assert client.post(path + "/send", json={"confirm": True}).status_code == 403
+    # Problem drafts remain owner-only, including sending and editing.
+    problem = reports.build_basic(error={"message": "boom"})
+    path = f"/api/v1/support/reports/{problem['report_id']}"
+    assert client.post(path + "/note", json={"user_note": "changed"}).status_code == 403
+    assert client.post(path + "/send", json={"confirm": True}).status_code == 403
+
+
+@pytest.mark.parametrize("token", [None, "invalid", "revoked-phone"])
+def test_reports_require_authentication(paired_env, token):
+    client, _ = paired_env
+    client.headers.pop("Authorization")
+    if token:
+        client.headers["Authorization"] = f"Bearer {token}"
+    assert client.get("/api/v1/support/capabilities").status_code == 401
+    assert client.post("/api/v1/support/reports", json=AI_INPUT).status_code == 401
+    assert client.post("/api/v1/support/reports/unknown/send", json={"confirm": True}).status_code == 401
+
+
+def test_ai_content_rate_limits_are_per_user_not_per_phone(paired_env):
+    client, state = paired_env
+    drafts = []
+    for _ in range(api._build_limiter.limit):
+        response = client.post("/api/v1/support/reports", json=AI_INPUT)
+        assert response.status_code == 200
+        drafts.append(response.json())
+    client.headers["Authorization"] = "Bearer phone-b"  # same account, different device
+    assert client.post("/api/v1/support/reports", json=AI_INPUT).status_code == 429
+    # Send failures also consume the user's delivery allowance.
+    state["binding"] = None
+    path = f"/api/v1/support/reports/{drafts[0]['report_id']}/send"
+    for _ in range(api._send_limiter.limit):
+        assert client.post(path, json={"confirm": True}).status_code == 200
+    assert client.post(path, json={"confirm": True}).status_code == 429
+    client.headers["Authorization"] = "Bearer other-user"
+    assert client.post("/api/v1/support/reports", json=AI_INPUT).status_code == 200
+
+
+def test_ai_content_payload_is_bounded(paired_env):
+    client, _ = paired_env
+    for field, value in (("excerpt", "x" * (reports.EXCERPT_MAX + 1)),
+                         ("user_note", "x" * (reports.NOTE_MAX + 1)),
+                         ("session_id", "x" * (reports.SESSION_REF_MAX + 1)),
+                         ("reporter_user_id", "spoofed-user")):
+        assert client.post("/api/v1/support/reports", json={**AI_INPUT, field: value}).status_code == 422
+    import json
+    # Whitespace is valid JSON, but may not bypass the byte-size bound.
+    oversized = json.dumps(AI_INPUT) + " " * api.REPORT_PAYLOAD_MAX_BYTES
+    assert client.post("/api/v1/support/reports", content=oversized,
+                       headers={"Content-Type": "application/json"}).status_code == 413
 
 
 def _wait(client, run_id):

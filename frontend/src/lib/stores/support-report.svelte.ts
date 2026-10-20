@@ -95,7 +95,7 @@ export function canSendSupportReport(): boolean {
  * stays for every client.
  */
 export function canReportAiContent(): boolean {
-	if (!isBundledMobile() || !canSendSupportReport()) return false;
+	if (!isBundledMobile() || supportCaps.status !== 'ready' || supportCaps.current?.can_report_ai_content !== true) return false;
 	return (nativeBridge()?.platform ?? 'android') === 'android';
 }
 
