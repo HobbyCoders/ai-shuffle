@@ -1,3 +1,5 @@
+import { PICKER_KINDS } from './pickers';
+
 export interface BrowserViewport {
 	mode: 'fit' | 'fixed';
 	width: number;
@@ -12,8 +14,13 @@ export interface BrowserEditorStyle {
 }
 
 export interface BrowserEditor {
+  /** For a select, `value` is the chosen option's label (what it shows). */
   id: string; type: string; label: string; value: string;
   accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
+  /** Date/time pickers: the page's own min/max/step attributes, unparsed. */
+  min?: string; max?: string; step?: string;
+  /** A picker control (select, date, time…) that has the page's focus. */
+  focused?: boolean;
   x: number; y: number; width: number; height: number;
   style?: BrowserEditorStyle;
 }
@@ -53,6 +60,16 @@ export interface BrowserWorkspaceState {
 	busy: boolean;
 	/** Plain notice for the viewer, e.g. a captcha the site withheld from this browser. */
 	notice?: string;
+}
+
+const TEXT_FIELDS = ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'];
+
+/** Picker limits (short strings) and the focus flag: valid, and only on pickers. */
+function pickerDetailsOk(field: Record<string, unknown>): boolean {
+	if (!(PICKER_KINDS as readonly string[]).includes(String(field.type)))
+		return ['min', 'max', 'step', 'focused'].every((k) => field[k] === undefined);
+	return ['min', 'max', 'step'].every((k) => field[k] === undefined || (typeof field[k] === 'string' && (field[k] as string).length <= 64)) &&
+		(field.focused === undefined || typeof field.focused === 'boolean');
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -118,7 +135,8 @@ export function isBrowserWorkspaceState(
 
 	if (Array.isArray(value.editors) && value.editors.length <= 32) value.editors.forEach(dropUnusableStyle);
 	if (value.editors !== undefined && (!Array.isArray(value.editors) || value.editors.length > 32 || !value.editors.every((field) =>
-		object(field) && id(field.id) && ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'].includes(String(field.type)) &&
+		object(field) && id(field.id) && [...TEXT_FIELDS, ...PICKER_KINDS].includes(String(field.type)) &&
+		pickerDetailsOk(field) &&
 		typeof field.label === 'string' && field.label.length <= 256 && typeof field.value === 'string' && field.value.length <= 16384 &&
 		(field.accept === undefined || (typeof field.accept === 'string' && field.accept.length <= 1024)) &&
 		(field.multiple === undefined || typeof field.multiple === 'boolean') &&

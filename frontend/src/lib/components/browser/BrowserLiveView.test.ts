@@ -9,6 +9,7 @@ import {
 import { tick } from 'svelte';
 import BrowserLiveView from './BrowserLiveView.svelte';
 import type { BrowserEditor } from '$lib/browser-panel/workspace';
+import type { BrowserChoices } from '$lib/browser-panel/pickers';
 
 beforeEach(() => {
 	vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -44,7 +45,7 @@ afterEach(() => {
 let keyboardView: BrowserLiveView;
 
 async function setup(
-	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void; editors?: BrowserEditor[]; onEdit?: () => void } = {},
+	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void; editors?: BrowserEditor[]; onEdit?: (args: Record<string, unknown>) => void; onChoices?: (field: BrowserEditor) => Promise<BrowserChoices> } = {},
 ) {
 	const onInput = vi.fn();
 	const onInspect = vi.fn();
@@ -776,5 +777,63 @@ describe('desktop keyboard input', () => {
 			['up', 'Tab', 9, 8],
 		]);
 		expect(document.activeElement).toBe(surface);
+	});
+});
+
+describe('panel pickers for select and date/time controls', () => {
+	const sent = (onInput: ReturnType<typeof vi.fn>) => onInput.mock.calls.map(([p]) => p);
+	const select: BrowserEditor = { id: 'sel-1', type: 'select', label: 'Country', value: 'Belgium', x: 20, y: 40, width: 160, height: 28 };
+	const choices: BrowserChoices = { selected: 1, groups: [], options: [{ label: 'Austria', disabled: false }, { label: 'Belgium', disabled: false }] };
+
+	it('covers a select with a see-through trigger that opens the panel list and sets the choice', async () => {
+		const onEdit = vi.fn();
+		const onChoices = vi.fn().mockResolvedValue(choices);
+		const { surface, onInput } = await setup({ editors: [select], onEdit, onChoices });
+		const trigger = screen.getByRole('button', { name: 'Country: Belgium' });
+		expect(trigger.getAttribute('aria-haspopup')).toBe('listbox');
+		await fireEvent.click(trigger);
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+		expect(onChoices).toHaveBeenCalledWith(select);
+		await fireEvent.click(await screen.findByText('Austria'));
+		expect(onEdit).toHaveBeenCalledWith({ field: 'sel-1', action: 'set', index: 0 });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(document.activeElement).toBe(surface); // keys go back to the page
+		expect(sent(onInput).filter((p) => p.kind === 'mouse')).toEqual([]); // the page never saw a click
+	});
+
+	it('opens a date picker and sets an ISO value; Escape closes it without an edit', async () => {
+		const onEdit = vi.fn();
+		const day: BrowserEditor = { id: 'day-1', type: 'date', label: 'Arrival', value: '2026-10-21', x: 20, y: 90, width: 140, height: 28 };
+		await setup({ editors: [day], onEdit });
+		await fireEvent.click(screen.getByRole('button', { name: 'Arrival: 2026-10-21' }));
+		await fireEvent.click(screen.getByRole('gridcell', { name: /October 23, 2026/ }));
+		expect(onEdit).toHaveBeenCalledWith({ field: 'day-1', action: 'set', value: '2026-10-23' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Arrival: 2026-10-21' }));
+		await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(onEdit).toHaveBeenCalledTimes(1);
+	});
+
+	it('opens the panel list for Space on a focused page select instead of Chrome’s hidden popup', async () => {
+		const onChoices = vi.fn().mockResolvedValue(choices);
+		const { surface, onInput } = await setup({ editors: [{ ...select, focused: true }], onEdit: vi.fn(), onChoices });
+		surface.focus();
+		await fireEvent.keyDown(surface, { key: ' ', code: 'Space' });
+		await fireEvent.keyUp(surface, { key: ' ', code: 'Space' });
+		expect(screen.getByRole('dialog', { name: 'List: Country' })).toBeTruthy();
+		expect(sent(onInput).filter((p) => p.kind === 'key')).toEqual([]);
+		// Plain arrows still change the page select in place (the stream shows that).
+		await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+		surface.focus();
+		await fireEvent.keyDown(surface, { key: 'ArrowDown', code: 'ArrowDown' });
+		expect(sent(onInput).filter((p) => p.kind === 'key').map((p) => p.key)).toEqual(['ArrowDown']);
+	});
+
+	it('closes the picker when its control leaves the page or input stops', async () => {
+		const { rerender } = await setup({ editors: [select], onEdit: vi.fn(), onChoices: vi.fn().mockResolvedValue(choices) });
+		await fireEvent.click(screen.getByRole('button', { name: 'Country: Belgium' }));
+		expect(screen.getByRole('dialog')).toBeTruthy();
+		await rerender({ editors: [] });
+		expect(screen.queryByRole('dialog')).toBeNull();
 	});
 });

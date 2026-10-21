@@ -62,8 +62,10 @@
 	import BrowserWorkspaceNotice from './BrowserWorkspaceNotice.svelte';
 	import {
 		ownsControl,
+		type BrowserEditor,
 		type BrowserWorkspaceState,
 	} from '$lib/browser-panel/workspace';
+	import type { BrowserChoices } from '$lib/browser-panel/pickers';
 
 	interface Props {
 		/** Session whose browser page is streamed. */
@@ -146,7 +148,7 @@
 	let navigationPending = $state(false);
 	const loading = $derived(pageLoading || navigationPending);
 	let trackedPage = false;
-	const replies = new Map<string, { ok: boolean; error?: string; text?: string }>();
+	const replies = new Map<string, { ok: boolean; error?: string; text?: string; choices?: BrowserChoices }>();
 	const awaitingReplies = new Set<string>();
 	// Last session we held a frame for. The canvas keeps its last picture across
 	// reconnects and transient status changes; only a genuine session switch
@@ -207,12 +209,12 @@
 				viewerId = id;
 				scope.notify();
 			},
-			onCommandResult: (_id, ok, error, text) => {
+			onCommandResult: (_id, ok, error, text, choices) => {
 				if (!active) return;
-				if (awaitingReplies.has(_id)) replies.set(_id, { ok, error, text });
+				if (awaitingReplies.has(_id)) replies.set(_id, { ok, error, text, choices });
 				scope.notify();
-				// A failed copy is reported by copyFromPage itself, in plain words.
-				if (!ok && !copyRequests.has(_id))
+				// A failed copy or list lookup is reported where it was asked for, in plain words.
+				if (!ok && !quietRequests.has(_id))
 					commandError =
 						error || 'Command failed. Try again after checking control.';
 			},
@@ -587,19 +589,32 @@
 			const reply = replies.get(id)!;
 			if (!reply.ok) throw new Error(reply.error || 'Command failed. Try again.');
 			return reply;
-		} finally { replies.delete(id); awaitingReplies.delete(id); copyRequests.delete(id); }
+		} finally { replies.delete(id); awaitingReplies.delete(id); quietRequests.delete(id); }
+	}
+
+	/** Requests whose failure is shown by their own caller, not the panel's error line. */
+	const quietRequests = new Set<string>();
+
+	// A select's options for the panel's own list. Like a copy, they travel
+	// only to this viewer and never enter workspace state.
+	async function loadChoices(field: BrowserEditor): Promise<BrowserChoices> {
+		const scope = operation;
+		if (!scope) throw new Error('Browser is not connected.');
+		await ensureControl();
+		const reply = await acknowledged(scope, 'options', { field: field.id }, (id) => quietRequests.add(id));
+		if (!reply.choices) throw new Error("Couldn't read this list. Try again.");
+		return reply.choices;
 	}
 
 	// Copy from the remote page to this device's clipboard. The text travels
 	// only to this viewer; it never enters workspace state or the agent's view.
-	const copyRequests = new Set<string>();
 	let copyNotice = $state('');
 	let copyNoticeTimer: ReturnType<typeof setTimeout> | undefined;
 	async function copyFromPage(): Promise<string> {
 		const scope = operation;
 		if (!scope) throw new Error('Browser is not connected.');
 		await ensureControl();
-		const reply = await acknowledged(scope, 'copy', {}, (id) => copyRequests.add(id));
+		const reply = await acknowledged(scope, 'copy', {}, (id) => quietRequests.add(id));
 		return reply.text ?? '';
 	}
 	function copyToClipboard() {
@@ -930,6 +945,7 @@
 							editors={workspace?.editors ?? []}
 							onEdit={(args) => workspaceCommand('edit', args)}
 							onPickFiles={pickFiles}
+							onChoices={loadChoices}
 							viewport={workspace?.viewport}
 							inspecting={inspectMode && isLive && frameMatchesWorkspace}
 							{hoverRect}
