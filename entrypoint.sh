@@ -1,6 +1,22 @@
 #!/bin/bash
 set -e
 
+# Tool code and production dependencies are supplied by the image. Startup
+# validates them, but never repairs or installs packages with root privileges.
+require_bundled_tools() {
+    case "${1:-run}" in
+        dump|restore) return 0 ;;
+    esac
+    local tool
+    for tool in /opt/ai-tools /opt/browser-mcp; do
+        if [ ! -f "$tool/package.json" ] || [ ! -f "$tool/dist/index.js" ] || [ ! -d "$tool/node_modules" ]; then
+            echo "Bundled tool assets are missing in $tool; replace or rebuild the image. Startup will not install packages." >&2
+            return 1
+        fi
+    done
+}
+require_bundled_tools "$@"
+
 # PostgreSQL is not up yet. This atomic marker mirrors the worker setting.
 # Until migration writes it, retain only an existing Claude user's install.
 claude_cli_keep_installed() {
@@ -54,7 +70,6 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     chown -R appuser:appuser /app/app
     # Retained DATA_DIR/postgres is validated by the runtime, never chowned.
     chown appuser:appuser /app /app/.env.example 2>/dev/null || true
-    find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
 else
     echo "UID/GID already correct, skipping user modification" >&2
 fi
@@ -174,13 +189,6 @@ if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuse
     setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
         git config --global user.email "${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
     echo "Git: seeded user.email=${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
-fi
-
-# Ensure AI tools node_modules exist (in case Docker image was built without them)
-if [ -d /opt/ai-tools ] && [ -f /opt/ai-tools/package.json ] && [ ! -d /opt/ai-tools/node_modules ]; then
-    echo "Installing AI tools Node.js dependencies..."
-    cd /opt/ai-tools && npm install --omit=dev 2>/dev/null || echo "AI tools npm install failed (continuing anyway)"
-    cd /app
 fi
 
 # Mount roots and retained database permissions are handled non-recursively
