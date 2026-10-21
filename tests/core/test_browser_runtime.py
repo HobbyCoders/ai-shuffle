@@ -372,6 +372,7 @@ def test_cold_config_uses_session_project_profile_policy_and_direct_mode(monkeyp
     assert result["command"] == "custom-node"
     assert result["args"] == ["custom-entry.js"]
     assert result["env"]["AIS_BROWSER_MODE"] == "runtime"
+    assert result["env"]["_AIS_BROWSER_EDITOR_STYLE"] == "1"
     assert result["env"]["BROWSER_UPLOAD_DIR"] == str(tmp_path)
     assert result["cwd"] == str(tmp_path)
 

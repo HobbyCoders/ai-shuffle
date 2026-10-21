@@ -33,9 +33,26 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
     try {
       const page = await browser.newPage();
       await page.setContent(`<input role="combobox"><input aria-haspopup="listbox"><input aria-haspopup="true">
-        <input aria-autocomplete="list"><input aria-expanded="false"><input list="choices"><datalist id="choices"></datalist>
+        <input aria-autocomplete="list"><input aria-autocomplete="inline"><input aria-autocomplete="both">
+        <input list="choices"><datalist id="choices"></datalist>
+        <input aria-label="Expanded only" aria-expanded="false"><input aria-label="Autocomplete none" aria-autocomplete="none">
+        <input aria-label="Dangling list" list="missing"><div id="not-list"></div><input aria-label="Not a datalist" list="not-list">
         <input aria-label="Plain"><input aria-label="No popup" aria-haspopup="false"><textarea aria-label="Notes"></textarea>`);
-      expect((await readEditors(page)).map(f => f.label)).toEqual(['Plain', 'No popup', 'Notes']);
+      expect((await readEditors(page)).map(f => f.label)).toEqual(['Expanded only', 'Autocomplete none', 'Dangling list', 'Not a datalist', 'Plain', 'No popup', 'Notes']);
+    } finally { await browser.close(); }
+  });
+
+  it('reports negotiated unscaled typography without password contents', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<input placeholder="Example" style="font:18px/24px monospace;padding:5px 7px;border-left:3px solid;border-top:4px solid">
+        <input type="password" value="never broadcast" placeholder="Secret" style="line-height:normal">`);
+      expect(await readEditors(page, true)).toMatchObject([
+        { style: { fontSize: 18, lineHeight: 24, paddingLeft: 7, paddingTop: 5, fontFamily: 'monospace', borderLeft: 3, borderTop: 4 } },
+        { type: 'password', value: '', style: { lineHeight: null } },
+      ]);
+      expect((await readEditors(page, false))[0]).not.toHaveProperty('style');
     } finally { await browser.close(); }
   });
 

@@ -14,6 +14,9 @@ from app.core import native_chrome as chrome, browser_control as control, browse
 def clean_recovery(monkeypatch):
     monkeypatch.setattr(chrome, "_recovery_done", None)
     monkeypatch.setattr(chrome, "_docker_restarts", [])
+    monkeypatch.setattr(chrome, "_health_states", {})
+    monkeypatch.setattr(chrome, "_protected_pages", set())
+    monkeypatch.setattr(chrome, "_external_users", 0)
     monkeypatch.setattr(control, "_brokers", {})
     monkeypatch.setattr(runtime, "_runtimes", {})
 
@@ -36,7 +39,7 @@ async def test_recovery_defers_while_any_session_is_using_shared_browser(monkeyp
         runtime._runtimes["agent-session"] = SimpleNamespace(active=1)
     probe = AsyncMock()
     owner = Mock()
-    monkeypatch.setattr(chrome, "_pages_answer", probe)
+    monkeypatch.setattr(chrome, "_probe_pages", probe)
     monkeypatch.setattr(chrome, "_docker_chrome_process", owner)
     await chrome._check_health(9221, docker=True)
     probe.assert_not_awaited()
@@ -47,12 +50,13 @@ async def test_recovery_defers_while_any_session_is_using_shared_browser(monkeyp
 async def test_new_agent_calls_and_takeovers_wait_until_repair_finishes(monkeypatch):
     started, finish = asyncio.Event(), asyncio.Event()
 
-    async def probe(port):
+    async def probe(*args):
         started.set()
         await finish.wait()
         return True
 
-    monkeypatch.setattr(chrome, "_pages_answer", probe)
+    monkeypatch.setattr(chrome, "_probe_pages", AsyncMock(return_value=({}, [])))
+    monkeypatch.setattr(chrome, "_repair_pages", probe)
     monkeypatch.setattr(chrome, "_docker_chrome_process", Mock(return_value=Mock(pid=123)))
     repair = asyncio.create_task(chrome._check_health(9221, docker=True))
     await started.wait()
@@ -88,11 +92,12 @@ async def test_new_agent_calls_and_takeovers_wait_until_repair_finishes(monkeypa
 async def test_cancelled_health_check_releases_admission_barrier(monkeypatch):
     started = asyncio.Event()
 
-    async def probe(port):
+    async def probe(*args):
         started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(chrome, "_pages_answer", probe)
+    monkeypatch.setattr(chrome, "_probe_pages", AsyncMock(return_value=({}, [])))
+    monkeypatch.setattr(chrome, "_repair_pages", probe)
     monkeypatch.setattr(chrome, "_docker_chrome_process", Mock(return_value=Mock(pid=123)))
     repair = asyncio.create_task(chrome._check_health(9221, docker=True))
     await started.wait()
@@ -106,30 +111,32 @@ async def test_cancelled_health_check_releases_admission_barrier(monkeypatch):
 async def test_unknown_docker_listener_is_not_probed_or_restarted(monkeypatch):
     probe = AsyncMock()
     monkeypatch.setattr(chrome, "_docker_chrome_process", lambda port: None)
-    monkeypatch.setattr(chrome, "_pages_answer", probe)
+    monkeypatch.setattr(chrome, "_probe_pages", probe)
     await chrome._check_health(9221, docker=True)
     probe.assert_not_awaited()
 
 
-def test_docker_restart_is_rate_limited_and_reverifies_pid_creation(monkeypatch):
+@pytest.mark.asyncio
+async def test_docker_restart_is_rate_limited_and_reverifies_pid_creation(monkeypatch):
     process = Mock(pid=123)
     process.create_time.return_value = 10
     monkeypatch.setattr(chrome, "_docker_chrome_process", lambda port: process)
     clock = Mock(return_value=100)
-    monkeypatch.setattr(chrome.time, "monotonic", clock)
-    assert chrome._restart_docker_chrome(9221, process)
-    assert not chrome._restart_docker_chrome(9221, process)
+    monkeypatch.setattr(chrome, "_health_now", clock)
+    assert await chrome._restart_docker_chrome(9221, process)
+    assert not await chrome._restart_docker_chrome(9221, process)
     for now in [161, 222]:
         clock.return_value = now
-        assert chrome._restart_docker_chrome(9221, process)
+        assert await chrome._restart_docker_chrome(9221, process)
     clock.return_value = 283
-    assert not chrome._restart_docker_chrome(9221, process)
-    assert process.kill.call_count == 3
+    assert not await chrome._restart_docker_chrome(9221, process)
+    assert process.terminate.call_count == 3
+    process.kill.assert_not_called()
     clock.return_value = 900
     changed = Mock(pid=123)
     changed.create_time.return_value = 20
     monkeypatch.setattr(chrome, "_docker_chrome_process", lambda port: changed)
-    assert not chrome._restart_docker_chrome(9221, process)
+    assert not await chrome._restart_docker_chrome(9221, process)
     changed.kill.assert_not_called()
 
 

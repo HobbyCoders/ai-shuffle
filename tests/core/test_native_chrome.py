@@ -403,6 +403,17 @@ async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(mo
 
         monkeypatch.setattr(nc, "cdp_get", get)
         monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(nc, "_health_states", {})
+        monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
+        monkeypatch.setattr(nc, "_health_now", lambda: clock[0])
+        clock = [0]
+        for second in (0, 15):
+            clock[0] = second
+            assert await nc._probe_pages(port) is None
+        clock[0] = 31
+        candidates = await nc._probe_pages(port)
+        assert candidates is not None
+        assert "Target.createTarget" not in calls
         profile = Mock(side_effect=AssertionError("health recovery must not alter the profile"))
         monkeypatch.setattr(nc, "_profile_dir", profile)
         if docker:
@@ -411,10 +422,13 @@ async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(mo
             monkeypatch.setattr(nc, "_docker_chrome_process", lambda port: process)
             monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
             monkeypatch.setattr(nc, "_docker_restarts", [])
+            process.wait.return_value = 0
+            monkeypatch.setattr(nc, "_probe_pages", AsyncMock(return_value=candidates))
             await nc._check_health(port, docker=True)
-            assert process.kill.call_count == (failure is not None)
+            assert process.terminate.call_count == (failure is not None)
+            process.kill.assert_not_called()
         else:
-            assert await nc._pages_answer(port) is (failure is None)
+            assert await nc._repair_pages(port, *candidates) is (failure is None)
         assert "Target.closeTarget" in calls
         assert "Target.createTarget" in calls
         profile.assert_not_called()
@@ -437,8 +451,9 @@ async def test_supervisor_restarts_when_page_repair_fails(monkeypatch):
         return 0
 
     process.wait = wait
-    health = AsyncMock(return_value=False)
-    monkeypatch.setattr(nc, "_pages_answer", health)
+    health = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(nc, "_probe_pages", health)
+    monkeypatch.setattr(nc, "_docker_restarts", [])
 
     async def stop(proc):
         assert proc is process

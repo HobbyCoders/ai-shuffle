@@ -34,6 +34,7 @@ terminate cannot be forwarded. Without the launcher the browser is not started.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -182,13 +183,57 @@ async def _cdp_answers(port: int) -> bool:
     return await cdp_get(path="/json/version", port=port) is not None
 
 
-_PAGE_PROBE_TIMEOUT_S = 2.0
+_PAGE_PROBE_TIMEOUT_S = 15.0
 _HEALTH_INTERVAL_S = 10.0
 _DOCKER_RESTART_GAP_S = 60.0
 _DOCKER_RESTART_WINDOW_S = 600.0
 _DOCKER_MAX_RESTARTS = 3
 _docker_restarts: list[float] = []
 _recovery_done: Optional[asyncio.Event] = None
+_PAGE_FAILURE_MIN_S = 30.0
+_PAGE_FAILURE_COUNT = 3
+_HEALTH_BACKOFF_S = 180.0
+_health_states: dict[int, dict] = {}
+_external_users = 0
+_protected_pages: set[tuple[int, str]] = set()
+
+
+@asynccontextmanager
+async def browser_in_use():
+    """Owner sign-in flows participate in the shared recovery admission gate."""
+    global _external_users
+    await wait_for_recovery()
+    _external_users += 1
+    try:
+        yield
+    finally:
+        _external_users -= 1
+
+
+def _health_now():
+    return time.monotonic()
+
+
+def _health_state(port):
+    return _health_states.setdefault(port, {"ready": False, "failures": {}, "backoff": 0.0})
+
+
+def _failed_long_enough(port, key):
+    failures = _health_state(port)["failures"]
+    now = _health_now()
+    first, count = failures.get(key, (now, 0))
+    failures[key] = (first, count + 1)
+    return count + 1 >= _PAGE_FAILURE_COUNT and now - first >= _PAGE_FAILURE_MIN_S
+
+
+def _restart_allowed(port):
+    now = _health_now()
+    _docker_restarts[:] = [t for t in _docker_restarts if now - t < _DOCKER_RESTART_WINDOW_S]
+    allowed = len(_docker_restarts) < _DOCKER_MAX_RESTARTS and (
+        not _docker_restarts or now - _docker_restarts[-1] >= _DOCKER_RESTART_GAP_S)
+    if not allowed:
+        _health_state(port)["backoff"] = now + _HEALTH_BACKOFF_S
+    return allowed
 
 
 async def wait_for_recovery() -> None:
@@ -200,7 +245,7 @@ async def wait_for_recovery() -> None:
 def _browser_in_use() -> bool:
     from app.core import browser_control, browser_runtime
 
-    return browser_control.recovery_blocked() or browser_runtime.recovery_blocked()
+    return bool(_external_users or _protected_pages) or browser_control.recovery_blocked() or browser_runtime.recovery_blocked()
 
 
 def _docker_chrome_process(port: int):
@@ -237,48 +282,81 @@ def _docker_chrome_process(port: int):
     return None
 
 
-def _restart_docker_chrome(port: int, expected) -> bool:
-    """Kill one re-verified browser PID; the existing shell supervisor relaunches.
-
-    No process-group signals, executable-name kills, profile writes or changes
-    to chrome-supervisor.sh. Its existing backoff remains an additional limit.
-    """
+async def _restart_docker_chrome(port: int, expected) -> bool:
+    """Reverify the listener, request a clean exit, then force only that PID."""
     import psutil
 
-    now = time.monotonic()
-    _docker_restarts[:] = [t for t in _docker_restarts if now - t < _DOCKER_RESTART_WINDOW_S]
-    if (_browser_in_use() or len(_docker_restarts) >= _DOCKER_MAX_RESTARTS
-            or (_docker_restarts and now - _docker_restarts[-1] < _DOCKER_RESTART_GAP_S)):
+    if _browser_in_use() or not _restart_allowed(port):
         return False
-    current = _docker_chrome_process(port)
+    current = await asyncio.to_thread(_docker_chrome_process, port)
     if (current is None or current.pid != expected.pid
-            or current.create_time() != expected.create_time()):
+            or current.create_time() != expected.create_time() or _browser_in_use()):
         return False
     try:
-        current.kill()
+        current.terminate()
+        _docker_restarts.append(_health_now())
+        if len(_docker_restarts) >= _DOCKER_MAX_RESTARTS:
+            _health_state(port)["backoff"] = _health_now() + _HEALTH_BACKOFF_S
+        try:
+            await asyncio.to_thread(current.wait, timeout=5)
+        except psutil.TimeoutExpired:
+            # psutil checks PID creation identity before every signal.
+            current.kill()
     except (psutil.Error, OSError):
         return False
-    _docker_restarts.append(now)
     logger.warning("browser health: stopped unresponsive supervised Chromium; waiting for supervisor relaunch")
     return True
 
 
 async def _check_health(port: int, *, docker: bool = False) -> None:
     global _recovery_done
+    from app.core import browser_runtime
 
-    if _recovery_done is not None or _browser_in_use():
-        return  # Defer, never preempt an owner or an admitted agent action.
-    process = _docker_chrome_process(port) if docker else None
+    state = _health_state(port)
+    if _protected_pages and not _external_users:
+        live = await cdp_get("/json/list", port)
+        if isinstance(live, list):
+            ids = {t.get("id") for t in live if isinstance(t, dict)}
+            _protected_pages.difference_update({(p, target) for p, target in _protected_pages if p == port and target not in ids})
+    if _browser_in_use():
+        state["failures"].clear()
+        return
+    if _recovery_done is not None or _health_now() < state["backoff"]:
+        return
+    process = await asyncio.to_thread(_docker_chrome_process, port) if docker else None
     if docker and process is None:
-        return  # Never probe/repair a CDP listener we cannot prove is ours.
+        return
+    if docker:
+        identity = (process.pid, process.create_time())
+        if state.get("process") != identity:
+            state.update(process=identity, ready=False, failures={})
+    # Probes never hold admission: normal calls may start while a page is slow.
+    if await browser_runtime.dialogs_block_recovery() or _browser_in_use():
+        state["failures"].clear()
+        return
+    candidates = await _probe_pages(port)
+    if _browser_in_use():
+        state["failures"].clear()
+        return
+    if candidates is None:
+        return
+    if await browser_runtime.dialogs_block_recovery() or _browser_in_use():
+        state["failures"].clear()
+        return
     done = asyncio.Event()
-    _recovery_done = done  # No await between the idle check and admission barrier.
+    _recovery_done = done  # Idle check and repair admission are atomic.
     try:
-        if not await _pages_answer(port):
-            if docker:
-                _restart_docker_chrome(port, process)
-            else:
-                await _stop_process(_proc)
+        version, targets = candidates
+        if version is not None and await _repair_pages(port, version, targets):
+            state["failures"].clear()
+            return
+        if docker:
+            await _restart_docker_chrome(port, process)
+        elif _restart_allowed(port):
+            _docker_restarts.append(_health_now())
+            if len(_docker_restarts) >= _DOCKER_MAX_RESTARTS:
+                state["backoff"] = _health_now() + _HEALTH_BACKOFF_S
+            await _stop_process(_proc)
     finally:
         _recovery_done = None
         done.set()
@@ -313,50 +391,68 @@ async def _cdp_command(url: str, method: str, params: dict) -> dict:
     raise RuntimeError("CDP socket closed before replying")
 
 
-async def _pages_answer(port: int) -> bool:
-    """Probe/repair tabs only for our supervised browser, preserving its profile.
+async def _probe_pages(port: int):
+    """Non-mutating probes: require >=3 failures spanning >=30 seconds.
 
-    A browser-level /json/version response does not prove a renderer is alive.
-    Replace wedged targets through the browser socket (not the stuck renderer)
-    with about:blank, keeping a live target before closing the old one. Return
-    False to request a process restart if repair fails. Never used for an
-    externally owned CDP listener.
+    No renderer checks or startup restarts until the browser CDP endpoint has
+    answered at least once. One slow script or transient HTTP miss is harmless.
     """
+    state = _health_state(port)
     version = await cdp_get("/json/version", port)
+    if not isinstance(version, dict):
+        if state["ready"] and _failed_long_enough(port, "browser"):
+            return None, None
+        return None
+    state["ready"] = True
+    state["failures"].pop("browser", None)
     targets = await cdp_get("/json/list", port)
-    if not isinstance(version, dict) or not isinstance(targets, list):
-        return False
+    if not isinstance(targets, list):
+        if _failed_long_enough(port, "targets"):
+            return None, None
+        return None
+    state["failures"].pop("targets", None)
+    live = {t.get("id") for t in targets if isinstance(t, dict)}
+    state["failures"] = {k: v for k, v in state["failures"].items() if k in live}
+    wedged = []
     for target in targets:
-        if not isinstance(target, dict):
-            return False
-        if target.get("type") != "page":
+        if _browser_in_use():
+            state["failures"].clear()
+            return None
+        if not isinstance(target, dict) or target.get("type") != "page":
             continue
+        key = target.get("id")
         try:
             await _cdp_command(target["webSocketDebuggerUrl"], "Runtime.evaluate", {"expression": "1"})
+            state["failures"].pop(key, None)
         except Exception:
-            logger.warning("browser health: replacing unresponsive page")
-            created = None
-            try:
-                url = version["webSocketDebuggerUrl"]
-                created = await _cdp_command(url, "Target.createTarget", {"url": "about:blank"})
-                if not created.get("targetId"):
-                    return False
-                # Verify the replacement too; an unhealthy renderer process can
-                # acknowledge creation without ever running page commands.
-                fresh = await cdp_get("/json/list", port)
-                replacement = next(t for t in fresh if t.get("id") == created["targetId"])
-                await _cdp_command(replacement["webSocketDebuggerUrl"], "Runtime.evaluate", {"expression": "1"})
-                closed = await _cdp_command(url, "Target.closeTarget", {"targetId": target["id"]})
-                if not closed.get("success"):
-                    raise RuntimeError("Could not close unresponsive page")
-            except Exception:
-                # Do not accumulate probe tabs while restart fallback is paced.
-                if created and created.get("targetId"):
-                    try:
-                        await _cdp_command(url, "Target.closeTarget", {"targetId": created["targetId"]})
-                    except Exception:
-                        pass
+            if _failed_long_enough(port, key):
+                wedged.append(target)
+    return (version, wedged) if wedged else None
+
+
+async def _repair_pages(port: int, version: dict, targets: list) -> bool:
+    """Called only for confirmed failures, while idle and behind admission."""
+    for target in targets:
+        logger.warning("browser health: replacing repeatedly unresponsive page")
+        created = None
+        try:
+            url = version["webSocketDebuggerUrl"]
+            created = await _cdp_command(url, "Target.createTarget", {"url": "about:blank"})
+            if not created.get("targetId"):
                 return False
+            fresh = await cdp_get("/json/list", port)
+            replacement = next(t for t in fresh if t.get("id") == created["targetId"])
+            await _cdp_command(replacement["webSocketDebuggerUrl"], "Runtime.evaluate", {"expression": "1"})
+            closed = await _cdp_command(url, "Target.closeTarget", {"targetId": target["id"]})
+            if not closed.get("success"):
+                raise RuntimeError("Could not close unresponsive page")
+        except Exception:
+            if created and created.get("targetId"):
+                try:
+                    await _cdp_command(url, "Target.closeTarget", {"targetId": created["targetId"]})
+                except Exception:
+                    pass
+            return False
     return True
 
 
@@ -441,6 +537,14 @@ async def sign_in_browser_version():
 
 
 async def create_page(url: str, port: Optional[int] = None) -> Optional[dict]:
+    async with browser_in_use():
+        page = await _create_page(url, port)
+        if page and (port is None or port == _cdp_port()):
+            _protected_pages.add((port or _cdp_port(), page["id"]))
+        return page
+
+
+async def _create_page(url: str, port: Optional[int] = None) -> Optional[dict]:
     """Open a new tab via DevTools ``PUT /json/new``. Returns the tab dict or None.
 
     Chrome takes the URL as the raw query string (``/json/new?https://…``),
@@ -613,6 +717,9 @@ async def _supervise(exe: str, port: int) -> None:
             port,
         )
         _last_detail = None
+        # A new process must first answer CDP; restart pacing survives relaunch.
+        backoff = _health_state(port)["backoff"]
+        _health_states[port] = {"ready": False, "failures": {}, "backoff": backoff}
 
         try:
             while True:
