@@ -47,19 +47,22 @@ def _local_sources():
             registered = []
             for item in source["registered"]:
                 ids = []
+                created_times = []
                 for registry_id in item["registry_ids"]:
                     row = canonical.get(registry_id)
                     if row:
                         if row["runner_id"] == settings.effective_instance_id and row.get("status") != "archived":
                             ids.append(registry_id)
+                            created_times.append(row.get("created_at"))
                     else:
                         legacy = database.get_worktree(registry_id)
                         if legacy and legacy.get("status") != "completed":
                             owner_repo = database.get_git_repository(legacy["repository_id"])
                             if owner_repo and owner_repo["project_id"] in aliases:
                                 ids.append(registry_id)
+                                created_times.append(legacy.get("created_at"))
                 if ids:
-                    registered.append({**item, "registry_ids": ids})
+                    registered.append({**item, "registry_ids": ids, "created_times": created_times})
             sources.append({**source, "aliases": aliases, "registered": registered})
     return sources
 
@@ -192,6 +195,22 @@ def _session_grace_reason(sessions):
     return None
 
 
+def _checkout_grace_reason(target, registered):
+    # A provisioned checkout can exist before its first session is bound. Do
+    # not mistake that dispatch window (or an unused owner checkout) for old
+    # merged work. Either a new registration or a new directory restarts grace.
+    try:
+        stamps = [target.stat().st_mtime]
+        stamps.extend(_activity_time(value) for value in registered.get("created_times", []))
+        if not all(math.isfinite(stamp) for stamp in stamps):
+            return "checkout creation time unavailable"
+        if time.time() - max(stamps) < GRACE_SECONDS:
+            return "no commits of its own; checkout within the 24-hour freshness guard"
+    except (OSError, ValueError, TypeError):
+        return "checkout creation time unavailable"
+    return None
+
+
 def _ignored_reason(path):
     ignored = wr._git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
     if ignored is None:
@@ -270,6 +289,10 @@ def _plan(source, registered, context, *, pulls=None):
         return keep("branch moved away from checkout HEAD")
     reflog = wr._git(repo, "reflog", "show", "--format=%H", f"refs/heads/{branch}") if branch else None
     no_own_commits = bool(head == context["default_sha"] and reflog and reflog.splitlines()[-1].strip() == head)
+    if no_own_commits and not missing:
+        checkout_grace = _checkout_grace_reason(target, registered)
+        if checkout_grace:
+            return keep(checkout_grace)
     reason = "no commits of its own" if no_own_commits else "integration proven; safe to reclaim"
     return {**row, "decision": "forget" if missing else "remove", "reason": reason}
 

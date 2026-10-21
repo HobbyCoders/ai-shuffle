@@ -79,6 +79,8 @@ def test_apply_pagination_does_not_skip_rows_as_registry_shrinks(api):
     for name in ("task-two", "task-three"):
         path = repo / ".fluid" / "worktrees" / name
         git(repo, "worktree", "add", "-q", "-b", name, str(path))
+        commit_file(path, name, "integrated", name)
+        git(repo, "merge", "--ff-only", name)
         checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(path), branch=name)
     app.dependency_overrides[git_worktrees.require_admin] = lambda: "owner"
     with TestClient(app) as client:

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from tests.core.test_worktree_reclaim import repository, checkout, commit, git, reclaim, rc  # noqa: F401
+from tests.core.test_worktree_reclaim import age_directory, repository, checkout, commit, git, reclaim, rc  # noqa: F401
 
 
 def merged(repository):
@@ -185,6 +185,42 @@ def test_preview_never_starts_automatic_reclamation(repository, monkeypatch):
     sources.assert_not_called()
 
 
+@pytest.mark.parametrize("young", ["both", "registry", "directory"])
+def test_fresh_unbound_checkout_is_kept(mock_db, tmp_path, monkeypatch, young):
+    import os
+
+    from app.db import checkouts, projects_v2
+    from app.db.base import get_db
+    from tests.git_repo_helpers import hermetic_git_env, init_repo
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    repo = init_repo(tmp_path / "unbound")
+    project = projects_v2.upsert_project("local:unbound-reclaim", name="Unbound")
+    checkouts.upsert_checkout(project["id"], rc.settings.effective_instance_id, str(repo))
+    path = repo / ".fluid" / "worktrees" / "task"
+    git(repo, "worktree", "add", "-q", "-b", "task", str(path))
+    row = checkouts.upsert_checkout(project["id"], rc.settings.effective_instance_id, str(path), branch="task")
+    old_time = time.time() - 2 * rc.GRACE_SECONDS
+    old = datetime.fromtimestamp(old_time, timezone.utc).isoformat()
+    if young == "registry":
+        os.utime(path, (old_time, old_time))
+    if young == "directory":
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s", (old, row["id"]))
+    preview = asyncio.run(rc.reclaim(project["id"]))
+    assert preview["items"][0]["decision"] == "keep"
+    assert "freshness guard" in preview["items"][0]["reason"]
+    assert asyncio.run(rc.reclaim(project["id"], dry_run=False))["reclaimed"] == 0
+    assert path.exists() and git(path, "rev-parse", "task")
+    assert checkouts.get_checkout_by_path(str(path), project_id=project["id"])["status"] == "active"
+    # Once both independent clocks are old, an unused checkout is reclaimable.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s", (old, row["id"]))
+    os.utime(path, (old_time, old_time))
+    assert asyncio.run(rc.reclaim(project["id"], dry_run=False))["reclaimed"] == 1
+    assert not path.exists()
+
+
 def test_first_dispatch_is_protected_until_finished_and_quiet(mock_db, tmp_path, monkeypatch):
     from app.db import checkouts, database, projects_v2, turns
     from app.db.base import get_db
@@ -209,6 +245,8 @@ def test_first_dispatch_is_protected_until_finished_and_quiet(mock_db, tmp_path,
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET updated_at = %s WHERE id = %s", (old, "new-worker"))
         conn.cursor().execute("UPDATE turns SET ended_at = %s WHERE session_id = %s", (old, "new-worker"))
+        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE path = %s", (old, str(path)))
+    age_directory(path)
     third = asyncio.run(rc.reclaim(project["id"], dry_run=False))
     assert third["reclaimed"] == 1 and third["items"][0]["reason"] == "no commits of its own"
     assert not path.exists()

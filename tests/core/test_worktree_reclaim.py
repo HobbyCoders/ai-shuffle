@@ -45,11 +45,19 @@ def repository(tmp_path, monkeypatch):
     return repo, source
 
 
+def age_directory(path):
+    old = time.time() - 2 * rc.GRACE_SECONDS
+    os.utime(path, (old, old))
+
+
 def checkout(repository, name="feature", detached=False):
     repo, source = repository
     path = repo / ".fluid" / "worktrees" / name
     args = ["--detach"] if detached else ["-b", name]
     git(repo, "worktree", "add", "-q", *args, str(path))
+    # Default removal fixtures represent old, unused checkouts. Fresh-dispatch
+    # regression tests create their real registry/worktree independently.
+    age_directory(path)
     source["registered"].append({"path": str(path), "branch": None if detached else name,
                                  "registry_ids": ["ck-" + name]})
     return path
@@ -202,6 +210,7 @@ def test_link_targets_untouched_and_severed_before_git(repository, tmp_path, mon
         return original(cwd, args, **kwargs)
 
     monkeypatch.setattr(rc.git_service, "_run_git", tracked)
+    age_directory(path)  # creating the runtime link changed the directory mtime
     assert reclaim(dry_run=False)["reclaimed"] == 1
     assert observed == [True]
     assert (target / "valuable").read_text() == "keep"
@@ -313,6 +322,8 @@ def test_registry_producing_path_and_foreign_worker_exclusion(mock_db, tmp_path,
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET updated_at = %s WHERE id = %s", (old, session["id"]))
         conn.cursor().execute("UPDATE turns SET ended_at = %s WHERE session_id = %s", (old, session["id"]))
+        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s", (old, row["id"]))
+    age_directory(path)
     result = asyncio.run(rc.reclaim(project["id"], dry_run=False))
     assert result["reclaimed"] == 1 and not path.exists()
     updated = checkouts.get_checkout_by_path(str(path), project_id=project["id"])
