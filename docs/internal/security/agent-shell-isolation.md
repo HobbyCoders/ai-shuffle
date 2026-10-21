@@ -170,6 +170,9 @@ Do not enable the split on a live worker merely to test it. Use disposable
 volumes and synthetic credentials. Optional `on` still fails open on migration
 or identity errors and is ignored with `--user`. Explicit `required` refuses
 these paths and reports `required agent isolation established` on success.
+Only `off`, `on` and `required` are valid (trimmed, case-insensitive); empty or
+unset defaults to `off`. Unknown values, including boolean aliases such as `yes`
+and `true`, refuse startup before migration or rollback and list the valid values.
 Its first supporting image is the image built from merged PR #335 (not yet
 released). Older images ignore the unknown value and run unisolated; pin a
 supporting image and check the log after tag changes. This startup policy is

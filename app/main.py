@@ -166,8 +166,10 @@ async def _cluster_heartbeat_loop():
 
 def require_agent_isolation():
     """Catch accidental direct-app entrypoint overrides before serving requests."""
-    if (os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
-            and os.environ.get("SHUFFLE_AGENT_ISOLATION") != "on"):
+    mode = os.environ.get("AGENT_ISOLATION", "").strip().lower() or "off"
+    if mode not in {"off", "on", "required"}:
+        raise RuntimeError("AGENT_ISOLATION: startup refused; valid values: off, on, required")
+    if mode == "required" and os.environ.get("SHUFFLE_AGENT_ISOLATION") != "on":
         raise RuntimeError("required agent isolation: startup refused (launch through the Docker container supervisor)")
 
 

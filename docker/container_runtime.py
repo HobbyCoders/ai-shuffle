@@ -650,10 +650,24 @@ def isolation():
     return _isolation
 
 
+def isolation_setting():
+    module = isolation()
+    if hasattr(module, "setting"):
+        try:
+            return module.setting()
+        except module.IsolationError as error:
+            raise RuntimeFailure(str(error)) from None
+    # Packaging/older images may lack helpers, but must not silently accept typos.
+    mode = os.environ.get("AGENT_ISOLATION", "").strip().lower() or "off"
+    if mode not in {"off", "on", "required"}:
+        raise RuntimeFailure("AGENT_ISOLATION: startup refused; valid values: off, on, required")
+    return mode
+
+
 def isolate(settings, account):
     """Root, before the drop: migrate for AGENT_ISOLATION and return the
     identity to drop to, or None for the usual single-account drop."""
-    required = os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
+    required = isolation_setting() == "required"
     module = isolation()
     if not hasattr(module, "bootstrap"):
         if required:
@@ -779,7 +793,7 @@ def maintenance_isolation(settings, account):
     the cluster lock (online dumps may share; restores still require offline).
     """
     module = isolation()
-    required = os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
+    required = isolation_setting() == "required"
     prefix = "required agent isolation: startup refused; " if required else ""
     if not hasattr(module, "read_record"):
         if required:
@@ -813,6 +827,7 @@ def maintenance_isolation(settings, account):
 def drop_privileges(settings, *, maintenance=False):
     """Root may prepare mount roots, never recursively repair database files."""
     global _agent_path
+    mode = isolation_setting()  # Validate before touching mount roots or ownership.
     if os.geteuid() == 0:
         account = pwd.getpwnam("appuser")
         if not account.pw_uid or not account.pw_gid:
@@ -840,13 +855,11 @@ def drop_privileges(settings, *, maintenance=False):
             os.setgid(account.pw_gid)
             os.setuid(account.pw_uid)
         os.environ["HOME"] = account.pw_dir
-    elif os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required":
+    elif mode == "required":
         raise RuntimeFailure("required agent isolation: startup refused (container must start as root; remove --user)")
-    elif getattr(isolation(), "setting", lambda: "off")() == "on":
+    elif mode == "on":
         log("agent isolation could NOT be enabled: the container did not start as root "
             "(--user or a hand-over); agents run unisolated")
-    elif getattr(isolation(), "setting", lambda: "off")() == "invalid":
-        log("agent isolation: ignoring invalid AGENT_ISOLATION; use required, on or off")
     # Real ids: with agent isolation the effective ids are the service account's.
     for name, actual in (("PUID", os.getuid()), ("PGID", os.getgid())):
         if name in os.environ and int(os.environ[name]) != actual:

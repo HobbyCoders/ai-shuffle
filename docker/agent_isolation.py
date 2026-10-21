@@ -60,9 +60,6 @@ APP_FLAG = "SHUFFLE_AGENT_ISOLATION"
 APP_ROOTS = "SHUFFLE_AGENT_ROOTS"
 EXTRA_DIRS = "AGENT_ISOLATION_EXTRA_DIRS"
 
-_TRUE = {"1", "on", "true", "yes"}
-_FALSE = {"", "0", "off", "false", "no"}
-
 
 class IsolationError(Exception):
     """Secret-free operator diagnostic."""
@@ -86,10 +83,11 @@ ACTIVE = None
 
 
 def setting(environ=None):
-    """"required", "on", "off" or "invalid". Read from the container environment only:
-    the agent can edit files the app reads settings from, never this."""
-    raw = (os.environ if environ is None else environ).get(SETTING, "").strip().lower()
-    return "required" if raw == "required" else "on" if raw in _TRUE else "off" if raw in _FALSE else "invalid"
+    """Read the strict container-only policy, never agent-editable settings files."""
+    raw = (os.environ if environ is None else environ).get(SETTING, "").strip().lower() or "off"
+    if raw not in {"off", "on", "required"}:
+        raise IsolationError("AGENT_ISOLATION: startup refused; valid values: off, on, required")
+    return raw
 
 
 def _id(environ, name):
@@ -444,9 +442,7 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
         if required:
             raise IsolationError("required agent isolation: startup refused (no isolation identity)")
         return None
-    if setting() not in {"on", "required"}:
-        if setting() == "invalid":
-            log(f"agent isolation: ignoring {SETTING}={os.environ.get(SETTING)!r}; use required, on or off")
+    if setting() == "off":
         if needs_rollback(data_dir, ident, ops):
             disable(data_dir, ident, ops, log)
             release_code(app_dir, ident, ops)
