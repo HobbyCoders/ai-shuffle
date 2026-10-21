@@ -434,7 +434,8 @@ class DisplayManager:
 
     # ----- capture -----------------------------------------------------------
 
-    def capture(self, crop: "Optional[tuple[int, int, int, int]]" = None) -> tuple[bytes, dict]:
+    def capture(self, crop: "Optional[tuple[int, int, int, int]]" = None, *,
+                window=None) -> tuple[bytes, dict]:
         """Capture the selected display, downscaled to the virtual size.
 
         Returns ``(png_bytes, info)`` where info has the virtual + physical size
@@ -485,6 +486,8 @@ class DisplayManager:
             "left": region["left"], "top": region["top"], "vw": vw, "vh": vh,
             "display_rect": (geo.left, geo.top, geo.width, geo.height),
             "id": shot_id, "at": time.time(),
+            "window_id": window.id if window is not None else None,
+            "window_bounds": tuple(window.bounds) if window is not None else None,
         }
         info = {
             "screenshot_id": shot_id,
@@ -521,6 +524,16 @@ class DisplayManager:
             self._map.pop(self.selected_index, None)
             raise stale("The display layout changed since the screenshot (layout changed). "
                         "Take a fresh screenshot before acting.")
+        if m.get("window_id") is not None:
+            from app.mcp.computer_use import windows
+            try:
+                win = windows.find_window(m["window_id"], self.list_displays())
+            except ValueError:
+                win = None
+            if win is None or win.bounds != m["window_bounds"] or win.display != self.selected_index:
+                self._map.pop(self.selected_index, None)
+                raise stale("The window moved, resized or disappeared since the screenshot. "
+                            "Take a fresh screenshot before acting.")
         return m
 
     @staticmethod

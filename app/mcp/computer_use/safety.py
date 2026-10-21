@@ -126,6 +126,7 @@ class SafeInput:
         self.sent = 0
         self.token = abort.generation(session_id)
         self.held: list[tuple[object, object]] = []
+        self._hold_timer = None
         abort.register_controller(self)
 
     def check(self):
@@ -136,6 +137,22 @@ class SafeInput:
         with abort.input_guard(self.session_id, self.token):
             self.sent += 1
             return fn(*args)
+
+    def click(self, button, count=1):
+        """Native click-count path, with emergency release if the controller fails."""
+        with abort.input_guard(self.session_id, self.token):
+            pair = (self.mouse, button)
+            if pair not in self.held:
+                self.held.append(pair)
+            self.sent += 1
+            try:
+                self.mouse.click(button, count)
+            except BaseException:
+                self.release(self.mouse, button)
+                raise
+            else:
+                # The native click already released it; do not send another mouse-up.
+                self.held.remove(pair)
 
     def move(self, point):
         """Place the pointer. Not counted as a side effect: nothing is clicked."""
@@ -168,9 +185,28 @@ class SafeInput:
             if (device, key) in self.held:
                 device.release(key)
                 self.held.remove((device, key))
+            if not self.held and self._hold_timer is not None:
+                self._hold_timer.cancel()
+                self._hold_timer = None
+
+    def expire_held_after(self, seconds=15.0):
+        """Bound cross-call holds even while the model is thinking. No Escape is sent."""
+        with abort._LOCK:
+            if self.held and self._hold_timer is None:
+                def expire():
+                    with abort._LOCK:
+                        if self._hold_timer is timer:
+                            self.release_all()
+                timer = threading.Timer(seconds, expire)
+                timer.daemon = True
+                self._hold_timer = timer
+                timer.start()
 
     def release_all(self):
         with abort._LOCK:
+            if self._hold_timer is not None:
+                self._hold_timer.cancel()
+                self._hold_timer = None
             for device, key in list(reversed(self.held)):
                 try:
                     self.release(device, key)

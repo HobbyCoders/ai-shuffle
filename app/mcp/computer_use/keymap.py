@@ -35,7 +35,14 @@ _SPECIAL = {
     "cmd": "cmd", "command": "cmd", "super": "cmd", "win": "cmd", "meta": "cmd",
 }
 
-_MODIFIERS = {"ctrl", "alt", "shift", "cmd"}
+# xdotool spellings for the existing modifiers and arithmetic keys.
+for _name, _canonical in (("control", "ctrl"), ("ctrl", "ctrl"), ("super", "cmd"),
+                          ("meta", "cmd"), ("alt", "alt"), ("shift", "shift")):
+    for _side in ("l", "r"):
+        _SPECIAL[f"{_name}_{_side}"] = _canonical
+
+_CHARACTERS = {"plus": "+", "minus": "-", "kp_add": "+", "kp_subtract": "-"}
+_MODIFIERS = {name for name, value in _SPECIAL.items() if value in {"ctrl", "alt", "shift", "cmd"}}
 
 # Function keys F1..F20.
 for _i in range(1, 21):
@@ -52,6 +59,8 @@ def _resolve(name: str) -> Any:
 
     token = name.strip()
     low = token.lower()
+    if low in _CHARACTERS:
+        return _CHARACTERS[low]
     if low in _SPECIAL:
         return getattr(Key, _SPECIAL[low])
     if len(token) == 1:
@@ -93,7 +102,10 @@ def parse_chord(text: str) -> tuple[list[Any], Any]:
     if text == "+":
         return ([], "+")
 
-    parts = [p for p in text.split("+") if p != ""]
+    # A trailing ++ is a separator followed by the literal plus key.
+    parts = text[:-2].split("+") + ["plus"] if text.endswith("++") else text.split("+")
+    if any(not p.strip() for p in parts):
+        raise ValueError(f"invalid key chord: {text!r}")
     if not parts:
         raise ValueError(f"invalid key chord: {text!r}")
 
@@ -131,6 +143,8 @@ def is_system_chord(text: str) -> bool:
     names = [_key_name(p) for p in parts]
     *mods, main = names
     held = set(mods)
+    if main in {"ctrl", "alt", "shift", "cmd"}:
+        held.add(main)
     if "cmd" in held or main == "cmd":
         return True
     if "alt" in held and main in ("tab", "esc", "f4"):

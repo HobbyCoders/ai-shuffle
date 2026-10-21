@@ -210,6 +210,8 @@ def _api():
         (user32, "GetWindowThreadProcessId"): ([H, ctypes.POINTER(D)], D),
         (user32, "GetWindowRect"): ([H, ctypes.POINTER(wintypes.RECT)], B),
         (user32, "GetForegroundWindow"): ([], H),
+        (user32, "WindowFromPoint"): ([wintypes.POINT], H),
+        (user32, "GetAncestor"): ([H, ctypes.c_uint], H),
         (user32, "SetForegroundWindow"): ([H], B),
         (user32, "BringWindowToTop"): ([H], B),
         (user32, "ShowWindowAsync"): ([H, ctypes.c_int], B),
@@ -622,6 +624,75 @@ def _elevated(process_handle) -> Optional[bool]:
         return bool(value.value)
     finally:
         kernel32.CloseHandle(token)
+
+
+def window_at(point) -> Optional[int]:
+    """Root window under a physical desktop point, without requiring UIA/COM."""
+    if sys.platform != "win32":
+        return None
+    _, wintypes, user32, *_ = _api()
+    hwnd = user32.WindowFromPoint(wintypes.POINT(*point))
+    return int(user32.GetAncestor(hwnd, 2) or hwnd) if hwnd else None
+
+
+def foreground_window() -> Optional[int]:
+    if sys.platform != "win32":
+        return None
+    hwnd = _api()[2].GetForegroundWindow()
+    return int(hwnd) if hwnd else None
+
+
+def related_window(target: int, other: Optional[int], displays) -> bool:
+    """Same window/process or an owned popup (not the reverse ownership edge)."""
+    if not other:
+        return False
+    if target == other:
+        return True
+    try:
+        a, b = find_window(target, displays), find_window(other, displays)
+        if a.pid and a.pid == b.pid:
+            return True
+    except ValueError:
+        pass  # Owned popups need not appear in EnumWindows' visible app list.
+    if sys.platform != "win32":
+        return False
+    user32 = _api()[2]
+    if _pid(target) and _pid(target) == _pid(other):
+        return True
+    seen = set()
+    while other and other not in seen:
+        if other == target:
+            return True
+        seen.add(other)
+        other = user32.GetWindow(other, 4)  # GW_OWNER
+    return False
+
+
+def start_search_focused() -> bool:
+    """Fail closed unless the focused shell host is Start/Search itself."""
+    hwnd = foreground_window()
+    if not hwnd:
+        return False
+    # Do not trust a window title (an arbitrary app can have a matching title).
+    process = os.path.basename(_exe_path(_pid(hwnd))).lower()
+    return process in {"startmenuexperiencehost.exe", "searchhost.exe", "searchapp.exe",
+                       "searchui.exe"}
+
+
+def occluders(win: WindowInfo, listed: list[WindowInfo]) -> list[int]:
+    """Overlapping visible windows above win, in front-to-back EnumWindows order."""
+    result = []
+    if not win.bounds:
+        return result
+    x, y, w, h = win.bounds
+    for other in listed:
+        if other.id == win.id:
+            break
+        if other.bounds:
+            ox, oy, ow, oh = other.bounds
+            if max(x, ox) < min(x + w, ox + ow) and max(y, oy) < min(y + h, oy + oh):
+                result.append(other.id)
+    return result
 
 
 def foreground_blocks_input() -> Optional[bool]:

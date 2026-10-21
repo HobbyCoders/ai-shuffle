@@ -169,6 +169,8 @@ def desktop(monkeypatch):
         native.focused.append(window_id)
         if native.nudge and nudge:
             nudge()
+        if native.focus_result:
+            open_windows[:] = [replace(w, foreground=w.id == window_id) for w in open_windows]
         return native.focus_result
     monkeypatch.setattr(windows, "list_windows", lambda displays: list(open_windows))
     monkeypatch.setattr(windows, "focus", fake_focus)
@@ -177,8 +179,18 @@ def desktop(monkeypatch):
     monkeypatch.setattr(windows, "move_resize",
                         lambda wid, bounds, displays, sleep: native.moves.append((wid, bounds)) or bounds)
     monkeypatch.setattr(windows, "window_blocks_input", lambda hwnd: None)
+    monkeypatch.setattr(windows, "input_desktop_locked", lambda: False)
+    monkeypatch.setattr(windows, "foreground_blocks_input", lambda: False)
+    # The input-target guard must never fall through to native APIs in this fixture.
+    monkeypatch.setattr(windows, "related_window", lambda target, other, displays:
+                        target == other or any(a.id == target and b.id == other and a.pid == b.pid
+                                               for a in open_windows for b in open_windows))
+    monkeypatch.setattr(windows, "foreground_window",
+                        lambda: next((w.id for w in open_windows if w.foreground), None))
+    monkeypatch.setattr(windows, "start_search_focused", lambda: True)
     # Fake UI Automation: never COM, never a real window.
     fake_uia = FakeUia()
+    monkeypatch.setattr(windows, "window_at", lambda point: fake_uia.window_at(*point))
     fake_uia.trees[101] = notepad_elements()
     uia_backend = uia.Backend(lambda: fake_uia, budget=0.5)
     monkeypatch.setattr(sdk, "_uia_backend", lambda: uia_backend)
