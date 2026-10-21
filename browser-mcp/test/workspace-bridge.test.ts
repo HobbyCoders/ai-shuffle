@@ -155,6 +155,30 @@ describe("runtime bridge", () => {
     // Sent once at most (never, when it could not fit), not retried.
     expect(h.calls.filter(c => c.endpoint === "report" && c.body.results.some((r: any) => r.choices))).toHaveLength(status ? 1 : 0);
   });
+  it.each([[429], [408]])("keeps a valid option list and retries it after a transient %i (a proxy, not a refusal)", async status => {
+    let refusals = 0;
+    const h = harness({ reportStatus: body => body.results.some((r: any) => r.choices) && refusals++ < 2 ? status : undefined });
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));
+    const choices = { selected: 0, groups: [], options: [{ label: "A", disabled: false }] };
+    vi.spyOn(h.bridge.workspace, "receive").mockImplementation(async (raw: any) => raw.op === "options" ? { id: raw.id, ok: true, choices } : { id: raw.id, ok: true });
+    h.send([{id:"opt",runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"a",op:"options",args:{},expires_at:Date.now()+30000}]);
+    await vi.waitFor(() => expect(refusals).toBe(3), {timeout:4000});
+    const reports = h.calls.filter(c => c.endpoint === "report").flatMap(c => c.body.results).filter((r: any) => r.id === "opt");
+    expect(reports).toHaveLength(3);
+    for (const r of reports) expect(r).toEqual({ id: "opt", ok: true, choices });
+  });
+  it("does not replace a valid queued list when a state-only report is refused with 422", async () => {
+    let refusals = 0;
+    const h = harness({ reportStatus: body => !body.results.some((r: any) => r.choices) && body.results.length && refusals++ < 1 ? 422 : undefined });
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));
+    const choices = { selected: 0, groups: [], options: [{ label: "A", disabled: false }] };
+    vi.spyOn(h.bridge.workspace, "receive").mockImplementation(async (raw: any) => raw.op === "options" ? { id: raw.id, ok: true, choices } : { id: raw.id, ok: true });
+    const command = (id: string, op: string) => ({id,runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"a",op,args:{},expires_at:Date.now()+30000});
+    h.send([command("beat", "heartbeat"), command("opt", "options")]);
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="report" && c.body.results.some((r:any)=>r.id==="opt"))).toBe(true), {timeout:4000});
+    const reported = h.calls.filter(c => c.endpoint === "report").flatMap(c => c.body.results).filter((r: any) => r.id === "opt");
+    expect(reported).toEqual([{ id: "opt", ok: true, choices }]);
+  });
   it("keeps retrying a refused report that carries no payload (the state itself may be at fault)", async () => {
     let refusals = 0;
     const h = harness({ reportStatus: body => body.results.length && refusals++ < 2 ? 422 : undefined });

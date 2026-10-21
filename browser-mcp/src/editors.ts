@@ -59,7 +59,7 @@ export async function readEditors(page: Page, typography = process.env._AIS_BROW
     while (focusedEl?.shadowRoot?.activeElement) focusedEl = focusedEl.shadowRoot.activeElement;
     const fields = []; let budget = 24000;
     // The page's own clock zone: the panel's Today/Now must match the page's, not the viewer's.
-    const zone = (() => { try { const z = Intl.DateTimeFormat().resolvedOptions().timeZone; return z && z.length <= 64 ? z : ''; } catch { return ''; } })();
+    const zone = (() => { try { const z = Intl.DateTimeFormat().resolvedOptions().timeZone; return typeof z === 'string' && z && z.length <= 64 ? z : ''; } catch { return ''; } })();
     // querySelectorAll stops at shadow boundaries. Reddit's auth fields (and
     // many other web components) are native inputs inside open shadow roots.
     function* inputs(root: Document | ShadowRoot): Generator<Field> {

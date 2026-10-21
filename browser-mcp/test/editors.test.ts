@@ -226,6 +226,20 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
     } finally { await browser.close(); }
   });
 
+  it('omits the zone when the page overrides Intl with a non-string time zone', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<input type="date" aria-label="Day" value="2026-10-21">');
+      await page.evaluate(() => {
+        Intl.DateTimeFormat = function () { return { resolvedOptions: () => ({ timeZone: { length: 3 } }) }; } as any;
+      });
+      const [day] = await readEditors(page);
+      expect(day).toMatchObject({ label: 'Day', type: 'date', value: '2026-10-21' });
+      expect(day).not.toHaveProperty('zone');
+    } finally { await browser.close(); }
+  });
+
   it('lists select options with groups and disabled state, bounded, without option values', async () => {
     const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
     try {

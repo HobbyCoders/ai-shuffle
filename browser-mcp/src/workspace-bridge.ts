@@ -13,7 +13,7 @@ export function bridgeConfig(env = process.env): BridgeConfig | undefined {
 }
 class Superseded extends Error {}
 /** The server refused this body (or it is too large to send): resending it unchanged cannot succeed. */
-class Rejected extends Error {}
+class Rejected extends Error { constructor(message: string, readonly status: number) { super(message); } }
 /** The server's request body limit (browser_control.MAX_BODY). */
 export const MAX_REPORT_BODY = 262144;
 /** Separate poll and report lanes: completion never waits for a long poll. */
@@ -70,7 +70,7 @@ export class WorkspaceBridge {
   }
   private async post(endpoint: string, data: object, timeout: number): Promise<unknown> {
     const body = JSON.stringify({ session_id: this.config.sessionId, token: this.config.token, runtime_id: this.workspace.runtimeId, ...data });
-    if (Buffer.byteLength(body) > MAX_REPORT_BODY) throw new Rejected("workspace payload too large");
+    if (Buffer.byteLength(body) > MAX_REPORT_BODY) throw new Rejected("workspace payload too large", 413);
     const response = await this.transport(new URL(endpoint, this.config.baseUrl), {
       method: "POST", headers: { "content-type": "application/json", origin: new URL(this.config.baseUrl).origin },
       body,
@@ -81,7 +81,10 @@ export class WorkspaceBridge {
     if (response.status === 401 || response.status === 403) { this.stop(); throw new Error("workspace authentication rejected"); }
     if (!response.ok) {
       await response.body?.cancel();
-      throw response.status >= 400 && response.status < 500 ? new Rejected(`workspace payload rejected (${response.status})`) : new Error("workspace transport unavailable");
+      // Only a definite refusal of this body: too large (413), or invalid (422).
+      // Other 4xx (a proxy's 408 or 429, say) are transient and retried as-is;
+      // flush() decides whether a 422 can be blamed on a payload.
+      throw response.status === 413 || response.status === 422 ? new Rejected(`workspace payload rejected (${response.status})`, response.status) : new Error("workspace transport unavailable");
     }
     if (response.status === 204) return null;
     const reader = response.body?.getReader();
@@ -175,7 +178,8 @@ export class WorkspaceBridge {
           // A copy or option list the server refuses (too long, too large) would
           // be resent forever and hold every later result and state behind it:
           // its viewer gets an error instead.
-          if (error instanceof Rejected && withoutPayloads(this.results, results.length)) continue;
+          // A 422 with no payload in the batch points at the state, not a list or copy.
+          if (error instanceof Rejected && (error.status === 413 || results.some(hasPayload)) && withoutPayloads(this.results, results.length)) continue;
           this.dirty = true; await this.pause(1000);
         }
         // Coalesce mouse movement / bursts, without holding a result behind polling.
@@ -194,6 +198,7 @@ export function reportBatch(results: readonly CommandResult[]): CommandResult[] 
   const second = batch.findIndex((r, i) => i > 0 && (r.text !== undefined || r.choices !== undefined));
   return second > 0 ? batch.slice(0, second) : batch;
 }
+const hasPayload = (r: CommandResult): boolean => r.text !== undefined || r.choices !== undefined;
 /**
  * Replaces the first `count` results' payloads with an error for their
  * viewer. Returns whether there was a payload to drop.
@@ -202,7 +207,7 @@ export function withoutPayloads(results: CommandResult[], count: number): boolea
   let dropped = false;
   for (let i = 0; i < count && i < results.length; i++) {
     const r = results[i];
-    if (r.text === undefined && r.choices === undefined) continue;
+    if (!hasPayload(r)) continue;
     results[i] = { id: r.id, ok: false, error: r.choices !== undefined ? "This list is too long to show here." : "That's too much text to copy at once." };
     dropped = true;
   }
