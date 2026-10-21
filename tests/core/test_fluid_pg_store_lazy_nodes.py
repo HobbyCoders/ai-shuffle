@@ -77,10 +77,17 @@ async def test_delegated_query_turns_never_reload_full_tree(mock_db, monkeypatch
             full_loads.append(sid)
         return original(sid, include_nodes=include_nodes)
     monkeypatch.setattr(module, "_load_session_sync", counted)
+    original_memory = module._load_memory_path_sync
+    memory_loads = []
+    def counted_memory(sid, head):
+        memory_loads.append(sid)
+        return original_memory(sid, head)
+    monkeypatch.setattr(module, "_load_memory_path_sync", counted_memory)
     try:
         for index in range(6):
             await _delegated_turn(adapter, f"memory backend task {index}")
         assert not full_loads
+        assert not memory_loads
         assert not store._nodes.get(adapter.sdk_session_id)
         from tests.core.test_memory_reminder import _memory_kinds
         assert (await _memory_kinds(adapter._engine)).count("full") == 1
@@ -143,3 +150,19 @@ async def test_memory_projection_overflow_is_conservative_and_recovers(mock_db):
     projection = await store.load_memory_path("overflow")
     assert [n.node_id for n in projection] == ["small"]
     assert [n.node_id for n in await PgFluidStore(cache_nodes=False).load_memory_path("overflow")] == ["small"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,expected", [("a" * 40000, True), ("猫" * 20000, True), ("😀" * 20000, False)],
+                         ids=["ascii", "three-byte-utf8", "over-budget-four-byte-utf8"])
+async def test_projection_budget_counts_exact_utf8_bytes(mock_db, text, expected):
+    from app.core import memory_reminder as mr
+    store = PgFluidStore(cache_nodes=False)
+    await store.create_session("utf8-budget")
+    note = mr.wrap("# Memory\n- [m1 r1; session] " + text)
+    first = node("snapshot")
+    first.message = Message(role="user", content=[Text(text=note)]).pin_context(note)
+    await store.append("utf8-budget", first)
+    assert (await store.load_memory_path("utf8-budget") is not None) is expected
+    cold = PgFluidStore(cache_nodes=False)
+    assert (await cold.load_memory_path("utf8-budget") is not None) is expected

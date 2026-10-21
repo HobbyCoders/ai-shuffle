@@ -160,7 +160,7 @@ def _memory_projection(nodes: Optional[List[SessionNode]], node: SessionNode) ->
         node_id=node.node_id, parent_id=node.parent_id, ts=node.ts,
         message=Message(role="user", content=[Text(text=note)], context_pin=(0, len(note))),
     )]
-    return result if sum(4 * len(n.message.text()) for n in result) <= MEMORY_PATH_BYTES else None
+    return result if sum(len(n.message.text().encode("utf-8")) for n in result) <= MEMORY_PATH_BYTES else None
 
 
 def _session_head_sync(session_id: str) -> Optional[str]:
@@ -202,7 +202,7 @@ def _load_memory_path_sync(session_id: str, head: Optional[str]) -> Optional[Lis
                 return None
             if not projected:
                 continue
-            size += 4 * len(projected[0].message.text())
+            size += len(projected[0].message.text().encode("utf-8"))
             if size > MEMORY_PATH_BYTES:
                 return None
             newest.append(projected[0])
