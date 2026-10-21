@@ -342,6 +342,82 @@ def test_return_reclaims_original_pool_if_global_changes(monkeypatch):
     assert conn.closed
 
 
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_cancelled_to_thread_due_reports(retaining_pool, monkeypatch, caplog):
+    import asyncio
+    from app.db import remote_tasks
+
+    pool, physical = retaining_pool
+    entered, draining, resume, finished = (threading.Event() for _ in range(4))
+    results, errors = [], []
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(remote_tasks, "init_schema", lambda conn: None)
+    monkeypatch.setattr(_PhysicalConn, "commit", lambda self: None, raising=False)
+
+    def fetchall(cursor):
+        entered.set()
+        assert resume.wait(5)
+        if cursor._conn.closed:
+            raise psycopg2.InterfaceError("cursor already closed")
+        return []
+
+    monkeypatch.setattr(_FakeCursor, "fetchall", fetchall, raising=False)
+    notify = pool._notify_available
+
+    def notify_shutdown():
+        if getattr(pool, "_closing", False) or pool.closed:
+            draining.set()
+        notify()
+
+    monkeypatch.setattr(pool, "_notify_available", notify_shutdown)
+
+    def query():
+        try:
+            results.append(remote_tasks.due_reports())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    task = asyncio.create_task(asyncio.to_thread(query))
+    shutdown = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        shutdown = asyncio.create_task(asyncio.to_thread(getattr(pool, "shutdown", pool.closeall)))
+        assert await asyncio.to_thread(draining.wait, 3)
+        # Cancellation must not let shutdown close a still-running DB query.
+        assert not any(conn.closed for conn in physical)
+        with pytest.raises(psycopg2.pool.PoolError, match="clos"):
+            pool.getconn()
+    finally:
+        resume.set()
+        assert await asyncio.to_thread(finished.wait, 3)
+        if shutdown is not None:
+            await shutdown
+        if not task.done():
+            await task
+    assert errors == []
+    assert results == [[]]
+    assert pool.closed and all(conn.closed for conn in physical)
+    assert not pool._used and not pool._rused
+    assert not caplog.records
+
+
+def test_shutdown_drain_is_bounded_for_stuck_borrower(retaining_pool, caplog):
+    pool, _ = retaining_pool
+    conn = pool.getconn()
+    pool.shutdown(timeout=0)
+    assert pool.closed and conn.closed
+    assert "1 borrowed connection" in caplog.text
+    pool.putconn(conn)
+    assert not pool._used and not pool._rused
+
+
 def test_retaining_pool_opens_only_startup_minimum(retaining_pool):
     pool, created = retaining_pool
     assert len(created) == 2

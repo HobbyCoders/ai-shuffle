@@ -99,6 +99,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._available = threading.Condition()
         self._waiters = deque()
         self._generation = 0
+        self._closing = False
         self._pressure_lock = threading.Lock()
         self._pressure = dict.fromkeys((
             "connections_opened", "connections_discarded", "connections_stale",
@@ -149,7 +150,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         try:
             while True:
                 with self._available:
-                    if self.closed:
+                    if self.closed or self._closing:
                         raise psycopg2.pool.PoolError("connection pool is closed")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -167,7 +168,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     break
                 except psycopg2.pool.PoolError:
                     with self._available:
-                        if self.closed:
+                        if self.closed or self._closing:
                             raise
                         if not waited:
                             waited = True
@@ -225,6 +226,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
 
     def _getconn(self, key=None):
         # Called under the driver lock: admission is atomic with returns.
+        if self._closing:
+            raise psycopg2.pool.PoolError("connection pool is closing")
         # Existing keyed checkouts do not consume another slot.
         if (self._reserved and not _lease_checkout.get()
                 and key not in self._used
@@ -290,6 +293,38 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             finally:
                 self._notify_available()
 
+    def shutdown(self, timeout: float = 3.0) -> None:
+        """Stop admission and let in-flight DB threads finish before socket close.
+
+        Cancelling an asyncio.to_thread await does not stop its running thread.
+        Shutdown callers must leave the pool alive for those borrowers, but a
+        stuck query must not hang process shutdown indefinitely. The ordinary
+        closeall() remains an immediate force-close operation.
+        """
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._closing = True
+        self._notify_available()
+        while True:
+            # Match _acquire's generation protocol: never take the driver lock
+            # while holding _available (returns notify in the opposite order).
+            with self._available:
+                generation = self._generation
+            with self._lock:
+                if self.closed:
+                    return
+                remaining = deadline - time.monotonic()
+                if not self._used or remaining <= 0:
+                    borrowed = len(self._used)
+                    self._closeall()
+                    break
+            with self._available:
+                if generation == self._generation:
+                    self._available.wait(max(0, remaining))
+        if borrowed:
+            logger.warning("Closing PostgreSQL pool with %d borrowed connection(s) "
+                           "after %.1fs shutdown drain", borrowed, timeout)
+
     def _closeall(self):
         try:
             super()._closeall()
@@ -325,9 +360,14 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
 def close_pool() -> None:
     """Shutdown the PostgreSQL connection pool. Called during app shutdown."""
     global _pg_pool
-    if _pg_pool is not None:
-        _pg_pool.closeall()
-        _pg_pool = None
+    pool = _pg_pool
+    if pool is not None:
+        if isinstance(pool, _RetainingThreadedConnectionPool):
+            pool.shutdown()
+        else:
+            pool.closeall()
+        if _pg_pool is pool:
+            _pg_pool = None
         logger.info("PostgreSQL connection pool closed")
 
 
