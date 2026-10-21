@@ -98,6 +98,10 @@ async function rollbackFixture(t, { baseline = false } = {}) {
 }
 test('installed-entry factory fully hashes a real ready journal before selection', async t => {
  const { f, u } = await rollbackFixture(t);
+ const { version } = JSON.parse(await fs.readFile(new URL('../launcher.json', import.meta.url), 'utf8'));
+ const { launcherValidatedRestorePoint } = require('../dist/main/update-restore-point.js');
+ assert.equal(version, 6, 'the audited installed factory must cover the shipped launcher');
+ assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
  const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
  const cluster = path.join(f.root, 'postgres');
@@ -1553,6 +1557,30 @@ test('#98: a waiting build takes precedence over a failed-start retry offer', as
  assert.equal(await u.discardStaged(C),true);
  await assert.rejects(u.check(),/This revision failed to start/);
 });
+test('unreadable running metadata leaves the verified staged offer ready',async t=>{
+ const {f,u}=await stagedOver(t);
+ await fs.writeFile(path.join(f.root,'versions',A,'release.json'),'unreadable');
+ await f.release(A);f.requests.length=0;
+ const result=await u.check();
+ assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
+ assert.equal(u.pendingVersion,B);
+ assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+});
+test('a verified current feed unselects a withdrawn unchosen download without deleting its files',async t=>{
+ for(const legacy of [false,true])await t.test(legacy?'legacy pending':'explicit staged',async t=>{
+  let f,manager;
+  if(legacy){
+   f=await fixture(t);await f.release(A);manager=f.create();await manager.load();
+   await manager.download();await manager.select();await manager.databaseStarting();await manager.healthy();
+   await f.release(B);await manager.download();
+  }else{const staged=await stagedOver(t);f=staged.f;manager=staged.u;}
+  await f.release(A);f.requests.length=0;const builds=f.builds;
+  assert.equal((await manager.check()).kind,'current');assert.equal(manager.pendingVersion,null);
+  assert.equal(f.builds,builds);assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+  assert((await fs.stat(path.join(f.root,'versions',B))).isDirectory());
+  const reloaded=f.create();await reloaded.load();assert.equal(reloaded.pendingVersion,null);
+ });
+});
 test('#98: a staged build does not hide a newer release; a download replaces it and removes its files',async t=>{
  const {f,u}=await stagedOver(t);
  await f.release(C,undefined,{version:'1.0.1'});f.requests.length=0;const builds=f.builds;
@@ -1598,5 +1626,8 @@ test('#98: a build selected to install or fenced is never replaced and the feed 
   assert.deepEqual(f.requests,[],step);
   await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});
   assert((await fs.stat(path.join(f.root,'versions',B))).isDirectory(),step);
+  await f.release(A);f.requests.length=0;
+  assert.equal((await manager.check()).kind,'ready',step);
+  assert.equal(manager.pendingVersion,B);assert.deepEqual(f.requests,[],step);
  }
 });
