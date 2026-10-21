@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
+from pydantic import BaseModel, Field
 
 from app.core import git_native
 from app.core.git_service import git_service
@@ -533,6 +534,36 @@ async def worktree_report(project_id: str, _=Depends(require_admin)):
     from app.core.worktree_report import report
 
     return await run_sync(report, project_id)
+
+
+class ReclaimWorktreesRequest(BaseModel):
+    dry_run: bool = True
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+@router.post("/worktrees/reclaim")
+async def reclaim_worktrees(
+    request: Request,
+    project_id: str,
+    body: ReclaimWorktreesRequest = ReclaimWorktreesRequest(),
+    token: str = Depends(require_admin),
+):
+    """Owner/admin-only local cleanup. Preview cookies may not call this route."""
+    from app.api.common import require_origin_access
+    from app.core.worktree_reclaim import reclaim
+    from app.db import projects_v2
+
+    if await run_sync(projects_v2.get_project_v2, project_id):
+        await run_sync(require_origin_access, request=request, project_v2_id=project_id)
+    else:
+        check_project_access(request, project_id)
+    try:
+        return await reclaim(project_id, dry_run=body.dry_run, limit=body.limit, offset=body.offset)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/worktrees", response_model=Union[WorktreeListResponse, WorktreeCompactListResponse])

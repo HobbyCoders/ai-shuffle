@@ -285,6 +285,10 @@ def set_system_setting(key: str, value: str) -> None:
         if key.startswith("openrouter_billing_key:"):
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
                            ("openrouter-account:" + key.removeprefix("openrouter_billing_key:"),))
+        if key == "fal_api_key" or key.startswith("openrouter_billing_key:"):
+            from app.db.provider_usage_snapshots import delete_shared_observations
+            delete_shared_observations(conn, "fal-ai" if key == "fal_api_key" else key.removeprefix("openrouter_billing_key:"),
+                                       source_id="fal_billing" if key == "fal_api_key" else "openrouter_credits")
     # Explicit invalidation: the memo must never outlive a write we made.
     invalidate_system_setting_memo(key)
 
@@ -300,6 +304,10 @@ def delete_system_setting(key: str) -> bool:
         if key.startswith("openrouter_billing_key:"):
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
                            ("openrouter-account:" + key.removeprefix("openrouter_billing_key:"),))
+        if key == "fal_api_key" or key.startswith("openrouter_billing_key:"):
+            from app.db.provider_usage_snapshots import delete_shared_observations
+            delete_shared_observations(conn, "fal-ai" if key == "fal_api_key" else key.removeprefix("openrouter_billing_key:"),
+                                       source_id="fal_billing" if key == "fal_api_key" else "openrouter_credits")
     invalidate_system_setting_memo(key)
     return deleted
 

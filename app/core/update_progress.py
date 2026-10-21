@@ -125,12 +125,29 @@ def put_back(current, target):
             and not same_version(current.get("running_version"), target.get("target_version")))
 
 
+def _with_outcome(operation):
+    """Add truthful display semantics without changing the legacy progress phase."""
+    if not operation:
+        return None
+    workers = operation["workers"]
+    refused = [{"device_id": row["device_id"], "device_name": row.get("device_name") or row["device_id"],
+                "reason": row.get("message") or row.get("reason") or "Restart not queued"}
+               for row in workers if row.get("status") == "skipped"]
+    if workers and len(refused) == len(workers):
+        outcome = "refused"
+    elif operation["phase"] == "complete":
+        outcome = "partial" if refused else "complete"
+    else:
+        outcome = "failed" if operation["phase"] == "error" else "waiting"
+    return {**operation, "outcome": outcome, "refused_workers": refused}
+
+
 def observe(operation, rows):
     if not operation:
         return None
     # Once complete, a later disconnect cannot restart the celebration.
     if operation["phase"] == "complete":
-        return operation
+        return _with_outcome(operation)
     live = {row["device_id"]: row for row in rows}
     age = time.time() - operation["started_at"]
     workers = []
@@ -172,7 +189,7 @@ def observe(operation, rows):
                 worker.update(status="error", message="Startup not confirmed. Check this worker before retrying.")
     else:
         phase = "waiting"
-    result = {**operation, "phase": phase, "workers": workers}
+    result = _with_outcome({**operation, "phase": phase, "workers": workers})
     if phase == "complete":
         # The UI only celebrates a recent completion, never one replayed from
         # history into a fresh browser, and never one this install did not make.

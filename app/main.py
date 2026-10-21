@@ -164,9 +164,17 @@ async def _cluster_heartbeat_loop():
             logger.debug("Cluster heartbeat tick failed", exc_info=True)
 
 
+def require_agent_isolation():
+    """Catch accidental direct-app entrypoint overrides before serving requests."""
+    if (os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
+            and os.environ.get("SHUFFLE_AGENT_ISOLATION") != "on"):
+        raise RuntimeError("required agent isolation: startup refused (launch through the Docker container supervisor)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle manager"""
+    require_agent_isolation()
     from app.core.startup import (
         init_core, init_encryption_and_sessions, init_workspace,
         check_prerequisites, start_services, start_background_tasks,

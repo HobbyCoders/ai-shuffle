@@ -22,6 +22,26 @@ test('#99: only installed Linux updates opt into the installed Electron prefligh
   assert.deepEqual(versions,expected);
  }
 });
+test('bridge reports staged identity without bypassing either busy check', async () => {
+ const {updater,calls}=fixture(); const pending='b'.repeat(40); let request={};
+ updater.useApplications(source({pendingVersion:pending}),'C:/Programs/AI Shuffle.exe');
+ updater.setPolicy(async()=>true);
+ updater.onInstallGuard(async()=> 'Busy with active sessions; retry when finished.');
+ updater.setBridge(async()=>{const next=request;request={};return next;},async()=>false);
+ updater.start(); await new Promise(setImmediate);
+ await updater.check();
+ assert.equal(updater.current.staged_version,pending);
+ await updater.download();
+ request={action:'install',expires_at:Date.now()/1000+10};
+ await updater.exchange(); await new Promise(setImmediate);
+ assert.equal(calls.length,0,'ordinary install still checks running sessions');
+ updater.setBridge(async()=>{const next=request;request={};return next;},async()=>true);
+ request={action:'install',expires_at:Date.now()/1000+10};
+ await updater.exchange(); await new Promise(setImmediate);
+ assert.equal(calls.length,0,'install guard still checks again immediately before restart');
+ updater.stop();
+});
+
 const available = { kind: 'available', version: 'bbbbbbbbbbbb' };
 const ready = { ...available, kind: 'ready' };
 function source(overrides = {}) { return {
@@ -246,10 +266,12 @@ test('bridge reports the running revision separately from the staged update', as
  await updater.exchange();
  assert.equal(seen[0].version, 'b'.repeat(12));
  assert.equal(seen[0].running_version, 'a'.repeat(40));
+ assert.equal(seen[0].staged_version, 'b'.repeat(40));
  updater.useApplications(source({ version: 'b'.repeat(40), pendingVersion: 'b'.repeat(40) }));
  await updater.exchange();
  assert.equal(seen[1].phase, 'idle');
  assert.equal(seen[1].running_version, 'b'.repeat(40));
+ assert.equal(seen[1].staged_version, null);
 });
 
 test('a pending revision already running its first boot is not offered for installation again', async () => {
