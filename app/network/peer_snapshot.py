@@ -549,6 +549,7 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
     first = True
     queued = 0
     while first or index < len(pages):
+        touched = []
         with store.get_db() as conn:
             cursor = conn.cursor()
             state = store.lock_state(cursor)
@@ -564,7 +565,10 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
             items = 0
             while index < len(pages) and (items == 0 or items + int(pages[index]["count"]) <= APPLY_BATCH_ITEMS):
                 chunk = _read_page(directory, index, pages[index])
-                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn)
+                page_touched = []
+                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
+                touched.extend(t for t in page_touched if t[0] == "provider_billing" or
+                               (t[0] == "system_settings" and t[1].startswith("provider_observation:")))
                 items += int(pages[index]["count"]) or 1
                 index += 1
             if index >= len(pages):
@@ -573,6 +577,9 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 if deferred:
                     queued = transcripts.register(cursor, publisher=publisher, floor=manifest["watermarks"],
                                                   ctx=trusted)
+        # These record-specific signals cannot be replaced by the final
+        # collection-wide notification. Never dispatch under the transaction.
+        engine._notify(touched)
         first = False
         if queued:
             # Committed: let the cache see it before anything else runs.

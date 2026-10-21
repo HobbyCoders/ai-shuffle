@@ -99,6 +99,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._available = threading.Condition()
         self._waiters = deque()
         self._generation = 0
+        self._closing = False
         self._pressure_lock = threading.Lock()
         self._pressure = dict.fromkeys((
             "connections_opened", "connections_discarded", "connections_stale",
@@ -149,7 +150,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         try:
             while True:
                 with self._available:
-                    if self.closed:
+                    if self.closed or self._closing:
                         raise psycopg2.pool.PoolError("connection pool is closed")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -167,7 +168,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     break
                 except psycopg2.pool.PoolError:
                     with self._available:
-                        if self.closed:
+                        if self.closed or self._closing:
                             raise
                         if not waited:
                             waited = True
@@ -225,6 +226,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
 
     def _getconn(self, key=None):
         # Called under the driver lock: admission is atomic with returns.
+        if self._closing:
+            raise psycopg2.pool.PoolError("connection pool is closing")
         # Existing keyed checkouts do not consume another slot.
         if (self._reserved and not _lease_checkout.get()
                 and key not in self._used
@@ -269,6 +272,19 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
 
     def _putconn(self, conn, key=None, close=False):
         try:
+            if self.closed and id(conn) in self._rused:
+                # closeall() also closes checked-out sockets, but psycopg2
+                # retains their bookkeeping and rejects their later returns.
+                # A borrower finishing during shutdown must discard, not try
+                # to roll back/reuse the socket or report a broken-pool error.
+                # Both paths run under the driver's same lock, so closeall
+                # cannot race this check or put the socket back in service.
+                if not conn.closed:
+                    conn.close()
+                held_key = self._rused.pop(id(conn), None)
+                if held_key is not None:
+                    self._used.pop(held_key, None)
+                return
             super()._putconn(conn, key, close)
         finally:
             try:
@@ -276,6 +292,48 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     self._returned(conn, conn not in self._pool)
             finally:
                 self._notify_available()
+
+    def shutdown(self, timeout: float = 3.0) -> None:
+        """Stop admission and let in-flight DB threads finish before socket close.
+
+        Cancelling an asyncio.to_thread await does not stop its running thread.
+        Shutdown callers must leave the pool alive for those borrowers, but a
+        stuck query must not hang process shutdown indefinitely. The ordinary
+        closeall() remains an immediate force-close operation.
+        """
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._closing = True
+        self._notify_available()
+        while True:
+            # Match _acquire's generation protocol: never take the driver lock
+            # while holding _available (returns notify in the opposite order).
+            with self._available:
+                generation = self._generation
+            with self._lock:
+                if self.closed:
+                    return
+                remaining = deadline - time.monotonic()
+                if not self._used or remaining <= 0:
+                    borrowed = len(self._used)
+                    if borrowed:
+                        # close() itself takes the connection lock, so closing
+                        # an executing query can outlive the drain deadline.
+                        # Cancel first to release that lock before socket close.
+                        logger.warning("Closing PostgreSQL pool with %d borrowed connection(s) "
+                                       "after %.1fs shutdown drain", borrowed, timeout)
+                        for conn in self._used.values():
+                            try:
+                                conn.cancel()
+                            except Exception:
+                                # Best effort: one failed cancellation must not
+                                # prevent cancelling the remaining borrowers.
+                                pass
+                    self._closeall()
+                    break
+            with self._available:
+                if generation == self._generation:
+                    self._available.wait(max(0, remaining))
 
     def _closeall(self):
         try:
@@ -312,9 +370,14 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
 def close_pool() -> None:
     """Shutdown the PostgreSQL connection pool. Called during app shutdown."""
     global _pg_pool
-    if _pg_pool is not None:
-        _pg_pool.closeall()
-        _pg_pool = None
+    pool = _pg_pool
+    if pool is not None:
+        if isinstance(pool, _RetainingThreadedConnectionPool):
+            pool.shutdown()
+        else:
+            pool.closeall()
+        if _pg_pool is pool:
+            _pg_pool = None
         logger.info("PostgreSQL connection pool closed")
 
 
@@ -488,11 +551,13 @@ def _close_connection(conn) -> None:
     ``except: pass``, which both leaked the slot and hid the leak entirely.
     Here we log it and force the slot free.
     """
-    if _pg_pool is None:
+    # Keep one pool throughout return/reclaim while shutdown clears the global.
+    pool = _pg_pool
+    if pool is None:
         return
     raw_conn = conn._conn if isinstance(conn, _PgDictConnection) else conn
     try:
-        _pg_pool.putconn(raw_conn)
+        pool.putconn(raw_conn)
         return
     except Exception:
         logger.warning(
@@ -503,7 +568,7 @@ def _close_connection(conn) -> None:
     # Retry with close=True — this skips the rollback path that just failed
     # and goes straight to conn.close(), so the _used slot is reclaimed.
     try:
-        _pg_pool.putconn(raw_conn, close=True)
+        pool.putconn(raw_conn, close=True)
         return
     except Exception:
         pass
@@ -512,9 +577,9 @@ def _close_connection(conn) -> None:
     # internals (no public API to force-reclaim a slot), so access them
     # defensively in case a future version renames them.
     try:
-        lock = getattr(_pg_pool, "_lock", None)
-        rused = getattr(_pg_pool, "_rused", None)
-        used = getattr(_pg_pool, "_used", None)
+        lock = getattr(pool, "_lock", None)
+        rused = getattr(pool, "_rused", None)
+        used = getattr(pool, "_used", None)
         if lock is not None and rused is not None and used is not None:
             with lock:
                 key = rused.pop(id(raw_conn), None)
@@ -527,12 +592,12 @@ def _close_connection(conn) -> None:
     except Exception:
         pass
     finally:
-        if isinstance(_pg_pool, _RetainingThreadedConnectionPool):
-            with _pg_pool._lock:
+        if isinstance(pool, _RetainingThreadedConnectionPool):
+            with pool._lock:
                 try:
-                    _pg_pool._returned(raw_conn, True)
+                    pool._returned(raw_conn, True)
                 finally:
-                    _pg_pool._notify_available()
+                    pool._notify_available()
 
 
 def pressure_stats() -> Optional[Dict[str, Any]]:

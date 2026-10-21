@@ -365,6 +365,9 @@ class HarnessAdapter(ProviderAdapter):
         # note decided to send (set by send_query around the note render).
         self._memory_held_for_turn: Optional[Any] = None
         self._memory_plan: Optional[Any] = None
+        # submit accepts before the delegated process calls its fresh-start
+        # hook. Keep this turn's screened slice after the plan is consumed.
+        self._memory_turn_section: Optional[str] = None
         # A full snapshot was submitted; its node id arrives with TurnStarted.
         self._memory_full_pending: bool = False
         # The delegated leg puts the full snapshot back right after a Claude
@@ -565,6 +568,10 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
+        if self._is_delegated:
+            from app.core.provider.fluid_pg_store import PgFluidStore
+            if isinstance(store, PgFluidStore):
+                store.cache_nodes = False
         # Legacy Auto selections on native routes use Ask. Only the
         # delegated Claude CLI implements the classifier-backed mode.
         options.permission_mode = effective_permission_mode(
@@ -955,6 +962,7 @@ class HarnessAdapter(ProviderAdapter):
                             settings.fluid_continual_model or cast(str, native_model),
                             skills,
                             project=memory_project,
+                            workflow_cwd=options.cwd,
                             on_change=_announce,
                             session_model=session_model,
                             guidance_snapshot=_session_guidance_snapshot(
@@ -1692,6 +1700,7 @@ class HarnessAdapter(ProviderAdapter):
         # instructions (#1820, #1794). The note rides the next prompt instead,
         # and a compaction puts it back through the SessionStart hook.
         self._memory_plan = None
+        self._memory_turn_section = None
         task_before = self._memory_initial_task
         if command and self._is_delegated and not _COMPACT_COMMAND.match(prompt.strip()):
             # Any other Claude Code command (a typed /clear, say) may reset the
@@ -1975,6 +1984,7 @@ class HarnessAdapter(ProviderAdapter):
 
             plan = MemoryPlan("full", wrap(section), section)
         self._memory_plan = plan
+        self._memory_turn_section = plan.section
         return plan.note
 
     def _memory_context_pin(self, content: str) -> Optional[Tuple[int, int]]:
@@ -2006,7 +2016,7 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_put_back = None
         if _is_cli_command(text):
             return None
-        section = getattr(self._memory_plan, "section", None)
+        section = getattr(self._memory_plan, "section", None) or self._memory_turn_section
         if section is None:
             section = await asyncio.to_thread(self._memory_section)
         self._memory_full_pending = section is not None
@@ -2026,8 +2036,9 @@ class HarnessAdapter(ProviderAdapter):
         the newest full snapshot on the path is still trustworthy: no
         compaction that can fold user text ran after the turn that carried it.
         Later calls rely on :meth:`_observe_memory_event`, which follows the
-        live turns. Reading the path every time catches a rewind or fork that
-        moved the head off that node. Never raises: None re-sends in full.
+        live turns. A durable-head check catches rewinds/forks; delegated
+        stores use a bounded pinned-memory projection, not a transcript read
+        every turn. Never raises: None re-sends in full.
         """
         engine = self._engine
         sid = self._sdk_session_id
@@ -2037,7 +2048,12 @@ class HarnessAdapter(ProviderAdapter):
         try:
             from app.core.memory_reminder import held_from_path, newest_full_node
 
-            nodes = await store.load_path(sid)
+            if getattr(store, "cache_nodes", True) is False:
+                # An over-budget projection is unknown, not held. Still recover
+                # task provenance below before conservatively sending it in full.
+                nodes = await store.load_memory_path(sid) or []
+            else:
+                nodes = await store.load_path(sid)
             identity = self._memory_engine_identity()
             if self._memory_identity is not None and identity != self._memory_identity:
                 self._memory_trusted_node = None
@@ -2092,12 +2108,15 @@ class HarnessAdapter(ProviderAdapter):
                         "provider": getattr(event, "provider", None),
                         "source": getattr(event, "source", None),
                     })
-        if nodes and not self._memory_initial_task:
+        if nodes is not None and not self._memory_initial_task:
             from app.core.memory_reminder import initial_task_query
             owner_ids = {row.get("node_id") for row in rows
                          if row.get("_cls") == "TurnStarted" and row.get("source") == "user"}
-            self._memory_initial_task = initial_task_query(
-                [node for node in nodes if getattr(node, "node_id", None) in owner_ids])
+            if getattr(store, "cache_nodes", True) is False:
+                self._memory_initial_task = await store.initial_task_query(sid, list(owner_ids))
+            else:
+                self._memory_initial_task = initial_task_query(
+                    [node for node in nodes if getattr(node, "node_id", None) in owner_ids])
         if not node_id:
             return True
         started = False

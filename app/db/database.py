@@ -2696,6 +2696,7 @@ def _run_column_migrations(cursor):
     migrations_applied.extend(_retire_message_hooks(cursor))
     migrations_applied.extend(_retire_webhooks_and_legacy_push(cursor))
     migrations_applied.extend(_retire_fal_billing_key(cursor))
+    migrations_applied.extend(_retire_secret_named_observations(cursor))
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -3001,6 +3002,24 @@ def _retire_webhooks_and_legacy_push(cursor) -> List[str]:
             cursor.execute(f"DROP TABLE IF EXISTS {table}")
             applied.append(f"drop {table}")
     return applied
+
+
+def _retire_secret_named_observations(cursor) -> List[str]:
+    """Remove obsolete draft observation names in the fingerprint-gated pass.
+
+    Network reconciliation publishes missing known rows as tombstones after
+    startup. Stable provider identities and unrelated settings are untouched.
+    """
+    import re
+
+    if not table_exists(cursor, "system_settings"):
+        return []
+    cursor.execute("SELECT key FROM system_settings WHERE key LIKE %s", ("provider_observation:%",))
+    keys = [row["key"] for row in cursor.fetchall()
+            if re.fullmatch(r"provider_observation:[^:]+:[0-9a-fA-F]{64}", row["key"])]
+    for key in keys:
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
+    return ["system_settings.legacy_provider_observations"] if keys else []
 
 
 def _retire_fal_billing_key(cursor) -> List[str]:

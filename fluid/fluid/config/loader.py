@@ -808,6 +808,7 @@ def _wire_continual(
         synthesizer = Synthesizer(
             client, config.continual_model or model, skills,
             project=project_key_for(config.cwd),
+            workflow_cwd=config.cwd,
             on_change=on_change,
             session_model=model,
             guidance_snapshot=guidance_snapshot or None,

@@ -50,10 +50,15 @@ address the peer withdrew stops being dialed: a session at it is dropped.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
+import time
 from typing import Iterable, List, Mapping, Optional
 from urllib.parse import urlsplit
+
+logger = logging.getLogger(__name__)
+_non_ascii_warning_at: float | None = None
 
 MAX_ENDPOINTS = 8
 MAX_ENDPOINT_LENGTH = 512
@@ -86,6 +91,12 @@ def is_valid_endpoint(url: object) -> bool:
     if not parts.netloc.isascii():
         from app.core.config import settings
         if settings.network_token_binding_enabled:
+            global _non_ascii_warning_at
+            now = time.monotonic()
+            if _non_ascii_warning_at is None or now - _non_ascii_warning_at >= 300:
+                _non_ascii_warning_at = now
+                logger.warning("Dropping endpoint with a non-ASCII authority: use ASCII/punycode "
+                               "hostnames in advertised addresses")
             return False
         import httpx
         try:
