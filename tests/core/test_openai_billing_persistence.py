@@ -83,11 +83,14 @@ def test_remote_rebind_rejects_both_late_success_and_failure(provider):
     assert "usage_error" not in snapshot(provider)["raw"]
 
 
-def test_other_installation_cannot_take_over_or_clear_binding(provider):
+def test_explicit_action_can_take_over_or_clear_restored_binding(provider):
     bind(provider, instance="remote-installation")
-    assert bind(provider) is None
-    assert db.clear_openai_billing_binding(provider, settings.effective_instance_id) is None
-    assert db.get_model_provider(provider)["openai_billing_instance_id"] == "remote-installation"
+    assert bind(provider)["openai_billing_instance_id"] == settings.effective_instance_id
+    bind(provider, instance="remote-installation")
+    assert db.clear_openai_billing_binding(provider, settings.effective_instance_id)
+    row = db.get_model_provider(provider)
+    assert row["openai_billing_instance_id"] == settings.effective_instance_id
+    assert row["openai_billing_org_id"] is None
 
 
 def test_api_key_attempts_cannot_replace_bound_browser_balance(provider):

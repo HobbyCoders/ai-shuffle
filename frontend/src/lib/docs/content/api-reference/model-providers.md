@@ -109,7 +109,7 @@ Update a provider. Takes the same fields as create, all optional, with the same 
 - Omitting `auth_token` or sending it blank keeps the stored key.
 - Sending `context_window` or `max_output_tokens` as `null` clears it; omitting it leaves it unchanged.
 - `models` replaces the whole list.
-- Disabling the provider, or changing it so it is no longer an official OpenAI API provider, removes its [OpenAI usage key](#openai-usage-key).
+- Disabling the provider or rotating its inference key invalidates readings but keeps its [OpenAI usage key](#openai-usage-key). Admin requests require an enabled, official OpenAI API provider; only explicit disconnect removes the shared Admin key.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11 \
@@ -135,7 +135,7 @@ curl -X DELETE http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9
 
 ### POST /api/v1/model-providers/{provider_id}/toggle
 
-Flip `enabled`. No body. Returns the updated provider object. Disabling removes the provider's OpenAI usage key.
+Flip `enabled`. No body. Returns the updated provider object. Disabling invalidates readings but keeps billing access, including the OpenAI Admin key, for re-enabling.
 
 **Auth:** Owner only
 
@@ -361,8 +361,8 @@ changes or is deliberately re-saved. Disconnecting balance access does not remov
 inference/Admin credentials. Changes of inference or billing key invalidate old
 readings and reject in-flight snapshots. Inference-key rotation, provider changes,
 and disabling the provider (including the enable toggle) invalidate readings but
-retain billing access. Only explicitly disconnecting billing access removes its
-key across the network. Fresh, error-free Admin organization-spend fields
+retain billing access, including the OpenAI Admin key. Only explicitly
+disconnecting the relevant billing access removes that key across the network. Fresh, error-free Admin organization-spend fields
 from the current UTC month remain alongside real remaining credit in the usage
 popover. Stale, failed or prior-month Admin totals are withheld when a balance
 is bound, rather than borrowing its newer timestamp. Balance freshness/error
@@ -420,7 +420,11 @@ curl -X PUT http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61
 
 `spend` holds the latest reading (`spend_month` in USD with `input_tokens`, `output_tokens` and `num_model_requests`), or `null` until one arrives.
 
-**Errors:** `404` provider not found. `409` on PUT when the provider is disabled, and on DELETE when the key was saved by a different server instance. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
+A restored installation's Admin key is not configured until saved here or received
+through authenticated sync. Explicit save or disconnect replaces a restored
+installation marker; it does not require that installation to come back online.
+
+**Errors:** `404` provider not found. `409` on PUT when the provider is disabled or changes during the operation. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
 
 ### Entered OpenAI prepaid balance
 

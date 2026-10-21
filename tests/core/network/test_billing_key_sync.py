@@ -256,29 +256,72 @@ def test_backup_binding_is_not_used_or_published(workers):
 
 
 @pytest.mark.parametrize("replacement", ["replacement-billing", None], ids=["save", "disconnect"])
-def test_explicit_bind_reclaims_restored_installation_marker(workers, replacement):
-    a, b = pair(workers, configured=False)
+@pytest.mark.parametrize("kind", ["xai", "openai_admin"])
+def test_explicit_bind_reclaims_restored_installation_marker(workers, replacement, kind):
+    a, b = pair(workers, "openai" if kind == "openai_admin" else "xai", configured=False)
+    secret, marker = (("openai_admin_key", "openai_billing_instance_id") if kind == "openai_admin"
+                      else ("balance_key", "balance_instance_id"))
     with a.active():
         with db.get_db() as conn:
             conn.cursor().execute(
-                "UPDATE model_providers SET balance_key = %s, balance_instance_id = %s WHERE id = %s",
+                f"UPDATE model_providers SET {secret} = %s, {marker} = %s WHERE id = %s",
                 ("enc:unreadable-backup", "another-installation", PROVIDER))
         restored = row()
         encrypted = encryption.encrypt_value(replacement) if replacement else None
-        assert provider_balances.bind(restored, "a", encrypted)
-        assert row()["balance_instance_id"] == "a"
+        if kind == "openai_admin":
+            if replacement:
+                assert db.set_openai_billing_binding(PROVIDER, "org-test", "a", encrypted)
+            else:
+                assert db.clear_openai_billing_binding(PROVIDER, "a")
+        else:
+            assert provider_balances.bind(restored, "a", encrypted)
+            # Reject delayed writes after an explicit takeover.
+            assert not provider_balances.bind(restored, "a", None)
+        assert row()[marker] == "a"
         assert scan() == 1
-        # Explicit takeover still rejects stale revisions, including a delayed
-        # disconnect that would otherwise wipe the replacement just saved.
-        assert not provider_balances.bind(restored, "a", None)
     exchange(a, b)
     with b.active():
-        assert row()["balance_instance_id"] == "b"
-        assert balances.status(row())["configured"] is bool(replacement)
-        if replacement:
-            assert encryption.decrypt_value(row()["balance_key"]) == replacement
+        assert row()[marker] == "b"
+        if kind == "openai_admin":
+            from app.api.openai_billing import _status
+            assert asyncio.run(_status(row()))["configured"] is bool(replacement)
         else:
-            assert row()["balance_key"] is None
+            assert balances.status(row())["configured"] is bool(replacement)
+        if replacement:
+            assert encryption.decrypt_value(row()[secret]) == replacement
+        else:
+            assert row()[secret] is None
+
+
+@pytest.mark.parametrize("change", ["disable_patch", "disable_toggle", "rotate"])
+def test_admin_access_survives_shared_disable_and_rotation(workers, change):
+    a, b = pair(workers, "openai")
+    with a.active():
+        db.set_openai_billing_binding(PROVIDER, "org-test", "a", encryption.encrypt_value("admin-test"))
+        scan()
+    exchange(a, b)
+    originals = {}
+    for worker in (a, b):
+        with worker.active():
+            originals[worker.name] = row()["openai_admin_key"]
+            assert db.upsert_provider_usage_snapshot(
+                PROVIDER, "openai", None, [], {"spend_month": 7}, {"source": "openai_admin"}, 123,
+                expected_binding=("org-test", worker.name), expected_admin_key=row()["openai_admin_key"])
+    with a.active():
+        if change == "disable_toggle":
+            db.set_model_provider_enabled(PROVIDER, False)
+        else:
+            db.update_model_provider(PROVIDER, **({"enabled": False} if change == "disable_patch"
+                                                 else {"auth_token": encryption.encrypt_value("inference-new")}))
+        assert scan() == 1
+    exchange(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert row()["openai_admin_key"] == originals[worker.name]
+            assert row()["openai_billing_org_id"] == "org-test"
+            assert row()["openai_billing_instance_id"] == worker.name
+            assert encryption.decrypt_value(row()["balance_key"]) == "billing-test"
+            assert not any(s["provider_id"] == PROVIDER for s in db.get_all_provider_usage_snapshots())
 
 
 def test_untrusted_unreadable_billing_does_not_block_scan_or_tombstones(workers, monkeypatch):

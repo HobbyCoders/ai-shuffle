@@ -699,7 +699,8 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             columns.append("balance_snapshot")
             values.append(None)
         if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
-                            for name in ("auth_token", "openai_admin_key", "openai_billing_org_id")):
+                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled",
+                                         "openai_admin_key", "openai_billing_org_id")):
             # Admin usage is worker-local too. A late poll is guarded by its
             # captured key/binding; never display a pre-rotation reading.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", keys)

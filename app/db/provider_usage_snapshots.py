@@ -75,11 +75,13 @@ def upsert_provider_usage_snapshot(
             raw = {**(raw or {}), "credential_generation": expected_credential_generation}
         if provider_type == "openai":
             cursor.execute(
-                "SELECT openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
+                "SELECT enabled, openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
                 (provider_id,),
             )
             binding = cursor.fetchone() or {}
-            if expected_admin_key is not None and binding.get("openai_admin_key") != expected_admin_key:
+            if expected_admin_key is not None and (
+                not binding.get("enabled") or binding.get("openai_admin_key") != expected_admin_key
+            ):
                 return False
             current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
             if expected_binding is not None and current != expected_binding:
@@ -141,11 +143,13 @@ def record_provider_usage_failure(
             return
         if provider_type == "openai":
             cursor.execute(
-                "SELECT openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
+                "SELECT enabled, openai_billing_org_id, openai_billing_instance_id, openai_admin_key FROM model_providers WHERE id = %s FOR UPDATE",
                 (provider_id,),
             )
             binding = cursor.fetchone() or {}
-            if expected_admin_key is not None and binding.get("openai_admin_key") != expected_admin_key:
+            if expected_admin_key is not None and (
+                not binding.get("enabled") or binding.get("openai_admin_key") != expected_admin_key
+            ):
                 return False
             current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
             if expected_binding is not None and current != expected_binding:
