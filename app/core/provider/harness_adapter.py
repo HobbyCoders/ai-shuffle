@@ -365,6 +365,9 @@ class HarnessAdapter(ProviderAdapter):
         # note decided to send (set by send_query around the note render).
         self._memory_held_for_turn: Optional[Any] = None
         self._memory_plan: Optional[Any] = None
+        # submit accepts before the delegated process calls its fresh-start
+        # hook. Keep this turn's screened slice after the plan is consumed.
+        self._memory_turn_section: Optional[str] = None
         # A full snapshot was submitted; its node id arrives with TurnStarted.
         self._memory_full_pending: bool = False
         # The delegated leg puts the full snapshot back right after a Claude
@@ -959,6 +962,7 @@ class HarnessAdapter(ProviderAdapter):
                             settings.fluid_continual_model or cast(str, native_model),
                             skills,
                             project=memory_project,
+                            workflow_cwd=options.cwd,
                             on_change=_announce,
                             session_model=session_model,
                             guidance_snapshot=_session_guidance_snapshot(
@@ -1696,6 +1700,7 @@ class HarnessAdapter(ProviderAdapter):
         # instructions (#1820, #1794). The note rides the next prompt instead,
         # and a compaction puts it back through the SessionStart hook.
         self._memory_plan = None
+        self._memory_turn_section = None
         task_before = self._memory_initial_task
         if command and self._is_delegated and not _COMPACT_COMMAND.match(prompt.strip()):
             # Any other Claude Code command (a typed /clear, say) may reset the
@@ -1979,6 +1984,7 @@ class HarnessAdapter(ProviderAdapter):
 
             plan = MemoryPlan("full", wrap(section), section)
         self._memory_plan = plan
+        self._memory_turn_section = plan.section
         return plan.note
 
     def _memory_context_pin(self, content: str) -> Optional[Tuple[int, int]]:
@@ -2010,7 +2016,7 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_put_back = None
         if _is_cli_command(text):
             return None
-        section = getattr(self._memory_plan, "section", None)
+        section = getattr(self._memory_plan, "section", None) or self._memory_turn_section
         if section is None:
             section = await asyncio.to_thread(self._memory_section)
         self._memory_full_pending = section is not None

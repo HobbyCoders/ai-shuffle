@@ -338,6 +338,14 @@ def build_parser() -> argparse.ArgumentParser:
         e_sub = evolve_sub.add_parser(name, help=help_text)
         _add_common(e_sub)
 
+    p_workflows = sub.add_parser("workflows", help="review grounded prose skill proposals (never auto-install)")
+    workflows_sub = p_workflows.add_subparsers(dest="workflows_command", required=True)
+    for name in ("list", "show", "approve", "reject"):
+        command = workflows_sub.add_parser(name)
+        _add_common(command)
+        if name != "list":
+            command.add_argument("proposal_id")
+
     p_import = sub.add_parser(
         "import-settings",
         aliases=["import-claude", "import-codex"],
@@ -439,6 +447,10 @@ def main(argv: list[str] | None = None) -> int:
         from fluid.cli.evolve import cmd_anchors
 
         return cmd_anchors(args, _resolve_config(args))
+    if args.command == "workflows":
+        from fluid.cli.workflows import cmd_workflows
+
+        return cmd_workflows(args, _resolve_config(args))
     if args.command == "evolve":
         from fluid.cli.evolve import cmd_evolve
 
