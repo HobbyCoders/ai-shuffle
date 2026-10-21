@@ -9,7 +9,7 @@
 	 * approve on its own behalf. The code is a comparison aid, not authority.
 	 */
 	import { onMount } from 'svelte';
-	import { MonitorSmartphone, ShieldCheck, TerminalSquare } from 'lucide-svelte';
+	import { MonitorSmartphone, ShieldCheck } from 'lucide-svelte';
 	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
 	import { age, countdown, PENDING_SECONDS } from '$lib/terminal/peer';
 	import PeerCode from './PeerCode.svelte';
@@ -41,12 +41,16 @@
 					<div class="req-title">
 						{#if request.status === 'approved'}
 							<h4 id={titleId(request.request_id)}>{request.used ? `${request.source_name} has a shell on ${workerName}` : `Approved for ${request.source_name}`}</h4>
-							<p class="meta">{request.used ? 'Open now' : 'Waiting for it to open'} · ends in <time>{countdown(timing.left)}</time></p>
+							<p class="meta">{request.used ? 'Open now' : 'Waiting for it to open'} · ends in <time>{countdown(timing.left)}</time> · Revoke closes it</p>
 						{:else}
 							<h4 id={titleId(request.request_id)}>{request.source_name} wants a shell on {workerName}</h4>
 							<p class="meta">Requested {age(timing.age)}</p>
 						{/if}
 					</div>
+					{#if request.status === 'approved'}
+						<button type="button" class="ghost danger head-action" disabled={!!decision}
+							onclick={() => peerTerminals.revoke(request.request_id, 'revoke')}>{decision === 'revoke' ? 'Revoking…' : 'Revoke'}</button>
+					{/if}
 				</header>
 
 				{#if request.status !== 'approved'}
@@ -59,25 +63,20 @@
 							<span>The code matches on {request.source_name}</span>
 						</label>
 					</div>
-				{:else}
-					<p class="why"><TerminalSquare size={13} aria-hidden="true" /> Revoking ends the approval and closes its shell.</p>
 				{/if}
 
 				{#if notice}<p class="err" role="alert">{notice}</p>{/if}
 
+				{#if request.status !== 'approved'}
 				<div class="req-actions">
-					{#if request.status === 'approved'}
-						<button type="button" class="ghost danger" disabled={!!decision}
-							onclick={() => peerTerminals.revoke(request.request_id, 'revoke')}>{decision === 'revoke' ? 'Revoking…' : 'Revoke'}</button>
-					{:else}
 						<button type="button" class="ghost" disabled={!!decision}
 							onclick={() => peerTerminals.revoke(request.request_id, 'deny')}>{decision === 'deny' ? 'Denying…' : 'Deny'}</button>
 						<button type="button" class="go" disabled={!!decision || !matched[request.request_id]}
 							aria-describedby={matched[request.request_id] ? undefined : `${titleId(request.request_id)}-hint`}
 							onclick={() => peerTerminals.approve(request.request_id)}>{decision === 'approve' ? 'Approving…' : 'Approve one shell'}</button>
 						{#if !matched[request.request_id]}<span class="hint" id={`${titleId(request.request_id)}-hint`}>Compare the code first</span>{/if}
-					{/if}
 				</div>
+				{/if}
 			</article>
 		{/each}
 	</section>
@@ -95,7 +94,8 @@
 	.glyph { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 8px; color: var(--primary);
 		background: color-mix(in oklch, var(--primary) 12%, transparent); }
 	.approved .glyph { color: var(--success); background: color-mix(in oklch, var(--success) 12%, transparent); }
-	.req-title { min-width: 0; }
+	.req-title { flex: 1; min-width: 0; }
+	.head-action { flex-shrink: 0; align-self: center; }
 	h4 { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--foreground); overflow-wrap: anywhere; }
 	.meta { margin: 2px 0 0; font-size: 11.5px; color: var(--muted-foreground); }
 	.meta time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--foreground); }
@@ -124,6 +124,15 @@
 	.go:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, white); }
 	.err { margin: 0; font-size: 12px; color: var(--destructive); }
 	@keyframes req-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-	@media (max-width: 700px) { button, .match { min-height: 44px; } .req-actions button { flex: 1 1 auto; } .hint { flex-basis: 100%; } }
+	/* Narrow screens: tighter cards and a taller list, so a pending card and an
+	   approved one (with its Revoke) both fit without scrolling. */
+	@media (max-width: 700px) {
+		.peer-requests { max-height: 75%; padding: 8px; gap: 6px; }
+		.req { gap: 8px; padding: 10px 12px; }
+		.req-body { gap: 8px; }
+		button, .match { min-height: 44px; }
+		.req-actions button { flex: 1 1 auto; }
+		.hint { flex-basis: 100%; }
+	}
 	@media (prefers-reduced-motion: reduce) { .req { animation: none; } }
 </style>

@@ -110,6 +110,12 @@ describe('a shell on a peer worker', () => {
 		expect(within(ended).getByText(/asks for approval again/)).toBeTruthy();
 	});
 
+	it('offers no Restart for a worker shell while this worker is not yet identified', async () => {
+		const view = await mount({ ...base, targets: [] }, [info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, state: 'exited', exit_code: 0 })]);
+		const ended = await view.findByRole('group', { name: 'Shell exited' });
+		expect(within(ended).queryByRole('button', { name: /Restart/ })).toBeNull();
+	});
+
 	it('still offers Restart for a local shell', async () => {
 		const view = await mount(withPeer(), [info('t1', { state: 'exited', exit_code: 0 })]);
 		const ended = await view.findByRole('group', { name: 'Shell exited' });

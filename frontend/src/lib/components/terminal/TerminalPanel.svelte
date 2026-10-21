@@ -331,7 +331,7 @@
 				{#if pickerOpen}
 					<div class="popover">
 						<NewTerminalPicker probe={ready} busy={creating} disabledReason={capReason}
-							onOpen={openTerminal} onCancel={() => (pickerOpen = false)} />
+							onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} onCancel={() => (pickerOpen = false)} />
 					</div>
 				{/if}
 			</div>
@@ -387,7 +387,7 @@
 		{:else if ready && !tabState.ids.length}
 			<div class="state empty">
 				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>{/if}
-				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} />
+				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} />
 			</div>
 		{/if}
 		{#if ready}

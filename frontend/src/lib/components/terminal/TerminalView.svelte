@@ -68,7 +68,8 @@
 		if (target.kind !== 'worker') return true;
 		const probe = terminals.probeFor(sessionId);
 		const local = probe.status === 'ready' ? localWorkerId(probe.targets) : undefined;
-		return !!target.worker_id && !!local && target.worker_id !== local;
+		// Until the probe names this worker, any worker id may be a peer: offer no Restart.
+		return !!target.worker_id && (!local || target.worker_id !== local);
 	});
 
 	function send(data: string) {

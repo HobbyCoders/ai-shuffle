@@ -4,7 +4,7 @@
 	import { Folder, TerminalSquare, ShieldCheck, LoaderCircle, TriangleAlert } from 'lucide-svelte';
 	import { cwdProblem, type ProbeState } from '$lib/terminal/gating';
 	import type { CreateTerminal, TerminalTarget } from '$lib/api/terminals';
-	import { PENDING_SECONDS, isPeerTarget, localWorkerId, openErrorMessage, peerChip, peerReason, selectable, type OpenResult } from '$lib/terminal/peer';
+	import { APPROVAL_REQUIRED, PENDING_SECONDS, isPeerTarget, localWorkerId, openErrorMessage, peerChip, peerReason, selectable, type OpenResult } from '$lib/terminal/peer';
 	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
 	import PeerCode from './PeerCode.svelte';
 
@@ -16,6 +16,7 @@
 		blurb = 'A shell for this chat. It keeps running when you close the panel.',
 		onOpen,
 		onCancel,
+		onTargetsChanged,
 	}: {
 		probe: Extract<ProbeState, { status: 'ready' }>;
 		busy?: boolean;
@@ -26,6 +27,8 @@
 		blurb?: string;
 		onOpen: (choice: CreateTerminal & { cwd: string | null; shell: string | null }) => void | Promise<OpenResult | void>;
 		onCancel?: () => void;
+		/** Ask for fresh targets (after a revoke), so the rows show what the worker now reports. */
+		onTargetsChanged?: () => void;
 	} = $props();
 
 	const SOURCE: Record<string, string> = {
@@ -49,7 +52,10 @@
 			&& !!peerTerminals.flow(target.worker_id) && peerTerminals.flow(target.worker_id)?.phase !== 'ended');
 		return waiting ? targetKey(waiting) : '';
 	})());
-	const destinations = $derived(probe.targets ?? []);
+	// A lease revoked here stays out of the row until the targets are probed again.
+	const masked = (target: TerminalTarget): TerminalTarget => target.authorization_id && peerTerminals.isRevoked(target.authorization_id)
+		? { ...target, available: false, authorization_id: undefined, reason_code: APPROVAL_REQUIRED, reason: null } : target;
+	const destinations = $derived((probe.targets ?? []).map(masked));
 	const destination = $derived(selected ? destinations.find((target) => targetKey(target) === selected) : destinations[0]);
 	const remote = $derived(!!selected);
 	const unavailable = $derived(destination?.available === false || (remote && !destination));
@@ -104,7 +110,7 @@
 			remoteFolder = null;
 			if (result && !result.ok && result.code === 'bad_folder') {
 				// Nothing was spent on either worker: correct the folder and open again.
-				remoteFolder = { folder: tried, message: result.message || `That folder isn't on ${name}.` };
+				remoteFolder = { folder: tried, message: `${name}: ${result.message || "that folder doesn't exist."}` };
 				await tick();
 				input?.focus();
 			} else if (result && !result.ok) peerTerminals.fail(workerId, name, `The shell on ${name} didn't open`, openErrorMessage(result.code, result.message, name));
@@ -112,6 +118,12 @@
 		} finally {
 			opening = false;
 		}
+	}
+
+	async function revoke() {
+		if (!peer?.worker_id) return;
+		await peerTerminals.cancel(peer.worker_id, authorizationId);
+		onTargetsChanged?.();
 	}
 
 	function submit(event: SubmitEvent) {
@@ -229,7 +241,7 @@
 		{#if onCancel}<button type="button" class="ghost" onclick={onCancel}>{stage === 'pending' ? 'Hide' : 'Cancel'}</button>{/if}
 		{#if peer}
 			{#if stage === 'pending' || stage === 'approved'}
-				<button type="button" class="ghost danger" onclick={() => peer?.worker_id && peerTerminals.cancel(peer.worker_id)}
+				<button type="button" class="ghost danger" onclick={revoke}
 					disabled={opening} aria-label={stage === 'pending' ? `Cancel the request to ${peer.name}` : `Revoke the approval on ${peer.name}`}>
 					{stage === 'pending' ? 'Cancel request' : 'Revoke'}
 				</button>

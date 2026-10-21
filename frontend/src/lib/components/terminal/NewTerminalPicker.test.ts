@@ -200,7 +200,7 @@ describe('requesting a peer shell', () => {
 		await fireEvent.click(openButton(ui));
 		expect(onOpen).toHaveBeenLastCalledWith({ cwd: '/nope', shell: null, target: { kind: 'worker', worker_id: 'peer', authorization_id: LEASE } });
 		const alert = await ui.findByRole('alert');
-		expect(alert.textContent).toContain("The folder /nope doesn't exist on this worker.");
+		expect(alert.textContent).toContain("Peer: The folder /nope doesn't exist on this worker.");
 		expect(alert.textContent).toContain('the approval still stands');
 		expect(box.getAttribute('aria-invalid')).toBe('true');
 		expect(ui.queryByRole('button', { name: /Request/ })).toBeNull();
@@ -229,6 +229,22 @@ describe('requesting a peer shell', () => {
 		await fireEvent.click(ui.getByRole('button', { name: 'Request approval' }));
 		await fireEvent.click(await ui.findByRole('button', { name: 'Revoke the approval on Peer' }));
 		expect(api.revokePeerAuthorization).toHaveBeenCalledWith(LEASE);
+	});
+
+	it('revokes an approval the worker reported (after a reload) with no flow in memory', async () => {
+		api.revokePeerAuthorization.mockResolvedValue({ revoked: true });
+		const onTargetsChanged = vi.fn();
+		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer({ available: true, reason_code: null, reason: null, authorization_id: LEASE })]),
+			onOpen: vi.fn(), onTargetsChanged });
+		await fireEvent.click(ui.getByRole('radio', { name: 'Peer, Peer worker, Approved' }));
+		expect(peerTerminals.flow('peer')).toBeNull();
+		await fireEvent.click(ui.getByRole('button', { name: 'Revoke the approval on Peer' }));
+		await waitFor(() => expect(api.revokePeerAuthorization).toHaveBeenCalledTimes(1));
+		expect(api.revokePeerAuthorization).toHaveBeenCalledWith(LEASE);
+		expect(onTargetsChanged).toHaveBeenCalledTimes(1);
+		expect(await ui.findByRole('radio', { name: 'Peer, Peer worker, Needs approval' })).toBeTruthy();
+		expect(ui.queryByRole('button', { name: 'Open terminal' })).toBeNull();
+		expect(ui.getByRole('button', { name: 'Request approval' })).toBeTruthy();
 	});
 
 	it('returns to a pending request when the picker opens again', async () => {

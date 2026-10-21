@@ -15,6 +15,8 @@ import { terminalsApi, TerminalApiError, type PeerAuthorization, type PeerReques
 import { requestErrorMessage } from '$lib/terminal/peer';
 
 export const SOURCE_POLL_MS = 2_000;
+/** An approved, unopened lease changes only on expiry or revocation: check it less often. */
+export const APPROVED_POLL_MS = 10_000;
 export const RECIPIENT_POLL_MS = 3_000;
 
 export type SourceFlow =
@@ -32,6 +34,14 @@ let recipientLoaded = $state(false);
 let recipientError = $state<string | null>(null);
 let decisions = $state<Record<string, 'approve' | 'deny' | 'revoke'>>({});
 let notices = $state<Record<string, string>>({});
+/** Leases this owner revoked here, so a target row still reporting one is not shown as approved. */
+let revoked = $state<string[]>([]);
+
+/** One status call per worker at a time, and when each was last asked. */
+const polling = new Set<string>();
+const polledAt = new Map<string, number>();
+/** Recipient list answers are applied only if no newer refresh or decision came after them. */
+let recipientSeq = 0;
 
 let ticker: ReturnType<typeof setInterval> | null = null;
 let sourceTimer: ReturnType<typeof setInterval> | null = null;
@@ -74,6 +84,8 @@ function apply(workerId: string, result: PeerAuthorization) {
 	const expiresAt = typeof result.expires_in === 'number' ? Date.now() + result.expires_in * 1000 : flow.expiresAt;
 	const code = result.confirmation_code || flow.code;
 	if (result.status === 'pending') {
+		// Approval only moves forward: a late "pending" never undoes "approved".
+		if (flow.phase === 'approved') return;
 		setFlow(workerId, { phase: 'pending', workerId, name: flow.name, authorizationId: flow.authorizationId, code, expiresAt, unreachable: false });
 	} else if (result.status === 'approved' && !result.used) {
 		setFlow(workerId, { phase: 'approved', workerId, name: flow.name, authorizationId: flow.authorizationId, code, expiresAt });
@@ -88,7 +100,9 @@ function apply(workerId: string, result: PeerAuthorization) {
 
 async function poll(workerId: string) {
 	const flow = flows[workerId];
-	if (!live(flow)) return;
+	if (!live(flow) || polling.has(workerId)) return;
+	polling.add(workerId);
+	polledAt.set(workerId, Date.now());
 	try {
 		apply(workerId, await terminalsApi.peerAuthorization(flow.authorizationId));
 	} catch (error) {
@@ -100,6 +114,8 @@ async function poll(workerId: string) {
 			// Keep waiting: the recipient may answer on the next poll.
 			setFlow(workerId, { ...current, unreachable: true });
 		}
+	} finally {
+		polling.delete(workerId);
 	}
 }
 
@@ -114,6 +130,7 @@ async function pollSources() {
 				: ended(flow, `The approval on ${flow.name} ran out before a shell opened.`));
 			continue;
 		}
+		if (flow.phase === 'approved' && at - (polledAt.get(flow.workerId) ?? 0) < APPROVED_POLL_MS) continue;
 		void poll(flow.workerId);
 	}
 }
@@ -153,17 +170,26 @@ export const peerTerminals = {
 		}
 	},
 
-	/** Withdraw a pending request or an unused approval. Local authority ends even if the peer is unreachable. */
-	async cancel(workerId: string): Promise<void> {
+	/**
+	 * Withdraw a pending request or an unused approval. `authorizationId` covers
+	 * an approval reported by the worker (after a reload) with no flow here.
+	 * Local authority ends even if the peer is unreachable.
+	 */
+	async cancel(workerId: string, authorizationId?: string): Promise<void> {
 		const flow = flows[workerId];
 		setFlow(workerId, null);
-		if (!live(flow)) return;
+		const id = live(flow) ? flow.authorizationId : authorizationId;
+		if (!id) return;
+		if (!revoked.includes(id)) revoked = [...revoked, id];
 		try {
-			await terminalsApi.revokePeerAuthorization(flow.authorizationId);
+			await terminalsApi.revokePeerAuthorization(id);
 		} catch {
 			// The source forgot it before calling out; the recipient expires its side by itself.
 		}
 	},
+
+	/** True once this owner revoked the lease here (a stale target row may still list it). */
+	isRevoked(authorizationId: string | undefined): boolean { return !!authorizationId && revoked.includes(authorizationId); },
 
 	/** Forget a flow without contacting anyone: the approval was used (or its error shown). */
 	clear(workerId: string) { setFlow(workerId, null); },
@@ -194,8 +220,11 @@ export const peerTerminals = {
 	notice(requestId: string): string | null { return notices[requestId] ?? null; },
 
 	async refreshRequests(): Promise<void> {
+		const seq = ++recipientSeq;
 		try {
 			const result = await terminalsApi.peerRequests();
+			// A newer refresh or a decision landed meanwhile: this answer is stale.
+			if (seq !== recipientSeq) return;
 			requests = result.requests ?? [];
 			fetchedAt = Date.now();
 			now = fetchedAt;
@@ -203,6 +232,7 @@ export const peerTerminals = {
 			for (const id of Object.keys(notices)) if (!requests.some((r) => r.request_id === id)) delete notices[id];
 		} catch (error) {
 			// 401/403: not this worker's owner. Show nothing rather than an error.
+			if (seq !== recipientSeq) return;
 			if (error instanceof TerminalApiError && (error.status === 401 || error.status === 403)) requests = [];
 			else recipientError = error instanceof Error ? error.message : 'Terminal requests are unavailable right now.';
 		} finally {
@@ -230,7 +260,8 @@ export const peerTerminals = {
 
 	/** Test hook. */
 	reset() {
-		flows = {}; requests = []; fetchedAt = 0; recipientLoaded = false; recipientError = null; decisions = {}; notices = {};
+		flows = {}; requests = []; fetchedAt = 0; recipientLoaded = false; recipientError = null; decisions = {}; notices = {}; revoked = [];
+		polling.clear(); polledAt.clear(); recipientSeq = 0;
 		watchers = 0; now = Date.now();
 		syncTimers();
 	},
@@ -243,9 +274,11 @@ async function decide(requestId: string, kind: 'approve' | 'deny' | 'revoke') {
 	try {
 		if (kind === 'approve') {
 			const approved = await terminalsApi.approvePeerRequest(requestId);
+			recipientSeq += 1; // Drop any list answer fetched before this decision.
 			requests = requests.map((r) => (r.request_id === requestId ? { ...r, ...approved, expires_in: approved.expires_in + (Date.now() - fetchedAt) / 1000 } : r));
 		} else {
 			await terminalsApi.revokePeerRequest(requestId);
+			recipientSeq += 1;
 			requests = requests.filter((r) => r.request_id !== requestId);
 		}
 	} catch (error) {
