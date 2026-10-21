@@ -415,6 +415,22 @@ async def test_the_cwd_project_dir_wins_over_other_copies(monkeypatch, tmp_path)
     assert captured["cli_session_id"] == "cli-handle"
 
 
+@pytest.mark.asyncio
+async def test_delegated_pg_connect_keeps_history_durable_not_cached(mock_db, monkeypatch, tmp_path):
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    await _seed(PgFluidStore(), PELICAN, handle="old-handle")
+    reader = PgFluidStore()
+    _fake_reseed(monkeypatch, ReseedResult(status="failed", error="synthetic refusal"))
+    captured = await _connect(monkeypatch, reader, _options(tmp_path))
+    assert captured["store"] is reader and not reader.cache_nodes
+    assert not reader._nodes.get(SID)
+    await reader.append(SID, _node("n3", "n2", "user", "next delegated turn"))
+    assert not reader._nodes.get(SID)
+    cold = PgFluidStore()
+    assert [n.node_id for n in await cold.load_path(SID)] == ["n1", "n2", "n3"]
+
+
 # ─── the prompt match itself ────────────────────────────────────────────────
 
 

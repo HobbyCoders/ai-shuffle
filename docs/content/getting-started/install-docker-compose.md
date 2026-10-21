@@ -408,6 +408,16 @@ Agents' shell commands run as the `PUID` user. By default that user can also rea
 
 AI Shuffle notes who owned each file before changing anything. Your database, keys and saved credentials stay as they are; nothing is created again. The container must start as root, which is the default; with `--user` the setting is ignored and the log says so. If the setting cannot be applied, AI Shuffle undoes the change, starts without it and says why in the log. Your projects keep their owner.
 
+**Require isolation (fail closed)**
+
+Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=required`). Startup refuses to launch the app unless isolation is established. The success log says `required agent isolation established`; refusal says `required agent isolation: startup refused` with the cause. Invalid service IDs, missing image helpers/accounts, unsupported ownership or code mounts, failed migration and non-root `--user` launches cannot fall back to an unisolated worker. A failed required migration **retains protected ownership** and stops; fix the cause and restart with `required` to resume, including after an interrupted migration. Only a deliberate `off` startup releases that ownership. Dump and restore reuse a completed isolation record without repeating migration; if it is incomplete, perform a normal required startup first. Do not override the image entrypoint or command with a direct app launch: only the supplied supervisor establishes isolation.
+
+**Image compatibility:** required mode first appears in the image built from merged PR #335 (not yet released; no older published version supports it). Pin an image containing that change and verify the success log. Older images interpret `required` as invalid, log `ignoring`, and run **unisolated**; rolling back the image tag can silently remove this protection. Check the release notes for the first published tag before deployment.
+
+**Check the spelling:** an unrecognized value such as `requried` or `enforce` only logs a warning and runs **unisolated**, just like `off`. This compatibility behavior is unchanged; verify the success log rather than assuming the setting took effect.
+
+The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
+
 **Turn it off**
 
 Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives every file back to `PUID` exactly as it was.

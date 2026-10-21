@@ -470,6 +470,10 @@ def start_background_tasks() -> List[asyncio.Task]:
     """Phase 6: Start periodic background tasks. Returns tasks for shutdown cancellation."""
     tasks = []
 
+    from app.core.worktree_reclaim import periodic_reclaim
+
+    tasks.append(asyncio.create_task(periodic_reclaim(), name="checkout-reclaim"))
+
     async def _report_nested_projects_once():
         """One pass after start-up, off the loop: Git runs once per project."""
         try:
