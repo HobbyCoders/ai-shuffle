@@ -496,7 +496,11 @@ def test_fast_push_scan_precedes_cached_or_uncached_pass(records, monkeypatch, c
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
     monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
     if cached:
-        local_ci.save_record("tree", {"mode": "fast", "security_gate": local_ci.SECURITY_GATE_VERSION})
+        local_ci.save_record("tree", {"mode": "fast", "base": "base",
+                                      "security_gate": local_ci.SECURITY_GATE_VERSION})
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
+    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "base")
     calls = []
     monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
     monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
@@ -517,6 +521,25 @@ def test_fast_scan_failure_blocks_even_a_cached_pass(records, monkeypatch, cache
     monkeypatch.setattr(local_ci, "scan_push", fail)
     with pytest.raises(local_ci.Failure, match="scanner rejected"):
         local_ci.cmd_pre_push(local_ci.argparse.Namespace())
+
+
+def test_fast_cached_pass_for_another_base_reruns_affected_checks(records, monkeypatch):
+    head = "h" * 40
+    local_ci.save_record("tree", {"mode": "fast", "base": "old-base",
+                                  "security_gate": local_ci.SECURITY_GATE_VERSION})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
+    monkeypatch.setattr(local_ci, "git", lambda *args: head)
+    monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
+    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "new-base")
+    calls = []
+    monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
+    assert local_ci.cmd_pre_push(local_ci.argparse.Namespace()) == 0
+    assert calls == ["scan", "fast"]
 
 
 def test_fast_explicit_runs_scan_on_every_invocation(monkeypatch):

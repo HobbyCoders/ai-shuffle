@@ -1160,7 +1160,15 @@ def cmd_pre_push(args) -> int:
                 continue
         if not remote_ref.startswith("refs/heads/"):
             continue  # tags get the secret scan, but not the test suites
-        if records.get(tree_of(local_sha), {}).get("security_gate") == SECURITY_GATE_VERSION:
+        record = records.get(tree_of(local_sha), {})
+        current = record.get("security_gate") == SECURITY_GATE_VERSION
+        if current and record.get("mode") == "fast":
+            # A pass selected against another remote/base is not this push's
+            # affected-test pass. The history scan above is never cached.
+            target = f"{push_remote}/main" if push_remote else resolve_base()
+            fetch_base(target)
+            current = record.get("base") == comparison_base(target, local_sha)
+        if current:
             # A draft pass must not bypass newly-ready state or removed labels.
             push_update_reach(local_sha, remote_ref)
             continue

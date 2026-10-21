@@ -71,7 +71,9 @@ requires a clean checkout at the public repository's current main revision.
 Attestation format and publication authorization are unchanged.
 
 A pass on a clean checkout is recorded against the commit's tree in
-`.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`, which
+`.git/local-ci/passes.json`. A fast receipt also pins the comparison merge-base;
+pushing against a different base reruns affected checks, never the secret scan cache
+(the secret scan has no cache). The pre-push hook (`.githooks/pre-push`, which
 `install` copies into the directory git runs hooks from, next to AI Shuffle's
 managed hooks; an older `pre-push` there is kept as `pre-push.user` and still
 runs afterwards; `install` also saves a Python that has pytest and PyYAML
