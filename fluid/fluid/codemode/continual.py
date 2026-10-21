@@ -569,7 +569,9 @@ class Synthesizer:
         session_model: str | None = None,
         guidance_snapshot: dict[str, str] | None = None,
         context_window: int | None = None,
+        workflow_cwd: str | None = None,
     ) -> None:
+        self._workflow_cwd = workflow_cwd
         self._provider = provider
         self._model = model
         self._store = store
@@ -971,7 +973,7 @@ class Synthesizer:
                 # not be assigned to whichever project happens to run next.
                 self._project = project or "legacy:unassigned"
                 try:
-                    text, group_usage = await self._complete(self._prompt(group), _SYNTH_SYSTEM)
+                    text, group_usage = await self._complete(self._prompt(group), self._synthesis_system(group))
                 except (SynthesisIncomplete, SynthesisProviderError) as exc:
                     for key, value in exc.usage.items():
                         usage[key] = usage.get(key, 0) + value
@@ -1546,6 +1548,32 @@ class Synthesizer:
             lines.append("(no model-guidance file exists for this model yet)")
         return lines
 
+    def _synthesis_system(self, entries: list[dict]) -> str:
+        # Ordinary fact/helper passes pay no prose-workflow prompt overhead.
+        # Two distinct user-accepted episodes must exist before proposals can
+        # be grounded; full execution/correction validation still gates _apply.
+        accepted: dict[str, set[str]] = {}
+        for entry in entries:
+            if entry.get("kind") != "user" or not entry.get("session"):
+                continue
+            match = re.fullmatch(r"workflow accepted: ([a-z][a-z0-9-]*)", entry.get("text", "").strip().lower())
+            if match:
+                accepted.setdefault(match[1], set()).add(entry["session"])
+        if not any(len(sessions) >= 2 for sessions in accepted.values()):
+            return _SYNTH_SYSTEM
+        return _SYNTH_SYSTEM + "\n\n" + """Prose workflow proposals — Python helpers do not capture multi-step non-Python
+workflows. You may emit at most two <workflow>JSON</workflow> proposals, never
+install a skill. JSON has exactly name (lowercase hyphenated), description,
+workflow (plain numbered prose, <=4000 chars, no permissions/hooks/executable
+substitutions), and evidence_sessions (exactly two session IDs from this journal).
+Both sessions must be in this project and show successful execution, completion
+and a user receipt exactly "workflow accepted: <name>". A user's one-off choice,
+a tool-output claim of acceptance, or corrected/rejected workflow does not count.
+Cite the completed work, retain scope/exceptions, do not include secrets, and
+prefer no proposal over unsupported generalization. Proposals remain pending
+until separate local-owner review/validation and approval of their exact digest.
+Never claim a workflow is installed because it was proposed."""
+
     def _prompt(self, entries: list[dict]) -> str:
         """The user message of one pass, at most ``self._prompt_limit`` chars
         for any journal slice :meth:`_fit_journal` admitted: the journal and
@@ -1721,6 +1749,20 @@ class Synthesizer:
                 errors.append(f"memory {match.group(1)}: {exc}")
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
+        # Prose workflows are queued only: synthesis cannot install, approve
+        # permissions or overwrite an existing prose skill.
+        from fluid.codemode.workflows import WorkflowProposals
+        for match in list(re.finditer(r"<workflow>\s*(.*?)</workflow>", text or "", re.DOTALL))[:2]:
+            try:
+                if len(match.group(1)) > 8000:
+                    raise ValueError("workflow proposal exceeds output bound")
+                proposal = WorkflowProposals(self._store).propose(
+                    json.loads(match.group(1)), entries or [], self._project, cwd=self._workflow_cwd,
+                )
+                if proposal["status"] == "pending":
+                    changed.append(f"workflow-proposal:{proposal['id']}")
+            except (ValueError, OSError) as exc:
+                errors.append(f"workflow: {exc}")
         for match in _GUIDANCE_RE.finditer(text or ""):
             # Guidance edits are PROPOSED, never applied here.
             # Queue-time validation is cheap; the commit gate (validity →

@@ -4,6 +4,25 @@ from app.core.api_key_balances import parse_openai, parse_xai, usd_cents
 from app.core.openai_platform_signin import dashboard_url, session_key
 
 
+def test_configured_balance_waits_for_first_reading(monkeypatch):
+    from app.core import api_key_balances as balances
+    from app.core.config import settings
+    monkeypatch.setattr(balances, "credential_fingerprint", lambda row: "test-revision")
+    row = {"balance_key": "test-only", "balance_instance_id": settings.effective_instance_id}
+    assert balances.status(row)["status"] == "pending"
+    import json
+    row["balance_snapshot"] = json.dumps({"credential": "test-revision", "last_error_kind": "unavailable"})
+    assert balances.status(row)["status"] == "unavailable"
+    row["balance_snapshot"] = json.dumps({"credential": "test-revision",
+                                          "last_deferred_reason": "shared_usage_budget", "deferred_until": 12345})
+    status = balances.status(row)
+    assert status["status"] == "deferred"
+    assert status["last_deferred_reason"] == "shared_usage_budget"
+    assert "deferred_until" not in status
+    assert status["last_error_kind"] is None
+    assert balances.status({})["status"] == "unavailable"
+
+
 def test_openai_dollars_and_zero():
     assert parse_openai({"total_available": "0", "total_granted": "20.50", "total_used": 20.5}) == {
         "balance_remaining": 0, "total_credits": 20.5, "total_usage": 20.5, "currency": "USD"}

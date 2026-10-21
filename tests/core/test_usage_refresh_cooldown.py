@@ -43,7 +43,12 @@ class Clock:
 
 @pytest.fixture
 def clock(monkeypatch):
+    from app.api import usage
+
     c = Clock()
+    # The serializer must observe the same advanced clock as the producers;
+    # future readings are deliberately stale after a real clock correction.
+    monkeypatch.setattr(usage, "time", types.SimpleNamespace(time=c))
     monkeypatch.setattr(provider_usage, "time", types.SimpleNamespace(time=c, monotonic=c))
     monkeypatch.setattr(usage_budget, "time", types.SimpleNamespace(time=c))
     monkeypatch.setattr(polling.random, "uniform", lambda *_: 0)

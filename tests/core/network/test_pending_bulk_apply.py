@@ -10,7 +10,8 @@ import pytest
 from app.db import network as store
 from app.network import engine
 from tests.core.network.test_pending_apply_budget import (  # noqa: F401
-    backlog, measured_apply, pg_workers, private_cluster,
+    backlog, measured_apply, pending_chunk_delay, pending_semantics_clock,
+    pg_workers, private_cluster,
 )
 
 
@@ -205,7 +206,9 @@ def test_mixed_buffered_transcript_uses_bulk_for_event_runs(pg_workers, monkeypa
 
 
 @pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
-def test_bulk_failure_then_transient_per_op_failure_commits_good_prefix(request, use_postgres, monkeypatch, caplog):
+@pytest.mark.parametrize("pending_chunk_delay", [0.0, 0.3], ids=["fast", "slow"], indirect=True)
+def test_bulk_failure_then_transient_per_op_failure_commits_good_prefix(
+        request, use_postgres, monkeypatch, caplog, pending_chunk_delay):
     import logging
     from app.network.engine import TransientApplyError
 

@@ -87,3 +87,54 @@ async def test_rejected_turn_does_not_claim_delivery(monkeypatch):
         await adapter.send_query("coding conventions")
     assert adapter._memory_trusted_node is None
     assert not adapter._memory_full_pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leg", ["native", "delegated"])
+async def test_rotated_task_slice_survives_real_compaction_or_cli_restore(tmp_path, monkeypatch, leg):
+    from app.core import fluid_memory
+    from app.core.memory_reminder import held_from_path, newest_full_node, TASK_TOTAL_CHARS
+    from tests.core.test_task_memory_growth import setup_store
+    from tests.core.test_memory_reminder import _adapter, _delegated, _turn, _Recording, _compactions
+    from fluid.context.compaction import CompactionConfig
+
+    store_root = tmp_path / "memory"
+    store = setup_store(store_root)
+    base = store.render_memory_section()
+    monkeypatch.setattr(fluid_memory, "session_memory", lambda sid, cwd: (SkillStore(store_root), "project:one"))
+    if leg == "native":
+        loop = NativeLoop(provider=_Recording("reply " * 300), store=MemoryStore(), model="fake",
+                          compaction=CompactionConfig(trigger_tokens=4000, keep_recent_turns=1))
+        adapter, loop = await _adapter(monkeypatch, {"section": base}, loop)
+    else:
+        adapter = await _delegated(monkeypatch, tmp_path, {"section": base})
+        loop = adapter._engine
+    # Use the actual owner-scoped producer, not the fixture's section stub.
+    monkeypatch.setattr(adapter, "_memory_section", HarnessAdapter._memory_section.__get__(adapter))
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "fixture-session")
+    try:
+        for i in range(4):
+            await _turn(adapter, f"topic{i} habit{i}")
+        nodes = await loop.store.load_path(loop.session_id)
+        held = held_from_path(nodes, newest_full_node(nodes))
+        assert held is not None
+        assert any("topic3 habit3" in x and "; task-match] " in x for x in held.items)
+        assert sum(len(x) + 1 for x in held.items if "; task-match] " in x) <= TASK_TOTAL_CHARS
+        assert held.task_order
+        if leg == "native":
+            for i in range(10):
+                await _turn(adapter, "topic3 habit3 " + "words " * 400)
+            assert any(e.tier >= 2 for e in await _compactions(loop))
+            # The real compacted provider view, not just the stored transcript,
+            # must retain the additions and ID withdrawals.
+            view = "\n".join(m.text() for m in loop._compactor.view(await loop.store.load_path(loop.session_id)))
+            assert "task-match" in view and "No longer in the snapshot" in view
+        else:
+            await loop._stop_process(grace=0.2)
+            loop.cli_session_id = None
+            await _turn(adapter, "topic3 habit3")
+            nodes = await loop.store.load_path(loop.session_id)
+            assert "topic3 habit3" in [n.message for n in nodes if n.message.role == "user"][-1].pinned_text()
+    finally:
+        await adapter.disconnect()
+

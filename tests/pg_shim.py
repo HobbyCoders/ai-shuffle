@@ -299,12 +299,17 @@ def translate_sql(sql: str) -> str:
         s,
     )
     s = _CAST_RE.sub("", s)                    # x::date -> x
+    # PostgreSQL UTF-8 octets, not SQLite's character-counting length(TEXT).
+    s = re.sub(r"\boctet_length\(CAST\(([A-Za-z_][A-Za-z0-9_.]*) AS TEXT\)\)",
+               r"length(CAST(\1 AS BLOB))", s, flags=re.I)
     # SQLite cannot ADD a STORED generated column to a populated table. A
     # virtual column exercises the same automatic insert/update derivation;
     # stored backfill/index behavior is covered on disposable PostgreSQL.
     if "GENERATED ALWAYS AS" in s.upper():
         s = re.sub(r"\bSTORED\b", "VIRTUAL", s, flags=re.I)
     s = re.sub(r"\bILIKE\b", "LIKE", s, flags=re.I)
+    s = re.sub(r"\bLEAST\(", "MIN(", s, flags=re.I)
+    s = re.sub(r"\bGREATEST\(", "MAX(", s, flags=re.I)
     s = re.sub(r"\bjsonb_agg\b", "json_group_array", s, flags=re.I)
     s = re.sub(r"\bjson_agg\b", "json_group_array", s, flags=re.I)
     s = re.sub(r"\bstring_agg\b", "group_concat", s, flags=re.I)

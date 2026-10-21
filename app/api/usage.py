@@ -193,7 +193,10 @@ class ProviderUsageEntry(BaseModel):
     windows: List[ProviderUsageWindow] = []
     credits: Optional[dict] = None
     fetched_at: Optional[int] = None
-    status: Literal["fresh", "stale", "unavailable", "never_fetched"] = "never_fetched"
+    status: Literal["fresh", "stale", "unavailable", "never_fetched", "pending", "deferred"] = "never_fetched"
+    observed_at: int | None = None
+    source_worker: str | None = None
+    last_deferred_reason: str | None = None
     last_error_kind: ErrorKind | None = None
     last_error_scope: str | None = None
     # Short labels kept for older clients; ``source_info`` has the full entry.
@@ -345,9 +348,11 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                         windows=_provider_windows(windows),
                         credits=credits,
                         fetched_at=fetched_at,
+                        observed_at=raw.get("observed_at", fetched_at),
+                        source_worker=raw.get("source_worker"),
                         status=(
                             "stale" if fetched_at and (
-                                error or now_ms - fetched_at > interval_ms
+                                error or not 0 <= now_ms - fetched_at <= interval_ms
                             ) else "fresh" if fetched_at else
                             "unavailable" if error else "never_fetched"
                         ),
@@ -421,6 +426,8 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                 provider_id=provider["id"], provider_name=provider.get("name"),
                 provider_type=provider["provider_type"], status=balance["status"],
                 credits=credits, fetched_at=balance["fetched_at"],
+                observed_at=balance["observed_at"], source_worker=balance["source_worker"],
+                last_deferred_reason=balance["last_deferred_reason"],
                 last_error_scope=balance["last_error_scope"],
                 source=source_def.label, scope=source_def.scope_label,
                 source_info=_source_info(source_def), last_error_kind=balance["last_error_kind"],

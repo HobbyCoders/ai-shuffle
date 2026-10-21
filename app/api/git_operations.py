@@ -493,8 +493,32 @@ async def _release_session_cwd(session_id: Optional[str]) -> bool:
     return True
 
 
+async def _release_idle_session_cwd(session_id: str) -> bool:
+    """Reclaim must never interrupt a turn or force-stop background work."""
+    from app.core import browser_runtime, session_runtime
+    from app.core.git_activity import active_git_sessions
+    from app.core.session_pool import get_session_pool
+
+    def busy():
+        return bool(active_git_sessions([{"id": session_id}]))
+
+    def executing():
+        return (session_runtime.get_live_runtime(session_id) is not None
+                or session_id in session_runtime.active_executions().values())
+
+    if await asyncio.to_thread(busy) or executing():
+        return False
+    await get_session_pool().remove(session_id, preserve_session=True)
+    if await asyncio.to_thread(busy) or executing():
+        return False
+    await browser_runtime.close_session(session_id)
+    # In particular, do NOT call stop_session_background_shells here: a Monitor
+    # can begin after a liveness check, and it must survive even if cleanup keeps.
+    return True
+
+
 async def _release_checkout_sessions(
-    project_id: str, working_dir: str, session_id: Optional[str],
+    project_id: str, working_dir: str, session_id: Optional[str], *, idle_only: bool = False,
 ) -> bool:
     """Release every local engine using this directory, including idle siblings."""
     from app.core.project_resolver import resolve_existing_cwd
@@ -538,8 +562,14 @@ async def _release_checkout_sessions(
         # sibling here started new work since; do not pull the checkout from it.
         if any(sid != session_id and _session_is_busy(sid) for sid in session_ids):
             return False
+        if idle_only:
+            from app.core.git_activity import active_git_sessions
+
+            if await asyncio.to_thread(active_git_sessions, [{"id": sid} for sid in session_ids]):
+                return False
         for sid in sorted(session_ids):
-            if not await _release_session_cwd(sid):
+            release = _release_idle_session_cwd if idle_only else _release_session_cwd
+            if not await release(sid):
                 return False
         return True
     except Exception:
