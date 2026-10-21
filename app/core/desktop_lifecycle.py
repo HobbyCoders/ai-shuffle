@@ -33,23 +33,71 @@ BUSY_LIMIT = 8
 
 
 def busy_work() -> list[dict]:
-    """The running chats behind ``active_session_ids``, for a refusal to name.
+    """Name live turns and surviving background work (owner-only display data).
 
-    ``[{"session_id", "title", "tasks": [task names]}]``, at most BUSY_LIMIT
-    rows. A title that cannot be read falls back to "Untitled chat".
+    Keep legacy task names; task_details explains why an idle chat still blocks.
+    Serving idle deadlines are estimates on the monitor's session-idle basis.
     """
-    from app.core.task_registry import task_registry
-    from app.db import database
+    import re
+    import time
+    from datetime import datetime, timezone
+    from app.core.task_registry import _iso, task_registry
+    from app.core.export_redaction import redact_export_text
+    from app.core.session_runtime import active_executions
+    from app.core.monitor_spawn import serving_idle_budget_seconds, session_idle_seconds
+    from app.mcp.builtin_tools import is_background_shell_running
+    from app.db import database, turns
 
     rows = []
+    executing = set(active_executions().values())
     for sid in sorted(active_session_ids())[:BUSY_LIMIT]:
         try:
             title = (database.get_session(sid) or {}).get("title")
-        except Exception:  # noqa: BLE001 — a name is a nicety, never a failure
+        except Exception:  # noqa: BLE001 — naming never breaks a refusal.
             title = None
-        tasks = [str(task.get("subject") or task.get("agent") or "Background task")
-                 for task in task_registry.get_active(sid)][:5]
-        rows.append({"session_id": sid, "title": title or "Untitled chat", "tasks": tasks})
+        tasks = task_registry.get_active(sid)
+        details = []
+        serving = any(task_registry.is_serving_monitor(sid, task["id"]) for task in tasks)
+        ended, turn_state = None, None
+        if serving and sid not in executing:
+            try:
+                latest = turns.get_latest_turn(sid) or {}
+                ended, turn_state = _iso(latest.get("ended_at")), latest.get("state")
+            except Exception:  # noqa: BLE001 — unavailable is not a finished chat.
+                pass
+        budget = serving_idle_budget_seconds() if serving else 0
+        idle = session_idle_seconds(sid) if serving and budget else None
+        now = time.time()
+        for task in tasks:
+            tid = task["id"]
+            service = task_registry.is_serving_monitor(sid, tid)
+            kind = "service" if service else task.get("kind") or "registry"
+            label = redact_export_text(str(task.get("subject") or task.get("agent") or "Background task"))
+            port_match = re.search(
+                r"(?:--port(?:=|\s+)|(?:https?://[\w.-]+|localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[\da-fA-F:]+\]):)(\d{1,5})\b",
+                label,
+            )
+            port = int(port_match[1]) if port_match else None
+            if port is not None and not 1 <= port <= 65535:
+                port = None
+            live = is_background_shell_running(tid) if kind in ("shell", "service") else False
+            stop_at = None
+            if service and live and budget and idle is not None:
+                try:
+                    started = datetime.fromisoformat(task["startedAt"].replace("Z", "+00:00"))
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    stop_at = max(started.timestamp(), now - idle) + budget
+                except (ValueError, TypeError, KeyError):
+                    pass
+            details.append({"task_id": tid, "kind": kind, "label": label[:120], "port": port,
+                            "started_at": task.get("startedAt"), "live": live,
+                            "stop_will_stop": kind in ("shell", "service"),
+                            "monitor_serving_idle_seconds": budget if service else None,
+                            "idle_stop_at": stop_at})
+        rows.append({"session_id": sid, "title": title or "Untitled chat",
+                     "tasks": [detail["label"] for detail in details][:5], "task_details": details,
+                     "running_turn": sid in executing, "turn_ended_at": ended, "turn_state": turn_state})
     return rows
 
 
@@ -79,6 +127,7 @@ async def stop_session_work(sid: str, *, shutdown: bool = False, source: Optiona
     # Latch first, cancel wakeups and queued turns, and stop parked tasks too.
     await stop_all_background_tasks(
         sid, user_stop=True, respect_shell_preference=False,
+        **({"source": SERVER_SHUTDOWN_REASON} if shutdown else {}),
     )
     runtime = session_runtime.get_live_runtime(sid)
     if runtime is not None:
