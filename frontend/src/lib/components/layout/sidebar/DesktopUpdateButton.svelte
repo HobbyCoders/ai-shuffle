@@ -105,8 +105,9 @@
 		const wait = waitingView(own, worker.is_self ? { skewSeconds: skew } : {});
 		// The launcher's reason is technical; the installer panel shows it as detail.
 		if (worker.remedy === 'installer') return { worker, role: row.role, label: 'Needs the latest installer', wait };
-		// What a staged restart waits for says more than "Staged"; plain ready keeps the worker's label.
-		const label = wait && wait.state !== 'ready' ? wait.title : row.label;
+		// What a staged restart waits for says more than "Staged"; plain ready, and a
+		// retained download the server already labels ("Check for updates before restarting"), keep the worker's label.
+		const label = wait && wait.state !== 'ready' && wait.reason !== 'updater_idle' ? wait.title : row.label;
 		return { worker, role: row.role, wait, label: worker.notice && worker.phase !== 'image-required' ? `${label}; a coming update needs a newer Docker image` : label };
 	}
 	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
@@ -122,11 +123,12 @@
 	const restartLocked = $derived(stopping || restartQueued || !!optimistic);
 	const named = $derived(restartWaits.length > 1 || !!snapshot?.update_all_workers);
 	// A retained download on an idle updater: not installable until a check reads the feed again.
-	// Only while the worker's role leaves it out; a server that includes it is trusted as is.
-	const retainedIdle = $derived(rows.some(row => row.role === 'excluded' && row.wait?.reason === 'updater_idle' && row.worker.online && row.worker.supported
-		&& row.worker.allow_updates && (!!snapshot?.update_all_workers || row.worker.is_self !== false)));
+	// The server includes it (role available, "Check for updates before restarting"); an older
+	// server that still excludes it shows no button for it, as before.
+	const retainedIdle = $derived(targets.some(row => row.wait?.reason === 'updater_idle'));
 	const downloading = $derived(targets.some(row => row.role === 'preparing'));
-	const available = $derived(targets.some(row => row.role === 'available'));
+	// There is nothing to download for a retained download on an idle updater: its action is a check.
+	const available = $derived(targets.some(row => row.role === 'available' && row.wait?.reason !== 'updater_idle'));
 	const staged = $derived(targets.filter(row => row.role === 'staged').length);
 	const unknown = $derived(targets.filter(row => row.role === 'unknown'));
 	// Included workers whose update only the latest installer can finish
@@ -164,7 +166,7 @@
 	const progressNote = $derived(targets.length > 1 ? ` ${staged} of ${targets.length} staged.` : '');
 	const waitText = $derived(restartWaits.map(w => `${named ? `${w.worker.device_name}: ` : ''}${waitingSummary(w.view)}`).join(' '));
 	const summary = $derived(error || waitText || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : partialNote
-		|| (retainedIdle ? 'Click to check for updates.' : 'Update available. Click to download.')));
+		|| (retainedIdle ? 'Previous download retained; the updater is idle. Click to check for updates.' : 'Update available. Click to download.')));
 	// Workers a still-running install will not restart, named while the rest finish.
 	const refusedNote = $derived(waiting && outcomeInfo?.outcome === 'waiting' ? outcomeInfo.detail : '');
 	const status = $derived(waiting ? `${headline}. ${FIRST_START_NOTE} ${reports}${refusedNote ? ` ${refusedNote}` : ''}` : celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
@@ -611,7 +613,7 @@
 					{#if error || !restartWaits.length}<span>{scope}: {summary}</span>{/if}
 					{#each rows as row (row.worker.device_id)}
 						<div class="worker-row"><span>{row.worker.device_name}</span><span class:verified={row.role === 'staged' && (!row.wait || row.wait.state === 'ready')}>{row.label}</span></div>
-						{#if row.wait && row.wait.state !== 'ready' && (row.role !== 'excluded' || row.wait.reason === 'updater_idle')}
+						{#if row.wait && row.wait.state !== 'ready' && row.role !== 'excluded' && row.wait.reason !== 'updater_idle'}
 							<div class="wait-tip">
 								<span>{row.wait.text}</span>
 								{#each (row.wait.blockers ?? []).slice(0, 3) as blocker (blocker.key)}<span class="wait-tip-item">{blocker.text}</span>{/each}

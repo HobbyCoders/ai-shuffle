@@ -766,23 +766,23 @@ describe('review fixes (#355)', () => {
   await new Promise(r => setTimeout(r, 0));
   expect(api.post).toHaveBeenCalledTimes(2);
  });
+ const idleRetained = {...worker,phase:'idle',version:null,staged_version:'abc123',install_state:'unavailable',wait_reason:'updater_idle'};
  it('checks for updates from a retained download on an idle updater, and says what it found', async () => {
-  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'idle',version:null,staged_version:'abc123',install_state:'unavailable',wait_reason:'updater_idle',role:'excluded',label:'No update offered'}]});
+  // The server includes it with role available and its own label.
+  api.get.mockResolvedValue({...state,workers:[{...idleRetained,role:'available',label:'Check for updates before restarting'}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Check for updates'});
-  expect(button.title).toContain('Click to check for updates.');
-  expect(button.title.match(/the updater is idle/g) ?? []).toHaveLength(0);
+  expect(button.title).toContain('Current worker: Check for updates before restarting');
+  expect(button.title.match(/the updater is idle/g)).toHaveLength(1);
   await fireEvent.click(button);
   await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'check'}));
   expect(notice.info).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({title:'Checking for updates'}));
  });
- it('trusts a server role that includes the retained download', async () => {
-  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'idle',version:null,staged_version:'abc123',install_state:'unavailable',wait_reason:'updater_idle',
-   checked_at:null,role:'available',label:'Not checked yet; will check and download'}]});
+ it('shows no button for a retained download an older server still excludes', async () => {
+  api.get.mockResolvedValue({...state,workers:[{...idleRetained,role:'excluded',label:'No update offered'}]});
   render(DesktopUpdateButton);
-  const button = await screen.findByRole('button',{name:'Download update'});
-  await fireEvent.click(button);
-  expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'download'});
+  await waitFor(()=>expect(api.get).toHaveBeenCalledOnce());
+  expect(screen.queryByRole('button')).toBeNull();
  });
  it('does not hide a newer offer behind the waiting panel', async () => {
   api.get.mockResolvedValue({...state,workers:[{...worker,phase:'available',version:'b'.repeat(40),install_state:'waiting_for_idle',wait_reason:'running_work',blocked_by:[svc],role:'available',label:'Update available; not downloaded'}]});

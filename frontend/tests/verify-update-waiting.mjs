@@ -91,8 +91,8 @@ const SCENARIOS = [
 	['newer-offer', one([{ ...self, phase: 'available', version: 'd'.repeat(40), staged_version: 'c'.repeat(40), install_state: 'unavailable', wait_reason: 'newer_offer',
 		release: '1.4.0', notes: '- Faster startup\n- Restart waiting details', role: 'available', label: 'Update available; not downloaded' }]),
 		'hover', 'Downloaded cccccccccccc is retained. A newer update is available; download it to continue.'],
-	['updater-idle', one([{ ...self, phase: 'idle', version: null, install_state: 'unavailable', wait_reason: 'updater_idle', role: 'excluded', label: 'No update offered' }]),
-		'hover', 'Previous download retained; the updater is idle. Check for updates before restarting.'],
+	['updater-idle', one([{ ...self, phase: 'idle', version: null, install_state: 'unavailable', wait_reason: 'updater_idle', role: 'available', label: 'Check for updates before restarting' }]),
+		'hover', 'Previous download retained; the updater is idle. Click to check for updates.'],
 	['not-sent', one([{ ...self, phase: 'ready', install_state: 'blocked', wait_reason: 'running_work', blocked_by: [service] }]),
 		'not-sent', 'Last request: Not sent to Current worker: Waiting on workers to finish the previous update.',
 		{ scope: 'current', sent: null, action: 'install', mode: 'when_idle', request_state: 'not_sent', results: [
