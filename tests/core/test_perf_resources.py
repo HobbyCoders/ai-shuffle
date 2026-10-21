@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import perf_resources as resources
+import scripts.perf_resources as resources
 
 
 def fixture_proc(tmp_path, monkeypatch):
