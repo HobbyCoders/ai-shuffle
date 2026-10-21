@@ -249,7 +249,7 @@ _FETCH = ("WebFetch", {"url": "https://example.com"})
     (None, {"permission_mode": "bypassPermissions"}, {"permission_mode": "default"}, _FETCH, False),
     (None, {"permission_mode": "default"}, {"permission_mode": "bypassPermissions"}, _FETCH, True),
     # A real row with no binding (NULL): the session's agent mode decides.
-    (None, {"id": SID, "permission_mode": None}, {"permission_mode": "acceptEdits"}, _EDIT, False),
+    (None, {"id": SID, "project_id": "project", "permission_mode": None}, {"permission_mode": "acceptEdits"}, _EDIT, False),
     # Nothing anywhere: default.
     (None, None, {}, _FETCH, True),
     # The retired "plan" mode normalizes to default.

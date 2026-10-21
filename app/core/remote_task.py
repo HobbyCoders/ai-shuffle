@@ -119,6 +119,7 @@ EFFORT_VERSION = 4
 #: The ``remote_task`` capability that expects ``chore/task-<id>``; an older
 #: target is sent the ``task/<id>`` name it checks for.
 CHORE_BRANCH_VERSION = 5
+TARGET_DEFAULT_VERSION = 6
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -408,10 +409,20 @@ async def dispatch_remote(
         # its child runs at its model's default window instead.
         logger.info("remote_task: %s predates context_window; the child keeps its default window", name)
         context_window = None
+    from app.core.worker_checkout import REMOTE_DEFAULT, RemoteWorkerBranch, _base_checkout_path
+    target_only = (caller_row.get("_task_named_project")
+                   and not await asyncio.to_thread(_base_checkout_path, caller_row.get("project_v2_id")))
+    if target_only and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
+        # Omit NOT_DISPATCHED so automatic placement cannot fall back locally.
+        return {"ok": False, "error": f"{name} cannot fork target-only projects; update that worker before retrying."}
     try:
-        state = await asyncio.to_thread(
-            publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
-            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
+        if target_only:
+            state = RemoteWorkerBranch(REMOTE_DEFAULT, project_v2_id=caller_row.get("project_v2_id"),
+                                       parent_branch=caller_row.get("_task_source_branch"))
+        else:
+            state = await asyncio.to_thread(
+                publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
+                legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
     if caller_row.get("_task_named_project") and state.mode == REMOTE_NONE:
@@ -900,6 +911,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
             "tool_use_id": start.tool_use_id,
             "mode": start.mode,
             "depth": start.depth,
+            **({"checkout_note": received.note} if received.note else {}),
         },
         FINGERPRINT_KEY: start.fingerprint,
         CHECKOUT_MODE_KEY: received.mode,
@@ -1117,6 +1129,10 @@ def _child_report(session_id: str) -> Tuple[Optional[Dict[str, Any]], List[str]]
     from app.core.provider_agent import bound_report
     from app.core.turn_recorder import _bound_subagent_result
 
+    # Keep a target-only upstream fetch failure visible in the durable report.
+    checkout_note = (report_owed(session_id) or {}).get("checkout_note")
+    if checkout_note:
+        report = checkout_note + "\n\n" + report
     # Use the SAME byte/paragraph bound before transport; the receiving recorder
     # rechecks it and preserves the flag. Never put unbounded text on the wire.
     card_result, card_result_truncated = _bound_subagent_result(report.strip())

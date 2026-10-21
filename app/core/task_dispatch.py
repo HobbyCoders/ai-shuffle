@@ -1523,6 +1523,12 @@ async def dispatch_task_tool(
     that left nothing running), the work runs here and the receipt carries
     ``worker_note``, one line saying why. Every other call runs here.
     """
+    if args.get("branch") is not None:
+        branch = args["branch"]
+        if not isinstance(branch, str) or not branch.strip() or len(branch) > 500:
+            return {"ok": False, "error": "branch must be a non-empty source branch name."}
+        if args.get("project") is None:
+            return {"ok": False, "error": "branch requires an explicitly named project."}
     if args.get("project") is not None:
         from app.core.session_orchestration import _project_placement
         try:
@@ -1841,7 +1847,7 @@ async def _dispatch_task_tool(
             return {"ok": False, "error": str(exc)}
         caller_row = {**caller_row, "project_id": None, "project_v2_id": project_override,
                       "branch": None, "worktree_id": None, "worktree_branch": None, "worktree_path": None,
-                      "_task_named_project": True}
+                      "_task_named_project": True, "_task_source_branch": args.get("branch")}
     elif runtime_session_mode(caller_row) == "chat" and not (caller_row.get("project_id") or caller_row.get("project_v2_id")):
         from app.core.worker_checkout import _is_shared_surface
         if not _is_shared_surface(declared_tools):

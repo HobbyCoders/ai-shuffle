@@ -58,7 +58,7 @@ When your account has more than one worker in its [worker network](/docs/feature
 ### What it needs
 
 - Both workers online and on the current release.
-- The project checked out on both workers, from the same Git remote. Both workers must be able to push to and fetch from it.
+- Normally, the project checked out on both workers from the same Git remote, with push/fetch access. A no-project owner conversation can also name a project checked out only on the target (remote Task protocol 6 or newer).
 - A sign-in on that worker for the subagent's AI provider.
 - An agent saved in the app. Agents from files or plugins run only on their own worker.
 - A chat you own. Chats started with an API key cannot use other workers.
@@ -88,7 +88,7 @@ A message from another chat is never treated as your instruction, and cannot app
 
 ### Coordinating without a project
 
-An owner conversation without a project uses your selected agent and effort. It can coordinate sessions, start work in any registered project on an eligible worker, use subagents and app tools, browse the web, and use resources you grant through the access card. It can read registered project folders with Read, Glob and Grep, but cannot edit worker files, run a shell or Python kernel, or write skills or plugins. Start a session in the project for code changes; code-capable subagents must name a project and receive their own checkout there. App configuration writes still ask for your approval. API-key and non-owner conversations do not gain this surface. Remote Task uses the existing committed-branch transfer; when the project is only checked out on the target worker, use StartSession in that project instead of Task.
+An owner conversation without a project uses your selected agent and effort. It can coordinate sessions, start work in any registered project on an eligible worker, use subagents and app tools, browse the web, and use resources you grant through the access card. It can read registered project folders with Read, Glob and Grep, but cannot edit worker files, run a shell or Python kernel, or write skills or plugins. Start a session in the project for code changes; code-capable subagents must name a project and receive their own checkout there. App configuration writes still ask for your approval. API-key and non-owner conversations do not gain this surface. When a named project is checked out only on the target, Task fetches that worker's own configured upstream/default branch and creates a fresh isolated checkout without switching or changing its main checkout's tracking. An explicit source `branch` wins. If fetching fails, it uses the local source-branch tip and says so in the report. Older peers require an update; no silent local fallback occurs. When the calling worker has a checkout, committed-branch transfer is unchanged.
 
 Chats started by an owner conversation report back automatically. If the starting conversation is settled, it stays settled: the report remains on the child chat and you receive a notification instead. Approval prompts can be answered in the starting conversation; only your own reply there counts. The existing Assistant daily spending limit also covers no-project coordination and the work it starts; the setting remains on the Assistant page during this transition.
 

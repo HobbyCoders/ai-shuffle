@@ -43,7 +43,8 @@ async def test_owner_without_project_can_start_registered_project(owner, tmp_pat
     assert "Work finished." in wakes(owner["id"])[0]["prompt"]
 
 
-@pytest.mark.parametrize("fields", [{"api_user_id": "api"}, {"is_worker": True, "parent_session_id": "coordinator"}])
+@pytest.mark.parametrize("fields", [{"api_user_id": "api"}, {"is_worker": True, "parent_session_id": "coordinator"},
+                                    {"automation_id": "automation"}])
 def test_owner_gate_fails_closed(owner, fields):
     row, _ = chat("restricted", **fields)
     assert not orch.is_owner_session(row)
@@ -187,20 +188,27 @@ def test_runtime_ceiling_for_legacy_no_project_owner_not_project_sessions(owner)
     assert runtime_session_mode({**owner, "mode": None, "project_v2_id": "project"}) == "code"
 
 
-def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode", [None, "chat"])
+@pytest.mark.parametrize("permission", ["default", "acceptEdits", "bypassPermissions"])
+def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, monkeypatch, tmp_path, mode, permission):
     from app.core import query_options, config
     from app.core.session_modes import CHAT_MODE_TOOL_SURFACE
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
-    database.set_session_run_binding(owner["id"], model="sonnet", effort="high")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET mode=%s WHERE id=%s", (mode, owner["id"]))
+    database.set_session_run_binding(owner["id"], model="sonnet", effort="high", permission_mode=permission)
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=owner["id"])
     assert options.effort == "high"
     assert options.aih_profile_id == "agent"
-    assert options.aih_owner_coordinator and options.permission_mode == "default"
+    assert options.aih_owner_coordinator
+    assert options.permission_mode == ("default" if mode == "chat" else permission)
     from app.core.session_modes import chat_uploads_dir
     assert str(chat_uploads_dir()) in options.aih_assistant_scope["roots"]
     assert "app-config" in options.mcp_servers
     assert all(tool_permitted(name, CHAT_MODE_TOOL_SURFACE, []) for name in options.allowed_tools)
+    for tool in ("Bash", "Monitor", "Edit", "Write", "run_python"):
+        assert not tool_permitted(tool, options.aih_tool_allowlist, options.disallowed_tools)
     for tool in ("StartSession", "Task", "Glob", "Grep", "GetAppLogs", "ScheduleWakeup"):
         assert tool in options.aih_tool_allowlist
     assert "# No-project coordination" in str(options.system_prompt)

@@ -24,7 +24,8 @@ def native(mock_db, monkeypatch, tmp_path):
     )
     db.create_profile("caller", "Caller", None, {"model": "opus"})
     db.create_profile("helper", "Helper", None, {"model": "sonnet"})
-    db.create_session(session_id="parent", profile_id="caller", title="Parent")
+    db.create_project("task-project", "Task project", None, str(tmp_path))
+    db.create_session(session_id="parent", profile_id="caller", title="Parent", project_id="task-project")
     from tests.core.test_task_model_choices import _user_says
     _user_says("parent", "Try haiku, opus, fable or gpt-5.6-sol for this.")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)

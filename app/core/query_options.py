@@ -1176,7 +1176,9 @@ def build_options_from_profile(
     # ``session_mode`` was resolved off ``_binding_row`` with the cwd above:
     # ``session_row`` is None on a cwd-override spawn, and the mode must not
     # depend on which branch happened to fetch the row.
-    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
+    # A legacy no-project code row gets the coordination tool ceiling, not a
+    # rewritten permission binding. Explicit chat rows still run on Ask.
+    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode_of(_binding_row))
 
     # The owner's assistant (its home, the chats it starts and their Task
     # workers) runs in Bypass, whatever the row says: ordinary work goes ahead

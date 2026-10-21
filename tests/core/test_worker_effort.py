@@ -177,7 +177,7 @@ def test_effort_is_captured_before_admission_and_survives_retry(
 ):
     from app.db import turns
 
-    agents.create_session(session_id="effort-parent", profile_id="root-agent", title="offline", effort="high")
+    agents.create_session(session_id="effort-parent", profile_id="root-agent", title="offline", effort="high", project_id="task-project")
     latest = {"overrides": {"effort": "xhigh"}}
     monkeypatch.setattr(turns, "get_latest_turn", lambda _: latest)
     monkeypatch.setattr(td, "_credential_gap", lambda _: None)

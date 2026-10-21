@@ -170,7 +170,8 @@ def _detect_claude_cli_signed_in() -> bool:
 # Version 5 names the worker's branch ``chore/task-<id>`` (pushable to an origin
 # that accepts only fix/, feat/ and chore/ branches); an older target gets
 # ``task/<id>``.
-REMOTE_TASK_VERSION = 5
+# Version 6 forks target-only projects from the target's own upstream/default ref.
+REMOTE_TASK_VERSION = 6
 
 # A moved chat's pending wake-ups move with it (#1819): version 1 receivers
 # re-create the ``wakes`` a move sends. Older ones ignore them, so the owner

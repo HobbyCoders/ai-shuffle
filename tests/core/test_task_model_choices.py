@@ -20,7 +20,8 @@ def lane(mock_db, monkeypatch, tmp_path):
     db.create_profile("caller", "Caller", None, {"model": "opus"})
     db.create_profile("helper", "Helper", None,
                       {"provider_models": {"lane": "astra"}})
-    db.create_session(session_id="parent", profile_id="caller", title="Parent")
+    db.create_project("task-project", "Task project", None, str(tmp_path))
+    db.create_session(session_id="parent", profile_id="caller", title="Parent", project_id="task-project")
     _user_says("parent", "Run it on sol, or on other-choice where that agent runs.")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
@@ -56,7 +57,7 @@ async def test_tool_adapters_preserve_selected_model(lane, surface):
         assert not result.is_error, result.text
     else:
         from tests.mcp.test_task_tool_contract import _task_handler
-        db.create_session(session_id="session-parent", profile_id="caller", title="MCP Parent")
+        db.create_session(session_id="session-parent", profile_id="caller", title="MCP Parent", project_id="task-project")
         _user_says("session-parent", "Use sol for this one.")
         result = await _task_handler(profile_id="caller", provider_id="lane")(args)
         assert not result["isError"], result

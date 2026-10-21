@@ -514,11 +514,11 @@ async def test_loop_guard_reads_a_worker_turns_origin(tmp_path):
 
 
 async def test_assistant_limit_refuses_the_turn(tmp_path):
-    from app.core import assistant_limits
+    from app.core import orchestration_limits
 
     with ExitStack() as stack:
         b = engine_patches(stack, cwd=str(tmp_path))
-        gate = stack.enter_context(patch.object(assistant_limits, "turn_refusal", return_value="Limit reached"))
+        gate = stack.enter_context(patch.object(orchestration_limits, "turn_refusal", return_value="Limit reached"))
         events = await _turn(stack, turn_source="user")
     assert events == [{"type": "error", "message": "Limit reached", "code": "assistant_limit"}]
     assert gate.call_args.args[1] == "user"

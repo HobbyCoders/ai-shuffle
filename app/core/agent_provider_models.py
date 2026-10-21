@@ -811,23 +811,18 @@ def build_task_contract(
     # Documented once, here, because delegating sessions otherwise burn turns
     # rediscovering it by KeyError.
     sync_shape = (
-        "A sync result is JSON with report_head (a bounded prefix), "
-        "report_chars (the report's full length), and report_path (the whole "
-        "report on disk) — there is NO 'report' key unless the file could not "
-        "be written, in which case 'report' carries the full text and the note "
-        "says so. Read report_path with Read(offset=..., limit=...), in ONE "
-        "cell, only when report_head is insufficient; never print the whole "
-        "file. A background result carries no report at all: it returns "
-        "worker_session_id/task_id and the completion is announced later."
+        "Sync JSON: report_head (bounded prefix), report_chars (full length), "
+        "report_path (full file). There is NO 'report' key unless writing failed; "
+        "then it holds the full text and the note explains. Only if report_head "
+        "is insufficient, Read report_path with offset/limit in ONE cell; never "
+        "print the whole file. Background returns worker_session_id/task_id, "
+        "no report; completion is announced later."
     )
 
     limits = host_worker_limits_text()
     description = (
-        "Delegate a self-contained task to one configured subagent. The "
-        "subagent runs in an isolated session with its own prompt, memory, "
-        "and tools; it does not see the parent conversation. Use delegation "
-        "for independent or context-heavy work, not a quick lookup or single "
-        "tool call. "
+        "Delegate independent or context-heavy work, not quick lookups. The "
+        "subagent has its own session, prompt, memory and tools, not your conversation. "
         + ("Follow the system prompt's delegation and checkout rules."
            if workflow_guidance else SWARM_ROUTING)
         + (f" {limits}" if limits else "")
@@ -859,7 +854,10 @@ def build_task_contract(
 
     properties["project"] = {
         "type": "string", "minLength": 1, "maxLength": 500,
-        "description": "Registered project name, id or path. Required for code-capable subagents from a no-project owner session; the host provisions a checkout there.",
+        "description": "Registered project name/id/path; required for no-project coding Tasks. The host creates its checkout.",
+    }
+    properties["branch"] = {
+        "type": "string", "description": "Source branch for a target-only project on worker; omitted: its default branch.",
     }
     properties["base_commit"] = {
         "type": "string",

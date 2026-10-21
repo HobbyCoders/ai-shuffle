@@ -4976,7 +4976,10 @@ class HarnessAdapter(ProviderAdapter):
             registry,
             options.mcp_servers,
             skip_tools={"builtins": skipped_builtins},
-            defer_servers=DEFERRED_SDK_SERVERS if native else None,
+            defer_servers=(DEFERRED_SDK_SERVERS if native and (
+                _expects_code_mode(options) or _tool_predicate(options) is None
+                or _tool_predicate(options)("ToolSearch")
+            ) else None),
         )
         if recorded:
             logger.info(

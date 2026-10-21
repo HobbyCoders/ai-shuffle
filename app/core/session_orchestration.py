@@ -17,8 +17,8 @@ from fluid.tools.hardening import defang_harness_markers
 from fluid.tools.registry import ToolOutcome
 
 log = logging.getLogger(__name__)
-# A human turn may coordinate a substantial batch; descendants share this budget.
-# Loop detection and the owner's daily spend cap remain independent guards.
+# Owner-approved: a 32-item batch with ~8 management actions per item.
+# Descendants share this budget; loop/depth and daily-spend guards still apply.
 MAX_ACTIONS = 256
 MAX_STARTS = 32
 # A StartSession on another worker is recorded here as a settled receipt turn
@@ -145,6 +145,7 @@ def is_owner_session(row_or_id):
     try:
         row = sessions.get_session(row_or_id) if isinstance(row_or_id, str) else row_or_id
         return bool(row and not row.get("is_worker") and not row.get("parent_session_id")
+                    and not row.get("automation_id")
                     and row.get("mode") != "voice" and not row.get("api_user_id")
                     and (not row.get("hidden") or _legacy_home(row["id"]))
                     and _owner(row) == _OWNER_CHAT)
@@ -1368,8 +1369,10 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     checkout_parent = sender
     if placement is not None:
         checkout_parent = {"project_v2_id": project_v2_id}
-    checkout = (_start_checkout(checkout_parent, new_id, named_project=placement is not None)
-                if action == "start" and remote is None else None)
+    checkout = None
+    if action == "start" and remote is None:
+        checkout = (_start_checkout(checkout_parent, new_id, named_project=True)
+                    if placement is not None else _start_checkout(checkout_parent, new_id))
     with _UnusedCheckout(checkout) as unused, transaction() as conn:
         cursor = conn.cursor()
         # Lock both session rows in a stable order before the chain root:
@@ -1541,9 +1544,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         project = placement["project"] if placement is not None else None
         result["note"] = (
             ("Runs in " + (project.get("name") or project["id"]) + " on this worker. " if project else "")
-            + "It reports back to you automatically when it finishes or fails; do not ask it to use "
-            "MessageSession. Its questions get the recommended option; approvals it needs appear to the "
-            "owner in this conversation. Queued is not delivered.")
+            + result["note"].replace(
+                "No automatic reply or completion notification; peers must use MessageSession.",
+                "It reports back to you automatically when it finishes or fails; do not ask it to use "
+                "MessageSession. Its questions get the recommended option; approvals it needs appear "
+                "to the owner in this conversation."))
         if project:
             result["project"] = {"id": project["id"], "name": project.get("name")}
     return result

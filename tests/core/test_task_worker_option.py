@@ -37,12 +37,13 @@ def network(monkeypatch):
 
 
 @pytest.fixture()
-def caller(mock_db):
+def caller(mock_db, tmp_path):
     from app.db import database
 
     database.create_profile("root-agent", "Root Agent", None, {"model": "opus"})
     database.create_profile("helper", "Helper", None, {"model": "sonnet"})
-    database.create_session(session_id="s-root", profile_id="root-agent", title="root")
+    database.create_project("task-project", "Task project", None, str(tmp_path))
+    database.create_session(session_id="s-root", profile_id="root-agent", title="root", project_id="task-project")
     return database
 
 

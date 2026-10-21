@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 from typing import Any, Dict, Mapping, Optional
 
@@ -440,6 +441,8 @@ REMOTE_BRANCH = "branch"
 REMOTE_SHARED = "shared"
 #: No project or not Git: nothing to transfer; run in the target's workspace.
 REMOTE_NONE = "none"
+#: Protocol v6: fork a target-only project's own upstream/default branch.
+REMOTE_DEFAULT = "default"
 
 _INVALID_STATE = "The worker checkout description is invalid; nothing was started."
 
@@ -462,7 +465,7 @@ class RemoteWorkerBranch:
 
     @classmethod
     def from_wire(cls, body: Any) -> "RemoteWorkerBranch":
-        if not isinstance(body, dict) or body.get("mode") not in (REMOTE_BRANCH, REMOTE_SHARED, REMOTE_NONE):
+        if not isinstance(body, dict) or body.get("mode") not in (REMOTE_BRANCH, REMOTE_SHARED, REMOTE_NONE, REMOTE_DEFAULT):
             raise WorkerCheckoutError(_INVALID_STATE)
         text = {key: body.get(key) for key in cls.__dataclass_fields__ if key not in ("mode", "pushed")}
         if any(value is not None and not isinstance(value, str) for value in text.values()):
@@ -482,6 +485,7 @@ class ReceivedWorkerCheckout:
     mode: str
     cwd: Optional[str]
     checkout: Optional[WorkerCheckout] = None
+    note: Optional[str] = None
 
 
 def _state(state) -> RemoteWorkerBranch:
@@ -554,6 +558,57 @@ def _base_checkout_path(project_id: str) -> Optional[str]:
     return path if path and os.path.isdir(path) else None
 
 
+def _receive_default_checkout(sent, project, base, worker_session_id):
+    """Use only this worker's tracking configuration; never switch its checkout."""
+    from app.core.git_service import git_service
+
+    if sent.remote is not None or sent.branch is not None or sent.base_commit is not None or sent.pushed:
+        raise WorkerCheckoutError(_INVALID_STATE)
+    default = git_service.get_default_branch(base)
+    source = sent.parent_branch or default
+    valid = git_service._run_git(base, ["check-ref-format", "refs/heads/" + source], timeout=5)
+    if valid.returncode:
+        raise WorkerCheckoutError("The requested source branch is invalid; nothing was started.")
+    remote = git_service._run_git(base, ["config", "--get", f"branch.{default}.remote"], timeout=5)
+    merge = git_service._run_git(base, ["config", "--get", f"branch.{default}.merge"], timeout=5)
+    names = git_service._run_git(base, ["remote"], timeout=5)
+    remote_name = remote.stdout.strip()
+    source_ref = "refs/heads/" + source if sent.parent_branch else merge.stdout.strip()
+    if (remote.returncode or merge.returncode or remote_name not in names.stdout.splitlines()
+            or not source_ref.startswith("refs/heads/")
+            or git_service._run_git(base, ["check-ref-format", source_ref], timeout=5).returncode):
+        raise WorkerCheckoutError("The project's default branch has no configured upstream; nothing was started.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id or ""):
+        raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
+    # A private destination avoids racing other fetches' FETCH_HEAD. The source
+    # and remote still come only from this worker's configured upstream.
+    private_ref = "refs/fluid/task-base/" + worker_session_id
+    if not git_service._run_git(base, ["show-ref", "--verify", "--quiet", private_ref], timeout=5).returncode:
+        raise WorkerCheckoutError("The worker's source ref already exists; refusing to reuse it.")
+    fetched = False
+    try:
+        try:
+            fetched = git_service._run_git(base, ["fetch", "--no-tags", "--no-write-fetch-head", remote_name,
+                                                source_ref + ":" + private_ref], timeout=60).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            fetched = False
+        ref = private_ref if fetched else "refs/heads/" + source
+        tip = git_service._run_git(base, ["rev-parse", "--verify", ref + "^{commit}"], timeout=5)
+        sha = tip.stdout.strip()
+        if tip.returncode or not _SHA.fullmatch(sha):
+            raise WorkerCheckoutError("The source branch has no local commit after fetch failure; nothing was started.")
+        checkout = prepare_worker_checkout({"project_v2_id": project["id"]}, worker_session_id,
+                                           None, base_commit=sha, share_read_only=False)
+        if checkout is None:
+            raise WorkerCheckoutError("Could not provision the target project's isolated checkout; nothing was started.")
+    finally:
+        if fetched:
+            git_service._run_git(base, ["update-ref", "-d", private_ref], timeout=5)
+    note = ("Upstream fetch failed; started from this worker's local source-branch tip."
+            if not fetched else None)
+    return ReceivedWorkerCheckout(REMOTE_BRANCH, checkout.path, checkout, note)
+
+
 def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
     """Target side: fetch the parent's ``chore/task-<id>`` and provision its checkout.
 
@@ -575,6 +630,8 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
                                   "first. Nothing was started.")
     if not git_service.is_git_repo(base):
         raise WorkerCheckoutError("This worker's checkout of the project is not a Git repository; nothing was started.")
+    if sent.mode == REMOTE_DEFAULT:
+        return _receive_default_checkout(sent, project, base, worker_session_id)
     if sent.remote is not None and checkout_transfer.origin_identity(base) != sent.remote:
         raise WorkerCheckoutError("This worker's origin is a different repository from the calling worker's "
                                   "origin; clone the project from the same origin to run tasks here. "

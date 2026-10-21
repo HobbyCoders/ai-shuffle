@@ -126,7 +126,7 @@ def test_a_revoked_worker_reads_as_this_worker(mock_db, network, monkeypatch):
 # ─── default_for ─────────────────────────────────────────────────────────────
 
 
-def test_default_applies_to_the_home_and_its_jobs_only(assistant_fixture, network):
+def test_default_applies_to_owner_chats_and_legacy_jobs_not_api_or_workers(assistant_fixture, network):
     home = assistant_fixture["id"]
     database.create_session("job-1", "assistant-agent", title="Job")
     store.link_job(service.assistant_id(), "job-1")
@@ -135,7 +135,12 @@ def test_default_applies_to_the_home_and_its_jobs_only(assistant_fixture, networ
     save("dev-unraid")
     assert assistant_worker.default_for(home)["device_id"] == "dev-unraid"
     assert assistant_worker.default_for("job-1")["device_id"] == "dev-unraid"
-    assert assistant_worker.default_for("plain") is None
+    assert assistant_worker.default_for("plain")["device_id"] == "dev-unraid"
+    database.create_api_user("api", "API", "hash")
+    database.create_session("api-chat", "assistant-agent", api_user_id="api")
+    database.create_session("worker-chat", "assistant-agent", is_worker=True, parent_session_id="plain")
+    assert assistant_worker.default_for("api-chat") is None
+    assert assistant_worker.default_for("worker-chat") is None
 
 
 def test_default_lookup_failure_runs_here(assistant_fixture, network, monkeypatch):
@@ -148,11 +153,12 @@ def test_default_lookup_failure_runs_here(assistant_fixture, network, monkeypatc
 
 
 @pytest.fixture()
-def callers(assistant_fixture):
+def callers(assistant_fixture, tmp_path):
+    database.create_project("task-project", "Task project", None, str(tmp_path))
     database.create_profile("helper", "Helper", None, {"model": "sonnet"})
-    database.create_session("job-1", "assistant-agent", title="Job")
+    database.create_session("job-1", "assistant-agent", title="Job", project_id="task-project")
     store.link_job(service.assistant_id(), "job-1")
-    database.create_session("plain", "assistant-agent", title="Ordinary chat")
+    database.create_session("plain", "assistant-agent", title="Ordinary chat", project_id="task-project")
     return {"home": assistant_fixture["id"], "job": "job-1", "plain": "plain"}
 
 
@@ -209,14 +215,20 @@ def test_older_default_falls_back_with_a_note(callers, network):
                                       "run remote subagents.")
 
 
-def test_ordinary_chats_ignore_the_choice(callers, network, monkeypatch):
-    save("dev-unraid")
+def test_ordinary_owner_chats_use_the_choice(callers, network, monkeypatch):
+    from app.core import remote_task
 
-    def _never(*a, **k):
-        raise AssertionError("an ordinary chat never resolves the default")
-    monkeypatch.setattr(runners, "resolve_worker", _never)
+    save("dev-unraid")
+    seen = []
+
+    async def remote(**kwargs):
+        seen.append(kwargs)
+        return {"ok": True, "mode": "remote"}
+
+    monkeypatch.setattr(remote_task, "dispatch_remote", remote)
     payload, calls = dispatch(callers["plain"])
-    assert payload["ok"] is True and "worker_note" not in payload and len(calls) == 1
+    assert payload == {"ok": True, "mode": "remote"} and calls == []
+    assert seen[0]["worker"]["device_id"] == "dev-unraid"
 
 
 def test_explicit_worker_wins_and_never_falls_back(callers, network):

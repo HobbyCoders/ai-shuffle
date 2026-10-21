@@ -502,6 +502,8 @@ def dispatch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
     )
+    monkeypatch.setattr(project_resolver, "resolve_project_v2",
+                        lambda row: {"id": "proj-1", "path": str(checkout)})
     monkeypatch.setattr(
         pa, "final_turn_outcome",
         lambda sid: {
@@ -746,7 +748,7 @@ class TestDispatchWorker:
         monkeypatch.setattr(turns_db, "get_latest_turn", lambda sid: None)
         monkeypatch.setattr(
             db, "get_session",
-            lambda sid: {"id": sid, "profile_id": "caller-prof"},
+            lambda sid: {"id": sid, "profile_id": "caller-prof", "project_id": "proj-1"},
         )
         monkeypatch.setattr(
             db, "get_profile",
@@ -772,7 +774,7 @@ class TestDispatchWorker:
         )
         monkeypatch.setattr(
             db, "get_session",
-            lambda sid: {"id": sid, "profile_id": "caller-prof", "permission_mode": "acceptEdits"},
+            lambda sid: {"id": sid, "profile_id": "caller-prof", "project_id": "proj-1", "permission_mode": "acceptEdits"},
         )
         monkeypatch.setattr(
             db, "get_profile",
@@ -795,7 +797,7 @@ class TestDispatchWorker:
         )
         monkeypatch.setattr(
             db, "get_session",
-            lambda sid: {"id": sid, "profile_id": "caller-prof", "permission_mode": "plan"},
+            lambda sid: {"id": sid, "profile_id": "caller-prof", "project_id": "proj-1", "permission_mode": "plan"},
         )
         monkeypatch.setattr(db, "get_profile", lambda pid: {"id": pid, "config": {}})
 
