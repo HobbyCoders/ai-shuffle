@@ -210,7 +210,7 @@ export async function runNavigate(
     else {
       // Rendered control-free pages still get a short DOM-quiet observation,
       // not an unconditional 1.5s control wait nor an immediate early return.
-      await session.beginWatch();
+      await session.beginWatch(false, false);
       textChurnIgnored = (await session.settle(page.url())).textChurnIgnored;
     }
   }

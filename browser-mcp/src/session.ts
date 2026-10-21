@@ -1206,11 +1206,11 @@ export class Session {
    * text history between calls. Failed observation refreshes conservatively in
    * {@link settle}, without inventing navigation.
    */
-  async beginWatch(passive = false): Promise<void> {
+  async beginWatch(passive = false, sample = true): Promise<void> {
     const page = this.requirePage();
     try {
       if (passive) endRequestWatch(page); else beginRequestWatch(page);
-      await raceWithTimeout(page.evaluate(installMutationWatcher, { key: WATCH_KEY, passive }), 5000, "mutation watcher timed out");
+      await raceWithTimeout(page.evaluate(installMutationWatcher, { key: WATCH_KEY, passive, sample }), 5000, "mutation watcher timed out");
     } catch {
       endRequestWatch(page);
       await this.disposeWatch();

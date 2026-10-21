@@ -58,15 +58,17 @@ export function classifyMutations(stats: MutationStats, thresholds = DEFAULT_MUT
 export const WATCH_KEY = "__browserMcpWatch";
 
 /** Self-contained: Playwright serializes this function into the page. */
-export async function installMutationWatcher(input: string | { key: string; passive: boolean }): Promise<void> {
+export async function installMutationWatcher(input: string | { key: string; passive: boolean; sample?: boolean }): Promise<void> {
   const key = typeof input === "string" ? input : input.key;
   const passive = typeof input !== "string" && input.passive;
   const w = window as unknown as Record<string, unknown>;
   type TextHistory = WeakMap<Node, { samples: number; first: number; last: number }>;
-  const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory } | undefined;
+  const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory; passive: boolean; observedSince: number } | undefined;
+  const installedAt = Date.now();
+  // A continuous passive window can establish the absence of a ticker too.
+  const observedSince = prev?.passive && Number.isFinite(prev.observedSince) ? prev.observedSince : installedAt;
   prev?.observer?.disconnect();
   const textHistory: TextHistory = prev?.textHistory ?? new WeakMap();
-  const installedAt = Date.now();
   const cleanups: (() => void)[] = [];
   const activeCleanups: (() => void)[] = [];
   const roots = new WeakSet<Node>();
@@ -76,10 +78,15 @@ export async function installMutationWatcher(input: string | { key: string; pass
     startUrl: location.href, lastMutation: Date.now(), pendingRequests: 0, pendingTimers: 0,
     deadline: 0, textSamples: 0, textTargets: new Set<Node>(), lastNonTextMutation: Date.now(), lastPendingWork: 0,
     textHistory, knownTextTargets: new WeakSet<Node>(), hasKnownText: false,
-    allTextTargetsKnown: true, nonBaselineTextChanges: 0, sampling: true, passive: false,
+    observedSince, lastNonBaselineTextMutation: Date.now(),
+    nonBaselineTextChanges: 0, sampling: true, passive,
     schedule: window.setTimeout.bind(window),
     observer: {
-      pause: () => { state.passive = true; for (const cleanup of activeCleanups.splice(0).reverse()) cleanup(); },
+      pause: () => {
+        state.passive = true;
+        for (const cleanup of activeCleanups.splice(0).reverse()) cleanup();
+        state.textTargets.clear(); // do not retain detached frame/root nodes
+      },
       disconnect: () => { state.observer.pause(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); },
     },
   };
@@ -100,6 +107,9 @@ export async function installMutationWatcher(input: string | { key: string; pass
     if ("querySelectorAll" in root) for (const el of Array.from((root as Document).querySelectorAll("*"))) inspect(el);
   };
   const observe = (root: Node, realm: Window) => {
+    // Passive history watches the top document only. Secondary roots and frame
+    // load closures must not retain documents removed while the agent is idle.
+    if (state.passive && root !== document) return;
     if (roots.has(root)) return;
     roots.add(root);
     const Observer = (realm as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver;
@@ -117,9 +127,11 @@ export async function installMutationWatcher(input: string | { key: string; pass
             state.knownTextTargets.add(target); state.hasKnownText = true;
           }
           if (!state.passive && !state.sampling) {
-            state.textSamples++; state.textTargets.add(target);
-            if (!state.knownTextTargets.has(target)) {
-              state.allTextTargetsKnown = false; state.nonBaselineTextChanges++;
+            if (state.knownTextTargets.has(target)) {
+              state.textSamples++; state.textTargets.add(target);
+            } else {
+              state.nonBaselineTextChanges++;
+              state.lastNonBaselineTextMutation = Date.now();
             }
           }
         } else state.lastNonTextMutation = Date.now();
@@ -139,7 +151,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
       changed();
     });
     observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
-    cleanups.push(() => observer.disconnect());
+    (root === document ? cleanups : activeCleanups).push(() => observer.disconnect());
     scan(root);
   };
   const watchWindow = (win: Window) => {
@@ -148,7 +160,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
     const doc = win.document;
     if (documents.has(doc)) return;
     documents.add(doc);
-    if (state.passive) { observe(doc, win); return; }
+    if (state.passive) { if (win === window) observe(doc, win); return; }
     const realm = win as unknown as typeof window;
     // Timers scheduled by the action matter too (e.g. debounce/700ms render).
     // Existing intervals are deliberately not tracked: clocks must not hold refs hostage.
@@ -190,24 +202,27 @@ export async function installMutationWatcher(input: string | { key: string; pass
   };
   function inspect(el: Element) {
     baseline(el);
+    if (state.passive) return;
     const win = el.ownerDocument.defaultView!;
     if (el.shadowRoot) observe(el.shadowRoot, win);
     if (el.tagName === "IFRAME") {
       const frame = el as HTMLIFrameElement;
       const loaded = () => { try { if (frame.contentWindow) watchWindow(frame.contentWindow); } catch { /* cross-origin */ } };
       loaded(); frame.addEventListener("load", loaded);
-      cleanups.push(() => frame.removeEventListener("load", loaded));
+      activeCleanups.push(() => frame.removeEventListener("load", loaded));
     }
   }
   w[key] = state;
   watchWindow(window);
   if (passive) { state.sampling = false; state.observer.pause(); return; }
-  // A fresh page/ticker has no history yet. Briefly sample BEFORE dispatch;
-  // targets first mutated or created by the action can never join this set.
-  if (!state.hasKnownText) await new Promise<void>(resolve => state.schedule(resolve, 100));
+  // Only finish the initial 100ms observation window, not a fresh 100ms on
+  // every plain-page action. Navigation explicitly opts out of sampling.
+  const remainingSample = typeof input !== "string" && input.sample === false
+    ? 0 : Math.max(0, 100 - (Date.now() - observedSince));
+  if (!state.hasKnownText && remainingSample) await new Promise<void>(resolve => state.schedule(resolve, remainingSample));
   state.sampling = false;
   state.addedNodes = state.removedNodes = state.attributeChanges = state.characterDataChanges = 0;
-  state.lastMutation = state.lastNonTextMutation = Date.now();
+  state.lastMutation = state.lastNonTextMutation = state.lastNonBaselineTextMutation = Date.now();
 }
 
 export function collectMutationStats(args: [string, number, number]): Promise<MutationStats> {
@@ -216,8 +231,8 @@ export function collectMutationStats(args: [string, number, number]): Promise<Mu
   const state = w[key] as (MutationStats & {
     startUrl: string; lastMutation: number; observer: { pause(): void };
     pendingRequests: number; pendingTimers: number;
-    deadline: number; textSamples: number; textTargets: Set<Node>; allTextTargetsKnown: boolean;
-    lastNonTextMutation: number; lastPendingWork: number;
+    deadline: number; textSamples: number; textTargets: Set<Node>;
+    lastNonTextMutation: number; lastPendingWork: number; lastNonBaselineTextMutation: number;
     schedule: typeof window.setTimeout;
   }) | undefined;
   // Missing watcher can mean same-URL document replacement. Refresh the tree,
@@ -233,8 +248,8 @@ export function collectMutationStats(args: [string, number, number]): Promise<Mu
       const capped = now - start >= capMs;
       // Only containers observed churning BEFORE dispatch can be ignored.
       // A counter/typewriter/chat stream started by the action is real work.
-      const stableText = state.allTextTargetsKnown && state.textSamples >= 2 && state.textTargets.size <= 3 &&
-        now - Math.max(start, state.lastNonTextMutation, state.lastPendingWork) >= quietMs;
+      const stableText = state.textSamples >= 2 && state.textTargets.size <= 3 &&
+        now - Math.max(start, state.lastNonTextMutation, state.lastNonBaselineTextMutation, state.lastPendingWork) >= quietMs;
       if (capped || (!state.pendingRequests && !state.pendingTimers && (now - state.lastMutation >= quietMs || stableText))) {
         state.observer.pause();
         resolve({

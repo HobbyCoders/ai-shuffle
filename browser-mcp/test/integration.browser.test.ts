@@ -325,8 +325,72 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    it("does not resample a mature plain page across repeated actions", async () => {
+      await load('<button>Plain</button><label>Name<input></label>');
+      const target = await ref("Plain"), field = await ref("Name");
+      for (const input of [
+        { kind: "click", ref: target }, { kind: "click", ref: target },
+        { kind: "fill", ref: field, value: "name" }, { kind: "type", ref: field, value: "x" },
+        { kind: "key", key: "Tab" },
+      ] as const) {
+        const result = body(await runAct(session, input));
+        expect(result).toMatchObject({ ok: true, text_churn_ignored: false });
+        expect(result.timings.dispatch_ms).toBeLessThan(90);
+      }
+    });
+    it("does not ignore a newly started ticker that has never mutated before dispatch", async () => {
+      const page = await load('<button>Unobserved</button><span id="clock"></span>');
+      const target = await ref("Unobserved");
+      await page.evaluate(() => { setInterval(() => { document.getElementById("clock")!.textContent = String(Date.now()); }, 100); });
+      const result = body(await runAct(session, { kind: "click", ref: target }));
+      expect(result).toMatchObject({ ok: true, settle_capped: true, text_churn_ignored: false });
+      expect(result.timings.dispatch_ms).toBeLessThan(90);
+      await page.goto("about:blank");
+    });
+    it("does not retain replaced iframe documents while the agent is idle", async () => {
+      const page = await load('<button>Idle</button><div id="frames"><iframe srcdoc="<p>Initial</p>"></iframe></div>');
+      await runAct(session, { kind: "click", ref: await ref("Idle") }); // active frame watch -> passive
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Performance.enable");
+      async function documents() {
+        await cdp.send("HeapProfiler.collectGarbage");
+        const metrics = (await cdp.send("Performance.getMetrics")).metrics;
+        return metrics.find(metric => metric.name === "Documents")!.value;
+      }
+      const before = await documents();
+      await page.evaluate(() => new Promise<void>(resolve => {
+        let n = 0;
+        const timer = setInterval(() => {
+          document.getElementById("frames")!.innerHTML = `<iframe srcdoc="<p>Frame ${n}</p>"></iframe>`;
+          if (++n === 20) { clearInterval(timer); resolve(); }
+        }, 50);
+      }));
+      expect(await documents()).toBeLessThanOrEqual(before + 4);
+      // The next active scan must still pick up the surviving frame.
+      await page.evaluate(() => {
+        document.querySelector("button")!.onclick = () => {
+          document.querySelector("iframe")!.contentDocument!.body.innerHTML = '<button>Frame result</button>'.repeat(15);
+        };
+      });
+      const result = await runAct(session, { kind: "click", ref: await ref("Idle") });
+      expect(body(result)).toMatchObject({ dom_mutated: "major", snapshot_stale: true });
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Frame result") });
+      await cdp.detach();
+    });
+    it.each(["timer", "raf", "fetch"])("settles a %s text result on a ticker once non-baseline text is quiet", async kind => {
+      const trigger = kind === "timer" ? "setTimeout(done,150)" : kind === "fetch" ? "fetch('/hydrate').then(r=>r.text()).then(done)" : "const start=performance.now();(function tick(){performance.now()-start>=150?done():requestAnimationFrame(tick)})()";
+      const page = await load(`<button onclick="go()">Save label</button><p id="status">Waiting</p><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100);function go(){const done=()=>{document.getElementById('status').textContent='Saved';window.done=true};${trigger}}</script>`);
+      await page.waitForTimeout(250); // the clock, unlike the result, is already churning
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Save label") }));
+      expect(result).toMatchObject({ ok: true, dom_mutated: "minor", settle_capped: false, text_churn_ignored: true });
+      expect(await page.locator("#status").innerText()).toBe("Saved");
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(kind === "fetch" ? 650 : 450);
+      expect(result.timings.settle_ms).toBeLessThan(1200);
+      await page.goto("about:blank");
+    });
     it("settles a 100ms text ticker quickly without navigation or expiring refs", async () => {
       const page = await load('<button>Tick action</button><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      await page.waitForTimeout(200); // an already-running ticker, outside act timing
       const target = await ref("Tick action");
       const start = Date.now();
       const result = body(await runAct(session, { kind: "click", ref: target }));
@@ -345,9 +409,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     for (const background of [false, true]) {
       it.each(actionTextCases)(`observes action-started $name through completion (background ticker: ${background})`, async ({ html, expected }) => {
         const page = await load(html + (background ? '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>' : ''));
+        if (background) await page.waitForTimeout(200);
         const started = Date.now();
         const result = await runAct(session, { kind: "click", ref: await ref("Start") });
-        expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true, text_churn_ignored: false });
+        expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true, settle_capped: false, text_churn_ignored: background });
         expect(await page.evaluate(() => (window as unknown as { done: boolean }).done)).toBe(true);
         expect(Date.now() - started).toBeGreaterThanOrEqual(900);
         expect(result.content[1]).toMatchObject({ text: expect.stringContaining(expected) });
@@ -359,6 +424,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     }
     it("reuses pre-action ticker history after settle without retaining active timer hooks", async () => {
       const page = await load('<button>Tick again</button><span id="clock"></span><script>window.originalSetTimeout=window.setTimeout;setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      await page.waitForTimeout(200);
       const target = await ref("Tick again");
       for (let i = 0; i < 3; i++) {
         const started = Date.now();
@@ -385,9 +451,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(Date.now() - started).toBeGreaterThanOrEqual(550);
       expect(Date.now() - started).toBeLessThan(2200);
     });
-    it("reports ignored text churn on control-free navigation as well as actions", async () => {
-      const url = "data:text/html," + encodeURIComponent('<p id="clock">Clock</p><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
-      const result = body(await runNavigate(session, { url }));
+    it("reports ignored text churn on same-document control-free navigation as well as actions", async () => {
+      const page = await load('<p id="clock">Clock</p><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      await page.waitForTimeout(200);
+      const result = body(await runNavigate(session, { url: page.url() + "#clock" }));
       expect(result).toMatchObject({ ok: true, ref_count: 0, text_churn_ignored: true });
       expect(result.timings.settle_ms).toBeLessThan(800);
       await (await session.ensurePage()).goto("about:blank");
@@ -398,7 +465,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       const result = body(await runNavigate(session, { url }));
       expect(result.ref_count).toBe(0);
       expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
-      expect(result.timings.settle_ms).toBeLessThan(800);
+      expect(result.timings.settle_ms).toBeLessThan(400);
       expect(await page.locator("p").innerText()).toContain("Rendered article");
     });
     it.each(["reload", "slowreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
