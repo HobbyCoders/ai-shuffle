@@ -144,8 +144,11 @@ class PeerTerminal(StreamTerminal):
         self._peer_closed = False
         try:
             info = (await self.call("open", options=options))["terminal"]
-        except BaseException:
-            terminal_relay.forget(self.lease)
+        except BaseException as exc:
+            # A rejected folder has not spawned a PTY or consumed B's consent.
+            # Keep A's matching lease so the owner can correct it and retry.
+            if not isinstance(exc, TerminalError) or exc.code != "bad_folder":
+                terminal_relay.forget(self.lease)
             raise
         self.shell, self.cwd = info["shell"], info["cwd"]
         self.state = info["state"]
