@@ -910,6 +910,16 @@ def test_withdrawn_release_fallback_is_never_applied_backwards(feed):
     assert status["phase"] == "idle" and status["message"] == "You are up to date."
 
 
+def test_first_boot_does_not_publish_running_revision_as_staged(feed):
+    updater, publish, _, _, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    assert status_of(updater)["staged_version"] == B
+    updater.activating()
+    updater.publish("idle")
+    assert status_of(updater)["staged_version"] is None
+
+
 def test_a_staged_build_does_not_hide_a_newer_release(feed):
     """#98: Update re-offered a staged build forever without reading the feed."""
     updater, publish, _, requests, _ = feed
@@ -922,6 +932,7 @@ def test_a_staged_build_does_not_hide_a_newer_release(feed):
     status = status_of(updater)
     assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
     assert status["phase"] == "available" and status["version"] == C[:12] and status["release"] == "1.0.1"
+    assert status["staged_version"] == B
     assert updater.state == {"pending": B}, "a check downloads nothing; B can still be installed"
     updater.check(download=True)
     assert updater.state == {"pending": C}

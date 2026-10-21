@@ -56,7 +56,7 @@ def main():
     parser.add_argument('--agent-gid', type=int, default=100)
     args = parser.parse_args()
     assert os.geteuid() == 0, 'run only as root in the disposable test container'
-    assert os.environ.get('AGENT_ISOLATION') == 'on'
+    assert os.environ.get('AGENT_ISOLATION') in {'on', 'required'}
     sys.path.insert(0, '/app')
     import psycopg2
     from app.core import private_storage, process_ledger

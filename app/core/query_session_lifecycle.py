@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 _SDK_INTERRUPT_TIMEOUT_SECONDS = 5.0
 
 
-def _reap_task_killed(session_id: str, task_id: str) -> None:
+def _reap_task_killed(session_id: str, task_id: str, *, source: str | None = None) -> None:
     """Reap a ghost task to "killed", attributing shutdown-origin reaps.
 
     A reap that runs while the server is tearing down is a consequence of the
     restart, not a task failure — stamp the wire record accordingly (item 4a)
     so the UI/parent can say "Server restarted — background task stopped"
-    instead of presenting a mysterious kill. This site cannot otherwise know
-    the reap's origin, so it gates on ``startup.is_shutting_down``.
+    instead of presenting a mysterious kill. An explicit shutdown source also
+    applies when the caller quiesces one session before global shutdown begins.
     """
     from app.core import startup
     from app.core.task_registry import (
@@ -35,7 +35,7 @@ def _reap_task_killed(session_id: str, task_id: str) -> None:
         SERVER_SHUTDOWN_REASON,
     )
 
-    if getattr(startup, "is_shutting_down", False):
+    if source == SERVER_SHUTDOWN_REASON or getattr(startup, "is_shutting_down", False):
         task_registry.complete_task(
             session_id,
             task_id,
@@ -266,7 +266,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     # already exited without the registry being told). Reap it rather than
     # mis-routing a shell id to the client's agent-task stop (which would error).
     if existing is not None and existing.get("kind") == "shell":
-        _reap_task_killed(session_id, task_id)
+        _reap_task_killed(session_id, task_id, source=source)
         return {
             "ok": True,
             "kind": "shell",
@@ -323,7 +323,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
                 "kind": existing.get("kind") or "agent",
                 "task_id": task_id,
             }
-        _reap_task_killed(session_id, task_id)
+        _reap_task_killed(session_id, task_id, source=source)
         return {
             "ok": True,
             "kind": existing.get("kind") or "agent",
