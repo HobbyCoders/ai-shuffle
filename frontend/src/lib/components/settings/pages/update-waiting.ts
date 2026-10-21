@@ -143,6 +143,9 @@ function idleStop(blocker: Blocker, bound: number | null | undefined, time: Time
 }
 
 /** One readable line per blocker, following the #344 copy table. */
+/** A service's note that Stop would end it; a view that does not offer Stop leaves it out. */
+export const STOP_STOPS_IT = 'Stopping running work stops it.';
+
 export function blockerView(blocker: Blocker, index: number, bound?: number | null, time: TimeOptions = {}): BlockerView {
 	const kind = blocker.kind || 'registry';
 	const key = `${blocker.session_id}:${blocker.task_id ?? kind}:${index}`;
@@ -157,7 +160,7 @@ export function blockerView(blocker: Blocker, index: number, bound?: number | nu
 			`Service${label ? ` ${label}` : ''} ${blocker.live ? 'still running' : 'still registered (process not confirmed)'} for ${chat}` +
 			`${blocker.port ? ` on port ${blocker.port}` : ''}${started ? `, started ${started}` : ''}${turn}.`;
 		const meta = [idleStop(blocker, bound, time)];
-		if (blocker.stop_will_stop) meta.push('Stopping running work stops it.');
+		if (blocker.stop_will_stop) meta.push(STOP_STOPS_IT);
 		return { key, kind, text, meta };
 	}
 	if (kind === 'turn') {
