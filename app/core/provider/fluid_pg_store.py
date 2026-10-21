@@ -6,11 +6,11 @@ PostgreSQL database (tables ``fluid_sessions`` / ``fluid_session_nodes`` /
 durability — resume, fork, and event replay all survive a process restart and
 work from any app instance sharing the database.
 
-Semantics mirror ``fluid.store.jsonl.JsonlStore``: per-session lazy load into a
-memory cache, then write-through on every mutation. The cache makes the hot
-read paths (``load_path`` on every prompt build, ``events_since`` on every
-receive loop) synchronous-fast; Postgres writes ride ``run_sync`` so the event
-loop never blocks on the driver.
+Semantics mirror ``fluid.store.jsonl.JsonlStore`` with write-through mutations.
+Native sessions cache the node tree for per-turn prompt building; delegated
+CLIs own their context, so their stores keep only metadata and read durable
+nodes on demand. Event replay uses a bounded tail cache. PostgreSQL reads and
+writes ride ``run_sync`` so the event loop never blocks on the driver.
 
 Event appends are idempotent per (session_id, seq) — ``ON CONFLICT DO
 NOTHING`` — because fluid's EventBus can replay a tail after reconnect and the
@@ -90,8 +90,8 @@ def _create_session_sync(meta: SessionMeta) -> None:
         )
 
 
-def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
-    """Load the node tree without retaining the unbounded event history."""
+def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Optional[Dict[str, Any]]:
+    """Load metadata, optionally decoding the node tree off-loop."""
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -102,6 +102,8 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
         meta = SessionMeta(**dict(row))
+        if not include_nodes:
+            return {"meta": meta, "nodes": {}}
         cur.execute(
             "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
             "WHERE session_id = %s", (session_id,),
@@ -113,6 +115,36 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
         message=Message.from_dict(_as_dict(r["message"])),
     ) for r in rows}
     return {"meta": meta, "nodes": nodes}
+
+
+def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
+            "WHERE session_id = %s AND node_id = %s", (session_id, node_id),
+        )
+        row = cur.fetchone()
+    return None if row is None else SessionNode(
+        node_id=row["node_id"], parent_id=row["parent_id"], ts=row["ts"],
+        message=Message.from_dict(_as_dict(row["message"])),
+    )
+
+
+def _load_path_sync(session_id: str, leaf_node_id: Optional[str]) -> List[SessionNode]:
+    # Rare delegated history reads (resume/reseed/fork), not the turn hot path.
+    # Decode and walk off-loop; never publish this temporary tree to the cache.
+    data = _load_session_sync(session_id)
+    if data is None:
+        raise KeyError(session_id)
+    cursor = leaf_node_id or data["meta"].head_node_id
+    path = []
+    while cursor is not None:
+        node = data["nodes"][cursor]
+        path.append(node)
+        cursor = node.parent_id
+    path.reverse()
+    return path
 
 
 def _events_since_sync(session_id: str, seq: int) -> List[Event]:
@@ -1248,7 +1280,10 @@ class PgFluidStore:
     STREAM_BATCH_BYTES = 64 * 1024
     STREAM_BATCH_SECONDS = 0.05
 
-    def __init__(self) -> None:
+    def __init__(self, *, cache_nodes: bool = True) -> None:
+        # Native prompt building needs the tree every turn. Delegated CLIs own
+        # their context: retain metadata only, and read history on demand.
+        self.cache_nodes = cache_nodes
         self._sessions: Dict[str, SessionMeta] = {}
         self._nodes: Dict[str, Dict[str, SessionNode]] = {}
         self._events: Dict[str, List[Event]] = {}
@@ -1264,7 +1299,7 @@ class PgFluidStore:
         async with self._load_lock:
             if session_id in self._loaded:
                 return session_id in self._sessions
-            data = await run_sync(_load_session_sync, session_id)
+            data = await run_sync(_load_session_sync, session_id, include_nodes=self.cache_nodes)
             # A failed read must be retryable; never publish a half-loaded cache.
             if data is not None:
                 self._sessions[session_id] = data["meta"]
@@ -1354,18 +1389,25 @@ class PgFluidStore:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
         await run_sync(_append_node_sync, session_id, node)
-        self._nodes.setdefault(session_id, {})[node.node_id] = node
+        if self.cache_nodes:
+            self._nodes.setdefault(session_id, {})[node.node_id] = node
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node.node_id
 
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
-        await self._ensure_loaded(session_id)
+        if not await self._ensure_loaded(session_id):
+            return None
+        if not self.cache_nodes:
+            return await run_sync(_get_node_sync, session_id, node_id)
         return self._nodes.get(session_id, {}).get(node_id)
 
     async def load_path(
         self, session_id: str, leaf_node_id: Optional[str] = None
     ) -> List[SessionNode]:
         await self._ensure_loaded(session_id)
+        if not self.cache_nodes:
+            await self.flush_events(session_id)
+            return await run_sync(_load_path_sync, session_id, leaf_node_id)
         meta = self._sessions[session_id]
         nodes = self._nodes[session_id]
         cursor = leaf_node_id or meta.head_node_id
