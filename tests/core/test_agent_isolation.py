@@ -91,11 +91,35 @@ def _protected(root):
 # --- settings ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("raw,expected", [("", "off"), (" ", "off"), ("off", "off"), ("OFF", "off"),
-                                          ("on", "on"), ("ON", "on"), (" On ", "on"),
-                                          ("required", "required"), (" required ", "required")])
+ACCEPTED_SETTINGS = [(None, "off"), ("", "off"), (" ", "off"), ("off", "off"), ("OFF", "off"),
+                     ("0", "off"), ("false", "off"), (" NO ", "off"),
+                     ("on", "on"), ("ON", "on"), (" On ", "on"),
+                     ("1", "on"), ("true", "on"), (" YES ", "on"),
+                     ("required", "required"), (" required ", "required")]
+
+
+@pytest.mark.parametrize("raw,expected", ACCEPTED_SETTINGS)
 def test_setting(raw, expected):
-    assert iso.setting({iso.SETTING: raw}) == expected
+    assert iso.setting({} if raw is None else {iso.SETTING: raw}) == expected
+
+
+@pytest.mark.parametrize("raw,expected", ACCEPTED_SETTINGS)
+def test_all_isolation_readers_accept_the_same_values(raw, expected, runtime, monkeypatch, tmp_path):
+    from app.core import owner_auth
+    from app.main import require_agent_isolation
+
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
+    if raw is None:
+        monkeypatch.delenv("AGENT_ISOLATION", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_ISOLATION", raw)
+    assert iso.setting() == expected
+    assert runtime.isolation_setting() == expected
+    monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    monkeypatch.setattr(runtime, "_isolation", None)
+    assert runtime.isolation_setting() == expected
+    monkeypatch.setenv("SHUFFLE_AGENT_ISOLATION", "on")
+    require_agent_isolation()
 
 
 
@@ -292,7 +316,9 @@ def test_main_marks_maintenance_actions(runtime, monkeypatch, action):
 
 
 def test_app_refuses_direct_entrypoint_override(monkeypatch):
+    from app.core import owner_auth
     from app.main import require_agent_isolation
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
     monkeypatch.setenv("AGENT_ISOLATION", "required")
     monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION", raising=False)
     with pytest.raises(RuntimeError, match="required agent isolation: startup refused"):
@@ -301,7 +327,7 @@ def test_app_refuses_direct_entrypoint_override(monkeypatch):
     require_agent_isolation()
 
 
-@pytest.mark.parametrize("raw", ["yes", "true", "isolated", "requried", "1", "0", "false", "no"])
+@pytest.mark.parametrize("raw", ["isolated", "requried"])
 def test_invalid_setting_refuses(raw, runtime, monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ISOLATION", raw)
     message = "AGENT_ISOLATION.*startup refused.*off, on, required"
@@ -319,9 +345,22 @@ def test_invalid_setting_refuses(raw, runtime, monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "_isolation", None)
     with pytest.raises(runtime.RuntimeFailure, match=message):
         runtime.drop_privileges(SimpleNamespace())
+    from app.core import owner_auth
     from app.main import require_agent_isolation
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
     with pytest.raises(RuntimeError, match=message):
         require_agent_isolation()
+
+
+@pytest.mark.parametrize("raw", ["isolated", "requried", "required"])
+def test_native_app_ignores_container_isolation_setting(monkeypatch, raw):
+    from app.core import owner_auth
+    from app.main import require_agent_isolation
+
+    monkeypatch.setattr(owner_auth, "container_install", lambda: False)
+    monkeypatch.setenv("AGENT_ISOLATION", raw)
+    monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION", raising=False)
+    require_agent_isolation()
 
 
 def test_setting_defaults_off():

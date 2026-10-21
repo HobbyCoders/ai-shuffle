@@ -85,6 +85,7 @@ ACTIVE = None
 def setting(environ=None):
     """Read the strict container-only policy, never agent-editable settings files."""
     raw = (os.environ if environ is None else environ).get(SETTING, "").strip().lower() or "off"
+    raw = {"1": "on", "true": "on", "yes": "on", "0": "off", "false": "off", "no": "off"}.get(raw, raw)
     if raw not in {"off", "on", "required"}:
         raise IsolationError("AGENT_ISOLATION: startup refused; valid values: off, on, required")
     return raw

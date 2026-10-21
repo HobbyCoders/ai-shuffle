@@ -173,6 +173,35 @@ def test_known_ignored_caches_do_not_block_reclaim(repository, name):
     assert not path.exists()
 
 
+def test_symlinked_cache_is_kept_without_touching_target(repository, tmp_path):
+    repo, path = merged(repository)
+    target = tmp_path / "cache-target"
+    target.mkdir()
+    valuable = target / "valuable"
+    valuable.write_text("keep")
+    link = path / ".pytest_cache"
+    link.symlink_to(target, target_is_directory=True)
+    excludes = repo / ".git" / "info" / "exclude"
+    excludes.write_text(excludes.read_text() + "\n.pytest_cache\n")
+    assert reclaim()["items"][0]["decision"] == "keep"
+    assert reclaim(dry_run=False)["reclaimed"] == 0
+    assert link.is_symlink()
+    assert valuable.read_text() == "keep"
+
+
+def test_unignored_parent_with_unknown_ignored_content_is_kept(repository):
+    repo, path = merged(repository)
+    valuable = path / "untracked-folder" / "local-output.txt"
+    valuable.parent.mkdir()
+    valuable.write_text("keep")
+    excludes = repo / ".git" / "info" / "exclude"
+    excludes.write_text(excludes.read_text() + "\nlocal-output.txt\n")
+    assert not git(path, "status", "--porcelain")
+    assert reclaim()["items"][0]["decision"] == "keep"
+    assert reclaim(dry_run=False)["reclaimed"] == 0
+    assert valuable.read_text() == "keep"
+
+
 def test_stamp_failure_aborts_before_removal(repository, monkeypatch):
     _, path = merged(repository)
     monkeypatch.setattr(rc, "_stamp_head", Mock(side_effect=RuntimeError("registry unavailable")))

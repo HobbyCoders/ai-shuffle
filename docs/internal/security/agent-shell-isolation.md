@@ -170,13 +170,16 @@ Do not enable the split on a live worker merely to test it. Use disposable
 volumes and synthetic credentials. Optional `on` still fails open on migration
 or identity errors and is ignored with `--user`. Explicit `required` refuses
 these paths and reports `required agent isolation established` on success.
-Only `off`, `on` and `required` are valid (trimmed, case-insensitive); empty or
-unset defaults to `off`. Unknown values, including boolean aliases such as `yes`
-and `true`, refuse startup before migration or rollback and list the valid values.
-Its first supporting image is the image built from merged PR #335 (not yet
-released). Older images ignore the unknown value and run unisolated; pin a
-supporting image and check the log after tag changes. This startup policy is
-not evidence of OS-level enforcement; run the disposable-image checks below
+The modes are `off`, `on` and `required` (trimmed, case-insensitive); empty or
+unset defaults to `off`. Legacy spellings `1`/`true`/`yes` mean `on`, and
+`0`/`false`/`no` mean `off`. Unknown values refuse container startup before
+migration or rollback and list the valid values. Desktop and native installs
+ignore this container-only setting.
+The first image supporting **required mode** is the image built from merged
+PR #335 (not yet released). Images predating that change ignore `required` and
+run unisolated; pin a supporting image and check the log after tag changes.
+This startup policy is not evidence of OS-level enforcement; run the
+disposable-image checks below
 before relying on it or considering a default-on change.
 
 Run these checks from the repository root:

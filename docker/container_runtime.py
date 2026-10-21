@@ -659,6 +659,7 @@ def isolation_setting():
             raise RuntimeFailure(str(error)) from None
     # Packaging/older images may lack helpers, but must not silently accept typos.
     mode = os.environ.get("AGENT_ISOLATION", "").strip().lower() or "off"
+    mode = {"1": "on", "true": "on", "yes": "on", "0": "off", "false": "off", "no": "off"}.get(mode, mode)
     if mode not in {"off", "on", "required"}:
         raise RuntimeFailure("AGENT_ISOLATION: startup refused; valid values: off, on, required")
     return mode
