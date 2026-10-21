@@ -37,13 +37,20 @@ response is shared; on a failure the other rows are deferred exactly as the
 budget would defer them, and only the requesting row records the failure.
 HTTP responses never leave the requesting worker. Successful **normalized**
 readings are published through authenticated, encrypted settings sync under
-`provider_observation:` keys, scoped to the source and a credential digest.
-Receiving workers import the latest matching observation before attempting a
-poll; its original `observed_at` and `source_worker` are retained, never stamped
-as newly fetched. Arrival of a billing key or observation schedules a post-commit
-refresh, including one follow-up if a refresh was already running. Local binding
-and credential/revision guards still authorize writes. Secrets, local binding IDs,
-denial fingerprints and raw provider bodies are not shared as observations.
+`provider_observation:` keys, scoped to a non-secret source/provider identity.
+A network-keyed HMAC credential revision prevents cross-credential imports without
+naming rows after secrets. Rotations replace rather than accumulate row names;
+credential edits, provider deletion and explicit billing disconnect delete old
+observations and publish their tombstones after commit.
+Receiving workers import the latest matching observation without claiming a
+budget or forcing a full pass. Its original `observed_at` is retained, never
+stamped as newly fetched; `source_worker` comes from the signed envelope origin.
+An older observation cannot replace a newer one for the same credential, nor
+clear a newer local attempt/error. Billing-key arrival schedules a post-commit
+refresh (including the real paged enrollment path), with one follow-up if a pass
+was already running. Local binding and credential/revision guards still authorize
+writes. Secrets, local binding IDs, denial fingerprints and raw provider bodies
+are not shared as observations.
 
 This covers API balances and polled provider snapshots (including OpenRouter,
 fal, Admin spend and subscription windows). No per-worker allowance is added:
@@ -53,8 +60,8 @@ multiplying requests by worker count is deliberately avoided. During a partition
 a worker keeps its last reading until observation sync or budget access returns.
 
 A configured balance without a snapshot or error is `pending`; a budget refusal
-is `deferred`, with a fixed `last_deferred_reason` and nullable `deferred_until`
-(epoch milliseconds; null when the coordinator's deadline is unknown). A failed
+is `deferred`, with a fixed `last_deferred_reason`; no retry deadline is
+advertised because the coordinator does not supply one. A failed
 first reading is `unavailable`. A previous successful reading remains `fresh` or
 `stale` using its original timestamp. xAI discovery deferrals persist this state
 even before a team ID is known, and keep any discovered team and prior reading.

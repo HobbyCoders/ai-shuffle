@@ -1,11 +1,12 @@
 """Share normalized observations, not provider responses or local trust markers.
 
 The request budget remains network-wide. A peer's reading travels through the
-existing authenticated/encrypted settings sync, keyed by a plaintext-credential
-digest (ciphertexts differ on each installation). Importing it never authorizes
+existing authenticated/encrypted settings sync, keyed by source/provider identity
+with a network-keyed credential revision. Importing it never authorizes
 billing access: local bindings and credential/revision guards still apply.
 """
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -125,8 +126,14 @@ def _binding(source, row):
             generation = generation or model_key_generation(row)
         parts.append(key)
         guards["expected_credential_generation"] = generation
-    digest = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
-    return PREFIX + source.id + ":" + digest, row, _snapshot_id(source, row), guards
+    from app.network import engine
+    ctx = engine.cached_context()
+    if ctx is None:
+        return None
+    revision = hmac.new(ctx.network_key, b"provider-observation-v1\0" + json.dumps(parts).encode(),
+                        hashlib.sha256).hexdigest()
+    provider_id = row["id"] if row else _snapshot_id(source, row)
+    return PREFIX + source.id + ":" + provider_id, row, _snapshot_id(source, row), guards, revision
 
 
 def _local(source, binding):
@@ -145,15 +152,18 @@ def _read(source, row):
     except (ValueError, TypeError):
         shared = {}
     observed = shared.get("observed_at")
-    if (_number(observed) and observed <= time.time() * 1000
-            and observed > (local.get("fetched_at") or 0)):
+    attempted = max(local.get("last_attempted_at") or 0,
+                    (local.get("raw") or {}).get("usage_attempted_at") or 0)
+    matching = shared.get("credential_revision") == binding[4]
+    if (matching and _number(observed) and observed <= time.time() * 1000
+            and observed > max(local.get("fetched_at") or 0, attempted)):
         credits, windows = _credits(shared.get("credits")), _windows(shared.get("windows"))
         if credits or windows:
             provenance = {"observed_at": observed, "source_worker": shared.get("source_worker")}
             if source.id in BALANCES:
                 provider_balances.snapshot(binding[1], {**local, "credits": credits, "fetched_at": observed,
                                                         "last_error_kind": None, "last_error_scope": None,
-                                                        "last_deferred_reason": None, "deferred_until": None,
+                                                        "last_deferred_reason": None,
                                                         **provenance})
             else:
                 raw = {"source": source.id, **provenance}
@@ -168,17 +178,36 @@ def _read(source, row):
     # observations still go through the existing budget (and its clock).
     from app.network import engine
     ctx = engine.cached_context()
-    peer_reading = bool(ctx and shared.get("source_worker")
+    peer_reading = bool(matching and ctx and shared.get("source_worker")
                         and shared.get("source_worker") != ctx.device_id
                         and observed == local.get("fetched_at"))
     return binding, local, peer_reading
+
+
+def import_keys(keys):
+    """Import only matching arrivals: never start a full poll or claim a budget."""
+    from app.core import usage_sources
+
+    for key in keys:
+        if not key.startswith(PREFIX):
+            continue
+        source_id, _, provider_id = key[len(PREFIX):].partition(":")
+        source = usage_sources.SOURCES.get(source_id)
+        if source is None or not source.poller:
+            continue
+        row = None if source.global_source else db.get_model_provider(provider_id, include_token=True)
+        if not source.global_source and (not row or source not in usage_sources.polled_sources(row)):
+            continue
+        binding = _binding(source, row)
+        if binding and binding[0] == key:
+            _read(source, row)
 
 
 def _publish(source, row, before):
     from app.network import engine
 
     binding = _binding(source, row)
-    if not binding or binding[0] != before[0][0]:
+    if not binding or binding[0] != before[0][0] or binding[4] != before[0][4]:
         return
     local = _local(source, binding)
     fetched = local.get("fetched_at")
@@ -196,7 +225,7 @@ def _publish(source, row, before):
     # provider-controlled text never enter the shared record.
     plan = local.get("plan_type")
     value = {"credits": credits, "windows": windows, "observed_at": fetched,
-             "source_worker": ctx.device_id}
+             "source_worker": ctx.device_id, "credential_revision": binding[4]}
     if plan in PLANS:
         value["plan_type"] = plan
     db.set_system_setting(binding[0], json.dumps(value))

@@ -28,7 +28,8 @@ def fake_http(monkeypatch, bodies):
     def handle(request):
         calls.append(str(request.url))
         value = bodies[str(request.url)]
-        return httpx.Response(200, json=value)
+        status, body = value if isinstance(value, tuple) else (200, value)
+        return httpx.Response(status, json=body)
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(
         **{**kw, "transport": httpx.MockTransport(handle)}))
@@ -248,7 +249,8 @@ def test_projection_does_not_publish_secret_or_trust_fields(workers, monkeypatch
         source = SOURCES["openai_platform_balance"]
         key = provider_observations._binding(source, row())[0]
         value = json.loads(db.get_system_setting(key))
-        assert set(value) == {"credits", "windows", "observed_at", "source_worker"}
+        assert set(value) == {"credits", "windows", "observed_at", "source_worker", "credential_revision"}
+        assert len(value["credential_revision"]) == 64
         assert set(value["credits"]) == {"balance_remaining", "total_credits", "total_usage", "currency"}
         assert "do-not-copy" not in json.dumps(value)
     assert len(calls) == 1

@@ -654,6 +654,24 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
+    if coll.name == "system_settings" and record_id.startswith("provider_observation:"):
+        from app.core.provider_observations import _number
+        existing = _read_row(cursor, coll, record_id)
+        try:
+            incoming = json.loads(record.get("value") or "{}")
+            current = json.loads((existing or {}).get("value") or "{}")
+        except (ValueError, TypeError):
+            return existing
+        if not isinstance(incoming, dict) or not _number(incoming.get("observed_at")):
+            return existing
+        if (isinstance(current, dict) and _number(current.get("observed_at"))
+                and current.get("credential_revision") == incoming.get("credential_revision")
+                and incoming["observed_at"] < current["observed_at"]):
+            return existing
+        # Provenance is authenticated by the record's signed envelope, not an
+        # assertion made inside its value (also preserved when forwarded).
+        incoming["source_worker"] = origin_device_id
+        record["value"] = json.dumps(incoming)
     new_agent = False
     if coll.name == "agents":
         cursor.execute("SELECT 1 FROM agents WHERE id = %s", keys)
@@ -2441,7 +2459,8 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
 
 def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
                          _conn=None, validated_membership: bool = False,
-                         body: Optional[Mapping[str, Any]] = None) -> int:
+                         body: Optional[Mapping[str, Any]] = None,
+                         _touched: Optional[list] = None) -> int:
     """Apply a chunk: records newer than what we hold replace ours (LWW by clock).
 
     A page for a collection this build does not know (retired here, or added
@@ -2457,6 +2476,8 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         applied, touched = apply_snapshot_items(conn.cursor(), coll, body["items"], ctx=ctx,
                                                 validated_membership=validated_membership)
+    if _touched is not None:
+        _touched.extend(touched)
     if touched and _conn is None:
         if coll.name in ("membership", "member_names"):
             load_context()

@@ -196,7 +196,6 @@ class ProviderUsageEntry(BaseModel):
     status: Literal["fresh", "stale", "unavailable", "never_fetched", "pending", "deferred"] = "never_fetched"
     observed_at: int | None = None
     source_worker: str | None = None
-    deferred_until: int | None = None
     last_deferred_reason: str | None = None
     last_error_kind: ErrorKind | None = None
     last_error_scope: str | None = None
@@ -428,7 +427,7 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                 provider_type=provider["provider_type"], status=balance["status"],
                 credits=credits, fetched_at=balance["fetched_at"],
                 observed_at=balance["observed_at"], source_worker=balance["source_worker"],
-                deferred_until=balance["deferred_until"], last_deferred_reason=balance["last_deferred_reason"],
+                last_deferred_reason=balance["last_deferred_reason"],
                 last_error_scope=balance["last_error_scope"],
                 source=source_def.label, scope=source_def.scope_label,
                 source_info=_source_info(source_def), last_error_kind=balance["last_error_kind"],

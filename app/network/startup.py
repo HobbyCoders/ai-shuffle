@@ -21,6 +21,7 @@ from typing import Callable, List, Optional
 
 from app.core.config import settings
 from app.db import database
+from app.db.async_database import run_sync
 from app.db import network as store
 from app.network import engine, identity as identity_mod, policy
 
@@ -345,9 +346,14 @@ def _on_applied(touched) -> None:
     from app.core.global_events import global_events
     resources = set()
     session_sources = set()
-    if any((c == "provider_billing" and op == "upsert") or
-           (c == "system_settings" and r.startswith("provider_observation:"))
-           for c, r, op in touched):
+    observation_keys = {r for c, r, op in touched if c == "system_settings"
+                        and r.startswith("provider_observation:") and op == "upsert"}
+    if observation_keys:
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            from app.core.provider_observations import import_keys
+            asyncio.run_coroutine_threadsafe(run_sync(import_keys, observation_keys), loop)
+    if any(c == "provider_billing" and op == "upsert" for c, r, op in touched):
         # Applied notifications run after commit, including bootstrap imports.
         # Hop from the sync/DB thread to the app loop; never poll under its locks.
         loop = getattr(global_events, "_loop", None)

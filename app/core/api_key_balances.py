@@ -106,7 +106,6 @@ def status(row):
             "invoice_error_kind": snap.get("invoice_error_kind"),
             "spending_limit_error_kind": snap.get("spending_limit_error_kind"),
             "last_error_kind": error, "needs_reauth": error == "billing_access_denied",
-            "deferred_until": snap.get("deferred_until"),
             "last_deferred_reason": snap.get("last_deferred_reason"),
             "observed_at": fetched, "source_worker": snap.get("source_worker"),
             "status": ("fresh" if fresh else "stale" if fetched else "unavailable"
@@ -179,7 +178,6 @@ async def poll(row):
         # wait and keep both discovery progress and the last successful reading.
         await run_sync(provider_balances.snapshot, row, {
             **cached, "team_id": team,
-            "deferred_until": deferred.deferred_until,
             "last_deferred_reason": deferred.reason,
         })
         return
@@ -187,4 +185,5 @@ async def poll(row):
         code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
         # No exception strings or provider response bodies (they may echo keys).
         kind = "billing_access_denied" if code in (401, 403) else "unavailable"
-        await run_sync(provider_balances.snapshot, row, {"last_error_kind": kind, "last_error_scope": error_scope, "team_id": team, "fetched_at": cached.get("fetched_at")})
+        await run_sync(provider_balances.snapshot, row, {"last_error_kind": kind, "last_error_scope": error_scope,
+            "last_attempted_at": int(time.time() * 1000), "team_id": team, "fetched_at": cached.get("fetched_at")})
