@@ -921,7 +921,8 @@ def test_presend_stop_refusal_names_workers_and_mode(setup, monkeypatch, caplog,
         result = asyncio.run(fleet.dispatch("install", mode))
     assert result["sent"] is None
     assert {row["device_name"] for row in result["results"]} >= {"Current worker", "Peer"}
-    assert all(row["request_state"] == "not_sent" and row["device_name"] in row["reason"] for row in result["results"])
+    assert all(row["request_state"] == "not_sent" and row["reason"] == "Waiting on workers to finish the previous update"
+               for row in result["results"])
     assert "mode=" + mode in caplog.text and "scope=all" in caplog.text
     remote.assert_not_called()
     assert updates._desktop_request is None

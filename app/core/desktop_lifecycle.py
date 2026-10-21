@@ -42,6 +42,7 @@ def busy_work() -> list[dict]:
     import time
     from datetime import datetime, timezone
     from app.core.task_registry import _iso, task_registry
+    from app.core.export_redaction import redact_export_text
     from app.core.session_runtime import active_executions
     from app.core.monitor_spawn import serving_idle_budget_seconds, session_idle_seconds
     from app.mcp.builtin_tools import is_background_shell_running
@@ -71,9 +72,14 @@ def busy_work() -> list[dict]:
             tid = task["id"]
             service = task_registry.is_serving_monitor(sid, tid)
             kind = "service" if service else task.get("kind") or "registry"
-            label = str(task.get("subject") or task.get("agent") or "Background task")
-            port_match = re.search(r"(?:--port(?:=|\s+)|:)(\d{2,5})(?:\b|$)", label)
+            label = redact_export_text(str(task.get("subject") or task.get("agent") or "Background task"))
+            port_match = re.search(
+                r"(?:--port(?:=|\s+)|(?:https?://[\w.-]+|localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[\da-fA-F:]+\]):)(\d{1,5})\b",
+                label,
+            )
             port = int(port_match[1]) if port_match else None
+            if port is not None and not 1 <= port <= 65535:
+                port = None
             live = is_background_shell_running(tid) if kind in ("shell", "service") else False
             stop_at = None
             if service and live and budget and idle is not None:

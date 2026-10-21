@@ -846,7 +846,7 @@ class ContainerUpdates:
         offered = self.offer if phase in ("available", "ready", "downloading") else {}
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
-                    "staged_version": pending,
+                    "staged_version": pending if pending != self.running else None,
                     "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel,
                     "checked_at": self.checked_at, "notice": self.notice})
 

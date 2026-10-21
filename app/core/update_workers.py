@@ -53,7 +53,7 @@ class UpdateNotSent(ValueError):
     """A preflight refusal, before any update action was delivered."""
 
 
-def waiting_status(state):
+def waiting_status(state, *, busy_rows=None):
     """Owner-only restart state; staging and a busy install are independent.
 
     Call on the event loop, not in run_sync: runtime/registry liveness belongs
@@ -71,7 +71,7 @@ def waiting_status(state):
     staged = state.get("staged_version") or (state.get("version") if state.get("phase") == "ready" else None)
     blocked = []
     executing = set(active_executions().values())
-    for row in busy_work():
+    for row in busy_work() if busy_rows is None else busy_rows:
         sid = row["session_id"]
         base = {"session_id": sid, "title": row["title"],
                 "running_turn": row.get("running_turn", sid in executing),
@@ -102,7 +102,7 @@ def waiting_status(state):
             else:
                 live = tid in workers or (isinstance(pending, dict) and tid in pending)
                 liveness = "live" if live else "unknown"
-            blocked.append({**base, **detail, "task_id": tid, "subject": task.get("subject"),
+            blocked.append({**base, **detail, "task_id": tid,
                             "kind": kind, "since": task.get("startedAt"),
                             "live": live, "liveness": liveness})
         if sid not in executing and not tasks:
@@ -117,7 +117,8 @@ def waiting_status(state):
     elif staged and state.get("phase") != "ready":
         install = "unavailable"
         reason = ("newer_offer" if state.get("phase") == "available" else
-                  "preparing_update" if state.get("phase") in ("checking", "downloading") else "updater_error")
+                  "preparing_update" if state.get("phase") in ("checking", "downloading") else
+                  "updater_idle" if state.get("phase") == "idle" else "updater_error")
     elif staged:
         install, reason = ("blocked", "running_work") if blocked else ("ready", None)
         if blocked and _stop_result and not _stop_result.get("accepted"):
@@ -128,6 +129,46 @@ def waiting_status(state):
             "blocked_by": blocked, "wait_reason": reason,
             "restart_expires_at": (_deferred or {}).get("expires_at"),
             "monitor_serving_idle_seconds": serving_idle_budget_seconds(), "stop_result": _stop_result}
+
+
+def _waiting_unavailable():
+    return {key: None for key in ("staged_version", "install_state", "blocked_by", "wait_reason",
+                                  "restart_expires_at", "monitor_serving_idle_seconds", "stop_result")}
+
+
+def _safe_waiting_status(state, busy_rows):
+    try:
+        return waiting_status(state, busy_rows=busy_rows)
+    except Exception as exc:  # Display metadata must never undo a queued action.
+        logger.warning("Application update: waiting state unavailable (%s)", type(exc).__name__)
+        return _waiting_unavailable()
+
+
+async def _async_waiting_status(state):
+    from app.core.desktop_lifecycle import busy_work
+    try:
+        rows = await run_sync(busy_work)
+    except Exception as exc:
+        logger.warning("Application update: waiting state unavailable (%s)", type(exc).__name__)
+        return _waiting_unavailable()
+    return _safe_waiting_status(state, rows)
+
+
+async def _local_action(action, request_id, mode=None):
+    # Keep registry/engine decisions and atomic enqueue on the loop; only the
+    # optional owner-display DB reads run in a thread. Recheck busy after await.
+    from app.core.desktop_lifecycle import busy_work
+    rows, unavailable = [], False
+    if action == "install":
+        try:
+            rows = await run_sync(busy_work)
+        except Exception as exc:
+            logger.warning("Application update: waiting state unavailable (%s)", type(exc).__name__)
+            unavailable = True
+    result = local_action(action, request_id, mode, busy_rows=rows)
+    if unavailable:
+        result.update(_waiting_unavailable())
+    return result
 
 
 def _busy_reason(busy):
@@ -165,7 +206,7 @@ async def _restart_when_idle(request_id):
             from app.core.desktop_lifecycle import active_session_ids
             if active_session_ids():
                 continue
-            result = local_action("install", f"{request_id[:64]}:idle:{uuid.uuid4().hex[:8]}")
+            result = await _local_action("install", f"{request_id[:64]}:idle:{uuid.uuid4().hex[:8]}")
             if result.get("busy"):
                 continue  # a new turn started between the two reads
             logger.info("Application update: deferred restart %s", result["reason"])
@@ -190,7 +231,7 @@ async def _stop_then_restart(request_id):
         await asyncio.sleep(1)
     # Do not bypass the normal guard: both runtimes check again before exit.
     # A failed stop must remain a named refusal, never a misleading queue ack.
-    result = local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
+    result = await _local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
     global _stop_result
     _stop_result = {"request_id": request_id, "accepted": result.get("accepted", False), "reason": result["reason"],
                     "completed_at": time.time(), "busy": result.get("busy", [])}
@@ -213,7 +254,7 @@ async def _stop_then_restart(request_id):
             logger.warning("Application update: could not publish stop refusal for %s", request_id, exc_info=True)
 
 
-def local_action(action, request_id, mode=None):
+def local_action(action, request_id, mode=None, *, busy_rows=None):
     """One worker's part of an update action. ``mode`` only applies to install.
 
     A busy install is refused with the running chats named in ``busy``, unless
@@ -257,8 +298,12 @@ def local_action(action, request_id, mode=None):
     busy = None
     if action == "install" and not reason:
         from app.core.desktop_lifecycle import active_session_ids, busy_work
-        if active_session_ids():
-            busy = busy_work()
+        active = active_session_ids()
+        if active:
+            busy = list(busy_work() if busy_rows is None else busy_rows)
+            named = {row["session_id"] for row in busy}
+            busy.extend({"session_id": sid, "title": "Running chat", "tasks": []}
+                        for sid in active if sid not in named)
             if mode is None:
                 reason = _busy_reason(busy)
             else:
@@ -276,7 +321,7 @@ def local_action(action, request_id, mode=None):
                     queued = "Stopping running work, then restarting"
                 result = {"accepted": True, "reason": queued, "phase": state["phase"],
                           "version": state.get("version"), "busy": busy,
-                          "deferred": mode == "when_idle", **waiting_status(state)}
+                          "deferred": mode == "when_idle", **_safe_waiting_status(state, busy)}
                 _receipts[request_id] = (time.monotonic() + 60, result)
                 return result
     if not reason:
@@ -295,7 +340,7 @@ def local_action(action, request_id, mode=None):
     if busy:
         result["busy"] = busy
     if action == "install":
-        result.update(waiting_status({**state, "install_pending": reason is None or state.get("install_pending", False)}))
+        result.update(_safe_waiting_status({**state, "install_pending": reason is None or state.get("install_pending", False)}, busy or []))
     _receipts[request_id] = (time.monotonic() + 60, result)
     while len(_receipts) > 256:
         _receipts.popitem(last=False)
@@ -317,7 +362,7 @@ async def peer_action(body, from_device):
         raise PermissionError("Only active account workers may request application updates")
     if body.get("operation") == "status":
         state = await run_sync(updates.status)
-        return {**state, **waiting_status(state), **_build(), "deferred": _deferred is not None}
+        return {**state, **await _async_waiting_status(state), **_build(), "deferred": _deferred is not None}
     if body.get("operation") != "action":
         raise ValueError("Unknown update operation")
     if not isinstance(body.get("request_id"), str) or not body["request_id"]:
@@ -325,7 +370,7 @@ async def peer_action(body, from_device):
     expiry = body.get("expires_at")
     if type(expiry) not in (int, float) or not time.time() <= expiry <= time.time() + 15:
         raise ValueError("Update request expired; offline commands are not replayed")
-    result = local_action(body.get("action"), from_device + ":" + body["request_id"], body.get("mode"))
+    result = await _local_action(body.get("action"), from_device + ":" + body["request_id"], body.get("mode"))
     logger.info("Application update action=%s mode=%s scope=current requested by worker %s: %s",
                 body.get("action"), body.get("mode"), from_device, result["reason"])
     return result
@@ -552,7 +597,7 @@ async def snapshot(*, fresh=False):
     local = await run_sync(updates.status)
     listing = await run_sync(runners.directory)
     rows = [{"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", "is_self": True,
-             "online": True, **local, **waiting_status(local), "deferred": _deferred is not None}]
+             "online": True, **local, **await _async_waiting_status(local), "deferred": _deferred is not None}]
     operation = await run_sync(progress.load)
     # A completed install is terminal (progress.observe returns it as saved), so
     # its cohort no longer needs reading.
@@ -621,11 +666,9 @@ async def dispatch(action, mode=None, scope=None):
             targets.append({"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker"})
             results = [{"device_id": row["device_id"], "device_name": row["device_name"], "accepted": False,
                         "request_state": "not_sent", "mode": mode,
-                        "reason": f"Not sent to {row['device_name']}: {exc}"} for row in targets]
-            global _refusals_at
-            _refusals.clear()
-            _refusals.update({row["device_id"]: row["reason"] for row in results})
-            _refusals_at = time.time()
+                        "reason": str(exc)} for row in targets]
+            # No delivery happened: preserve actual refusals from the active
+            # operation. These request-local rows already explain non-delivery.
             return {"scope": resolved_scope, "sent": None, "action": action, "mode": mode,
                     "request_state": "not_sent", "results": results}
         finally:
@@ -740,7 +783,7 @@ async def _send(action, mode=None, scope=None):
         state = await run_sync(updates.status)
         await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"),
                        from_version=state.get("running_version"))
-    local = local_action(action, request_id, mode)
+    local = await _local_action(action, request_id, mode)
     if action == "install":
         await run_sync(progress.record, request_id, self_row["device_id"], result=_tracked(local))
     results.append({**self_row, **local})
@@ -759,7 +802,7 @@ def _tracked(result):
 async def _act(row, action, request_id):
     """Send one action to one snapshot row, the current worker included."""
     if row.get("is_self"):
-        result = local_action(action, request_id)
+        result = await _local_action(action, request_id)
     else:
         result = await _remote(row, {"operation": "action", "action": action, "request_id": request_id,
                                      "expires_at": time.time() + 10})
