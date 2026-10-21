@@ -52,6 +52,7 @@ from app.core.provider import legacy_events as _legacy_events  # noqa: F401
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
+from fluid.messages.content import Text
 from fluid.store.base import (
     RECONSTRUCTIBLE_EVENTS,
     SessionMeta,
@@ -129,6 +130,104 @@ def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
         node_id=row["node_id"], parent_id=row["parent_id"], ts=row["ts"],
         message=Message.from_dict(_as_dict(row["message"])),
     )
+
+
+# A delegated CLI owns the transcript. Keep only the host-pinned memory
+# projection; never the surrounding owner prompt/tool payload. Overflow is
+# conservative: the adapter re-sends a full snapshot on its next turn.
+MEMORY_PATH_BYTES = 64 * 1024
+_ANCESTORS_SQL = """WITH RECURSIVE ancestors AS (
+    SELECT node_id, parent_id, 0 AS depth FROM fluid_session_nodes
+    WHERE session_id = %s AND node_id = %s
+    UNION ALL
+    SELECT n.node_id, n.parent_id, a.depth + 1 FROM fluid_session_nodes n
+    JOIN ancestors a ON n.node_id = a.parent_id WHERE n.session_id = %s
+) """
+
+
+def _memory_projection(nodes: Optional[List[SessionNode]], node: SessionNode) -> Optional[List[SessionNode]]:
+    from app.core.memory_reminder import memory_blocks, newest_full_node
+
+    message = node.message
+    note = message.pinned_text() if message.role == "user" else ""
+    if not note or not memory_blocks(note):
+        return nodes
+    if newest_full_node([node]):
+        nodes = []
+    if nodes is None:
+        return None
+    result = [*nodes, SessionNode(
+        node_id=node.node_id, parent_id=node.parent_id, ts=node.ts,
+        message=Message(role="user", content=[Text(text=note)], context_pin=(0, len(note))),
+    )]
+    return result if sum(4 * len(n.message.text()) for n in result) <= MEMORY_PATH_BYTES else None
+
+
+def _session_head_sync(session_id: str) -> Optional[str]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT head_node_id FROM fluid_sessions WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(session_id)
+    return row["head_node_id"]
+
+
+def _load_memory_path_sync(session_id: str, head: Optional[str]) -> Optional[List[SessionNode]]:
+    """Cold/rewound path only: indexed ancestry IDs, memory candidates only.
+
+    No off-path rows or assistant/tool messages are decoded. Walk candidates
+    newest-first and stop at the newest provenance-marked full snapshot.
+    Linear appends advance the bounded projection without this ancestry read.
+    """
+    from app.core.memory_reminder import newest_full_node
+
+    if head is None:
+        return []
+    newest = []
+    size = 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(_ANCESTORS_SQL + """
+            SELECT n.node_id, n.parent_id, n.ts, n.message FROM ancestors a
+            JOIN fluid_session_nodes n ON n.node_id = a.node_id AND n.session_id = %s
+            WHERE n.message ->> 'role' = 'user' AND n.message -> 'context_pin' IS NOT NULL
+              AND CAST(n.message AS TEXT) LIKE %s ORDER BY a.depth
+        """, (session_id, head, session_id, session_id, '%# Memory%'))
+        while (row := cur.fetchone()) is not None:
+            node = SessionNode(node_id=row["node_id"], parent_id=row["parent_id"], ts=row["ts"],
+                               message=Message.from_dict(_as_dict(row["message"])))
+            projected = _memory_projection([], node)
+            if projected is None:
+                return None
+            if not projected:
+                continue
+            size += 4 * len(projected[0].message.text())
+            if size > MEMORY_PATH_BYTES:
+                return None
+            newest.append(projected[0])
+            if newest_full_node([node]):
+                break
+    return list(reversed(newest))
+
+
+def _initial_task_sync(session_id: str, owner_ids: List[str]) -> str:
+    from app.core.memory_reminder import initial_task_query
+
+    if not owner_ids:
+        return ""
+    head = _session_head_sync(session_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        slots = ','.join(['%s'] * len(owner_ids))
+        cur.execute(_ANCESTORS_SQL + f"SELECT node_id FROM ancestors WHERE node_id IN ({slots}) "
+                    "ORDER BY depth DESC", (session_id, head, session_id, *owner_ids))
+        ids = [row["node_id"] for row in cur.fetchall()]
+    for node_id in ids:
+        node = _get_node_sync(session_id, node_id)
+        if node is not None and (query := initial_task_query([node])):
+            return query
+    return ""
 
 
 def _load_path_sync(session_id: str, leaf_node_id: Optional[str]) -> List[SessionNode]:
@@ -1286,6 +1385,7 @@ class PgFluidStore:
         self.cache_nodes = cache_nodes
         self._sessions: Dict[str, SessionMeta] = {}
         self._nodes: Dict[str, Dict[str, SessionNode]] = {}
+        self._memory_paths: Dict[str, tuple[Optional[str], Optional[List[SessionNode]]]] = {}
         self._events: Dict[str, List[Event]] = {}
         self._event_floor: Dict[str, int] = {}
         self._pending_events: Dict[str, List[Event]] = {}
@@ -1376,6 +1476,8 @@ class PgFluidStore:
         await run_sync(_create_session_sync, meta)
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
+        if not self.cache_nodes:
+            self._memory_paths[meta.session_id] = (None, [])
         self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
         return meta
@@ -1391,6 +1493,12 @@ class PgFluidStore:
         await run_sync(_append_node_sync, session_id, node)
         if self.cache_nodes:
             self._nodes.setdefault(session_id, {})[node.node_id] = node
+        elif session_id in self._memory_paths:
+            head, projection = self._memory_paths[session_id]
+            if node.parent_id == head:
+                self._memory_paths[session_id] = (node.node_id, _memory_projection(projection, node))
+            else:
+                self._memory_paths.pop(session_id, None)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node.node_id
 
@@ -1419,11 +1527,26 @@ class PgFluidStore:
         path.reverse()
         return path
 
+    async def load_memory_path(self, session_id: str) -> Optional[List[SessionNode]]:
+        """Bounded pinned-memory projection, validated against the durable head."""
+        await self._ensure_loaded(session_id)
+        await self.flush_events(session_id)
+        head = await run_sync(_session_head_sync, session_id)
+        cached = self._memory_paths.get(session_id)
+        if cached is None or cached[0] != head:
+            projection = await run_sync(_load_memory_path_sync, session_id, head)
+            cached = self._memory_paths[session_id] = (head, projection)
+        return cached[1]
+
+    async def initial_task_query(self, session_id: str, owner_ids: List[str]) -> str:
+        return await run_sync(_initial_task_sync, session_id, owner_ids)
+
     async def set_head(self, session_id: str, node_id: Optional[str]) -> None:
         await self._ensure_loaded(session_id)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node_id
         await run_sync(_set_head_sync, session_id, node_id)
+        self._memory_paths.pop(session_id, None)
 
     async def set_cli_session_id(
         self, session_id: str, cli_session_id: Optional[str]

@@ -58,7 +58,11 @@ def sample(pid):
         except (OSError, ValueError):
             continue
     network = {}
-    for line in (Path('/proc') / str(pid) / 'net/dev').read_text().splitlines()[2:]:
+    try:
+        network_text = (Path('/proc') / str(pid) / 'net/dev').read_text()
+    except OSError:
+        raise SystemExit('Target process exited or its network counters are unavailable') from None
+    for line in network_text.splitlines()[2:]:
         name, values = line.split(':')
         fields = values.split()
         network[name.strip()] = dict(rx_bytes=int(fields[0]), tx_bytes=int(fields[8]))
