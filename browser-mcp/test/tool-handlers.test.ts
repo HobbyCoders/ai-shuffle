@@ -140,13 +140,11 @@ describe("capText", () => {
 
 describe("browser_read_text truncation", () => {
   function readSession(text: string): Session {
-    const frame = { isDetached: () => false, parentFrame: () => null,
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => page,
       locator: () => ({ evaluate: async () => text }) };
+    const page = { title: async () => "Long", url: () => "http://h/long", mainFrame: () => frame, frames: () => [frame] };
     return {
-      ensurePage: async () => ({
-        title: async () => "Long", url: () => "http://h/long",
-        mainFrame: () => frame, frames: () => [frame],
-      }),
+      ensurePage: async () => page,
       checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }

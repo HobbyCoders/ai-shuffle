@@ -84,7 +84,7 @@ describe("browser_navigate loopback retry", () => {
     failure: string | ((url: string) => string) = REFUSED,
     responseHeaders: Record<string, string> | ((url: string) => Record<string, string>) = {},
   ): Session {
-    const frame = { isDetached: () => false, parentFrame: () => null,
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => page,
       locator: () => ({ filter() { return this; }, count: async () => 1 }) };
     const page = {
       url: () => visited[visited.length - 1] ?? "about:blank",

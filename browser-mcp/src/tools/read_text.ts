@@ -9,7 +9,7 @@
  */
 
 import { raceWithTimeout, type Session } from "../session.js";
-import { observationRoots, includeObservationRoot, observationTask, boundedObservation } from "./observation_scope.js";
+import { observationRoots, includeObservationRoot, observationTask, boundedObservation, observationReady } from "./observation_scope.js";
 import { jsonResult, errorResult, capText, emptyContentWarning, type McpToolResult } from "./result.js";
 
 export const READ_TEXT_MAX_CHARS = 30000;
@@ -19,7 +19,9 @@ interface Extracted {
   url: string;
   text: string;
   frames_skipped: number;
+  frames_hidden: number;
 }
+interface ReadPart { text: string; hidden?: boolean; excluded?: boolean }
 
 /**
  * Runs inside each frame, traversing the rendered composed tree, including
@@ -59,19 +61,24 @@ export async function runReadText(session: Session, input: { offset?: number; sc
   const roots = await observationRoots(session, input.scope_ref);
   let extracted: Extracted;
   try {
-    const read = (root: typeof roots[number], budget: number) => observationTask(session, root, `read:${input.scope_ref ?? ""}`, async () => {
-      if (!await includeObservationRoot(root)) return undefined;
+    const key = Symbol("read");
+    const read = (root: typeof roots[number], budget: number) => observationTask<ReadPart>(root, key, async () => {
+      if (!await includeObservationRoot(root, false)) return { text: "", excluded: true };
+      if (!await includeObservationRoot(root)) return { text: "", hidden: true };
       const text = root.primary && root.scope
         ? await root.scope.evaluate(extractInRoot, true, { timeout: budget })
         : await root.frame.locator(":root").evaluate(extractInRoot, Boolean(input.scope_ref), { timeout: budget });
-      return !text || root.frame === page.mainFrame() ? text : `[frame ${new URL(root.frame.url()).origin}]\n${text}`;
+      return { text: !text || root.frame === page.mainFrame() ? text : `[frame ${new URL(root.frame.url()).origin}]\n${text}` };
     });
     // Protect main prose from child-frame contention; a failed main read is an
     // error, never a successful empty result or a diagnosis of a blank app.
-    const main = await boundedObservation(read(roots[0], 5000), 5000);
-    if (main === undefined) throw new Error("primary observation root is unavailable");
+    const mainDeadline = Date.now() + 5000;
+    await observationReady(roots[0], mainDeadline);
+    const mainBudget = Math.max(1, mainDeadline - Date.now());
+    const main = await boundedObservation(read(roots[0], mainBudget), mainBudget);
+    if (main.hidden || main.excluded) throw new Error("primary observation root is unavailable");
     const children = roots.slice(1, 49);
-    const parts: (string | undefined)[] = new Array(children.length);
+    const parts: (ReadPart | undefined)[] = new Array(children.length);
     let next = 0;
     const deadline = Date.now() + 2500;
     await Promise.all(Array.from({ length: Math.min(6, children.length) }, async () => {
@@ -85,8 +92,9 @@ export async function runReadText(session: Session, input: { offset?: number; sc
     }));
     extracted = {
       title: await raceWithTimeout(page.title(), 1000, "title timed out").catch(() => ""),
-      url: page.url(), text: [main, ...parts].filter(Boolean).join("\n\n"),
+      url: page.url(), text: [main, ...parts].map(part => part?.text).filter(Boolean).join("\n\n"),
       frames_skipped: roots.length - 1 - parts.filter(part => part !== undefined).length,
+      frames_hidden: parts.filter(part => part?.hidden).length,
     };
   } catch (err) {
     return errorResult(`observation_failed: main-frame text could not be read: ${err instanceof Error ? err.message : String(err)}`);
@@ -103,6 +111,7 @@ export async function runReadText(session: Session, input: { offset?: number; sc
     title: extracted.title,
     chars: text.length,
     frames_skipped: extracted.frames_skipped,
+    frames_hidden: extracted.frames_hidden,
     truncated,
     ...(offset ? { offset } : {}),
     ...(truncated ? { total_chars: total, next_offset: next } : {}),

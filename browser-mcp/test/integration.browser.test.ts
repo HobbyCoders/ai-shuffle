@@ -367,6 +367,78 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "#cross", state: "detached", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
   });
 
+  it.each([
+    ["below fold", '<div style="height:3000px"></div>FRAME'],
+    ["transparent overlay", '<div style="position:relative;width:320px">FRAME<div style="position:absolute;inset:0;background:transparent"></div></div>'],
+    ["click shield", '<div style="position:relative;width:320px">FRAME<div style="position:absolute;inset:0;opacity:0;pointer-events:auto"></div></div>'],
+    ["pointer events none", '<div style="pointer-events:none">FRAME</div>'],
+    ["inner scrollport", '<div style="overflow:auto;width:340px;height:100px"><div style="height:800px"></div>FRAME</div>'],
+    ["sticky header", '<header style="position:sticky;top:0;height:200px;background:white;z-index:5">Header</header><div style="margin-top:-160px">FRAME</div>'],
+  ])("geometry: %s frames remain readable and hidden waits cannot falsely pass", async (_name, layout) => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=ReachableFrame", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent('<p>Main content</p>' + layout.replace("FRAME", `<iframe style="display:block;width:300px;height:150px" src="${src}"></iframe>`));
+    const child = page.frames().find(frame => frame !== page.mainFrame())!;
+    expect(await child.getByText("ReachableFrame").filter({ visible: true }).count()).toBe(1);
+    const read = await runReadText(session);
+    expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_hidden: 0, frames_skipped: 0 });
+    expect((read.content[1] as { text: string }).text).toContain("ReachableFrame");
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "ReachableFrame", timeout_ms: 1000 })))).toMatchObject({ matched: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "ReachableFrame", state: "hidden", timeout_ms: 200 })))).toMatchObject({ matched: false, timed_out: true });
+    await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+    expect((await runReadText(session)).content.map(c => c.type === "text" ? c.text : "").join("\n")).toContain("ReachableFrame");
+  });
+
+  it("geometry: busy counts in one tab cannot starve reads or waits in another", async () => {
+    const pageA = await session.ensurePage(); await pageA.goto(httpUrl);
+    const tabA = session.currentTabId()!;
+    const src = new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost");
+    await pageA.setContent('<p>Tab A</p>' + `<iframe src="${src}"></iframe>`.repeat(8));
+    const children = pageA.frames().filter(frame => frame !== pageA.mainFrame());
+    await Promise.all(children.map(frame => frame.evaluate(() => {
+      addEventListener("message", () => { const until = Date.now() + 20000; while (Date.now() < until) { /* busy renderer */ } });
+    })));
+    let tabB: string | undefined;
+    try {
+      await pageA.evaluate(() => { document.querySelectorAll("iframe").forEach(frame => frame.contentWindow!.postMessage("busy", "*")); });
+      await pageA.waitForTimeout(100);
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing", state: "hidden", timeout_ms: 1100 })))).toMatchObject({ matched: false, timed_out: true });
+      tabB = await session.createTab(); await session.selectTab(tabB);
+      const pageB = await session.ensurePage(); await pageB.goto(httpUrl);
+      await pageB.setContent(`<p>Tab B</p><iframe src="${new URL("observation-text?text=HealthyTabBFrame", httpUrl)}"></iframe>`);
+      const read = await runReadText(session);
+      expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_skipped: 0 });
+      expect((read.content[1] as { text: string }).text).toContain("HealthyTabBFrame");
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HealthyTabBFrame", timeout_ms: 1000 })))).toMatchObject({ matched: true });
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing", state: "hidden", timeout_ms: 1000 })))).toMatchObject({ matched: true });
+    } finally {
+      if (tabB) await session.closeTab(tabA);
+      else await pageA.goto("about:blank");
+    }
+  });
+
+  it("geometry: a read waits within its own budget for a preceding main-frame count", async () => {
+    const page = await session.ensurePage(); await page.goto(httpUrl); await page.setContent("<p>MainBusy</p>");
+    await page.evaluate(() => { setTimeout(() => { const until = Date.now() + 2500; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    try {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "MainBusy", state: "hidden", timeout_ms: 400 })))).toMatchObject({ timed_out: true });
+      const read = await runReadText(session);
+      expect(JSON.parse(firstText(read))).toMatchObject({ ok: true });
+      expect((read.content[1] as { text: string }).text).toContain("MainBusy");
+    } finally { await page.evaluate(() => true); }
+  });
+
+  it("geometry: a new wait cannot reuse a preceding wait's late absence result", async () => {
+    const page = await session.ensurePage(); await page.goto(httpUrl); await page.setContent("<p>Main</p>");
+    await page.evaluate(() => { setTimeout(() => { const until = Date.now() + 1500; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Spinner", state: "hidden", timeout_ms: 200 })))).toMatchObject({ timed_out: true });
+    const add = page.evaluate(() => { const p = document.createElement("p"); p.textContent = "Spinner"; document.body.append(p); });
+    const result = await runWait(session, { condition: "text", text: "Spinner", state: "hidden", timeout_ms: 2200 });
+    await add;
+    expect(await page.getByText("Spinner").count()).toBe(1);
+    expect(JSON.parse(firstText(result))).toMatchObject({ matched: false, timed_out: true });
+  });
+
   it.each([10000, 60000])("delta: large %i-node pages preserve main prose and never satisfy false negative waits", async count => {
     const page = await session.ensurePage(); await page.goto("about:blank");
     await page.evaluate(count => {
@@ -437,7 +509,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     ['behind page', 'style="position:absolute;top:0;left:0;z-index:-1"', ""],
     ['content visibility', '', 'content-visibility:hidden'],
     ['padding consumes viewport', 'style="width:300px;height:150px;border:20px solid;box-sizing:border-box;padding:55px"', ""],
-  ])("delta: %s frames cannot inject hidden prose into reads or waits", async (_name, attributes, wrapper) => {
+  ])("delta: %s injection is excluded from reads while waits use Playwright visibility", async (_name, attributes, wrapper) => {
     const page = await session.ensurePage(); await page.goto(httpUrl);
     const src = new URL("observation-text?text=HiddenInjection", httpUrl).href.replace("127.0.0.1", "localhost");
     await page.setContent(`<p>Main content</p><div style="${wrapper}"><iframe ${attributes} src="${src}"></iframe></div><iframe srcdoc="<p>Visible control frame</p>"></iframe>`);
@@ -445,7 +517,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const text = (read.content[1] as { text: string }).text;
     expect(text).toContain("Main content"); expect(text).toContain("Visible control frame");
     expect(text).not.toContain("HiddenInjection");
-    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", timeout_ms: 150 })))).toMatchObject({ timed_out: true, matched: false });
+    expect(JSON.parse(firstText(read))).toMatchObject({ frames_hidden: 1, frames_skipped: 0 });
+    const child = page.frames().find(frame => frame.url() === src)!;
+    const visible = await child.getByText("HiddenInjection").filter({ visible: true }).count() > 0;
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", timeout_ms: 400 })))).toMatchObject({ matched: visible });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", state: "hidden", timeout_ms: 150 })))).toMatchObject({ matched: !visible });
   });
 
   it("review: churn, SVG and never-answering frames cannot break main-frame observations", async () => {

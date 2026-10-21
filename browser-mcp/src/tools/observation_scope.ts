@@ -1,5 +1,5 @@
 /** Failure-isolated, visible composed-document scopes for text observations. */
-import type { Frame, Locator } from "playwright-core";
+import type { Frame, Locator, Page } from "playwright-core";
 import { raceWithTimeout, type Session } from "../session.js";
 
 export interface ObservationRoot {
@@ -24,10 +24,11 @@ export async function observationRoots(session: Session, scopeRef?: string): Pro
 
 // A timed-out Playwright evaluation cannot be cancelled. Keep its slot occupied
 // until it really settles, and reuse it across polls instead of piling up work.
-const pending = new WeakMap<Session, Map<Frame, { key: string; promise: Promise<unknown> }>>();
-export function observationTask<T>(session: Session, root: ObservationRoot, key: string, run: () => Promise<T>): Promise<T> | undefined {
-  let tasks = pending.get(session);
-  if (!tasks) pending.set(session, tasks = new Map());
+const pending = new WeakMap<Page, Map<Frame, { key: symbol; promise: Promise<unknown> }>>();
+export function observationTask<T>(root: ObservationRoot, key: symbol, run: () => Promise<T>): Promise<T> | undefined {
+  const page = root.frame.page();
+  let tasks = pending.get(page);
+  if (!tasks) pending.set(page, tasks = new Map());
   const existing = tasks.get(root.frame);
   if (existing) return existing.key === key ? existing.promise as Promise<T> : undefined;
   if (!root.primary && tasks.size >= 7) return undefined;
@@ -39,21 +40,31 @@ export function observationTask<T>(session: Session, root: ObservationRoot, key:
   return promise;
 }
 
+/** Wait for actual settlement, but never launch late work after our own budget. */
+export async function observationReady(root: ObservationRoot, deadline: number): Promise<void> {
+  while (true) {
+    const existing = pending.get(root.frame.page())?.get(root.frame);
+    if (!existing) return;
+    await boundedObservation(existing.promise.catch(() => undefined), deadline - Date.now());
+    if (Date.now() >= deadline) throw new Error("frame observation timed out");
+  }
+}
+
 export async function boundedObservation<T>(task: Promise<T> | undefined, timeout: number): Promise<T> {
   if (!task) throw new Error("observation busy");
   return raceWithTimeout(task, Math.max(1, timeout), "frame observation timed out");
 }
 
 /** Called inside each frame's bounded task: a bad child never rejects siblings. */
-export async function includeObservationRoot(root: ObservationRoot): Promise<boolean> {
+export async function includeObservationRoot(root: ObservationRoot, filterHidden = true): Promise<boolean> {
   if (root.frame.isDetached()) return false;
-  if (root.primary && !root.frame.parentFrame()) return true;
+  if ((!filterHidden && !root.scope) || (root.primary && !root.frame.parentFrame())) return true;
   let frame = root.frame;
   let withinScope = !root.scope || root.primary;
   while (frame.parentFrame()) {
     const element = await frame.frameElement();
     try {
-      const visible = await element.evaluate(el => {
+      const visible = !filterHidden || await element.evaluate(el => {
         if (!(el instanceof Element)) return false;
         const rect = el.getBoundingClientRect();
         const ownStyle = getComputedStyle(el);
@@ -64,32 +75,68 @@ export async function includeObservationRoot(root: ObservationRoot): Promise<boo
         const width = (el.clientWidth - px(ownStyle.paddingLeft) - px(ownStyle.paddingRight)) * scaleX;
         const height = (el.clientHeight - px(ownStyle.paddingTop) - px(ownStyle.paddingBottom)) * scaleY;
         if (width <= 2 || height <= 2) return false;
-        const left = Math.max(0, rect.left + (el.clientLeft + px(ownStyle.paddingLeft)) * scaleX);
-        const top = Math.max(0, rect.top + (el.clientTop + px(ownStyle.paddingTop)) * scaleY);
-        const right = Math.min(innerWidth, rect.left + (el.clientLeft + px(ownStyle.paddingLeft)) * scaleX + width);
-        const bottom = Math.min(innerHeight, rect.top + (el.clientTop + px(ownStyle.paddingTop)) * scaleY + height);
-        if (right <= left || bottom <= top) return false;
+        let left = rect.left + (el.clientLeft + px(ownStyle.paddingLeft)) * scaleX;
+        let top = rect.top + (el.clientTop + px(ownStyle.paddingTop)) * scaleY;
+        let right = left + width, bottom = top + height;
+        const intersects = () => right > left && bottom > top;
+        const clip = (x1: number, y1: number, x2: number, y2: number) => {
+          left = Math.max(left, x1); top = Math.max(top, y1);
+          right = Math.min(right, x2); bottom = Math.min(bottom, y2);
+        };
+        const length = (value: string, size: number) => value.endsWith("%") ? px(value) * size / 100 : px(value);
         let node: Element | null = el;
         let opacity = 1;
         while (node) {
           const style = getComputedStyle(node);
           opacity *= Number(style.opacity);
-          if (style.display === "none" || style.visibility !== "visible" ||
-              style.contentVisibility === "hidden" || opacity <= 0.01) return false;
+          if (style.display === "none" || style.visibility !== "visible" || style.contentVisibility === "hidden" ||
+              opacity <= 0.01 || Number(style.zIndex) < 0) return false;
+          const box = node.getBoundingClientRect();
+          const inset = /^inset\((.*?)(?:\s+round\s+.*?)?\)$/.exec(style.clipPath);
+          if (inset) {
+            const v = inset[1].trim().split(/\s+/);
+            clip(box.left + length(v[3] ?? v[1] ?? v[0], box.width), box.top + length(v[0], box.height),
+              box.right - length(v[1] ?? v[0], box.width), box.bottom - length(v[2] ?? v[0], box.height));
+          }
+          const legacy = /^rect\((.*?)\)$/.exec(style.clip);
+          if (legacy) {
+            const v = legacy[1].trim().split(/[,\s]+/);
+            const edge = (i: number, size: number, fallback: number) => v[i] === "auto" ? fallback : length(v[i], size);
+            clip(box.left + edge(3, box.width, 0), box.top + edge(0, box.height, 0),
+              box.left + edge(1, box.width, box.width), box.top + edge(2, box.height, box.height));
+          }
+          if (node !== el) {
+            // Scrollable ancestors expose their full scrollable content, not
+            // just today's scrollport. Non-scrollable overflow really clips.
+            for (const axis of ["x", "y"] as const) {
+              const overflow = axis === "x" ? style.overflowX : style.overflowY;
+              if (overflow === "visible") continue;
+              const size = axis === "x" ? node.clientWidth : node.clientHeight;
+              if (!size) return false;
+              const origin = axis === "x" ? box.left + node.clientLeft : box.top + node.clientTop;
+              let lo = origin, hi = origin + size;
+              if (overflow === "auto" || overflow === "scroll") {
+                lo -= axis === "x" ? node.scrollLeft : node.scrollTop;
+                hi = lo + (axis === "x" ? node.scrollWidth : node.scrollHeight);
+              }
+              if (axis === "x") { left = Math.max(left, lo); right = Math.min(right, hi); }
+              else { top = Math.max(top, lo); bottom = Math.min(bottom, hi); }
+              if (!intersects()) return false;
+              if (overflow === "auto" || overflow === "scroll") {
+                // Project reachable content back to its scrollport before
+                // checking outer ancestors/the document's scrollable area.
+                if (axis === "x") { left = origin; right = origin + size; }
+                else { top = origin; bottom = origin + size; }
+              }
+            }
+          }
+          if (!intersects()) return false;
           node = node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
         }
-        // Browser hit testing accounts for overflow, clip/clip-path, stacking
-        // behind the page, and clipping ancestors (also inside open shadows).
-        for (const x of [0.2, 0.5, 0.8]) for (const y of [0.2, 0.5, 0.8]) {
-          let hit = document.elementFromPoint(left + (right - left) * x, top + (bottom - top) * y);
-          while (hit?.shadowRoot) {
-            const inner = hit.shadowRoot.elementFromPoint(left + (right - left) * x, top + (bottom - top) * y);
-            if (!inner || inner === hit) break;
-            hit = inner;
-          }
-          if (hit === el) return true;
-        }
-        return false;
+        const doc = document.scrollingElement ?? document.documentElement;
+        clip(-scrollX, -scrollY, Math.max(doc.scrollWidth, innerWidth) - scrollX,
+          Math.max(doc.scrollHeight, innerHeight) - scrollY);
+        return intersects();
       });
       if (!visible) return false;
       if (root.scope && frame.parentFrame() === root.owner) {

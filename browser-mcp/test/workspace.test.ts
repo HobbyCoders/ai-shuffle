@@ -368,7 +368,7 @@ describe("bounded wait", () => {
   function fixture() {
     const {session, ws} = make();
     const locator = { first() {return this;}, filter() {return this;}, isVisible: vi.fn(async () => true), count: vi.fn(async () => 1) };
-    const frame = { isDetached: () => false, parentFrame: () => null, locator: () => locator, getByText: () => locator };
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => page, locator: () => locator, getByText: () => locator };
     const page = { url: () => "https://example.com/ready", mainFrame: () => frame, frames: () => [frame] };
     vi.spyOn(session, "ensurePage").mockResolvedValue(page as never);
     vi.spyOn(session, "resolveRef").mockReturnValue(locator as never);

@@ -174,7 +174,7 @@ describe("content warning via browser_navigate", () => {
     page: { title: string; textChars: number } = { title: "", textChars: 0 },
     landing = "http://127.0.0.1:5173/",
   ): Session {
-    const frame = { isDetached: () => false, parentFrame: () => null,
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => handle,
       locator: () => ({ filter() { return this; }, count: async () => 1 }) };
     const handle = {
       goto: async () => {},
@@ -261,13 +261,11 @@ describe("content warning via browser_navigate", () => {
 
 describe("emptyContentWarning via browser_read_text", () => {
   function readSession(text: string): Session {
-    const frame = { isDetached: () => false, parentFrame: () => null,
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => page,
       locator: () => ({ evaluate: async () => text }) };
+    const page = { title: async () => "App", url: () => "http://127.0.0.1:5173/", mainFrame: () => frame, frames: () => [frame] };
     return {
-      ensurePage: async () => ({
-        title: async () => "App", url: () => "http://127.0.0.1:5173/",
-        mainFrame: () => frame, frames: () => [frame],
-      }),
+      ensurePage: async () => page,
       checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }

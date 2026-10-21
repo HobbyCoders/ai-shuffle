@@ -27,7 +27,7 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
   const negative = state === "hidden" || state === "detached";
   // Retain unresolved checks across polls: a timeout means unknown, not absent.
   const pending = new Map<Frame, Promise<boolean>>();
-  const key = `wait:${JSON.stringify(input)}`;
+  const key = Symbol("wait"); // never reuse another invocation's stale absence result
   const selectorError = (err: unknown) => input.selector && /while parsing|InvalidSelector|not a valid (?:selector|XPath)|Unexpected token|Unknown engine|Malformed selector|SyntaxError/i.test(String(err));
   while (true) {
     session.agentAdmission?.(); // a pending takeover interrupts a long wait, not the queue
@@ -44,9 +44,9 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
       const inspect = async (root: typeof roots[number]): Promise<boolean | undefined> => {
         let task = pending.get(root.frame);
         if (!task) {
-          task = observationTask(session, root, key, async () => {
+          task = observationTask(root, key, async () => {
             if (root.primary && root.frame.isDetached()) throw new Error("primary document detached");
-            if (!await includeObservationRoot(root)) return false;
+            if (!await includeObservationRoot(root, false)) return false;
             const scope = root.primary && root.scope ? root.scope : root.frame;
             const locator = input.selector ? scope.locator(input.selector)
               : scope.getByText(input.text!, { exact: input.match === "exact" });
@@ -55,7 +55,9 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
           if (task) pending.set(root.frame, task);
         }
         try {
-          const result = await boundedObservation(task, Math.min(root.primary ? 15000 : 500, deadline - Date.now()));
+          // count() has no native timeout in Playwright. Bound its result,
+          // retaining its page-local slot until the raw operation settles.
+          const result = await boundedObservation(task, Math.min(root.primary ? 5000 : 500, deadline - Date.now()));
           pending.delete(root.frame);
           return result;
         } catch (err) {
