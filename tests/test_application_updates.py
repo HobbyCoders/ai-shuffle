@@ -730,7 +730,8 @@ def _no_inherited_update_settings(monkeypatch):
     both, which made the supervisor follow edge instead of stable here.
     Tests that need one of these set it themselves.
     """
-    for name in ("UPDATE_CHANNEL", "SHUFFLE_CONTAINER_UPDATES", "SHUFFLE_UPDATE_POLICY_FILE", "GIT_SHA"):
+    for name in ("UPDATE_CHANNEL", "SHUFFLE_CONTAINER_UPDATES", "SHUFFLE_UPDATE_POLICY_FILE", "GIT_SHA",
+                 "SHUFFLE_HANDED_OVER"):
         monkeypatch.delenv(name, raising=False)
 
 
