@@ -408,6 +408,12 @@ Agents' shell commands run as the `PUID` user. By default that user can also rea
 
 AI Shuffle notes who owned each file before changing anything. Your database, keys and saved credentials stay as they are; nothing is created again. The container must start as root, which is the default; with `--user` the setting is ignored and the log says so. If the setting cannot be applied, AI Shuffle undoes the change, starts without it and says why in the log. Your projects keep their owner.
 
+**Require isolation (fail closed)**
+
+Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=required`). Startup refuses to launch the app unless isolation is established. The success log says `required agent isolation established`; refusal says `required agent isolation: startup refused` with the cause. Invalid service IDs, missing image helpers/accounts, unsupported ownership or code mounts, failed migration and non-root `--user` launches cannot fall back to an unisolated worker. A failed migration attempts rollback; fix the cause and restart with `required` to retry, including after an interrupted migration. Do not override the image entrypoint or command with a direct app launch: only the supplied supervisor establishes isolation.
+
+The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
+
 **Turn it off**
 
 Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives every file back to `PUID` exactly as it was.

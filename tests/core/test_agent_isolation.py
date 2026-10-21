@@ -98,6 +98,69 @@ def test_setting(raw, expected):
     assert iso.setting({iso.SETTING: raw}) == expected
 
 
+
+
+@pytest.mark.parametrize("stage", ["ensure_account", "protect_code", "enable"])
+def test_required_failure_refuses_and_restart_recovers(data, app_dir, monkeypatch, stage):
+    root, ops = data
+    monkeypatch.setenv(iso.SETTING, "required")
+    monkeypatch.setattr(iso, "ensure_account", lambda *a: None)
+    original = getattr(iso, stage)
+    def fail(*a, **k):
+        raise iso.IsolationError("unsupported ownership")
+    monkeypatch.setattr(iso, stage, fail)
+    messages = []
+    with pytest.raises(iso.IsolationError, match="required agent isolation.*startup refused"):
+        iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=messages.append)
+    assert not any("agents run unisolated" in m for m in messages)
+    monkeypatch.setattr(iso, stage, original)
+    assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=messages.append) == IDENT
+    assert any("required agent isolation established" in m for m in messages)
+
+
+def test_required_partial_migration_failure_can_restart(data, app_dir, monkeypatch):
+    root, ops = data
+    monkeypatch.setenv(iso.SETTING, "required")
+    monkeypatch.setattr(iso, "ensure_account", lambda *a: None)
+    original = ops.lchown
+    failed = False
+    def fail_once(path, uid, gid):
+        nonlocal failed
+        if Path(path).name == "preview-access.key" and uid == SUID and not failed:
+            failed = True
+            raise OSError("synthetic filesystem failure")
+        return original(path, uid, gid)
+    monkeypatch.setattr(ops, "lchown", fail_once)
+    with pytest.raises(iso.IsolationError, match="required agent isolation.*startup refused"):
+        iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops)
+    assert failed
+    assert all(ops.lstat(p).st_uid == PUID for p in _protected(root))
+    assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops) == IDENT
+    assert all(ops.lstat(p).st_uid == SUID for p in _protected(root))
+
+
+def test_required_without_identity_refuses(data, monkeypatch):
+    monkeypatch.setenv(iso.SETTING, "required")
+    with pytest.raises(iso.IsolationError, match="required agent isolation.*startup refused"):
+        iso.bootstrap(data[0], None, ops=data[1])
+
+
+@pytest.mark.parametrize("problem", ["identity", "missing_module", "nonroot"])
+def test_required_runtime_refuses(runtime, monkeypatch, tmp_path, problem):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    account = SimpleNamespace(pw_uid=1000, pw_gid=1000)
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "1000")
+    if problem == "missing_module":
+        monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    if problem == "nonroot":
+        monkeypatch.setattr(runtime.os, "geteuid", lambda: 1000)
+    with pytest.raises(runtime.RuntimeFailure, match="required agent isolation.*startup refused"):
+        if problem == "nonroot":
+            runtime.drop_privileges(SimpleNamespace())
+        else:
+            runtime.isolate(SimpleNamespace(effective_data_dir=tmp_path), account)
+
+
 def test_setting_defaults_off():
     assert iso.setting({}) == "off"
 

@@ -653,12 +653,17 @@ def isolation():
 def isolate(settings, account):
     """Root, before the drop: migrate for AGENT_ISOLATION and return the
     identity to drop to, or None for the usual single-account drop."""
+    required = os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
     module = isolation()
     if not hasattr(module, "bootstrap"):
+        if required:
+            raise RuntimeFailure("required agent isolation: startup refused (image lacks isolation helpers)")
         return None
     try:
         ident = module.identity(account.pw_uid, account.pw_gid)
     except module.IsolationError as error:
+        if required:
+            raise RuntimeFailure(f"required agent isolation: startup refused ({error})") from None
         if module.setting() == "on":
             log(f"agent isolation could NOT be enabled ({error}); agents run unisolated")
         return None
@@ -791,6 +796,8 @@ def drop_privileges(settings):
             os.setgid(account.pw_gid)
             os.setuid(account.pw_uid)
         os.environ["HOME"] = account.pw_dir
+    elif os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required":
+        raise RuntimeFailure("required agent isolation: startup refused (container must start as root; remove --user)")
     elif getattr(isolation(), "setting", lambda: "off")() == "on":
         log("agent isolation could NOT be enabled: the container did not start as root "
             "(--user or a hand-over); agents run unisolated")
