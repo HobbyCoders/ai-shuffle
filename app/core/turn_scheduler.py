@@ -1701,6 +1701,32 @@ async def retire_task_terminals(
     ])
     if not session_id or not frames:
         return False
+    # Retirement is terminal in BOTH stores. A cancelled task can reach this
+    # seam without its producer completing the registry row; retiring only the
+    # engine then leaves a permanent busy entry. Keep the terminal record for
+    # TaskGet/UI history, but remove it from the running view even without an
+    # adapter. Continuation reports are not task completions.
+    from app.core.task_registry import task_registry
+
+    try:
+        for frame in frames:
+            record = task_registry.get_task(session_id, frame["task_id"])
+            # Legacy unstamped frames still retire in the engine for compatibility,
+            # but cannot prove which running registry start they refer to. All local
+            # on_task_terminal frames carry the per-start stamp before reaching here;
+            # direct Stop callers already settle their own registry records.
+            if (record and record.get("status") == "running"
+                    and frame.get("task_incarnation")
+                    and frame["task_incarnation"] == task_registry.task_incarnation(session_id, frame["task_id"])
+                    and not frame.get("agent_message_turn_id")
+                    and frame.get("status") in ("completed", "error", "killed")):
+                task_registry.complete_task(
+                    session_id, frame["task_id"], frame["status"],
+                    summary=frame.get("summary"), reason=frame.get("reason"),
+                    notify=False,
+                )
+    except Exception:  # noqa: BLE001 — bookkeeping must not prevent engine retirement.
+        logger.debug("turn_scheduler: could not settle terminal registry rows on %s", session_id, exc_info=True)
     try:
         from app.core.session_pool import get_session_pool
 
