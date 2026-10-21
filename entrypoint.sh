@@ -71,17 +71,13 @@ CURRENT_GID=$(id -g appuser)
 if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     echo "Adjusting appuser UID:GID from ${CURRENT_UID}:${CURRENT_GID} to ${PUID}:${PGID}" >&2
 
-    # Modify group first
+    /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py remap-home \
+        --old-uid "$CURRENT_UID" --old-gid "$CURRENT_GID" --new-uid "$PUID" --new-gid "$PGID"
     groupmod -o -g "$PGID" appuser
-
-    # Modify user
-    usermod -o -u "$PUID" appuser
-
-    # Fix ownership of critical directories (skip node_modules to avoid slow recursive chown)
-    echo "Updating ownership of /home/appuser" >&2
-    chown -hR -P appuser:appuser /home/appuser
-    # Image code stays root-owned. Retained DATA_DIR/postgres is validated by
-    # the runtime, never recursively chowned.
+    # The temporary root-owned home suppresses usermod's automatic recursive
+    # ownership walk. Restore the image home immediately, without moving it.
+    usermod -o -u "$PUID" -d / appuser
+    usermod -d /home/appuser appuser
 else
     echo "UID/GID already correct, skipping user modification" >&2
 fi
@@ -108,13 +104,8 @@ case "${1:-run}" in
     dump|restore) exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@" ;;
 esac
 
-# Repair only direct home entries, physically: never follow a home symlink or
-# traverse an appuser-controlled parent as root. Creation runs as appuser.
-for directory in /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude /home/appuser/.local; do
-    if [ -e "$directory" ] || [ -L "$directory" ]; then
-        chown -hR -P appuser:appuser "$directory"
-    fi
-done
+# Home volume roots are initialized with appuser ownership in the image.
+# Startup creates missing directories only as appuser; no root ownership walk.
 setpriv --reuid=appuser --regid=appuser --init-groups \
     mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh /home/appuser/.local/bin
 

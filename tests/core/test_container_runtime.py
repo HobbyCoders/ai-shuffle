@@ -33,7 +33,7 @@ def settings_factory(monkeypatch, tmp_path):
 
 
 
-@pytest.mark.parametrize("action", ["run", "dump", "restore"])
+@pytest.mark.parametrize("action", ["run", "dump", "restore", "remap-home"])
 def test_root_phase_imports_only_image_bootstrap_and_installed_dependencies(tmp_path, action):
     """Stop at the real privilege boundary in a fresh, isolated interpreter."""
     import subprocess
@@ -44,18 +44,25 @@ spec = importlib.util.spec_from_file_location("rt", sys.argv[1])
 rt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rt)
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[1]))
-def boundary(settings):
+def boundary(*args):
     rt.isolation()
     origins = {name: str(pathlib.Path(mod.__file__).resolve())
                for name, mod in sys.modules.copy().items() if getattr(mod, "__file__", None)}
     print(json.dumps(origins))
     raise SystemExit(0)
 rt.drop_privileges = boundary
+rt.remap_home = boundary
+rt.os.geteuid = lambda: 0
 rt.main(sys.argv[2:])
 """
     env = dict(os.environ, DATA_DIR=str(tmp_path), WORKSPACE_DIR=str(tmp_path / "workspace"),
                AI_SHUFFLE_ENV_FILE="/dev/null")
-    args = [action] + (["--file", "-"] if action != "run" else [])
+    args = [action]
+    if action == "remap-home":
+        for name in ("old-uid", "old-gid", "new-uid", "new-gid"):
+            args += ["--" + name, "41001"]
+    elif action != "run":
+        args += ["--file", "-"]
     result = subprocess.run([sys.executable, "-I", "-c", script,
                              str(project / "docker/container_runtime.py"), *args],
                             cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -68,7 +75,9 @@ rt.main(sys.argv[2:])
         if path.is_relative_to(project):
             assert path.parent == project / "docker", origin
         else:
-            assert path.is_relative_to(Path(sys.base_prefix)), origin
+            assert any(path.is_relative_to(Path(prefix)) for prefix in (sys.prefix, sys.base_prefix)), origin
+            info = path.stat()
+            assert info.st_uid == 0 and not info.st_mode & 0o022, origin
 
 
 @pytest.mark.parametrize("local_mode", ["false", "true"])
@@ -776,6 +785,81 @@ def test_root_mount_detection_includes_same_device_bind_mounts(monkeypatch, path
     monkeypatch.setattr(Path, "read_text", lambda self, *a, **kw: mountinfo if str(self) == "/proc/self/mountinfo" else original(self, *a, **kw))
     assert runtime.mounted_directory(Path(path))
     assert not runtime.mounted_directory(Path(path + "-other"))
+
+
+
+
+def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    for name in ("single", "owned", "root-file", "service-file"):
+        (home / name).write_text("fixture")
+    (home / "owned-link").hardlink_to(home / "owned")
+    (home / "root-link").hardlink_to(home / "root-file")
+    original = Path.lstat
+    def owner(path):
+        info = list(original(path))
+        info[4] = {"root-file": 0, "root-link": 0, "service-file": 64000}.get(path.name, 41001)
+        info[5] = 41001
+        return os.stat_result(info)
+    monkeypatch.setattr(Path, "lstat", owner)
+    monkeypatch.setattr(runtime, "mount_points", lambda: set())
+    chown = Mock()
+    monkeypatch.setattr(runtime.os, "chown", chown)
+    runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+    changed = {call.args[0] for call in chown.call_args_list}
+    assert changed == {home, home / "single"}
+    assert all(call.args[1:] == (41002, 41002) and call.kwargs == {"follow_symlinks": False}
+               for call in chown.call_args_list)
+
+
+def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeypatch):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".claude"
+    alias, nested = volume / "data", volume / "other-volume"
+    for directory in (alias, nested):
+        directory.mkdir(parents=True)
+        (directory / "untouched").write_text("fixture")
+    (volume / "migrate").write_text("fixture")
+    original = Path.lstat
+    def owner(path):
+        info = list(data.stat() if path == alias else original(path))
+        info[4], info[5] = 41001, 41001
+        return os.stat_result(info)
+    monkeypatch.setattr(Path, "lstat", owner)
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume, nested})
+    chown = Mock()
+    monkeypatch.setattr(runtime.os, "chown", chown)
+    runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+    changed = {call.args[0] for call in chown.call_args_list}
+    assert changed == {home, volume, volume / "migrate"}
+
+
+def test_isolated_drop_keeps_full_agent_path_but_trusts_supervisor(settings_factory, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    effective = [0]
+    tool_path = "/home/appuser/.local/bin:/usr/bin"
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("SHUFFLE_CONTAINER_PATH", tool_path)
+    monkeypatch.delenv("PUID", raising=False)
+    monkeypatch.delenv("PGID", raising=False)
+    monkeypatch.setattr(runtime, "_agent_path", None)
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: effective[0])
+    monkeypatch.setattr(runtime.os, "chown", Mock())
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir=str(tmp_path)))
+    split = object()
+    monkeypatch.setattr(runtime, "isolate", lambda *args: split)
+    def drop(ident):
+        assert ident is split and os.environ["PATH"] == "/usr/bin"
+        effective[0] = 41001
+    module = SimpleNamespace(drop=drop, trusted_path=lambda original: "/usr/bin" if original == tool_path else "wrong")
+    monkeypatch.setattr(runtime, "isolation", lambda: module)
+    runtime.drop_privileges(settings_factory(workspace_dir=tmp_path))
+    assert runtime._agent_path == tool_path
+    assert os.environ["PATH"] == "/usr/bin"
+    assert "SHUFFLE_CONTAINER_PATH" not in os.environ
 
 
 def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monkeypatch):

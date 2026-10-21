@@ -802,20 +802,67 @@ def chrome_command(env):
             dict(env, START_CHROME_COMMAND=str(private / "start-chrome.sh")), private)
 
 
-def mounted_directory(path):
+def mount_points():
     """Include same-filesystem bind mounts, which ismount alone misses."""
-    if os.path.ismount(path):
-        return True
+    result = set()
     try:
         for line in Path("/proc/self/mountinfo").read_text().splitlines():
             fields = line.split()
             if len(fields) >= 5:
-                mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])
-                if Path(mount) == path:
-                    return True
+                result.add(Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
     except OSError:
         pass
-    return False
+    return result
+
+
+def mounted_directory(path):
+    return os.path.ismount(path) or path in mount_points()
+
+
+def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
+    """Migrate only the previous agent's own entries, not retained service data.
+
+    Known home volumes are separate walk roots. Never cross another mount,
+    follow a symlink, change a multiply-linked file, or enter DATA_DIR through
+    any path (including a bind alias with the same device/inode).
+    """
+    home, data_dir = safe_path(home), safe_path(data_dir)
+    try:
+        data = data_dir.stat()
+        data_inode = (data.st_dev, data.st_ino)
+    except FileNotFoundError:
+        data_inode = None
+    mounts = mount_points()
+    volumes = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
+    roots = [home, *(home / name for name in volumes if home / name in mounts)]
+    for root in roots:
+        if root.is_symlink() or not root.is_dir():
+            continue
+        device = root.stat().st_dev
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            path = Path(directory)
+            info = path.lstat()
+            if (info.st_dev, info.st_ino) == data_inode:
+                dirs[:] = []
+                continue
+            kept = []
+            for name in dirs:
+                child = path / name
+                entry = child.lstat()
+                if (stat.S_ISDIR(entry.st_mode) and entry.st_dev == device
+                        and child not in mounts and not os.path.ismount(child)
+                        and (entry.st_dev, entry.st_ino) != data_inode):
+                    kept.append(name)
+            dirs[:] = kept
+            for entry_path in [path, *(path / name for name in files)]:
+                entry = entry_path.lstat()
+                if entry.st_uid != old_uid or stat.S_ISLNK(entry.st_mode):
+                    continue
+                if not stat.S_ISDIR(entry.st_mode) and (
+                        not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1):
+                    continue
+                gid = new_gid if entry.st_gid == old_gid else entry.st_gid
+                os.chown(entry_path, new_uid, gid, follow_symlinks=False)
 
 
 def validate_mount_root(name, path):
@@ -1191,6 +1238,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("run")
+    remap = sub.add_parser("remap-home")
+    for name in ("old-uid", "old-gid", "new-uid", "new-gid"):
+        remap.add_argument("--" + name, type=int, required=True)
     for action in ("dump", "restore"):
         sub.add_parser(action).add_argument("--file", required=True)
     args = parser.parse_args(argv)
@@ -1198,6 +1248,12 @@ def main(argv=None):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: STOP.set())
     try:
+        if args.action == "remap-home":
+            if os.geteuid() != 0 or min(args.old_uid, args.old_gid, args.new_uid, args.new_gid) <= 0:
+                raise RuntimeFailure("home remapping requires root and non-root account IDs")
+            remap_home(Path("/home/appuser"), load_startup_settings().effective_data_dir,
+                       args.old_uid, args.old_gid, args.new_uid, args.new_gid)
+            return 0
         drop_privileges(load_startup_settings())
         # Only unprivileged code may import the application (or hand over to a
         # retained update's supervisor/interpreter on the data volume).

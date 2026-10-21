@@ -140,7 +140,7 @@ RUN set -eux; \
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
-    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude && \
+    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.config/gh /home/appuser/.claude /home/appuser/.local/bin /home/appuser/chrome-profile && \
     mkdir -p /data /workspace && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
