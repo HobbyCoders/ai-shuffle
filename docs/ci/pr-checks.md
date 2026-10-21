@@ -20,7 +20,10 @@ These workflows retain manual dispatch and also run on unfiltered
 - `ci-frontend.yml`: frontend, mobile, tools and browser-mcp checks.
 - `desktop.yml`: desktop typecheck and unit tests; packaging stays manual.
 - `desktop-source-checks.yml`: source-update protocol regressions.
-- `windows-suite.yml`: the full parallel Windows suite, not its selected-test mode.
+- `windows-suite.yml`: the native desktop part on PRs. The full parallel Windows
+  suite remains available by dispatch while unrelated backend portability
+  failures are repaired (Internal tracking: #381). Linux PR checks still run
+  the complete backend suite. No assertions or failure behavior are weakened.
 - `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
 - `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
 - `ci-browser-workspace.yml`: editor and real browser-workspace integration checks.

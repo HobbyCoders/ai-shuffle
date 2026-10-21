@@ -416,7 +416,11 @@ def select_by_name(files: list[str]) -> list[str] | str:
 
 def affected_backend_tests(ctx: Context, *, use_map: bool = True) -> list[str] | str:
     """Reuse the dependency map, or name matching with a per-path safe fallback."""
-    if use_map and MAP_PATH.is_file():
+    if (use_map and MAP_PATH.is_file()
+            and set(changed_files(ctx.base)) <= set(ctx.files or [])):
+        # The map CLI compares the whole Git diff. When other areas were
+        # removed from this context (notably workflow changes), do not let
+        # those unrelated paths turn a targeted backend check into "all".
         return select_backend_tests(ctx)
     selected: set[str] = set()
     for name in ctx.files or []:

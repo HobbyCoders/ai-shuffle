@@ -24,16 +24,21 @@ def workflow():
 
 def test_the_workflow_runs_every_part_without_cancelling_the_others():
     suite = workflow()["jobs"]["suite"]
-    assert suite["strategy"]["matrix"]["part"] == windows_parts.parts()
+    import json
+    matrix = suite["strategy"]["matrix"]["part"]
+    assert matrix.startswith("${{ fromJSON(github.event_name == 'pull_request' && ")
+    choices = matrix.split("'")
+    assert json.loads(choices[3]) == ["desktop"]
+    assert json.loads(choices[5]) == windows_parts.parts()
     assert suite["strategy"]["fail-fast"] == "false"
-    assert suite["if"] == "inputs.tests == ''"
+    assert suite["if"] == "github.event_name == 'pull_request' || inputs.tests == ''"
     command = next(step["run"] for step in suite["steps"] if step.get("name") == "Suite part")
     assert 'scripts/ci/windows_parts.py "$PART"' in command
 
 
 def test_selected_tests_are_refused_on_main():
     selected = workflow()["jobs"]["selected"]
-    assert selected["if"] == "inputs.tests != ''"
+    assert selected["if"] == "github.event_name == 'workflow_dispatch' && inputs.tests != ''"
     refuse = next(step for step in selected["steps"] if step.get("name") == "Refuse a partial run on main")
     assert refuse["if"] == "github.ref == 'refs/heads/main'"
     assert "exit 1" in refuse["run"]

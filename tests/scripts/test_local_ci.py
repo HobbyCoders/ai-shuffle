@@ -430,8 +430,21 @@ def test_fast_failed_dependency_map_still_falls_back_safely(monkeypatch, tmp_pat
                         SimpleNamespace(returncode=1, stderr="unreadable map", stdout=""))
     ctx = context(["app/core/deploy_status.py", "app/core/unmapped.py"])
     ctx.mode = "fast"
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: ctx.files)
     assert local_ci.affected_backend_tests(ctx) == "all"
     assert local_ci.affected_backend_tests(context(["unknown-area/config.json"]), use_map=False) == "all"
+
+
+def test_fast_map_does_not_include_unrelated_workflow_paths(monkeypatch, tmp_path):
+    mapping = tmp_path / "map"
+    mapping.touch()
+    monkeypatch.setattr(local_ci, "MAP_PATH", mapping)
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: [
+        "app/core/deploy_status.py", "scripts/local_ci.py"])
+    monkeypatch.setattr(local_ci, "select_backend_tests",
+                        lambda ctx: pytest.fail("map CLI would include workflow changes"))
+    assert "tests/core/test_deploy_status.py" in local_ci.affected_backend_tests(
+        context(["app/core/deploy_status.py"]))
 
 
 def test_fast_reuses_recorded_backend_map(monkeypatch, tmp_path):
@@ -440,6 +453,7 @@ def test_fast_reuses_recorded_backend_map(monkeypatch, tmp_path):
     monkeypatch.setattr(local_ci, "MAP_PATH", mapping)
     calls = []
     ctx = context(["app/core/deploy_status.py"])
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: ctx.files)
     monkeypatch.setattr(local_ci, "select_backend_tests",
                         lambda ctx: calls.append(ctx) or ["tests/core/test_deploy_status.py"])
     assert local_ci.affected_backend_tests(ctx) == ["tests/core/test_deploy_status.py"]
