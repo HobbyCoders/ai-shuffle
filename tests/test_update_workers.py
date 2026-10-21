@@ -21,6 +21,9 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(updates, "_desktop_seen", 0)
     monkeypatch.setattr(updates, "_desktop_request", None)
     monkeypatch.setattr(updates, "_desktop_followup", None)
+    monkeypatch.setattr(fleet, "_stop_result", None)
+    # asyncio.run creates a new loop per scenario; contended locks retain theirs.
+    monkeypatch.setattr(fleet, "_dispatch_lock", asyncio.Lock())
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: [])
     fleet._receipts.clear()
     fleet._peer_status.clear()
@@ -834,6 +837,133 @@ def busy(setup, monkeypatch):
     return running
 
 
+def test_waiting_turn_timestamp_is_wire_safe(setup, monkeypatch):
+    from datetime import datetime, timezone
+    started = datetime.now(timezone.utc)
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: [{"session_id": "s", "title": "Live turn"}])
+    monkeypatch.setattr("app.core.session_runtime.active_executions", lambda: {"run": "s"})
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: SimpleNamespace(turn={"started_at": started}))
+    row = fleet.waiting_status({"phase": "ready", "version": B[:12]})
+    assert row["blocked_by"][0]["since"] == started.isoformat()
+    json.dumps(row)  # authenticated peer transport is JSON, not FastAPI's encoder
+
+
+@pytest.mark.parametrize("running,stopped,liveness", [(True, False, "live"), (False, True, "stale"), (False, False, "unknown")])
+def test_waiting_blocker_reports_real_registry_shell_liveness(setup, monkeypatch, running, stopped, liveness):
+    from app.core.task_registry import TaskRegistry
+
+    registry = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", registry.active_session_ids)
+    monkeypatch.setattr(updates.database, "get_session", lambda sid: {"title": "Build application"})
+    monkeypatch.setattr("app.mcp.builtin_tools.is_background_shell_running", lambda tid: running)
+    registry.start_task("s", "shell", "shell", "Run build")
+    if stopped:
+        registry.mark_user_stopped("s")
+    state = fleet.waiting_status({"phase": "ready", "version": B[:12]})
+    blocker = state["blocked_by"][0]
+    assert blocker["kind"] == "shell" and blocker["live"] is running
+    assert blocker["liveness"] == liveness
+    assert blocker["since"] == registry.get_task("s", "shell")["startedAt"]
+    registry.complete_task("s", "shell", "killed", reason="user_stop")
+    assert fleet.waiting_status({"phase": "ready", "version": B[:12]})["blocked_by"] == []
+
+
+@pytest.mark.parametrize("mode,expected", [("when_idle", "waiting_for_idle"), ("stop", "stopping")])
+def test_waiting_contract_tracks_owner_choice_and_expiry(busy, monkeypatch, mode, expected):
+    async def hold(*args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fleet, "_stop_then_restart", hold)
+    async def scenario():
+        result = fleet.local_action("install", "contract-choice", mode)
+        assert result["install_state"] == expected
+        row = (await fleet.snapshot())["workers"][0]
+        assert row["install_state"] == expected
+        assert bool(row["restart_expires_at"]) is (mode == "when_idle")
+        if fleet._deferred:
+            task = fleet._deferred["task"]
+            fleet._cancel_deferred()
+            await asyncio.gather(task, return_exceptions=True)
+        for task in list(fleet._stop_tasks):
+            task.cancel()
+        await asyncio.gather(*fleet._stop_tasks, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("transport", ["desktop", "container"])
+@pytest.mark.parametrize("action,expected", [("check", "ready"), ("install", "queued")])
+def test_queued_check_is_not_reported_as_a_restart(setup, action, expected, transport, monkeypatch, tmp_path):
+    if transport == "container":
+        root = tmp_path / "control"
+        root.mkdir()
+        monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(root))
+        (root / "status.json").write_text(json.dumps({"phase": "ready", "version": B[:12]}))
+    else:
+        updates.desktop_exchange({"phase": "ready", "version": B[:12]})
+    assert fleet.local_action(action, "queue-kind")["accepted"]
+    assert asyncio.run(fleet.snapshot())["workers"][0]["install_state"] == expected
+
+
+def test_error_after_send_is_not_mislabeled_as_not_sent(setup, monkeypatch):
+    monkeypatch.setattr(fleet, "_send", AsyncMock(side_effect=ValueError("delivery already attempted")))
+    with pytest.raises(ValueError, match="delivery already attempted"):
+        asyncio.run(fleet.dispatch("install", "stop"))
+
+
+@pytest.mark.parametrize("mode", ["stop", "when_idle"])
+def test_presend_stop_refusal_names_workers_and_mode(setup, monkeypatch, caplog, mode):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    monkeypatch.setattr(fleet.progress, "load", lambda: {"phase": "waiting"})
+    monkeypatch.setattr(fleet, "snapshot", AsyncMock(return_value={"operation": {"phase": "waiting"}}))
+    with caplog.at_level("INFO"):
+        result = asyncio.run(fleet.dispatch("install", mode))
+    assert result["sent"] is None
+    assert {row["device_name"] for row in result["results"]} >= {"Current worker", "Peer"}
+    assert all(row["request_state"] == "not_sent" and row["reason"] == "Waiting on workers to finish the previous update"
+               for row in result["results"])
+    assert "mode=" + mode in caplog.text and "scope=all" in caplog.text
+    remote.assert_not_called()
+    assert updates._desktop_request is None
+
+
+def test_waiting_contract_keeps_staged_identity_beside_new_offer(setup):
+    updates.desktop_exchange({"phase": "available", "version": "c" * 12, "staged_version": B})
+    row = asyncio.run(fleet.snapshot())["workers"][0]
+    assert row["version"] == "c" * 12 and row["staged_version"] == B
+    assert row["install_state"] == "unavailable" and row["wait_reason"] == "newer_offer"
+    result = fleet.local_action("install", "staged-older-offer")
+    assert not result["accepted"] and "previous download is retained" in result["reason"]
+
+
+@pytest.mark.parametrize("mode", ["stop", "when_idle"])
+def test_followup_install_ids_stay_within_request_limit(busy, monkeypatch, mode):
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=lambda *args, **kwargs: busy.clear()))
+    async def scenario():
+        fleet.local_action("install", "x" * 100, mode)
+        if mode == "stop":
+            await asyncio.gather(*fleet._stop_tasks)
+        else:
+            task = fleet._deferred["task"]
+            busy.clear()
+            await task
+        assert updates._desktop_request["action"] == "install"
+    asyncio.run(scenario())
+
+
+def test_ready_is_staged_but_install_is_blocked(busy):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12]})
+    row = asyncio.run(fleet.snapshot())["workers"][0]
+    assert row["staged_version"] == B[:12]
+    assert row["install_state"] == "blocked"
+    assert row["wait_reason"] == "running_work"
+    blocker = row["blocked_by"][0]
+    assert blocker["session_id"] == "s1" and blocker["title"] == "Fix login"
+    assert {"kind", "since", "live", "liveness"} <= blocker.keys()
+
+
 def test_refused_restart_names_the_running_work_and_leaves_no_failed_install(busy):
     result = asyncio.run(fleet.dispatch("install"))
     row = result["results"][-1]
@@ -927,6 +1057,7 @@ def test_stop_then_restart_reaps_real_adapterless_registry_ghost(setup, monkeypa
 
 
 def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypatch, caplog):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12]})
     monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
     monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
     async def scenario():
@@ -939,9 +1070,44 @@ def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypat
     assert "Busy with running work: Fix login" in caplog.text
     snapshot = asyncio.run(fleet.snapshot())
     assert snapshot["refusals"]["self"] == "Busy with running work: Fix login"
+    row = snapshot["workers"][0]
+    assert row["wait_reason"] == "still_busy_after_stop"
+    assert row["stop_result"]["accepted"] is False
     assert snapshot["operation"]["phase"] == "error"
     worker = snapshot["operation"]["workers"][0]
     assert worker["status"] == "skipped" and worker["message"] == "Busy with running work: Fix login"
+    assert snapshot["operation"]["outcome"] == "refused"
+    assert snapshot["operation"]["refused_workers"] == [{"device_id": "self", "device_name": "Current worker",
+                                                         "reason": "Busy with running work: Fix login"}]
+
+
+def test_all_worker_stop_reports_partial_completion_when_requester_stays_behind(busy, setup, monkeypatch):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": "a" * 12})
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    peer_running = "a" * 12
+
+    async def sent(device_id, kind, body, **kwargs):
+        if body["operation"] == "status":
+            return {"supported": True, "allow_updates": True, "phase": "ready", "version": B[:12],
+                    "running_version": peer_running}
+        return {"accepted": True, "reason": "Request queued"}
+    remote.side_effect = sent
+
+    async def scenario():
+        nonlocal peer_running
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+        peer_running = B[:12]
+        result = await fleet.snapshot(fresh=True)
+        assert result["operation"]["phase"] == "complete"  # compatible legacy transport phase
+        assert result["operation"]["outcome"] == "partial"
+        assert result["operation"]["refused_workers"] == [{"device_id": "self", "device_name": "Current worker",
+                                                          "reason": "Busy with running work: Fix login"}]
+        assert updates._desktop_request is None
+    asyncio.run(scenario())
 
 
 def test_late_stop_refusal_cannot_change_a_newer_install(busy, monkeypatch):
@@ -956,6 +1122,39 @@ def test_late_stop_refusal_cannot_change_a_newer_install(busy, monkeypatch):
     operation = fleet.progress.load()
     assert operation["id"] == "newer-operation" and operation["workers"][0]["accepted"] is None
     assert "self" not in fleet._refusals
+
+
+@pytest.mark.parametrize("current_request", [True, False])
+def test_peer_stop_outcome_settles_requester_progress(busy, setup, monkeypatch, current_request):
+    # Drive the peer producer, then consume its authenticated status as the
+    # requester. No manually seeded stop_result can hide a broken producer.
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(fleet.engine, "context", lambda: SimpleNamespace(member=lambda _: member))
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    _, remote = setup
+
+    async def scenario():
+        response = await fleet.peer_action({"operation": "action", "action": "install", "mode": "stop",
+                                           "request_id": "wire-id", "expires_at": time.time() + 10}, "self")
+        assert response["accepted"]
+        await asyncio.gather(*fleet._stop_tasks)
+        peer_status = await fleet.peer_action({"operation": "status"}, "self")
+        request_id = "wire-id" if current_request else "newer-id"
+        fleet.progress.begin(request_id, [{"device_id": "peer", "device_name": "Peer"}])
+        fleet.progress.record(request_id, "peer", target_version="b" * 12, result={"accepted": True})
+        remote.return_value = peer_status
+        result = await fleet.snapshot(fresh=True)
+        worker = result["operation"]["workers"][0]
+        if current_request:
+            assert result["operation"]["phase"] == "error"
+            assert worker["status"] == "skipped"
+            assert worker["message"] == "Busy with running work: Fix login"
+            assert fleet.progress.load()["workers"][0]["accepted"] is False
+        else:
+            assert result["operation"]["phase"] == "waiting"
+            assert worker["accepted"] is True
+    asyncio.run(scenario())
 
 
 def test_stop_refusal_reporting_failure_is_logged(busy, monkeypatch, caplog):

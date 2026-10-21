@@ -55,6 +55,62 @@ def test_preview_cookie_names_redact_opaque_values(name):
     assert redact_external_export({name: "fixture-cookie", "ok": True}) == {name: "***", "ok": True}
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("GITHUB_TOKEN=fixture-token", "GITHUB_TOKEN=***"),
+    ("AWS_SECRET_ACCESS_KEY=fixture-secret", "AWS_SECRET_ACCESS_KEY=***"),
+    ("PGPASSWORD=fixture-password", "PGPASSWORD=***"),
+    ('DB_PASSWORD="fixture secret"', 'DB_PASSWORD="***"'),
+    ("tool --token fixture-token --port 5173", "tool --token *** --port 5173"),
+    ("tool --password=fixture-password", "tool --password=***"),
+    ("tool --api-key 'fixture key'", "tool --api-key '***'"),
+    ("aws AKIAIOSFODNN7EXAMPLE ASIAIOSFODNN7EXAMPLE", "aws *** ***"),
+    ("KEYBOARD=us --keyboard us --keep-alive 30 --monkey banana", "KEYBOARD=us --keyboard us --keep-alive 30 --monkey banana"),
+    ("total_tokens_in=42 token_count=7 tokenizer=example", "total_tokens_in=42 token_count=7 tokenizer=example"),
+    ("function(api_key=fixture-value)", "function(api_key=***)"),
+    ("[token=fixture-value]", "[token=***]"),
+    ("--access-key fixture-value", "--access-key ***"),
+    # An unquoted credential flag's value is indistinguishable from prose.
+    ("use the --token flag to authenticate", "use the --token *** to authenticate"),
+])
+def test_command_credential_values_and_false_positives(text, expected):
+    assert redact_export_text(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "max(xs, key=len)", "Column(Integer, primary_key=True)",
+    "sorted(items, key=lambda x: x[1])", "<li key={item.id}>",
+    "self.key = value", "key = 'abc'", "cache_key=build_key(x)",
+    "idempotency_key=req-1", "first_pass=True", "next_page_token=None",
+    "https://example.com/a?key=abc&x=1", "https://example.com/a?page_token=abc",
+    "--sort-key name --max-tokens 4096", "--password\n\nNext paragraph here",
+    "KEYBOARD=us", "TOKENIZERS_PARALLELISM=false", "SSH_KEY_PATH=/x", "API_KEY_ID=abc",
+    "--key-file /tmp/k", "--ssh-key ~/.ssh/id", "dict(key='a', value=1)",
+    "set key=value in the config", "sa.ForeignKey('t.id'), foreign_key=True",
+    "for k in ...: d[key]=v", "export PATH=/usr/bin", "git log --pretty=format:%H",
+])
+def test_command_redaction_preserves_code_and_noncredential_options(text):
+    assert redact_export_text(text) == text
+
+
+def test_unterminated_quoted_backslashes_are_bounded():
+    # A child timeout makes the failing-first regression safe even with the
+    # old exponential regex; measure only redaction, not interpreter startup.
+    import subprocess
+    import sys
+    code = """from time import perf_counter
+from app.core.export_redaction import redact_export_text
+started = perf_counter()
+for name in ('token', 'GITHUB_TOKEN', '--token'):
+    for quote in (chr(34), chr(39)):
+        separator = ' ' if name.startswith('--') else '='
+        redact_export_text(name + separator + quote + chr(92) * 60)
+print(perf_counter() - started)
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                            text=True, timeout=2, check=True)
+    assert float(result.stdout) < 0.1
+
+
 def test_structure_and_useful_content_survive_without_mutation():
     data = {
         "content": "notes " + PREVIEW,

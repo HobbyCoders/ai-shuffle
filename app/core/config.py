@@ -377,6 +377,10 @@ class Settings(BaseSettings):
     # the note you are looking at), so 60s is the default.
     notes_sync_interval_seconds: int = 60
 
+    # Reclaim integrated, idle app-managed branch checkouts after a 24h grace.
+    # Set WORKTREE_AUTO_RECLAIM_ENABLED=false to disable the periodic pass.
+    worktree_auto_reclaim_enabled: bool = True
+
     # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
     # enabled Codex provider on this cadence and refreshes any whose access token
     # is due (proactive 8-day interval, or JWT exp within 15 min — see

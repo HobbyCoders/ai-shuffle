@@ -27,7 +27,9 @@ Most releases install from inside AI Shuffle:
 1. When a new release is out, the update button appears in the sidebar with its release notes.
 2. Choose **Download update**, then **Update and restart**. Agents stop, the update installs, and AI Shuffle starts again.
 
-On a Docker worker, a downloaded update that is waiting for **Update and restart** does not hide a newer release. Checking for updates still reads the feed: when a newer release is out, the button offers it, and **Download update** replaces the waiting one and removes its files. If that download fails, the earlier update stays ready to install. Nothing is replaced while an update is installing or starting.
+If a chat is still working, or a service it started (such as a preview server) is still running, the restart waits. Click the update button to see what is running: each service shows its port, when it started and when its chat's turn ended. Choose **Restart when work finishes**, or **Stop running work and restart**. A scheduled restart shows when it gives up waiting and can be cancelled with **Cancel schedule**; restarting the worker drops it. A worker that refuses the restart is named with its reason, and an update that finished on only some workers says which ones were not restarted.
+
+On a Docker worker, a downloaded update that is waiting for **Update and restart** does not hide a newer release. Checking for updates still reads the feed: when a newer release is out, the button offers it, and **Download update** replaces the waiting one and removes its files. If that download fails, the earlier update stays ready to install. Nothing is replaced while an update is installing or starting. If a successful signed check instead offers the running version or an older release, a verified download that was never selected to install is no longer selected; its files are retained, but it is not offered for restart. Failed, starting and recovery-protected builds are kept.
 
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
