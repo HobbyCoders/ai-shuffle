@@ -162,6 +162,7 @@ class TargetRef(BaseModel):
     kind: str = Field("worker", max_length=32)
     worker_id: Optional[str] = Field(None, max_length=200)
     grant_id: Optional[str] = Field(None, max_length=200)
+    authorization_id: Optional[str] = Field(None, max_length=100)
 
 
 class CreateTerminal(BaseModel):
@@ -200,13 +201,99 @@ async def list_terminals(session_id: Optional[str] = Query(None, max_length=200)
     return _listing(worker, session_id)
 
 
+class PeerAuthorizationBody(BaseModel):
+    worker_id: str = Field(..., min_length=1, max_length=200)
+
+
+async def _peer_call(worker_id, operation, lease=None):
+    from app.network import control
+    try:
+        return await control.call(worker_id, "terminal", {"op": operation, "lease": lease}, timeout=15, secure=True)
+    except control.InsecureRoute:
+        raise HTTPException(503, {"code": "https_required", "message": "The peer needs an authenticated HTTPS route."}) from None
+    except Exception:
+        raise HTTPException(503, {"code": "peer_unavailable", "message": "The peer is unavailable or refused terminal access."}) from None
+
+
+@router.post("/peer-authorizations", status_code=201)
+async def request_peer_terminal(body: PeerAuthorizationBody, request: Request,
+                                who: str = Depends(require_terminal_owner)):
+    from app.core.terminal_targets import peer_reason
+    from app.network import terminal_relay, runners
+    directory = await run_sync(runners.directory)
+    row = next((r for r in directory["runners"] if r["id"] == body.worker_id and not r["is_self"]), None)
+    if row is None:
+        raise HTTPException(404, "Unknown peer worker")
+    reason = peer_reason(row)
+    if reason["reason_code"] != "recipient_approval_required":
+        raise HTTPException(409, reason)
+    try:
+        lease = terminal_relay.authorize(request, who, body.worker_id)
+    except PermissionError as exc:
+        raise HTTPException(429, str(exc)) from None
+    try:
+        result = await _peer_call(body.worker_id, "request", lease)
+        if result.get("status") == "unavailable":
+            terminal_relay.forget(lease)
+        return {**result, "authorization_id": lease, "worker_id": body.worker_id}
+    except BaseException:
+        terminal_relay.forget(lease)
+        raise
+
+
+@router.get("/peer-authorizations/{authorization_id}")
+async def peer_terminal_authorization(authorization_id: str, who: str = Depends(require_terminal_owner)):
+    from app.network import terminal_relay
+    try:
+        entry = terminal_relay.source_authorization(authorization_id, who)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    result = await _peer_call(entry[2], "status", authorization_id)
+    return {**result, "worker_id": entry[2], "authorization_id": authorization_id}
+
+
+@router.delete("/peer-authorizations/{authorization_id}")
+async def revoke_peer_terminal_authorization(authorization_id: str, who: str = Depends(require_terminal_owner)):
+    from app.network import terminal_relay
+    try:
+        entry = terminal_relay.source_authorization(authorization_id, who)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    terminal_relay.forget(authorization_id)  # Revoke locally even if the peer is unreachable.
+    return await _peer_call(entry[2], "revoke", authorization_id)
+
+
+@router.get("/peer-requests")
+async def recipient_terminal_requests(who: str = Depends(require_terminal_owner)):
+    from app.network import terminal_relay
+    return {"requests": terminal_relay.recipient_requests()}
+
+
+@router.post("/peer-requests/{request_id}/approve")
+async def approve_peer_terminal(request_id: str, request: Request, who: str = Depends(require_terminal_owner)):
+    from app.network import terminal_relay
+    try:
+        return await terminal_relay.approve_request(request_id, request, who)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+
+
+@router.delete("/peer-requests/{request_id}")
+async def revoke_peer_terminal_request(request_id: str, who: str = Depends(require_terminal_owner)):
+    from app.network import terminal_relay
+    try:
+        return await terminal_relay.revoke_request(request_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+
+
 @router.get("/targets")
 async def terminal_targets(session_id: Optional[str] = Query(None, max_length=200),
                            who: str = Depends(require_terminal_owner)):
     from app.core.terminal_targets import targets
 
     worker = await run_sync(service.worker_identity)
-    other_targets = await targets(session_id)
+    other_targets = await targets(session_id, who=who)
     is_supported = service.supported()
     shells = service.available_shells() if service.pty_supported() else []
     default_folder = None
@@ -222,8 +309,10 @@ async def terminal_targets(session_id: Optional[str] = Query(None, max_length=20
             shells = []
     return {
         "worker": worker,
-        "supported": is_supported or bool(other_targets),
-        "unsupported_reason": None if is_supported or other_targets else "Terminals are not supported on this worker yet.",
+        "supported": is_supported or any(t["available"] for t in other_targets),
+        "unsupported_reason": None if is_supported or any(t["available"] for t in other_targets)
+                              else ("No authorized terminal target is currently available." if other_targets
+                                    else "Terminals are not supported on this worker yet."),
         "targets": [{"kind": service.TARGET_WORKER, "worker_id": worker["id"], "name": worker["name"],
                      "available": is_supported}, *other_targets],
         "shells": [{"name": s["name"], "default": s["default"]} for s in shells],

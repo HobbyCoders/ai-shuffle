@@ -7,18 +7,77 @@ authorization). Tests: `tests/core/test_terminals.py`,
 `tests/api/test_terminals_api.py`.
 
 Terminals support local Unix PTYs and Windows ConPTY and explicitly selected
-private-access SSH machine grants. **Peer-worker terminals are unavailable.**
-`NETWORK_PEER_TERMINALS` defaults to `false` and is checked on the recipient.
-Setting it to `true` is not sufficient: recipient dispatch still refuses every
-operation until independent recipient-verified owner grants are implemented.
-Peers are not offered in the picker or advertised as relay-capable.
+private-access SSH machine grants. **The peer-terminal backend is available;
+the terminal-panel UI integration is pending.** `NETWORK_PEER_TERMINALS` still
+defaults to `false` and must be enabled on both workers. It does not authorize
+a terminal: every new shell requires an explicit owner-authenticated approval
+directly on the receiving worker. No approval can be issued by peer control.
 
 An enrolled worker can forge a lease and its own callback response. Therefore
 neither membership nor a reverse `terminal-owner` callback is owner proof.
-The retained transport scaffold requires HTTPS on outbound calls/callbacks and
-recipient ingress, with no plaintext fallback. Its source and recipient leases
-have independent ten-minute deadlines; inactivity also expires the recipient.
-These safeguards do not substitute for the missing independent owner proof.
+The recipient holds its own memory-only approval bound to the source worker
+and request lease; it independently rechecks the approving credential using
+`require_terminal_owner` on every operation and at most every 15 seconds while
+idle. Source owner authorization is also rechecked via the callback. Both
+legs require authenticated HTTPS, with no plaintext fallback. Pending requests
+expire after two minutes; approved grants are single-use with a ten-minute
+maximum, and 30 seconds without relay activity closes the shell. Revocation,
+expiry, lost membership, either owner's sign-out, or process restart ends
+access. Audit records cover request, approval, refusal, open and close, never
+input/output, credentials or lease tokens. This strict per-use approval on the
+recipient is intentional; any less restrictive policy needs an owner decision.
+
+### Peer-terminal API (UI contract)
+
+All routes below require the existing terminal owner authentication and
+same-origin checks. Agent previews, API keys, passwordless local access,
+non-owner paired devices and peer device tokens are refused.
+
+1. On source A, `GET /api/v1/terminals/targets` includes all known peer workers.
+   Each has `kind: "worker"`, `worker_id`, `name`, `available`, `reason_code`
+   and `reason`. Codes: `peer_offline`, `peer_terminals_disabled`,
+   `peer_unsupported_or_disabled`, `not_supported`, `https_required`,
+   `peer_unavailable`, `recipient_approval_required`. Pending approval is **not**
+   available. Live HTTPS probes detect unavailable recipients even when cached
+   capability advertisements are stale.
+2. On A, `POST /api/v1/terminals/peer-authorizations` with
+   `{"worker_id":"<B>"}` returns 201 with `authorization_id`, `worker_id`,
+   `request_id`, `status: "pending"`, `used: false`, `expires_in` (seconds).
+   A disabled/unsupported recipient can instead return `status: "unavailable"`
+   plus `available: false`, `reason_code`, `reason`; never open in that state.
+3. Directly on B, `GET /api/v1/terminals/peer-requests` returns
+   `{"requests":[{"request_id", "worker_id":"<A>", "status", "used", "expires_in"}]}`.
+   Show the requesting worker and explain that this grants one interactive shell.
+   `POST /api/v1/terminals/peer-requests/{request_id}/approve` returns the
+   approved request object. It requires B's own owner credential; A cannot
+   forward an approval. `DELETE /api/v1/terminals/peer-requests/{request_id}`
+   revokes it and closes its shell (`{"revoked":true}`).
+4. On A, `GET /api/v1/terminals/peer-authorizations/{authorization_id}` returns
+   the request state plus `authorization_id`, `worker_id`. Poll until
+   `status: "approved"` and `used: false`; `expired` means request again.
+   A fresh `/targets` then reports `available: true`, null reasons and that
+   `authorization_id` only to its authorizing owner principal.
+5. Open on A with `POST /api/v1/terminals` and
+   `{"target":{"kind":"worker","worker_id":"<B>","authorization_id":"<id>"},"cols":80,"rows":24}`.
+   Optional `session_id` is only A's UI association; optional `cwd`/`shell`
+   are resolved on B, never from a mirrored session. Returns existing
+   `201 {"terminal":...}`. Each approval opens at most one shell.
+6. Attach/reconnect, input/output and resize use the existing A socket
+   `/api/v1/ws/terminals/{terminal_id}` (protocol below); its bounded replay
+   buffer survives viewer reconnects while the relay remains alive. Close via
+   `DELETE /api/v1/terminals/{terminal_id}`. No new transport is required in UI.
+   `DELETE /api/v1/terminals/peer-authorizations/{authorization_id}` revokes
+   source authority immediately and attempts recipient teardown; an unreachable
+   recipient independently expires. A lost relay requires a new approval, not
+   automatic reconnection or restart.
+
+`authorization_id` is an opaque, in-memory source lease: keep it out of URLs
+other than these owner API routes and out of logs/storage. It is not proof on B.
+Unreachable/insecure peers return 503 detail `{code,message}`; invalid/expired
+source authorizations return 403; missing peers 404; locally unavailable
+request targets 409 with the reason object. Existing terminal create failures
+retain `{detail,code}`. Real two-worker verification is still outstanding;
+in-process tests exercise real recipient HTTP owner checks and relay PTYs.
 
 SSH targets require an active, writable machine grant for this chat (including
 grants approved from saved connections). They reuse the private-access SSH
@@ -35,12 +94,12 @@ The Files-open and read-only Monitor APIs are documented below.
 
 | Where | Field | Values |
 | --- | --- | --- |
-| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `1` = local only, `0` = none; `2` is reserved and not advertised |
+| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `2` = per-use recipient-approved relay enabled, `1` = local only, `0` = none |
 | `GET /api/v1/terminals/targets` | `supported` | `true` / `false` |
 
 `terminal` is `0` on a worker with no usable PTY/shell. `/targets` lists the
-local worker and approved SSH grants, never peers (even when the peer setting
-is enabled). `supported` is true when any offered target is usable.
+local worker, approved SSH grants and peer workers (including unavailable
+peers with reasons). `supported` is true when any offered target is usable.
 Creating a local terminal on an unsupported worker returns `501 not_supported`
 with the message "Terminals are not supported on this worker yet." Clients
 should hide or disable the terminal button when the flag is off and show
@@ -528,12 +587,15 @@ text and output are never logged.
 ## Remote implementation
 
 `app/network/terminal_relay.py` registers the `terminal` and `terminal-owner`
-control actions. The terminal recipient rejects all operations, including when
-`NETWORK_PEER_TERMINALS=true`: there is no independent owner-proof issuer or
-verifier yet. Its old source callback must never be promoted to authorization.
-Transport-only tests explicitly stub the closed recipient gate to retain byte
-relay regression coverage; separate malicious-member tests exercise the real
-registered handler without those stubs, with the setting both on and off.
+control actions. The recipient issues pending requests and accepts approval
+only through its own owner-authenticated HTTP routes. Its source callback is
+an additional revocation check, never an issuer of recipient authority. Each
+approval is single-use and bound to the authenticated source and source lease;
+revocation or replacement during spawn closes the newly created PTY.
+Tests drive the HTTP request/approval producer, a real relay PTY, the existing
+WebSocket, immediate close before the reader starts, and malicious-member
+requests with policy both on and off. The in-process transport is a test seam,
+not evidence of a working two-worker HTTPS deployment.
 All transport calls require `secure=True`; both inbound actions require the
 trusted HTTPS context. Plain HTTP and currently unsupported sealed-LAN control
 routes are refused rather than used as fallback.

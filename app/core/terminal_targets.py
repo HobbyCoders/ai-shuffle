@@ -11,11 +11,64 @@ from app.db.async_database import run_sync
 from app.network import control, runners, terminal_relay
 
 
-async def targets(session_id):
-    rows = await run_sync(runners.directory) if terminal_relay.peer_targets_enabled() else {"runners": []}
-    result = [{"kind": "worker", "worker_id": row["id"], "name": row["device_name"], "available": True}
-              for row in rows["runners"] if not row["is_self"] and row["online"]
-              and row.get("capabilities", {}).get("terminal", 0) >= 2]
+def peer_reason(row):
+    if not row["online"]:
+        code, reason = "peer_offline", "The peer worker is offline."
+    elif not terminal_relay.peer_targets_enabled():
+        code, reason = "peer_terminals_disabled", "Enable NETWORK_PEER_TERMINALS on both workers."
+    elif row.get("capabilities", {}).get("terminal", 0) < 2:
+        code, reason = "peer_unsupported_or_disabled", "The peer does not support owner-approved terminals or has them disabled."
+    elif not any(url.lower().startswith("https://") for url in row.get("endpoints", [])):
+        code, reason = "https_required", "The peer needs an authenticated HTTPS route."
+    else:
+        code, reason = "recipient_approval_required", "The owner must approve this terminal directly on the receiving worker."
+    return {"available": False, "reason_code": code, "reason": reason}
+
+
+async def peer_availability(row):
+    state = peer_reason(row)
+    if state["reason_code"] != "recipient_approval_required":
+        return state
+    try:
+        probe = await control.call(row["id"], "terminal", {"op": "probe"}, timeout=3, secure=True)
+    except control.InsecureRoute:
+        code, reason = "https_required", "The peer needs an authenticated HTTPS route."
+    except Exception:
+        code, reason = "peer_unavailable", "The peer did not answer the terminal availability check."
+    else:
+        code = probe.get("reason_code") if isinstance(probe, dict) else None
+        if code == "recipient_approval_required":
+            return state
+        reasons = {"peer_terminals_disabled": "Enable NETWORK_PEER_TERMINALS on both workers.",
+                   "not_supported": "No usable PTY or shell on the peer worker."}
+        if code not in reasons:
+            code = "peer_unsupported_or_disabled"
+        reason = reasons.get(code, "The peer does not support owner-approved terminals.")
+    return {"available": False, "reason_code": code, "reason": reason}
+
+
+async def targets(session_id, who=None):
+    rows = await run_sync(runners.directory)
+    workers = [row for row in rows["runners"] if not row["is_self"]]
+    states = await asyncio.gather(*(peer_availability(row) for row in workers))
+    result = []
+    for row, state in zip(workers, states):
+        target = {"kind": "worker", "worker_id": row["id"], "name": row["device_name"], **state}
+        if who and state["reason_code"] == "recipient_approval_required":
+            for lease in list(terminal_relay._owners):
+                try:
+                    terminal_relay.source_authorization(lease, who, row["id"])
+                except PermissionError:
+                    continue
+                try:
+                    status = await control.call(row["id"], "terminal", {"op": "status", "lease": lease}, timeout=10, secure=True)
+                except Exception:
+                    target.update(reason_code="peer_unavailable", reason="The peer did not answer the authorization check.")
+                    break
+                if status.get("status") == "approved" and not status.get("used"):
+                    target.update(available=True, reason_code=None, reason=None, authorization_id=lease)
+                    break
+        result.append(target)
     if session_id:
         from app.core.chat_access import broker, AccessDenied
         for grant in list(broker.grants.values()):
@@ -63,8 +116,13 @@ class StreamTerminal(service.Terminal):
 class PeerTerminal(StreamTerminal):
     async def start(self, target, request, options):
         self.target = {"kind": "worker", "worker_id": target.worker_id}
-        self.lease = terminal_relay.authorize(request, self.created_by, target.worker_id)
+        self.lease = target.authorization_id
+        try:
+            terminal_relay.source_authorization(self.lease, self.created_by, target.worker_id)
+        except PermissionError as exc:
+            raise TerminalError("recipient_approval_required", str(exc), 403) from None
         self.pending_size = None
+        self._peer_closed = False
         try:
             info = (await self.call("open", options=options))["terminal"]
         except BaseException:
@@ -105,11 +163,26 @@ class PeerTerminal(StreamTerminal):
         except (Exception, asyncio.CancelledError):
             self._on_exit(-1)
         finally:
-            try:
-                await self.call("close")
-            except TerminalError:
-                pass  # The recipient's lease deadline kills an unreachable PTY.
+            await self._close_peer()
+
+    async def _close_peer(self):
+        if self._peer_closed:
+            return
+        self._peer_closed = True
+        try:
+            # Revocation only reduces access, so it remains valid if the owner
+            # credential expired or the reader was cancelled before starting.
+            await self.call("revoke")
+        except TerminalError:
+            pass  # The recipient's lease deadline kills an unreachable PTY.
+        finally:
             terminal_relay.forget(self.lease)
+
+    async def kill(self):
+        try:
+            await super().kill()
+        finally:
+            await self._close_peer()
 
     async def write(self, data):
         if self.state == service.STATE_EXITED:
@@ -204,8 +277,8 @@ async def create(registry, body, who, request):
         raise TerminalError("limit_reached", "Close a terminal before opening another.", 409)
     choices = await targets(body.session_id)
     match = any(row["kind"] == target.kind and
-                (row.get("worker_id") == target.worker_id if target.kind == "worker"
-                 else row.get("grant_id") == target.grant_id) for row in choices)
+                ((row.get("worker_id") == target.worker_id and row.get("reason_code") == "recipient_approval_required")
+                 if target.kind == "worker" else row.get("grant_id") == target.grant_id) for row in choices)
     if not match:
         raise TerminalError("target_unavailable", "Choose an online terminal worker or an approved SSH grant.", 400)
     cls = PeerTerminal if target.kind == "worker" else SSHTerminal
