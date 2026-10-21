@@ -476,7 +476,36 @@ auth.addEventListener('input', () => {
                     for field in msg["state"].get("editors", [])
                 )
             ))
+            # A grouped list at the option budget: the runtime's count (group
+            # labels included) must agree with the server's, or the report is
+            # refused and every later result stalls behind it.
+            grouped = await mcp.tool("browser_eval", {"code": (
+                "const s = document.createElement('select'); s.setAttribute('aria-label', 'Grouped');"
+                "s.style.cssText = 'position:fixed;left:10px;top:120px;width:200px;height:30px';"
+                "const g = document.createElement('optgroup'); g.label = 'G';"
+                "for (let i = 0; i < 120; i++) { const o = document.createElement('option');"
+                " o.textContent = String(i).padStart(3, '0') + 'x'.repeat(197); g.appendChild(o); }"
+                "s.appendChild(g); document.body.appendChild(s); return true;"
+            )})
+            assert not grouped.get("isError"), _text(grouped)
+            listed = await _receive(first, lambda msg: (
+                msg.get("type") == "workspace" and any(
+                    field.get("label") == "Grouped" for field in msg["state"].get("editors", [])
+                )
+            ))
+            grouped_id = next(f["id"] for f in listed["state"]["editors"] if f["label"] == "Grouped")
             await _command(first, state, "takeover")
+            options = await _command(first, state, "options", {"field": grouped_id})
+            assert options["choices"]["truncated"] is True
+            assert options["choices"]["groups"] == ["G"]
+            assert len(options["choices"]["options"]) == 119
+            second_label = options["choices"]["options"][1]["label"]
+            await _command(first, state, "edit", {"field": grouped_id, "action": "set", "index": 1, "label": second_label})
+            await _command(first, state, "edit", {"field": grouped_id, "action": "set", "index": 2, "label": second_label}, ok=False)
+            # Results still flow after the long list: nothing is stuck behind it.
+            shared = await _receive(first, lambda msg: msg.get("type") == "workspace" and any(
+                f.get("label") == "Grouped" and f.get("value") == second_label for f in msg["state"].get("editors", [])
+            ))
             shared = await _receive(
                 second,
                 lambda msg: (
