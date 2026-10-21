@@ -758,9 +758,13 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.evaluate(() => {
         const root = document.getElementById("hosts")!.attachShadow({ mode: "open" });
         root.innerHTML = '<span id="clock"></span>';
-        setInterval(() => { root.querySelector("span")!.textContent = String(Date.now()); }, 100);
+        let ticks = 0;
+        // Do not put the first observed write on the 100ms sample boundary.
+        // A 60ms ticker writes within that window and gives the watcher time
+        // to prove a second sample, even when the renderer coalesces timers.
+        setInterval(() => { root.querySelector("span")!.textContent = String(++ticks); }, 60);
       });
-      await page.waitForTimeout(400);
+      await page.waitForFunction(() => Number(document.getElementById("hosts")!.shadowRoot!.querySelector("span")!.textContent) >= 2);
       const result = body(await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") }));
       expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
       expect(result.timings.dispatch_ms).toBeLessThan(450); // idle late attachment gets its first sample
