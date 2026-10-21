@@ -126,11 +126,12 @@ def _binding(source, row):
             generation = generation or model_key_generation(row)
         parts.append(key)
         guards["expected_credential_generation"] = generation
-    from app.network import engine
+    from app.network import crypto, engine
     ctx = engine.cached_context()
     if ctx is None:
         return None
-    revision = hmac.new(ctx.network_key, b"provider-observation-v1\0" + json.dumps(parts).encode(),
+    hmac_key = crypto._hkdf(ctx.network_key, b"shuffle-provider-observation-hmac-v1")
+    revision = hmac.new(hmac_key, b"provider-observation-v1\0" + json.dumps(parts).encode(),
                         hashlib.sha256).hexdigest()
     provider_id = row["id"] if row else _snapshot_id(source, row)
     return PREFIX + source.id + ":" + provider_id, row, _snapshot_id(source, row), guards, revision
@@ -221,6 +222,9 @@ def _publish(source, row, before):
     ctx = engine.cached_context()
     if ctx is None:
         return
+    source_worker = local.get("source_worker") or (local.get("raw") or {}).get("source_worker")
+    if source_worker and source_worker != ctx.device_id:
+        return  # A deferred poll may have imported a peer's reading mid-flight.
     # Explicit projection: raw, denial fingerprints, binding IDs, secrets and
     # provider-controlled text never enter the shared record.
     plan = local.get("plan_type")
@@ -241,7 +245,7 @@ async def poll_shared(source, row, poll):
         pass  # Sharing must not prevent the existing local poll path.
     if (before and before[2] and not before[1].get("last_error_kind")
             and not (before[1].get("raw") or {}).get("usage_error")
-            and (before[1].get("fetched_at") or 0) > (time.time() - source.min_interval) * 1000):
+            and 0 <= time.time() * 1000 - (before[1].get("fetched_at") or 0) < source.min_interval * 1000):
         return
     result = await poll(row) if row is not None else await poll()
     if before:
