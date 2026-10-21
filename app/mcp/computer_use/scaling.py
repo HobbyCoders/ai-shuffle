@@ -389,6 +389,8 @@ class DisplayManager:
         # Per-display scale map, filled on each screenshot, consumed by actions.
         # index -> {"scale","pw","ph","left","top","vw","vh"}
         self._map: dict[int, dict] = {}
+        self._checked_windows: Optional[set[str]] = None
+        self._defer_window_check = False
         _ensure_dpi_awareness()
         displays = self.list_displays()
         if target_display is not None and any(d.index == target_display for d in displays):
@@ -434,7 +436,8 @@ class DisplayManager:
 
     # ----- capture -----------------------------------------------------------
 
-    def capture(self, crop: "Optional[tuple[int, int, int, int]]" = None) -> tuple[bytes, dict]:
+    def capture(self, crop: "Optional[tuple[int, int, int, int]]" = None, *,
+                window=None) -> tuple[bytes, dict]:
         """Capture the selected display, downscaled to the virtual size.
 
         Returns ``(png_bytes, info)`` where info has the virtual + physical size
@@ -485,6 +488,8 @@ class DisplayManager:
             "left": region["left"], "top": region["top"], "vw": vw, "vh": vh,
             "display_rect": (geo.left, geo.top, geo.width, geo.height),
             "id": shot_id, "at": time.time(),
+            "window_id": window.id if window is not None else None,
+            "window_bounds": tuple(window.bounds) if window is not None else None,
         }
         info = {
             "screenshot_id": shot_id,
@@ -501,6 +506,15 @@ class DisplayManager:
         """Id of the screenshot input is mapped through, or None."""
         m = self._map.get(self.selected_index)
         return m.get("id") if m else None
+
+    def begin_action(self, *, defer_window_check: bool = False) -> None:
+        """Cache native validation; paired drags may intentionally move the window."""
+        self._checked_windows = set()
+        self._defer_window_check = defer_window_check
+
+    def end_action(self) -> None:
+        self._checked_windows = None
+        self._defer_window_check = False
 
     def mapped_geometry(self, screenshot_id: Optional[str] = None) -> dict:
         """The current screenshot's mapping. Refuses input based on an image
@@ -521,6 +535,19 @@ class DisplayManager:
             self._map.pop(self.selected_index, None)
             raise stale("The display layout changed since the screenshot (layout changed). "
                         "Take a fresh screenshot before acting.")
+        if (m.get("window_id") is not None and not self._defer_window_check
+                and (self._checked_windows is None or m["id"] not in self._checked_windows)):
+            from app.mcp.computer_use import windows
+            try:
+                win = windows.find_window(m["window_id"], [geo])
+            except ValueError:
+                win = None
+            if win is None or win.bounds != m["window_bounds"] or win.display != self.selected_index:
+                self._map.pop(self.selected_index, None)
+                raise stale("The window moved, resized or disappeared since the screenshot. "
+                            "Take a fresh screenshot before acting.")
+            if self._checked_windows is not None:
+                self._checked_windows.add(m["id"])
         return m
 
     @staticmethod

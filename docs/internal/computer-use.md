@@ -89,16 +89,71 @@ screenshot of the selected display; an action is refused with
 - it names a screenshot that is no longer current (a newer one replaced it);
 - no current screenshot exists (never taken, `switch_display`, `release_control`,
   a cancelled call, a new turn or owner);
-- the monitor layout changed since the capture.
+- the monitor layout changed since the capture;
+- a captured window moved, resized, disappeared, or changed display;
+- `focus_window`, `window_control`, or `open_application` invalidated the mapping.
+
+Window screenshots are **screen crops**, not background window captures. Their
+`occluded_by` list reports overlapping listed windows above the target in z-order;
+unlisted overlays can still be present. When a window is pinned, keyboard input
+refuses unrelated foreground windows. Pointer targeting is restricted to that app
+only when the current screenshot is its window crop; a full-display mapping still
+allows taskbar and other-app clicks. Related targets include the same process or
+an owned popup. Take `screenshot` **without `window_id`** to clear the pin and work
+elsewhere. This narrows, but cannot eliminate, the focus/input race. Window bounds
+are validated once per action (not once per path point). A window-moving drag,
+including paired down/move/up calls, completes before its old crop becomes stale
+for the next action. During a paired drag, screenshot-id and display-topology
+checks still apply. Elevated pointer targets are refused before clicking,
+scrolling, or dragging.
 
 A coordinate more than 2 pixels outside the screenshot is refused with
 `INVALID_ARGUMENT` instead of being clamped onto the edge (which used to click
 whatever sat there, often the taskbar). `zoom` and `list_windows` report the
 `screenshot_id` their mapping belongs to.
 
+**Gestures.** Click coordinates may be omitted to use the current pointer (a
+current screenshot is still required). `mouse_down` / `mouse_up` accept `button`
+(left/right/middle), optional `coordinate` / `screenshot_id`, and `text` modifiers;
+`left_mouse_down` / `left_mouse_up` remain left-button aliases. Down-call modifiers
+stay held until up; modifiers supplied on up are held through the drop and released.
+`key_down` /
+`key_up` hold/release a key or chord across calls. System-key grants still apply,
+including pointer modifiers combined with already-held modifiers. `type` while
+Ctrl, Alt or Win/Command is held requires system-key permission too. X11 refuses
+held Escape. `open_application`, `focus_window`, `click_element` and `set_value`
+refuse while keys or buttons are held, even with a system-key grant: release held
+keys or buttons first, because these actions can send their own keys or clicks.
+Application names must not contain control characters.
+Cross-call holds auto-release after **15 seconds**, as well as on errors, Stop,
+turn end and `release_control`. Use a short `computer_batch` for a held gesture.
+Timeout/Stop release does not send Escape to cancel a drag. If an up action finds
+nothing held, it returns `released: false` and asks for a fresh screenshot.
+
+`left_click_drag` retains its default straight, 20-step, 0.3-second motion and adds
+optional `path` screenshot points, movement `duration`, post-press `hold`,
+pre-release `drop_delay`, `button`, and `text` modifiers. Each time is 0–60 seconds.
+All points are checked before pressing; the endpoint is checked before release.
+Detected pointer takeover releases input rather than moving it back. Activity
+recording reuses per-action display geometry, not a new capture instance per step.
+`scroll` also accepts `text` modifiers, for example Ctrl+wheel zoom.
+
+`type` always sends Enter for newlines, including long text. Its clipboard fast
+path is single-line only and checks the focused field when UIA exposes a readable,
+non-password value, polling for up to one second for paste delivery. Multiline text
+is typed key by key: at the default pacing a 2 KB block takes about 30 seconds.
+If the paste cannot be confirmed from that evidence, it reports
+an unknown outcome instead of typing a duplicate. Fields without readable UIA
+values still need screenshot confirmation. Clipboard preservation/history exclusion
+is not implemented here. Key chords accept `ctrl++`, `plus`, `minus`, `KP_Add`,
+`KP_Subtract`, and xdotool modifier names such as `Control_L` and `Super_L`.
+`KP_Add`/`KP_Subtract` emit real keypad events, not ordinary plus/minus characters.
+
 **Outcomes.** Every error carries `error` (short, plain), `code` and `outcome`:
 `rejected` (nothing sent), `partial` (some input sent) or `unknown` (input may
-have taken effect; observe before retrying). Codes are listed in
+have taken effect; observe before retrying). Error cleanup that releases a held
+key/button counts as input, so a refusal that drops a cross-call drag reports
+`partial`, not `rejected`. Codes are listed in
 `app/mcp/computer_use/errors.py`: `STALE_OBSERVATION`, `TARGET_NOT_FOUND`,
 `TARGET_CHANGED`, `FOCUS_BLOCKED`, `POINTER_MISMATCH`, `USER_INTERRUPTED`, `DESKTOP_LOCKED`,
 `PERMISSION_REQUIRED`, `DESKTOP_BUSY`, `UNSUPPORTED_CAPABILITY`,
@@ -172,7 +227,9 @@ step naming one returns `UNSUPPORTED_CAPABILITY`.
   session's `request_access` grant (by executable, file description, product
   name, or a trailing word, so 'Edge' matches 'Microsoft Edge').
 - `open_application` focuses an open, granted window of the app before falling
-  back to a Start-menu launch.
+  back to a Start-menu launch. It waits up to two seconds for Start/Search focus,
+  including known Explorer-hosted shell windows; otherwise it returns `FOCUS_BLOCKED`
+  without typing the application name.
 - `ui_tree`, `click_element` and `set_value` target controls by element; see
   the next section.
 - Windows of apps running as administrator cannot be focused or moved from a
