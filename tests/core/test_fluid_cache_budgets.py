@@ -75,3 +75,26 @@ async def test_legacy_replay_decodes_in_small_finite_pages(mock_db, monkeypatch)
     assert calls == [(0, 17, 8), (8, 17, 8), (16, 17, 8)]
 
 
+@pytest.mark.asyncio
+async def test_byte_diagnostics_never_serialize_messages_on_event_loop(mock_db, monkeypatch):
+    import threading
+    from app.core.provider import fluid_pg_store as module
+    from fluid.messages import Message, Text
+    from fluid.store.base import SessionNode
+    store = PgFluidStore()
+    await store.create_session("off-loop-count")
+    node = SessionNode(node_id="root", parent_id=None,
+                       message=Message(role="user", content=[Text("large-ish payload" * 1000)]))
+    loop_thread = threading.get_ident()
+    original = module.json.dumps
+    def checked(value, *args, **kwargs):
+        assert threading.get_ident() != loop_thread, "diagnostic serialization blocked the event loop"
+        return original(value, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(module.json, "dumps", checked)
+        await store.append("off-loop-count", node)
+        cold = PgFluidStore()
+        await cold.get_session("off-loop-count")
+        assert cold.cache_stats() == store.cache_stats()
+
+

@@ -104,7 +104,7 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
             return None
         meta = SessionMeta(**dict(row))
         if not include_nodes:
-            return {"meta": meta, "nodes": {}}
+            return {"meta": meta, "nodes": {}, "node_sizes": {}}
         cur.execute(
             "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
             "WHERE session_id = %s", (session_id,),
@@ -115,7 +115,8 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
         node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
         message=Message.from_dict(_as_dict(r["message"])),
     ) for r in rows}
-    return {"meta": meta, "nodes": nodes}
+    sizes = {key: len(json.dumps(node.message.to_dict())) for key, node in nodes.items()}
+    return {"meta": meta, "nodes": nodes, "node_sizes": sizes}
 
 
 def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
@@ -289,7 +290,7 @@ def _last_event_seq_sync(session_id: str) -> int:
     return int(row["seq"]) if row else 0
 
 
-def _append_node_sync(session_id: str, node: SessionNode) -> None:
+def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool = True) -> int:
     """Insert the node and advance the head in one transaction (JsonlStore
     parity: append implies head-move)."""
     message = _scrub_pg_illegal(scrub_url_credentials(node.message.to_dict()))
@@ -312,6 +313,9 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
             "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
             (node.node_id, session_id),
         )
+    # Count raw cached payload off-loop as well as the SQL serialization. A
+    # delegated metadata-only store needs neither the count nor another copy.
+    return len(json.dumps(node.message.to_dict())) if measure_bytes else 0
 
 
 def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
@@ -1396,6 +1400,7 @@ class PgFluidStore:
         self._event_floor: Dict[str, int] = {}
         self._event_bytes: Dict[str, int] = {}
         self._node_json_bytes: Dict[str, int] = {}
+        self._node_sizes: Dict[str, Dict[str, int]] = {}
         self._pending_events: Dict[str, List[Event]] = {}
         self._pending_since: Dict[str, float] = {}
         self._pending_bytes: Dict[str, int] = {}
@@ -1412,18 +1417,17 @@ class PgFluidStore:
             if data is not None:
                 self._sessions[session_id] = data["meta"]
                 self._nodes[session_id] = data["nodes"]
-                self._node_json_bytes[session_id] = sum(
-                    len(json.dumps(node.message.to_dict())) for node in data["nodes"].values())
+                self._node_sizes[session_id] = data["node_sizes"]
+                self._node_json_bytes[session_id] = sum(data["node_sizes"].values())
             self._loaded.add(session_id)
             return data is not None
 
-    def _cache_node(self, session_id: str, node: SessionNode) -> None:
+    def _cache_node(self, session_id: str, node: SessionNode, size: int) -> None:
         nodes = self._nodes.setdefault(session_id, {})
-        old = nodes.get(node.node_id)
-        delta = len(json.dumps(node.message.to_dict()))
-        if old is not None:
-            delta -= len(json.dumps(old.message.to_dict()))
+        sizes = self._node_sizes.setdefault(session_id, {})
+        delta = size - sizes.get(node.node_id, 0)
         self._node_json_bytes[session_id] = self._node_json_bytes.get(session_id, 0) + delta
+        sizes[node.node_id] = size
         nodes[node.node_id] = node
 
     def cache_stats(self) -> Dict[str, int]:
@@ -1535,9 +1539,9 @@ class PgFluidStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
-        await run_sync(_append_node_sync, session_id, node)
+        size = await run_sync(_append_node_sync, session_id, node, measure_bytes=self.cache_nodes)
         if self.cache_nodes:
-            self._cache_node(session_id, node)
+            self._cache_node(session_id, node, size)
         elif session_id in self._memory_paths:
             head, projection = self._memory_paths[session_id]
             if node.parent_id == head:
