@@ -29,6 +29,7 @@ terminate cannot be forwarded. Without the launcher the browser is not started.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import httpx
+import websockets
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,68 @@ def get_detail() -> Optional[str]:
 async def _cdp_answers(port: int) -> bool:
     """True if something answers ``GET /json/version`` on the loopback CDP port."""
     return await cdp_get(path="/json/version", port=port) is not None
+
+
+_PAGE_PROBE_TIMEOUT_S = 2.0
+_HEALTH_INTERVAL_S = 10.0
+
+
+async def _cdp_command(url: str, method: str, params: dict) -> dict:
+    """One bounded CDP request; ignore unsolicited events on the socket."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme != "ws" or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("Expected a loopback CDP WebSocket")
+    async with asyncio.timeout(_PAGE_PROBE_TIMEOUT_S):
+        async with websockets.connect(url, open_timeout=_PAGE_PROBE_TIMEOUT_S, close_timeout=0.1) as ws:
+            await ws.send(json.dumps({"id": 1, "method": method, "params": params}))
+            async for raw in ws:
+                message = json.loads(raw)
+                if message.get("id") == 1:
+                    if "error" in message:
+                        raise RuntimeError("CDP command failed")
+                    return message.get("result", {})
+    raise RuntimeError("CDP socket closed before replying")
+
+
+async def _pages_answer(port: int) -> bool:
+    """Probe/repair tabs only for our supervised browser, preserving its profile.
+
+    A browser-level /json/version response does not prove a renderer is alive.
+    Close wedged targets through the browser socket (not the stuck renderer),
+    replacing each with about:blank. Return False to request a process restart
+    if repair fails. Never used for an externally owned CDP listener.
+    """
+    version = await cdp_get("/json/version", port)
+    targets = await cdp_get("/json/list", port)
+    if not isinstance(version, dict) or not isinstance(targets, list):
+        return False
+    for target in targets:
+        if not isinstance(target, dict):
+            return False
+        if target.get("type") != "page":
+            continue
+        try:
+            await _cdp_command(target["webSocketDebuggerUrl"], "Runtime.evaluate", {"expression": "1"})
+        except Exception:
+            logger.warning("native chrome supervisor: replacing unresponsive page")
+            try:
+                url = version["webSocketDebuggerUrl"]
+                closed = await _cdp_command(url, "Target.closeTarget", {"targetId": target["id"]})
+                if not closed.get("success"):
+                    return False
+                created = await _cdp_command(url, "Target.createTarget", {"url": "about:blank"})
+                if not created.get("targetId"):
+                    return False
+                # Verify the replacement too; an unhealthy renderer process can
+                # acknowledge creation without ever running page commands.
+                fresh = await cdp_get("/json/list", port)
+                replacement = next(t for t in fresh if t.get("id") == created["targetId"])
+                await _cdp_command(replacement["webSocketDebuggerUrl"], "Runtime.evaluate", {"expression": "1"})
+            except Exception:
+                return False
+    return True
 
 
 async def wait_until_answering(port: int, task=None):
@@ -429,7 +493,15 @@ async def _supervise(exe: str, port: int) -> None:
         _last_detail = None
 
         try:
-            returncode = await _proc.wait()
+            while True:
+                try:
+                    returncode = await asyncio.wait_for(_proc.wait(), _HEALTH_INTERVAL_S)
+                    break
+                except asyncio.TimeoutError:
+                    if not await _pages_answer(port):
+                        _last_detail = "Chrome page health check failed; restarting with the existing profile"
+                        logger.warning("native chrome supervisor: %s", _last_detail)
+                        await _stop_process(_proc)
         except asyncio.CancelledError:
             if log is not None:
                 log.close()
@@ -526,23 +598,8 @@ async def ensure_started() -> None:
     _supervisor_task = asyncio.create_task(_supervise(exe, port))
 
 
-async def stop() -> None:
-    """Cancel supervision and terminate the browser. Idempotent."""
-    global _proc, _supervisor_task, _stopping, _last_detail
-
-    _stopping = True
-
-    task = _supervisor_task
-    _supervisor_task = None
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    proc = _proc
-    _proc = None
+async def _stop_process(proc) -> None:
+    """Stop the egress launcher without ever changing its Chrome profile."""
     if proc is not None and proc.returncode is None:
         # End of stdin tells the egress launcher to stop the browser. On
         # Windows terminate() would kill only the launcher, so give it a moment.
@@ -569,6 +626,26 @@ async def stop() -> None:
                 proc.kill()
             except Exception:
                 pass
+
+
+async def stop() -> None:
+    """Cancel supervision and terminate the browser. Idempotent."""
+    global _proc, _supervisor_task, _stopping, _last_detail
+
+    _stopping = True
+
+    task = _supervisor_task
+    _supervisor_task = None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    proc = _proc
+    _proc = None
+    await _stop_process(proc)
 
     _last_detail = None
     _stopping = False

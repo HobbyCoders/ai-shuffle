@@ -28,6 +28,37 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
     } finally { await browser.close(); }
   });
 
+  it('leaves combobox-like fields to the page but keeps plain inputs', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<input role="combobox"><input aria-haspopup="listbox"><input aria-haspopup="true">
+        <input aria-autocomplete="list"><input aria-expanded="false"><input list="choices"><datalist id="choices"></datalist>
+        <input aria-label="Plain"><input aria-label="No popup" aria-haspopup="false"><textarea aria-label="Notes"></textarea>`);
+      expect((await readEditors(page)).map(f => f.label)).toEqual(['Plain', 'No popup', 'Notes']);
+    } finally { await browser.close(); }
+  });
+
+  it('omits covered fields, including inside nested shadow roots, but accepts labels', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div id="host"></div>');
+      await page.evaluate(() => {
+        const root = document.querySelector('#host')!.attachShadow({ mode: 'open' });
+        root.innerHTML = '<div id="inner"></div>';
+        root.querySelector('#inner')!.attachShadow({ mode: 'open' }).innerHTML = `
+          <style>input{display:block;width:200px;height:30px}label{position:absolute;left:0;top:0;width:200px;height:30px}
+          .row{position:relative}#options{position:absolute;left:0;top:0;width:200px;height:30px;background:white;z-index:2}</style>
+          <input aria-label="Visible"><div class="row"><input aria-label="Covered"><div id="options" role="listbox">Option</div></div>
+          <div class="row"><input id="labelled"><label for="labelled"><span>Label hit</span></label></div>`;
+      });
+      expect((await readEditors(page)).map(f => f.label)).toEqual(['Visible', 'Label hit']);
+      await page.locator('#options').evaluate(el => el.remove());
+      expect((await readEditors(page)).map(f => f.label)).toEqual(['Visible', 'Covered', 'Label hit']);
+    } finally { await browser.close(); }
+  });
+
   it('flags split one-time-code boxes for keystrokes so the page can advance focus itself', async () => {
     const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });
     try {

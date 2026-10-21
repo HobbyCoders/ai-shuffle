@@ -88,6 +88,12 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       if (fields.length >= 32) break;
       const type = el instanceof HTMLTextAreaElement ? 'textarea' : el.type;
       if (!['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'].includes(type) || el.disabled || el.readOnly) continue;
+      // Rich text widgets need the page's real pointer and keyboard handlers.
+      if (type !== 'file' && (
+        el.getAttribute('role')?.toLowerCase().split(/\s+/).includes('combobox') ||
+        (el.hasAttribute('aria-haspopup') && el.getAttribute('aria-haspopup')?.toLowerCase() !== 'false') ||
+        ['aria-autocomplete', 'aria-expanded', 'list'].some(attr => el.hasAttribute(attr))
+      )) continue;
       const anchor = type === 'file' && (!el.checkVisibility() || el.getBoundingClientRect().width < 1)
         ? Array.from(el.labels ?? []).find(label => label.checkVisibility()) ?? el : el;
       const chooser = type === 'file' && registry.pending === el;
@@ -96,6 +102,18 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       if (!chooser && !anchor.checkVisibility()) continue;
       const rect = chooser ? new DOMRect(16, 16, Math.max(240, innerWidth - 32), 44) : anchor.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) continue;
+      if (!chooser) {
+        const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+        let hit = document.elementFromPoint(x, y);
+        // Document hit-testing returns the shadow host, not its inner control.
+        while (hit?.shadowRoot) {
+          const inner = hit.shadowRoot.elementFromPoint(x, y);
+          if (!inner || inner === hit) break;
+          hit = inner;
+        }
+        if (!hit || !(hit === el || el.contains(hit) ||
+          Array.from(el.labels ?? []).some(label => label === hit || label.contains(hit)))) continue;
+      }
       // Do not put password contents into shared workspace state.
       const value = type === 'password' ? '' : type === 'file' ? Array.from((el as HTMLInputElement).files ?? []).map(f => f.name).join(', ') : el.value;
       if (value.length > 16384 || value.length > budget) continue;

@@ -346,3 +346,92 @@ def test_the_browser_is_launched_without_the_server_run_marker(monkeypatch):
     env = nc._egress_env()
     assert process_ledger.RUN_MARKER not in env
     assert env["SOME_SETTING"] == "kept"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "close", "replacement"])
+async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(monkeypatch, failure):
+    """Real fake CDP socket: browser commands answer, page commands can hang."""
+    import json
+    import websockets
+
+    calls = []
+    repaired = False
+
+    async def endpoint(ws):
+        nonlocal repaired
+        async for raw in ws:
+            message = json.loads(raw)
+            method = message["method"]
+            calls.append(method)
+            path = ws.request.path
+            if path == "/page/stuck" or (path == "/page/new" and failure == "replacement"):
+                continue  # A live connection whose renderer never replies.
+            result = {}
+            if method == "Target.closeTarget":
+                result = {"success": failure != "close"}
+            elif method == "Target.createTarget":
+                repaired = True
+                result = {"targetId": "new"}
+            await ws.send(json.dumps({"id": message["id"], "result": result}))
+
+    async with websockets.serve(endpoint, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        base = f"ws://127.0.0.1:{port}"
+
+        async def get(path, port):
+            if path == "/json/version":
+                return {"webSocketDebuggerUrl": base + "/browser"}
+            target = "new" if repaired else "stuck"
+            return [{"type": "page", "id": target, "webSocketDebuggerUrl": base + "/page/" + target}]
+
+        monkeypatch.setattr(nc, "cdp_get", get)
+        monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.05)
+        profile = Mock(side_effect=AssertionError("health recovery must not alter the profile"))
+        monkeypatch.setattr(nc, "_profile_dir", profile)
+        assert await nc._pages_answer(port) is (failure is None)
+        assert "Target.closeTarget" in calls
+        if failure != "close":
+            assert "Target.createTarget" in calls
+        profile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restarts_when_page_repair_fails(monkeypatch):
+    monkeypatch.setattr(nc, "_stopping", False)
+    monkeypatch.setattr(nc, "_HEALTH_INTERVAL_S", 0.01)
+    monkeypatch.setattr(nc, "_RELAUNCH_BACKOFF_S", 0)
+    monkeypatch.setattr(nc, "_open_launcher_log", lambda port: None)
+    monkeypatch.setattr(nc, "_egress_command", lambda exe, args: [exe, *args])
+    monkeypatch.setattr(nc, "_egress_env", lambda: {})
+    process = Mock(returncode=None, pid=123)
+    exited = asyncio.Event()
+
+    async def wait():
+        await exited.wait()
+        return 0
+
+    process.wait = wait
+    health = AsyncMock(return_value=False)
+    monkeypatch.setattr(nc, "_pages_answer", health)
+
+    async def stop(proc):
+        assert proc is process
+        exited.set()
+
+    stopper = AsyncMock(side_effect=stop)
+    monkeypatch.setattr(nc, "_stop_process", stopper)
+    launches = []
+
+    async def spawn(*args, **kwargs):
+        launches.append(args)
+        if len(launches) == 2:
+            monkeypatch.setattr(nc, "_stopping", True)
+        return process
+
+    monkeypatch.setattr(nc.asyncio, "create_subprocess_exec", spawn)
+    await nc._supervise("fake-chrome", 1234)
+    health.assert_awaited_once_with(1234)
+    stopper.assert_awaited_once_with(process)
+    assert len(launches) == 2
+    profiles = [[a for a in args if a.startswith("--user-data-dir=")] for args in launches]
+    assert profiles[0] == profiles[1] and len(profiles[0]) == 1
