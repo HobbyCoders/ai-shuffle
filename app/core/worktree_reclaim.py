@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -82,8 +83,16 @@ def _project_sessions(source):
             for row in cursor.fetchall():
                 row = dict(row)
                 rows[row["id"]] = row
+    finished = {}
+    if rows:
+        placeholders = ",".join("%s" for _ in rows)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT session_id, MAX(ended_at) AS finished_at FROM turns "
+                           f"WHERE session_id IN ({placeholders}) AND ended_at IS NOT NULL GROUP BY session_id", list(rows))
+            finished = {r["session_id"]: r["finished_at"] for r in cursor.fetchall()}
     busy = {s["id"] for s in active_git_sessions(list(rows.values()))}
-    return [{**s, "running": s["id"] in busy} for s in rows.values()]
+    return [{**s, "running": s["id"] in busy, "finished_at": finished.get(s["id"])} for s in rows.values()]
 
 
 def _context(source):
@@ -157,8 +166,44 @@ def _bound_sessions(context, registered, branch):
     return bound
 
 
-def _plan(source, registered, context):
+def _pulls(context, branch):
     from app.core.github_service import github_service
+
+    if branch and context["github_repo"]:
+        return github_service.list_pulls(context["github_repo"], state="all", head=branch, limit=100)
+    return []
+
+
+def _activity_time(value):
+    stamp = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _session_grace_reason(sessions):
+    for session in sessions:
+        if not session.get("finished_at"):
+            return "bound session has no finished turn; dispatch may still be pending"
+        try:
+            last = max(_activity_time(session.get("updated_at")), _activity_time(session["finished_at"]))
+            if time.time() - last < GRACE_SECONDS:
+                return "bound session has activity within the 24-hour freshness guard"
+        except (ValueError, TypeError):
+            return "bound session activity time unavailable"
+    return None
+
+
+def _ignored_reason(path):
+    ignored = wr._git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    if ignored is None:
+        return "ignored files could not be checked"
+    paths = [p for p in ignored.split("\0") if p]
+    dependencies = {"node_modules", "venv", ".venv", "__pycache__"}
+    if any(not dependencies.intersection(Path(p.rstrip("/")).parts) for p in paths):
+        return "non-dependency ignored files would be removed; checkout kept"
+    return None
+
+
+def _plan(source, registered, context, *, pulls=None):
 
     path, repo = registered["path"], source["path"]
     row = {"path": path, "registry_ids": registered["registry_ids"],
@@ -191,6 +236,9 @@ def _plan(source, registered, context):
         status = wr._git(path, "status", "--porcelain", "--untracked-files=all")
         if status is None or status.strip():
             return keep("uncommitted changes or status unavailable")
+        ignored_reason = _ignored_reason(path)
+        if ignored_reason:
+            return keep(ignored_reason)
     branch = row["branch"]
     if branch and branch.casefold() == context["default_branch"].casefold():
         return keep("default branch protected")
@@ -199,14 +247,16 @@ def _plan(source, registered, context):
         return keep("bound to an active or running session")
     if any(str(s.get("pr_state") or "").lower() == "open" for s in sessions):
         return keep("open PR head branch")
-    prs = []
-    if branch and context["github_repo"]:
-        # Per-head lookup avoids a truncated global PR list hiding an open PR.
-        prs = github_service.list_pulls(context["github_repo"], state="all", head=branch, limit=100)
-        if len(prs) >= 100:
-            return keep("PR history truncated; status unknown")
-        if any(pr.state.lower() == "open" for pr in prs):
-            return keep("open PR head branch")
+    grace_reason = _session_grace_reason(sessions)
+    if grace_reason:
+        return keep(grace_reason)
+    # Look up PRs outside repo_worktree_lock; apply supplies this snapshot while
+    # rechecking the matching HEAD, local Git state and liveness under the lock.
+    prs = _pulls(context, branch) if pulls is None else pulls
+    if len(prs) >= 100:
+        return keep("PR history truncated; status unknown")
+    if any(pr.state.lower() == "open" for pr in prs):
+        return keep("open PR head branch")
     branch_head = _branch_head(repo, branch)
     head = ((wr._git(path, "rev-parse", "HEAD") or "").strip() if not missing
             else branch_head or (item or {}).get("head"))
@@ -218,7 +268,25 @@ def _plan(source, registered, context):
         return keep("unmerged or unpushed work; integration not proven")
     if branch_head and head != branch_head:
         return keep("branch moved away from checkout HEAD")
-    return {**row, "decision": "forget" if missing else "remove", "reason": "safe to reclaim"}
+    reflog = wr._git(repo, "reflog", "show", "--format=%H", f"refs/heads/{branch}") if branch else None
+    no_own_commits = bool(head == context["default_sha"] and reflog and reflog.splitlines()[-1].strip() == head)
+    reason = "no commits of its own" if no_own_commits else "integration proven; safe to reclaim"
+    return {**row, "decision": "forget" if missing else "remove", "reason": reason}
+
+
+def _stamp_head(source, row):
+    from app.db import checkouts
+
+    if row["head_sha"]:
+        stamped = set()
+        for alias in source["aliases"]:
+            updated = checkouts.set_head_sha_for_path(row["path"], row["head_sha"], project_id=alias,
+                                                     runner_id=settings.effective_instance_id)
+            if updated:
+                stamped.add(updated["id"])
+        expected = {i for i in row["registry_ids"] if i.startswith("ck-")}
+        if not expected <= stamped:
+            raise ValueError("checkout restoration HEAD could not be persisted")
 
 
 def _archive(source, row):
@@ -226,9 +294,6 @@ def _archive(source, row):
     from app.db.base import WorktreeStatus
 
     for alias in source["aliases"]:
-        if row["head_sha"]:
-            checkouts.set_head_sha_for_path(row["path"], row["head_sha"], project_id=alias,
-                                           runner_id=settings.effective_instance_id)
         checkouts.archive_checkout_by_path(alias, row["path"], runner_id=settings.effective_instance_id)
     for registry_id in row["registry_ids"]:
         if database.get_worktree(registry_id):
@@ -250,23 +315,48 @@ def _invalidate(source, path):
         _native_reader.invalidate_repo(path)
 
 
-def _apply(source, registered, preview, *, automatic=False):
+def _prepare(source, registered, preview, automatic):
+    # Network lookup is deliberately outside the repository lock, and BEFORE
+    # releasing users. A stale plan must not evict an engine or stop its work.
+    lookup_context = _context(source)
+    pulls = _pulls(lookup_context, registered.get("branch"))
+    context = _context(source)  # the network round trip may have outlived a new dispatch/run
+    snapshot = {"repository": lookup_context["github_repo"], "pulls": pulls}
+    row = _plan(source, registered, context, pulls=pulls)
+    if context["github_repo"] != snapshot["repository"]:
+        row = {**row, "decision": "keep", "reason": "PR repository changed during lookup"}
+    if row["decision"] == "keep" or row["head_sha"] != preview["head_sha"]:
+        row = {**row, "decision": "keep", "reason": "safety changed: " + row["reason"]}
+    elif automatic and not _old_activity(source, registered, row, time.time()):
+        row = {**row, "decision": "keep", "reason": "session activity changed during automatic grace check"}
+    return row, snapshot
+
+
+def _apply(source, registered, preview, *, automatic=False, pulls):
     repo = source["path"]
     with repo_worktree_lock(repo):
-        # Re-read Git, PR and session truth immediately before the mutation. An
-        # old dry-run response is never a deletion authorization.
-        row = _plan(source, registered, _context(source))
+        # Re-verify after release. No network I/O is allowed under this lock.
+        context = _context(source)
+        if context["github_repo"] != pulls["repository"]:
+            return {**preview, "decision": "keep", "reason": "PR repository changed after lookup"}
+        row = _plan(source, registered, context, pulls=pulls["pulls"])
         if row["decision"] == "keep" or row["head_sha"] != preview["head_sha"]:
             return {**row, "decision": "keep", "reason": "safety changed: " + row["reason"]}
         if automatic and not _old_activity(source, registered, row, time.time()):
             return {**row, "decision": "keep", "reason": "session activity changed during automatic grace check"}
         try:
+            # Persist restoration information BEFORE either Git resource goes.
+            # Failure here aborts removal rather than leaving an unrestorable row.
+            _stamp_head(source, row)
+            users = _bound_sessions({"sessions": _project_sessions(source)}, registered, row["branch"])
+            if any(s.get("is_active") or s.get("running") for s in users) or _session_grace_reason(users):
+                return {**row, "decision": "keep", "reason": "session activity changed immediately before removal"}
             if row["decision"] == "forget":
                 forget_stale_worktree_metadata(repo, row["path"])
-            elif not git_service.remove_worktree(repo, row["path"], True):
-                raise ValueError("safe worktree removal failed")
-            # remove_worktree performs sever_runtime_links BEFORE Git recurses.
-            # Never use rmtree here, including as an error fallback.
+            elif not git_service.remove_worktree(repo, row["path"], False):
+                raise ValueError("safe non-forced worktree removal refused")
+            # remove_worktree severs runtime links BEFORE Git recurses. Without
+            # --force, Git is the last-line guard for files written after status.
             branch_head = _branch_head(repo, row["branch"])
             if branch_head:
                 if branch_head != row["head_sha"]:
@@ -350,10 +440,13 @@ async def reclaim(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=0, observ
                 if not dry_run and row["decision"] != "keep":
                     from app.api.git_operations import _release_checkout_sessions
 
-                    if await _release_checkout_sessions(project_id, row["path"], None):
-                        row = await asyncio.to_thread(_apply, source, candidate, row, automatic=observations is not None)
-                    else:
-                        row = {**row, "decision": "keep", "reason": "checkout users could not be released"}
+                    row, pulls = await asyncio.to_thread(_prepare, source, candidate, row, observations is not None)
+                    if row["decision"] != "keep":
+                        if await _release_checkout_sessions(project_id, row["path"], None, idle_only=True):
+                            row = await asyncio.to_thread(_apply, source, candidate, row,
+                                                          automatic=observations is not None, pulls=pulls)
+                        else:
+                            row = {**row, "decision": "keep", "reason": "checkout users are busy or could not be released"}
             except Exception:
                 logger.warning("Checkout reclaim item failed", exc_info=True)
                 row = {**row, "decision": "keep", "reason": "safety check or reclaim failed; refresh preview before retry", "error": True}
@@ -373,6 +466,8 @@ async def reclaim(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=0, observ
 
 async def automatic_pass():
     """One project / at most 50 candidates per pass; rotate for eventual coverage."""
+    if os.environ.get("AI_SHUFFLE_PREVIEW") == "1":
+        return
     if not settings.worktree_auto_reclaim_enabled:
         logger.info("Checkout reclaim: disabled")
         return
@@ -380,8 +475,29 @@ async def automatic_pass():
 
     def load():
         try:
-            return json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                raise ValueError("state must be an object")
+            index, offsets, observed = state.get("project_index", 0), state.get("offsets", {}), state.get("observations", {})
+            if type(index) is not int or index < 0 or not isinstance(offsets, dict) or not isinstance(observed, dict):
+                raise ValueError("invalid rotation state")
+            if any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in offsets.items()):
+                raise ValueError("invalid offsets")
+            for key, value in observed.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
+                    raise ValueError("invalid observation")
+                since = value.get("since")
+                if type(since) not in (int, float) or not math.isfinite(since) or since < 0:
+                    raise ValueError("invalid observation time")
+                head = value.get("head")
+                if head is not None and (not isinstance(head, str) or len(head) not in (40, 64)
+                                         or any(c not in "0123456789abcdef" for c in head)):
+                    raise ValueError("invalid observation HEAD")
+            return state
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, TypeError):
+            logger.warning("Checkout reclaim: invalid/unreadable state; resetting conservative grace")
             return {}
 
     state = await asyncio.to_thread(load)
@@ -418,6 +534,8 @@ async def automatic_pass():
 
 
 async def periodic_reclaim():
+    if os.environ.get("AI_SHUFFLE_PREVIEW") == "1":
+        return
     await asyncio.sleep(60)
     while True:
         try:

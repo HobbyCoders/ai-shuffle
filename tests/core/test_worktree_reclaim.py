@@ -38,6 +38,7 @@ def repository(tmp_path, monkeypatch):
     monkeypatch.setattr(rc, "_local_sources", lambda: [source])
     monkeypatch.setattr(rc, "_project_sessions", lambda source: [])
     monkeypatch.setattr(rc, "_archive", Mock())
+    monkeypatch.setattr(rc, "_stamp_head", Mock())
     monkeypatch.setattr(rc, "_invalidate", Mock())
     from app.api import git_operations
     monkeypatch.setattr(git_operations, "_release_checkout_sessions", AsyncMock(return_value=True))
@@ -100,7 +101,9 @@ def test_valuable_work_is_retained(repository, monkeypatch, kind):
             git(repo, "config", "branch.feature.merge", "refs/heads/feature")
         commit(path)
     if kind == "closed-pr":
-        monkeypatch.setattr(rc, "_project_sessions", lambda source: [{"id": "s", "branch": "feature", "pr_state": "closed"}])
+        old = datetime.fromtimestamp(time.time() - 2 * rc.GRACE_SECONDS, timezone.utc).isoformat()
+        monkeypatch.setattr(rc, "_project_sessions", lambda source: [{"id": "s", "branch": "feature", "pr_state": "closed",
+                                                                    "updated_at": old, "finished_at": old}])
     result = reclaim(dry_run=False)
     assert result["reclaimed"] == 0 and result["items"][0]["decision"] == "keep"
     assert path.exists()
@@ -261,15 +264,15 @@ def test_automatic_grace_and_activity(repository, monkeypatch):
     assert reclaim(dry_run=False, observations=observations)["reclaimed"] == 0
     now += rc.GRACE_SECONDS + 1
     monkeypatch.setattr(rc, "_project_sessions", lambda source: [])
+    assert reclaim(dry_run=False, observations=observations)["reclaimed"] == 0  # eligibility restarts after activity
+    now += rc.GRACE_SECONDS + 1
     assert reclaim(dry_run=False, observations=observations)["reclaimed"] == 1
     assert not path.exists()
 
 
 def test_automatic_setting_and_persisted_grace(repository, tmp_path, monkeypatch):
-    from app.core import config
-
     path = checkout(repository)
-    monkeypatch.setitem(config._runtime_overrides, "data_dir", str(tmp_path / "state"))
+    monkeypatch.setattr(rc.settings, "data_dir", tmp_path / "state")
     monkeypatch.setattr(rc.settings, "worktree_auto_reclaim_enabled", False)
     asyncio.run(rc.automatic_pass())
     state = Path(rc.settings.effective_data_dir) / "checkout-reclaim.json"
@@ -302,6 +305,14 @@ def test_registry_producing_path_and_foreign_worker_exclusion(mock_db, tmp_path,
     result = asyncio.run(rc.reclaim(project["id"], dry_run=False))
     assert result["reclaimed"] == 0 and path.exists()  # sidebar-active producer state
     database.set_session_active(session["id"], False)
+    from app.db import turns
+    from app.db.base import get_db
+
+    turns.record_adhoc_turn(session["id"], "test", outcome="completed")
+    old = datetime.fromtimestamp(time.time() - 2 * rc.GRACE_SECONDS, timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET updated_at = %s WHERE id = %s", (old, session["id"]))
+        conn.cursor().execute("UPDATE turns SET ended_at = %s WHERE session_id = %s", (old, session["id"]))
     result = asyncio.run(rc.reclaim(project["id"], dry_run=False))
     assert result["reclaimed"] == 1 and not path.exists()
     updated = checkouts.get_checkout_by_path(str(path), project_id=project["id"])
