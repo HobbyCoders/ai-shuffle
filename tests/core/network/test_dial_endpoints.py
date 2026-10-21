@@ -57,6 +57,24 @@ def _route_httpx(monkeypatch, served):
     monkeypatch.setattr(httpx, "Client", lambda *a, **kw: real_sync(**{**kw, "transport": served.transport()}))
 
 
+def test_dropped_unicode_authority_warns_to_use_punycode(monkeypatch, caplog):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    monkeypatch.setattr(endpoints, "_non_ascii_warning_at", None, raising=False)
+    unicode_url = "https://bücher.example"
+    punycode_url = "https://" + "bücher.example".encode("idna").decode("ascii")
+    for _ in range(2):
+        assert endpoints.validate_endpoints([unicode_url, punycode_url]) == [punycode_url]
+    warnings = [record for record in caplog.records if record.name == endpoints.__name__]
+    assert len(warnings) == 1
+    assert "Dropping endpoint" in warnings[0].message
+    assert "punycode" in warnings[0].message
+    assert unicode_url not in warnings[0].message  # never log untrusted URL credentials/paths
+    endpoints._non_ascii_warning_at -= 301
+    assert not endpoints.is_valid_endpoint(unicode_url)
+    assert len([record for record in caplog.records if record.name == endpoints.__name__]) == 2
+
+
 def test_dial_endpoints_uses_the_tunnel_alone_when_one_is_advertised():
     assert endpoints.dial_endpoints([LAN, TUNNEL]) == [TUNNEL]
     assert endpoints.dial_endpoints([TUNNEL, LAN]) == [TUNNEL]

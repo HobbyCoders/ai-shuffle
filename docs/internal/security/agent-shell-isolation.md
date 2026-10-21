@@ -123,10 +123,32 @@ mode, failure retains protected ownership and refuses startup; restart with
 never repeat migration: they reuse only a completed, root-owned isolation
 record, so online maintenance cannot release the running worker's keys. A
 fresh maintenance container prepares the passwd entry for custom service IDs
-without changing retained-file ownership. Optional `on` maintenance without a
-record uses the single-account fallback; `required` refuses without a record.
+without changing retained-file ownership. A new empty `DATA_DIR` root is mapped
+to PUID:PGID for offline dump/restore too, using the same pinned, no-symlink
+preparation as normal startup; populated roots and their contents are never
+re-owned, and maintenance does not prepare `WORKSPACE_DIR`. Optional `on`
+maintenance without a record uses the single-account fallback; `required`
+refuses without a record.
 Unknown values (for example `requried`) warn and run unisolated, preserving
 compatibility; refusing unknown non-empty values remains an owner decision.
+
+Image code under `/app` stays root-owned in every mode; disabling isolation
+does not release it. The root startup phase reads only mount-path settings
+through image-installed dependencies and the image's `docker/` helpers, with
+an image-only executable PATH and isolated Python imports. Full application
+settings and any source-update handover load only after dropping privileges.
+Runtime writes stay in the data volume or home. Before dropping privileges,
+startup also repairs root-owned directories and single-link regular files in
+`/home/appuser` and its fixed home volumes. The pinned-descriptor walk never
+follows symlinks or enters retained data/workspace aliases or unlisted mounts;
+it rechecks ownership, inode identity and link count before `fchown`. A
+20,000-entry/five-second scan budget and 64-level depth limit bound this
+best-effort repair. It scans `.fluid` and `.claude`, then direct home-root
+entries without descending, then the other fixed paths and remaining subtrees;
+pinned-fd directory listings stream entries
+with budget checks instead of eagerly enumerating a large directory. Its one-line
+summary reports repairs, skips by reason, the scan limit and at most five
+relative-path samples; it never logs file contents.
 
 **Deviations from the recommendation and remaining exposure**
 
@@ -170,10 +192,16 @@ Do not enable the split on a live worker merely to test it. Use disposable
 volumes and synthetic credentials. Optional `on` still fails open on migration
 or identity errors and is ignored with `--user`. Explicit `required` refuses
 these paths and reports `required agent isolation established` on success.
-Its first supporting image is the image built from merged PR #335 (not yet
-released). Older images ignore the unknown value and run unisolated; pin a
-supporting image and check the log after tag changes. This startup policy is
-not evidence of OS-level enforcement; run the disposable-image checks below
+The modes are `off`, `on` and `required` (trimmed, case-insensitive); empty or
+unset defaults to `off`. Legacy spellings `1`/`true`/`yes` mean `on`, and
+`0`/`false`/`no` mean `off`. Unknown values refuse container startup before
+migration or rollback and list the valid values. Desktop and native installs
+ignore this container-only setting.
+The first image supporting **required mode** is the image built from merged
+PR #335 (not yet released). Images predating that change ignore `required` and
+run unisolated; pin a supporting image and check the log after tag changes.
+This startup policy is not evidence of OS-level enforcement; run the
+disposable-image checks below
 before relying on it or considering a default-on change.
 
 Run these checks from the repository root:

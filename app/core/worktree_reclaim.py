@@ -11,10 +11,13 @@ import json
 import logging
 import math
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from fluid.tools.child_env import scrub_child_env
 
 from app.core import worktree_report as wr
 from app.core.config import settings
@@ -216,10 +219,35 @@ def _ignored_reason(path):
     if ignored is None:
         return "ignored files could not be checked"
     paths = [p for p in ignored.split("\0") if p]
-    dependencies = {"node_modules", "venv", ".venv", "__pycache__"}
-    if any(not dependencies.intersection(Path(p.rstrip("/")).parts) for p in paths):
-        return "non-dependency ignored files would be removed; checkout kept"
-    return None
+    dependencies = {"node_modules", "venv", ".venv"}
+    disposable_dirs = {".pytest_cache", "__pycache__", ".svelte-kit"}
+
+    def disposable(relative):
+        # Existing dependency links are detached by the removal path, never followed.
+        if dependencies.intersection(relative.parts):
+            return True
+        target = Path(path) / relative
+        if target.is_symlink():
+            return False
+        if target.is_dir():
+            if target.name in disposable_dirs:
+                return True
+            # --directory also collapses *unignored* parents containing only
+            # ignored children. Descend those, but never an unknown ignored dir
+            # (e.g. dist/), even if all its children happen to be caches.
+            result = subprocess.run(["git", "-C", str(path), "check-ignore", "-q", "--", str(relative)],
+                                    capture_output=True, timeout=15, env=scrub_child_env())
+            if result.returncode != 1:
+                return False
+            return all(disposable(child.relative_to(path)) for child in target.iterdir())
+        return target.is_file() and target.suffix == ".pyc"
+
+    try:
+        if all(disposable(Path(p.rstrip("/"))) for p in paths):
+            return None
+    except (OSError, subprocess.SubprocessError):
+        return "ignored files could not be checked"
+    return "non-dependency/cache ignored files would be removed; checkout kept"
 
 
 def _plan(source, registered, context, *, pulls=None):

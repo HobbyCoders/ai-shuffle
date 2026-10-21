@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { TerminalToggle, PhoneToggle } from './composer-shell';
+	import type { TerminalToggle } from './composer-shell';
 	/**
 	 * ChatInput - the split-chips composer (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
@@ -81,10 +81,9 @@
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
-		phone?: PhoneToggle;
 	}
 
-	let { compact = false, assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, phone }: Props = $props();
+	let { compact = false, assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
 	// ChatView remounts the editor when its account changes. Teardown and
 	// already queued callbacks must not write the previous account's text.
 	const ownerEpoch = sessionOwnerEpoch();
@@ -1530,7 +1529,6 @@
 					{onBrowserPreload}
 					{browserOpen}
 					terminal={assistantMode ? undefined : terminal}
-					phone={assistantMode ? undefined : phone}
 					{isUploading}
 					inertToolbar={toolbarPointerBlocked}
 					onAttachClick={triggerFileUpload}

@@ -377,6 +377,18 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/sessions
 
 Earlier versions let `docker exec <container> curl http://localhost:8000/...` (and the host itself, with `network_mode: host`) act as the owner without a password; those calls now get `401` or `403`. Requests from the host through the published port always needed a sign-in, so they are unchanged, and so is the health check. Keep the token out of project folders and the container's environment, where agents could read it. Details: [Calling a Docker worker from scripts](/docs/api-reference/authentication#calling-a-docker-worker-from-scripts).
 
+## Bundled tool assets
+
+The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`. The application and startup files under `/app` are also root-owned in every isolation mode. Runtime state and application-update builds remain in the data volume or the app user’s home; `PUID`/`PGID` still control your project files.
+
+If startup reports `Bundled tool assets are missing`, replace or rebuild the image and remove any mount hiding `/opt/ai-tools` or `/opt/browser-mcp`. Startup does not install packages or continue with incomplete bundled tools. Database dump and restore remain available without these assets.
+
+### Startup path troubleshooting
+
+If startup says `DATA_DIR` or `WORKSPACE_DIR` is inside an image tree, mount a volume at that exact path or choose a path outside the image’s application, tool, Python and system directories. For example, a volume mounted at `/app/data` still works; an unmounted directory there is not prepared by root. The default `/data` and `/workspace` paths are unchanged.
+
+For a home-volume ownership error, stop the container and set the host directory’s ownership to the configured PUID:PGID. Keep home and retained data on separate volumes. Startup migrates the previous account’s own single-link files and automatically repairs root-owned directories and single-link regular files in the application home, including its fixed `.fluid`, `.config`, `.config/gh`, `.claude`, `.local` and `chrome-profile` volumes. It never follows symlinks or repairs data/workspace storage, shared files or other nested mounts. Repair scans `.fluid` and `.claude` first, then the home root’s direct entries without descending, followed by the other fixed home paths and remaining subtrees, so caches and package installs do not precede those common destinations. It uses a 20,000-entry/five-second scan budget and a 64-level depth limit, then logs a summary and continues if a limit is reached. Use `docker exec -u appuser` for home-file writes; for multi-link files, other mounts or files left beyond the repair limit, stop the container and manually set only the affected files’ host ownership to PUID:PGID when needed.
+
 ## Optional settings
 
 These are only needed in special cases. Uncomment the matching line under `environment:` in `compose.yaml` (or add `-e NAME=value` to `docker run`), then run `docker compose up -d`. A line in `.env` alone does not reach the container.
@@ -414,13 +426,13 @@ Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=r
 
 **Image compatibility:** required mode first appears in the image built from merged PR #335 (not yet released; no older published version supports it). Pin an image containing that change and verify the success log. Older images interpret `required` as invalid, log `ignoring`, and run **unisolated**; rolling back the image tag can silently remove this protection. Check the release notes for the first published tag before deployment.
 
-**Check the spelling:** an unrecognized value such as `requried` or `enforce` only logs a warning and runs **unisolated**, just like `off`. This compatibility behavior is unchanged; verify the success log rather than assuming the setting took effect.
+**Valid values:** `off`, `on` and `required`. Values are trimmed and case-insensitive (`ON` and ` required ` work); empty or unset means `off`. Legacy spellings `1`, `true` and `yes` mean `on`; `0`, `false` and `no` mean `off`. Any other value, including `isolated` or a misspelling, **refuses container startup** with a message listing the valid values. This also applies to non-root container launches and maintenance commands; desktop and native installs ignore this container-only setting.
 
 The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
 
 **Turn it off**
 
-Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives every file back to `PUID` exactly as it was.
+Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives the protected data files back to `PUID` exactly as they were. Image application and startup files stay root-owned.
 
 **Good to know**
 

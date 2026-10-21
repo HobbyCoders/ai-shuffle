@@ -31,6 +31,83 @@ def settings_factory(monkeypatch, tmp_path):
     return lambda **kw: Settings(_env_file=None, **kw)
 
 
+
+
+@pytest.mark.parametrize("action", ["run", "dump", "restore", "remap-home"])
+def test_root_phase_imports_only_image_bootstrap_and_installed_dependencies(tmp_path, action):
+    """Stop at the real privilege boundary in a fresh, isolated interpreter."""
+    import subprocess
+    project = Path(__file__).resolve().parents[2]
+    script = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("rt", sys.argv[1])
+rt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rt)
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[1]))
+def boundary(*args, **kwargs):
+    rt.isolation()
+    origins = {name: str(pathlib.Path(mod.__file__).resolve())
+               for name, mod in sys.modules.copy().items() if getattr(mod, "__file__", None)}
+    print(json.dumps(origins))
+    raise SystemExit(0)
+rt.drop_privileges = boundary
+rt.remap_home = boundary
+rt.os.geteuid = lambda: 0
+rt.main(sys.argv[2:])
+"""
+    env = dict(os.environ, DATA_DIR=str(tmp_path), WORKSPACE_DIR=str(tmp_path / "workspace"),
+               AI_SHUFFLE_ENV_FILE="/dev/null")
+    args = [action]
+    if action == "remap-home":
+        for name in ("old-uid", "old-gid", "new-uid", "new-gid"):
+            args += ["--" + name, "41001"]
+    elif action != "run":
+        args += ["--file", "-"]
+    result = subprocess.run([sys.executable, "-I", "-c", script,
+                             str(project / "docker/container_runtime.py"), *args],
+                            cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    origins = json.loads(result.stdout)
+    assert not any(name == "app" or name.startswith("app.") for name in origins), origins
+    for origin in origins.values():
+        path = Path(origin)
+        assert not path.is_relative_to(tmp_path), origin
+        if path.is_relative_to(project):
+            assert path.parent == project / "docker", origin
+        else:
+            assert any(path.is_relative_to(Path(prefix)) for prefix in (sys.prefix, sys.base_prefix)), origin
+            prefix = next(Path(prefix) for prefix in (sys.prefix, sys.base_prefix)
+                          if path.is_relative_to(Path(prefix)))
+            info = path.stat()
+            assert info.st_uid == prefix.stat().st_uid and not info.st_mode & 0o022, origin
+
+
+@pytest.mark.parametrize("local_mode", ["false", "true"])
+@pytest.mark.parametrize("source", ["defaults", "file", "environment"])
+def test_startup_paths_match_application_settings(settings_factory, tmp_path, monkeypatch, local_mode, source):
+    monkeypatch.setenv("LOCAL_MODE", local_mode)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    if source != "defaults":
+        (tmp_path / ".env").write_text('data_dir="./file data"\nworkspace_dir=./file-workspace\n')
+    if source == "environment":
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "env-data"))
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path / "env-workspace"))
+    startup, app = runtime.load_startup_settings(), runtime.load_settings()
+    assert startup.effective_data_dir == app.effective_data_dir
+    assert startup.effective_workspace_dir == app.effective_workspace_dir
+
+
+def test_startup_paths_honor_referenced_env_file(settings_factory, tmp_path, monkeypatch):
+    config = tmp_path / "referenced-config"
+    config.write_text('WORKSPACE_DIR="./quoted workspace"\n')
+    monkeypatch.setenv("AI_SHUFFLE_ENV_FILE", str(config))
+    assert runtime.load_startup_settings().effective_workspace_dir == runtime.load_settings().effective_workspace_dir
+
+
 def test_fresh_defaults_to_embedded(settings_factory):
     assert runtime.Database(settings_factory()).mode == "embedded"
 
@@ -100,6 +177,7 @@ def test_main_diagnostics_keep_type_and_call_site_but_not_secret_values(monkeypa
     def fail_settings():
         raise PermissionError("postgresql://user:private-test-password@host/database")
     monkeypatch.setattr(runtime, "load_settings", fail_settings)
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: None)
     monkeypatch.setattr(runtime.signal, "signal", lambda *args: None)
     assert runtime.main(["run"]) == 1
     output = capsys.readouterr().err
@@ -562,6 +640,8 @@ def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, m
     monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
     monkeypatch.setattr(runtime, "watch", lambda *args, **kwargs: 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
+    # A running source worker may export its production image directory.
+    monkeypatch.setattr(runtime, "image_dir", lambda: tmp_path / "image")
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
     chrome, app = spawned["chrome-supervisor"], spawned["app"]
@@ -591,12 +671,12 @@ def test_main_marks_the_supervisor_non_dumpable_after_dropping_privileges(monkey
     """R13-1: the supervisor holds every secret in its own environ."""
     order = []
     cfg = settings_factory()
-    monkeypatch.setattr(runtime, "load_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "load_settings", lambda: order.append("settings") or cfg)
     monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: order.append("drop"))
     monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: order.append("harden"))
     monkeypatch.setattr(runtime, "run", lambda settings, action, filename=None: order.append(action) or 0)
     assert runtime.main(["run"]) == 0
-    assert order == ["drop", "harden", "run"]
+    assert order == ["drop", "settings", "harden", "run"]
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl is Linux-only")
@@ -660,6 +740,591 @@ def test_dump_refuses_existing_backup_and_symlink(settings_factory, tmp_path):
     assert backup.read_bytes() == b"preserve"
 
 
+
+
+@pytest.mark.parametrize("name", ["DATA_DIR", "WORKSPACE_DIR"])
+@pytest.mark.parametrize("path", ["/app/docker/__pycache__", "/usr/local/lib/python3.12/site-packages/sitecustomize", "/opt/fluid/cache", "/etc/cache"])
+def test_root_mount_preparation_refuses_unmounted_image_paths(monkeypatch, name, path):
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
+    with pytest.raises(runtime.RuntimeFailure, match=name + ".*mount a volume.*outside the image trees"):
+        runtime.validate_mount_root(name, Path(path))
+
+
+
+
+@pytest.mark.parametrize("field,name", [("data_dir", "DATA_DIR"), ("workspace_dir", "WORKSPACE_DIR")])
+def test_root_rejects_image_storage_before_any_preparation(settings_factory, tmp_path, monkeypatch, field, name):
+    from types import SimpleNamespace
+    cfg = settings_factory(**{field: Path("/app/docker/__pycache__")})
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/appuser"))
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
+    mkdir, chown = Mock(), Mock()
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(runtime.os, "chown", chown)
+    with pytest.raises(runtime.RuntimeFailure, match=name + ".*mount a volume"):
+        runtime.drop_privileges(cfg)
+    mkdir.assert_not_called()
+    chown.assert_not_called()
+
+
+def test_root_mount_preparation_preserves_volume_inside_app(monkeypatch):
+    monkeypatch.setattr(runtime, "mounted_directory", lambda path: path == Path("/app/data"))
+    assert runtime.validate_mount_root("DATA_DIR", Path("/app/data")) == Path("/app/data")
+
+
+@pytest.mark.parametrize("name,path", [("DATA_DIR", "/data"), ("WORKSPACE_DIR", "/workspace")])
+def test_root_mount_preparation_preserves_defaults(monkeypatch, name, path):
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: pytest.fail("defaults need no mount exception"))
+    assert runtime.validate_mount_root(name, Path(path)) == Path(path)
+
+
+@pytest.mark.parametrize("path,escaped", [("/app/data", "/app/data"), ("/app/my data", r"/app/my\040data")])
+def test_root_mount_detection_includes_same_device_bind_mounts(monkeypatch, path, escaped):
+    original = Path.read_text
+    monkeypatch.setattr(runtime.os.path, "ismount", lambda _: False)
+    mountinfo = "44 31 8:1 /retained " + escaped + " rw - ext4 /dev/test rw\n"
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **kw: mountinfo if str(self) == "/proc/self/mountinfo" else original(self, *a, **kw))
+    assert runtime.mounted_directory(Path(path))
+    assert not runtime.mounted_directory(Path(path + "-other"))
+
+
+
+
+@pytest.fixture
+def home_ownership(monkeypatch):
+    """Real walks/inodes/hardlinks with simulated IDs and no privileged writes."""
+    def configure(owners=None, aliases=None):
+        owners, aliases = dict(owners or {}), dict(aliases or {})
+        original_stat, original_fstat = os.stat, os.fstat
+        changed = []
+        def fd_path(fd):
+            return Path(os.readlink(f"/proc/self/fd/{fd}"))
+        def decorate(path, info):
+            result = list(aliases.get(path, info))
+            owner = owners.get(path, (41001, 41001))
+            result[4], result[5] = owner
+            return os.stat_result(result)
+        def stat_path(path, *, dir_fd=None, follow_symlinks=True):
+            info = original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            resolved = fd_path(path) if isinstance(path, int) else (fd_path(dir_fd) / path if dir_fd is not None else Path(path))
+            return decorate(resolved, info)
+        def fstat(fd):
+            return decorate(fd_path(fd), original_fstat(fd))
+        def fchown(fd, uid, gid):
+            path = fd_path(fd)
+            changed.append((path, uid, gid))
+            owners[path] = (uid, gid)
+        monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "64000")
+        monkeypatch.setattr(runtime.os, "stat", stat_path)
+        monkeypatch.setattr(runtime.os, "fstat", fstat)
+        monkeypatch.setattr(runtime.os, "fchown", fchown)
+        monkeypatch.setattr(runtime, "mount_points", lambda: set())
+        return changed
+    return configure
+
+
+@pytest.mark.parametrize("kind", ["exec-file", "hardlink", "symlink", "mount", "swap"])
+def test_home_root_repair_safety(tmp_path, monkeypatch, home_ownership, kind):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    victim = home / "exec-file"
+    victim.write_text("docker exec style write")
+    outside = tmp_path / "shadow-like"
+    outside.write_text("protected fixture")
+    owners = {victim: (0, 0), outside: (0, 0)}
+    if kind == "hardlink":
+        (home / "linked").hardlink_to(victim)
+        owners[home / "linked"] = (0, 0)
+    elif kind == "symlink":
+        victim.unlink()
+        victim.symlink_to(outside)
+    elif kind == "mount":
+        victim.unlink()
+        victim.mkdir()
+        (victim / "foreign").write_text("another mount")
+        owners[victim / "foreign"] = (0, 0)
+    changed = home_ownership(owners)
+    if kind == "mount":
+        monkeypatch.setattr(runtime, "mount_points", lambda: {victim})
+    elif kind == "swap":
+        original_open = os.open
+        def swapped(name, flags, *args, **kwargs):
+            return original_open(outside if name == "exec-file" else name, flags, *args, **kwargs)
+        monkeypatch.setattr(runtime.os, "open", swapped)
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == ([(victim, 41002, 41002)] if kind == "exec-file" else [])
+    assert result["repaired"] == (1 if kind == "exec-file" else 0)
+    assert result["reasons"].get({"hardlink": "hardlink", "symlink": "type", "mount": "mount", "swap": "changed"}.get(kind, "not-root"), 0)
+
+
+def test_home_root_repair_fixed_mounts_and_storage_aliases(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    volume = home / ".local"
+    for directory in (volume, data, workspace):
+        directory.mkdir(parents=True)
+    paths = [volume / "repair", home / "data-alias", home / "workspace-alias"]
+    paths[0].write_text("fixture")
+    for alias in paths[1:]:
+        alias.mkdir()
+        (alias / "untouched").write_text("retained storage")
+    changed = home_ownership({path: (0, 0) for path in [volume, *paths, *(p / "untouched" for p in paths[1:])]},
+                             aliases={paths[1]: data.stat(), paths[2]: workspace.stat()})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert {entry[0] for entry in changed} == {volume, paths[0]}
+    assert result["reasons"]["storage"] == 4  # both aliases in shallow and general passes
+    again = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert again["repaired"] == 0
+    assert len(changed) == 2
+
+
+def test_home_root_repair_prioritizes_fluid_before_large_decoy(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    decoy = home / ".cache"
+    decoy.mkdir(parents=True)
+    for index in range(30):
+        (decoy / str(index)).write_text("decoy")
+    target = home / ".fluid" / "exec-file"
+    target.parent.mkdir()
+    target.write_text("repair me")
+    data.mkdir()
+    workspace.mkdir()
+    changed = home_ownership({target: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=4)
+    assert changed == [(target, 41002, 41002)]
+    assert result["limited"]
+
+
+def test_home_root_repair_prioritizes_shallow_home_before_large_local(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    local = home / ".local"
+    local.mkdir(parents=True)
+    for index in range(30):
+        (local / str(index)).write_text("large package tree")
+    target = home / "root-exec-file"
+    target.write_text("repair before descending")
+    data.mkdir()
+    workspace.mkdir()
+    changed = home_ownership({target: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=5)
+    assert changed == [(target, 41002, 41002)]
+    assert result["limited"]
+
+
+def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    for index in range(30):
+        (home / str(index)).write_text("fixture")
+    home_ownership()
+    original_scandir = os.scandir
+    clock, reads = [0], []
+    class SlowListing:
+        def __init__(self, fd):
+            self.iterator = original_scandir(fd)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.iterator.close()
+        def __iter__(self):
+            return self
+        def __next__(self):
+            reads.append(1)
+            clock[0] += 2
+            return next(self.iterator)
+    monkeypatch.setattr(runtime.os, "scandir", SlowListing)
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert result["limited"]
+    assert len(reads) <= 3
+
+
+def test_home_root_repair_is_bounded_and_logs_capped_relative_sample(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    files = [home / f"file-{index}" for index in range(20)]
+    for path in files:
+        path.write_text("contents never logged")
+    changed = home_ownership({path: (0, 0) for path in files})
+    messages = []
+    monkeypatch.setattr(runtime, "log", messages.append)
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=10)
+    assert result["visited"] == 10
+    assert result["limited"]
+    assert 0 < len(changed) < len(files)
+    assert len(messages) == 1
+    assert "limit" in messages[0] and "repaired=" in messages[0] and "skipped=" in messages[0]
+    assert str(home) not in messages[0] and "contents never logged" not in messages[0]
+    sample = json.loads(messages[0].split("sample=", 1)[1])
+    assert len(sample) <= 5
+
+
+def test_home_root_repair_refuses_symlinked_fixed_volume_parent(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace, outside = (tmp_path / name for name in ("home", "data", "workspace", "outside"))
+    for directory in (home, data, workspace, outside / "gh"):
+        directory.mkdir(parents=True)
+    (home / ".config").symlink_to(outside, target_is_directory=True)
+    changed = home_ownership({outside / "gh": (0, 0)})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {home / ".config" / "gh"})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    # Both the fixed .config root and its fixed gh child refuse that parent.
+    assert result["reasons"]["unavailable"] == 2
+
+
+@pytest.mark.parametrize("change", ["device", "hardlink-after-open"])
+def test_home_root_repair_rechecks_device_and_link_count(tmp_path, monkeypatch, home_ownership, change):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    victim = home / "victim"
+    victim.write_text("fixture")
+    aliases = {}
+    if change == "device":
+        info = list(victim.stat())
+        info[2] += 1
+        aliases[victim] = os.stat_result(info)
+    changed = home_ownership({victim: (0, 0)}, aliases=aliases)
+    if change == "hardlink-after-open":
+        original_open = os.open
+        def linked(name, flags, *args, **kwargs):
+            fd = original_open(name, flags, *args, **kwargs)
+            if name == "victim":
+                (home / "late-link").hardlink_to(victim)
+            return fd
+        monkeypatch.setattr(runtime.os, "open", linked)
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    # A foreign device is excluded in both passes; a late hardlink is caught
+    # after open in the first pass and excluded before open in the second.
+    assert result["reasons"]["device" if change == "device" else "changed"] == (2 if change == "device" else 1)
+
+
+@pytest.mark.parametrize("storage", ["data", "workspace"])
+def test_home_root_repair_never_repairs_home_used_as_storage(tmp_path, home_ownership, storage):
+    home, outside = tmp_path / "home", tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    victim = home / "victim"
+    victim.write_text("fixture")
+    changed = home_ownership({home: (0, 0), victim: (0, 0)})
+    result = runtime.repair_home_root_files(home, home if storage == "data" else outside,
+                                           home if storage == "workspace" else outside, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["storage"] == len(runtime.HOME_VOLUMES) + 2
+
+
+def test_home_root_repair_priority_child_cannot_bypass_storage_ancestor(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    config = home / ".config"
+    gh = config / "gh"
+    for directory in (gh, data, workspace):
+        directory.mkdir(parents=True)
+    victim = gh / "untouched"
+    victim.write_text("retained data")
+    changed = home_ownership({victim: (0, 0)}, aliases={config: data.stat()})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["storage"] == 4  # .config, .config/gh, shallow and general walks
+
+
+def test_home_root_repair_bounds_directory_depth(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    deep = home.joinpath(*(["nested"] * 66))
+    for directory in (deep, data, workspace):
+        directory.mkdir(parents=True)
+    victim = deep / "untouched"
+    victim.write_text("beyond depth budget")
+    changed = home_ownership({victim: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["depth"] == 1
+
+
+def test_home_root_repair_time_budget_does_not_block_startup(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    changed = home_ownership({home: (0, 0)})
+    clock = iter([0, 6])
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(clock))
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == [] and result["limited"] and result["visited"] == 0
+
+
+def test_remap_home_startup_repairs_as_root_before_drop(monkeypatch):
+    from types import SimpleNamespace
+    settings = SimpleNamespace(effective_data_dir=Path("/data"), effective_workspace_dir=Path("/workspace"))
+    monkeypatch.setattr(runtime, "load_startup_settings", lambda: settings)
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime, "drop_privileges", lambda *a, **kw: pytest.fail("repair must precede drop"))
+    monkeypatch.setattr(runtime, "load_settings", lambda: pytest.fail("no root application imports"))
+    calls = []
+    monkeypatch.setattr(runtime, "remap_home", lambda *args: calls.append(("remap", args)))
+    monkeypatch.setattr(runtime, "repair_home_root_files", lambda *args: calls.append(("repair", args)))
+    assert runtime.main(["remap-home", "--old-uid", "41001", "--old-gid", "41001",
+                         "--new-uid", "41002", "--new-gid", "41002"]) == 0
+    assert [name for name, _ in calls] == ["remap", "repair"]
+    assert calls[1][1] == (Path("/home/appuser"), Path("/data"), Path("/workspace"), 41002, 41002)
+
+
+def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    for name in ("single", "owned", "root-file", "service-file"):
+        (home / name).write_text("fixture")
+    (home / "owned-link").hardlink_to(home / "owned")
+    (home / "root-link").hardlink_to(home / "root-file")
+    changed = home_ownership({home / name: (uid, 41001) for name, uid in
+                              (("root-file", 0), ("root-link", 0), ("service-file", 64000))})
+    runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+    assert changed == [(home / "single", 41002, 41002), (home, 41002, 41002)]
+
+
+def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".claude"
+    alias, nested = volume / "data", volume / "other-volume"
+    for directory in (alias, nested):
+        directory.mkdir(parents=True)
+        (directory / "untouched").write_text("fixture")
+    (volume / "migrate").write_text("fixture")
+    changed = home_ownership(aliases={alias: data.stat()})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume, nested})
+    runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+    assert {entry[0] for entry in changed} == {home, volume, volume / "migrate"}
+
+
+@pytest.mark.parametrize("mode", ["on", "required", "off"])
+def test_home_remap_invalid_service_uid_obeys_isolation_mode(tmp_path, monkeypatch, home_ownership, mode):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    changed = home_ownership()
+    monkeypatch.setenv("AGENT_ISOLATION", mode)
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "abc")
+    if mode == "required":
+        with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused; AGENT_ISOLATION_SERVICE_UID"):
+            runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+        assert changed == []
+    else:
+        runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+        assert changed == [(home, 41002, 41002)]
+
+
+def test_mounted_home_already_owned_by_puid_64000_with_isolation_off(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".local"
+    volume.mkdir(parents=True)
+    changed = home_ownership({home: (64000, 64000), volume: (64000, 64000)})
+    monkeypatch.setenv("AGENT_ISOLATION", "off")
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    runtime.remap_home(home, data, 64000, 64000, 64000, 64000)
+    assert changed == []
+
+
+@pytest.mark.parametrize("owner", [0, 41003, 64000])
+def test_mounted_home_root_preparation_without_image_id_change(tmp_path, monkeypatch, home_ownership, owner):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".local"
+    volume.mkdir(parents=True)
+    (volume / "own-file").write_text("fixture")
+    changed = home_ownership({volume: (owner, owner), volume / "own-file": (owner, owner)})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    if owner == 64000:
+        with pytest.raises(runtime.RuntimeFailure, match="belongs to the service account.*PUID:PGID"):
+            runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+        assert changed == []
+    else:
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+        expected = {volume} if owner == 0 else {volume, volume / "own-file"}
+        assert {entry[0] for entry in changed} == expected
+        count = len(changed)
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+        assert len(changed) == count
+
+
+def test_storage_directory_creation_refuses_parent_swap(tmp_path, monkeypatch):
+    parent, outside = tmp_path / "parent", tmp_path / "outside"
+    parent.mkdir()
+    outside.mkdir()
+    original = os.mkdir
+    def swap(component, *args, **kwargs):
+        if component == "parent":
+            parent.rename(tmp_path / "moved")
+            parent.symlink_to(outside, target_is_directory=True)
+        return original(component, *args, **kwargs)
+    monkeypatch.setattr(runtime.os, "mkdir", swap)
+    with pytest.raises(OSError):
+        runtime.open_directory(parent / "runtime", create=True)
+    assert not (outside / "runtime").exists()
+
+
+def test_home_prepare_rejects_symlinked_mount_parent(tmp_path, monkeypatch, home_ownership):
+    home, data, code = tmp_path / "home", tmp_path / "data", tmp_path / "code"
+    home.mkdir()
+    data.mkdir()
+    (code / "gh").mkdir(parents=True)
+    (home / ".config").symlink_to(code, target_is_directory=True)
+    changed = home_ownership({code / "gh": (0, 0), home / ".config" / "gh": (0, 0)})
+    # A cached mount path from before a concurrent parent rename/symlink swap.
+    monkeypatch.setattr(runtime, "mount_points", lambda: {home / ".config" / "gh"})
+    with pytest.raises(runtime.RuntimeFailure, match="home volume.*real directories"):
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert changed == []
+
+
+@pytest.mark.parametrize("owner", [0, 41001])
+def test_home_remap_rechecks_pinned_inode_after_entry_swap(tmp_path, monkeypatch, home_ownership, owner):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    (home / "victim").write_text("fixture")
+    protected = tmp_path / "protected"
+    protected.write_text("outside the walk")
+    changed = home_ownership({protected: (owner, 41001)})
+    original_open = os.open
+    def swapped(name, flags, *args, **kwargs):
+        return original_open(protected if name == "victim" else name, flags, *args, **kwargs)
+    monkeypatch.setattr(runtime.os, "open", swapped)
+    runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+    assert changed == [(home, 41002, 41002)]
+
+
+def test_mounted_home_migration_commits_root_last_and_resumes(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".local"
+    (volume / "sub").mkdir(parents=True)
+    for path in (volume / "first", volume / "second", volume / "sub" / "tail"):
+        path.write_text("fixture")
+    entries = [volume, volume / "sub", volume / "first", volume / "second", volume / "sub" / "tail"]
+    changed = home_ownership({path: (41003, 41003) for path in entries})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    original = os.fchown
+    class Interrupted(Exception):
+        pass
+    def interrupt(fd, uid, gid):
+        if len(changed) == 2:
+            raise Interrupted
+        original(fd, uid, gid)
+    monkeypatch.setattr(runtime.os, "fchown", interrupt)
+    with pytest.raises(Interrupted):
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert volume.stat().st_uid == 41003
+    monkeypatch.setattr(runtime.os, "fchown", original)
+    runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert all(path.stat().st_uid == 41002 for path in entries)
+    assert changed[-1] == (volume, 41002, 41002)
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "standalone"])
+def test_home_prepare_tolerates_unused_isolation_setting(tmp_path, monkeypatch, home_ownership, raw):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    changed = home_ownership()
+    monkeypatch.setenv("AGENT_ISOLATION", "off")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", raw)
+    if raw == "standalone":
+        monkeypatch.setattr(runtime, "_isolation", None)
+        monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert changed == []
+
+
+def test_drop_refuses_interrupted_account_home(settings_factory, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir="/"))
+    with pytest.raises(runtime.RuntimeFailure, match="appuser home must be /home/appuser"):
+        runtime.drop_privileges(settings_factory())
+
+
+def test_isolated_drop_keeps_full_agent_path_but_trusts_supervisor(settings_factory, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    effective = [0]
+    tool_path = "/home/appuser/.local/bin:/usr/bin"
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("SHUFFLE_CONTAINER_PATH", tool_path)
+    monkeypatch.delenv("PUID", raising=False)
+    monkeypatch.delenv("PGID", raising=False)
+    monkeypatch.setattr(runtime, "_agent_path", None)
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: effective[0])
+    monkeypatch.setattr(runtime.os, "fchown", Mock())
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir="/home/appuser"))
+    split = object()
+    monkeypatch.setattr(runtime, "isolate", lambda *args: split)
+    def drop(ident):
+        assert ident is split and os.environ["PATH"] == "/usr/bin"
+        effective[0] = 41001
+    module = SimpleNamespace(drop=drop, trusted_path=lambda original: "/usr/bin" if original == tool_path else "wrong")
+    monkeypatch.setattr(runtime, "isolation", lambda: module)
+    runtime.drop_privileges(settings_factory(workspace_dir=tmp_path))
+    assert runtime._agent_path == tool_path
+    assert os.environ["PATH"] == "/usr/bin"
+    assert "SHUFFLE_CONTAINER_PATH" not in os.environ
+
+
+@pytest.mark.parametrize("action", ["dump", "restore"])
+@pytest.mark.parametrize("puid", [99, 3456])
+@pytest.mark.parametrize("state", ["empty", "populated", "symlink"])
+def test_maintenance_prepares_only_empty_mapped_data_root(settings_factory, tmp_path, monkeypatch, home_ownership, action, puid, state):
+    from types import SimpleNamespace
+    data, workspace = tmp_path / "data", tmp_path / "unused-workspace"
+    actual = tmp_path / "outside" if state == "symlink" else data
+    actual.mkdir()
+    if state == "symlink":
+        data.symlink_to(actual, target_is_directory=True)
+    elif state == "populated":
+        (data / "sentinel").write_text("retained state")
+    changed = home_ownership({actual: (1000, 1000), actual / "sentinel": (1000, 1000)})
+    assert actual.stat().st_uid == 1000
+    cfg = settings_factory(data_dir=data, workspace_dir=workspace)
+    identity = [0, 0]
+    pgid = 100
+    monkeypatch.setenv("PUID", str(puid))
+    monkeypatch.setenv("PGID", str(pgid))
+    monkeypatch.setenv("AGENT_ISOLATION", "off")
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: identity[0])
+    monkeypatch.setattr(runtime.os, "getuid", lambda: identity[0])
+    monkeypatch.setattr(runtime.os, "getgid", lambda: identity[1])
+    monkeypatch.setattr(runtime.os, "initgroups", Mock())
+    monkeypatch.setattr(runtime.os, "setuid", lambda value: identity.__setitem__(0, value))
+    monkeypatch.setattr(runtime.os, "setgid", lambda value: identity.__setitem__(1, value))
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(
+        pw_uid=puid, pw_gid=pgid, pw_name="appuser", pw_dir="/home/appuser"))
+    monkeypatch.setattr(runtime.os, "access", lambda path, mode: Path(path).stat().st_uid == identity[0])
+    monkeypatch.setattr(runtime, "maintenance_isolation", lambda *args: None)
+    monkeypatch.setattr(runtime, "isolate", lambda *args: pytest.fail("maintenance must not migrate ownership"))
+    monkeypatch.setattr(runtime, "load_startup_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "load_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: None)
+    calls = []
+    monkeypatch.setattr(runtime, "run", lambda settings, action, file: calls.append((action, file, identity[:])) or 0)
+    result = runtime.main([action, "--file", "/restore/db.dump"])
+    if state == "empty":
+        assert result == 0
+        assert changed == [(data, puid, pgid)]
+        assert calls == [(action, "/restore/db.dump", [puid, pgid])]
+    else:
+        assert result == 1
+        assert changed == [] and calls == []
+        assert actual.stat().st_uid == 1000
+        if state == "populated":
+            assert (data / "sentinel").read_text() == "retained state"
+            assert (data / "sentinel").stat().st_uid == 1000
+    assert not workspace.exists()  # database-only maintenance does not prepare it
+
+
 def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monkeypatch):
     from types import SimpleNamespace
     data = tmp_path / "empty"
@@ -671,14 +1336,24 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     monkeypatch.delenv("PUID", raising=False)
     monkeypatch.delenv("PGID", raising=False)
     monkeypatch.setattr(runtime.os, "geteuid", lambda: uid[0])
-    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="appuser", pw_dir=str(tmp_path)))
-    chown = Mock()
-    monkeypatch.setattr(runtime.os, "chown", chown)
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="appuser", pw_dir="/home/appuser"))
+    changed = []
+    monkeypatch.setattr(runtime.os, "fchown", lambda fd, uid, gid: changed.append(
+        (Path(os.readlink(f"/proc/self/fd/{fd}")), uid, gid)))
     monkeypatch.setattr(runtime.os, "initgroups", Mock())
     monkeypatch.setattr(runtime.os, "setgid", Mock())
-    monkeypatch.setattr(runtime.os, "setuid", lambda value: uid.__setitem__(0, value))
+    tool_path = "/home/appuser/.local/bin:/usr/bin"
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("SHUFFLE_CONTAINER_PATH", tool_path)
+    monkeypatch.setattr(runtime, "isolate", lambda *args: None)
+    def setuid(value):
+        assert os.environ["PATH"] == "/usr/bin"  # root still uses image tools
+        uid[0] = value
+    monkeypatch.setattr(runtime.os, "setuid", setuid)
     runtime.drop_privileges(settings_factory(data_dir=data, workspace_dir=workspace))
-    chown.assert_called_once_with(data, 1000, 1000)
+    assert os.environ["PATH"] == tool_path
+    assert "SHUFFLE_CONTAINER_PATH" not in os.environ
+    assert changed == [(data, 1000, 1000)]
     assert (workspace / "sentinel").read_text() == "preserve"
 
 

@@ -88,7 +88,7 @@
 	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { terminalAccess } from '$lib/terminal/gating';
-	import type { TerminalToggle, PhoneToggle } from '$lib/components/chat/composer-shell';
+	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
 	import { phonePanel } from '$lib/stores/phone-panel.svelte';
 	import { preloadWhenIdle, runWhenIdle } from '$lib/components/deck/lazy/lazy-component';
 	import {
@@ -311,6 +311,8 @@
 	});
 	function closeSidePanel() {
 		if (activeSidePanel.active === 'browser') browserPanel.closePanel(activeTab?.sessionId ?? null);
+		// Closing the phone is remembered: the agent's later calls leave it closed.
+		else if (activeSidePanel.active === 'phone' && activeTab?.sessionId) phonePanel.close(activeTab.sessionId);
 		else sidePanel.close(panelScope);
 	}
 
@@ -374,19 +376,18 @@
 			preload: () => void TerminalSidePanel.preload(),
 		};
 	});
-	// The composer's Phone toggle: offered once the worker answers the emulator
-	// status (any answer but "no such API" / "not for you").
+	// The Phone panel has no composer toggle: it opens when the agent uses the
+	// Emulator tools (feed controller) or from "Show phone" on such a tool row.
+	// Both need to know whether this worker has the emulator API and whether
+	// the chat runs here, so ask once a chat is open and keep the remote flag
+	// current.
 	$effect(() => {
 		if (terminalSessionId) untrack(() => void phonePanel.ensureCapability());
 	});
-	const phoneToggle = $derived.by((): PhoneToggle | undefined => {
+	$effect(() => {
 		const sid = terminalSessionId;
-		if (!sid || phonePanel.capability !== 'available') return undefined;
-		return {
-			open: activeSidePanel.active === 'phone',
-			toggle: () => phonePanel.toggle(sid),
-			preload: () => void PhoneSidePanel.preload(),
-		};
+		const remote = activeIsRemote;
+		if (sid) untrack(() => phonePanel.noteRemote(sid, remote));
 	});
 	/** The chat column's width: the notification dock centres on it, not on the side panel. */
 	let chatColumnWidth = $state(0);
@@ -1046,7 +1047,6 @@
 						onBrowserPreload={() => BrowserSidePanel.preload()}
 						browserOpen={sessionBrowser.open}
 						terminal={terminalToggle}
-						phone={phoneToggle}
 					/>
 					</div>
 				</div>
