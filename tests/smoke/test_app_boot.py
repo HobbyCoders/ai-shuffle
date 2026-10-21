@@ -34,6 +34,11 @@ module skips, unless ``BOOT_SMOKE_REQUIRED=1`` (CI), where it fails instead.
 
 Run: ``python -m pytest tests/smoke -m boot_smoke -o addopts="" -p no:cacheprovider``
 (serially; never under xdist, the server owns real ports and a real cluster).
+
+On failure, console/app/fatal logs are copied to a unique directory outside
+pytest's pruned temp roots; the failure report prints its path. Set
+``SMOKE_ARTIFACT_DIR`` to choose a durable parent directory. These diagnostic
+copies are retained until manually removed (successful runs make no copies).
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -190,7 +196,12 @@ def _ws_connect(url: str):
 
 
 def _problem_lines(text: str) -> list[str]:
-    """Traceback / ERROR / CRITICAL / Python-warning lines not on the allow-list."""
+    """Unexpected problem lines with bounded context, including traceback bodies.
+
+    Keep two preceding lines and up to 37 following lines for every match.
+    Overlapping windows are merged (then split at 40 lines) so nested/chained
+    tracebacks remain readable without dropping later, independent problems.
+    """
     patterns = (
         r"Traceback \(most recent call last\)",
         r" - (ERROR|CRITICAL) - ",
@@ -200,13 +211,32 @@ def _problem_lines(text: str) -> list[str]:
         r"Task exception was never retrieved",
         r"was never awaited",
     )
-    found = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    windows = []
+    for index, line in enumerate(lines):
         if any(re.search(p, line) for p in patterns) and not any(
             re.search(allowed, line) for allowed, _reason in ALLOWED_PROBLEMS
         ):
-            found.append(line)
-    return found
+            start, end = max(0, index - 2), min(len(lines), index + 38)
+            if windows and start <= windows[-1][1]:
+                windows[-1] = (windows[-1][0], end)
+            else:
+                windows.append((start, end))
+    return ["\n".join(lines[offset:min(offset + 40, end)])
+            for start, end in windows for offset in range(start, end, 40)]
+
+
+def _preserve_logs(root: Path, destination: Path) -> None:
+    """Copy only diagnostics, never the private cluster, env file or workspace."""
+    destination.mkdir(parents=True, exist_ok=True)
+    sources = [root / "console.log"]
+    sources.extend(path for path in (root / "data" / "logs").rglob("*")
+                   if path.name in {"app.log", "fatal.log"})
+    for source in sources:
+        if source.is_file():
+            target = destination / source.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +248,7 @@ class BootedServer(SimpleNamespace):
 
 
 @pytest.fixture(scope="module")
-def server(tmp_path_factory):
+def server(tmp_path_factory, request):
     bindir = _pg16_bindir()
     if bindir is None:
         message = ("PostgreSQL 16 server binaries not found (PATH, SMOKE_PG_BIN or "
@@ -228,6 +258,20 @@ def server(tmp_path_factory):
         pytest.skip(message)
 
     root = tmp_path_factory.mktemp("boot-smoke")
+    artifact_dir = None
+
+    def preserve_failure():
+        nonlocal artifact_dir
+        if artifact_dir is None:
+            # Not under pytest-of-USER: concurrent runs prune sibling roots.
+            parent = os.environ.get("SMOKE_ARTIFACT_DIR")
+            if parent:
+                Path(parent).mkdir(parents=True, exist_ok=True)
+            artifact_dir = Path(tempfile.mkdtemp(prefix="boot-smoke-failure-", dir=parent))
+        _preserve_logs(root, artifact_dir)
+        return artifact_dir
+
+    request.node._boot_smoke_preserve_failure = preserve_failure
     data, workspace, home = root / "data", root / "workspace", root / "home"
     workspace.mkdir()
     home.mkdir()
@@ -341,8 +385,14 @@ def server(tmp_path_factory):
                     pass
         finally:
             console.close()
-            recorder.close()
-            db.close()
+            try:
+                recorder.close()
+                db.close()
+            finally:
+                # A call failure was snapshotted by the report hook; refresh it
+                # after process teardown to include any final shutdown records.
+                if artifact_dir is not None:
+                    preserve_failure()
 
 
 def _auth(server) -> dict:
@@ -598,8 +648,10 @@ def test_sigterm_exits_cleanly_without_tracebacks(server):
     assert peer_summaries[0]["count"] == peer_summaries[0]["errors"] == 1
     assert fatal.strip() == "", f"fatal.log is not empty:\n{fatal}"
 
-    problems = _problem_lines(console) + _problem_lines(app_log)
-    assert problems == [], "unexpected tracebacks/errors/warnings:\n" + "\n".join(problems)
+    problems = [(source, block) for source, text in (("console.log", console), ("app.log", app_log))
+                for block in _problem_lines(text)]
+    assert problems == [], "unexpected tracebacks/errors/warnings:\n" + "\n\n".join(
+        f"--- {source} ---\n{block}" for source, block in problems)
 
     unexpected = sorted({host for _, host in server.recorder.attempts() if host not in ALLOWED_OUTBOUND})
     assert unexpected == [], f"outbound connection attempts: {unexpected}"
