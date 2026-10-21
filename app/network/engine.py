@@ -500,8 +500,18 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
         return None
     record: Dict[str, Any] = {}
     encrypted_columns: List[str] = []
+    excluded = set(coll.local_fields)
+    if coll.name == "model_providers":
+        # Filter backup-only credentials before decryption: an unreadable key
+        # trusted by another install must not prevent unrelated row sync or
+        # hold back the collection's tombstones. Keep explicit local clears.
+        for secret, binding, companions in (
+                ("balance_key", "balance_instance_id", ()),
+                ("openai_admin_key", "openai_billing_instance_id", ("openai_billing_org_id",))):
+            if row.get(binding) != _my_instance_id():
+                excluded.update((secret, *companions))
     for name in coll.fields:
-        if name in coll.local_fields:
+        if name in excluded:
             continue
         value = row.get(name)
         if name in coll.json_fields:
@@ -517,22 +527,6 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
         record[name] = _normalize_value(value)
     if encrypted_columns:
         record["_enc"] = sorted(encrypted_columns)
-    if coll.name == "model_providers":
-        # A restored database must not publish credentials trusted only by a
-        # different installation. Authenticated sync rebinds them on receipt.
-        # Keep the local marker on explicit clears, too: an upgraded old peer
-        # with no key/marker must not turn its missing fields into a deletion.
-        for secret, binding, companions in (
-                ("balance_key", "balance_instance_id", ()),
-                ("openai_admin_key", "openai_billing_instance_id", ("openai_billing_org_id",))):
-            if row.get(binding) != _my_instance_id():
-                for name in (secret, *companions):
-                    record.pop(name, None)
-                encrypted_columns = [name for name in encrypted_columns if name != secret]
-        if encrypted_columns:
-            record["_enc"] = sorted(encrypted_columns)
-        else:
-            record.pop("_enc", None)
     if coll.serialize_hook is not None:
         record = coll.serialize_hook(record)
     return record
@@ -540,6 +534,13 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
 
 def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     subset = {name: record.get(name) for name in coll.hash_fields if name not in coll.local_fields}
+    if coll.name == "model_providers":
+        # An explicit local disconnect is an update even when the previously
+        # published row omitted an untrusted/restored billing credential.
+        billing = [name for name in ("balance_key", "openai_admin_key", "openai_billing_org_id")
+                   if name in coll.hash_fields and name not in coll.local_fields]
+        if billing:
+            subset["_billing_present"] = [name for name in billing if name in record]
     subset["_enc"] = record.get("_enc") or []
     return crypto.sha256_hex(envelope_mod.record_bytes(subset))
 

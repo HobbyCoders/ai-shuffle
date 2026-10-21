@@ -255,6 +255,66 @@ def test_backup_binding_is_not_used_or_published(workers):
         assert not set(SECRETS) & set(outgoing.get("_enc", []))
 
 
+@pytest.mark.parametrize("replacement", ["replacement-billing", None], ids=["save", "disconnect"])
+def test_explicit_bind_reclaims_restored_installation_marker(workers, replacement):
+    a, b = pair(workers, configured=False)
+    with a.active():
+        with db.get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE model_providers SET balance_key = %s, balance_instance_id = %s WHERE id = %s",
+                ("enc:unreadable-backup", "another-installation", PROVIDER))
+        restored = row()
+        encrypted = encryption.encrypt_value(replacement) if replacement else None
+        assert provider_balances.bind(restored, "a", encrypted)
+        assert row()["balance_instance_id"] == "a"
+        assert scan() == 1
+        # Explicit takeover still rejects stale revisions, including a delayed
+        # disconnect that would otherwise wipe the replacement just saved.
+        assert not provider_balances.bind(restored, "a", None)
+    exchange(a, b)
+    with b.active():
+        assert row()["balance_instance_id"] == "b"
+        assert balances.status(row())["configured"] is bool(replacement)
+        if replacement:
+            assert encryption.decrypt_value(row()["balance_key"]) == replacement
+        else:
+            assert row()["balance_key"] is None
+
+
+def test_untrusted_unreadable_billing_does_not_block_scan_or_tombstones(workers, monkeypatch):
+    a, b = pair(workers, "openai", configured=False)
+    with a.active():
+        db.create_model_provider("removed-provider", "Remove me", "openai", "https://api.openai.com/v1")
+        scan()
+    exchange(a, b)
+    with a.active():
+        corrupt = ("enc:unreadable-balance", "enc:unreadable-admin")
+        with db.get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE model_providers SET balance_key = %s, balance_instance_id = %s, "
+                "openai_admin_key = %s, openai_billing_instance_id = %s, openai_billing_org_id = %s WHERE id = %s",
+                (corrupt[0], "another-installation", corrupt[1], "another-installation", "org-backup", PROVIDER))
+        db.update_model_provider(PROVIDER, name="Unrelated shared edit")
+        db.delete_model_provider("removed-provider")
+        real_decrypt = encryption.decrypt_value
+
+        def decrypt(value):
+            assert value not in corrupt  # excluded before attempting decryption
+            return real_decrypt(value)
+
+        monkeypatch.setattr(encryption, "decrypt_value", decrypt)
+        outgoing = engine.serialize_row(policy.collection("model_providers"), row())
+        assert not set(BILLING) & outgoing.keys()
+        assert not set(SECRETS) & set(outgoing.get("_enc", []))
+        assert scan() == 2  # the edit and the unrelated deletion both publish
+    exchange(a, b)
+    with b.active():
+        assert row()["name"] == "Unrelated shared edit"
+        assert row()["balance_key"] is None
+        assert row()["openai_admin_key"] is None
+        assert db.get_model_provider("removed-provider") is None
+
+
 @contextmanager
 def version(coll):
     with patch.dict(policy.COLLECTIONS, {"model_providers": coll}):

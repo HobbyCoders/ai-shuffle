@@ -313,7 +313,9 @@ reachable. Keys become usable after the next sync; readings arrive on the next
 poll. The network founder coordinates that budget: other workers defer new
 requests while it is offline, even if they already have the synced key.
 Disconnecting access syncs the removal. Older versions keep their local billing
-configuration until upgraded. Restoring another installation's database alone
+configuration until upgraded. An upgraded worker that lacks the key gets it once
+the worker holding the key is online and running this build.
+Restoring another installation's database alone
 does not authorize using or publishing its billing keys; authenticated sync does.
 
 - **xAI (official):** create a management key in console.x.ai → Settings →

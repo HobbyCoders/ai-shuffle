@@ -17,11 +17,10 @@ def bind(row, instance_id, encrypted_key):
             UPDATE model_providers SET balance_key = %s, balance_instance_id = %s,
                 balance_snapshot = %s, revision = %s
             WHERE id = %s AND revision = %s
-                AND (balance_instance_id IS NULL OR balance_instance_id = %s)
             RETURNING id
         """, (encrypted_key, instance_id,
               json.dumps({"credential": credential_fingerprint({**row, "balance_key": encrypted_key})}) if encrypted_key else None, str(uuid4()),
-              row["id"], row.get("revision"), instance_id))
+              row["id"], row.get("revision")))
         return cur.fetchone() is not None
 
 
