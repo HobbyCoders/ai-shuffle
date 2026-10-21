@@ -110,13 +110,24 @@ def validate_state(state, runtime_id):
     if not isinstance(editors, list) or len(editors) > 32:
         raise ControlError("Invalid text fields")
     for field in editors:
-        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
+        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys", "style"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
             raise ControlError("Invalid text field")
         identifier(field["id"])
         if field["type"] not in ("text", "search", "email", "url", "tel", "password", "textarea", "file"):
             raise ControlError("Invalid text field type")
         if not isinstance(field["value"], str) or not isinstance(field["label"], str) or len(field["label"]) > 256:
             raise ControlError("Invalid text field content")
+        if "style" in field:
+            style = field["style"]
+            if not isinstance(style, dict) or set(style) != {"fontSize", "lineHeight", "paddingLeft", "paddingTop", "borderLeft", "borderTop", "fontFamily"}:
+                raise ControlError("Invalid field style")
+            if not isinstance(style["fontFamily"], str) or len(style["fontFamily"]) > 200:
+                raise ControlError("Invalid field font")
+            for name in ("fontSize", "lineHeight", "paddingLeft", "paddingTop", "borderLeft", "borderTop"):
+                if name == "lineHeight" and style[name] is None:
+                    continue
+                if type(style[name]) not in (int, float) or not 0 <= style[name] <= 1000:
+                    raise ControlError("Invalid field typography")
         if "accept" in field and (not isinstance(field["accept"], str) or len(field["accept"]) > 1024):
             raise ControlError("Invalid file accept filter")
         if "chooser" in field and type(field["chooser"]) is not bool:
@@ -379,6 +390,9 @@ class Broker:
             )
 
     async def submit(self, viewer_id, data, internal=False):
+        from app.core.native_chrome import wait_for_recovery
+
+        await wait_for_recovery()
         self.identity(data)
         command_id = identifier(data.get("id"))
         if command_id in self.seen:
@@ -565,6 +579,17 @@ class Broker:
 
 
 _brokers = {}
+
+
+def recovery_blocked():
+    """Do not repair shared Chrome while a viewer or queued command owns it."""
+    return any(
+        broker.pending or broker.reserved_viewer or broker.state.get("busy")
+        or broker.state["control"].get("viewer_id")
+        or broker.state["control"].get("pending_viewer_id")
+        or broker.state["control"].get("owner") == "human"
+        for broker in _brokers.values()
+    )
 
 
 def get(session_id):

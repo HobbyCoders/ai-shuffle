@@ -45,8 +45,8 @@ export async function uploadField(page: Page, args: Record<string, unknown>): Pr
 }
 
 /** Page-local handles: a detached/replaced node can never receive a stale edit. */
-export async function readEditors(page: Page): Promise<BrowserEditor[]> {
-  return page.evaluate((seed) => {
+export async function readEditors(page: Page, typography = process.env._AIS_BROWSER_EDITOR_STYLE === '1'): Promise<BrowserEditor[]> {
+  return page.evaluate(({ seed, typography }) => {
     type Field = HTMLInputElement | HTMLTextAreaElement;
     const host = window as typeof window & { __aisEditors?: { ids: WeakMap<Element, string>; nodes: Map<string, Field>; initial: WeakMap<Element, string>; pending?: HTMLInputElement } };
     const registry: NonNullable<typeof host.__aisEditors> = host.__aisEditors ??= { ids: new WeakMap(), nodes: new Map(), initial: new WeakMap() };
@@ -88,6 +88,13 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       if (fields.length >= 32) break;
       const type = el instanceof HTMLTextAreaElement ? 'textarea' : el.type;
       if (!['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'].includes(type) || el.disabled || el.readOnly) continue;
+      // Rich text widgets need the page's real pointer and keyboard handlers.
+      if (type !== 'file' && (
+        el.getAttribute('role')?.toLowerCase().split(/\s+/).includes('combobox') ||
+        (el.hasAttribute('aria-haspopup') && el.getAttribute('aria-haspopup')?.toLowerCase() !== 'false') ||
+        ['inline', 'list', 'both'].includes(el.getAttribute('aria-autocomplete')?.toLowerCase() ?? '') ||
+        (el instanceof HTMLInputElement && el.list instanceof HTMLDataListElement)
+      )) continue;
       const anchor = type === 'file' && (!el.checkVisibility() || el.getBoundingClientRect().width < 1)
         ? Array.from(el.labels ?? []).find(label => label.checkVisibility()) ?? el : el;
       const chooser = type === 'file' && registry.pending === el;
@@ -96,6 +103,18 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       if (!chooser && !anchor.checkVisibility()) continue;
       const rect = chooser ? new DOMRect(16, 16, Math.max(240, innerWidth - 32), 44) : anchor.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) continue;
+      if (!chooser) {
+        const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+        let hit = document.elementFromPoint(x, y);
+        // Document hit-testing returns the shadow host, not its inner control.
+        while (hit?.shadowRoot) {
+          const inner = hit.shadowRoot.elementFromPoint(x, y);
+          if (!inner || inner === hit) break;
+          hit = inner;
+        }
+        if (!hit || !(hit === el || el.contains(hit) ||
+          Array.from(el.labels ?? []).some(label => label === hit || label.contains(hit)))) continue;
+      }
       // Do not put password contents into shared workspace state.
       const value = type === 'password' ? '' : type === 'file' ? Array.from((el as HTMLInputElement).files ?? []).map(f => f.name).join(', ') : el.value;
       if (value.length > 16384 || value.length > budget) continue;
@@ -106,10 +125,17 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       // Split one-time-code boxes reformat themselves and move focus on every
       // digit. Those take real keystrokes, so the page's own handlers run.
       const keys = type !== 'file' && type !== 'textarea' && ((el as HTMLInputElement).autocomplete === 'one-time-code' || (el.maxLength > 0 && el.maxLength <= 2));
-      fields.push({ id, type, value, ...(keys ? { keys } : {}), ...(type === 'file' ? { chooser, accept: (el as HTMLInputElement).accept.slice(0, 1024), multiple: (el as HTMLInputElement).multiple } : {}), label: labelFor(el), x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      const css = typography ? getComputedStyle(el) : null;
+      const style = css ? {
+        fontSize: parseFloat(css.fontSize), lineHeight: css.lineHeight === 'normal' ? null : parseFloat(css.lineHeight),
+        paddingLeft: parseFloat(css.paddingLeft), paddingTop: parseFloat(css.paddingTop), fontFamily: css.fontFamily.slice(0, 200),
+        borderLeft: parseFloat(css.borderLeftWidth), borderTop: parseFloat(css.borderTopWidth),
+      } : undefined;
+      const validStyle = style && Object.values(style).every(v => typeof v === 'string' || v === null || (Number.isFinite(v) && v >= 0 && v <= 1000));
+      fields.push({ id, type, value, ...(validStyle ? { style } : {}), ...(keys ? { keys } : {}), ...(type === 'file' ? { chooser, accept: (el as HTMLInputElement).accept.slice(0, 1024), multiple: (el as HTMLInputElement).multiple } : {}), label: labelFor(el), x: rect.x, y: rect.y, width: rect.width, height: rect.height });
     }
     return fields;
-  }, randomUUID());
+  }, { seed: randomUUID(), typography });
 }
 
 export async function editField(page: Page, args: Record<string, unknown>): Promise<void> {

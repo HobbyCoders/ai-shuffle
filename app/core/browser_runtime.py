@@ -167,6 +167,9 @@ def resolve_config(session_id):
     if not server or not server.get("command"):
         raise RuntimeUnavailable("Browser runtime unavailable")
     server.setdefault("env", {})["AIS_BROWSER_MODE"] = "runtime"
+    # Only a server with the matching editor validator advertises typography.
+    # An older server starting a newer runtime therefore still gets legacy fields.
+    server["env"]["_AIS_BROWSER_EDITOR_STYLE"] = "1"
     server.update(
         cwd=cwd,
         connect_timeout=15,
@@ -210,6 +213,9 @@ class Runtime:
         self.idle = asyncio.create_task(self._idle())
 
     async def _start(self):
+        from app.core.native_chrome import wait_for_recovery
+
+        await wait_for_recovery()
         # Cold/reopened actors are busy before their first tool or viewer exists.
         # The idle timer must not cancel that connection or consume its grace.
         self.active += 1
@@ -288,6 +294,9 @@ class Runtime:
         return copy.deepcopy(broker.state)
 
     async def call(self, tool, arguments):
+        from app.core.native_chrome import wait_for_recovery
+
+        await wait_for_recovery()
         if self.active >= MAX_CALLS:
             raise RuntimeUnavailable("Browser runtime busy")
         self.active += 1
@@ -365,6 +374,34 @@ class Runtime:
 
 
 _runtimes = {}
+
+
+def recovery_blocked():
+    """Includes cold connections and calls whose caller already timed out."""
+    return any(runtime.active for runtime in _runtimes.values())
+
+
+async def dialogs_block_recovery():
+    """Read the runtime's existing no-page-I/O status, not a renderer probe.
+
+    A new CDP connection itself stalls behind a pending JavaScript dialog.
+    The runtime already owns that dialog and browser_status exposes it even
+    while paused_by_dialog has returned and the tool call is no longer busy.
+    Unknown/unreachable status is deliberately not evidence of a wedged page.
+    """
+    for runtime in list(_runtimes.values()):
+        if runtime.client is None:
+            return True
+        try:
+            async with asyncio.timeout(2):
+                result = await runtime.client.call_tool("browser_status", {})
+            bodies = [json.loads(item["text"]) for item in result.get("content", [])
+                      if item.get("type") == "text"]
+            if result.get("isError") or not bodies or any(body.get("pending_dialog") for body in bodies):
+                return True
+        except Exception:
+            return True
+    return False
 
 
 def get(session_id):
