@@ -82,16 +82,19 @@ async def _restart_when_idle(request_id):
 
 async def _stop_then_restart(request_id):
     """Stop this worker's running work as its Stop buttons do, then install."""
-    from app.core.desktop_lifecycle import active_session_ids, stop_session_work
+    from app.core.desktop_lifecycle import active_session_ids, prune_stale_tasks, stop_session_work
     sessions = active_session_ids()
     results = await asyncio.gather(*(stop_session_work(sid, source="worker_update") for sid in sessions), return_exceptions=True)
     for sid, result in zip(sessions, results):
         if isinstance(result, BaseException):
             logger.warning("Application update: could not stop %s before restarting", sid, exc_info=result)
     deadline = time.monotonic() + STOP_WAIT_SECONDS
-    while active_session_ids() and time.monotonic() < deadline:
-        await asyncio.sleep(1)
-    result = local_action("install", f"{request_id}:stopped")
+    while time.monotonic() < deadline:
+        prune_stale_tasks()
+        if not active_session_ids():
+            break
+        await asyncio.sleep(0.1)
+    result = local_action("install", f"{request_id}:stopped", mode="stopped")
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
 
 
@@ -105,7 +108,9 @@ def local_action(action, request_id, mode=None):
     global _deferred
     if action not in ("check", "download", "install", "cancel"):
         raise ValueError("Unknown update action")
-    if mode not in (None, "when_idle", "stop"):
+    # "stopped" is internal: dispatch/peer validation never accepts it. The
+    # owner already chose Stop; do not send them through the busy guard again.
+    if mode not in (None, "when_idle", "stop", "stopped"):
         raise ValueError("Unknown update mode")
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 100:
         raise ValueError("Invalid update request id")
@@ -136,7 +141,7 @@ def local_action(action, request_id, mode=None):
     elif action == "install" and state["phase"] != "ready":
         reason = "No staged update; current version left running"
     busy = None
-    if action == "install" and not reason:
+    if action == "install" and not reason and mode != "stopped":
         from app.core.desktop_lifecycle import active_session_ids, busy_work
         if active_session_ids():
             busy = busy_work()
@@ -202,6 +207,8 @@ async def peer_action(body, from_device):
     expiry = body.get("expires_at")
     if type(expiry) not in (int, float) or not time.time() <= expiry <= time.time() + 15:
         raise ValueError("Update request expired; offline commands are not replayed")
+    if body.get("mode") not in (None, "when_idle", "stop"):
+        raise ValueError("Unknown update mode")
     result = local_action(body.get("action"), from_device + ":" + body["request_id"], body.get("mode"))
     logger.info("Application update %s requested by worker %s: %s", body.get("action"), from_device,
                 result["reason"])
