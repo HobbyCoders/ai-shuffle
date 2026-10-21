@@ -935,10 +935,11 @@ def async_twin(sync_double):
     return _twin
 
 
-# ─── One ``pytest -n`` run per machine ─────────────────────────────────────
-# Parallel runs from several agent sessions have saturated the shared worker
-# host. The xdist controller waits for a machine-wide file lock before its
-# workers start; see tests/_xdist_gate.py. Off on CI, without -n, and with
+# ─── Machine-sized slots for ``pytest -n`` runs ────────────────────────────
+# Shared hosts need bounded parallelism, not unconditional serialization.
+# Each controller reserves one of the CPU/RAM-sized machine-wide file locks
+# and uses at most two workers; see tests/_xdist_gate.py. Override capacity
+# with AI_SHUFFLE_PYTEST_SLOTS. Off on CI, without -n, and with
 # AI_SHUFFLE_PYTEST_GATE=0.
 
 def pytest_configure(config):
