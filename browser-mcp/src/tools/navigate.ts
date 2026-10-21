@@ -182,6 +182,7 @@ export async function runNavigate(
 
   const dispatchMs = performance.now() - dispatchStart;
   const settleStart = performance.now();
+  let textChurnIgnored = false;
   // Readiness inspection can race a page's own redirect or a blocked main
   // thread. Fall through to the bounded locator wait, never fail navigation
   // merely because this optional page evaluate lost its execution context.
@@ -210,9 +211,11 @@ export async function runNavigate(
       // Rendered control-free pages still get a short DOM-quiet observation,
       // not an unconditional 1.5s control wait nor an immediate early return.
       await session.beginWatch();
-      await session.settle(page.url());
+      textChurnIgnored = (await session.settle(page.url())).textChurnIgnored;
     }
   }
+  // Preserve passive pre-action text history even on pages with controls.
+  await session.beginWatch(true);
   const settleMs = performance.now() - settleStart;
   session.agentAdmission?.();
   const snapshotStart = performance.now();
@@ -260,6 +263,7 @@ export async function runNavigate(
       snapshot_id: snap.snapshot_id,
       ref_count: emittedRefCount,
       truncated: snap.truncated,
+      text_churn_ignored: textChurnIgnored,
       timings: { dispatch_ms: Math.round(dispatchMs), settle_ms: Math.round(settleMs), snapshot_ms: Math.round(snapshotMs) },
       ...(rewroteTo ? { rewrote_loopback_to: rewroteTo, note: rewriteNote } : {}),
       ...(redirected ? { redirected_to_origin: landedOrigin } : {}),

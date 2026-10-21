@@ -98,6 +98,7 @@ describe("browser_navigate loopback retry", () => {
     };
     return {
       ensurePage: async () => page,
+      beginWatch: async () => {},
       currentTabId: () => "tab1",
       notifyNavigation: () => {},
       pageContent: async () => ({ title: "Dev server", textChars: 200 }),

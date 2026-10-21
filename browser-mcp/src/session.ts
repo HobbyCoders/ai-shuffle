@@ -1202,14 +1202,15 @@ export class Session {
 
   /**
    * Install the mutation watcher BEFORE an action so synchronous DOM changes
-   * made during the action are captured. Best-effort — a failure here just means
-   * we fall back to a post-hoc URL comparison in {@link settle}.
+   * made during the action are captured. A passive watcher only retains weak
+   * text history between calls. Failed observation refreshes conservatively in
+   * {@link settle}, without inventing navigation.
    */
-  async beginWatch(): Promise<void> {
+  async beginWatch(passive = false): Promise<void> {
     const page = this.requirePage();
     try {
-      beginRequestWatch(page);
-      await raceWithTimeout(page.evaluate(installMutationWatcher, WATCH_KEY), 5000, "mutation watcher timed out");
+      if (passive) endRequestWatch(page); else beginRequestWatch(page);
+      await raceWithTimeout(page.evaluate(installMutationWatcher, { key: WATCH_KEY, passive }), 5000, "mutation watcher timed out");
     } catch {
       endRequestWatch(page);
       await this.disposeWatch();
@@ -1217,10 +1218,9 @@ export class Session {
   }
 
   /**
-   * Tear down the mutation watcher without collecting stats. {@link settle} is
-   * the normal teardown, but when an action throws before settling this is the
-   * cleanup path so the MutationObserver and its `window[WATCH_KEY]`
-   * accumulator do not leak. Best-effort.
+   * Tear down active/passive mutation observation without collecting stats.
+   * Normal settle removes active hooks but preserves DOM-only text history;
+   * an action/observation failure removes that baseline too. Best-effort.
    */
   async disposeWatch(): Promise<void> {
     const entry = this.currentEntry();
@@ -1249,7 +1249,7 @@ export class Session {
    * mutation stats, and classify what changed. Returns none/minor/major plus
    * whether the URL changed. Call {@link beginWatch} before the action.
    */
-  async settle(urlBefore?: string, quietMs = QUIET_MS): Promise<SettleResult & { settleCapped: boolean; observationFailed: boolean; pendingRequests: number; pendingTimers: number }> {
+  async settle(urlBefore?: string, quietMs = QUIET_MS): Promise<SettleResult & { settleCapped: boolean; observationFailed: boolean; pendingRequests: number; pendingTimers: number; textChurnIgnored: boolean }> {
     const page = this.requirePage();
     const before = urlBefore ?? page.url();
     let stats: MutationStats;
@@ -1278,6 +1278,6 @@ export class Session {
     const urlChanged = stats.urlChanged || page.url() !== before;
     if (urlChanged) this.notifyNavigation();
     const domMutated = classifyMutations(stats);
-    return { urlChanged, domMutated, settleCapped: stats.settleCapped ?? false, observationFailed: stats.observationFailed ?? false, pendingRequests: stats.pendingRequests ?? 0, pendingTimers: stats.pendingTimers ?? 0 };
+    return { urlChanged, domMutated, settleCapped: stats.settleCapped ?? false, observationFailed: stats.observationFailed ?? false, pendingRequests: stats.pendingRequests ?? 0, pendingTimers: stats.pendingTimers ?? 0, textChurnIgnored: stats.textChurnIgnored ?? false };
   }
 }

@@ -185,6 +185,7 @@ describe("content warning via browser_navigate", () => {
     };
     return {
       ensurePage: async () => handle,
+      beginWatch: async () => {},
       currentTabId: () => "tab1",
       notifyNavigation: () => {},
       pageContent: async () => page,

@@ -328,17 +328,19 @@ describe("browser_act type budget", () => {
     expect(error).not.toContain("stale_ref");
     expect(error).not.toContain("\x1b");
   });
-  it("resolves the ref before acting and rejects an unknown one without touching the page", async () => {
+  it("rejects an unknown ref before dispatch and clears any passive baseline", async () => {
     const beginWatch = vi.fn(async () => {});
+    const disposeWatch = vi.fn(async () => {});
     const session = {
       ...actSession({}),
-      beginWatch,
+      beginWatch, disposeWatch,
       resolveRef: async (ref: string) => { throw new StaleRefError(ref); },
       checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const res = await runAct(session, { kind: "click", ref: "e404" });
     expect(bodyOf(res).error).toMatch(/^stale_ref: e404/);
     expect(beginWatch).not.toHaveBeenCalled();
+    expect(disposeWatch).toHaveBeenCalledOnce();
   });
   it("reports a missing value as a plain error", async () => {
     const res = await runAct(actSession({ fill: vi.fn() }), { kind: "fill", ref: "e1" });

@@ -44,6 +44,11 @@ describe("classifyMutations", () => {
     expect(classifyMutations(stats({ characterDataChanges: 2 }))).toBe("minor");
   });
 
+  it("refreshes substantial action text churn, but not a known background ticker", () => {
+    expect(classifyMutations(stats({ characterDataChanges: 20, nonBaselineTextChanges: 20 }))).toBe("major");
+    expect(classifyMutations(stats({ characterDataChanges: 20, nonBaselineTextChanges: 0 }))).toBe("minor");
+  });
+
   it("respects a custom threshold", () => {
     expect(classifyMutations(stats({ addedNodes: 4 }), { majorNodeThreshold: 4 })).toBe("major");
     expect(classifyMutations(stats({ addedNodes: 3 }), { majorNodeThreshold: 4 })).toBe("minor");
