@@ -1,4 +1,5 @@
-import { observationRoots, includeObservationRoot } from "./observation_scope.js";
+import { observationRoots, includeObservationRoot, observationTask, boundedObservation } from "./observation_scope.js";
+import type { Frame } from "playwright-core";
 import type { Session } from "../session.js";
 import { raceWithTimeout } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
@@ -23,6 +24,11 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
   const state = input.state ?? "visible";
   const started = Date.now();
   const deadline = started + timeout;
+  const negative = state === "hidden" || state === "detached";
+  // Retain unresolved checks across polls: a timeout means unknown, not absent.
+  const pending = new Map<Frame, Promise<boolean>>();
+  const key = `wait:${JSON.stringify(input)}`;
+  const selectorError = (err: unknown) => input.selector && /while parsing|InvalidSelector|not a valid (?:selector|XPath)|Unexpected token|Unknown engine|Malformed selector|SyntaxError/i.test(String(err));
   while (true) {
     session.agentAdmission?.(); // a pending takeover interrupts a long wait, not the queue
     const check = async () => {
@@ -30,24 +36,56 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
       const present = async (locator: import("playwright-core").Locator) =>
         state === "attached" || state === "detached" ? await locator.count() > 0
           : await locator.filter({ visible: true }).count() > 0;
-      let any = false;
-      if (input.ref) any = await present(await session.resolveRef(input.ref));
-      else {
-        const roots = await observationRoots(session, input.scope_ref);
-        const checks = await Promise.allSettled(roots.map(root => raceWithTimeout((async () => {
-          if (!await includeObservationRoot(root)) return false;
-          const scope = root.primary && root.scope ? root.scope : root.frame;
-          const locator = input.selector ? scope.locator(input.selector)
-            : scope.getByText(input.text!, { exact: input.match === "exact" });
-          return present(locator);
-        })(), Math.max(1, Math.min(150, deadline - Date.now())), "frame wait timed out")));
-        any = checks.some(check => check.status === "fulfilled" && check.value);
+      if (input.ref) {
+        const any = await present(await session.resolveRef(input.ref));
+        return negative ? !any : any;
       }
-      return state === "hidden" || state === "detached" ? !any : any;
+      const roots = await observationRoots(session, input.scope_ref);
+      const inspect = async (root: typeof roots[number]): Promise<boolean | undefined> => {
+        let task = pending.get(root.frame);
+        if (!task) {
+          task = observationTask(session, root, key, async () => {
+            if (root.primary && root.frame.isDetached()) throw new Error("primary document detached");
+            if (!await includeObservationRoot(root)) return false;
+            const scope = root.primary && root.scope ? root.scope : root.frame;
+            const locator = input.selector ? scope.locator(input.selector)
+              : scope.getByText(input.text!, { exact: input.match === "exact" });
+            return present(locator);
+          });
+          if (task) pending.set(root.frame, task);
+        }
+        try {
+          const result = await boundedObservation(task, Math.min(root.primary ? 15000 : 500, deadline - Date.now()));
+          pending.delete(root.frame);
+          return result;
+        } catch (err) {
+          if (selectorError(err)) throw new Error(`invalid_input: ${String(err)}`);
+          if (!(err instanceof Error) || err.message !== "frame observation timed out") pending.delete(root.frame);
+          // Detached child documents can no longer contain the target. Every
+          // other error/timeout is unknown; retry failures, retain pending work.
+          return !root.primary && root.frame.isDetached() ? false : undefined;
+        }
+      };
+      const primary = await inspect(roots[0]);
+      if (primary === true) return !negative;
+      let any = false;
+      let unknown = primary === undefined;
+      let next = 1;
+      await Promise.all(Array.from({ length: Math.min(6, roots.length - 1) }, async () => {
+        while (next < roots.length) {
+          if (any || Date.now() >= deadline) { unknown = true; break; }
+          const result = await inspect(roots[next++]);
+          any ||= result === true;
+          unknown ||= result === undefined;
+        }
+      }));
+      return negative ? !any && !unknown : any;
     };
     let matched = false;
     try { matched = await raceWithTimeout(check(), Math.max(1, deadline - Date.now()), "browser_wait timed out"); }
     catch (err) {
+      if (err instanceof Error && err.message.startsWith("invalid_input:")) return errorResult(err.message);
+      if (selectorError(err)) return errorResult(`invalid_input: ${String(err)}`);
       if (!(err instanceof Error) || err.message !== "browser_wait timed out") throw err;
     }
     const evidence = {

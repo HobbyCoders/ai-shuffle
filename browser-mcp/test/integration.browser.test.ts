@@ -367,6 +367,87 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "#cross", state: "detached", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
   });
 
+  it.each([10000, 60000])("delta: large %i-node pages preserve main prose and never satisfy false negative waits", async count => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.evaluate(count => {
+      document.body.innerHTML = '<p>Loading spinner</p>' + Array.from({ length: count }, (_, i) => `<div><span>Item ${i} lorem ipsum</span></div>`).join("");
+    }, count);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Loading spinner", state: "hidden", timeout_ms: 1200 })))).toMatchObject({ matched: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Loading spinner", timeout_ms: 4000 })))).toMatchObject({ ok: true, matched: true });
+    const read = await runReadText(session);
+    expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, chars: 30000, truncated: true });
+    expect((read.content[1] as { text: string }).text).toContain("Loading spinner");
+  });
+
+  it.each(["hidden", "detached", "visible"] as const)("delta: malformed selectors are invalid_input for %s waits", async state => {
+    const page = await session.ensurePage(); await page.goto("about:blank"); await page.setContent("<p>Ready</p>");
+    for (const selector of ["div[[[", "xpath=//["]) {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector, state, timeout_ms: 1000 })))).toMatchObject({ ok: false, code: "invalid_input" });
+    }
+  });
+
+  it.each(["hidden", "detached"] as const)("delta: busy cross-origin frames are unknown for %s waits without queued evaluations", async state => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    await page.setContent(`<p>Main</p><iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe>`);
+    const frame = page.frames().find(frame => frame !== page.mainFrame())!;
+    await frame.getByText("Cross frame text").waitFor();
+    const spy = vi.spyOn(frame, "getByText");
+    await frame.evaluate(() => { setTimeout(() => { const until = Date.now() + 2500; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    try {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", state, timeout_ms: 1100 })))).toMatchObject({ matched: false, timed_out: true });
+      expect(spy.mock.calls.length).toBeLessThanOrEqual(1);
+    } finally { spy.mockRestore(); await frame.evaluate(() => true); }
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", timeout_ms: 2000 })))).toMatchObject({ matched: true });
+  });
+
+  it("delta: main read failure is an explicit error, not an empty or blank-app result", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank"); await page.setContent("<p>Main is present</p>");
+    await page.evaluate(() => { setTimeout(() => { const until = Date.now() + 6000; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    try {
+      const body = JSON.parse(firstText(await runReadText(session)));
+      expect(body).toMatchObject({ ok: false, code: "observation_failed" });
+      expect(body.chars).toBeUndefined(); expect(body.warning).toBeUndefined();
+    } finally { await page.evaluate(() => true); }
+  });
+
+  it.each([15, 30, 300])("delta: %i frames cannot starve main text and skipped children are reported", async count => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    await page.setContent('<p>Main survives frame fanout</p>' + Array.from({ length: count }, (_, i) =>
+      `<iframe style="width:50px;height:50px;border:0" src="${new URL("observation-text?text=F" + i, httpUrl).href.replace("127.0.0.1", i % 2 ? "localhost" : "127.0.0.1")}"></iframe>`).join(""));
+    const read = await runReadText(session);
+    const body = JSON.parse(firstText(read));
+    expect(body).toMatchObject({ ok: true });
+    expect(body.chars).toBeGreaterThan(20);
+    expect((read.content[1] as { text: string }).text).toContain("Main survives frame fanout");
+    expect(body.frames_skipped).toBeGreaterThanOrEqual(Math.max(0, count - 48));
+    expect(body.frames_skipped).toBeLessThanOrEqual(count);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Main survives frame fanout", timeout_ms: 2000 })))).toMatchObject({ matched: true });
+    const last = page.frames().find(frame => frame.url().endsWith("text=F" + (count - 1)))!;
+    await page.locator("iframe").last().scrollIntoViewIfNeeded();
+    expect(await last.getByText("F" + (count - 1), { exact: true }).filter({ visible: true }).count()).toBe(1);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "F" + (count - 1), match: "exact", timeout_ms: 4000 })))).toMatchObject({ matched: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing frame text", timeout_ms: 100 })))).toMatchObject({ timed_out: true });
+  }, 30000);
+
+  it.each([
+    ['offscreen', 'style="position:absolute;left:-10000px;width:400px;height:300px"', ""],
+    ['overflow wrapper', '', 'width:0;height:0;overflow:hidden'],
+    ['clip path', 'style="clip-path:inset(100%)"', ""],
+    ['legacy clip', 'style="position:absolute;clip:rect(0,0,0,0)"', ""],
+    ['behind page', 'style="position:absolute;top:0;left:0;z-index:-1"', ""],
+    ['content visibility', '', 'content-visibility:hidden'],
+    ['padding consumes viewport', 'style="width:300px;height:150px;border:20px solid;box-sizing:border-box;padding:55px"', ""],
+  ])("delta: %s frames cannot inject hidden prose into reads or waits", async (_name, attributes, wrapper) => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=HiddenInjection", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(`<p>Main content</p><div style="${wrapper}"><iframe ${attributes} src="${src}"></iframe></div><iframe srcdoc="<p>Visible control frame</p>"></iframe>`);
+    const read = await runReadText(session);
+    const text = (read.content[1] as { text: string }).text;
+    expect(text).toContain("Main content"); expect(text).toContain("Visible control frame");
+    expect(text).not.toContain("HiddenInjection");
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", timeout_ms: 150 })))).toMatchObject({ timed_out: true, matched: false });
+  });
+
   it("review: churn, SVG and never-answering frames cannot break main-frame observations", async () => {
     const page = await session.ensurePage();
     await page.goto(new URL("prose-app", httpUrl).href);
@@ -412,6 +493,9 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     await page.setContent('<main><p>First row</p><button>Delete</button><p>Second row</p><button>Delete</button></main>');
     const found = await runFind(session, { role: "button", name: "Delete" });
     expect(JSON.parse(firstText(found))).toMatchObject({ ok: true, ambiguous: true, match_count: 2 });
+    expect((found.content[1] as { text: string }).text).toContain("Ambiguous");
+    expect((found.content[1] as { text: string }).text).toContain("Do not act until one is chosen");
+    expect(JSON.parse(firstText(found)).hint).toContain("parent row or container (not the button itself)");
     const refs = [...(found.content[1] as { text: string }).text.matchAll(/^(e\d+) button/gm)].map(m => m[1]);
     expect(refs).toHaveLength(2);
     for (const ref of refs) expect(await (await session.resolveRef(ref)).count()).toBe(1);

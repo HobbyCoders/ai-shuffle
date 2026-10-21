@@ -82,13 +82,14 @@ export async function runFind(session: Session, input: FindInput): Promise<McpTo
   const ambiguous = matchedRefs !== undefined && candidateCount > 1 && input.index === undefined;
   return jsonResult({ ok: true, snapshot_id: snap.snapshot_id, match_count: result.matches.length,
     ...(ambiguous ? { ambiguous: true, candidate_count: candidateCount,
-      hint: "Inspect nearby row text with browser_snapshot scope_ref, or select a zero-based find index. Candidates are in document order." } : {}),
+      hint: "Ambiguous: do not act until a candidate is chosen. Snapshot the parent row or container (not the button itself) to inspect nearby text, then pass a zero-based find index. Candidates are in document order." } : {}),
     degraded: result.degraded, method: matchedRefs ? "locator" : structured.length ? "locator" : "search" },
-    formatMatches(query, snap.snapshot_id, result));
+    formatMatches(query, snap.snapshot_id, result, ambiguous));
 }
 
-function formatMatches(query: string, snapshotId: number, result: FindResult): string {
-  const lines = [`${result.matches.length} matches for "${query}" (snapshot_id=${snapshotId})`];
+function formatMatches(query: string, snapshotId: number, result: FindResult, ambiguous: boolean): string {
+  const lines = [`${ambiguous ? "Ambiguous: " : ""}${result.matches.length} matches for "${query}" (snapshot_id=${snapshotId})`];
+  if (ambiguous) lines.push("Do not act until one is chosen: snapshot the parent row or container, then pass index.");
   if (result.degraded) lines.push(`semantic search unavailable (${result.reason ?? "unknown"}); showing text matches`);
   for (const m of result.matches) lines.push(`${m.ref} ${m.role} "${m.name}"${m.reason ? ` — ${m.reason}` : ""}`);
   return lines.join("\n");

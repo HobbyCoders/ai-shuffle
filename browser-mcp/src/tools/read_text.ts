@@ -9,8 +9,8 @@
  */
 
 import { raceWithTimeout, type Session } from "../session.js";
-import { observationRoots, includeObservationRoot } from "./observation_scope.js";
-import { jsonResult, capText, emptyContentWarning, type McpToolResult } from "./result.js";
+import { observationRoots, includeObservationRoot, observationTask, boundedObservation } from "./observation_scope.js";
+import { jsonResult, errorResult, capText, emptyContentWarning, type McpToolResult } from "./result.js";
 
 export const READ_TEXT_MAX_CHARS = 30000;
 
@@ -18,6 +18,7 @@ interface Extracted {
   title: string;
   url: string;
   text: string;
+  frames_skipped: number;
 }
 
 /**
@@ -55,20 +56,41 @@ function extractInRoot(root: Element | null, scoped: boolean): string {
 
 export async function runReadText(session: Session, input: { offset?: number; scope_ref?: string } = {}): Promise<McpToolResult> {
   const page = await session.ensurePage();
-  const extracted: Extracted = await raceWithTimeout((async () => {
-    const roots = await observationRoots(session, input.scope_ref);
-    const parts = await Promise.allSettled(roots.map(root => raceWithTimeout((async () => {
-      if (!await includeObservationRoot(root)) return "";
-      // Evaluate the existing document root without auto-waiting for a body
-      // in SVG, uncommitted or indefinitely loading frames.
+  const roots = await observationRoots(session, input.scope_ref);
+  let extracted: Extracted;
+  try {
+    const read = (root: typeof roots[number], budget: number) => observationTask(session, root, `read:${input.scope_ref ?? ""}`, async () => {
+      if (!await includeObservationRoot(root)) return undefined;
       const text = root.primary && root.scope
-        ? await root.scope.evaluate(extractInRoot, true, { timeout: 200 })
-        : await root.frame.locator(":root").evaluate(extractInRoot, Boolean(input.scope_ref), { timeout: 200 });
-      if (!text) return "";
-      return root.frame === page.mainFrame() ? text : `[frame ${new URL(root.frame.url()).origin}]\n${text}`;
-    })(), root.primary ? 1000 : 200, "frame text timed out")));
-    return { title: await page.title(), url: page.url(), text: parts.flatMap(part => part.status === "fulfilled" && part.value ? [part.value] : []).join("\n\n") };
-  })(), 5000, "read_text timed out");
+        ? await root.scope.evaluate(extractInRoot, true, { timeout: budget })
+        : await root.frame.locator(":root").evaluate(extractInRoot, Boolean(input.scope_ref), { timeout: budget });
+      return !text || root.frame === page.mainFrame() ? text : `[frame ${new URL(root.frame.url()).origin}]\n${text}`;
+    });
+    // Protect main prose from child-frame contention; a failed main read is an
+    // error, never a successful empty result or a diagnosis of a blank app.
+    const main = await boundedObservation(read(roots[0], 5000), 5000);
+    if (main === undefined) throw new Error("primary observation root is unavailable");
+    const children = roots.slice(1, 49);
+    const parts: (string | undefined)[] = new Array(children.length);
+    let next = 0;
+    const deadline = Date.now() + 2500;
+    await Promise.all(Array.from({ length: Math.min(6, children.length) }, async () => {
+      while (next < children.length && Date.now() < deadline) {
+        const index = next++;
+        try {
+          const budget = Math.min(300, deadline - Date.now());
+          parts[index] = await boundedObservation(read(children[index], budget), budget);
+        } catch { /* child failure is reported in frames_skipped */ }
+      }
+    }));
+    extracted = {
+      title: await raceWithTimeout(page.title(), 1000, "title timed out").catch(() => ""),
+      url: page.url(), text: [main, ...parts].filter(Boolean).join("\n\n"),
+      frames_skipped: roots.length - 1 - parts.filter(part => part !== undefined).length,
+    };
+  } catch (err) {
+    return errorResult(`observation_failed: main-frame text could not be read: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   const offset = Math.max(0, Math.min(input.offset ?? 0, extracted.text.length));
   const { text, truncated, fullChars } = capText(extracted.text.slice(offset), READ_TEXT_MAX_CHARS);
@@ -80,6 +102,7 @@ export async function runReadText(session: Session, input: { offset?: number; sc
     url: extracted.url,
     title: extracted.title,
     chars: text.length,
+    frames_skipped: extracted.frames_skipped,
     truncated,
     ...(offset ? { offset } : {}),
     ...(truncated ? { total_chars: total, next_offset: next } : {}),
