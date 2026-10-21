@@ -15,8 +15,8 @@ export function beginRequestWatch(page: Page): void {
   const sync = async () => {
     if (!active) return;
     await page.evaluate(({ key, count }) => {
-      const state = (window as unknown as Record<string, unknown>)[key] as { pendingRequests: number; lastMutation: number } | undefined;
-      if (state) { state.pendingRequests = count; state.lastMutation = Date.now(); }
+      const state = (window as unknown as Record<string, unknown>)[key] as { pendingRequests: number; lastMutation: number; lastPendingWork: number } | undefined;
+      if (state) { state.pendingRequests = count; state.lastMutation = state.lastPendingWork = Date.now(); }
     }, { key: WATCH_KEY, count: pending.size }).catch(() => {}); // navigation can destroy the watcher
   };
   const started = (request: Request) => { pending.add(request); void sync(); };
@@ -38,6 +38,7 @@ export interface MutationStats {
   characterDataChanges: number;
   urlChanged: boolean;
   settleCapped?: boolean;
+  observationFailed?: boolean;
   pendingRequests?: number;
   pendingTimers?: number;
 }
@@ -64,6 +65,7 @@ export function installMutationWatcher(key: string): void {
   const state = {
     addedNodes: 0, removedNodes: 0, attributeChanges: 0, characterDataChanges: 0,
     startUrl: location.href, lastMutation: Date.now(), pendingRequests: 0, pendingTimers: 0,
+    deadline: 0, textSamples: 0, textTargets: new Set<Node>(), lastNonTextMutation: Date.now(), lastPendingWork: 0,
     schedule: window.setTimeout.bind(window),
     observer: { disconnect: () => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); } },
   };
@@ -81,6 +83,12 @@ export function installMutationWatcher(key: string): void {
     const Observer = (realm as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver;
     const observer = new Observer(records => {
       for (const r of records) {
+        const textOnly = r.type === "characterData" || (r.type === "childList" &&
+          [...Array.from(r.addedNodes), ...Array.from(r.removedNodes)].every(node => node.nodeType === 3));
+        if (textOnly) {
+          state.textSamples++;
+          state.textTargets.add(r.target.nodeType === 3 ? r.target.parentNode ?? r.target : r.target);
+        } else state.lastNonTextMutation = Date.now();
         if (r.type === "childList") {
           state.addedNodes += count(r.addedNodes); state.removedNodes += count(r.removedNodes);
           if ([...Array.from(r.addedNodes), ...Array.from(r.removedNodes)].some(node => node.nodeType === 3)) state.characterDataChanges++;
@@ -108,16 +116,20 @@ export function installMutationWatcher(key: string): void {
     const clear = realm.clearTimeout as unknown as (id?: number) => void;
     const timers = new Set<number>();
     const setWrapper: Timer = (handler, delay, ...args) => {
-      if (typeof handler !== "function") return set.call(realm, handler, delay, ...args);
+      // A timer that cannot fire within this observation budget (e.g. toast
+      // dismissal) must not hold every unrelated action to the cap.
+      const remaining = state.deadline ? state.deadline - Date.now() : 1500;
+      if (typeof handler !== "function" || Number(delay ?? 0) >= remaining) return set.call(realm, handler, delay, ...args);
       state.pendingTimers++;
       const id = set.call(realm, () => {
         if (timers.delete(id)) state.pendingTimers--;
+        state.lastPendingWork = Date.now();
         changed(); handler.apply(realm, args);
       }, delay);
       timers.add(id); return id;
     };
     const clearWrapper = (id?: number) => {
-      if (id !== undefined && timers.delete(id)) { state.pendingTimers--; changed(); }
+      if (id !== undefined && timers.delete(id)) { state.pendingTimers--; state.lastPendingWork = Date.now(); changed(); }
       clear.call(realm, id);
     };
     realm.setTimeout = setWrapper as typeof realm.setTimeout; realm.clearTimeout = clearWrapper as typeof realm.clearTimeout;
@@ -155,19 +167,26 @@ export function collectMutationStats(args: [string, number, number]): Promise<Mu
   const state = w[key] as (MutationStats & {
     startUrl: string; lastMutation: number; observer: { disconnect(): void };
     pendingRequests: number; pendingTimers: number;
+    deadline: number; textSamples: number; textTargets: Set<Node>; lastNonTextMutation: number; lastPendingWork: number;
     schedule: typeof window.setTimeout;
   }) | undefined;
   // Missing watcher can mean same-URL document replacement. Refresh the tree,
   // but leave URL-change detection to the actual URL comparison in Session.
-  if (!state) return Promise.resolve({ addedNodes: 12, removedNodes: 0, attributeChanges: 0, characterDataChanges: 0, urlChanged: false });
+  if (!state) return Promise.resolve({ addedNodes: 12, removedNodes: 0, attributeChanges: 0, characterDataChanges: 0, urlChanged: false, observationFailed: true });
   const start = Date.now();
   // Quiet time starts at the END of dispatch, not watcher installation.
   state.lastMutation = start;
+  state.deadline = start + capMs;
   return new Promise(resolve => {
     const tick = () => {
       const now = Date.now();
       const capped = now - start >= capMs;
-      if (capped || (!state.pendingRequests && !state.pendingTimers && now - state.lastMutation >= quietMs)) {
+      // Clocks and counters can be text-only forever. After a full quiet
+      // window since dispatch/structural work, ignore churn on <=3 stable
+      // text containers, but never bypass action-started requests/timers.
+      const stableText = state.textSamples >= 2 && state.textTargets.size <= 3 &&
+        now - Math.max(start, state.lastNonTextMutation, state.lastPendingWork) >= quietMs;
+      if (capped || (!state.pendingRequests && !state.pendingTimers && (now - state.lastMutation >= quietMs || stableText))) {
         state.observer.disconnect();
         delete w[key];
         resolve({

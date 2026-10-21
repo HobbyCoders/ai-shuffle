@@ -180,7 +180,7 @@ describe("content warning via browser_navigate", () => {
       goForward: async () => {},
       url: () => landing,
       title: async () => page.title,
-      evaluate: async () => false,
+      evaluate: async () => ({ controls: true, loading: false }),
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
     };
     return {

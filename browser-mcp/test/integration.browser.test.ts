@@ -50,6 +50,32 @@ console.log("http-fixture-log hi");
 fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").textContent=JSON.stringify(d);});
 </script></body></html>`;
   const server = createHttpServer((req, res) => {
+    if (req.url?.startsWith("/review/")) {
+      const url = new URL(req.url, "http://fixture.test");
+      const pages: Record<string, string> = {
+        "/review/single": '<title>Single</title><label>Size<select><option value="s">Small</option><option value="m">Medium</option></select></label>',
+        "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
+        "/review/reload": '<title>Reload</title><form method="post" action="/review/reload"><button>Save</button></form>',
+        "/review/slowreload": '<title>Reload</title><form method="post" action="/review/slowreload"><button>Save</button></form>',
+        "/review/latereload": '<title>Reload</title><button onclick="setTimeout(()=>location.reload(),400)">Later</button>',
+      };
+      let html = pages[url.pathname];
+      if (url.pathname === "/review/loading") {
+        const media: Record<string, string> = {
+          svg: '<svg width="20" height="20"><circle r="5" cx="10" cy="10"></circle></svg>',
+          img: '<img width="20" height="20" alt="" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E">',
+          canvas: '<canvas width="20" height="20"></canvas>',
+          hidden: '<button hidden>Hidden control</button>',
+          spinner: '<svg width="20" height="20"><circle r="5" cx="10" cy="10"></circle></svg>',
+        };
+        const kind = url.searchParams.get("kind")!;
+        html = `<title>Loading app</title><main id="root">${media[kind] ?? ""}${kind === "spinner" ? "" : "Loading your dashboard…"}</main><script>setTimeout(()=>root.innerHTML='<button>Hydrated</button>',600)</script>`;
+      }
+      const send = () => { res.writeHead(200, { "content-type": "text/html" }); res.end(html ?? "not found"); };
+      if (url.pathname === "/review/slowreload" && req.method === "POST") setTimeout(send, 400);
+      else send();
+      return;
+    }
     if (req.url === "/action-late" || req.url === "/action-pending") {
       setTimeout(() => { res.writeHead(200, { "content-type": "text/html" }); res.end('<button>Network result</button>'.repeat(15)); }, req.url === "/action-late" ? 700 : 2200);
       return;
@@ -299,16 +325,123 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
-    it("caps a 100ms ticker without navigation or expiring refs", async () => {
+    it("settles a 100ms text ticker quickly without navigation or expiring refs", async () => {
       const page = await load('<button>Tick action</button><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
       const target = await ref("Tick action");
       const start = Date.now();
       const result = body(await runAct(session, { kind: "click", ref: target }));
-      expect(result).toMatchObject({ ok: true, url_changed: false, settle_capped: true, snapshot_stale: false, dom_mutated: "minor" });
-      expect(Date.now() - start).toBeLessThan(3000);
-      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(1500);
+      expect(result).toMatchObject({ ok: true, url_changed: false, settle_capped: false, snapshot_stale: false, dom_mutated: "minor" });
+      expect(Date.now() - start).toBeLessThan(800);
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
+      expect(result.timings.settle_ms).toBeLessThan(500);
       expect(await (await session.resolveRef(target)).count()).toBe(1);
       await page.goto("about:blank"); // stop the ticker before the next test
+    });
+    it("handles repeated 5ms script redirects without poisoning later navigations", async () => {
+      for (let i = 0; i < 5; i++) {
+        const result = body(await runNavigate(session, { url: httpUrl + "review/jsredir" }));
+        expect(result.ok).toBe(true);
+        expect(result.url).toBe(httpUrl + "review/single");
+        expect(result.ref_count).toBeGreaterThan(0);
+      }
+      expect(body(await runNavigate(session, { url: httpUrl + "review/single" })).ok).toBe(true);
+    });
+    it.each(["svg", "img", "canvas", "hidden", "spinner"])("does not mistake a %s loading shell for hydration", async kind => {
+      const started = Date.now();
+      const result = await runNavigate(session, { url: httpUrl + "review/loading?kind=" + kind });
+      expect(body(result).ref_count).toBeGreaterThan(0);
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Hydrated") });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(550);
+      expect(Date.now() - started).toBeLessThan(2200);
+    });
+    it("gives prose with CSS-only animation a short quiet wait rather than a 1.5s control wait", async () => {
+      const page = await session.ensurePage();
+      const url = 'data:text/html,' + encodeURIComponent('<style>@keyframes spin{to{transform:rotate(360deg)}}i{display:inline-block;animation:spin .1s infinite}</style><p>Rendered article content, without any actionable controls.</p><i>◌</i>');
+      const result = body(await runNavigate(session, { url }));
+      expect(result.ref_count).toBe(0);
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
+      expect(result.timings.settle_ms).toBeLessThan(800);
+      expect(await page.locator("p").innerText()).toContain("Rendered article");
+    });
+    it.each(["reload", "slowreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
+      await runNavigate(session, { url: httpUrl + "review/" + path });
+      const page = await session.ensurePage();
+      const before = await page.evaluate(() => performance.timeOrigin);
+      const result = await runAct(session, { kind: "click", ref: await ref(path === "latereload" ? "Later" : "Save") });
+      expect(body(result)).toMatchObject({ url_changed: false, dom_mutated: "major", snapshot_stale: true, settle_capped: false });
+      if (path === "latereload") expect(body(result).observation_failed).toBe(true);
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining(path === "latereload" ? "Later" : "Save") });
+      expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
+    });
+    it("does not claim none when a 3s blocked main thread prevents observation", async () => {
+      const page = await load(`<button onclick="setTimeout(()=>{const t=Date.now();while(Date.now()-t<3000);out.innerHTML='<button>Busy result</button>'.repeat(20)},0)">Busy</button><div id="out"></div>`);
+      const result = await runAct(session, { kind: "click", ref: await ref("Busy") });
+      expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true });
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Busy result") });
+      expect(await page.locator("#out button").count()).toBe(20);
+    }, 10000);
+    it("ignores a 5s toast dismissal without skipping a short 700ms render", async () => {
+      await load(`<button onclick="out.textContent='Saved';setTimeout(()=>out.textContent='',5000)">Toast</button><div id="out"></div>`);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Toast") }));
+      expect(result).toMatchObject({ settle_capped: false, pending_timers: 0, dom_mutated: "minor" });
+      expect(result.timings.settle_ms).toBeLessThan(500);
+      await load(`<button onclick="setTimeout(()=>out.textContent='',5000);setTimeout(()=>out.innerHTML='<button>Late result</button>'.repeat(20),700)">Both timers</button><div id="out"></div>`);
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Both timers") }))).toMatchObject({ dom_mutated: "major", snapshot_stale: true, settle_capped: false });
+    });
+    it("still caps attribute churn and wide text churn rather than treating them as a stable ticker", async () => {
+      const page = await load('<button>Churn</button><div id="out"></div><script>setInterval(()=>out.dataset.tick=String(Date.now()),100)</script>');
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Churn") }));
+      expect(result).toMatchObject({ settle_capped: true, url_changed: false, dom_mutated: "minor" });
+      await page.goto("about:blank");
+      await load('<button>Churn</button><div id="out">' + '<span>old</span>'.repeat(6) + '</div><script>setInterval(()=>document.querySelectorAll("span").forEach(el=>el.textContent=String(Date.now())),100)</script>');
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Churn") })).settle_capped).toBe(true);
+      await page.goto("about:blank");
+    }, 10000);
+    it("omits evidence when scrolling removes the virtualised source row", async () => {
+      const page = await load(`<div role="region" aria-label="List" id="sc" style="height:100px;overflow:auto"><div id="inner" style="height:3000px;position:relative"></div></div><script>function render(){const start=Math.floor(sc.scrollTop/20);inner.innerHTML='';for(let i=start;i<start+6;i++){const row=document.createElement('div');row.textContent='Row '+i;row.role='button';row.style.cssText='position:absolute;top:'+(i*20)+'px';inner.appendChild(row)}}sc.onscroll=render;render()</script>`);
+      const target = await ref("Row 0");
+      const start = Date.now();
+      const result = body(await runAct(session, { kind: "scroll", ref: target, direction: "down", amount: 1000 }));
+      expect(result.ok).toBe(true);
+      expect(result.scroll).toBeUndefined();
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(await page.getByRole("button", { name: "Row 0", exact: true }).count()).toBe(0);
+    });
+    it("bounds fill evidence on replaced inputs and select pre-checks on removed refs", async () => {
+      const page = await load(`<label>Size<select id="size"><option value="s">Small</option><option value="m">Medium</option></select></label><label>Name<input oninput="const clone=this.cloneNode();clone.value=this.value;this.replaceWith(clone)"></label>`);
+      const input = await ref("Name"), select = await ref("Size");
+      let start = Date.now();
+      const filled = body(await runAct(session, { kind: "fill", ref: input, value: "hello" }));
+      expect(filled.ok).toBe(true);
+      expect(filled.actual_value).toBeUndefined();
+      expect(Date.now() - start).toBeLessThan(1500);
+      expect(await page.getByRole("textbox", { name: "Name" }).inputValue()).toBe("hello");
+      await page.locator("#size").evaluate(el => el.remove());
+      start = Date.now();
+      expect(body(await runAct(session, { kind: "select", ref: select, value: "m" }))).toMatchObject({ code: "stale_ref", outcome: "not_executed" });
+      expect(Date.now() - start).toBeLessThan(3500);
+    });
+    it("reports a covered ARIA combobox as not executed, but uses unknown after opening it", async () => {
+      const page = await load('<button role="combobox" aria-label="Covered combo" aria-controls="choices" onclick="choices.hidden=false">Choose</button><div id="choices" role="listbox" hidden><div role="option">Known</div></div><div id="overlay" style="position:fixed;inset:0"></div>');
+      const target = await ref("Covered combo");
+      expect(body(await runAct(session, { kind: "select", ref: target, value: "Known" }))).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
+      await page.locator("#overlay").evaluate(el => el.remove());
+      const missing = body(await runAct(session, { kind: "select", ref: target, value: "Missing" }));
+      expect(missing).toMatchObject({ code: "outcome_unknown", outcome: "unknown" });
+      expect(await page.locator("#choices").isVisible()).toBe(true);
+    }, 10000);
+    it("echoes only capped native fill mismatches, not matching values or contenteditable text", async () => {
+      await load('<label>Plain<input></label><label>Mask<input oninput="this.value+=\'x\'.repeat(700)"></label><div contenteditable="true" role="textbox" aria-label="Editor"></div>');
+      const plain = body(await runAct(session, { kind: "fill", ref: await ref("Plain"), value: "match" }));
+      expect(plain.value_matches).toBe(true);
+      expect(plain.actual_value).toBeUndefined();
+      const mask = body(await runAct(session, { kind: "fill", ref: await ref("Mask"), value: "a" }));
+      expect(mask).toMatchObject({ value_matches: false, actual_value_truncated: true });
+      expect(mask.actual_value).toHaveLength(500);
+      const editor = body(await runAct(session, { kind: "fill", ref: await ref("Editor"), value: "a\nb" }));
+      expect(editor.ok).toBe(true);
+      expect(editor.actual_value).toBeUndefined();
+      expect(editor.note).toBeUndefined();
     });
     it("waits for a timer-rendered result 700ms after the click", async () => {
       const page = await load('<button onclick="setTimeout(()=>out.innerHTML=\'<button>Result</button>\'.repeat(20),700)">Late</button><div id="out"></div>');

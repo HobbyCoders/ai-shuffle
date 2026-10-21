@@ -44,6 +44,8 @@ export function typeTimeoutMs(value: string): number {
 
 /** Budget for asking whether a ref still resolves after its action failed. */
 const REF_PROBE_TIMEOUT_MS = 1000;
+const EVIDENCE_TIMEOUT_MS = 500;
+const MAX_FILL_VALUE_ECHO = 500;
 
 /**
  * Could this Playwright error mean the ref no longer resolves (element detached
@@ -274,7 +276,9 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     await session.disposeWatch();
     const msg = err instanceof Error ? err.message : String(err);
     const remedy = invalidInputRemedy(msg);
-    if (remedy) return errorResult(remedy, sent ? { outcome: "unknown" } : NOT_EXECUTED);
+    if (remedy) return sent
+      ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
+      : errorResult(remedy, NOT_EXECUTED);
     // Already a clean stale_ref / stale_screenshot: rejected before input.
     if (msg.startsWith("stale_ref") || msg.startsWith("stale_screenshot")) return errorResult(msg, NOT_EXECUTED);
     if (sent) return errorResult(outcomeUnknownMessage(input.kind, msg), { outcome: "unknown" });
@@ -314,22 +318,32 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
   const events = session.eventsSince(mark);
 
   if (input.kind === "fill") {
-    const actual = locator
-      ? await locator.evaluate(el => "value" in el ? String((el as HTMLInputElement).value) : el.textContent ?? "").catch(() => undefined)
-      : await page.evaluate(() => {
+    // Virtual DOMs may have replaced the acted-on element. Bound locator
+    // resolution AND execution: evidence must not turn success into a 30s wait.
+    // Contenteditables have no native value comparable to fill's text semantics.
+    const actual = await raceWithTimeout(locator
+      ? locator.evaluate(el => /^(INPUT|TEXTAREA)$/.test(el.tagName) ? (el as HTMLInputElement).value : undefined,
+        undefined, { timeout: EVIDENCE_TIMEOUT_MS })
+      : page.evaluate(() => {
         const el = document.activeElement;
-        return el && "value" in el ? String((el as HTMLInputElement).value) : el?.textContent ?? "";
-      }).catch(() => undefined);
+        return el && /^(INPUT|TEXTAREA)$/.test(el.tagName) ? (el as HTMLInputElement).value : undefined;
+      }), EVIDENCE_TIMEOUT_MS, "fill evidence timed out").catch(() => undefined);
     if (actual !== undefined) {
-      evidence.actual_value = actual;
       evidence.value_matches = actual === input.value;
-      if (actual !== input.value) evidence.note = "The resulting value differs from the requested fill; a mask/formatter may have changed it. Try kind=type to send keystrokes.";
+      if (actual !== input.value) {
+        evidence.actual_value = actual.slice(0, MAX_FILL_VALUE_ECHO);
+        if (actual.length > MAX_FILL_VALUE_ECHO) evidence.actual_value_truncated = true;
+        evidence.note = "The resulting value differs from the requested fill; a mask/formatter may have changed it. Try kind=type to send keystrokes.";
+      }
     }
   }
   if (input.kind === "scroll") {
     const point = evidence.scroll_point as number[] | undefined;
     delete evidence.scroll_point;
-    evidence.scroll = await (locator ?? page.locator("body")).evaluate(readScrollPosition, { direction: input.direction ?? "down", point });
+    const scroll = await raceWithTimeout((locator ?? page.locator("body")).evaluate(readScrollPosition,
+      { direction: input.direction ?? "down", point }, { timeout: EVIDENCE_TIMEOUT_MS }),
+      EVIDENCE_TIMEOUT_MS, "scroll evidence timed out").catch(() => undefined);
+    if (scroll !== undefined) evidence.scroll = scroll;
   }
   const body: Record<string, unknown> = {
     ok: true,
@@ -338,6 +352,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     dom_mutated: settle.domMutated,
     snapshot_stale: snapshotStale,
     settle_capped: settle.settleCapped ?? false,
+    observation_failed: settle.observationFailed ?? false,
     pending_requests: settle.pendingRequests ?? 0,
     pending_timers: settle.pendingTimers ?? 0,
     timings,
@@ -565,11 +580,11 @@ async function selectValues(locator: Locator, input: ActInput, markSent: () => v
   if (input.value !== undefined && input.values !== undefined) throw new Error("invalid_input: select takes value OR values[], not both");
   const values = input.values ?? [requireValue(input.value, "select")];
   if (!Array.isArray(values) || values.some(value => typeof value !== "string")) throw new Error("invalid_input: values must be an array of option values/labels");
-  const info = await locator.evaluate(el => ({
+  const info = await raceWithTimeout(locator.evaluate(el => ({
     native: el.tagName === "SELECT", multiple: (el as HTMLSelectElement).multiple,
     role: el.getAttribute("role"), controls: el.getAttribute("aria-controls") || el.getAttribute("aria-owns"),
     options: el.tagName === "SELECT" ? Array.from((el as HTMLSelectElement).options).map(o => ({ value: o.value, label: o.label })) : [],
-  }));
+  }), undefined, { timeout: REF_ACTION_TIMEOUT_MS }), REF_ACTION_TIMEOUT_MS, `Timeout ${REF_ACTION_TIMEOUT_MS}ms exceeded while checking select ref`);
   if (info.native) {
     if (!info.multiple && values.length > 1) throw new Error("invalid_input: this select is single-choice; send one value, not multiple values");
     const options = values.map(value => {
@@ -591,16 +606,16 @@ async function selectValues(locator: Locator, input: ActInput, markSent: () => v
   let scope = info.role === "listbox" ? locator : root;
   if (info.controls) scope = root.locator(info.controls.split(/\s+/).map(id => `[id=${JSON.stringify(id)}]`).join(","));
   if (info.role === "combobox") {
-    markSent();
     await locator.click({ timeout: REF_ACTION_TIMEOUT_MS });
+    markSent();
     if (!(await scope.getByRole("option").first().isVisible())) await locator.press("ArrowDown", { timeout: REF_ACTION_TIMEOUT_MS });
   }
   const option = scope.getByRole("option", { name: values[0], exact: true });
   try { await option.first().waitFor({ state: "visible", timeout: REF_ACTION_TIMEOUT_MS }); }
   catch { throw new Error(`invalid_input: no visible option labelled "${values[0]}"; inspect the open list and use its exact label`); }
   if (await option.count() !== 1) throw new Error(`invalid_input: label "${values[0]}" matches multiple options; click a specific option ref instead`);
-  markSent();
   await option.click({ timeout: REF_ACTION_TIMEOUT_MS });
+  markSent();
 }
 
 function requireValue(value: string | undefined, kind: string): string {

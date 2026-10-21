@@ -1249,7 +1249,7 @@ export class Session {
    * mutation stats, and classify what changed. Returns none/minor/major plus
    * whether the URL changed. Call {@link beginWatch} before the action.
    */
-  async settle(urlBefore?: string, quietMs = QUIET_MS): Promise<SettleResult & { settleCapped: boolean; pendingRequests: number; pendingTimers: number }> {
+  async settle(urlBefore?: string, quietMs = QUIET_MS): Promise<SettleResult & { settleCapped: boolean; observationFailed: boolean; pendingRequests: number; pendingTimers: number }> {
     const page = this.requirePage();
     const before = urlBefore ?? page.url();
     let stats: MutationStats;
@@ -1260,22 +1260,24 @@ export class Session {
         number,
         number,
       ]), QUIET_CAP_MS + 1000, "mutation settle timed out");
-    } catch {
-      // A slow/ticking page is not evidence of navigation. Compare the URL.
+    } catch (err) {
+      // Failed observation is not "nothing changed". Refresh refs conservatively
+      // without inventing URL navigation; context destruction is not a cap hit.
       await this.disposeWatch();
       stats = {
-        addedNodes: 0,
+        addedNodes: 12,
         removedNodes: 0,
         attributeChanges: 0,
         characterDataChanges: 0,
         urlChanged: page.url() !== before,
-        settleCapped: true,
+        settleCapped: err instanceof Error && err.message === "mutation settle timed out",
+        observationFailed: true,
       };
     } finally { endRequestWatch(page); }
 
     const urlChanged = stats.urlChanged || page.url() !== before;
     if (urlChanged) this.notifyNavigation();
     const domMutated = classifyMutations(stats);
-    return { urlChanged, domMutated, settleCapped: stats.settleCapped ?? false, pendingRequests: stats.pendingRequests ?? 0, pendingTimers: stats.pendingTimers ?? 0 };
+    return { urlChanged, domMutated, settleCapped: stats.settleCapped ?? false, observationFailed: stats.observationFailed ?? false, pendingRequests: stats.pendingRequests ?? 0, pendingTimers: stats.pendingTimers ?? 0 };
   }
 }

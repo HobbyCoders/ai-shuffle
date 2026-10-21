@@ -4,7 +4,7 @@
  * snapshot so the model has an immediate map of the landing page.
  */
 
-import type { Session } from "../session.js";
+import { raceWithTimeout, type Session } from "../session.js";
 import { runWait } from "./wait.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
@@ -182,19 +182,37 @@ export async function runNavigate(
 
   const dispatchMs = performance.now() - dispatchStart;
   const settleStart = performance.now();
-  // A rendered prose/canvas page need not acquire controls. Only blank/loading
-  // shells get the bounded hydration wait (never an unbounded network-idle wait).
-  const needsHydration = await page.evaluate(() => {
+  // Readiness inspection can race a page's own redirect or a blocked main
+  // thread. Fall through to the bounded locator wait, never fail navigation
+  // merely because this optional page evaluate lost its execution context.
+  const readiness = await raceWithTimeout(page.evaluate(() => {
+    const visible = (el: Element) => {
+      const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
     const body = document.body;
     const content = body?.innerText.trim() ?? "";
-    const controls = body?.querySelector('button, a[href], input, select, textarea, [role="button"], [role="textbox"], canvas, svg, img');
-    return !controls && (!content || /^(loading|please wait)[.\s…!]*$/i.test(content));
-  });
-  if (needsHydration) await runWait(session, {
-    condition: "element",
-    selector: 'button:visible, a[href]:visible, input:visible, select:visible, textarea:visible, [role="button"]:visible, [role="link"]:visible, [role="textbox"]:visible, [tabindex]:visible, [contenteditable="true"]:visible',
-    timeout_ms: 1500,
-  });
+    const controls = Array.from(body?.querySelectorAll('button, a[href], input, select, textarea, [role="button"], [role="link"], [role="textbox"], [role="combobox"], [role="listbox"], [tabindex], [contenteditable="true"]') ?? []).some(visible);
+    // Media is rendered content, not an actionable control. Small/animated
+    // spinner images must not make a loading shell look hydrated.
+    const renderedMedia = Array.from(body?.querySelectorAll("canvas, img") ?? []).some(el =>
+      visible(el) && el.getBoundingClientRect().width >= 64 && el.getBoundingClientRect().height >= 64);
+    const loading = (!content && !renderedMedia) || (content.length < 200 && /(?:^|\n)\s*(loading\b|please wait\b|redirecting\b)/i.test(content));
+    return { controls, loading };
+  }), 500, "navigation readiness timed out").catch(() => ({ controls: false, loading: true }));
+  if (!readiness.controls) {
+    if (readiness.loading) await runWait(session, {
+      condition: "element",
+      selector: 'button:visible, a[href]:visible, input:visible, select:visible, textarea:visible, [role="button"]:visible, [role="link"]:visible, [role="textbox"]:visible, [role="combobox"]:visible, [role="listbox"]:visible, [tabindex]:visible, [contenteditable="true"]:visible',
+      timeout_ms: 1500,
+    });
+    else {
+      // Rendered control-free pages still get a short DOM-quiet observation,
+      // not an unconditional 1.5s control wait nor an immediate early return.
+      await session.beginWatch();
+      await session.settle(page.url());
+    }
+  }
   const settleMs = performance.now() - settleStart;
   session.agentAdmission?.();
   const snapshotStart = performance.now();

@@ -43,7 +43,7 @@ describe("settle timeout", () => {
       };
       const pending = Session.prototype.settle.call(fake as unknown as Session, "https://example.test/");
       await vi.advanceTimersByTimeAsync(QUIET_CAP_MS + 1000);
-      expect(await pending).toMatchObject({ urlChanged: false, settleCapped: true });
+      expect(await pending).toMatchObject({ urlChanged: false, domMutated: "major", settleCapped: true, observationFailed: true });
       expect(notifyNavigation).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });
