@@ -16,7 +16,17 @@ from app.db.base import get_db
 
 
 class UsageDeferred(Exception):
-    """A cached read must not bypass an upstream cooldown."""
+    """A cached read must not bypass an upstream cooldown.
+
+    Only fixed categories cross the status boundary, never exception messages.
+    Times are epoch milliseconds, matching snapshot timestamps.
+    """
+
+    def __init__(self, message="Usage request deferred", *, deferred_until=None,
+                 reason="shared_usage_budget"):
+        super().__init__(message)
+        self.deferred_until = deferred_until
+        self.reason = reason
 
 
 # One poll pass's usage requests, keyed by the exact request. Model-provider
