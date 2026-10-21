@@ -13,6 +13,8 @@ import local_ci_stages as stages
 
 @pytest.fixture
 def gate(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PG", raising=False)
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PRESSURE", raising=False)
     calls = []
     monkeypatch.setattr(ci, "ROOT", tmp_path)
     monkeypatch.setattr(ci, "records_path", lambda: tmp_path / "git/passes.json")
@@ -58,6 +60,28 @@ def test_full_gate_only_records_and_attests_after_every_stage(gate):
     assert calls.count("success") == 1
     # The update-reach recheck runs in local_ci.attest_preflight, before this.
     assert calls[len(before):] == []
+
+
+@pytest.mark.parametrize("optin", ["LOCAL_CI_CONTAINER_PG", "LOCAL_CI_CONTAINER_PRESSURE"])
+@pytest.mark.parametrize("initially_enabled", [False, True])
+def test_completed_gate_does_not_reuse_different_container_optins(gate, monkeypatch, optin, initially_enabled):
+    calls, args = gate
+    if initially_enabled:
+        monkeypatch.setenv(optin, "1")
+    for _ in range(5):
+        assert step(args) == 0
+    assert stages.completed(ci, args, sys.executable, "revision")
+
+    if initially_enabled:
+        monkeypatch.delenv(optin)
+    else:
+        monkeypatch.setenv(optin, "1")
+    assert not stages.completed(ci, args, sys.executable, "revision")
+    before = len(calls)
+    assert step(args) == 0
+    assert calls[before:] == ["pending", "security"]
+    state = json.loads(ci.records_path().with_name("full-stages.json").read_text())
+    assert state["completed"] == ["security"]
 
 
 def test_failed_stage_retries_without_replaying_successes(gate, monkeypatch):

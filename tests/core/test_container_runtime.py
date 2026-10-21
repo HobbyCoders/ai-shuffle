@@ -592,7 +592,7 @@ def test_main_marks_the_supervisor_non_dumpable_after_dropping_privileges(monkey
     order = []
     cfg = settings_factory()
     monkeypatch.setattr(runtime, "load_settings", lambda: cfg)
-    monkeypatch.setattr(runtime, "drop_privileges", lambda settings: order.append("drop"))
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: order.append("drop"))
     monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: order.append("harden"))
     monkeypatch.setattr(runtime, "run", lambda settings, action, filename=None: order.append(action) or 0)
     assert runtime.main(["run"]) == 0

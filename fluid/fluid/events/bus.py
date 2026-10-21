@@ -64,19 +64,29 @@ def _field_names(event_type):
     return tuple(field.name for field in fields(event_type))
 
 
-def _retained_size(value, depth=0) -> int:
-    """Conservative estimate for JSON-shaped event fields, without copying them."""
-    size = sys.getsizeof(value)
-    if depth >= 12:
-        return size
-    if is_dataclass(value) and not isinstance(value, type):
-        size += sum(_retained_size(getattr(value, name), depth + 1)
-                    for name in _field_names(type(value)))
-    elif isinstance(value, dict):
-        size += sum(_retained_size(k, depth + 1) + _retained_size(v, depth + 1)
-                    for k, v in value.items())
-    elif isinstance(value, (list, tuple)):
-        size += sum(_retained_size(v, depth + 1) for v in value)
+def _retained_size(value) -> int:
+    """Estimate JSON-shaped fields without copies, recursion, or a depth bypass.
+
+    Identity tracking also terminates accidental cycles/shared subtrees. The
+    estimate is per event (shared objects across events may be overcounted).
+    """
+    size = 0
+    pending = [value]
+    seen = set()
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        size += sys.getsizeof(item)
+        if is_dataclass(item) and not isinstance(item, type):
+            pending.extend(getattr(item, name) for name in _field_names(type(item)))
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                pending.extend((key, child))
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
     return size
 
 

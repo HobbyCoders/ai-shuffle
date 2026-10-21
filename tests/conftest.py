@@ -70,7 +70,12 @@ def requires_symlinks(tmp_path):
 # AI_SHUFFLE_ALLOW_REAL_CLAUDE, ...) are not settings and stay.
 
 _TEST_SET_ENV = {"TESTING", "DATA_DIR", "CORS_ORIGINS"}
-_DIRECT_ENV_READS = {"BROWSER_MCP_ENTRY"}
+_DIRECT_ENV_READS = {
+    "BROWSER_MCP_ENTRY",
+    # The source supervisor reads these outside Settings. Inheriting them makes
+    # container tests load the launching worker's installed image and update key.
+    "SHUFFLE_HANDED_OVER", "SHUFFLE_IMAGE_DIR", "SHUFFLE_HANDOVER",
+}
 
 
 def settings_env_names() -> set:

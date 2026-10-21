@@ -35,9 +35,49 @@ budgeted request, the others wait for it and write the same successful reading,
 so every row refreshes at the cost of one upstream request. Only a successful
 response is shared; on a failure the other rows are deferred exactly as the
 budget would defer them, and only the requesting row records the failure.
-Nothing is reused across passes or across workers. Responses still never leave
-the worker that made the request, so a second worker with a mirrored credential
-keeps its own last reading until it wins a later lease.
+HTTP responses never leave the requesting worker. Successful **normalized**
+readings are published through authenticated, encrypted settings sync under
+`provider_observation:` keys, scoped to a non-secret source/provider identity.
+An HMAC credential revision, using an HKDF-derived key separate from payload
+encryption, prevents cross-credential imports without naming rows after secrets.
+Upgrading the earlier draft's direct-key HMAC invalidates its revisions: each
+worker may need one extra refresh/budget attempt, not a new upstream allowance.
+A fingerprint-gated startup cleanup removes earlier 64-hex secret-derived row
+names; normal reconciliation then publishes their missing-row tombstones.
+Rotations replace rather than accumulate row names;
+credential edits, provider deletion and explicit billing disconnect delete old
+observations and publish their tombstones after commit.
+Receiving workers import the latest matching observation without claiming a
+budget or forcing a full pass. Its original `observed_at` is retained, never
+stamped as newly fetched; `source_worker` comes from the stored sync origin
+(signed for envelopes; asserted by the trusted publisher for snapshot items).
+An older observation cannot replace a newer one for the same credential, nor
+clear a newer local attempt/error. Rejected values retain the stored sync
+origin/clock as well as the value, including when forwarded by snapshot; rejected
+snapshot readings do not generate repeated conflicts. A deferred poll never
+republishes an imported peer reading as its own. Poll and import writes normally
+do not move successful observation time backwards, so a deferred poll cannot
+restore its pre-import cache. To recover after a clock correction, local storage
+ignores a stored success timestamp more than five minutes ahead of local time.
+Future-dated readings are stale, not fresh. Billing-key arrival schedules a post-commit
+refresh (including the real paged enrollment path), with one follow-up if a pass
+was already running. Local binding and credential/revision guards still authorize
+writes. Secrets, local binding IDs, denial fingerprints and raw provider bodies
+are not shared as observations.
+
+This covers API balances and polled provider snapshots (including OpenRouter,
+fal, Admin spend and subscription windows). No per-worker allowance is added:
+the existing upstream budget, backoff and auth pauses are unchanged. The registry
+intervals are application budgets, not documented provider rate guarantees, so
+multiplying requests by worker count is deliberately avoided. During a partition,
+a worker keeps its last reading until observation sync or budget access returns.
+
+A configured balance without a snapshot or error is `pending`; a budget refusal
+is `deferred`, with a fixed `last_deferred_reason`; no retry deadline is
+advertised because the coordinator does not supply one. A failed
+first reading is `unavailable`. A previous successful reading remains `fresh` or
+`stale` using its original timestamp. xAI discovery deferrals persist this state
+even before a team ID is known, and keep any discovered team and prior reading.
 
 Ordinary usage reads never wait on an upstream request. A stale provider
 reading starts one shared background refresh; explicit refreshes join the same

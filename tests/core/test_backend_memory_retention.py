@@ -194,6 +194,32 @@ async def test_disconnect_releases_store_and_registry_even_on_incomplete_close(m
 
 
 @pytest.mark.asyncio
+async def test_resource_monitor_splits_provider_bytes_and_pool_ownership(monkeypatch):
+    from app.core import resource_monitor, session_pool
+    from fluid.messages import Message, Text
+    monkeypatch.setattr(ha.HarnessAdapter, "_instances", weakref.WeakSet())
+    adapter = ha.HarnessAdapter()
+    adapter._provider_kind = "openai_responses"
+    adapter._store = PgFluidStore()
+    await adapter._store.create_session("provider-bytes")
+    await adapter._store.append("provider-bytes", SessionNode(node_id="root", parent_id=None,
+        message=Message(role="user", content=[Text("diagnostic payload")])))
+    monkeypatch.setattr(session_pool, "_session_pool", None)
+    metrics = await resource_monitor._collect_metrics()
+    group = metrics["harness_cache_by_provider"]["openai_responses"]
+    assert group["adapters"] == group["adapters_with_store"] == 1
+    assert group["retained_nodes"] == 1
+    assert group["message_json_bytes"] == adapter._store.cache_stats()["message_json_bytes"] > 0
+    assert metrics["harness_retained_message_json_bytes"] == group["message_json_bytes"]
+    assert metrics["harness_stored_adapters_outside_pool"] == 1
+    pool = SessionPool(max_size=1)
+    pool.put("provider-bytes", SessionState(adapter=adapter, is_connected=True))
+    monkeypatch.setattr(session_pool, "_session_pool", pool)
+    assert (await resource_monitor._collect_metrics())["harness_stored_adapters_outside_pool"] == 0
+    await adapter.disconnect_transport()
+
+
+@pytest.mark.asyncio
 async def test_resource_monitor_counts_adapters_without_owning_them(monkeypatch):
     from app.core import resource_monitor
 
