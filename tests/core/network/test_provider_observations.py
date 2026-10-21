@@ -7,7 +7,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from app.core import api_key_balances as balances, encryption, provider_observations, usage_polling
+import app.core.provider_observations as provider_observations
+from app.core import api_key_balances as balances, encryption, usage_polling
 from app.core.config import settings
 from app.core.provider_usage import ProviderUsageMonitor, provider_usage_monitor
 from app.core.usage_sources import SOURCES
