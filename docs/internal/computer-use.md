@@ -127,8 +127,12 @@ keys or buttons first, because these actions can send their own keys or clicks.
 Application names must not contain control characters.
 Cross-call holds auto-release after **15 seconds**, as well as on errors, Stop,
 turn end and `release_control`. Use a short `computer_batch` for a held gesture.
-Timeout/Stop release does not send Escape to cancel a drag. If an up action finds
-nothing held, it returns `released: false` and asks for a fresh screenshot.
+Stop and cancelled tool calls (including tool timeouts) send Escape down/up before
+releasing a held mouse button, cancelling the drag rather than dropping it. Escape
+injection failures are logged and do not prevent mouse-button release. No Escape
+is sent when no mouse button is held, on a normal drop, or on the 15-second hold
+expiry. If an up action finds nothing held, it returns `released: false` and asks
+for a fresh screenshot.
 
 `left_click_drag` retains its default straight, 20-step, 0.3-second motion and adds
 optional `path` screenshot points, movement `duration`, post-press `hold`,

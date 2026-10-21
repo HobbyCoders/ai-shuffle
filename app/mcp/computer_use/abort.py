@@ -138,7 +138,7 @@ def describe(reason: str | None) -> str:
 def _release_controllers(key: str) -> None:
     for controller in list(_controllers):
         if _key(controller.session_id) == key:
-            controller.release_all()
+            controller.release_all(cancel_drag=True)
 
 
 def request_stop(session_id: str | None = None, *, reason: str = "stopped",
