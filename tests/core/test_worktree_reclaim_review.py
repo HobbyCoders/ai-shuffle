@@ -141,18 +141,65 @@ def test_github_round_trip_is_outside_repository_lock(repository, monkeypatch):
     assert reclaim(dry_run=False)["reclaimed"] == 1
 
 
-@pytest.mark.parametrize("name", [".env", "local-output.txt"])
+@pytest.mark.parametrize("name", [".env", ".env.local", "local-output.txt", "dist/output.js",
+                                  "outputs/result.txt", "unknown/data", ".pytest_cache_backup/data",
+                                  "cache.pyc/data", "dist/.pytest_cache/data", "dist/__pycache__/x.pyc"])
 def test_non_dependency_ignored_files_are_kept(repository, name):
     repo, _ = repository
     _, path = merged(repository)
     excludes = repo / ".git" / "info" / "exclude"
-    excludes.write_text(excludes.read_text() + "\n" + name + "\n")
+    excludes.write_text(excludes.read_text() + "\n" + name.split("/")[0] + "\n")
     valuable = path / name
+    valuable.parent.mkdir(parents=True, exist_ok=True)
     valuable.write_text("local fixture output")
     preview = reclaim()["items"][0]
     assert preview["decision"] == "keep" and "ignored files" in preview["reason"]
     assert reclaim(dry_run=False)["reclaimed"] == 0
     assert valuable.read_text() == "local fixture output"
+
+
+@pytest.mark.parametrize("name", [".pytest_cache/v/cache/nodeids", "__pycache__/module.pyc",
+                                  "nested/__pycache__/module.pyc", "module.pyc", "nested/module.pyc",
+                                  ".svelte-kit/generated/client.js", "frontend/.svelte-kit/output/client.js"])
+def test_known_ignored_caches_do_not_block_reclaim(repository, name):
+    repo, path = merged(repository)
+    excludes = repo / ".git" / "info" / "exclude"
+    excludes.write_text(excludes.read_text() + "\n.pytest_cache/\n__pycache__/\n*.pyc\n.svelte-kit/\n")
+    cache = path / name
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("disposable cache")
+    assert reclaim()["items"][0]["decision"] == "remove"
+    assert reclaim(dry_run=False)["reclaimed"] == 1
+    assert not path.exists()
+
+
+def test_symlinked_cache_is_kept_without_touching_target(repository, tmp_path):
+    repo, path = merged(repository)
+    target = tmp_path / "cache-target"
+    target.mkdir()
+    valuable = target / "valuable"
+    valuable.write_text("keep")
+    link = path / ".pytest_cache"
+    link.symlink_to(target, target_is_directory=True)
+    excludes = repo / ".git" / "info" / "exclude"
+    excludes.write_text(excludes.read_text() + "\n.pytest_cache\n")
+    assert reclaim()["items"][0]["decision"] == "keep"
+    assert reclaim(dry_run=False)["reclaimed"] == 0
+    assert link.is_symlink()
+    assert valuable.read_text() == "keep"
+
+
+def test_unignored_parent_with_unknown_ignored_content_is_kept(repository):
+    repo, path = merged(repository)
+    valuable = path / "untracked-folder" / "local-output.txt"
+    valuable.parent.mkdir()
+    valuable.write_text("keep")
+    excludes = repo / ".git" / "info" / "exclude"
+    excludes.write_text(excludes.read_text() + "\nlocal-output.txt\n")
+    assert not git(path, "status", "--porcelain")
+    assert reclaim()["items"][0]["decision"] == "keep"
+    assert reclaim(dry_run=False)["reclaimed"] == 0
+    assert valuable.read_text() == "keep"
 
 
 def test_stamp_failure_aborts_before_removal(repository, monkeypatch):
