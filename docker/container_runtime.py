@@ -873,7 +873,7 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
         result["limited"] = result["visited"] >= max_entries or time.monotonic() - started >= max_seconds
         return result["limited"]
 
-    def walk(root, mounts, priority):
+    def walk(root, mounts, priority, *, shallow=False):
         def visit(fd, name, child, device, depth):
             if limited():
                 return
@@ -918,6 +918,8 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
                         if len(sample) < 5:
                             sample.append(str(child.relative_to(home))[:120])
                     if directory:
+                        if shallow and depth >= 1:
+                            return
                         if depth >= 64:
                             skip("depth")
                             return
@@ -976,12 +978,16 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
         priority = {home / name for name in HOME_VOLUMES}
         # Common exec-as-root destinations precede caches and package installs,
         # whether or not these fixed paths are separately mounted.
-        names = (".fluid", ".claude", *(name for name in HOME_VOLUMES if name not in {".fluid", ".claude"}))
-        for root in [*(home / name for name in names), home]:
+        early = {".fluid", ".claude"}
+        scans = [(home / name, False) for name in (".fluid", ".claude")]
+        scans.append((home, True))  # direct home writes precede large package subtrees
+        scans += [(home / name, False) for name in HOME_VOLUMES if name not in early]
+        scans.append((home, False))
+        for root, shallow in scans:
             if limited():
                 break
             try:
-                walk(root, mounts, priority)
+                walk(root, mounts, priority, shallow=shallow)
             except FileNotFoundError:
                 pass  # absent optional home directories need no repair
             except OSError:
@@ -1012,7 +1018,7 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
         service_uid = 64000  # standalone bootstrap copy without isolation helpers
     except module.IsolationError as error:
         if module.setting() == "required":
-            raise RuntimeFailure(str(error)) from None
+            raise RuntimeFailure(f"required agent isolation: startup refused; {error}") from None
         service_uid = module.DEFAULT_SERVICE_ID
     roots = [(home, old_uid, old_gid, False)]
     roots += [(home / name, None, None, True) for name in HOME_VOLUMES if home / name in mounts]

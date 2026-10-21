@@ -874,7 +874,7 @@ def test_home_root_repair_fixed_mounts_and_storage_aliases(tmp_path, monkeypatch
     monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
     result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
     assert {entry[0] for entry in changed} == {volume, paths[0]}
-    assert result["reasons"]["storage"] == 2
+    assert result["reasons"]["storage"] == 4  # both aliases in shallow and general passes
     again = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
     assert again["repaired"] == 0
     assert len(changed) == 2
@@ -893,6 +893,22 @@ def test_home_root_repair_prioritizes_fluid_before_large_decoy(tmp_path, monkeyp
     workspace.mkdir()
     changed = home_ownership({target: (0, 0)})
     result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=4)
+    assert changed == [(target, 41002, 41002)]
+    assert result["limited"]
+
+
+def test_home_root_repair_prioritizes_shallow_home_before_large_local(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    local = home / ".local"
+    local.mkdir(parents=True)
+    for index in range(30):
+        (local / str(index)).write_text("large package tree")
+    target = home / "root-exec-file"
+    target.write_text("repair before descending")
+    data.mkdir()
+    workspace.mkdir()
+    changed = home_ownership({target: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=5)
     assert changed == [(target, 41002, 41002)]
     assert result["limited"]
 
@@ -983,7 +999,9 @@ def test_home_root_repair_rechecks_device_and_link_count(tmp_path, monkeypatch, 
         monkeypatch.setattr(runtime.os, "open", linked)
     result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
     assert changed == []
-    assert result["reasons"]["device" if change == "device" else "changed"] == 1
+    # A foreign device is excluded in both passes; a late hardlink is caught
+    # after open in the first pass and excluded before open in the second.
+    assert result["reasons"]["device" if change == "device" else "changed"] == (2 if change == "device" else 1)
 
 
 @pytest.mark.parametrize("storage", ["data", "workspace"])
@@ -997,7 +1015,7 @@ def test_home_root_repair_never_repairs_home_used_as_storage(tmp_path, home_owne
     result = runtime.repair_home_root_files(home, home if storage == "data" else outside,
                                            home if storage == "workspace" else outside, 41002, 41002)
     assert changed == []
-    assert result["reasons"]["storage"] == len(runtime.HOME_VOLUMES) + 1
+    assert result["reasons"]["storage"] == len(runtime.HOME_VOLUMES) + 2
 
 
 def test_home_root_repair_priority_child_cannot_bypass_storage_ancestor(tmp_path, home_ownership):
@@ -1011,7 +1029,7 @@ def test_home_root_repair_priority_child_cannot_bypass_storage_ancestor(tmp_path
     changed = home_ownership({victim: (0, 0)}, aliases={config: data.stat()})
     result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
     assert changed == []
-    assert result["reasons"]["storage"] == 3  # .config, .config/gh, and the general walk
+    assert result["reasons"]["storage"] == 4  # .config, .config/gh, shallow and general walks
 
 
 def test_home_root_repair_bounds_directory_depth(tmp_path, home_ownership):
@@ -1092,7 +1110,7 @@ def test_home_remap_invalid_service_uid_obeys_isolation_mode(tmp_path, monkeypat
     monkeypatch.setenv("AGENT_ISOLATION", mode)
     monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "abc")
     if mode == "required":
-        with pytest.raises(runtime.RuntimeFailure, match="AGENT_ISOLATION_SERVICE_UID"):
+        with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused; AGENT_ISOLATION_SERVICE_UID"):
             runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
         assert changed == []
     else:

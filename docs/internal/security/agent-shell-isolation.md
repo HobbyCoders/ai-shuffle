@@ -143,8 +143,9 @@ startup also repairs root-owned directories and single-link regular files in
 follows symlinks or enters retained data/workspace aliases or unlisted mounts;
 it rechecks ownership, inode identity and link count before `fchown`. A
 20,000-entry/five-second scan budget and 64-level depth limit bound this
-best-effort repair. Fixed home paths are scanned before the general home,
-prioritizing `.fluid` and `.claude`; pinned-fd directory listings stream entries
+best-effort repair. It scans `.fluid` and `.claude`, then direct home-root
+entries without descending, then the other fixed paths and remaining subtrees;
+pinned-fd directory listings stream entries
 with budget checks instead of eagerly enumerating a large directory. Its one-line
 summary reports repairs, skips by reason, the scan limit and at most five
 relative-path samples; it never logs file contents.
