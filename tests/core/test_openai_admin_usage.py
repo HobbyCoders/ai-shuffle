@@ -177,14 +177,15 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
         assert "input_tokens" not in entry.credits
     assert entry.source_info.id == "openai_platform_balance"
     current = db.get_model_provider(pid, include_token=True)
-    # Model a failed first reading after a billing-key save invalidates the
-    # previous balance. A later failure alone now retains its prior success.
-    assert provider_balances.bind(current, settings.effective_instance_id, encryption.encrypt_value("sess-next-balance"))
-    current = db.get_model_provider(pid, include_token=True)
+    # Fail after a successful reading on the same key, as the real poll does:
+    # retain its timestamp (not its credits) and record the failed attempt.
+    import json
+    previous = json.loads(current["balance_snapshot"])
     assert provider_balances.snapshot(current, {
         "last_error_kind": "billing_access_denied",
-        "last_error_scope": "billing",
+        "last_error_scope": "balance",
         "last_attempted_at": int(balances.time.time() * 1000),
+        "fetched_at": previous["fetched_at"],
     })
     entry = next(e for e in await _load_provider_usage() if e.provider_id == pid)
     assert "balance_remaining" not in (entry.credits or {})
@@ -193,7 +194,9 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
     else:
         assert entry.credits is None
     assert entry.last_error_kind == "billing_access_denied"
-    assert entry.status == "unavailable"
+    assert entry.status == "stale"
+    assert entry.fetched_at == previous["fetched_at"]
+    assert db.get_model_provider(pid, include_token=True)["balance_key"] == current["balance_key"]
     db.clear_openai_billing_binding(pid)
     assert not await monitor._poll_openai_provider(row)
     assert upstream.await_count == 3

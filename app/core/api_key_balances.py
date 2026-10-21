@@ -98,7 +98,7 @@ def status(row):
         snap = {}
     fetched = snap.get("fetched_at")
     error = snap.get("last_error_kind")
-    fresh = bool(fetched and not error and time.time() * 1000 - fetched <= FRESHNESS_SECONDS * 1000)
+    fresh = bool(fetched and not error and 0 <= time.time() * 1000 - fetched <= FRESHNESS_SECONDS * 1000)
     return {"configured": configured, "source": SOURCES[source_id(row)].label,
             "source_id": source_id(row), "fetched_at": fetched,
             "fresh_until": fetched + FRESHNESS_SECONDS * 1000 if fetched else None,

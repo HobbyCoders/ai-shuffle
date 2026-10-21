@@ -2,6 +2,8 @@
 import asyncio
 import hmac
 import json
+import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -43,7 +45,10 @@ def test_rejected_old_value_keeps_sync_origin_and_clock_when_forwarded(workers, 
         with c.active():
             chunk = engine.snapshot_chunk("system_settings")
         with b.active():
+            conflicts_before = len(store.list_conflicts())
             engine.apply_snapshot_chunk(chunk)
+            engine.apply_snapshot_chunk(chunk)  # a rejected row is retried each round
+            assert len(store.list_conflicts()) == conflicts_before
     with b.active(), db.get_db() as conn:
         after = store.get_record(conn.cursor(), "system_settings", key)
         assert json.loads(db.get_system_setting(key))["observed_at"] == 5000
@@ -172,3 +177,95 @@ def test_newer_local_failure_keeps_imported_reading_and_error_state(workers, mon
         assert status["needs_reauth"]
         assert status["fetched_at"] == expected
         assert json.loads(row()["balance_snapshot"])["credits"]["balance_remaining"] == 42
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_future_balance_does_not_block_corrected_clock_write(workers, monkeypatch, failure):
+    from app.db import provider_balances
+    from tests.core.network.test_billing_key_sync import row
+    a, _ = pair(workers, "openai")
+    now = int(time.time() * 1000)
+    with a.active():
+        current = row()
+        assert provider_balances.snapshot(current, {"fetched_at": now + 2 * 3600 * 1000,
+                                                   "credits": {"balance_remaining": 42}})
+        monkeypatch.setattr(balances, "time", SimpleNamespace(time=lambda: now / 1000))
+        assert balances.status(row())["status"] == "stale"
+        assert balances.status(row())["credits"] is None
+        corrected = {"fetched_at": now, "credits": {"balance_remaining": 7}}
+        if failure:
+            corrected = {"fetched_at": now - 1000, "last_attempted_at": now,
+                         "last_error_kind": "billing_access_denied", "last_error_scope": "balance"}
+        assert provider_balances.snapshot(row(), corrected)
+        status = balances.status(row())
+        if failure:
+            assert status["needs_reauth"]
+            assert status["last_error_kind"] == "billing_access_denied"
+        else:
+            assert status["status"] == "fresh"
+            assert status["credits"]["balance_remaining"] == 7
+
+
+def test_future_provider_snapshot_does_not_block_corrected_clock_write(mock_db):
+    now = int(time.time() * 1000)
+    assert db.upsert_provider_usage_snapshot("clock-test", "openrouter", None, [],
+                                             {"limit_remaining": 42}, {}, now + 2 * 3600 * 1000)
+    assert db.upsert_provider_usage_snapshot("clock-test", "openrouter", None, [],
+                                             {"limit_remaining": 7}, {}, now)
+    snapshot = next(s for s in db.get_all_provider_usage_snapshots() if s["provider_id"] == "clock-test")
+    assert snapshot["fetched_at"] == now
+    assert snapshot["credits"]["limit_remaining"] == 7
+
+
+def test_future_provider_reading_is_stale_in_usage_api(authenticated_client, monkeypatch):
+    from app.api import usage
+    now = int(time.time() * 1000)
+    provider = db.create_model_provider("future-router", "Router", "openrouter", "https://openrouter.ai/api/v1",
+                                        auth_token=encryption.encrypt_value("inference-test"))
+    assert db.upsert_provider_usage_snapshot(provider["id"], "openrouter", None, [],
+                                             {"limit_remaining": 42}, {}, now + 2 * 3600 * 1000)
+    monkeypatch.setattr(usage, "time", SimpleNamespace(time=lambda: now / 1000))
+    entry = next(e for e in asyncio.run(usage._load_provider_usage()) if e.provider_id == provider["id"])
+    assert entry.status == "stale"
+
+
+def test_deferred_poll_does_not_republish_an_import_as_local(workers, monkeypatch):
+    from tests.core.network.test_billing_key_sync import row
+    a, b = pair(workers, "openai")
+    fake_http(monkeypatch, {balances.OPENAI_CREDIT_URL:
+        {"total_available": 42, "total_granted": 50, "total_used": 8}})
+    poll(a, "openai_platform_balance")
+    source = SOURCES["openai_platform_balance"]
+    with a.active():
+        key = observations._binding(source, row())[0]
+        original = db.get_system_setting(key)
+    async def arrive_then_defer(*args):
+        exchange(a, b)
+        with b.active():
+            observations.import_keys({key})
+        raise UsageDeferred()
+    monkeypatch.setattr(balances, "get", arrive_then_defer)
+    poll(b, "openai_platform_balance")
+    with b.active():
+        assert balances.status(row())["source_worker"] == a.device_id
+        assert db.get_system_setting(key) == original
+
+
+@pytest.mark.parametrize("source_id", ["openai_platform_balance", "openrouter_key"])
+def test_publish_rejects_peer_provenance_in_both_local_storage_shapes(workers, monkeypatch, source_id):
+    from tests.core.network.test_billing_key_sync import row
+    a, b = pair(workers, "openai")
+    with b.active():
+        source = SOURCES[source_id]
+        binding = observations._binding(SOURCES["openai_platform_balance"], row())
+        peer = {"fetched_at": int(time.time() * 1000), "credits": {"limit_remaining": 42}}
+        if source_id == "openai_platform_balance":
+            peer["source_worker"] = a.device_id
+        else:
+            peer["raw"] = {"source_worker": a.device_id}
+        monkeypatch.setattr(observations, "_binding", lambda *args: binding)
+        monkeypatch.setattr(observations, "_local", lambda *args: peer)
+        publish = Mock()
+        monkeypatch.setattr(engine, "record_after_commit", publish)
+        observations._publish(source, row(), (binding, {}, False))
+        publish.assert_not_called()

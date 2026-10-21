@@ -26,6 +26,9 @@ from app.db.base import get_db, rows_to_list
 
 logger = logging.getLogger(__name__)
 
+# Recover after a wall-clock correction without relaxing normal write ordering.
+MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
+
 
 def delete_shared_observations(conn, provider_id: str, *, source_id: str | None = None) -> None:
     """Remove obsolete readings atomically; publish their tombstones after commit."""
@@ -137,6 +140,7 @@ def upsert_provider_usage_snapshot(
                 updated_at = EXCLUDED.updated_at
             WHERE provider_usage_snapshots.provider_type <> EXCLUDED.provider_type
                OR provider_usage_snapshots.fetched_at IS NULL
+               OR provider_usage_snapshots.fetched_at > %s
                OR (EXCLUDED.fetched_at IS NOT NULL
                    AND EXCLUDED.fetched_at >= provider_usage_snapshots.fetched_at)
             """,
@@ -149,6 +153,7 @@ def upsert_provider_usage_snapshot(
                 json.dumps(raw) if raw is not None else None,
                 fetched_at,
                 now,
+                int(datetime.now(timezone.utc).timestamp() * 1000) + MAX_FUTURE_SKEW_MS,
             ),
         )
         return cursor.rowcount > 0
