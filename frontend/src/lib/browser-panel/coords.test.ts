@@ -5,6 +5,11 @@ import {
 	canvasToPage,
 	pageRectToCanvas,
 	modifiersFromEvent,
+	remoteModifiers,
+	remoteKey,
+	buttonName,
+	heldButton,
+	ClickCounter,
 	MOD_ALT,
 	MOD_CTRL,
 	MOD_META,
@@ -148,5 +153,75 @@ describe('pageRectToCanvas', () => {
 		expect(
 			pageRectToCanvas({ x: 0, y: 0, width: 10, height: 10 }, rect(0, 0, 800, 800), meta(0, 0)),
 		).toBeNull();
+	});
+});
+
+describe('remote keys (Linux Chrome on the other end)', () => {
+	const key = (k: string, mods: Partial<Record<'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey', boolean>> = {}, altGraph = false) => ({
+		key: k,
+		code: k.length === 1 ? `Key${k.toUpperCase()}` : k,
+		keyCode: k.length === 1 ? k.toUpperCase().charCodeAt(0) : 0,
+		altKey: false,
+		ctrlKey: false,
+		metaKey: false,
+		shiftKey: false,
+		...mods,
+		getModifierState: (m: string) => m === 'AltGraph' && altGraph,
+	});
+
+	it('sends Cmd as Ctrl so Mac shortcuts do what they mean', () => {
+		expect(remoteModifiers({ altKey: false, ctrlKey: false, metaKey: true, shiftKey: true })).toBe(MOD_CTRL | MOD_SHIFT);
+		expect(remoteKey(key('Meta', { metaKey: true }), 'down')).toMatchObject({ key: 'Control', code: 'ControlLeft', keyCode: 17, modifiers: MOD_CTRL });
+	});
+
+	it('types plain and shifted characters on keydown only', () => {
+		expect(remoteKey(key('a'), 'down')).toEqual({ key: 'a', code: 'KeyA', keyCode: 65, text: 'a', modifiers: 0 });
+		expect(remoteKey(key('A', { shiftKey: true }), 'down')).toMatchObject({ text: 'A', modifiers: MOD_SHIFT });
+		expect(remoteKey(key('a'), 'up').text).toBe('');
+		expect(remoteKey(key('😀'), 'down').text).toBe('😀');
+		expect(remoteKey(key('Enter'), 'down').text).toBe('');
+	});
+
+	it('never types the letter of a Ctrl or Cmd shortcut', () => {
+		expect(remoteKey(key('s', { metaKey: true }), 'down')).toMatchObject({ text: '', modifiers: MOD_CTRL });
+		expect(remoteKey(key('a', { ctrlKey: true }), 'down')).toMatchObject({ text: '', modifiers: MOD_CTRL });
+	});
+
+	it('types AltGr characters with Ctrl and Alt cleared', () => {
+		expect(remoteKey(key('@', { ctrlKey: true, altKey: true }, true), 'down')).toMatchObject({ key: '@', text: '@', modifiers: 0 });
+		expect(remoteKey(key('€', { ctrlKey: true, altKey: true, shiftKey: true }, true), 'down')).toMatchObject({ text: '€', modifiers: MOD_SHIFT });
+		// Real Ctrl+Alt shortcuts without AltGr stay shortcuts.
+		expect(remoteKey(key('t', { ctrlKey: true, altKey: true }), 'down')).toMatchObject({ text: '', modifiers: MOD_CTRL | MOD_ALT });
+	});
+
+	it('keeps Mac Option characters as typed text', () => {
+		expect(remoteKey(key('å', { altKey: true }), 'down')).toMatchObject({ text: 'å', modifiers: MOD_ALT });
+	});
+});
+
+describe('remote mouse buttons', () => {
+	it('names the changed button, and the held button for moves', () => {
+		expect([0, 1, 2, 3, -1].map(buttonName)).toEqual(['left', 'middle', 'right', 'none', 'none']);
+		expect([0, 1, 2, 4, 3].map(heldButton)).toEqual(['none', 'left', 'right', 'middle', 'left']);
+	});
+});
+
+describe('ClickCounter', () => {
+	it('counts quick presses in place up to a triple click', () => {
+		const c = new ClickCounter();
+		expect(c.press(0, 10, 10, 0)).toBe(1);
+		expect(c.press(200, 12, 9, 0)).toBe(2);
+		expect(c.press(400, 10, 10, 0)).toBe(3);
+		expect(c.press(600, 10, 10, 0)).toBe(3);
+	});
+
+	it('starts over after a pause, a move or another button', () => {
+		const c = new ClickCounter();
+		c.press(0, 10, 10, 0);
+		expect(c.press(501, 10, 10, 0)).toBe(1);
+		expect(c.press(600, 15, 10, 0)).toBe(1);
+		expect(c.press(700, 15, 10, 2)).toBe(1);
+		c.reset();
+		expect(c.press(710, 15, 10, 2)).toBe(1);
 	});
 });

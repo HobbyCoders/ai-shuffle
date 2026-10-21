@@ -8,6 +8,7 @@ import {
 } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import BrowserLiveView from './BrowserLiveView.svelte';
+import type { BrowserEditor } from '$lib/browser-panel/workspace';
 
 beforeEach(() => {
 	vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -43,7 +44,7 @@ afterEach(() => {
 let keyboardView: BrowserLiveView;
 
 async function setup(
-	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void } = {},
+	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void; editors?: BrowserEditor[]; onEdit?: () => void } = {},
 ) {
 	const onInput = vi.fn();
 	const onInspect = vi.fn();
@@ -62,7 +63,7 @@ async function setup(
 	await tick();
 	await Promise.resolve();
 	const surface = screen.getByRole('application');
-	const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+	const input = screen.getByLabelText('Type in the remote browser') as HTMLTextAreaElement;
 	return { ...view, onInput, onInspect, surface, input };
 }
 function pointer(target: HTMLElement, type: string, x = 50, y = 60) {
@@ -483,5 +484,177 @@ describe('frame lifetime', () => {
 		finish(image);
 		await Promise.resolve();
 		await waitFor(() => expect(image.close).toHaveBeenCalledOnce());
+	});
+});
+
+function mouse(target: HTMLElement, type: string, init: { x?: number; y?: number; button?: number; buttons?: number; metaKey?: boolean } = {}) {
+	const event = new Event(type, { bubbles: true, cancelable: true });
+	Object.assign(event, {
+		pointerType: 'mouse',
+		pointerId: 7,
+		clientX: init.x ?? 50,
+		clientY: init.y ?? 60,
+		button: init.button ?? -1,
+		buttons: init.buttons ?? 0,
+		altKey: false,
+		ctrlKey: false,
+		metaKey: init.metaKey ?? false,
+		shiftKey: false,
+	});
+	target.dispatchEvent(event);
+	return event;
+}
+const field: BrowserEditor = { id: 'name', type: 'text', label: 'Name', value: '', x: 100, y: 100, width: 120, height: 24 };
+function captureOn(surface: HTMLElement) {
+	let captured: number | null = null;
+	Object.assign(surface, {
+		setPointerCapture: vi.fn((id: number) => { captured = id; }),
+		hasPointerCapture: (id: number) => captured === id,
+		releasePointerCapture: () => { captured = null; },
+	});
+	return () => { captured = null; };
+}
+const mouseCalls = (onInput: ReturnType<typeof vi.fn>) => onInput.mock.calls.map(([p]) => p).filter((p) => p.kind === 'mouse');
+
+describe('desktop mouse input', () => {
+	it('reports hover as no button held and a drag as the held button', async () => {
+		const { surface, onInput } = await setup();
+		mouse(surface, 'pointermove', { x: 10, y: 20 });
+		mouse(surface, 'pointerdown', { x: 10, y: 20, button: 0, buttons: 1 });
+		mouse(surface, 'pointermove', { x: 30, y: 20, buttons: 1 });
+		expect(mouseCalls(onInput).map((p) => [p.event, p.button, p.buttons, p.clickCount])).toEqual([
+			['move', 'none', 0, 0],
+			['down', 'left', 1, 1],
+			['move', 'left', 1, 0],
+		]);
+	});
+
+	it('still releases a drag that ends over a field overlay, via pointer capture', async () => {
+		const { surface, onInput } = await setup({ editors: [field], onEdit: vi.fn() });
+		const overlay = screen.getByRole('textbox', { name: 'Name' });
+		captureOn(surface);
+		mouse(surface, 'pointerdown', { x: 20, y: 20, button: 0, buttons: 1 });
+		expect(surface.setPointerCapture).toHaveBeenCalledWith(7);
+		mouse(overlay, 'pointermove', { x: 110, y: 110, buttons: 1 });
+		mouse(overlay, 'pointerup', { x: 110, y: 110, button: 0, buttons: 0 });
+		expect(mouseCalls(onInput).map((p) => [p.event, p.x, p.y])).toEqual([
+			['down', 20, 20],
+			['move', 110, 110],
+			['up', 110, 110],
+		]);
+	});
+
+	it('sends the release when capture is lost without a pointerup', async () => {
+		const { surface, onInput } = await setup();
+		const lose = captureOn(surface);
+		mouse(surface, 'pointerdown', { x: 20, y: 20, button: 0, buttons: 1 });
+		mouse(surface, 'pointermove', { x: 40, y: 20, buttons: 1 });
+		lose();
+		mouse(surface, 'lostpointercapture');
+		mouse(surface, 'lostpointercapture'); // already released: nothing more
+		expect(mouseCalls(onInput).map((p) => [p.event, p.button, p.buttons, p.x])).toEqual([
+			['down', 'left', 1, 20],
+			['move', 'left', 1, 40],
+			['up', 'left', 0, 40],
+		]);
+	});
+
+	it('lands a pending hover move before the press', async () => {
+		const frames: FrameRequestCallback[] = [];
+		const { surface, onInput } = await setup();
+		vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+		mouse(surface, 'pointermove', { x: 80, y: 90 });
+		mouse(surface, 'pointerdown', { x: 80, y: 90, button: 0, buttons: 1 });
+		mouse(surface, 'pointerup', { x: 80, y: 90, button: 0 });
+		for (const cb of frames) cb(0); // the late animation frame sends nothing twice
+		expect(mouseCalls(onInput).map((p) => [p.event, p.x, p.y])).toEqual([
+			['move', 80, 90],
+			['down', 80, 90],
+			['up', 80, 90],
+		]);
+	});
+
+	it('counts double and triple clicks itself (Chrome reports detail 0)', async () => {
+		const { surface, onInput } = await setup();
+		const click = (x: number) => {
+			mouse(surface, 'pointerdown', { x, y: 60, button: 0, buttons: 1 });
+			mouse(surface, 'pointerup', { x, y: 60, button: 0 });
+		};
+		click(50); click(51); click(50); click(150);
+		expect(mouseCalls(onInput).map((p) => `${p.event}${p.clickCount}`)).toEqual([
+			'down1', 'up1', 'down2', 'up2', 'down3', 'up3', 'down1', 'up1',
+		]);
+	});
+
+	it('sends Cmd+click as Ctrl+click and ignores Back/Forward buttons', async () => {
+		const { surface, onInput } = await setup();
+		mouse(surface, 'pointerdown', { button: 0, buttons: 1, metaKey: true });
+		mouse(surface, 'pointerup', { button: 0, metaKey: true });
+		mouse(surface, 'pointerdown', { button: 3, buttons: 8 });
+		mouse(surface, 'pointerup', { button: 3 });
+		expect(mouseCalls(onInput).map((p) => [p.event, p.modifiers])).toEqual([
+			['down', 2],
+			['up', 2],
+		]);
+	});
+});
+
+describe('desktop keyboard input', () => {
+	const sent = (onInput: ReturnType<typeof vi.fn>) => onInput.mock.calls.map(([p]) => p);
+	it('sends Cmd shortcuts as Ctrl without typing their letter', async () => {
+		const { surface, onInput } = await setup();
+		surface.focus();
+		await fireEvent.keyDown(surface, { key: 's', code: 'KeyS', keyCode: 83, metaKey: true });
+		expect(sent(onInput)).toEqual([
+			{ type: 'input', kind: 'key', event: 'down', key: 's', code: 'KeyS', keyCode: 83, text: '', modifiers: 2 },
+		]);
+	});
+
+	it('types AltGr characters as text', async () => {
+		const { surface, onInput } = await setup();
+		surface.focus();
+		const e = new KeyboardEvent('keydown', { key: '@', code: 'KeyQ', keyCode: 81, ctrlKey: true, altKey: true, bubbles: true, cancelable: true });
+		Object.defineProperty(e, 'getModifierState', { value: (m: string) => m === 'AltGraph' });
+		surface.dispatchEvent(e);
+		expect(sent(onInput)).toEqual([
+			{ type: 'input', kind: 'key', event: 'down', key: '@', code: 'KeyQ', keyCode: 81, text: '@', modifiers: 0 },
+		]);
+	});
+
+	it('pastes this device\'s clipboard text instead of forwarding Ctrl+V', async () => {
+		const { surface, onInput } = await setup();
+		surface.focus();
+		// The shortcut is left alone so the browser raises its paste event.
+		expect(await fireEvent.keyDown(surface, { key: 'v', code: 'KeyV', keyCode: 86, ctrlKey: true })).toBe(true);
+		await fireEvent.keyUp(surface, { key: 'v', code: 'KeyV', keyCode: 86, ctrlKey: true });
+		const paste = (text: string) => {
+			const e = new Event('paste', { bubbles: true, cancelable: true });
+			Object.assign(e, { clipboardData: { getData: (t: string) => (t === 'text/plain' ? text : '') } });
+			surface.dispatchEvent(e);
+			return e;
+		};
+		expect(paste('hello world').defaultPrevented).toBe(true);
+		expect(sent(onInput)).toEqual([{ type: 'input', kind: 'text', text: 'hello world' }]);
+		onInput.mockClear();
+		paste(''); // an image or empty clipboard: the remote pastes its own
+		expect(sent(onInput).map((p) => [p.kind, p.event, p.key, p.modifiers])).toEqual([
+			['key', 'down', 'v', 2],
+			['key', 'up', 'v', 2],
+		]);
+	});
+
+	it('forwards navigation keys typed in a field overlay and hands Tab back to the live view', async () => {
+		const { surface, onInput } = await setup({ editors: [field], onEdit: vi.fn() });
+		const overlay = screen.getByRole('textbox', { name: 'Name' });
+		overlay.focus();
+		await fireEvent.keyDown(overlay, { key: 'ArrowDown', code: 'ArrowDown' });
+		await fireEvent.keyDown(overlay, { key: 'Tab', code: 'Tab', shiftKey: true });
+		expect(sent(onInput).filter((p) => p.kind === 'key').map((p) => [p.event, p.key, p.keyCode, p.modifiers])).toEqual([
+			['down', 'ArrowDown', 40, 0],
+			['up', 'ArrowDown', 40, 0],
+			['down', 'Tab', 9, 8],
+			['up', 'Tab', 9, 8],
+		]);
+		expect(document.activeElement).toBe(surface);
 	});
 });

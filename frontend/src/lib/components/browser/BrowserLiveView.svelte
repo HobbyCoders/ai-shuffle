@@ -17,8 +17,12 @@
 	 * image through resizes and letterbox changes.
 	 *
 	 * Input: captured on a focusable wrapper. Pointer moves are rAF-coalesced
-	 * (~60 Hz), wheel and key events preventDefault while focused so page hotkeys
-	 * and the app's own shortcuts don't fire underneath the live view.
+	 * (~60 Hz) and a pending move is flushed before a press or release so hover
+	 * state lands first. A mouse press captures the pointer, so a drag released
+	 * over a field overlay (or outside the panel) still sends its release. Wheel
+	 * and key events preventDefault while focused so page hotkeys and the app's
+	 * own shortcuts don't fire underneath the live view. Clipboard paste sends
+	 * this device's text to the page.
 	 *
 	 * Touch: a touch drag is translated into wheel (scroll) events — the page
 	 * content follows the finger — and a tap (< slop movement) into a full
@@ -31,11 +35,17 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import {
+		buttonName,
 		canvasToPage,
+		ClickCounter,
 		fitScale,
+		heldButton,
 		letterbox,
-		modifiersFromEvent,
+		MOD_CTRL,
+		remoteKey,
+		remoteModifiers,
 		type FrameMetadata,
+		type ModifierFlags,
 		type PageRect,
 	} from '$lib/browser-panel/coords';
 
@@ -338,6 +348,8 @@
 			touch = null;
 			pendingMove = null;
 			trailingHover = null;
+			pressed.clear();
+			clicks.reset();
 		}
 	});
 	$effect(() => {
@@ -345,10 +357,14 @@
 	});
 	onDestroy(dismissKeyboard);
 
-	function commitText(text: string) {
-		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
+	function sendText(text: string) {
 		for (const chunk of browserTextChunks(text))
 			onInput({ type: 'input', kind: 'text', text: chunk });
+	}
+
+	function commitText(text: string) {
+		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
+		sendText(text);
 	}
 
 	function bridgeCompositionEnd(e: CompositionEvent) {
@@ -375,8 +391,7 @@
 		if (keyboardEl) keyboardEl.value = '';
 	}
 
-	function bridgeKeyPair(key: string, code: string, keyCode: number) {
-		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
+	function keyPair(key: string, code: string, keyCode: number, modifiers = 0) {
 		for (const event of ['down', 'up']) {
 			onInput({
 				type: 'input',
@@ -386,9 +401,23 @@
 				code,
 				keyCode,
 				text: '',
-				modifiers: 0,
+				modifiers,
 			});
 		}
+	}
+
+	function bridgeKeyPair(key: string, code: string, keyCode: number) {
+		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
+		keyPair(key, code, keyCode);
+	}
+
+	/** Arrows/paging/Tab/Escape typed in a field overlay also reach the page. */
+	function overlayNavKey(key: string, code: string, keyCode: number, modifiers: number) {
+		if (!keyboardEnabled || inspecting) return;
+		keyPair(key, code, keyCode, modifiers);
+		// Tab moved the page's focus and Escape leaves the field: keep typing
+		// going to the page through the live view instead of a stale overlay.
+		if (key === 'Tab' || key === 'Escape') wrapperEl?.focus({ preventScroll: true });
 	}
 
 	function bridgeBeforeInput(e: InputEvent) {
@@ -452,10 +481,6 @@
 
 	// ── Input forwarding ───────────────────────────────────────────────────
 
-	function buttonName(btn: number): 'left' | 'middle' | 'right' {
-		return btn === 1 ? 'middle' : btn === 2 ? 'right' : 'left';
-	}
-
 	function pagePoint(e: { clientX: number; clientY: number }) {
 		if (!canvasEl || !currentMeta) return null;
 		return canvasToPage(
@@ -466,27 +491,110 @@
 		);
 	}
 
+	/** The fields of a pointer/wheel event that a remote mouse event needs. */
+	type MouseSample = ModifierFlags & {
+		clientX: number;
+		clientY: number;
+		button: number;
+		buttons: number;
+	};
+
+	/**
+	 * Moves and wheels report the held buttons (`none` while hovering); presses
+	 * and releases report the button that changed plus their click count.
+	 */
 	function sendMouse(
 		event: 'move' | 'down' | 'up' | 'wheel',
-		e: PointerEvent | WheelEvent,
+		e: MouseSample,
 		extra: Record<string, unknown> = {},
 	) {
 		if (!interactive || disposed) return;
 		const p = pagePoint(e);
 		if (!p) return;
+		const buttons = e.buttons ?? 0;
 		onInput({
 			type: 'input',
 			kind: 'mouse',
 			event,
 			x: p.x,
 			y: p.y,
-			button: buttonName((e as PointerEvent).button ?? 0),
-			clickCount: (e as PointerEvent).detail || 1,
+			button:
+				event === 'down' || event === 'up'
+					? buttonName(e.button)
+					: event === 'move'
+						? heldButton(buttons)
+						: 'none',
+			buttons,
+			clickCount: 0,
 			deltaX: 0,
 			deltaY: 0,
-			modifiers: modifiersFromEvent(e),
+			modifiers: remoteModifiers(e),
 			...extra,
 		});
+	}
+
+	// ── Mouse buttons: click counting + pointer capture ───────────────────
+	const clicks = new ClickCounter();
+	/** Buttons pressed on the page (DOM button → its click count) awaiting release. */
+	const pressed = new Map<number, number>();
+	let lastPointer: MouseSample | null = null;
+
+	function sample(e: PointerEvent): MouseSample {
+		return {
+			clientX: e.clientX,
+			clientY: e.clientY,
+			button: e.button,
+			buttons: e.buttons ?? 0,
+			altKey: e.altKey,
+			ctrlKey: e.ctrlKey,
+			metaKey: e.metaKey,
+			shiftKey: e.shiftKey,
+		};
+	}
+
+	/** DOM `button` → its bit in the DOM `buttons` mask. */
+	function buttonBit(button: number) {
+		return button === 1 ? 4 : button === 2 ? 2 : 1 << button;
+	}
+
+	function press(e: MouseSample) {
+		// Only left/middle/right exist on the remote; Back/Forward stay local.
+		if (e.button < 0 || e.button > 2) return;
+		flushMove(); // hover state lands before the press, not after it
+		const count = clicks.press(Date.now(), e.clientX, e.clientY, e.button);
+		pressed.set(e.button, count);
+		sendMouse('down', e, { clickCount: count });
+	}
+
+	function release(e: MouseSample) {
+		if (e.button < 0 || e.button > 2) return;
+		flushMove();
+		const count = pressed.get(e.button);
+		pressed.delete(e.button);
+		sendMouse('up', e, { clickCount: count ?? 1 });
+	}
+
+	/** Release every button still held on the page (capture lost, cancel). */
+	function releaseHeld() {
+		const at = lastPointer;
+		if (!at) {
+			pressed.clear();
+			return;
+		}
+		let buttons = at.buttons;
+		for (const button of [...pressed.keys()]) {
+			buttons &= ~buttonBit(button);
+			release({ ...at, button, buttons });
+		}
+	}
+
+	/** Pointer events for this view: on the canvas, or captured by a drag. */
+	function ours(e: PointerEvent) {
+		return (
+			e.target === wrapperEl ||
+			e.target === canvasEl ||
+			!!wrapperEl?.hasPointerCapture?.(e.pointerId)
+		);
 	}
 
 	// ── Inspect hit-testing (hover throttled to ~12 Hz, trailing kept) ────
@@ -567,7 +675,7 @@
 			touch.moved = true;
 		}
 		// Content follows the finger: dragging up scrolls down.
-		if (touch.moved) sendMouse('wheel', e, { deltaX: -dx, deltaY: -dy });
+		if (touch.moved) sendMouse('wheel', e, { buttons: 0, deltaX: -dx, deltaY: -dy });
 	}
 
 	function onTouchUp(e: PointerEvent) {
@@ -579,17 +687,19 @@
 			sendInspect(e, 'select');
 			return;
 		}
-		// Full click sequence at the tap point.
-		sendMouse('move', e);
-		sendMouse('down', e, { clickCount: 1 });
-		sendMouse('up', e, { clickCount: 1 });
+		// Full click sequence at the tap point; quick repeat taps double-click.
+		const clickCount = clicks.press(Date.now(), e.clientX, e.clientY, 0);
+		const at = { ...sample(e), button: 0, buttons: 0 };
+		sendMouse('move', at);
+		sendMouse('down', at, { buttons: 1, clickCount });
+		sendMouse('up', at, { buttons: 0, clickCount });
 		// Remote taps never summon/refocus the native keyboard.
 	}
 
 	// ── Pointer handlers ───────────────────────────────────────────────────
 
 	// Pointer moves coalesced to one send per animation frame (~60 Hz).
-	let pendingMove: PointerEvent | null = null;
+	let pendingMove: MouseSample | null = null;
 	let moveScheduled = false;
 
 	function flushMove() {
@@ -600,7 +710,7 @@
 	}
 
 	function onPointerMove(e: PointerEvent) {
-		if (e.target !== wrapperEl && e.target !== canvasEl) return;
+		if (!ours(e)) return;
 		if (!interactive || disposed) return;
 		if (e.pointerType === 'touch') {
 			onTouchMove(e);
@@ -610,7 +720,14 @@
 			sendInspect(e, 'hover');
 			return;
 		}
-		pendingMove = e;
+		lastPointer = sample(e);
+		// A second button pressed or released mid-drag arrives as a move.
+		if (e.button >= 0 && e.button <= 2) {
+			if (e.buttons & buttonBit(e.button)) press(lastPointer);
+			else if (pressed.has(e.button)) release(lastPointer);
+			return;
+		}
+		pendingMove = lastPointer;
 		if (moveScheduled) return;
 		moveScheduled = true;
 		if (typeof requestAnimationFrame !== 'undefined')
@@ -634,11 +751,19 @@
 			return;
 		}
 		if (inspecting) return; // select fires on pointerup
-		sendMouse('down', e);
+		// Keep the drag's release even if it ends over a field overlay or
+		// outside the panel: the page must never be left with a button held.
+		try {
+			wrapperEl?.setPointerCapture?.(e.pointerId);
+		} catch {
+			// Pointer already gone (synthetic or released) — nothing to capture.
+		}
+		lastPointer = sample(e);
+		press(lastPointer);
 	}
 
 	function onPointerUp(e: PointerEvent) {
-		if (e.target !== wrapperEl && e.target !== canvasEl) return;
+		if (!ours(e)) return;
 		if (!interactive || disposed) return;
 		if (e.pointerType === 'touch') {
 			onTouchUp(e);
@@ -648,11 +773,13 @@
 			sendInspect(e, 'select');
 			return;
 		}
-		sendMouse('up', e);
+		lastPointer = sample(e);
+		release(lastPointer);
 	}
 
 	function onPointerCancel(e: PointerEvent) {
 		if (touch && e.pointerId === touch.id) touch = null;
+		if (e.pointerType !== 'touch') releaseHeld();
 	}
 
 	function onPointerLeave() {
@@ -670,27 +797,33 @@
 		sendMouse('wheel', e, { deltaX: e.deltaX, deltaY: e.deltaY });
 	}
 
-	function isPrintable(key: string): boolean {
-		// A single-character key (letter, digit, symbol, space) is text input;
-		// named keys ("Enter", "ArrowLeft", …) are longer than one char.
-		return key.length === 1;
+	function sendKey(event: 'down' | 'up', e: KeyboardEvent) {
+		onInput({ type: 'input', kind: 'key', event, ...remoteKey(e, event) });
 	}
 
-	function sendKey(event: 'down' | 'up', e: KeyboardEvent) {
-		onInput({
-			type: 'input',
-			kind: 'key',
-			event,
-			key: e.key,
-			code: e.code,
-			keyCode: e.keyCode,
-			text: event === 'down' && isPrintable(e.key) ? e.key : '',
-			modifiers: modifiersFromEvent(e),
-		});
+	/** Ctrl/Cmd+V: let the native paste event bring this device's clipboard. */
+	function isPasteShortcut(e: KeyboardEvent) {
+		return (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v';
+	}
+
+	function onPaste(e: ClipboardEvent) {
+		if (e.target !== wrapperEl || !interactive || !focused || inspecting) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const text = e.clipboardData?.getData('text/plain') ?? '';
+		// Nothing textual (an image, an empty clipboard): let the remote browser
+		// paste from its own clipboard, as Ctrl+V did before.
+		if (text) sendText(text);
+		else keyPair('v', 'KeyV', 86, MOD_CTRL);
 	}
 
 	function onKeyDown(e: KeyboardEvent) {
 		if (e.target !== wrapperEl || !interactive || !focused) return;
+		if (!inspecting && isPasteShortcut(e)) {
+			// No preventDefault: that would cancel the paste event itself.
+			e.stopPropagation();
+			return;
+		}
 		// Keep the keystroke inside the live view — don't let it trigger app hotkeys.
 		e.preventDefault();
 		e.stopPropagation();
@@ -706,6 +839,10 @@
 
 	function onKeyUp(e: KeyboardEvent) {
 		if (e.target !== wrapperEl || !interactive || !focused) return;
+		if (!inspecting && isPasteShortcut(e)) {
+			e.stopPropagation();
+			return;
+		}
 		e.preventDefault();
 		e.stopPropagation();
 		if (inspecting) return;
@@ -733,10 +870,14 @@
 	onpointerup={onPointerUp}
 	onpointermove={onPointerMove}
 	onpointercancel={onPointerCancel}
+	onlostpointercapture={(e) => {
+		if (e.pointerType !== 'touch') releaseHeld();
+	}}
 	onpointerleave={onPointerLeave}
 	onwheel={onWheel}
 	onkeydown={onKeyDown}
 	onkeyup={onKeyUp}
+	onpaste={onPaste}
 	onfocus={() => (focused = true)}
 	onblur={() => (focused = false)}
 	oncontextmenu={(e) => e.preventDefault()}
@@ -749,7 +890,7 @@
 					<BrowserFileInput {field} scale={editorScale} left={editorLeft} top={editorTop} onPick={onPickFiles} onActive={(active) => keyboardOpen = active} />
 				{/if}
 			{:else}
-				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} onText={commitText} onKey={(k) => bridgeKeyPair(k, k, k === 'Delete' ? 46 : 8)} />
+				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} onText={commitText} onKey={(k) => bridgeKeyPair(k, k, k === 'Delete' ? 46 : 8)} onNavKey={overlayNavKey} />
 			{/if}
 		{/each}
 	{/if}
