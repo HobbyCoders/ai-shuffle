@@ -462,13 +462,14 @@ def test_a_retried_start_returns_the_same_answer(world):
 
 
 
-@pytest.mark.parametrize("wake_payload", [{}, {
+@pytest.mark.parametrize("wake_payload", [None, {}, {
     "task_report_device": "stranger-device",
     "task_report": {"owner_session_id": "stranger"},
     "task_start_fingerprint": "wrong",
     "loop_guard_origin": "user",
+    "birth_source": "user",
 }])
-def test_parked_first_turn_wake_keeps_task_identity(world, wake_payload):
+def test_parked_first_turn_wake_keeps_task_identity(world, monkeypatch, wake_payload):
     from app.core import loop_guard, remote_task_approvals, session_runtime
     from app.db import turns
 
@@ -479,9 +480,23 @@ def test_parked_first_turn_wake_keeps_task_identity(world, wake_payload):
     owed = remote_task.report_owed(sid)
     assert turns.start_turn(turn["id"], "run-one", TARGET_RUNNER)
     assert turns.park_turn(turn["id"], ["background-monitor"])
-    wake = turns.enqueue_turn(sid, "unpark", prompt="monitor completed",
-                              profile_id=turn["profile_id"], overrides=turn["overrides"],
-                              payload=wake_payload)
+    if wake_payload is None:
+        from app.core.task_registry import task_registry
+
+        monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+        task_registry.start_task(sid, "background-monitor", "shell", "monitor", tool_use_id="background-monitor")
+        task_registry.mark_background_launch(sid, "background-monitor")
+        asyncio.run(turn_scheduler.on_task_terminal(sid, {
+            "task_id": "background-monitor", "status": "completed", "summary": "monitor completed",
+        }))
+        queued = turns.get_queued_turns(sid)
+        assert len(queued) == 1 and queued[0]["source"] == "unpark"
+        wake = queued[0]
+        assert wake["payload"]["task_ids"] == ["background-monitor"]
+    else:
+        wake = turns.enqueue_turn(sid, "unpark", prompt="monitor completed",
+                                  profile_id=turn["profile_id"], overrides=turn["overrides"],
+                                  payload=wake_payload)
     resumed = turns.start_turn(wake["id"], "run-two", TARGET_RUNNER,
                                can_resume=session_runtime.SessionRuntime._can_resume_parked)
     assert resumed["id"] == turn["id"]

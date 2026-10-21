@@ -54,7 +54,7 @@ REPORT_STATUSES = ("completed", "failed", "stopped")
 MAX_NEEDS_OWNER = 10
 # Turn sources that begin work in a chat. Continuations (unpark, auto-continue,
 # failover) belong to the most recent of these.
-_ORIGIN_SOURCES = ("user", "queue", "agent_message")
+_ORIGIN_SOURCES = ("user", "queue", "api", "agent_message")
 
 
 def _text(data, key, limit):
@@ -1630,11 +1630,15 @@ def _origin_turn(session_id, settled):
     recent user/queue/peer turn before a continuation)."""
     from app.db import turns
     from app.db.base import get_db
-    if settled.get("source") in _ORIGIN_SOURCES:
+    if turns.logical_source(settled) in _ORIGIN_SOURCES:
         return settled
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source IN ('user','queue','agent_message') "
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND "
+                       "(source IN ('user','queue','api','agent_message') OR "
+                       "(source NOT IN ('user','queue','api') AND "
+                       "CAST(payload ->> 'continued_turn' AS TEXT) IN ('true','1') AND "
+                       "payload ->> 'birth_source' IN ('user','queue','api','agent_message'))) "
                        "AND state IN ('completed','aborted') AND position <= %s "
                        "ORDER BY position DESC LIMIT 1", (session_id, settled.get("position") or 0))
         return turns._row(cursor.fetchone())
@@ -1700,13 +1704,13 @@ def build_started_report(session_id, settled, outcome):
     device = start_payload.get("orchestration_report_device")
     if not home and not device:
         return None
+    from app.db import sessions, turns
     origin = _origin_turn(session_id, settled)
     origin_payload = (origin or {}).get("payload") or {}
     # Work the owner typed into that chat is theirs, not a job to report.
-    if (not origin or origin.get("source") != "agent_message"
+    if (not origin or turns.logical_source(origin) != "agent_message"
             or origin_payload.get("orchestration_sender") != start_payload.get("orchestration_sender")):
         return None
-    from app.db import sessions
     status, report, needs = _turn_report(session_id, settled["id"], outcome, origin["id"])
     row = sessions.get_session(session_id) or {}
     frame = {"task_id": session_id, "status": status, "summary": defang_harness_markers(report),

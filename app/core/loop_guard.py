@@ -224,7 +224,7 @@ def turn_origin(turn: Optional[Dict[str, Any]]) -> Optional[str]:
     for _ in range(_MAX_ORIGIN_HOPS):
         if not turn:
             return None
-        source = turn.get("source")
+        source = turns_db.logical_source(turn)
         payload = turn.get("payload") or {}
         if (source == WORKER_SOURCE
                 or (source in RELAY_SOURCES and payload.get("continued_turn") and ORIGIN_KEY in payload)):

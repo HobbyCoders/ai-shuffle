@@ -176,27 +176,30 @@ def _session_row(session_id: str) -> Optional[SessionRow]:
 def _first_turn_source(session_id: str) -> Optional[str]:
     """The birth source of a session's first turn.
 
-    Remote Task starts keep their command identity even after a parked wake
-    replaces their source. Forks/user sessions do not have that command id.
+    Continued turns retain their logical source in birth_source. Remote Task
+    command identity also survives older source rewrites without that marker.
     """
     try:
+        from app.db import turns
         from app.db.base import get_db
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT source, command_id FROM turns WHERE session_id = %s "
-                "ORDER BY created_at ASC LIMIT 1",
+                "SELECT source, command_id, payload FROM turns WHERE session_id = %s "
+                "ORDER BY position ASC, created_at ASC, id ASC LIMIT 1",
                 (session_id,),
             )
-            row = cursor.fetchone()
-            # Remote Task starts keep their command id when the first parked
-            # turn resumes in place with the wake's source (including old rows).
+            row = turns._row(cursor.fetchone())
+            source = turns.logical_source(row)
+            # Remote Task starts keep their command id even on older rows
+            # without birth_source. Human input is a new job, not a worker wake.
             from app.core.remote_task import COMMAND_PREFIX
-            if row and row.get("command_id") == COMMAND_PREFIX + session_id:
+            if (row and source not in turns.HUMAN_INPUT_SOURCES
+                    and row.get("command_id") == COMMAND_PREFIX + session_id):
                 from app.core.provider_agent import WORKER_TURN_SOURCE
                 return WORKER_TURN_SOURCE
-            return row["source"] if row else None
+            return source
     except Exception:  # noqa: BLE001
         return None
 
