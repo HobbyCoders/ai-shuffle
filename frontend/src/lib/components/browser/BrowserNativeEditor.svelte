@@ -121,13 +121,15 @@
 	.keys { outline: 1px dashed var(--primary, #6750a4); outline-offset: 1px; }
 	.keys:not(:focus) { outline: none; }
 	/* Mouse/trackpad focus: same box as the page field, see-through, ring only.
-	   The page draws the text and its own caret; the halo marks where keys go. */
+	   The page draws the text and its own caret; the ring marks where keys go.
+	   The page under it can be any colour (and a theme's ring can be white), so
+	   the ring is two bands: app background, then the theme's focus colour. */
 	.focused {
-		z-index: 2; outline: 2px solid var(--primary, #6750a4); outline-offset: 1px;
-		box-shadow: 0 0 0 5px color-mix(in oklch, var(--primary, #6750a4) 22%, transparent);
+		z-index: 2; outline: none;
+		box-shadow: 0 0 0 2px var(--background, #fff), 0 0 0 4px var(--ring, #6750a4), 0 0 10px 4px color-mix(in oklch, var(--ring, #6750a4) 30%, transparent);
 	}
-	.focused::selection { background: color-mix(in oklch, var(--primary, #6750a4) 22%, transparent); }
+	.focused::selection { background: color-mix(in oklch, var(--ring, #6750a4) 25%, transparent); }
 	/* Touch focus: an enlarged, opaque native editor that is readable over a thumbnail page. */
-	.enlarged { background: var(--background, white); color: var(--foreground, #111); caret-color: auto; border-color: var(--primary, #6750a4); box-shadow: none; outline-offset: 0; }
+	.enlarged { background: var(--background, white); color: var(--foreground, #111); caret-color: auto; border-color: var(--primary, #6750a4); outline: 2px solid var(--primary, #6750a4); box-shadow: none; }
 	.enlarged::selection { background: color-mix(in oklch, var(--primary, #6750a4) 35%, transparent); }
 </style>
