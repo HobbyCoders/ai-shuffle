@@ -43,6 +43,43 @@ render with a hint to confirm them with Remember. Recall exposes a conflict's
 ID and revision for an explicit correction, rather than presenting a guessed
 winner as fact. Saved text is data, not an instruction layer.
 
+## Grounded prose workflow proposals
+
+Python helper synthesis remains separate from prose `SKILL.md` workflows.
+Synthesizer can queue at most two workflow proposals per pass; it never installs
+one. The conservative first slice requires two distinct project-scoped journal
+sessions with successful execution, a completion reply and an explicit user
+receipt `workflow accepted: <name>`. Tool output cannot provide that receipt.
+`workflow corrected: <name>` or `workflow rejected: <name>` blocks the workflow.
+These receipts support evidence; they are **not** installation approval. Natural
+language corrections must also be considered during owner review.
+
+Proposals retain owner/project identity, exact content digests and bounded
+source episodes/hashes. Content and evidence pass secret/injection screening;
+capability metadata and executable substitutions are rejected. Installed skill
+names and near-identical descriptions are checked at proposal time when the
+host supplies the working directory, and always checked again at promotion.
+The per-owner queue/audit holds at most 32 records and 256 KiB including rejected
+and promoted records. Capacity exhaustion refuses new proposals, not old audit.
+There is no automatic skill target count, deletion or overwrite.
+
+Standalone Fluid's local owner can inspect with `fluid workflows list` and
+`fluid workflows show <digest>`, then `fluid workflows approve <digest> --cwd
+<project>` (or `reject`). Supply `--skills-dir` when using a custom store. Approval
+requires an interactive terminal and typing the full digest after reviewing the
+complete source work, scope, exceptions and successful outcomes. Source evidence
+is revalidated; stale/reaped/corrected evidence fails closed. Approval creates a
+new `.fluid/skills/<name>/SKILL.md` exclusively in the same project, with no tool
+grants or permission bypass. A fresh native/delegated session uses ordinary
+skill discovery and the Skill loader, not a new injection surface.
+
+API-owner and application-ID project promotion is deliberately refused by this
+local CLI: an authenticated application approval UI and project-location binding
+remain product work. No API-owner proposal may install into shared global
+roots. Global promotion and replacing an owner-authored skill are not supported.
+Pending proposals are inert until this explicit local-owner approval; production
+skills must not be installed merely to test the learner.
+
 ## Automatic lifecycle
 
 Hard limits and expiry are enforced by code at ingestion and maintenance, not by

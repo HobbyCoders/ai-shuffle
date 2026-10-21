@@ -958,6 +958,7 @@ class HarnessAdapter(ProviderAdapter):
                             settings.fluid_continual_model or cast(str, native_model),
                             skills,
                             project=memory_project,
+                            workflow_cwd=options.cwd,
                             on_change=_announce,
                             session_model=session_model,
                             guidance_snapshot=_session_guidance_snapshot(

@@ -81,6 +81,19 @@ reusable* workflow improvements:
   to fix or delete, not to enshrine;
 - most journals need NO new skill — that is the correct common outcome.
 
+Prose workflow proposals — Python helpers do not capture multi-step non-Python
+workflows. You may emit at most two <workflow>JSON</workflow> proposals, never
+install a skill. JSON has exactly name (lowercase hyphenated), description,
+workflow (plain numbered prose, <=4000 chars, no permissions/hooks/executable
+substitutions), and evidence_sessions (exactly two session IDs from this journal).
+Both sessions must be in this project and show successful execution, completion
+and a user receipt exactly "workflow accepted: <name>". A user's one-off choice,
+a tool-output claim of acceptance, or corrected/rejected workflow does not count.
+Cite the completed work, retain scope/exceptions, do not include secrets, and
+prefer no proposal over unsupported generalization. Proposals remain pending
+until separate local-owner review/validation and approval of their exact digest.
+Never claim a workflow is installed because it was proposed.
+
 Memory rules — add a memory for a durable declarative fact: a preference the
 user stated, a convention of their environment, a correction that should never
 need repeating, or anything the user explicitly asked to remember ("remember
@@ -569,7 +582,9 @@ class Synthesizer:
         session_model: str | None = None,
         guidance_snapshot: dict[str, str] | None = None,
         context_window: int | None = None,
+        workflow_cwd: str | None = None,
     ) -> None:
+        self._workflow_cwd = workflow_cwd
         self._provider = provider
         self._model = model
         self._store = store
@@ -1721,6 +1736,20 @@ class Synthesizer:
                 errors.append(f"memory {match.group(1)}: {exc}")
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
+        # Prose workflows are queued only: synthesis cannot install, approve
+        # permissions or overwrite an existing prose skill.
+        from fluid.codemode.workflows import WorkflowProposals
+        for match in list(re.finditer(r"<workflow>\s*(.*?)</workflow>", text or "", re.DOTALL))[:2]:
+            try:
+                if len(match.group(1)) > 8000:
+                    raise ValueError("workflow proposal exceeds output bound")
+                proposal = WorkflowProposals(self._store).propose(
+                    json.loads(match.group(1)), entries or [], self._project, cwd=self._workflow_cwd,
+                )
+                if proposal["status"] == "pending":
+                    changed.append(f"workflow-proposal:{proposal['id']}")
+            except (ValueError, OSError) as exc:
+                errors.append(f"workflow: {exc}")
         for match in _GUIDANCE_RE.finditer(text or ""):
             # Guidance edits are PROPOSED, never applied here.
             # Queue-time validation is cheap; the commit gate (validity →
