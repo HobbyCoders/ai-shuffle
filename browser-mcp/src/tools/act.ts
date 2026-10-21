@@ -259,11 +259,11 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
   }
 
   const mark = session.eventMark();
-  // Install the mutation watcher before acting so synchronous DOM changes made
-  // during the action are captured, not just async settling.
+  const dispatchStart = performance.now();
+  // Include baseline sampling/setup in dispatch timing, then capture synchronous
+  // action mutations as well as async settling.
   await session.beginWatch();
 
-  const dispatchStart = performance.now();
   const evidence: Record<string, unknown> = {};
   let sent = false;
   try {
@@ -355,6 +355,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     observation_failed: settle.observationFailed ?? false,
     pending_requests: settle.pendingRequests ?? 0,
     pending_timers: settle.pendingTimers ?? 0,
+    text_churn_ignored: settle.textChurnIgnored ?? false,
     timings,
   };
   if (settle.urlChanged) {

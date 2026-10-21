@@ -330,12 +330,40 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       const target = await ref("Tick action");
       const start = Date.now();
       const result = body(await runAct(session, { kind: "click", ref: target }));
-      expect(result).toMatchObject({ ok: true, url_changed: false, settle_capped: false, snapshot_stale: false, dom_mutated: "minor" });
+      expect(result).toMatchObject({ ok: true, url_changed: false, settle_capped: false, snapshot_stale: false, dom_mutated: "minor", text_churn_ignored: true });
       expect(Date.now() - start).toBeLessThan(800);
       expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
       expect(result.timings.settle_ms).toBeLessThan(500);
       expect(await (await session.resolveRef(target)).count()).toBe(1);
       await page.goto("about:blank"); // stop the ticker before the next test
+    });
+    const actionTextCases = [
+      { name: "rAF result count", html: `<button onclick="go()">Start</button><p id="count">0 results</p><ul id="out"></ul><script>function go(){const start=performance.now();(function tick(){const n=Math.min(20,Math.floor((performance.now()-start)/45));count.textContent=n+' results';if(n<20)requestAnimationFrame(tick);else{out.innerHTML=Array.from({length:20},(_,i)=>'<li><a href=#'+i+'>Result '+i+'</a></li>').join('');window.done=true}})()}</script>`, expected: "Result 19" },
+      { name: "Saving typewriter", html: `<button onclick="go()">Start</button><p id="progress"></p><div id="out"></div><script>function go(){let n=0;const timer=setInterval(()=>{progress.textContent='Saving'+'.'.repeat(n++%4);if(n>=15){clearInterval(timer);progress.textContent='Saved';out.innerHTML='<button>View result</button>'.repeat(15);window.done=true}},60)}</script>`, expected: "View result" },
+      { name: "chat token stream into an action-created paragraph", html: `<button onclick="go()">Start</button><div id="out"></div><script>function go(){out.innerHTML='<div>Question</div><div><p id="answer"></p></div>';let n=0;const timer=setInterval(()=>{answer.textContent+='token '+n+++' ';if(n>=18){clearInterval(timer);out.insertAdjacentHTML('beforeend','<button>Regenerate</button><button>Copy</button>');window.done=true}},60)}</script>`, expected: "Regenerate" },
+    ];
+    for (const background of [false, true]) {
+      it.each(actionTextCases)(`observes action-started $name through completion (background ticker: ${background})`, async ({ html, expected }) => {
+        const page = await load(html + (background ? '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>' : ''));
+        const started = Date.now();
+        const result = await runAct(session, { kind: "click", ref: await ref("Start") });
+        expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true, text_churn_ignored: false });
+        expect(await page.evaluate(() => (window as unknown as { done: boolean }).done)).toBe(true);
+        expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+        expect(result.content[1]).toMatchObject({ text: expect.stringContaining(expected) });
+        await page.goto("about:blank");
+      });
+    }
+    it("reuses pre-action ticker history after settle without retaining active timer hooks", async () => {
+      const page = await load('<button>Tick again</button><span id="clock"></span><script>window.originalSetTimeout=window.setTimeout;setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      const target = await ref("Tick again");
+      for (let i = 0; i < 3; i++) {
+        const started = Date.now();
+        expect(body(await runAct(session, { kind: "click", ref: target }))).toMatchObject({ text_churn_ignored: true, settle_capped: false, snapshot_stale: false });
+        expect(Date.now() - started).toBeLessThan(i === 0 ? 800 : 500);
+        expect(await page.evaluate(() => window.setTimeout === (window as unknown as { originalSetTimeout: typeof window.setTimeout }).originalSetTimeout)).toBe(true);
+      }
+      await page.goto("about:blank");
     });
     it("handles repeated 5ms script redirects without poisoning later navigations", async () => {
       for (let i = 0; i < 5; i++) {

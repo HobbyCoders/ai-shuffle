@@ -1205,11 +1205,11 @@ export class Session {
    * made during the action are captured. Best-effort — a failure here just means
    * we fall back to a post-hoc URL comparison in {@link settle}.
    */
-  async beginWatch(): Promise<void> {
+  async beginWatch(passive = false): Promise<void> {
     const page = this.requirePage();
     try {
-      beginRequestWatch(page);
-      await raceWithTimeout(page.evaluate(installMutationWatcher, WATCH_KEY), 5000, "mutation watcher timed out");
+      if (passive) endRequestWatch(page); else beginRequestWatch(page);
+      await raceWithTimeout(page.evaluate(installMutationWatcher, { key: WATCH_KEY, passive }), 5000, "mutation watcher timed out");
     } catch {
       endRequestWatch(page);
       await this.disposeWatch();
@@ -1249,7 +1249,7 @@ export class Session {
    * mutation stats, and classify what changed. Returns none/minor/major plus
    * whether the URL changed. Call {@link beginWatch} before the action.
    */
-  async settle(urlBefore?: string, quietMs = QUIET_MS): Promise<SettleResult & { settleCapped: boolean; observationFailed: boolean; pendingRequests: number; pendingTimers: number }> {
+  async settle(urlBefore?: string, quietMs = QUIET_MS): Promise<SettleResult & { settleCapped: boolean; observationFailed: boolean; pendingRequests: number; pendingTimers: number; textChurnIgnored: boolean }> {
     const page = this.requirePage();
     const before = urlBefore ?? page.url();
     let stats: MutationStats;
@@ -1278,6 +1278,6 @@ export class Session {
     const urlChanged = stats.urlChanged || page.url() !== before;
     if (urlChanged) this.notifyNavigation();
     const domMutated = classifyMutations(stats);
-    return { urlChanged, domMutated, settleCapped: stats.settleCapped ?? false, observationFailed: stats.observationFailed ?? false, pendingRequests: stats.pendingRequests ?? 0, pendingTimers: stats.pendingTimers ?? 0 };
+    return { urlChanged, domMutated, settleCapped: stats.settleCapped ?? false, observationFailed: stats.observationFailed ?? false, pendingRequests: stats.pendingRequests ?? 0, pendingTimers: stats.pendingTimers ?? 0, textChurnIgnored: stats.textChurnIgnored ?? false };
   }
 }

@@ -213,6 +213,8 @@ export async function runNavigate(
       await session.settle(page.url());
     }
   }
+  // Preserve passive pre-action text history even on pages with controls.
+  await session.beginWatch(true);
   const settleMs = performance.now() - settleStart;
   session.agentAdmission?.();
   const snapshotStart = performance.now();
