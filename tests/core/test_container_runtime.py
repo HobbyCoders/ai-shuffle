@@ -1256,6 +1256,57 @@ def test_isolated_drop_keeps_full_agent_path_but_trusts_supervisor(settings_fact
     assert "SHUFFLE_CONTAINER_PATH" not in os.environ
 
 
+@pytest.mark.parametrize("action", ["dump", "restore"])
+@pytest.mark.parametrize("puid", [99, 3456])
+@pytest.mark.parametrize("state", ["empty", "populated", "symlink"])
+def test_maintenance_prepares_only_empty_mapped_data_root(settings_factory, tmp_path, monkeypatch, home_ownership, action, puid, state):
+    from types import SimpleNamespace
+    data, workspace = tmp_path / "data", tmp_path / "unused-workspace"
+    actual = tmp_path / "outside" if state == "symlink" else data
+    actual.mkdir()
+    if state == "symlink":
+        data.symlink_to(actual, target_is_directory=True)
+    elif state == "populated":
+        (data / "sentinel").write_text("retained state")
+    changed = home_ownership({actual: (1000, 1000), actual / "sentinel": (1000, 1000)})
+    assert actual.stat().st_uid == 1000
+    cfg = settings_factory(data_dir=data, workspace_dir=workspace)
+    identity = [0, 0]
+    pgid = 100
+    monkeypatch.setenv("PUID", str(puid))
+    monkeypatch.setenv("PGID", str(pgid))
+    monkeypatch.setenv("AGENT_ISOLATION", "off")
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: identity[0])
+    monkeypatch.setattr(runtime.os, "getuid", lambda: identity[0])
+    monkeypatch.setattr(runtime.os, "getgid", lambda: identity[1])
+    monkeypatch.setattr(runtime.os, "initgroups", Mock())
+    monkeypatch.setattr(runtime.os, "setuid", lambda value: identity.__setitem__(0, value))
+    monkeypatch.setattr(runtime.os, "setgid", lambda value: identity.__setitem__(1, value))
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(
+        pw_uid=puid, pw_gid=pgid, pw_name="appuser", pw_dir="/home/appuser"))
+    monkeypatch.setattr(runtime.os, "access", lambda path, mode: Path(path).stat().st_uid == identity[0])
+    monkeypatch.setattr(runtime, "maintenance_isolation", lambda *args: None)
+    monkeypatch.setattr(runtime, "isolate", lambda *args: pytest.fail("maintenance must not migrate ownership"))
+    monkeypatch.setattr(runtime, "load_startup_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "load_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: None)
+    calls = []
+    monkeypatch.setattr(runtime, "run", lambda settings, action, file: calls.append((action, file, identity[:])) or 0)
+    result = runtime.main([action, "--file", "/restore/db.dump"])
+    if state == "empty":
+        assert result == 0
+        assert changed == [(data, puid, pgid)]
+        assert calls == [(action, "/restore/db.dump", [puid, pgid])]
+    else:
+        assert result == 1
+        assert changed == [] and calls == []
+        assert actual.stat().st_uid == 1000
+        if state == "populated":
+            assert (data / "sentinel").read_text() == "retained state"
+            assert (data / "sentinel").stat().st_uid == 1000
+    assert not workspace.exists()  # database-only maintenance does not prepare it
+
+
 def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monkeypatch):
     from types import SimpleNamespace
     data = tmp_path / "empty"

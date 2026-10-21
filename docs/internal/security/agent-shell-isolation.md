@@ -123,8 +123,12 @@ mode, failure retains protected ownership and refuses startup; restart with
 never repeat migration: they reuse only a completed, root-owned isolation
 record, so online maintenance cannot release the running worker's keys. A
 fresh maintenance container prepares the passwd entry for custom service IDs
-without changing retained-file ownership. Optional `on` maintenance without a
-record uses the single-account fallback; `required` refuses without a record.
+without changing retained-file ownership. A new empty `DATA_DIR` root is mapped
+to PUID:PGID for offline dump/restore too, using the same pinned, no-symlink
+preparation as normal startup; populated roots and their contents are never
+re-owned, and maintenance does not prepare `WORKSPACE_DIR`. Optional `on`
+maintenance without a record uses the single-account fallback; `required`
+refuses without a record.
 Unknown values (for example `requried`) warn and run unisolated, preserving
 compatibility; refusing unknown non-empty values remains an owner decision.
 

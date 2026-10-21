@@ -1099,7 +1099,7 @@ def validate_mount_root(name, path):
 
 
 def maintenance_isolation(settings, account):
-    """Dump/restore never migrate or release ownership, even against a live app.
+    """Dump/restore never migrate or release retained ownership, even against a live app.
 
     Reuse only a completed root-owned record. Database.open independently owns
     the cluster lock (online dumps may share; restores still require offline).
@@ -1145,20 +1145,21 @@ def drop_privileges(settings, *, maintenance=False):
             raise RuntimeFailure("PUID/PGID must identify a non-root account")
         if account.pw_dir != "/home/appuser":
             raise RuntimeFailure("appuser home must be /home/appuser; recreate the container to repair its account")
+        paths = [("DATA_DIR", settings.effective_data_dir)]
         if not maintenance:
-            roots = [validate_mount_root(name, Path(path)) for name, path in (
-                ("DATA_DIR", settings.effective_data_dir),
-                ("WORKSPACE_DIR", settings.effective_workspace_dir))]
-            for path in roots:
-                fd = open_directory(path, create=True)
-                try:
-                    # Empty mounts may retain the image UID after PUID changes.
-                    # Pin both lookup and chown: no parent symlink swap may turn
-                    # an outside storage path into a writable image directory.
-                    if not os.listdir(fd):
-                        os.fchown(fd, account.pw_uid, account.pw_gid)
-                finally:
-                    os.close(fd)
+            paths.append(("WORKSPACE_DIR", settings.effective_workspace_dir))
+        roots = [validate_mount_root(name, Path(path)) for name, path in paths]
+        for path in roots:
+            fd = open_directory(path, create=True)
+            try:
+                # New named volumes retain the image UID, including offline
+                # restore targets. Only the empty root inode may be re-owned;
+                # maintenance never traverses or repairs retained contents.
+                # Pin both lookup and chown against parent symlink swaps.
+                if not os.listdir(fd):
+                    os.fchown(fd, account.pw_uid, account.pw_gid)
+            finally:
+                os.close(fd)
         split = maintenance_isolation(settings, account) if maintenance else isolate(settings, account)
         if split is not None:
             try:
