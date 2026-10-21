@@ -98,3 +98,48 @@ async def test_replica_id_addressed_correction_preserves_scope_on_round_trip(tmp
     entry, = source.memories()
     assert entry.id == first.id and entry.scope == "project:one"
     assert "corrected on replica" not in source.render_memory_section("project:two")
+
+
+@pytest.mark.parametrize("scopes", [
+    ["project:one"], ["project:one", "project:two"], ["global"],
+    ["global", "project:one", "project:two"], ["project:two"],
+])
+@pytest.mark.parametrize("scope", [None, "global", "project"])
+async def test_key_correction_resolves_only_visible_unambiguous_slot(tmp_path, scopes, scope):
+    store = SkillStore(tmp_path / "source")
+    for slot in scopes:
+        store.save_memory("Fixture runner in " + slot, key="fixture.runner", scope=slot, protected=True)
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(store._facts.export())
+    ctx = ToolCtx(extra={"memory_store": replica, "memory_project": "project:one"})
+    data = {"text": "Fixture corrected runner.", "key": "fixture.runner",
+            "expected_revision": 1, "user_requested": True}
+    if scope is not None:
+        data["scope"] = scope
+    candidates = [s for s in scopes if s in ("global", "project:one")] if scope is None else [
+        s for s in scopes if s == ("project:one" if scope == "project" else scope)]
+    result = await handler(data, ctx)
+    assert result.is_error == (len(candidates) != 1)
+    assert len(replica.memories()) == len(scopes)
+    updated = [m for m in replica.memories() if m.text == data["text"]]
+    assert [m.scope for m in updated] == (candidates if len(candidates) == 1 else [])
+    store._facts.merge(replica._facts.export())
+    assert len(store.memories()) == len(scopes)
+
+
+async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path):
+    store = SkillStore(tmp_path)
+    first = store.save_memory("Fixture runner alpha.", key="fixture.runner", scope="project:one", protected=True)
+    ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
+    data = {"text": "Fixture runner beta.", "key": "fixture.runner", "expected_revision": 99,
+            "user_requested": True}
+    assert (await handler(data, ctx)).is_error
+    data.update(expected_revision=first.revision, user_requested=False)
+    assert (await handler(data, ctx)).is_error
+    assert store.delete_memory(first.id, explicit=True, expected_revision=first.revision)
+    data["user_requested"] = True
+    assert (await handler(data, ctx)).is_error
+    assert not store.memories()
+    assert not (await handler({"text": "Fixture new convention.", "key": "fixture.new"}, ctx)).is_error
+    assert store.memories()[0].scope == "global"
+

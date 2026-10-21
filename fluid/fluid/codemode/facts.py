@@ -509,7 +509,7 @@ class FactStore:
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
-             per_worker=False):
+             per_worker=False, correction_project=None):
         """Save one fact in a tier.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
@@ -532,6 +532,17 @@ class FactStore:
             old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
             if memory_id and (old is None or not visible_on(old, local)):
                 raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
+            if not memory_id and key and expected_revision is not None:
+                # Never turn an unresolved correction into an insertion. Restrict
+                # lookup to the authenticated session's project and global slot;
+                # revisions are guards, not a way to guess among matching slots.
+                scopes = {scope} if scope is not None else {"global", correction_project}
+                candidates = [e for e in all_entries if e.get("key") == key
+                              and e.get("scope", "global") in scopes and visible_on(e, local)]
+                if len(candidates) != 1:
+                    raise ValueError("Key correction is ambiguous or unknown in this scope; Recall and supply memory_id or explicit scope")
+                old = candidates[0]
+                memory_id = old["id"]
             if old is not None and scope is None:
                 scope = old.get("scope", "global")
             # Scope-sensitive canonical keys and deletion barriers must use the
@@ -563,9 +574,8 @@ class FactStore:
                     raise ValueError("This fact was saved at the user's request; an agent cannot "
                                      "rewrite it unless the user asked for the change")
                 raise ValueError("Background learning cannot rewrite an explicitly saved fact")
-            # A revision guards a rewrite. With nothing to rewrite (a new fact,
-            # no memory ID) it has nothing to compare against: models fill the
-            # optional field in anyway, and refusing made every such save fail.
+            # A revision guards a rewrite. A key-addressed correction must have
+            # resolved above; an unkeyed new save has no slot to compare.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
             # An owner correction of either endpoint resolves the displayed pair.
