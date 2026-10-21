@@ -145,11 +145,16 @@ class IsolationCheck(Check):
         # Inject a filesystem failure only in a disposable volume, after the
         # first protected key migrated. Required mode must never give it back.
         injection = """
-import os, sys
+import os, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, '/app/docker')
 import agent_isolation as iso
 os.environ['AGENT_ISOLATION'] = 'required'
+# inspect_volume bypasses entrypoint.sh: the image account is still UID 1000.
+# Prepare the same PUID/PGID as launch(), without usermod walking the home.
+subprocess.run(['groupmod', '-o', '-g', '100', 'appuser'], check=True)
+subprocess.run(['usermod', '-o', '-u', '99', '-d', '/', 'appuser'], check=True)
+subprocess.run(['usermod', '-d', '/home/appuser', 'appuser'], check=True)
 root = Path('/data')
 keys = root / '.credential-keys'
 keys.mkdir()
@@ -167,13 +172,17 @@ class FailOnce(iso.Ops):
             if self.moved == 3:
                 raise OSError('injected disposable migration failure')
         super().lchown(path, uid, gid)
+ops = FailOnce()
 try:
-    iso.bootstrap(root, iso.identity(99, 100), ops=FailOnce())
+    iso.bootstrap(root, iso.identity(99, 100), ops=ops)
 except iso.IsolationError as error:
     assert 'required agent isolation: startup refused' in str(error)
 else:
     raise AssertionError('required migration did not refuse')
-assert iso.read_record(root)['state'] == 'enabling'
+assert ops.moved == 3, 'startup refused before the injected migration failure'
+record = iso.read_record(root)
+assert record is not None, 'partial migration did not retain its root-owned record'
+assert record['state'] == 'enabling'
 assert keys.stat().st_uid == 64000
 assert any(p.stat().st_uid == 64000 for p in keys.iterdir())
 print('REQUIRED_PARTIAL_MIGRATION_RETAINED')
