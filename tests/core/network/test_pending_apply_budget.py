@@ -12,10 +12,13 @@ from app.network import catalog, engine
 from tests.core.network.harness import converge, join
 
 
-@pytest.fixture(autouse=True)
+pytestmark = pytest.mark.usefixtures("pending_semantics_clock")
+
+
+@pytest.fixture
 def pending_semantics_clock(monkeypatch):
-    # These tests assert committed prefixes, chunk sizes, and SQL shape, not
-    # host speed. Freeze only this module's clock (not the shared time module)
+    # Opt in for committed-prefix, chunk-size, and SQL-shape semantics, not
+    # host speed. Freeze only engine's clock (not the shared time module)
     # so a slow database cannot exhaust the real 250 ms request deadline.
     # test_pending_drain_deadline.py separately advances a fake clock to check
     # that deadline and background handoff with the unchanged product budget.
