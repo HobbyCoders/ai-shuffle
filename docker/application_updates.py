@@ -846,6 +846,7 @@ class ContainerUpdates:
         offered = self.offer if phase in ("available", "ready", "downloading") else {}
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
+                    "staged_version": pending if pending != self.running else None,
                     "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel,
                     "checked_at": self.checked_at, "notice": self.notice})
 
@@ -1174,8 +1175,30 @@ class ContainerUpdates:
         # Said ahead of the release that needs it, while this one still installs.
         lacking = set(manifest["container"].get("recommends") or []) - set(self.image.get("provides") or [])
         self.notice = IMAGE_NOTICE if lacking else None
+        try:
+            active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
+        except (OSError, UpdateError):
+            if not staged:
+                raise
+            # Unknown running metadata cannot justify withdrawing a download.
+            # Still allow the verified staged offer to survive a plain check.
+            active = None
+        staged_manifest = self.manifest(staged) if staged else None
+        if (staged and active is not None and revision != staged
+                and (revision in (self.state.get("active"), self.image["revision"])
+                     or manifest["container"]["sequence"] <= active["sequence"])
+                and not self.install_requested.is_set() and not self.state.get("booting")
+                and not self.state.get("blocked") and not self.state.get("snapshot")
+                and staged not in (self.state.get("active"), self.state.get("previous"))
+                and staged not in self.state.get("failed", [])):
+            # A verified feed no longer offers an update. Unselect only a build
+            # that never started; retain its files and every recovery reference.
+            self.state.pop("pending")
+            self.save()
+            self.remember(manifest)
+            self.publish("idle", "You are up to date.")
+            return
         if staged:
-            staged_manifest = self.manifest(staged)
             if (revision == staged or manifest["container"]["sequence"] <= staged_manifest["container"]["sequence"]
                     or unsatisfied_capabilities(manifest["container"], self.image)
                     or (revision in self.state.get("failed", []) and not download)):
@@ -1183,7 +1206,9 @@ class ContainerUpdates:
                 self.remember(staged_manifest)
                 self.publish("ready", "Update ready. Choose Update and restart.")
                 return
-        active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
+        if active is None:
+            # Outside the retained-offer path, preserve fail-closed validation.
+            active = self.manifest(self.state["active"])["container"]
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
             self.publish("idle", "You are up to date.")
             return

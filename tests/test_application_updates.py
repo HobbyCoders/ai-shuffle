@@ -910,6 +910,64 @@ def test_withdrawn_release_fallback_is_never_applied_backwards(feed):
     assert status["phase"] == "idle" and status["message"] == "You are up to date."
 
 
+def test_first_boot_does_not_publish_running_revision_as_staged(feed):
+    updater, publish, _, _, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    assert status_of(updater)["staged_version"] == B
+    updater.activating()
+    updater.publish("idle")
+    assert status_of(updater)["staged_version"] is None
+
+
+@pytest.mark.parametrize("offered", [A, C])
+def test_unreadable_active_metadata_keeps_verified_download_ready(feed, offered):
+    updater, publish, _, _, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    publish(revision=C, sequence=3)
+    updater.check(download=True)
+    # The active metadata can become unreadable independently of the valid download.
+    (updater.directory(B) / "release.json").write_text("unreadable")
+    publish(revision=offered, sequence=1 if offered == A else 3)
+    updater.check()
+    assert updater.state["pending"] == C
+    assert status_of(updater)["phase"] == "ready"
+
+
+@pytest.mark.parametrize("offered", [A, "0" * 40])
+def test_check_for_current_or_older_offer_unselects_withdrawn_download(feed, offered):
+    updater, publish, _, requests, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    publish(revision=offered, sequence=1)
+    requests.clear()
+    updater.check()
+    assert updater.state.get("pending") is None
+    assert updater.directory(B).exists(), "unselect only; never delete diagnostic source on check"
+    assert status_of(updater)["phase"] == "idle"
+    assert status_of(updater)["staged_version"] is None
+    assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
+
+
+@pytest.mark.parametrize("protection", ["selected", "booting", "blocked", "snapshot", "failed"])
+def test_current_feed_does_not_unselect_recovery_or_selected_build(feed, protection):
+    updater, publish, _, _, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    if protection == "selected":
+        updater.install_requested.set()
+    else:
+        updater.state[protection] = [B] if protection == "failed" else B if protection == "booting" else True
+    publish(revision=A, sequence=1)
+    updater.check()
+    assert updater.state["pending"] == B
+    assert updater.directory(B).exists()
+
+
 def test_a_staged_build_does_not_hide_a_newer_release(feed):
     """#98: Update re-offered a staged build forever without reading the feed."""
     updater, publish, _, requests, _ = feed
@@ -922,6 +980,7 @@ def test_a_staged_build_does_not_hide_a_newer_release(feed):
     status = status_of(updater)
     assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
     assert status["phase"] == "available" and status["version"] == C[:12] and status["release"] == "1.0.1"
+    assert status["staged_version"] == B
     assert updater.state == {"pending": B}, "a check downloads nothing; B can still be installed"
     updater.check(download=True)
     assert updater.state == {"pending": C}

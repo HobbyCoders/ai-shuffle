@@ -3,7 +3,9 @@
 	 * An API key (OpenAI, Grok, OpenRouter) or a custom gateway's key.
 	 * Overview is the connection (name, endpoint, token, dialect, context
 	 * window, max output); fields save on blur or Enter, the token with Replace.
-	 * Every save passes the curated models back with their metadata.
+	 * Every save passes the curated models back with their metadata, including
+	 * per-model local tuning. A custom gateway speaking OpenAI chat also gets a
+	 * Tuning tab (LocalTuning) for a declared llama.cpp or vLLM server.
 	 */
 	import { onMount } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
@@ -29,8 +31,10 @@
 	import Switch from '../rows/Switch.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ModelCuration from './ModelCuration.svelte';
+	import LocalTuning from './LocalTuning.svelte';
 	import KeyUsage from './tabs/KeyUsage.svelte';
 	import { passthroughModels } from './curation';
+	import { supportsLocalTuning, tunedModels } from './local-tuning';
 	import { hostOf, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import { setCredentialEnabled } from './provider-actions';
 
@@ -50,6 +54,7 @@
 	const row = $derived(credential.row!);
 	const gateway = $derived(credential.flavor === 'gateway');
 	const dialect = $derived<Dialect>(row.api_dialect === 'openai' ? 'openai' : 'anthropic');
+	const tuning = $derived(gateway && supportsLocalTuning(row));
 
 	let token = $state('');
 	let saving = $state(false);
@@ -138,6 +143,17 @@
 		void save({ [field]: value });
 	}
 
+	/** The API refuses local tuning on an Anthropic endpoint: say so before sending. */
+	function changeDialect(next: Dialect) {
+		const tuned = tunedModels(row.models);
+		if (next !== 'openai' && tuned.length) {
+			const names = tuned.length === 1 ? tuned[0].id : `${tuned.length} models`;
+			error = `Clear the local tuning on ${names} in the Tuning tab first. Anthropic Messages endpoints do not take it.`;
+			return Promise.resolve(false);
+		}
+		return save({ api_dialect: next });
+	}
+
 	async function replaceToken() {
 		const value = token.trim();
 		if (!value) return;
@@ -183,7 +199,7 @@
 	statusText={credential.statusText}
 	subtitle={row.enabled ? `${row.models.length} models in picker` : 'Not in the model picker'}
 	{facts}
-	tabs={gateway ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
+	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : ['Overview', 'Models', 'Usage']}
 	{danger}
 	item={credential.item}
 >
@@ -201,6 +217,11 @@
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
 			{#key row.id}<ModelCuration {row} />{/key}
+		{:else if tab === 'Tuning' && tuning}
+			{#key row.id}<LocalTuning
+					{row}
+					onOpenModels={() => settingsNav.setTab('providers', credential.item, 'Models')}
+				/>{/key}
 		{:else if tab === 'Usage'}
 			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} xai={supportsXAIBalance(row)} />{/key}
 		{:else}
@@ -237,7 +258,7 @@
 							options={DIALECTS}
 							value={dialect}
 							disabled={saving}
-							onchange={(v: Dialect) => save({ api_dialect: v })}
+							onchange={(v: Dialect) => changeDialect(v)}
 						/>
 					</SettingRow>
 				{/if}

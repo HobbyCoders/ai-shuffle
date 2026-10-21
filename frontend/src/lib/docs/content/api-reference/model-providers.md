@@ -71,8 +71,12 @@ connected session after editing its provider configuration.
 Use these entries in `models` on POST or PATCH. PATCH replaces the whole model
 list: preserve other entries and their metadata. GET returns the stored settings.
 Omit `local_settings`, set it to `null`, or replace the entry without it to clear
-all overrides. Unknown keys and invalid values return `400`, as do local settings
-on another provider type/dialect. Changing the dialect requires clearing them.
+all overrides. New or changed local settings with unknown keys or invalid values
+return `400`, as do local settings on another provider type/dialect. PATCH preserves
+unchanged settings for the same model ID, even if a newer worker synced values this
+worker does not recognize; renaming, toggling, and editing other models remain
+possible. New IDs and changed settings are always validated. Changing the provider
+type or dialect revalidates all remaining settings; clear incompatible settings first.
 
 - `server` (required): `llama_cpp` or `vllm` (explicit protocol declaration, not detection).
 - `sampling` (optional object): `temperature` in [0, 2], `top_p` and `min_p` in
@@ -423,7 +427,12 @@ budget reachable, readings refresh about every five minutes, not once per worker
 per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
 remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
 `fresh_until` is supplied by the server. Status includes the source and last
-successful fetched time. Failed/expired readings never expose old credit as
+successful fetched time. A newly synchronized billing key schedules a refresh
+only after commit. Workers share successful normalized readings without adding
+upstream calls; `observed_at` and `source_worker` retain the original time and
+source. Configured access with no reading or error is `pending`; a shared-budget
+wait is `deferred`, with a fixed `last_deferred_reason` (no retry deadline is
+advertised). A failed first reading remains `unavailable`. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference or billing key invalidate old

@@ -237,3 +237,18 @@ describe('a desktop only the latest installer can update', () => {
 		expect(INSTALLER_URL).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
 	});
 });
+
+describe('restart waiting state in check results (#344)', () => {
+	it('says what a downloaded update waits for, and keeps plain ready and unknown state as before', () => {
+		const blocker = { session_id: 's', title: 'Fix login', kind: 'shell', task_id: 't', label: 'pytest -q', running_turn: true };
+		expect(describeWorker(self('ready', { install_state: 'blocked', wait_reason: 'running_work', blocked_by: [blocker] }))).toEqual({
+			tone: 'warn',
+			text: 'Downloaded and ready. Waiting for Fix login: pytest -q.'
+		});
+		expect(describeWorker(self('ready', { install_state: 'ready', blocked_by: [] }))).toEqual({ tone: 'warn', text: 'Update downloaded, ready to install' });
+		expect(describeWorker(self('ready', { install_state: null }))).toEqual({ tone: 'warn', text: 'Update downloaded, ready to install' });
+		expect(
+			describeWorker(self('available', { version: 'b'.repeat(40), staged_version: 'a'.repeat(40), install_state: 'unavailable', wait_reason: 'newer_offer' }))
+		).toEqual({ tone: 'warn', text: 'Downloaded aaaaaaaaaaaa is retained. A newer update is available; download it to continue.' });
+	});
+});

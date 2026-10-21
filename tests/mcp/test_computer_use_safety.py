@@ -80,6 +80,38 @@ def test_stop_releases_only_agent_held_keys_and_mouse_buttons():
     assert inputs.held == []
 
 
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_stop_drag_announces_synthetic_escape(monkeypatch, platform):
+    from app.mcp.computer_use import linux
+
+    events = []
+    monkeypatch.setattr(safety, "_x11", lambda: platform == "linux")
+    monkeypatch.setattr(linux, "_pending_echoes", [])
+    note_escape = MagicMock()
+    monkeypatch.setattr(safety, "note_agent_escape", note_escape)
+    mouse, keyboard = MagicMock(), MagicMock()
+    inputs = safety.SafeInput("s", mouse, keyboard, escape_key="esc")
+
+    def press(key):
+        events.append(("key_down", key))
+        if platform == "linux":
+            assert linux.consume_agent_escape(), "X11 must excuse the injected Escape"
+        else:
+            note_escape.assert_called_once_with()
+
+    keyboard.press.side_effect = press
+    keyboard.release.side_effect = lambda key: events.append(("key_up", key))
+    mouse.press.side_effect = lambda button: events.append(("mouse_down", button))
+    mouse.release.side_effect = lambda button: events.append(("mouse_up", button))
+    inputs.press(mouse, "left")
+    abort.request_stop("s")
+    abort.request_stop("s")  # cleanup is idempotent; never inject a second Escape
+    assert inputs.held == []
+    assert not linux.consume_agent_escape()
+    assert events == [("mouse_down", "left"), ("key_down", "esc"),
+                      ("key_up", "esc"), ("mouse_up", "left")]
+
+
 def test_old_worker_stays_stopped_after_new_turn_resumes():
     inputs = safety.SafeInput("s", MagicMock(), MagicMock())
     abort.request_stop("s")

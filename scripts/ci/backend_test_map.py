@@ -45,7 +45,8 @@ FAST_SUBSET_DIRS = (
     "tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract",
     "tests/performance", "tests/mcp", "tests/services", "tests/unit", "tests/scripts",
 )
-# Run in full by dedicated steps of the same job on every run.
+# Run by dedicated steps (backend-linux in local_ci), not parallel fast tests:
+# the container supervisor has global state and idle/disk timing measurements.
 FAST_SUBSET_EXCLUDED = {
     "tests/test_scan_blocking_db.py",
     "tests/core/test_chat_shell.py",

@@ -7,6 +7,16 @@ from fluid.events.bus import EventBus
 from fluid.events.model import ToolResult
 
 
+async def test_deep_json_cannot_hide_an_oversize_payload():
+    output = "x" * 40000
+    for _ in range(30):
+        output = [output]
+    bus = EventBus(log_ring_max_bytes=4096)
+    await bus.publish(ToolResult(session_id="deep", tool_use_id="deep", name="Read", output=output))
+    assert bus.log("deep") == []
+    assert bus.memory_stats()["event_bus_ring_estimated_bytes"] == 0
+
+
 async def test_large_tool_results_do_not_fill_count_bounded_ring():
     bus = EventBus()
     for i in range(100):

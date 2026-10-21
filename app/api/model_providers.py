@@ -18,6 +18,7 @@ are populated by the (later) device-code enrollment flow + refresh worker.
 """
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -244,15 +245,27 @@ def _validate_base_url(base_url: Optional[str], *, required: bool) -> None:
 
 
 def _validate_local_models(
-    models: Optional[List[Dict[str, Any]]], provider_type: Optional[str], api_dialect: Optional[str]
+    models: Optional[List[Dict[str, Any]]], provider_type: Optional[str], api_dialect: Optional[str],
+    *, existing_models: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     from app.core.local_model_settings import validate_local_settings
 
+    # Unchanged settings may have been synced from a newer worker. Compare JSON
+    # rather than Python equality so a change from a number to bool is not lost.
+    previous_settings = {
+        entry["id"]: json.dumps(entry.get("local_settings"), sort_keys=True)
+        for entry in existing_models or []
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
     for entry in models or []:
         if not isinstance(entry, dict):
             continue
         config = entry.get("local_settings")
         if config is None:
+            continue
+        model_id = entry.get("id")
+        if (isinstance(model_id, str) and model_id in previous_settings
+                and json.dumps(config, sort_keys=True) == previous_settings[model_id]):
             continue
         if provider_type != "custom" or api_dialect != "openai":
             raise HTTPException(status_code=400, detail="local_settings requires a custom OpenAI provider")
@@ -884,10 +897,16 @@ async def update_provider(
     _validate_base_url(body.base_url, required=False)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
+    # A route change still requires compatible settings, even if unchanged.
+    previous_models = None
+    if ((body.provider_type is None or body.provider_type == existing.get("provider_type"))
+            and (body.api_dialect is None or body.api_dialect == existing.get("api_dialect"))):
+        previous_models = existing.get("models_json")
     _validate_local_models(
         body.models if body.models is not None else existing.get("models_json"),
         body.provider_type if body.provider_type is not None else existing.get("provider_type"),
         body.api_dialect if body.api_dialect is not None else existing.get("api_dialect"),
+        existing_models=previous_models,
     )
     _validate_extra_env(body.extra_env)
 

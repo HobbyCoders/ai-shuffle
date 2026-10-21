@@ -34,7 +34,7 @@ def coordinator():
     owner = ctx.member(ctx.founder_device_id)
     if (not ownership.execution_eligible() or not me or me.kind != "worker"
             or not owner or owner.kind != "worker" or owner.status != "active"):
-        raise polling.UsageDeferred("Usage budget authority is unavailable")
+        raise polling.UsageDeferred("Usage budget authority is unavailable", reason="budget_authority_unavailable")
     return ctx
 
 
@@ -42,7 +42,7 @@ async def _remote(ctx, action, key, body=None):
     try:
         current, link = await peer_link(ctx.founder_device_id)
         if current.network_id != ctx.network_id or current.device_id != ctx.device_id:
-            raise polling.UsageDeferred("Usage network changed")
+            raise polling.UsageDeferred("Usage network changed", reason="usage_network_changed")
         async with asyncio.timeout(20), httpx.AsyncClient(follow_redirects=False) as client:
             for attempt in range(2):
                 await link.authenticate(client, ctx)
@@ -60,7 +60,7 @@ async def _remote(ctx, action, key, body=None):
                 transport.note_contact(ctx.founder_device_id)
                 return response.json()
     except (TimeoutError, httpx.HTTPError, transport.PeerError, HTTPException, ValueError, KeyError, TypeError):
-        raise polling.UsageDeferred("Usage budget authority is unavailable") from None
+        raise polling.UsageDeferred("Usage budget authority is unavailable", reason="budget_authority_unavailable") from None
 
 
 @dataclass(frozen=True)

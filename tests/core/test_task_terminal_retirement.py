@@ -102,6 +102,74 @@ def _user_turn(session_id: str) -> dict:
 
 class TestEngineRetirement:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("adapter_available", [True, False])
+    async def test_terminal_retirement_removes_busy_ghost(self, adapter_available):
+        from app.core.desktop_lifecycle import active_session_ids
+
+        _seed_own_background_task("ghost", "cancelled-task")
+        assert "ghost" in active_session_ids()
+        adapter = _RecordingAdapter() if adapter_available else None
+        with _pool_with(adapter):
+            await turn_scheduler.retire_task_terminals("ghost", [{
+                "task_id": "cancelled-task", "status": "killed",
+                "task_incarnation": task_registry.task_incarnation("ghost", "cancelled-task"),
+                "reason": "user_stop", "summary": "Stopped by user",
+            }])
+        assert "ghost" not in active_session_ids()
+        record = task_registry.get_task("ghost", "cancelled-task")
+        assert record["status"] == "killed"
+        assert record["reason"] == "user_stop"
+
+    @pytest.mark.asyncio
+    async def test_retirement_keeps_a_continuation_running(self):
+        _seed_own_background_task("continuing", "task")
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("continuing", [{
+                "task_id": "task", "status": "completed",
+                "agent_message_turn_id": "report-turn",
+            }])
+        assert task_registry.get_active("continuing")
+
+    @pytest.mark.asyncio
+    async def test_retirement_ignores_a_replaced_task_incarnation(self):
+        _seed_own_background_task("replaced", "task")
+        old = task_registry.task_incarnation("replaced", "task")
+        task_registry.complete_task("replaced", "task", "completed")
+        _seed_own_background_task("replaced", "task")
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("replaced", [{
+                "task_id": "task", "status": "killed", "task_incarnation": old,
+            }])
+        assert task_registry.get_active("replaced")
+
+    @pytest.mark.asyncio
+    async def test_unstamped_legacy_retirement_does_not_close_running_registry_row(self):
+        _seed_own_background_task("legacy", "task")
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("legacy", [{
+                "task_id": "task", "status": "killed",
+            }])
+        assert task_registry.get_active("legacy")
+
+    @pytest.mark.asyncio
+    async def test_unstamped_retirement_preserves_a_legacy_null_start(self):
+        assert task_registry.hydrate_rows("legacy-null", [{
+            "task_id": "task", "kind": "agent", "status": "running",
+            "remote_device_id": "peer", "started_at": None,
+        }]) == 1
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("legacy-null", [{"task_id": "task", "status": "killed"}])
+        assert task_registry.get_active("legacy-null")
+
+    @pytest.mark.asyncio
+    async def test_registry_retirement_failure_still_reaches_engine(self, monkeypatch):
+        adapter = _RecordingAdapter()
+        monkeypatch.setattr(task_registry, "get_task", lambda *args: (_ for _ in ()).throw(RuntimeError("registry unavailable")))
+        with _pool_with(adapter):
+            assert await turn_scheduler.retire_task_terminals("s", [{"task_id": "task", "status": "killed"}])
+        assert adapter.submitted == [[{"task_id": "task", "status": "killed"}]]
+
+    @pytest.mark.asyncio
     async def test_retire_submits_the_frames_to_the_pooled_adapter(self):
         adapter = _RecordingAdapter()
         with _pool_with(adapter):
