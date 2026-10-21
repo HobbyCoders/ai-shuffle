@@ -116,14 +116,19 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _events_since_sync(session_id: str, seq: int) -> List[Event]:
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT event FROM fluid_session_events WHERE session_id = %s "
-            "AND seq > %s ORDER BY seq", (session_id, seq),
-        )
-        rows = cur.fetchall()
-    return [event_from_dict(_as_dict(r["event"])) for r in rows]
+    # Compatibility API still returns the complete prefix, but libpq must not
+    # retain another full-history JSON result while Python decodes that list.
+    # Eight potentially large tool results at a time, connections released
+    # between pages. New consumers should use iter_events/events_page instead.
+    through = _last_event_seq_sync(session_id)
+    events = []
+    while seq < through:
+        page = _events_page_sync(session_id, seq, through, 8)
+        if not page:
+            break
+        events.extend(page)
+        seq = page[-1].seq
+    return events
 
 
 def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> List[Event]:
@@ -1244,6 +1249,7 @@ class PgFluidStore:
     """fluid ``SessionStore`` over the app's PostgreSQL database."""
 
     EVENT_CACHE_LIMIT = 128
+    EVENT_CACHE_BYTES = 8 * 1024 * 1024
     STREAM_BATCH_LIMIT = 32
     STREAM_BATCH_BYTES = 64 * 1024
     STREAM_BATCH_SECONDS = 0.05
@@ -1253,6 +1259,8 @@ class PgFluidStore:
         self._nodes: Dict[str, Dict[str, SessionNode]] = {}
         self._events: Dict[str, List[Event]] = {}
         self._event_floor: Dict[str, int] = {}
+        self._event_bytes: Dict[str, int] = {}
+        self._node_json_bytes: Dict[str, int] = {}
         self._pending_events: Dict[str, List[Event]] = {}
         self._pending_since: Dict[str, float] = {}
         self._pending_bytes: Dict[str, int] = {}
@@ -1269,13 +1277,48 @@ class PgFluidStore:
             if data is not None:
                 self._sessions[session_id] = data["meta"]
                 self._nodes[session_id] = data["nodes"]
+                self._node_json_bytes[session_id] = sum(
+                    len(json.dumps(node.message.to_dict())) for node in data["nodes"].values())
             self._loaded.add(session_id)
             return data is not None
 
+    def _cache_node(self, session_id: str, node: SessionNode) -> None:
+        nodes = self._nodes.setdefault(session_id, {})
+        old = nodes.get(node.node_id)
+        delta = len(json.dumps(node.message.to_dict()))
+        if old is not None:
+            delta -= len(json.dumps(old.message.to_dict()))
+        self._node_json_bytes[session_id] = self._node_json_bytes.get(session_id, 0) + delta
+        nodes[node.node_id] = node
+
+    def cache_stats(self) -> Dict[str, int]:
+        """Cheap diagnostics; JSON byte counts are captured at cache insertion.
+
+        JSON's default ASCII escaping makes character count equal encoded bytes.
+        This is payload size, not an RSS/heap estimate, and never logs content.
+        """
+        return dict(retained_nodes=sum(map(len, self._nodes.values())),
+                    message_json_bytes=sum(self._node_json_bytes.values()),
+                    event_cache_estimated_bytes=sum(self._event_bytes.values()))
+
     def _cache_events(self, session_id: str, events: List[Event], floor: int) -> None:
-        tail = events[-self.EVENT_CACHE_LIMIT:]
+        from fluid.events.bus import _retained_size
+
+        # Keep a contiguous newest suffix. An oversized newest event means an
+        # empty cache, not a hole that could silently omit it on reconnect.
+        tail = []
+        size = 0
+        for event in reversed(events[-self.EVENT_CACHE_LIMIT:]):
+            weight = _retained_size(event)
+            if size + weight > self.EVENT_CACHE_BYTES:
+                break
+            tail.append(event)
+            size += weight
+        tail.reverse()
         self._events[session_id] = tail
-        self._event_floor[session_id] = max(floor, tail[0].seq - 1) if len(events) > len(tail) else floor
+        self._event_bytes[session_id] = size
+        evicted_through = tail[0].seq - 1 if tail else events[-1].seq if events else floor
+        self._event_floor[session_id] = max(floor, evicted_through)
 
     async def _write_pending(self, session_id: str, extra: Optional[Event] = None) -> None:
         # Accepted deltas remain retryable until the transaction acknowledges
@@ -1289,6 +1332,7 @@ class PgFluidStore:
         # serve a pre-write cache after either success or an uncertain failure.
         self._events.pop(session_id, None)
         self._event_floor.pop(session_id, None)
+        self._event_bytes.pop(session_id, None)
         await run_sync(_append_events_sync, session_id, events)
         self._pending_events.pop(session_id, None)
         self._pending_since.pop(session_id, None)
@@ -1341,6 +1385,7 @@ class PgFluidStore:
         await run_sync(_create_session_sync, meta)
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
+        self._node_json_bytes[meta.session_id] = 0
         self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
         return meta
@@ -1354,7 +1399,7 @@ class PgFluidStore:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
         await run_sync(_append_node_sync, session_id, node)
-        self._nodes.setdefault(session_id, {})[node.node_id] = node
+        self._cache_node(session_id, node)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node.node_id
 

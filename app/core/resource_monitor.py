@@ -89,10 +89,31 @@ async def _collect_metrics() -> dict:
     adapters = tuple(HarnessAdapter._instances)
     metrics["harness_adapters"] = len(adapters)
     metrics["harness_adapters_with_store"] = sum(a._store is not None for a in adapters)
-    metrics["harness_retained_nodes"] = sum(
-        len(nodes) for a in adapters
-        for nodes in getattr(a._store, "_nodes", {}).values()
-    )
+    by_provider = {}
+    for adapter in adapters:
+        provider = adapter.provider_kind or "unknown"
+        group = by_provider.setdefault(provider, dict(adapters=0, adapters_with_store=0,
+            retained_nodes=0, message_json_bytes=0, event_cache_estimated_bytes=0,
+            stores_without_json_byte_counter=0))
+        group["adapters"] += 1
+        store = adapter._store
+        if store is None:
+            continue
+        group["adapters_with_store"] += 1
+        stats = getattr(store, "cache_stats", None)
+        if callable(stats):
+            for key, value in stats().items():
+                group[key] += value
+        else:
+            group["retained_nodes"] += sum(map(len, getattr(store, "_nodes", {}).values()))
+            group["stores_without_json_byte_counter"] += 1
+    metrics["harness_cache_by_provider"] = by_provider
+    metrics["harness_retained_nodes"] = sum(g["retained_nodes"] for g in by_provider.values())
+    metrics["harness_retained_message_json_bytes"] = sum(g["message_json_bytes"] for g in by_provider.values())
+    from app.core.session_pool import _session_pool
+    pooled = {id(state.adapter) for state in _session_pool._pool.values()} if _session_pool else set()
+    metrics["harness_stored_adapters_outside_pool"] = sum(
+        a._store is not None and id(a) not in pooled for a in adapters)
     del adapters
 
     # --- Session Pool ---
