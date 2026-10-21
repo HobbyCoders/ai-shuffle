@@ -119,25 +119,61 @@ async def test_key_correction_resolves_only_visible_unambiguous_slot(tmp_path, s
     candidates = [s for s in scopes if s in ("global", "project:one")] if scope is None else [
         s for s in scopes if s == ("project:one" if scope == "project" else scope)]
     result = await handler(data, ctx)
-    assert result.is_error == (len(candidates) != 1)
-    assert len(replica.memories()) == len(scopes)
+    # A scope with no existing slot is a new revision-1 save, not a correction
+    # of an unrelated project's key. Multiple eligible slots stay ambiguous.
+    fresh = not candidates
+    fresh_scope = "project:one" if scope == "project" else "global"
+    assert result.is_error == (len(candidates) > 1)
+    assert len(replica.memories()) == len(scopes) + int(fresh)
     updated = [m for m in replica.memories() if m.text == data["text"]]
-    assert [m.scope for m in updated] == (candidates if len(candidates) == 1 else [])
+    expected = candidates if len(candidates) == 1 else ([fresh_scope] if fresh else [])
+    assert [m.scope for m in updated] == expected
     store._facts.merge(replica._facts.export())
-    assert len(store.memories()) == len(scopes)
+    assert len(store.memories()) == len(scopes) + int(fresh)
 
 
 @pytest.mark.parametrize("scope,expected_scope", [(None, "global"), ("global", "global"), ("project", "project:one")])
 @pytest.mark.parametrize("revision", [1, 2])
-async def test_fresh_key_with_initial_revision_preserves_new_save_contract(tmp_path, scope, expected_scope, revision):
-    store = SkillStore(tmp_path)
+@pytest.mark.parametrize("other_project", [False, True])
+@pytest.mark.parametrize("per_worker", [False, True])
+async def test_fresh_key_with_initial_revision_preserves_new_save_contract(tmp_path, scope, expected_scope, revision, other_project, per_worker):
+    store = SkillStore(tmp_path / "local")
+    if other_project:
+        remote = SkillStore(tmp_path / "remote")
+        remote.save_memory("Other project fixture command.", key="fixture.fresh", scope="project:two", per_worker=per_worker)
+        store._facts.merge(remote._facts.export())
     ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
     data = {"text": "Fixture genuinely new convention.", "key": "fixture.fresh", "expected_revision": revision}
     if scope is not None:
         data["scope"] = scope
     result = await handler(data, ctx)
     assert result.is_error == (revision != 1)
-    assert [m.scope for m in store.memories()] == ([expected_scope] if revision == 1 else [])
+    saved = [m for m in store.memories() if m.text == data["text"]]
+    assert [m.scope for m in saved] == ([expected_scope] if revision == 1 else [])
+    assert [m.revision for m in saved] == ([1] if revision == 1 else [])
+
+
+@pytest.mark.parametrize("scope", [None, "project"])
+async def test_initial_revision_does_not_replace_in_scope_invisible_worker_slot(tmp_path, scope):
+    remote = SkillStore(tmp_path / "remote")
+    remote.save_memory("Remote worker fixture.", key="fixture.worker", scope="project:one", per_worker=True)
+    local = SkillStore(tmp_path / "local")
+    local._facts.merge(remote._facts.export())
+    data = {"text": "Local fixture.", "key": "fixture.worker", "expected_revision": 1}
+    if scope is not None:
+        data["scope"] = scope
+    ctx = ToolCtx(extra={"memory_store": local, "memory_project": "project:one"})
+    assert (await handler(data, ctx)).is_error
+
+
+async def test_initial_revision_without_project_context_keeps_conservative_lookup(tmp_path):
+    store = SkillStore(tmp_path)
+    store.save_memory("Other project fixture.", key="fixture.runner", scope="project:two")
+    ctx = ToolCtx(extra={"memory_store": store})
+    out = await handler({"text": "Unknown project fixture.", "key": "fixture.runner",
+                         "scope": "global", "expected_revision": 1}, ctx)
+    assert out.is_error
+    assert len(store.memories()) == 1
 
 
 async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path):

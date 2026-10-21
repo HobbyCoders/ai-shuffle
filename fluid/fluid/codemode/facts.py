@@ -542,7 +542,9 @@ class FactStore:
                 candidates = [e for e in all_entries if e.get("key") == key
                               and e.get("scope", "global") in scopes and visible_on(e, local)]
                 fresh = (expected_revision == 1
-                         and not any(e.get("key") == key for e in all_entries)
+                         and not any(e.get("key") == key
+                                     and (correction_project is None or e.get("scope", "global") in scopes)
+                                     for e in all_entries)
                          and not any(t.get("key") == key and t.get("scope") in scopes
                                      for t in doc["tombstones"])
                          and not any(barrier_contains(doc.get("forgotten", ""), "key:" + s + ":" + key)
