@@ -56,15 +56,16 @@ export async function boundedObservation<T>(task: Promise<T> | undefined, timeou
 }
 
 /** Called inside each frame's bounded task: a bad child never rejects siblings. */
-export async function includeObservationRoot(root: ObservationRoot, filterHidden = true): Promise<boolean> {
-  if (root.frame.isDetached()) return false;
-  if ((!filterHidden && !root.scope) || (root.primary && !root.frame.parentFrame())) return true;
+export async function observationRootStatus(root: ObservationRoot, mode: "reader" | "visible" | "attached" = "reader"): Promise<"included" | "hidden" | "excluded"> {
+  if (root.frame.isDetached()) return "excluded";
+  if ((mode === "attached" && !root.scope) || (root.primary && !root.frame.parentFrame())) return "included";
   let frame = root.frame;
   let withinScope = !root.scope || root.primary;
+  let hidden = false;
   while (frame.parentFrame()) {
     const element = await frame.frameElement();
     try {
-      const visible = !filterHidden || await element.evaluate(el => {
+      const visible = mode === "attached" || (mode === "visible" ? await element.isVisible() : await element.evaluate(el => {
         if (!(el instanceof Element)) return false;
         const rect = el.getBoundingClientRect();
         const ownStyle = getComputedStyle(el);
@@ -84,6 +85,26 @@ export async function includeObservationRoot(root: ObservationRoot, filterHidden
           right = Math.min(right, x2); bottom = Math.min(bottom, y2);
         };
         const length = (value: string, size: number) => value.endsWith("%") ? px(value) * size / 100 : px(value);
+        const parent = (node: Element): Element | null => node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
+        const fixedContainer = (node: Element): Element | null => {
+          for (let ancestor = parent(node); ancestor; ancestor = parent(ancestor)) {
+            const style = getComputedStyle(ancestor);
+            const effect = ["transform", "filter", "perspective", "backdrop-filter", "-webkit-backdrop-filter", "translate", "scale", "rotate"]
+              .some(property => {
+                const value = style.getPropertyValue(property);
+                return value !== "" && value !== "none";
+              });
+            // Non-default will-change may establish a containing block even
+            // before its effect is applied. Keep clipping for unfamiliar hints
+            // too: uncertain ancestors must retain the base fail-closed behavior.
+            if (effect || (style.willChange && style.willChange !== "auto") ||
+                style.transformStyle === "preserve-3d" || style.contentVisibility === "auto" ||
+                /(?:layout|paint|strict|content)/.test(style.contain)) return ancestor;
+          }
+          return null; // viewport-fixed descendants escape ordinary overflow
+        };
+        let overflowRoot: Element | null = null;
+        let clipOverflow = true;
         let node: Element | null = el;
         let opacity = 1;
         while (node) {
@@ -105,7 +126,8 @@ export async function includeObservationRoot(root: ObservationRoot, filterHidden
             clip(box.left + edge(3, box.width, 0), box.top + edge(0, box.height, 0),
               box.left + edge(1, box.width, box.width), box.top + edge(2, box.height, box.height));
           }
-          if (node !== el) {
+          if (node === overflowRoot) clipOverflow = true;
+          if (node !== el && clipOverflow) {
             // Scrollable ancestors expose their full scrollable content, not
             // just today's scrollport. Non-scrollable overflow really clips.
             for (const axis of ["x", "y"] as const) {
@@ -131,14 +153,20 @@ export async function includeObservationRoot(root: ObservationRoot, filterHidden
             }
           }
           if (!intersects()) return false;
-          node = node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
+          // Overflow clips along containing blocks, not every DOM ancestor.
+          // A positioned portal can therefore escape a zero-height wrapper.
+          if (clipOverflow && (style.position === "fixed" || style.position === "absolute")) {
+            overflowRoot = style.position === "fixed" ? fixedContainer(node) : (node as HTMLElement).offsetParent;
+            clipOverflow = false;
+          }
+          node = parent(node);
         }
         const doc = document.scrollingElement ?? document.documentElement;
         clip(-scrollX, -scrollY, Math.max(doc.scrollWidth, innerWidth) - scrollX,
           Math.max(doc.scrollHeight, innerHeight) - scrollY);
         return intersects();
-      });
-      if (!visible) return false;
+      }));
+      hidden ||= !visible;
       if (root.scope && frame.parentFrame() === root.owner) {
         withinScope = await root.scope.evaluate((scope, candidate) => {
           let node: Node | null = candidate;
@@ -152,5 +180,5 @@ export async function includeObservationRoot(root: ObservationRoot, filterHidden
     } finally { await element.dispose(); }
     frame = frame.parentFrame()!;
   }
-  return withinScope;
+  return !withinScope ? "excluded" : hidden ? "hidden" : "included";
 }
