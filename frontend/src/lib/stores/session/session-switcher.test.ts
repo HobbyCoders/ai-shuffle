@@ -61,6 +61,9 @@ vi.mock('./v2/feed-controller', () => ({
 		// so the snapshot still applies its own.
 		hasAppliedUsage: vi.fn(() => false),
 		isReducerStreaming: vi.fn(() => false),
+		// The registry's running list goes to the feed when it is feeding this
+		// session (#320). Default = not feeding, so the snapshot seeds the strip.
+		reconcileRunningTasks: vi.fn(() => false),
 		noteOptimisticSend: vi.fn(),
 		clearOptimisticSend: vi.fn(),
 	},
@@ -1221,6 +1224,53 @@ describe('gateSnapshotPatch (W7)', () => {
 			currentTaskCount: 2,
 		});
 		expect(gated.activeTasks).toBeUndefined();
+	});
+});
+
+describe('the running strip follows the task registry (#320)', () => {
+	const running = {
+		id: 'w1', subject: 'Backend fix', status: 'running', kind: 'agent', summary: null,
+		toolUseId: 'w1', startedAt: '2026-10-21T00:44:29Z', updatedAt: '2026-10-21T00:51:40Z',
+	};
+	const finished = { ...running, id: 'w2', status: 'completed' };
+
+	beforeEach(() => {
+		_mockSessions.current = [];
+		vi.mocked(feedController.reconcileRunningTasks).mockClear();
+	});
+
+	it('hands the snapshot\'s running rows to the feed that owns the strip', async () => {
+		vi.mocked(feedController.reconcileRunningTasks).mockReturnValueOnce(true);
+		vi.mocked(api.get).mockResolvedValueOnce({ activeTasks: [running, finished] });
+		const { switcher, getState } = makeSwitcher(fullState({ sessionId: 'session-A' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(feedController.reconcileRunningTasks).toHaveBeenCalledExactlyOnceWith('session-A', [running]);
+		// The feed publishes the strip; the snapshot does not write it directly.
+		expect(getState().activeTasks).toEqual([]);
+		switcher.destroy();
+	});
+
+	it('still seeds an empty strip when nothing is feeding the session', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ activeTasks: [running] });
+		const { switcher, getState } = makeSwitcher(fullState({ sessionId: 'session-A' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState().activeTasks).toEqual([running]);
+		switcher.destroy();
+	});
+
+	it('refreshRunningTasks re-reads the registry for the fed session only', async () => {
+		vi.mocked(feedController.isFeeding).mockImplementation((id?: string) => id === 'session-A');
+		vi.mocked(api.get).mockResolvedValueOnce({ activeTasks: [running, finished] });
+		const { switcher } = makeSwitcher(fullState({ sessionId: 'session-A' }));
+		await switcher.refreshRunningTasks('session-A');
+		expect(api.get).toHaveBeenLastCalledWith('/sessions/session-A/live?since_update_id=0&include_messages=false');
+		expect(feedController.reconcileRunningTasks).toHaveBeenCalledExactlyOnceWith('session-A', [running]);
+
+		vi.mocked(api.get).mockClear();
+		await switcher.refreshRunningTasks('session-B');
+		expect(api.get).not.toHaveBeenCalled();
+		vi.mocked(feedController.isFeeding).mockImplementation(() => false);
+		switcher.destroy();
 	});
 });
 

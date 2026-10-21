@@ -127,6 +127,10 @@ export interface SessionWorktreeInfo {
 interface SessionSwitcher {
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => Promise<void>;
 	refreshSessionMetadata: (sessionId: string) => Promise<void>;
+	/** Re-read the task registry's running list and reconcile the running
+	 *  strip with it (#320). For a reconnect, which resumes the feed at its
+	 *  cursor without a fresh `/live` snapshot. */
+	refreshRunningTasks: (sessionId: string) => Promise<void>;
 	newChat: () => boolean;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
@@ -376,6 +380,11 @@ export function gateSnapshotPatch(
 		delete gated.activeTasks;
 	}
 	return gated;
+}
+
+/** The `/live` snapshot's running tasks: the registry's own running list. */
+function runningSnapshotTasks(snap: LiveSnapshot): Task[] {
+	return (snap.activeTasks ?? []).filter((t) => t?.status === 'running');
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -844,17 +853,20 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			patch.contextUsed = inTok + cacheCreate + cacheRead;
 		}
 
-		// Seed the chip strip from durable truth. The switch-in reset above wipes
-		// `activeTasks` (the leaving session's tasks must not flash on the target),
-		// and the feed repaints it from the target's `task.updated` rows — but a
-		// task that started BEFORE those rows existed, or in a session whose log
-		// predates them, would leave a genuinely running background shell with no
-		// surface at all. `/live` reports the task registry's own view, so use it
-		// as the floor: only RUNNING rows (never the recently-failed retention
-		// rows `get_visible` also carries), and only while the strip is still
-		// empty, so a fresher feed fold is never overwritten.
-		const snapshotTasks = (snap.activeTasks ?? []).filter((t) => t?.status === 'running');
-		if (snapshotTasks.length > 0) patch.activeTasks = snapshotTasks;
+		// Reconcile the chip strip with durable truth. The switch-in reset above
+		// wipes `activeTasks` (the leaving session's tasks must not flash on the
+		// target), and the feed repaints it from the target's `task.updated` rows
+		// — but a task that started BEFORE those rows existed, or whose log got a
+		// terminal frame for a run that went on (#320), would leave genuinely
+		// running work with no surface at all. `/live` reports the task
+		// registry's own view: only its RUNNING rows (never the recently-failed
+		// retention rows `get_visible` also carries) go to the feed, which keeps
+		// them on the strip until the log says something newer. Without a feed
+		// for this session they only seed an empty strip, as before.
+		const snapshotTasks = runningSnapshotTasks(snap);
+		if (!feedController.reconcileRunningTasks(sessionId, snapshotTasks) && snapshotTasks.length > 0) {
+			patch.activeTasks = snapshotTasks;
+		}
 
 		const meta = snap.session_meta;
 		if (meta) {
@@ -925,6 +937,21 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		});
 		// Persist any server-authoritative worktree/cloud correction.
 		persistSession();
+	}
+
+	async function refreshRunningTasks(sessionId: string) {
+		if (!feedController.isFeeding(sessionId)) return;
+		let snap: LiveSnapshot | null;
+		try {
+			snap = await api.get<LiveSnapshot>(
+				`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0&include_messages=false`
+			);
+		} catch (e) {
+			console.warn('[ActiveSession] running-tasks refresh failed:', e);
+			return;
+		}
+		if (!snap || getState().sessionId !== sessionId) return;
+		feedController.reconcileRunningTasks(sessionId, runningSnapshotTasks(snap));
 	}
 
 	function newChat() {
@@ -1099,6 +1126,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	return {
 		switchSession,
 		refreshSessionMetadata: (sessionId: string) => applyMetadataSnapshot(sessionId, _switchGeneration),
+		refreshRunningTasks,
 		newChat,
 		persistSession,
 		loadPersistedSession,

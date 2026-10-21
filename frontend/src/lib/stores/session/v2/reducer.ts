@@ -792,6 +792,52 @@ export function withLogEpoch(state: V2SessionState, epoch: string | null): V2Ses
 	return { ...state, logEpoch: epoch, messages };
 }
 
+/**
+ * Reconcile the running strip with the task registry's own running list (the
+ * `/live` snapshot's `activeTasks`, read on switch-in, reload and reconnect).
+ *
+ * The event log is the strip's normal source, but it can disagree with the
+ * registry: a log with no start row for a task, or a terminal frame for a run
+ * that went on (#320). The registry wins only where it is NEWER than the log's
+ * last word on that task, so a snapshot read just before a completion can
+ * never bring a finished task back:
+ *
+ *   - a running task the log has no summary for is added;
+ *   - a summary the log settled is running again only when the registry
+ *     updated the task after that settle (`updatedAt` later than the frame).
+ *
+ * Anything the log says later still applies on top, as usual. Not a wire
+ * event: it is re-applied from each new snapshot, never replayed. Returns
+ * `state` unchanged when nothing moves.
+ */
+export function reconcileRunningTasks(state: V2SessionState, tasks: readonly Task[]): V2SessionState {
+	const at = (iso: string | null | undefined): number => {
+		const ms = iso ? Date.parse(iso) : NaN;
+		return Number.isNaN(ms) ? -Infinity : ms;
+	};
+	let summaries = state.activeTaskSummaries;
+	for (const task of tasks) {
+		if (!task?.id || task.status !== 'running') continue;
+		const index = summaries.findIndex((t) => t.id === task.id);
+		if (index === -1) {
+			summaries = [...summaries, { ...task, kind: task.kind === 'shell' ? 'shell' : 'agent' }];
+			continue;
+		}
+		const existing = summaries[index];
+		if (existing.status === 'running' || at(task.updatedAt) <= at(existing.updatedAt)) continue;
+		summaries = summaries.slice();
+		summaries[index] = {
+			...existing,
+			status: 'running',
+			startedAt: task.startedAt || existing.startedAt,
+			updatedAt: task.updatedAt,
+			...(task.model && !existing.model ? { model: task.model } : {}),
+			...(task.worker && !existing.worker ? { worker: task.worker } : {}),
+		};
+	}
+	return summaries === state.activeTaskSummaries ? state : { ...state, activeTaskSummaries: summaries };
+}
+
 /** Prefer an event payload `timestamp` over the envelope `created_at`. */
 function stampTs(event: WireEvent, createdAt: string): string {
 	return str(event.timestamp) || createdAt;
@@ -1189,6 +1235,25 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					mayHaveRunningSubagents: next.mayHaveRunningSubagents || cardIds.length > 0,
 					speculativelySettledCardIds: [],
 					speculativelySettledTaskIds: [],
+				};
+			}
+			// `task_ids` is the backend's own list of work this turn parked on:
+			// what its task registry still has running, re-checked against the
+			// durable rows the moment the park was written. A summary named there
+			// that reads 'completed' got a terminal frame for a run that did not
+			// end — a worker's report delivered while its next turn was already
+			// queued (#320). Keep it on the running strip. The card is left alone:
+			// it shows the report that was delivered. When the work really ends,
+			// its terminal task.updated lands after this park and settles it.
+			const parkedOn = Array.isArray(event.task_ids)
+				? new Set(event.task_ids.filter((id): id is string => typeof id === 'string' && !!id))
+				: null;
+			if (parkedOn?.size && next.activeTaskSummaries.some((t) => parkedOn.has(t.id) && t.status === 'completed')) {
+				next = {
+					...next,
+					activeTaskSummaries: next.activeTaskSummaries.map((t) =>
+						parkedOn.has(t.id) && t.status === 'completed' ? { ...t, status: 'running' as const } : t
+					),
 				};
 			}
 			return next;

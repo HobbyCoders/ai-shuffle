@@ -572,6 +572,9 @@ const wsConn: WsConnection = createWsConnection({
 				// from_seq=lastSeq — no reducer reset, no repaint (unlike the
 				// unconditional restart removed in #640), gap- and duplicate-free.
 				feedController.revive(sessionId);
+				// The task registry may have moved on while the socket was down;
+				// the strip follows its running list (#320).
+				void switcher.refreshRunningTasks(sessionId);
 			}
 			// The feed clears isRestoringSession only when its first caught_up
 			// atomically publishes the complete transcript. A connected socket alone

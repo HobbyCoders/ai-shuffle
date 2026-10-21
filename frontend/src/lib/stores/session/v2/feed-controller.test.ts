@@ -1394,6 +1394,74 @@ describe('feedController activeTasks', () => {
 	});
 });
 
+// ─── #320: the strip follows the registry's running list ─────────────────────
+
+describe('feedController running strip vs the task registry (#320)', () => {
+	const W = 'worker-320';
+	const at = (iso: string) => ({ created_at: iso });
+	const registryRow = {
+		id: W, subject: 'Backend fix', status: 'running' as const, kind: 'agent' as const, summary: null,
+		toolUseId: W, startedAt: '2026-10-21T00:44:29.900+00:00', updatedAt: '2026-10-21T00:51:40.000+00:00',
+	};
+	// The parent's log around the delivered report: resumed (running), parked on
+	// it, the report delivered with a terminal frame, parked on it again.
+	const history = (parkNames: string[]) => [
+		{ ...taskUpdated(W, 'running', { description: 'Backend fix' }), seq: 1, ...at('2026-10-21T00:44:29.874Z') },
+		{ type: 'turn.parked', id: 'park-1', seq: 2, session_id: 's1', task_ids: [W] },
+		{ ...taskUpdated(W, 'completed'), seq: 3, ...at('2026-10-21T00:51:34.309Z') },
+		{ type: 'turn.parked', id: 'park-2', seq: 4, session_id: 's1', task_ids: parkNames },
+	];
+
+	it('keeps a worker the park names on the published strip after its report', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		for (const e of history([W])) hoisted.onEvent!(e);
+		hoisted.onEvent!(caughtUp(4));
+		expect((deps.state.activeTasks as Array<{ id: string }>).map((t) => t.id)).toEqual([W]);
+	});
+
+	it('a /live list that lands during the backfill is applied after it', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		// An older log whose park did not name the worker: only the registry knows.
+		hoisted.onEvent!(history([])[0]);
+		expect(feedController.reconcileRunningTasks('s1', [registryRow])).toBe(true);
+		for (const e of history([]).slice(1)) hoisted.onEvent!(e);
+		hoisted.onEvent!(caughtUp(4));
+		expect((deps.state.activeTasks as Array<{ id: string }>).map((t) => t.id)).toEqual([W]);
+		// ...and a fold for an unrelated event does not wipe it.
+		hoisted.onEvent!({ ...textDelta('later', 'hello'), seq: 5 });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect((deps.state.activeTasks as Array<{ id: string }>).map((t) => t.id)).toEqual([W]);
+	});
+
+	it('a live /live list re-adds the worker; a later terminal frame still clears it', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		for (const e of history([])) hoisted.onEvent!(e);
+		hoisted.onEvent!(caughtUp(4));
+		expect(deps.state.activeTasks).toEqual([]);
+
+		expect(feedController.reconcileRunningTasks('s1', [registryRow])).toBe(true);
+		flushRaf();
+		expect((deps.state.activeTasks as Array<{ id: string }>).map((t) => t.id)).toEqual([W]);
+
+		hoisted.onEvent!({ ...taskUpdated(W, 'completed', { summary: 'Done.' }), id: 'done', seq: 5, ...at('2026-10-21T00:59:00.000Z') });
+		flushRaf();
+		expect(deps.state.activeTasks).toEqual([]);
+	});
+
+	it('answers false for a session it is not feeding', () => {
+		feedController.attach(makeDeps());
+		feedController.start('s1');
+		expect(feedController.reconcileRunningTasks('other', [registryRow])).toBe(false);
+	});
+});
+
 // ─── Browser-panel auto-open on a live browser tool.use ──────────────────────
 
 describe('feedController browser-panel auto-open', () => {
