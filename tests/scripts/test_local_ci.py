@@ -120,11 +120,13 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source):
     assert env["ALLOW_REAL_PG"] == "0"
     assert env["TEST_POSTGRES_DSN"] == ""
     assert env["AI_SHUFFLE_ENV_FILE"] == "/dev/null"
-    expected = "1" if pg_source else "0"
+    expected = "1" if pg_source and ctx.mode == "full" else "0"
     assert env["CONTAINER_RUNTIME_TEST_PG"] == expected
     assert env["CONTAINER_RUNTIME_TEST_PRESSURE"] == expected
     assert env["PATH"] == ("/test/pg/bin:" if pg_source else "") + "/test/original-path"
-    if not pg_source:
+    if ctx.mode != "full":
+        assert any("Container" in note and "full" in note for note in ctx.notes)
+    elif not pg_source:
         assert any("Container" in note and "PostgreSQL" in note for note in ctx.notes)
 
 
