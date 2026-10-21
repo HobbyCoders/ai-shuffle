@@ -36,6 +36,7 @@ vi.mock('$lib/emulator/stream-client', () => ({
 	},
 }));
 import * as emulatorApi from '$lib/api/emulator';
+import { phonePanel } from '$lib/stores/phone-panel.svelte';
 
 const device = (state: string) => ({ id: 'pixel', name: 'Pixel 8', state, api: 35, width: 1080, height: 2400 });
 const ready = (state = 'running') => parseStatus({ available: true, reason: 'ready', message: '', install: null, license_url: 'https://example.test/license', devices: [device(state)] });
@@ -72,6 +73,26 @@ beforeEach(() => {
 	}));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe('focus', () => {
+	beforeEach(() => phonePanel.reset());
+
+	it('takes focus when the user opened it ("Show phone"), so focus does not fall to the page', async () => {
+		phonePanel.open('focus-a');
+		await mount(ready());
+		const panel = screen.getByRole('region', { name: 'Phone' });
+		expect(document.activeElement).toBe(panel);
+	});
+
+	it('leaves focus alone when the agent opened it', async () => {
+		const field = document.createElement('textarea');
+		document.body.append(field);
+		field.focus();
+		await mount(ready());
+		expect(document.activeElement).toBe(field);
+		field.remove();
+	});
+});
 
 describe('setup and host states', () => {
 	it('requires the license before setup, links it, mentions the size, then shows progress', async () => {

@@ -16,6 +16,14 @@ AI Shuffle can run an Android phone emulator on your worker. You and your agents
 
 The emulator runs a Pixel-sized phone (1080 × 2400) with Android 15 (API 35, Google APIs). It is shared by every chat on that worker. AI Shuffle stops it when nobody has used it for 30 minutes.
 
+## When the Phone panel opens
+
+The phone is the agent's tool, so the composer has no Phone button. The **Phone** panel opens beside the chat when an agent in that chat uses the emulator.
+
+- If you close the panel, it stays closed for that chat while the agent keeps working.
+- To open it again, choose **Show phone** next to one of the agent's Emulator steps in the chat. This also works after you reopen an older chat.
+- The panel shows the phone of the worker you are connected to. It does not open for a chat that runs on another worker.
+
 ## What you need
 
 - **A Linux or Windows worker on an x86_64 (Intel or AMD) processor.** macOS and Windows ARM64 workers are not supported yet.
@@ -66,7 +74,7 @@ Live Windows verification of this backend is still pending; its Windows paths an
 
 The emulator is not part of AI Shuffle's download. Install it once per worker:
 
-1. Open the **Phone** panel.
+1. Ask an agent to check the emulator, for example *"Check the Android emulator's status."* The **Phone** panel opens.
 2. Read the Android SDK License Agreement. The panel links to it.
 3. Tick **I accept the Android SDK License Agreement** and choose **Set up Android emulator**.
 

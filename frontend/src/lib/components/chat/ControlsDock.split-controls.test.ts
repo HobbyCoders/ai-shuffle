@@ -288,6 +288,14 @@ describe('ControlsDock split controls', () => {
 		expect(toggle).toHaveBeenCalledOnce();
 	});
 
+	it('offers no Phone toggle at any width: the phone opens when the agent uses it', () => {
+		const { container } = renderDock({ onBrowserToggle: vi.fn(),
+			terminal: { open: false, disabledReason: null, toggle: vi.fn(), preload: vi.fn() } });
+		expect(screen.getByRole('button', { name: 'Toggle terminal' })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /phone|emulator/i })).toBeNull();
+		expect(container.querySelector('.phone-toggle-btn')).toBeNull();
+	});
+
 	it('splits the old summary chip into permission, model and effort controls', () => {
 		const { container } = renderDock();
 
