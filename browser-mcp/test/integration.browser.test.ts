@@ -303,6 +303,9 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
+        // Match the worker launcher; managed Chromium bypasses distro wrappers
+        // which add this flag automatically on small container /dev/shm mounts.
+        "--disable-dev-shm-usage",
         // Linux/Ozone only, as in docker/start-chrome.sh (#1791). Other platforms
         // ignore this flag; the fixed-screen regression is skipped there (#2292).
         "--ozone-override-screen-size=1920,1080",
