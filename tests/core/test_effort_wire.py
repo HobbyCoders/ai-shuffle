@@ -35,6 +35,7 @@ ROUTES = [
     ("anthropic", "claude-opus-4-7", None, None),
     ("delegated", "claude-opus-4-7", None, None),
     ("openai", "gpt-5.5", None, None),
+    ("openai", "gpt-6.1-sol", None, None),
     ("chatgpt", "gpt-6.1-sol", ["low", "medium", "high", "xhigh", "max", "ultra"], "low"),
     ("chatgpt", "catalog-future", list(EFFORT_LEVELS), "medium"),
     ("xai", "grok-4.6", None, None),
@@ -52,6 +53,9 @@ for kind, model, levels, default in ROUTES:
 CASES.append(pytest.param("chatgpt", "gpt-6.1-sol",
     provider("chatgpt", "gpt-6.1-sol", ["low", "high"], "low"),
     "app-initial", "high", id="benchmarked-initial-picker-to-wire"))
+for unsupported in ("none", "minimal", "ultra"):
+    CASES.append(pytest.param("openai", "gpt-6.1-sol", provider("openai", "gpt-6.1-sol"),
+                              unsupported, None, id=f"native-sol-reject-{unsupported}"))
 # Remembered or inherited invalid picks, effortless and unknown models.
 for kind in ("anthropic", "delegated"):
     CASES.extend([
