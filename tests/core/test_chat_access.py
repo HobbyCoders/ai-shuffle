@@ -613,6 +613,8 @@ def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, m
     assert options.plugins == []
     assert not isinstance(options.system_prompt, dict)
     assert "general-purpose assistant" in options.system_prompt
+    from app.mcp.chat_access_sdk import GUIDANCE
+    assert options.system_prompt.count(GUIDANCE) == 1
     assert set(options.mcp_servers) == {"builtins", "chat-access"}
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
     assert "Bash" not in options.allowed_tools
@@ -703,7 +705,7 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
     {"suggested_username": None},
 ])
 async def test_machine_hints_reject_invalid_inputs_before_card(broker, hints):
-    with pytest.raises(AccessDenied):
+    with pytest.raises(AccessDenied, match=next(iter(hints))):
         await broker.request("chat", "machine", "Inspect VM", **hints)
     assert not broker.requests and not broker.grants
 
@@ -714,8 +716,9 @@ async def test_machine_hints_reject_invalid_inputs_before_card(broker, hints):
     {"suggested_host": "10.0.0.50"}, {"suggested_port": 22}, {"suggested_username": "x"},
 ])
 async def test_machine_hints_are_machine_only(broker, kind, hints):
-    with pytest.raises(AccessDenied, match="only available for machine"):
+    with pytest.raises(AccessDenied, match="only available for machine") as caught:
         await broker.request("chat", kind, "Inspect resource", **hints)
+    assert next(iter(hints)) in str(caught.value)
     assert not broker.requests
 
 
@@ -750,6 +753,90 @@ async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, 
     finally:
         requested.cancel()
         await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,use_saved", [("machine", True), ("machine", False), ("folder", False)])
+async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
+    broker, saved_vault, ssh_target, monkeypatch, tmp_path, kind, use_saved,
+):
+    from unittest.mock import patch
+    from uuid import UUID
+
+    from app.core.chat_access import GrantSubmission
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.db import database
+    from app.mcp import chat_access_sdk as sdk
+
+    row = {"id": "chat", "mode": "chat", "instance_id": "worker", "permission_mode": "default"}
+    monkeypatch.setattr(database, "get_session", lambda sid: row)
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    monkeypatch.setattr(sdk, "broker", broker)
+    spec, _, _ = ssh_target
+    # Reproduce the plain-JSON payload, including its saved ID. The required
+    # purpose is supplied separately; blank purposes must still be refused.
+    args = {"kind": "machine", "saved_id": "2fa64c8f515e4800aa658ba26f7aff00",
+            "plugin": "", "service": "", "suggested_url": "", "suggested_host": "",
+            "suggested_path": "", "suggested_port": 22, "service_provider": "custom",
+            "suggested_username": ""}
+    if use_saved:
+        with patch.object(chat_vault.uuid, "uuid4", return_value=UUID(args["saved_id"])):
+            assert chat_vault.save((None, "worker", None), spec) == args["saved_id"]
+    else:
+        args["saved_id"] = ""
+    args.update(kind=kind, purpose="Inspect resource")
+    if kind == "folder":
+        spec = GrantInput(kind="folder", label="Test folder", path=str(tmp_path))
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
+    try:
+        async with asyncio.timeout(3):
+            while not broker.requests and not requested.done():
+                await asyncio.sleep(0)
+        assert not requested.done(), requested.result() if requested.done() else None
+        card = (await broker.snapshot("chat"))["requests"][0]
+        assert card.get("saved_id", "") == args["saved_id"]
+        assert card["kind"] == kind
+        for field in ("suggested_host", "suggested_username", "suggested_path", "suggested_url", "service_provider"):
+            assert not card.get(field)
+        expected_port = 22 if kind == "machine" and not use_saved else None
+        assert card.get("suggested_port") == expected_port
+        assert not broker.grants  # Creating a card is not approval.
+        submission = GrantSubmission(saved_id=args["saved_id"]) if use_saved else GrantSubmission(connection=spec)
+        await broker.fulfill("chat", card["id"], submission)
+        response = await asyncio.wait_for(requested, 3)
+        assert not response.get("isError")
+        handle = json.loads(response["content"][0]["text"])
+        assert handle["kind"] == kind
+        broker.revoke("chat", handle["id"])
+    finally:
+        requested.cancel()
+        await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", [None, "", " \t"])
+@pytest.mark.parametrize("kind,expected", [
+    ("machine", {"suggested_host": "192.0.2.1", "suggested_port": 2222, "suggested_username": "operator"}),
+    ("folder", {"suggested_path": "/workspace/project"}),
+    ("service", {"service_provider": "custom", "suggested_url": "https://api.example"}),
+])
+async def test_sdk_keeps_only_meaningful_hints_for_kind(monkeypatch, kind, expected, blank):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    request = AsyncMock(return_value={"status": "awaiting_user"})
+    monkeypatch.setattr(sdk.broker, "request", request)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    args = {"kind": kind, "purpose": "Inspect resource", "suggested_host": "192.0.2.1",
+            "suggested_port": 2222, "suggested_username": "operator", "suggested_path": "/workspace/project",
+            "service_provider": "custom", "suggested_url": "https://api.example"}
+    assert not (await tools["RequestChatAccess"].handler(args)).get("isError")
+    request.assert_awaited_once_with("chat", kind, "Inspect resource", **expected, plugin="", service="", saved_id="")
+    request.reset_mock()
+    args.update({field: blank for field in expected})
+    assert not (await tools["RequestChatAccess"].handler(args)).get("isError")
+    request.assert_awaited_once_with("chat", kind, "Inspect resource", plugin="", service="", saved_id="")
 
 
 @pytest.mark.asyncio
@@ -1258,7 +1345,8 @@ def test_code_and_voice_options_include_private_tools_without_chat_restrictions(
         options, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
     assert "chat-access" in options.mcp_servers
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
-    assert "private input card" in str(options.system_prompt)
+    from app.mcp.chat_access_sdk import GUIDANCE
+    assert str(options.system_prompt).count(GUIDANCE) == 1
     assert "For repository development, ask the user to switch" not in str(options.system_prompt)
     assert options.tools == {"type": "preset", "preset": "claude_code"}
     profile["config"].update(tool_selection_mode="disallow", disallowed_tools=CHAT_MODE_RESOURCE_TOOLS)

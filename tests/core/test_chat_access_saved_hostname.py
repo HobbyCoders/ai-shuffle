@@ -116,7 +116,7 @@ async def test_saved_discovery_uses_real_owner_scoped_vault_and_survives_broker_
         await restarted.request("chat", "service", "Read inventory", saved_id=foreign)
     with pytest.raises(AccessDenied, match="Unknown saved connection"):
         await restarted.request("chat", "machine", "Wrong kind", saved_id=saved_id)
-    with pytest.raises(AccessDenied, match="without connection hints"):
+    with pytest.raises(AccessDenied, match="without connection hints.*service_provider"):
         await restarted.request("chat", "service", "Conflicting hints", saved_id=saved_id, service_provider="cloudflare")
     assert not restarted.grants and not restarted.requests
 

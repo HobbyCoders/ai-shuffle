@@ -671,19 +671,25 @@ class Broker:
                       saved_id: str = ""):
         owner = await session_owner(session_id)
         if not isinstance(saved_id, str):
-            raise AccessDenied("Unknown saved connection.")
+            raise AccessDenied("Unknown saved connection (saved_id).")
         if saved_id:
-            if (plugin or service or suggested_path or suggested_host or suggested_port is not None
-                    or suggested_username or service_provider or suggested_url):
-                raise AccessDenied("Use saved_id without connection hints or plugin sign-in.")
+            conflicts = [name for name, present in (
+                ("plugin", plugin), ("service", service), ("suggested_path", suggested_path),
+                ("suggested_host", suggested_host), ("suggested_port", suggested_port is not None),
+                ("suggested_username", suggested_username), ("service_provider", service_provider),
+                ("suggested_url", suggested_url),
+            ) if present]
+            if conflicts:
+                raise AccessDenied("Use saved_id without connection hints or plugin sign-in. Omit: "
+                                   + ", ".join(conflicts) + ".")
             saved = await self._saved_metadata(owner)
             if not any(entry["id"] == saved_id and entry["kind"] == kind for entry in saved):
-                raise AccessDenied("Unknown saved connection for this resource kind.")
+                raise AccessDenied("Unknown saved connection for this resource kind (saved_id, kind).")
         if not isinstance(plugin, str) or not isinstance(service, str):
-            raise AccessDenied("Name an installed plugin and one service it declares.")
+            raise AccessDenied("Name an installed plugin (plugin) and one service it declares (service).")
         if plugin or service:
             if kind != "service" or not (plugin and service):
-                raise AccessDenied("A plugin sign-in request needs kind service, the plugin id and the service name.")
+                raise AccessDenied("A plugin sign-in request needs kind service, the plugin id (plugin) and the service name (service).")
             if service_provider or suggested_url:
                 raise AccessDenied("A plugin service's address comes from the plugin; omit service_provider and suggested_url.")
             config = await _plugin_config(plugin, service)
@@ -691,37 +697,46 @@ class Broker:
             service_provider = "custom"
             suggested_url = chat_services.parse_origin(config.service_url).url
         if kind not in {"machine", "folder", "service"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
-            raise AccessDenied("Specify machine, folder or service and a short explanation of the requested access.")
+            raise AccessDenied("Specify machine, folder or service (kind) and a short explanation of the requested access (purpose).")
         if not isinstance(suggested_host, str) or not isinstance(suggested_username, str):
-            raise AccessDenied("Machine hints must be an IPv4 or IPv6 literal and a POSIX username. Pass the machine IP, not a hostname.")
+            raise AccessDenied("suggested_host and suggested_username must be strings. Pass the machine IP as an IPv4 or IPv6 literal and a POSIX username.")
         if (suggested_host or suggested_port is not None or suggested_username) and kind != "machine":
-            raise AccessDenied("Machine setup hints are only available for machine requests.")
+            fields = [name for name, present in (
+                ("suggested_host", suggested_host), ("suggested_port", suggested_port is not None),
+                ("suggested_username", suggested_username),
+            ) if present]
+            raise AccessDenied("Machine setup hints are only available for machine requests. Omit: "
+                               + ", ".join(fields) + ".")
         if suggested_host:
             try:
                 address = ipaddress.ip_address(suggested_host)
             except ValueError:
-                raise AccessDenied("Pass the machine IP as an IPv4 or IPv6 literal, not a hostname, URL or credentials.") from None
+                raise AccessDenied("suggested_host: Pass the machine IP as an IPv4 or IPv6 literal, not a hostname, URL or credentials.") from None
             if "%" in suggested_host or address.is_unspecified or address.is_multicast or address.is_link_local:
-                raise AccessDenied("Suggest a unicast machine IP literal without an interface scope.")
+                raise AccessDenied("suggested_host: Suggest a unicast machine IP literal without an interface scope.")
         if suggested_port is not None and (type(suggested_port) is not int or not 1 <= suggested_port <= 65535):
-            raise AccessDenied("A suggested machine port must be an integer from 1 to 65535.")
+            raise AccessDenied("suggested_port: A suggested machine port must be an integer from 1 to 65535.")
         if suggested_username and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", suggested_username):
-            raise AccessDenied("Suggest a POSIX username, never credentials or connection strings.")
+            raise AccessDenied("suggested_username: Suggest a POSIX username, never credentials or connection strings.")
         if not isinstance(suggested_path, str) or (suggested_path and (
             kind != "folder" or not suggested_path.startswith("/") or len(suggested_path) > 4096
             or any(c in suggested_path for c in "\0\r\n")
         )):
-            raise AccessDenied("A suggested path must be an absolute folder path on the owning worker.")
+            raise AccessDenied("suggested_path: A suggested path must be an absolute folder path on the owning worker.")
         if kind == "folder" and not chat_files.available():
             raise AccessDenied("This worker cannot safely grant folders. Do not ask for a path or use a shell workaround.")
         if not isinstance(service_provider, str) or not isinstance(suggested_url, str):
-            raise AccessDenied("Specify a service provider and a public HTTPS API base address.")
+            raise AccessDenied("service_provider and suggested_url must be strings: specify a service provider and a public HTTPS API base address.")
         if (service_provider or suggested_url) and kind != "service":
-            raise AccessDenied("Service setup hints are only available for service requests.")
+            fields = [name for name, value in (
+                ("service_provider", service_provider), ("suggested_url", suggested_url),
+            ) if value]
+            raise AccessDenied("Service setup hints are only available for service requests. Omit: "
+                               + ", ".join(fields) + ".")
         if kind == "service" and not plugin:
             service_provider = service_provider or ("cloudflare" if suggested_url.rstrip("/") == CLOUDFLARE_API_URL else "custom")
             if service_provider not in {"cloudflare", "custom"}:
-                raise AccessDenied("Choose cloudflare or custom for the service provider.")
+                raise AccessDenied("service_provider: Choose cloudflare or custom for the service provider.")
             if suggested_url:
                 origin = chat_services.parse_origin(suggested_url)
                 try:
@@ -730,11 +745,11 @@ class Broker:
                     address = None
                 if ((address is not None and not address.is_global)
                         or origin.host == "localhost" or origin.host.endswith((".localhost", ".local"))):
-                    raise AccessDenied("Only public service endpoints may be suggested; choose private addresses in the card.")
+                    raise AccessDenied("suggested_url: Only public service endpoints may be suggested; choose private addresses in the card.")
                 suggested_url = origin.url
             if service_provider == "cloudflare":
                 if suggested_url and suggested_url != CLOUDFLARE_API_URL:
-                    raise AccessDenied("The Cloudflare preset uses its official API base address.")
+                    raise AccessDenied("suggested_url: The Cloudflare preset uses its official API base address.")
                 suggested_url = CLOUDFLARE_API_URL
         for pending in self._live_requests(session_id, owner):
             if (kind == "service" and pending.kind == kind and pending.purpose == purpose.strip()

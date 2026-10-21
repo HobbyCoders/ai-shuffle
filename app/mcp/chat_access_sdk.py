@@ -32,13 +32,22 @@ def create_chat_access_server(session_id: str):
     async def invoke(operation, args):
         try:
             if operation == "request":
-                result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""),
-                                              suggested_path=args.get("suggested_path", ""),
-                                              suggested_host=args.get("suggested_host", ""),
-                                              suggested_port=args.get("suggested_port"),
-                                              suggested_username=args.get("suggested_username", ""),
-                                              service_provider=args.get("service_provider", ""),
-                                              suggested_url=args.get("suggested_url", ""),
+                kind = args.get("kind", "")
+                # Plain-JSON callers may fill every optional field. Only pass
+                # meaningful hints for this kind; a saved entry defines them all.
+                hint_kinds = {
+                    "suggested_host": "machine", "suggested_port": "machine",
+                    "suggested_username": "machine", "suggested_path": "folder",
+                    "service_provider": "service", "suggested_url": "service",
+                }
+                hints = {
+                    name: args[name] for name, hint_kind in hint_kinds.items()
+                    if not args.get("saved_id") and kind == hint_kind
+                    and args.get(name) is not None
+                    and not (isinstance(args[name], str) and not args[name].strip())
+                }
+                result = await broker.request(session_id, kind, args.get("purpose", ""),
+                                              **hints,
                                               plugin=args.get("plugin", ""), service=args.get("service", ""),
                                               saved_id=args.get("saved_id", ""))
             elif operation == "resources":
