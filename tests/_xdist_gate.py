@@ -1,11 +1,15 @@
-"""One ``pytest -n`` run per machine.
+"""Machine-sized slots for concurrent ``pytest -n`` runs.
 
-The worker container is shared by every agent session on the host. Several
-parallel pytest runs at once (each with its own xdist workers) have driven it
-to almost all of the host's CPU. ``tests/conftest.py`` calls :func:`configure`
-from ``pytest_configure`` and :func:`unconfigure` from ``pytest_unconfigure``,
-so an xdist controller takes an exclusive lock on a file in the system temp
-directory before it starts its workers and waits while another run holds it.
+``tests/conftest.py`` takes one OS file lock per controller before starting
+xdist workers. Slots default to one per eight CPUs and per 12 GiB total RAM,
+with a minimum of one and maximum of four. Total (not free) memory keeps the
+budget stable across concurrent runs. Unknown memory means one slot.
+``AI_SHUFFLE_PYTEST_SLOTS`` overrides this budget. Each gated controller is
+capped at two workers, so the default admits at most eight xdist workers.
+
+Waiters rotate their first slot and jitter their polling to share acquisition
+opportunities rather than repeatedly racing in lockstep. This is best-effort
+fairness, not a strict FIFO queue; OS locks do not promise FIFO admission.
 
 The lock is an OS file lock (``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
 Windows), so the operating system drops it when the holding process exits;
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import errno
 import os
+import random
 import sys
 import tempfile
 import time
@@ -28,6 +33,8 @@ from typing import Callable, Mapping, Optional, TextIO
 
 LOCK_FILE_NAME = "ai-shuffle-pytest-xdist.lock"
 BYPASS_ENV = "AI_SHUFFLE_PYTEST_GATE"
+SLOTS_ENV = "AI_SHUFFLE_PYTEST_SLOTS"
+WORKERS_PER_SLOT = 2
 # Only GITHUB_ACTIONS marks a CI run. A bare ``CI`` is not enough: the desktop
 # app starts its worker with CI=true (desktop/src/main/source-build.ts
 # buildEnvironment), so every agent shell on a desktop worker inherits it.
@@ -56,6 +63,38 @@ _HELD_ERRNOS = {
 def default_lock_path() -> str:
     """Lock file shared by every checkout on this machine."""
     return os.path.join(tempfile.gettempdir(), LOCK_FILE_NAME)
+
+
+def _cpu_count() -> int:
+    """Respect a container/worker's CPU affinity where the OS exposes it."""
+    count = os.cpu_count() or 1
+    try:
+        return min(count, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return count
+
+
+def _total_memory_bytes() -> Optional[int]:
+    """Portable physical RAM budget; never derive capacity from fluctuating free RAM."""
+    try:
+        import psutil
+
+        return psutil.virtual_memory().total
+    except (ImportError, OSError, ValueError, AttributeError):
+        return None
+
+
+def slot_count(environ: Optional[Mapping[str, str]] = None) -> int:
+    env = os.environ if environ is None else environ
+    try:
+        override = int(env.get(SLOTS_ENV, ""))
+        if override >= 1:
+            return override
+    except (ValueError, TypeError):
+        pass
+    memory = _total_memory_bytes()
+    memory_slots = memory // (12 * 1024**3) if memory else 1
+    return max(1, min(4, _cpu_count() // 8, memory_slots))
 
 
 def xdist_parallel(config) -> bool:
@@ -207,12 +246,50 @@ class XdistGate:
         self._close()
 
 
-def configure(config, environ: Optional[Mapping[str, str]] = None, **gate_kwargs) -> Optional[XdistGate]:
-    """``pytest_configure`` body: take the lock when the gate applies."""
+class XdistSlots(XdistGate):
+    """Scan independent per-file locks, closing every losing descriptor immediately."""
+
+    def __init__(self, path: Optional[str] = None, *, slots: int = 1, **kwargs) -> None:
+        super().__init__(path, **kwargs)
+        self._base_path = self.path
+        self.slots = slots
+        self._next_slot = os.getpid() % slots
+
+    def try_lock(self) -> bool:
+        if self.held:
+            return True
+        start = self._next_slot
+        self._next_slot = (start + 1) % self.slots
+        for offset in range(self.slots):
+            self.path = f"{self._base_path}.{(start + offset) % self.slots}"
+            if super().try_lock():
+                return True
+            self._close()
+        return False
+
+    def acquire(self) -> bool:
+        # Jitter the inherited bounded wait/notice loop so independent sessions
+        # do not always poll in the same order. Restore the supplied sleep hook.
+        sleep = self._sleep
+        self._sleep = lambda delay: sleep(delay * random.uniform(0.5, 1.0))
+        try:
+            return super().acquire()
+        finally:
+            self._sleep = sleep
+
+
+def configure(config, environ: Optional[Mapping[str, str]] = None, **gate_kwargs) -> Optional[XdistSlots]:
+    """``pytest_configure`` body: reserve a slot when the gate applies."""
     try:
         if not gate_applies(config, environ):
             return None
-        gate = XdistGate(**gate_kwargs)
+        requested = config.getoption("numprocesses", default=None)
+        if isinstance(requested, str) or requested > WORKERS_PER_SLOT:
+            config.option.numprocesses = WORKERS_PER_SLOT
+            _warn(gate_kwargs.get("stream"),
+                  f"pytest gate: limiting {requested!r} workers to {WORKERS_PER_SLOT} per slot.")
+        gate_kwargs.setdefault("slots", slot_count(environ))
+        gate = XdistSlots(**gate_kwargs)
         if gate.acquire():
             setattr(config, _CONFIG_ATTR, gate)
             return gate
