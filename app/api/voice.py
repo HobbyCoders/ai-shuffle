@@ -1433,9 +1433,11 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
             raise HTTPException(429, "Too many voice calls are connected.")
         from app.core.voice_grok import GrokVoiceStream
-        from app.core.voice_codex import CodexVoiceStream
-        stream_cls = (CodexVoiceStream if config["model"] == CODEX_MODEL else
-                      GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream)
+        if config["model"] == CODEX_MODEL:
+            from app.core.voice_codex import CodexVoiceStream  # Only when this engine is used.
+            stream_cls = CodexVoiceStream
+        else:
+            stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
         call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],
                                         api_user_id=(api_user or {}).get("id"))
         # Reserve before accepting: there is no await between capacity check

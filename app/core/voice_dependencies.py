@@ -4,6 +4,7 @@ Invoked explicitly by installers as a standalone script. Failure to install
 this separately hash-pinned feature must never fail an app install/update.
 """
 import importlib
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -56,11 +57,16 @@ def install(root):
         print(reason or UNAVAILABLE + " Optional dependency lock is missing.")
         return False
     try:
+        try:  # Standalone installer runs may not have the harness on the path.
+            from fluid.tools.child_env import scrub_child_env
+            env = scrub_child_env()
+        except ImportError:
+            env = dict(os.environ)
         result = subprocess.run([
             sys.executable, "-m", "pip", "install", "--only-binary=:all:",
             "--require-hashes", "--no-deps", "--timeout", "30", "--retries", "0",
             "-r", str(lock),
-        ], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        ], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, env=env)
         installed = result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         installed = False
