@@ -145,7 +145,7 @@ def test_workers_lists_this_worker_without_peer_endpoints(c):
         "device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version",
         "running_version", "percent", "message", "error", "reason", "request_pending", "checked_at",
         "channel", "release", "notes", "role", "label", "deferred", "notice", "remedy", "data_kept",
-        "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at"}
+        "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result"}
     assert body["plan"]["action"] in ("check", "download", "install")
 
 

@@ -21,6 +21,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(updates, "_desktop_seen", 0)
     monkeypatch.setattr(updates, "_desktop_request", None)
     monkeypatch.setattr(updates, "_desktop_followup", None)
+    monkeypatch.setattr(fleet, "_stop_result", None)
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: [])
     fleet._receipts.clear()
     fleet._peer_status.clear()
@@ -902,6 +903,28 @@ def test_queued_check_is_not_reported_as_a_restart(setup, action, expected, tran
     assert asyncio.run(fleet.snapshot())["workers"][0]["install_state"] == expected
 
 
+def test_error_after_send_is_not_mislabeled_as_not_sent(setup, monkeypatch):
+    monkeypatch.setattr(fleet, "_send", AsyncMock(side_effect=ValueError("delivery already attempted")))
+    with pytest.raises(ValueError, match="delivery already attempted"):
+        asyncio.run(fleet.dispatch("install", "stop"))
+
+
+@pytest.mark.parametrize("mode", ["stop", "when_idle"])
+def test_presend_stop_refusal_names_workers_and_mode(setup, monkeypatch, caplog, mode):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    monkeypatch.setattr(fleet.progress, "load", lambda: {"phase": "waiting"})
+    monkeypatch.setattr(fleet, "snapshot", AsyncMock(return_value={"operation": {"phase": "waiting"}}))
+    with caplog.at_level("INFO"):
+        result = asyncio.run(fleet.dispatch("install", mode))
+    assert result["sent"] is None
+    assert {row["device_name"] for row in result["results"]} >= {"Current worker", "Peer"}
+    assert all(row["request_state"] == "not_sent" and row["device_name"] in row["reason"] for row in result["results"])
+    assert "mode=" + mode in caplog.text and "scope=all" in caplog.text
+    remote.assert_not_called()
+    assert updates._desktop_request is None
+
+
 def test_waiting_contract_keeps_staged_identity_beside_new_offer(setup):
     updates.desktop_exchange({"phase": "available", "version": "c" * 12, "staged_version": B})
     row = asyncio.run(fleet.snapshot())["workers"][0]
@@ -1041,7 +1064,11 @@ def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypat
     assert updates._desktop_request is None
     assert "could not stop s1 before restarting" in caplog.text
     assert "Busy with running work: Fix login" in caplog.text
-    assert asyncio.run(fleet.snapshot())["refusals"]["self"] == "Busy with running work: Fix login"
+    snapshot = asyncio.run(fleet.snapshot())
+    assert snapshot["refusals"]["self"] == "Busy with running work: Fix login"
+    row = snapshot["workers"][0]
+    assert row["wait_reason"] == "still_busy_after_stop"
+    assert row["stop_result"]["accepted"] is False
 
 
 def test_a_mode_only_applies_to_install(setup):
