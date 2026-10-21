@@ -4,6 +4,9 @@ No live auth, HTTP or claude process: only credentials/transport and unrelated
 workspace discovery are replaced. The request producer and serializer are real.
 """
 import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -89,8 +92,10 @@ async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
                               thinking_mode="default", expected_thinking=None, local_extra=None):
     from app.core.config import settings
     captured = []
+    destinations = []
 
     def capture(request):
+        destinations.append((request.method, str(request.url)))
         captured.append(json.loads(request.content))
         return httpx.Response(200, headers={"content-type": "text/event-stream"},
                               text="data: [DONE]\n\n")
@@ -154,8 +159,33 @@ async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
         await adapter.connect_with_sdk_options(opts)
         loop = adapter._engine
         if kind == "delegated":
-            assert loop.effort == expected
-            argv = loop._build_argv()
+            import fluid.engine.delegated as delegated
+
+            class SpawnCaptured(Exception):
+                """Stop at the OS boundary, without starting a paid CLI."""
+
+            launches = []
+
+            async def capture_spawn(*argv, **kwargs):
+                if "--version" in argv:
+                    return SimpleNamespace(communicate=AsyncMock(
+                        return_value=(b"2.1.295 (Claude Code)", b"")))
+                launches.append(argv)
+                raise SpawnCaptured
+
+            # Resolve an installed executable even when agent isolation wraps
+            # the command. Neither the argv builder nor spawn wrapper is mocked.
+            loop.claude_cmd = [sys.executable, str(
+                Path(__file__).resolve().parents[2] / "fluid/tests/fixtures/fake_claude_script.py")]
+            monkeypatch.setattr(delegated.asyncio, "create_subprocess_exec", capture_spawn)
+            monkeypatch.setattr(loop, "_start_bundled_server", AsyncMock())
+            with pytest.raises(SpawnCaptured):
+                await loop._ensure_process()
+            assert len(launches) == 1
+            argv = launches[0]
+            assert argv[argv.index("--input-format") + 1] == "stream-json"
+            assert argv[argv.index("--output-format") + 1] == "stream-json"
+            assert argv.count("--effort") == (0 if expected is None else 1)
             assert (argv[argv.index("--effort") + 1] if "--effort" in argv else None) == expected
             assert loop._setting_request("apply_flag_settings")["settings"]["effortLevel"] == expected
             record_property("wire", {"route": kind, "model": model, "pick": pick,
@@ -169,6 +199,13 @@ async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
             async for _ in loop.provider.stream(request):
                 pass
             assert len(captured) == 1
+            endpoint = (
+                "https://chatgpt.com/backend-api/codex/responses" if kind == "chatgpt" else
+                "http://fixture.invalid/v1/messages" if kind == "anthropic" else
+                "http://fixture.invalid/v1/responses" if kind in ("openai", "xai") else
+                "http://fixture.invalid/v1/chat/completions"
+            )
+            assert destinations == [("POST", endpoint)]
             body = captured[0]
             record_property("wire", {"route": kind, "model": model, "pick": pick,
                 "source": source, "thinking_mode": thinking_mode, "parameters": {k: v for k, v in body.items()
@@ -195,12 +232,17 @@ async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
                 assert loop._build_request([]).model == "claude-opus-4-6"
                 assert body.get("thinking") == expected_thinking
             key = "output_config" if kind == "anthropic" else "reasoning"
+            # A correct nested value alongside a second, incompatible effort
+            # field is still a bad request. Pin the entire effort object.
+            assert "reasoning_effort" not in body
+            assert ("reasoning" if kind == "anthropic" else "output_config") not in body
             if expected is None:
                 assert key not in body
             else:
-                assert body[key]["effort"] == expected
+                expected_object = {"effort": expected}
                 if kind in ("openai", "chatgpt", "xai"):
-                    assert body[key] == {"effort": expected, "summary": "auto"}
+                    expected_object["summary"] = "auto"
+                assert body[key] == expected_object
     finally:
         await adapter.disconnect()
         await http.aclose()
@@ -246,3 +288,102 @@ async def test_api_local_settings_to_wire(authenticated_client, mock_db, monkeyp
         "custom", "local", stored, None, None, "session", local_extra={
             "temperature": 0.6, "top_p": 0.95, "top_k": top_k, "min_p": 0.0,
             penalty: 1.1, "chat_template_kwargs": {"enable_thinking": False}})
+
+
+# Independent expectations, not generated from effort_capabilities: deleting a
+# picker level must fail a test rather than silently deleting a wire case.
+# Groups enumerate every native table entry; catalog routes state their metadata.
+WIRE_CONTRACTS = [
+    ("anthropic", (
+        "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+        "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5",
+        "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
+    ), ("low", "medium", "high", "xhigh", "max")),
+    ("anthropic", ("claude-mythos-preview", "claude-opus-4-6", "claude-sonnet-4-6"),
+     ("low", "medium", "high", "max")),
+    ("anthropic", ("claude-opus-4-5-20251101",), ("low", "medium", "high")),
+    ("anthropic", ("claude-haiku-4-5", "claude-haiku-4-5-20251001"), ()),
+    ("delegated", (
+        "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
+        "claude-opus-4-8", "claude-opus-4-7", "claude-haiku-5-5", "claude-opus-5-5",
+        "claude-sonnet-5-5",
+    ), ("low", "medium", "high", "xhigh", "max")),
+    ("delegated", ("claude-opus-4-6", "claude-sonnet-4-6"), ("low", "medium", "high", "max")),
+    ("delegated", (
+        "claude-mythos-5-1", "claude-mythos-5", "claude-mythos-preview",
+        "claude-opus-4-5-20251101", "claude-haiku-4-5", "claude-haiku-4-5-20251001",
+    ), ()),
+    ("openai", ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+     ("none", "low", "medium", "high", "xhigh", "max")),
+    ("openai", ("gpt-6-astra", "gpt-6.1-sol"), ("low", "medium", "high", "xhigh", "max")),
+    ("openai", ("gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"),
+     ("none", "low", "medium", "high", "xhigh")),
+    ("chatgpt", ("catalog-all",),
+     ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")),
+    ("chatgpt", ("gpt-5.5",), ("none", "low", "medium", "high", "xhigh")),
+    ("chatgpt", ("gpt-6.1-sol",), ("low", "medium", "high", "xhigh", "max", "ultra")),
+    ("openrouter", ("catalog-all",), ("none", "minimal", "low", "medium", "high", "xhigh", "max")),
+    ("openrouter", ("catalog-mandatory",), ("low", "medium", "high", "xhigh", "max")),
+    ("custom", ("local-all",), ("none", "minimal", "low", "medium", "high", "xhigh", "max")),
+    ("custom", ("local-restricted",), ("none", "low", "medium", "high")),
+    ("custom", ("local-off",), ()),
+]
+# Include provider default (None), every recognized token, and an unrecognized
+# spelling. In particular "none" is an explicit wire value, not Python None.
+WIRE_PICKS = (None, "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "bogus")
+MATRIX_CASES = []
+for kind, models, levels in WIRE_CONTRACTS:
+    for model in models:
+        for pick in WIRE_PICKS:
+            expected = pick if pick in levels else None
+            if kind in ("anthropic", "delegated") and levels:
+                if pick == "xhigh" and "xhigh" not in levels:
+                    expected = "high"
+                if pick == "max" and "max" not in levels:
+                    expected = "high"
+            MATRIX_CASES.append(pytest.param(
+                kind, model, levels, pick, expected, id=f"{kind}-{model}-{pick}"))
+
+
+def test_wire_matrix_covers_native_catalog():
+    from app.core.model_effort import _ANTHROPIC, _CLI, _OPENAI
+
+    for kind, table in (("anthropic", _ANTHROPIC), ("delegated", _CLI), ("openai", _OPENAI)):
+        assert {model for route, models, _ in WIRE_CONTRACTS if route == kind
+                for model in models} == set(table)
+    assert set(WIRE_PICKS) >= {None, *EFFORT_LEVELS}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,model,levels,pick,expected", MATRIX_CASES)
+@pytest.mark.parametrize("source", ["session", "override"])
+async def test_explicit_route_effort_matrix(mock_db, monkeypatch, tmp_path, record_property,
+                                           kind, model, levels, pick, expected, source):
+    if kind in ("anthropic", "delegated"):
+        row = None
+        route = kind
+    elif kind == "openai":
+        row = provider(kind, model)
+        route = "openai_responses"
+    else:
+        row = provider(kind, model, list(levels), "medium" if "medium" in levels else None)
+        route = "openai_responses" if kind == "chatgpt" else "openrouter"
+        if model == "catalog-mandatory":
+            row["models_json"][0]["reasoning_capabilities"]["mandatory"] = True
+    assert effort_capabilities(model, row, route=route)["effort_levels"] == list(levels)
+    await test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
+                              kind, model, row, pick, expected, source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["claude-opus-4-7", "claude-opus-5", "claude-fable-5-1"])
+@pytest.mark.parametrize("pick", [None, "low", "medium", "high", "xhigh", "max"])
+async def test_thinking_off_to_wire(mock_db, monkeypatch, tmp_path, record_property, model, pick):
+    # Off is distinct from provider-default effort. Always-thinking models must
+    # omit an illegal disabled block, without losing their effort selection.
+    thinking = {"type": "disabled"}
+    if model == "claude-fable-5-1" or (model == "claude-opus-5" and pick in ("xhigh", "max")):
+        thinking = None
+    await test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
+        "anthropic", model, None, pick, pick, "session",
+        thinking_mode="disabled", expected_thinking=thinking)

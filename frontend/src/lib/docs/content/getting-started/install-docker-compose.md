@@ -377,6 +377,12 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/sessions
 
 Earlier versions let `docker exec <container> curl http://localhost:8000/...` (and the host itself, with `network_mode: host`) act as the owner without a password; those calls now get `401` or `403`. Requests from the host through the published port always needed a sign-in, so they are unchanged, and so is the health check. Keep the token out of project folders and the container's environment, where agents could read it. Details: [Calling a Docker worker from scripts](/docs/api-reference/authentication#calling-a-docker-worker-from-scripts).
 
+## Bundled tool assets
+
+The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`.
+
+If startup reports `Bundled tool assets are missing`, replace or rebuild the image and remove any mount hiding `/opt/ai-tools` or `/opt/browser-mcp`. Startup does not install packages or continue with incomplete bundled tools. Database dump and restore remain available without these assets.
+
 ## Optional settings
 
 These are only needed in special cases. Uncomment the matching line under `environment:` in `compose.yaml` (or add `-e NAME=value` to `docker run`), then run `docker compose up -d`. A line in `.env` alone does not reach the container.
@@ -407,6 +413,16 @@ Agents' shell commands run as the `PUID` user. By default that user can also rea
 3. Run `docker compose up -d`. The log says `agent isolation is on`.
 
 AI Shuffle notes who owned each file before changing anything. Your database, keys and saved credentials stay as they are; nothing is created again. The container must start as root, which is the default; with `--user` the setting is ignored and the log says so. If the setting cannot be applied, AI Shuffle undoes the change, starts without it and says why in the log. Your projects keep their owner.
+
+**Require isolation (fail closed)**
+
+Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=required`). Startup refuses to launch the app unless isolation is established. The success log says `required agent isolation established`; refusal says `required agent isolation: startup refused` with the cause. Invalid service IDs, missing image helpers/accounts, unsupported ownership or code mounts, failed migration and non-root `--user` launches cannot fall back to an unisolated worker. A failed required migration **retains protected ownership** and stops; fix the cause and restart with `required` to resume, including after an interrupted migration. Only a deliberate `off` startup releases that ownership. Dump and restore reuse a completed isolation record without repeating migration; if it is incomplete, perform a normal required startup first. Do not override the image entrypoint or command with a direct app launch: only the supplied supervisor establishes isolation.
+
+**Image compatibility:** required mode first appears in the image built from merged PR #335 (not yet released; no older published version supports it). Pin an image containing that change and verify the success log. Older images interpret `required` as invalid, log `ignoring`, and run **unisolated**; rolling back the image tag can silently remove this protection. Check the release notes for the first published tag before deployment.
+
+**Valid values:** `off`, `on` and `required`. Values are trimmed and case-insensitive (`ON` and ` required ` work); empty or unset means `off`. Legacy spellings `1`, `true` and `yes` mean `on`; `0`, `false` and `no` mean `off`. Any other value, including `isolated` or a misspelling, **refuses container startup** with a message listing the valid values. This also applies to non-root container launches and maintenance commands; desktop and native installs ignore this container-only setting.
+
+The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
 
 **Turn it off**
 

@@ -139,6 +139,78 @@ class IsolationCheck(Check):
         self.passed("mode off again: ownership and modes are back exactly as before, same cluster and data")
 
 
+    def required_mode(self):
+        """Required startup, refusal and resumable partial migration on synthetic data."""
+        volume = self.volume()
+        # Inject a filesystem failure only in a disposable volume, after the
+        # first protected key migrated. Required mode must never give it back.
+        injection = """
+import os, sys
+from pathlib import Path
+sys.path.insert(0, '/app/docker')
+import agent_isolation as iso
+os.environ['AGENT_ISOLATION'] = 'required'
+root = Path('/data')
+keys = root / '.credential-keys'
+keys.mkdir()
+for name in ('first', 'second'):
+    p = keys / name
+    p.write_text('synthetic')
+    os.chown(p, 99, 100)
+os.chown(keys, 99, 100)
+os.chown(root, 99, 100)
+class FailOnce(iso.Ops):
+    moved = 0
+    def lchown(self, path, uid, gid):
+        if uid == 64000:
+            self.moved += 1
+            if self.moved == 3:
+                raise OSError('injected disposable migration failure')
+        super().lchown(path, uid, gid)
+try:
+    iso.bootstrap(root, iso.identity(99, 100), ops=FailOnce())
+except iso.IsolationError as error:
+    assert 'required agent isolation: startup refused' in str(error)
+else:
+    raise AssertionError('required migration did not refuse')
+assert iso.read_record(root)['state'] == 'enabling'
+assert keys.stat().st_uid == 64000
+assert any(p.stat().st_uid == 64000 for p in keys.iterdir())
+print('REQUIRED_PARTIAL_MIGRATION_RETAINED')
+"""
+        assert b"REQUIRED_PARTIAL_MIGRATION_RETAINED" in self.inspect_volume(volume, injection).stdout
+        required = self.launch(volume, env={"AGENT_ISOLATION": "required"})
+        self.ready(required)
+        logs = self.docker("logs", required)
+        assert b"required agent isolation established" in logs.stdout + logs.stderr
+        self.denied(required, ["cat", FILES[0]])
+        self.denied(required, ["ls", DIRS[0]])
+        assert self.dump(required).startswith(b"PGDMP")
+        # A live dump must reuse the record, not start another ownership walk.
+        assert b"required agent isolation established" not in self.docker(
+            "exec", required, "python", RUNTIME, "dump", "--file", "-", timeout=180).stderr
+        probe = Path(__file__).with_name("agent_isolation_probe.py").read_text()
+        result = self.docker("exec", "--workdir", "/app", required, "python", "-c", probe, "--disposable")
+        assert b"BASH_MONITOR_FILES_DATABASE_DENIED_SERVICE_READ_OK" in result.stdout
+        self.docker("restart", "--time", "90", required, timeout=100)
+        self.ready(required)
+        self.denied(required, ["cat", FILES[0]])
+        self.stop(required)
+        for env, user in (({"AGENT_ISOLATION": "required", "AGENT_ISOLATION_SERVICE_UID": "99"}, None),
+                          ({"AGENT_ISOLATION": "required"}, AGENT)):
+            refused = self.launch(volume, env=env, user=user)
+            self.exited(refused, success=False)
+            logs = self.docker("logs", refused)
+            assert b"required agent isolation: startup refused" in logs.stdout + logs.stderr
+            assert b"agents run unisolated" not in logs.stdout + logs.stderr
+        again = self.launch(volume, env={"AGENT_ISOLATION": "required"})
+        self.ready(again)
+        self.denied(again, ["cat", FILES[0]])
+        self.stop(again)
+        self.passed("required: startup and restart enforce separation; invalid identity/non-root refuse; "
+                    "partial migration retains keys and resumes; live dump never remigrates")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
@@ -149,6 +221,7 @@ def main():
     try:
         check.docker("image", "inspect", args.image)
         check.round_trip()
+        check.required_mode()
     finally:
         check.cleanup()
 

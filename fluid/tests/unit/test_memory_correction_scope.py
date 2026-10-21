@@ -98,3 +98,97 @@ async def test_replica_id_addressed_correction_preserves_scope_on_round_trip(tmp
     entry, = source.memories()
     assert entry.id == first.id and entry.scope == "project:one"
     assert "corrected on replica" not in source.render_memory_section("project:two")
+
+
+@pytest.mark.parametrize("scopes", [
+    ["project:one"], ["project:one", "project:two"], ["global"],
+    ["global", "project:one", "project:two"], ["project:two"],
+])
+@pytest.mark.parametrize("scope", [None, "global", "project"])
+async def test_key_correction_resolves_only_visible_unambiguous_slot(tmp_path, scopes, scope):
+    store = SkillStore(tmp_path / "source")
+    for slot in scopes:
+        store.save_memory("Fixture runner in " + slot, key="fixture.runner", scope=slot, protected=True)
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(store._facts.export())
+    ctx = ToolCtx(extra={"memory_store": replica, "memory_project": "project:one"})
+    data = {"text": "Fixture corrected runner.", "key": "fixture.runner",
+            "expected_revision": 1, "user_requested": True}
+    if scope is not None:
+        data["scope"] = scope
+    candidates = [s for s in scopes if s in ("global", "project:one")] if scope is None else [
+        s for s in scopes if s == ("project:one" if scope == "project" else scope)]
+    result = await handler(data, ctx)
+    # A scope with no existing slot is a new revision-1 save, not a correction
+    # of an unrelated project's key. Multiple eligible slots stay ambiguous.
+    fresh = not candidates
+    fresh_scope = "project:one" if scope == "project" else "global"
+    assert result.is_error == (len(candidates) > 1)
+    assert len(replica.memories()) == len(scopes) + int(fresh)
+    updated = [m for m in replica.memories() if m.text == data["text"]]
+    expected = candidates if len(candidates) == 1 else ([fresh_scope] if fresh else [])
+    assert [m.scope for m in updated] == expected
+    store._facts.merge(replica._facts.export())
+    assert len(store.memories()) == len(scopes) + int(fresh)
+
+
+@pytest.mark.parametrize("scope,expected_scope", [(None, "global"), ("global", "global"), ("project", "project:one")])
+@pytest.mark.parametrize("revision", [1, 2])
+@pytest.mark.parametrize("other_project", [False, True])
+@pytest.mark.parametrize("per_worker", [False, True])
+async def test_fresh_key_with_initial_revision_preserves_new_save_contract(tmp_path, scope, expected_scope, revision, other_project, per_worker):
+    store = SkillStore(tmp_path / "local")
+    if other_project:
+        remote = SkillStore(tmp_path / "remote")
+        remote.save_memory("Other project fixture command.", key="fixture.fresh", scope="project:two", per_worker=per_worker)
+        store._facts.merge(remote._facts.export())
+    ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
+    data = {"text": "Fixture genuinely new convention.", "key": "fixture.fresh", "expected_revision": revision}
+    if scope is not None:
+        data["scope"] = scope
+    result = await handler(data, ctx)
+    assert result.is_error == (revision != 1)
+    saved = [m for m in store.memories() if m.text == data["text"]]
+    assert [m.scope for m in saved] == ([expected_scope] if revision == 1 else [])
+    assert [m.revision for m in saved] == ([1] if revision == 1 else [])
+
+
+@pytest.mark.parametrize("scope", [None, "project"])
+async def test_initial_revision_does_not_replace_in_scope_invisible_worker_slot(tmp_path, scope):
+    remote = SkillStore(tmp_path / "remote")
+    remote.save_memory("Remote worker fixture.", key="fixture.worker", scope="project:one", per_worker=True)
+    local = SkillStore(tmp_path / "local")
+    local._facts.merge(remote._facts.export())
+    data = {"text": "Local fixture.", "key": "fixture.worker", "expected_revision": 1}
+    if scope is not None:
+        data["scope"] = scope
+    ctx = ToolCtx(extra={"memory_store": local, "memory_project": "project:one"})
+    assert (await handler(data, ctx)).is_error
+
+
+async def test_initial_revision_without_project_context_keeps_conservative_lookup(tmp_path):
+    store = SkillStore(tmp_path)
+    store.save_memory("Other project fixture.", key="fixture.runner", scope="project:two")
+    ctx = ToolCtx(extra={"memory_store": store})
+    out = await handler({"text": "Unknown project fixture.", "key": "fixture.runner",
+                         "scope": "global", "expected_revision": 1}, ctx)
+    assert out.is_error
+    assert len(store.memories()) == 1
+
+
+async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path):
+    store = SkillStore(tmp_path)
+    first = store.save_memory("Fixture runner alpha.", key="fixture.runner", scope="project:one", protected=True)
+    ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
+    data = {"text": "Fixture runner beta.", "key": "fixture.runner", "expected_revision": 99,
+            "user_requested": True}
+    assert (await handler(data, ctx)).is_error
+    data.update(expected_revision=first.revision, user_requested=False)
+    assert (await handler(data, ctx)).is_error
+    assert store.delete_memory(first.id, explicit=True, expected_revision=first.revision)
+    data["user_requested"] = True
+    assert (await handler(data, ctx)).is_error
+    assert not store.memories()
+    assert not (await handler({"text": "Fixture new convention.", "key": "fixture.new"}, ctx)).is_error
+    assert store.memories()[0].scope == "global"
+

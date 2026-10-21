@@ -36,6 +36,13 @@ ADAPTIVE_SUMMARIZED = {"type": "adaptive", "display": "summarized"}
         ("claude-sonnet-4-6", "xhigh", "high"),
         ("claude-opus-4-6", "max", "max"),
         ("claude-sonnet-4-6", "medium", "medium"),
+        # A named preview has no numeric version for the generic parser.
+        ("claude-mythos-preview", "xhigh", "high"),
+        ("claude-mythos-preview[1m]", "xhigh", "high"),
+        ("claude-mythos-preview", "max", "max"),
+        ("claude-mythos-preview", "low", "low"),
+        ("claude-mythos-preview", None, None),
+        ("claude-future-preview", "xhigh", "xhigh"),
         # Opus 4.5: low/medium/high only.
         ("claude-opus-4-5-20251101", "max", "high"),
         ("claude-opus-4-5-20251101", "xhigh", "high"),

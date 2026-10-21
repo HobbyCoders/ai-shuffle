@@ -25,6 +25,7 @@ def updater(tmp_path, monkeypatch):
     monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(root))
     monkeypatch.setenv("SHUFFLE_UPDATE_POLICY_FILE", str(tmp_path / "policy.json"))
     monkeypatch.setenv("GIT_SHA", "abc1234")
+    monkeypatch.setattr(application_updates, "_desktop_seen", 0)
     monkeypatch.setattr(update_workers.progress, "_path", lambda: tmp_path / "progress.json")
     monkeypatch.setattr(update_workers.runners, "directory", lambda: {"self_device_id": None, "runners": []})
     update_workers._receipts.clear()
@@ -51,6 +52,7 @@ def test_status_reports_policy_and_updater_state(c, updater):
     assert (body["phase"], body["version"], body["channel"], body["notes"]) == ("available", "2.0.0", "stable", "n")
     assert body["running_version"] == "abc1234"
     assert "secret" not in body
+    assert "blocked_by" not in body, "session titles belong only on the owner worker-status endpoint"
     # Reading the default never writes the synced policy.
     assert database.get_system_setting(application_updates.KEY) is None
 
@@ -142,7 +144,8 @@ def test_workers_lists_this_worker_without_peer_endpoints(c):
     assert set(body["workers"][0]) == {
         "device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version",
         "running_version", "percent", "message", "error", "reason", "request_pending", "checked_at",
-        "channel", "release", "notes", "role", "label", "deferred", "notice", "remedy", "data_kept"}
+        "channel", "release", "notes", "role", "label", "deferred", "notice", "remedy", "data_kept",
+        "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result"}
     assert body["plan"]["action"] in ("check", "download", "install")
 
 

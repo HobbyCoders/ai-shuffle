@@ -31,10 +31,12 @@ The rule now:
   corrected or removed, for example by a Remember in the same session. A full
   snapshot replaces the change lists once their combined size passes half the
   snapshot, so the model never has to fold many small lists together.
-* **Bounded task additions** supplement the stable base without displacing it.
-  They require two distinct matched words, add at most 1k fact-line characters
-  per owner turn and hold at most 2k total. Task-only additions do not trigger
-  full base re-sends; a topic switch does not withdraw earlier additions.
+* **Bounded task rotation** supplements the stable base without displacing it.
+  Two distinct matched words are required; at most 1k new fact-line characters
+  per owner turn and 2k held total. When full, oldest-admitted task-only facts
+  that do not match the current topic may yield space. A lifetime 8k change-list
+  allowance prevents topic churn from accumulating unlimited history; once
+  spent, Recall is the fallback. Task changes never force full base re-sends.
   Changed, expired, unsafe or out-of-scope sources still update/remove them.
 
 What the model holds is recovered from host-marked ranges in the transcript
@@ -231,6 +233,9 @@ class HeldMemory:
     items: frozenset[str]
     changes_chars: int
     full_node_id: str
+    # Admission order, reconstructed only from provenance-marked changes. No
+    # query log or owner-turn counter is persisted.
+    task_order: tuple[str, ...] = ()
 
 
 def initial_task_query(nodes: Sequence[Any]) -> str:
@@ -310,6 +315,7 @@ def held_from_path(nodes: Sequence[Any], trusted_full_node: Optional[str]) -> Op
             items=frozenset(items),
             changes_chars=sum(len(wrap(body)) for body in changes),
             full_node_id=trusted_full_node,
+            task_order=tuple(fid for item in items if _is_task_item(item) and (fid := _fact_id(item))),
         )
     return None
 
@@ -328,6 +334,10 @@ class MemoryPlan:
 
 TASK_TURN_CHARS = 1000
 TASK_TOTAL_CHARS = 2000
+# Lifetime novelty allowance since the trusted full snapshot. Once spent,
+# explicit Recall is the fallback until a genuine restore/base update; topic
+# switches must never buy another full base or an unbounded change-list chain.
+TASK_HISTORY_CHARS = 8000
 _TASK_MARK = "; task-match] "
 
 
@@ -339,7 +349,7 @@ def _is_task_item(item: str) -> bool:
 def task_memory_section(
     section: str, held: Optional[HeldMemory], eligible: Sequence[str], query: str,
 ) -> str:
-    """Add bounded live matches without displacing or re-ranking the base.
+    """Rotate bounded live matches without displacing or re-ranking the base.
 
     Eligible lines come from the same scope/checkout/injection/conflict screen
     as the base snapshot. Previously delivered task facts persist across topic
@@ -365,7 +375,8 @@ def task_memory_section(
 
     # Retain only positively identified task facts, never arbitrary omissions
     # from an older base snapshot. Real source revisions replace stale text.
-    for item in sorted(held.items if held else ()):
+    order = {fid: i for i, fid in enumerate(held.task_order if held else ())}
+    for item in sorted(held.items if held else (), key=lambda item: (order.get(_fact_id(item), -1), item)):
         fid = _fact_id(item)
         if _is_task_item(item) and fid in live and fid not in selected:
             add(fid)
@@ -376,8 +387,25 @@ def task_memory_section(
         if fid in selected or scores[fid] < 2:
             continue
         cost = len(live[fid].replace("] ", _TASK_MARK, 1)) + 1
-        if cost <= turn_remaining and add(fid):
-            turn_remaining -= cost
+        if cost > turn_remaining:
+            continue
+        previous = dict(selected)
+        previous_remaining = remaining
+        # Oldest-admitted first, but never evict a fact still matching this
+        # topic. Withdrawal means dropped for space, not invalid or forgotten.
+        for victim in list(selected):
+            if cost <= remaining:
+                break
+            if scores[victim] < 2:
+                remaining += len(selected.pop(victim)) + 1
+        if add(fid):
+            candidate = section + "\n\n" + "\n".join(selected.values())
+            delta = render_changes(sorted(held.items), section_items(candidate)) if held else None
+            if not held or held.changes_chars + len(wrap(delta or "")) <= TASK_HISTORY_CHARS:
+                turn_remaining -= cost
+                continue
+        selected = previous
+        remaining = previous_remaining
     if not selected:
         return section
     return section + "\n\n" + "\n".join(selected.values())
@@ -413,11 +441,10 @@ def plan_memory_note(section: str, held: Optional[HeldMemory]) -> MemoryPlan:
         return MemoryPlan("none", None, section)
     note = wrap(body)
     added = set(current) - held.items
-    task_additions_only = (
-        not (held.items - set(current)) and added and all(map(_is_task_item, added))
-    )
-    # Task additions have their own strict held-context cap. They cannot trigger
-    # re-sending the unchanged base. Actual edits/removals use the normal gate.
-    if not task_additions_only and held.changes_chars + len(note) > CHANGES_BUDGET_SHARE * len(full):
+    task_changes_only = all(map(_is_task_item, added | (held.items - set(current))))
+    # Task rotation has its own cumulative allowance; neither additions nor
+    # withdrawals may trigger base churn. Safety edits still reconcile even
+    # after novelty is exhausted. Actual base mutations use the normal gate.
+    if not task_changes_only and held.changes_chars + len(note) > CHANGES_BUDGET_SHARE * len(full):
         return MemoryPlan("full", full, section)
     return MemoryPlan("changes", note, section)

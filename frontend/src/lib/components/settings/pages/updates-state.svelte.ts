@@ -20,11 +20,12 @@ import { isForbidden } from '$lib/settings/access.svelte';
 import { flashSaved } from '$lib/settings/save-status.svelte';
 import type { StatusTone } from '$lib/settings/types';
 import { INSTALLER_LINK, installerHint } from './update-remedy';
+import { waitingSummary, waitingView, type WaitingFields } from './update-waiting';
 
 export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_URL, installerHint } from './update-remedy';
 
-/** One worker in GET /settings/application-updates/workers. */
-export interface UpdateWorker {
+/** One worker in GET /settings/application-updates/workers; restart waiting fields from update-waiting.ts. */
+export interface UpdateWorker extends WaitingFields {
 	device_id: string;
 	device_name: string;
 	is_self?: boolean;
@@ -95,6 +96,9 @@ export function describeWorker(worker: UpdateWorker, receipt?: UpdateReceipt): {
 	if (worker.request_pending) return { tone: 'busy', text: 'Checking' };
 	// The container updater reports the running revision with this phase (#1901).
 	if (worker.phase === 'image-required') return { tone: 'err', text: worker.message || 'Needs a new Docker image' };
+	// A downloaded update held by running work, or a retained download behind a newer offer (#344).
+	const wait = worker.phase !== 'checking' ? waitingView(worker) : null;
+	if (wait && wait.state !== 'ready') return { tone: wait.tone, text: waitingSummary(wait) };
 	if (worker.phase !== 'checking' && sameVersion(worker.version, worker.running_version)) {
 		return { tone: 'ok', text: 'Up to date' };
 	}

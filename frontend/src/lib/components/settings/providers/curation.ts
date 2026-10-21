@@ -4,10 +4,13 @@
  * The saved entries carry more than an id and a label: a per-model
  * `context_window` (dropping it flattens every model onto the row's one shared
  * window), OpenRouter `pricing` (server-side spend projection), and the raw and
- * normalized reasoning metadata (`copyReasoningMetadata`). Every rebuild here
- * keeps them; computed registry fields are never saved.
+ * normalized reasoning metadata (`copyReasoningMetadata`), and an owner's
+ * per-model `local_settings` (PATCH replaces the whole list, so dropping it
+ * would clear local tuning on an unrelated save). Every rebuild here keeps
+ * them; computed registry fields are never saved.
  */
 import {
+	copyLocalSettings,
 	copyReasoningMetadata,
 	mergeReasoningMetadata,
 	type FetchModelsResult,
@@ -39,7 +42,8 @@ export function rowsFromFetch(stored: ProviderModelEntry[], res: FetchModelsResu
 			checked: true,
 			context_window: m.context_window,
 			pricing: m.pricing,
-			...copyReasoningMetadata(m)
+			...copyReasoningMetadata(m),
+			...copyLocalSettings(m)
 		}));
 	const storedById = new Map(stored.map((m) => [m.id, m]));
 	const catalogRows = catalog.map((m) => {
@@ -50,7 +54,8 @@ export function rowsFromFetch(stored: ProviderModelEntry[], res: FetchModelsResu
 			checked: hasCurated ? curatedIds.has(m.id) : res.source === 'preset',
 			context_window: saved?.context_window ?? m.context_window,
 			pricing: saved?.pricing ?? m.pricing,
-			...mergeReasoningMetadata(saved, m)
+			...mergeReasoningMetadata(saved, m),
+			...copyLocalSettings(saved)
 		};
 	});
 	return [...extras, ...catalogRows];
@@ -77,7 +82,8 @@ export function rowsFromStored(stored: ProviderModelEntry[]): CurationRow[] {
 		checked: true,
 		context_window: m.context_window,
 		pricing: m.pricing,
-		...copyReasoningMetadata(m)
+		...copyReasoningMetadata(m),
+		...copyLocalSettings(m)
 	}));
 }
 
@@ -101,6 +107,7 @@ export function curatedEntries(rows: CurationRow[]): ProviderModelEntry[] {
 			label: (r.label || r.id).trim(),
 			...(r.context_window != null ? { context_window: r.context_window } : {}),
 			...copyReasoningMetadata(r),
+			...copyLocalSettings(r),
 			...(r.pricing ? { pricing: r.pricing } : {})
 		}))
 		.filter((m) => m.id && m.label);
@@ -113,6 +120,7 @@ export function passthroughModels(models: ProviderModelEntry[] | undefined): Pro
 		label: m.label,
 		...(m.context_window != null ? { context_window: m.context_window } : {}),
 		...copyReasoningMetadata(m),
+		...copyLocalSettings(m),
 		...(m.pricing ? { pricing: m.pricing } : {})
 	}));
 }
