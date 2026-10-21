@@ -14,12 +14,16 @@
 	import TerminalView from './TerminalView.svelte';
 	import MonitorWatch from './MonitorWatch.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
+	import PeerRequestList from './PeerRequestList.svelte';
 	import TerminalKeyBar from './TerminalKeyBar.svelte';
 	import { terminals, WORKER_TERMINALS, type TerminalRequest } from '$lib/stores/terminals.svelte';
 	import { terminalAccess, blockAccess, folderName } from '$lib/terminal/gating';
 	import { pasteNeedsConfirm, pasteConfirmLabel, pasteHint, normalizePaste, pasteLines, pasteRefusal } from '$lib/terminal/paste';
 	import { mayTakeFocus } from '$lib/terminal/focus';
+	import { isPeerTarget, localWorkerId, type OpenResult } from '$lib/terminal/peer';
+	import type { CreateTerminal, TerminalInfo } from '$lib/api/terminals';
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
+	import { resourceSync } from '$lib/services/resource-sync';
 
 	let { sessionId, panelActions, mobile = false }: { sessionId: string; panelActions?: Snippet; mobile?: boolean } = $props();
 
@@ -78,15 +82,36 @@
 	const capReason = $derived(ready && openCount >= limit
 		? `${limit} terminals are open on ${ready.worker}. Close one to open another.` : null);
 
+	// Peer terminals (#196): only when this worker lists another worker as a
+	// target, which it does only with peer terminals turned on here.
+	const localId = $derived(probe.status === 'ready' ? localWorkerId(probe.targets) : undefined);
+	const peerTerminalsOn = $derived(probe.status === 'ready' && (probe.targets ?? []).some((t) => isPeerTarget(t, localId)));
+	/** Where a tab's shell runs: this worker, a peer worker, or an SSH grant. */
+	function hostName(info: TerminalInfo | null): string {
+		const fallback = ready?.worker ?? '';
+		const target = info?.target as { kind: string; worker_id?: string; grant_id?: string } | undefined;
+		if (!target || probe.status !== 'ready') return fallback;
+		if (target.kind === 'worker' && (!target.worker_id || target.worker_id === localId)) return fallback;
+		const row = (probe.targets ?? []).find((t) => t.kind === target.kind && (t.worker_id ?? t.grant_id) === (target.worker_id ?? target.grant_id));
+		return row?.name ?? (target.kind === 'ssh' ? 'SSH machine' : 'Peer worker');
+	}
+
+	// Joining or leaving a network, and a peer coming or going, change the
+	// targets this worker lists. The server announces those as `network`
+	// changes, so a page left open picks up a newly enrolled peer without
+	// being reopened.
+	let stopNetworkSync: (() => void) | undefined;
 	onMount(() => {
 		void terminals.ensureProbe(sessionId, true);
 		void terminals.load(sessionId);
+		stopNetworkSync = resourceSync.subscribe(['network'], () => terminals.ensureProbe(sessionId, true));
 	});
 
 	// Closing the panel drops a request it has not acted on: it must never
 	// replay the next time the panel opens.
 	onDestroy(() => {
 		destroyed = true;
+		stopNetworkSync?.();
 		terminals.dropRequest(sessionId);
 	});
 
@@ -197,16 +222,23 @@
 	}
 
 	// ── Tabs ───────────────────────────────────────────────────────────────
-	async function openTerminal(choice: { cwd: string | null; shell: string | null }) {
+	async function openTerminal(choice: CreateTerminal): Promise<OpenResult> {
 		creating = true;
-		const info = await terminals.create(sessionId, choice);
+		// A peer open reports its failure to the picker (the approval is spent),
+		// and the targets are probed again so the row shows what is left.
+		const peer = !!choice.target?.authorization_id;
+		const result = peer ? await terminals.open(sessionId, choice) : null;
+		const info = result ? ('info' in result ? result.info : null) : await terminals.create(sessionId, choice);
 		creating = false;
+		if (peer) void terminals.ensureProbe(sessionId, true);
 		if (info) {
 			pickerOpen = false;
 			await tick();
 			views[info.id]?.markFresh();
 			focusView(info.id);
+			return { ok: true };
 		}
+		return result && !('info' in result) ? { ok: false, code: result.code, message: result.message } : { ok: false, code: 'unknown', message: '' };
 	}
 
 	function closeTab(id: string) {
@@ -281,10 +313,11 @@
 					{@const link = terminals.connection(id)}
 					<div class="tab" class:current={id === activeId}>
 						<button id={`terminal-tab-${id}`} class="tab-select" role="tab" aria-selected={id === activeId}
-							tabindex={id === activeId ? 0 : -1} title={info?.cwd}
+							tabindex={id === activeId ? 0 : -1} title={hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : info?.cwd}
 							onclick={() => terminals.select(sessionId, id)} onkeydown={(e) => tabKeydown(e, index)}>
 							<span class="dot" data-tone={info?.state === 'exited' ? 'bad' : link.status === 'live' ? (info?.busy ? 'run' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'wait'} aria-hidden="true"></span>
 							<span class="tab-shell">{info?.shell ?? 'shell'}</span>
+							{#if hostName(info) !== ready.worker}<span class="tab-host" title={hostName(info)}>{hostName(info)}</span>{/if}
 							<span class="tab-folder">{folderName(info?.cwd)}</span>
 						</button>
 						<button class="tab-close" aria-label={`Close terminal ${index + 1}`} title="Close terminal" onclick={() => closeTab(id)}><X size={12} /></button>
@@ -306,7 +339,7 @@
 				{#if pickerOpen}
 					<div class="popover">
 						<NewTerminalPicker probe={ready} busy={creating} disabledReason={capReason}
-							onOpen={openTerminal} onCancel={() => (pickerOpen = false)} />
+							onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} onCancel={() => (pickerOpen = false)} />
 					</div>
 				{/if}
 			</div>
@@ -346,6 +379,8 @@
 		</div>
 	{/if}
 
+	{#if peerTerminalsOn && ready && !watching}<PeerRequestList workerName={ready.worker} />{/if}
+
 	{#if watching}<MonitorWatch {sessionId} />{/if}
 	<div class="stage" class:watch-hidden={watching}>
 		{#if probe.status === 'idle' || probe.status === 'loading' || (ready && !tabState.loaded)}
@@ -358,9 +393,10 @@
 			<div class="state"><p class="state-title">Terminals aren't available right now</p><p>{probe.message}</p>
 				<button class="retry" onclick={() => terminals.ensureProbe(sessionId, true)}>Try again</button></div>
 		{:else if ready && !tabState.ids.length}
-			<div class="state empty">
+			<!-- Backstop for a missed change: using the picker re-probes once the answer is stale. -->
+			<div class="state empty" onfocusin={() => void terminals.ensureProbe(sessionId)}>
 				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>{/if}
-				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} />
+				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} />
 			</div>
 		{/if}
 		{#if ready}
@@ -400,7 +436,7 @@
 	{#if ready && activeInfo && statusLabel && !watching}
 		<footer class="status" aria-live="polite">
 			<span class="state-pill" data-tone={statusLabel.tone}><span class="dot" data-tone={statusLabel.tone} aria-hidden="true"></span>{statusLabel.text}</span>
-			<span class="meta" title={activeInfo.cwd}>{activeInfo.shell} · {folderName(activeInfo.cwd)} · {ready.worker}</span>
+			<span class="meta" title={activeInfo.cwd}>{activeInfo.shell} · {folderName(activeInfo.cwd)} · {hostName(activeInfo)}</span>
 		</footer>
 	{/if}
 
@@ -433,7 +469,11 @@
 	.tab.current .tab-select { color: var(--foreground); }
 	.tab-select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
 	.tab-shell { flex-shrink: 0; }
-	.tab-folder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
+	/* One line, cut with an ellipsis (the full name is its title). It may
+	   shrink, so it never runs under the close button; the folder gives way first. */
+	.tab-host { flex: 0 1 auto; min-width: 0; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
+		color: var(--primary); background: color-mix(in oklch, var(--primary) 13%, transparent); }
+	.tab-folder { flex-shrink: 100; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
 	.tab-close { position: absolute; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); cursor: pointer; opacity: 0; transition: opacity 0.12s; }
 	.tab:hover .tab-close, .tab.current .tab-close, .tab-close:focus-visible { opacity: 1; }
 	.tab-close:hover { background: var(--hover-overlay); color: var(--foreground); }
@@ -473,7 +513,7 @@
 		repeating-linear-gradient(0deg, transparent 0 23px, color-mix(in oklch, var(--foreground) 3%, transparent) 23px 24px); }
 	.state p { margin: 0; max-width: 34ch; line-height: 1.5; }
 	.state-title { font-size: 13.5px; font-weight: 600; color: var(--foreground); }
-	.state.empty { align-items: stretch; justify-content: center; padding: 24px clamp(16px, 8cqi, 48px); text-align: left; }
+	.state.empty { align-items: stretch; justify-content: safe center; overflow-y: auto; padding: 24px clamp(16px, 8cqi, 48px); text-align: left; }
 	.state.empty > :global(*) { align-self: center; }
 	.err { color: var(--destructive); }
 	.retry { margin-top: 8px; min-height: 32px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: calc(var(--radius) - 4px); background: transparent; color: var(--foreground); cursor: pointer; }
@@ -506,7 +546,14 @@
 	.mobile .tab.current { height: 41px; }
 	.mobile .tab-close { width: 28px; height: 28px; opacity: 1; }
 	.mobile .tab-select { padding-right: 32px; }
-	@container (max-width: 420px) { .tab-folder { display: none; } .tab { flex-basis: 96px; min-width: 76px; } }
+	@container (max-width: 420px) {
+		.tab-folder { display: none; }
+		.tab { flex-basis: 96px; min-width: 76px; }
+		/* A shell on another worker: the worker matters more than the shell
+		   name here (the status bar still shows both), so the badge gets the room. */
+		.tab:has(.tab-host) { flex-basis: 128px; min-width: 112px; max-width: 128px; }
+		.tab-select:has(.tab-host) .tab-shell { display: none; }
+	}
 
 	@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--success) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
 	@keyframes blink { 50% { opacity: 0.35; } }

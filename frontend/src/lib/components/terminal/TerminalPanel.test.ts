@@ -4,10 +4,12 @@
  * channel, when focus moves, and which tab a paste goes to.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 
 const api = vi.hoisted(() => ({
 	list: vi.fn(), targets: vi.fn(), create: vi.fn(), get: vi.fn(), close: vi.fn(), restart: vi.fn(), paste: vi.fn(),
+	peerRequests: vi.fn(),
 }));
 vi.mock('$lib/api/terminals', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/api/terminals')>();
@@ -72,6 +74,8 @@ import TerminalPanel from './TerminalPanel.svelte';
 import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
 import { terminals, WORKER_TERMINALS } from '$lib/stores/terminals.svelte';
+import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
+import { resourceSync } from '$lib/services/resource-sync';
 import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 import type { CommandBlock } from '$lib/terminal/commands';
 
@@ -103,10 +107,12 @@ beforeEach(() => {
 		created += 1;
 		return info(`t${created}`, { shell: body.shell ?? 'bash', cwd: body.cwd ?? '/workspace/app' });
 	});
+	api.peerRequests.mockResolvedValue({ requests: [] });
 	api.paste.mockImplementation(async (id: string) => ({ mode: 'bracketed', terminal: terminals.terminal(id) ?? info(id) }));
 });
 afterEach(() => {
 	cleanup();
+	peerTerminals.reset();
 	document.body.innerHTML = '';
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
@@ -449,5 +455,86 @@ describe('Terminal page (no chat)', () => {
 		await fireEvent.click(view.getByRole('button', { name: 'Close terminal 1' }));
 		await waitFor(() => expect(api.close).toHaveBeenCalledWith('own'));
 		await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).ids).toEqual([]));
+	});
+});
+
+describe('peer workers', () => {
+	const local = { kind: 'worker', worker_id: 'w', name: 'ServerWorker', available: true };
+	const peerRow = { kind: 'worker', worker_id: 'peer', name: 'Acceptance Windows B', available: false,
+		reason_code: 'recipient_approval_required', reason: 'Approve a shell on Acceptance Windows B.' };
+	const withPeer: TerminalTargets = { ...targets, targets: [local, peerRow] };
+	const ready = () => terminals.tabsFor(WORKER_TERMINALS).loaded && terminals.probeFor(WORKER_TERMINALS).status === 'ready';
+
+	it('picks up a newly enrolled peer on a page left open, without reopening it', async () => {
+		api.targets.mockResolvedValue({ ...targets, targets: [local] });
+		const view = render(TerminalPage);
+		await waitFor(() => expect(ready()).toBe(true));
+		expect(view.queryByRole('radio', { name: /Acceptance Windows B/ })).toBeNull();
+		const before = api.targets.mock.calls.length;
+
+		// The worker joins a network: the server announces a `network` change.
+		api.targets.mockResolvedValue(withPeer);
+		resourceSync.invalidate(['network']);
+
+		await waitFor(() => expect(view.getByRole('radio', { name: /Acceptance Windows B/ })).toBeTruthy());
+		expect(api.targets.mock.calls.length).toBe(before + 1);
+		expect(api.targets).toHaveBeenLastCalledWith(null);
+	});
+
+	it('ignores unrelated changes and stops listening once closed', async () => {
+		const view = await mount();
+		const before = api.targets.mock.calls.length;
+		resourceSync.invalidate(['notes']);
+		await new Promise((r) => setTimeout(r, 150));
+		expect(api.targets.mock.calls.length).toBe(before);
+
+		view.unmount();
+		resourceSync.invalidate(['network']);
+		await new Promise((r) => setTimeout(r, 150));
+		expect(api.targets.mock.calls.length).toBe(before);
+	});
+
+	it('re-probes a stale answer when the owner uses the open picker', async () => {
+		const view = await mount();
+		const before = api.targets.mock.calls.length;
+		const folder = () => view.getByRole('textbox', { name: /^Folder/ });
+		await fireEvent.focusIn(folder());
+		expect(api.targets.mock.calls.length).toBe(before); // still fresh: no request
+
+		const now = Date.now();
+		vi.spyOn(Date, 'now').mockReturnValue(now + 61_000);
+		api.targets.mockResolvedValue(withPeer);
+		await fireEvent.focusIn(folder());
+		await waitFor(() => expect(view.getByRole('radio', { name: /Acceptance Windows B/ })).toBeTruthy());
+		expect(api.targets.mock.calls.length).toBe(before + 1);
+		vi.restoreAllMocks();
+	});
+
+	it('shows a long peer name on the tab in full as a tooltip', async () => {
+		api.targets.mockResolvedValue(withPeer);
+		const view = await mount([info('p1', { target: { kind: 'worker', worker_id: 'peer' } })]);
+		const badge = await waitFor(() => {
+			const el = view.container.querySelector('.tab-host');
+			expect(el).toBeTruthy();
+			return el as HTMLElement;
+		});
+		expect(badge.textContent).toBe('Acceptance Windows B');
+		expect(badge.title).toBe('Acceptance Windows B');
+	});
+
+	it('keeps the peer badge on one line, cut with an ellipsis', () => {
+		// jsdom applies no component CSS, so read the rule itself: without
+		// nowrap a long name wraps onto several lines inside the 35 px tab.
+		const source = readFileSync('src/lib/components/terminal/TerminalPanel.svelte', 'utf8');
+		const rule = source.match(/\.tab-host\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(rule).toMatch(/white-space:\s*nowrap/);
+		expect(rule).toMatch(/text-overflow:\s*ellipsis/);
+		expect(rule).toMatch(/overflow:\s*hidden/);
+		expect(rule).toMatch(/max-width:/);
+		// It must be able to shrink: a fixed-width badge ran out of a narrow
+		// (390 px) tab and under its close button, cut with no ellipsis.
+		expect(rule).toMatch(/min-width:\s*0/);
+		expect(rule).not.toMatch(/flex-shrink:\s*0/);
+		expect(rule).toMatch(/flex:\s*0 1 auto/);
 	});
 });
