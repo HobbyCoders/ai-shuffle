@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { runFind } from "../src/tools/find.js";
+import { renderSnapshot } from "../src/snapshot.js";
+import type { Session } from "../src/session.js";
 import {
   chooseAuthHeaders,
   extractJsonArray,
@@ -94,13 +97,35 @@ describe("scoreDegraded", () => {
     const out = scoreDegraded("search", entries);
     expect(out.map((m) => m.ref)).toEqual(["e3"]); // only "Search products"
   });
-  it("breaks ties by document order", () => {
-    // Two buttons, query only hits the role token → equal score → order by index.
-    const out = scoreDegraded("button", entries);
-    expect(out.map((m) => m.ref)).toEqual(["e1", "e4"]);
+  it("does not match everything on a role word alone", () => {
+    expect(scoreDegraded("button", entries)).toEqual([]);
+    expect(scoreDegraded("Bottom button", entries)).toEqual([]);
+    expect(scoreDegraded("go missing", [{ ref: "e9", role: "button", name: "go elsewhere" }])).toEqual([]);
+  });
+  it("breaks genuine name ties by document order", () => {
+    expect(scoreDegraded("Same", [
+      { ref: "e8", role: "button", name: "Same" }, { ref: "e9", role: "link", name: "Same" },
+    ]).map(m => m.ref)).toEqual(["e8", "e9"]);
   });
   it("returns nothing when there is no overlap", () => {
     expect(scoreDegraded("nonexistent zzz", entries)).toEqual([]);
+  });
+});
+
+describe("find beyond snapshot output budgets", () => {
+  it("searches the untruncated tree and does not call a model for a literal label", async () => {
+    const yaml = Array.from({ length: 1500 }, (_, i) => `- button "Product ${i}" [ref=e${i + 1}]`).join("\n");
+    expect(yaml.length).toBeGreaterThan(40000);
+    const empty = { filter() { return this; }, count: async () => 0 };
+    const session = {
+      ensurePage: async () => ({ getByRole: () => empty, getByLabel: () => empty,
+        getByPlaceholder: () => empty, getByTestId: () => empty, getByText: () => empty }),
+      snapshot: async (opts: Parameters<typeof renderSnapshot>[1]) => ({ ...renderSnapshot(yaml, opts), snapshot_id: 1 }),
+    } as unknown as Session;
+    const result = await runFind(session, { query: "Product 1499" });
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body).toMatchObject({ ok: true, match_count: 1, degraded: false });
+    expect((result.content[1] as { text: string }).text).toContain('e1500 button "Product 1499"');
   });
 });
 

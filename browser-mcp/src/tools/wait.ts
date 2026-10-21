@@ -1,3 +1,5 @@
+import { observationRoots, includeObservationRoot, observationTask, boundedObservation } from "./observation_scope.js";
+import type { Frame } from "playwright-core";
 import type { Session } from "../session.js";
 import { raceWithTimeout } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
@@ -6,7 +8,7 @@ export interface WaitInput {
   condition: "url" | "text" | "element";
   url?: string; text?: string; ref?: string; selector?: string;
   state?: "visible" | "hidden" | "attached" | "detached";
-  match?: "contains" | "exact"; timeout_ms?: number;
+  match?: "contains" | "exact"; timeout_ms?: number; scope_ref?: string;
 }
 export async function runWait(session: Session, input: WaitInput): Promise<McpToolResult> {
   const timeout = input.timeout_ms ?? 5000;
@@ -15,23 +17,77 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
   if (targets.length !== 1 || !targets[0] || targets[0].length > 8192) return errorResult("provide exactly one nonempty url, text, ref, or selector");
   if ((input.condition === "url" && !input.url) || (input.condition === "text" && !input.text) ||
       (input.condition === "element" && !input.ref && !input.selector) || !["url", "text", "element"].includes(input.condition)) return errorResult("condition does not match wait target");
+  if (input.scope_ref && (input.condition === "url" || input.ref)) return errorResult("scope_ref applies only to text/selector waits");
   if (input.condition === "url" && input.state !== undefined) return errorResult("state applies only to text/element waits");
   if (input.condition === "element" && input.match !== undefined) return errorResult("match applies only to url/text waits");
   const page = await session.ensurePage();
   const state = input.state ?? "visible";
   const started = Date.now();
   const deadline = started + timeout;
+  const negative = state === "hidden" || state === "detached";
+  // Retain unresolved checks across polls: a timeout means unknown, not absent.
+  const pending = new Map<Frame, Promise<boolean>>();
+  const key = Symbol("wait"); // never reuse another invocation's stale absence result
+  const selectorError = (err: unknown) => input.selector && /while parsing|InvalidSelector|not a valid (?:selector|XPath)|Unexpected token|Unknown engine|Malformed selector|SyntaxError/i.test(String(err));
   while (true) {
     session.agentAdmission?.(); // a pending takeover interrupts a long wait, not the queue
     const check = async () => {
       if (input.condition === "url") return input.match === "exact" ? page.url() === input.url : page.url().includes(input.url!);
-      const locator = input.ref ? await session.resolveRef(input.ref) : input.selector ? page.locator(input.selector).first() : page.getByText(input.text!, { exact: input.match === "exact" }).first();
-      if (state === "attached" || state === "detached") return (await locator.count() > 0) === (state === "attached");
-      return (await locator.isVisible()) === (state === "visible");
+      const present = async (locator: import("playwright-core").Locator) =>
+        state === "attached" || state === "detached" ? await locator.count() > 0
+          : await locator.filter({ visible: true }).count() > 0;
+      if (input.ref) {
+        const any = await present(await session.resolveRef(input.ref));
+        return negative ? !any : any;
+      }
+      const roots = await observationRoots(session, input.scope_ref);
+      const inspect = async (root: typeof roots[number]): Promise<boolean | undefined> => {
+        let task = pending.get(root.frame);
+        if (!task) {
+          task = observationTask(root, key, async () => {
+            if (root.primary && root.frame.isDetached()) throw new Error("primary document detached");
+            if (!await includeObservationRoot(root, false)) return false;
+            const scope = root.primary && root.scope ? root.scope : root.frame;
+            const locator = input.selector ? scope.locator(input.selector)
+              : scope.getByText(input.text!, { exact: input.match === "exact" });
+            return present(locator);
+          });
+          if (task) pending.set(root.frame, task);
+        }
+        try {
+          // count() has no native timeout in Playwright. Bound its result,
+          // retaining its page-local slot until the raw operation settles.
+          const result = await boundedObservation(task, Math.min(root.primary ? 5000 : 500, deadline - Date.now()));
+          pending.delete(root.frame);
+          return result;
+        } catch (err) {
+          if (selectorError(err)) throw new Error(`invalid_input: ${String(err)}`);
+          if (!(err instanceof Error) || err.message !== "frame observation timed out") pending.delete(root.frame);
+          // Detached child documents can no longer contain the target. Every
+          // other error/timeout is unknown; retry failures, retain pending work.
+          return !root.primary && root.frame.isDetached() ? false : undefined;
+        }
+      };
+      const primary = await inspect(roots[0]);
+      if (primary === true) return !negative;
+      let any = false;
+      let unknown = primary === undefined;
+      let next = 1;
+      await Promise.all(Array.from({ length: Math.min(6, roots.length - 1) }, async () => {
+        while (next < roots.length) {
+          if (any || Date.now() >= deadline) { unknown = true; break; }
+          const result = await inspect(roots[next++]);
+          any ||= result === true;
+          unknown ||= result === undefined;
+        }
+      }));
+      return negative ? !any && !unknown : any;
     };
     let matched = false;
     try { matched = await raceWithTimeout(check(), Math.max(1, deadline - Date.now()), "browser_wait timed out"); }
     catch (err) {
+      if (err instanceof Error && err.message.startsWith("invalid_input:")) return errorResult(err.message);
+      if (selectorError(err)) return errorResult(`invalid_input: ${String(err)}`);
       if (!(err instanceof Error) || err.message !== "browser_wait timed out") throw err;
     }
     const evidence = {

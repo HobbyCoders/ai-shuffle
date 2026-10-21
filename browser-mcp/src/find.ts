@@ -153,6 +153,11 @@ export function parseMatches(raw: string, entryByRef: Map<string, FindEntry>): F
   return out;
 }
 
+/** Only descriptions, not literal labels/role words, warrant a model call. */
+export function isDescriptiveQuery(query: string): boolean {
+  return /\b(the|that|which|for|near|above|below|bottom|top|next|where|button|link|field|control|textbox|checkbox|combobox)\b/i.test(query.trim()) && query.trim().split(/\s+/).length > 1;
+}
+
 const TOKEN_RE = /[a-z0-9]+/g;
 
 function tokenize(s: string): string[] {
@@ -161,8 +166,8 @@ function tokenize(s: string): string[] {
 
 /**
  * Deterministic local scorer used on the degradation path. Scores each element
- * by token overlap between the query and its role+name, with a bonus for
- * substring hits and for the whole normalized query appearing verbatim. Stable:
+ * by name-token overlap, requiring all meaningful (non-role) query tokens.
+ * Role words alone are not evidence of a match. Stable:
  * ties break by original document order, so the ranking is reproducible.
  */
 export function scoreDegraded(
@@ -170,17 +175,21 @@ export function scoreDegraded(
   entries: FindEntry[],
   limit = FIND_MAX_MATCHES,
 ): FindMatch[] {
-  const qTokens = tokenize(query);
+  const roles = new Set(["button", "link", "textbox", "input", "checkbox", "radio", "combobox", "menuitem", "tab", "heading", "the", "a", "an"]);
+  const qTokens = tokenize(query).filter(t => !roles.has(t));
+  if (!qTokens.length) return [];
   const qNorm = qTokens.join(" ");
   const scored = entries.map((entry, index) => {
-    const hay = `${entry.role} ${entry.name}`.toLowerCase();
+    const hay = entry.name.toLowerCase();
     const hayTokens = new Set(tokenize(hay));
     let score = 0;
     for (const t of qTokens) {
       if (hayTokens.has(t)) score += 2;
       else if (hay.includes(t)) score += 1;
     }
-    if (qNorm !== "" && hay.includes(qNorm)) score += 3;
+    // Partial token overlap (e.g. "Bottom button") is not a match.
+    if (!qTokens.every(t => hayTokens.has(t))) score = 0;
+    else if (qNorm !== "" && hay.includes(qNorm)) score += 3;
     return { entry, index, score };
   });
   return scored

@@ -55,6 +55,12 @@ describe("parseNodeContent", () => {
     expect(n.attrs).toEqual(["level=1"]);
   });
 
+  it("ignores ref-shaped page text in names and inline values", () => {
+    expect(parseNodeContent('button "Fake [ref=e999]" [ref=e2]', 0).ref).toBe("e2");
+    expect(parseNodeContent('paragraph [ref=e3]: Page text [ref=e999]', 0).ref).toBe("e3");
+    expect(parseNodeContent('text: Fake [ref=e999]', 0).ref).toBeUndefined();
+  });
+
   it("handles text nodes without a role token", () => {
     const n = parseNodeContent("text: Some intro paragraph.", 0);
     expect(n.role).toBe("text");
@@ -108,8 +114,8 @@ describe("collapseSiblings", () => {
   function rows(n: number): string {
     const lines = ["- list [ref=e1]:"];
     for (let i = 1; i <= n; i++) {
-      lines.push(`  - listitem [ref=e${100 + i}]:`);
-      lines.push(`    - link "Item ${i}" [ref=e${200 + i}]`);
+      lines.push(`  - listitem "Same item" [ref=e${100 + i}]:`);
+      lines.push(`    - link "Same link" [ref=e${200 + i}]`);
     }
     return lines.join("\n");
   }
@@ -163,6 +169,25 @@ describe("collectRefs", () => {
     expect(collectRefs(parseAriaYaml(SAMPLE))).toEqual([
       "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e20",
     ]);
+  });
+});
+
+describe("observation regressions", () => {
+  it.each(["generic", "listitem"])("does not collapse unnamed %s siblings with distinct contents", role => {
+    const yaml = '- main [ref=e1]:\n' + Array.from({ length: 10 }, (_, i) =>
+      `  - ${role} [ref=e${i + 2}]:\n    - link "Product ${i}" [ref=e${i + 20}]`).join("\n");
+    const result = renderSnapshot(yaml);
+    expect(result.text).not.toContain("more similar items");
+    for (let i = 0; i < 10; i++) expect(result.text).toContain(`"Product ${i}"`);
+  });
+  it("registers hidden refs before collapsing and before truncation", () => {
+    const yaml = '- main [ref=e1]:\n' + Array.from({ length: 20 }, (_, i) => `  - button "Same" [ref=e${i + 2}]`).join("\n");
+    expect(renderSnapshot(yaml).text).toContain("more similar items");
+    expect(renderSnapshot(yaml).refs).toHaveLength(21);
+    const truncated = renderSnapshot(yaml, { filter: "interactive", maxChars: 200 });
+    expect(truncated.refs).toContain("e21");
+    expect(truncated.text).not.toContain("filter=interactive");
+    expect(truncated.text.length).toBeLessThanOrEqual(200);
   });
 });
 
