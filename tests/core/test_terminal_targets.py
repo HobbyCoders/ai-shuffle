@@ -76,6 +76,24 @@ async def test_discovery_requires_online_and_relay_capability(peers):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["peer_terminals_disabled", "not_supported"])
+async def test_discovery_probes_recipient_despite_stale_capabilities(peers, monkeypatch, code):
+    monkeypatch.setattr(relay, "availability", lambda: {"available": False, "reason_code": code, "reason": "Unavailable"})
+    rows = await targets.targets(None)
+    assert rows[0]["reason_code"] == code and not rows[0]["available"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_reports_unreachable_and_insecure_peers(peers, monkeypatch):
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=ConnectionError("offline")))
+    rows = await targets.targets(None)
+    assert rows[0]["reason_code"] == "peer_unavailable"
+    peers[1]["runners"][0]["endpoints"] = ["http://peer.example"]
+    rows = await targets.targets(None)
+    assert rows[0]["reason_code"] == "https_required"
+
+
+@pytest.mark.asyncio
 async def test_peer_rechecks_membership_target_bound_owner_lease_and_revocation(peers):
     request = SimpleNamespace(valid=True)
     lease = relay.authorize(request, "owner", "peer")
@@ -129,6 +147,16 @@ async def test_stream_relays_arbitrary_bytes_input_resize_and_close(peers):
     await source.close(terminal.id, by="owner")
     assert peers[0].count == 0 and not relay._owners
     await peers[0].shutdown()
+
+
+@pytest.mark.asyncio
+async def test_immediate_source_close_releases_recipient_before_reader_runs(peers):
+    source = service.TerminalRegistry()
+    request = SimpleNamespace(valid=True)
+    terminal = await targets.create(source, api.CreateTerminal(target=await approved_target(request)), "owner", request)
+    await source.close(terminal.id, by="owner")
+    assert peers[0].count == 0
+    assert not relay._owners
 
 
 @pytest.mark.asyncio

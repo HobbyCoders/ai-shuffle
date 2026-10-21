@@ -36,8 +36,10 @@ non-owner paired devices and peer device tokens are refused.
 1. On source A, `GET /api/v1/terminals/targets` includes all known peer workers.
    Each has `kind: "worker"`, `worker_id`, `name`, `available`, `reason_code`
    and `reason`. Codes: `peer_offline`, `peer_terminals_disabled`,
-   `peer_unsupported_or_disabled`, `https_required`, `peer_unavailable`,
-   `recipient_approval_required`. Pending approval is **not** available.
+   `peer_unsupported_or_disabled`, `not_supported`, `https_required`,
+   `peer_unavailable`, `recipient_approval_required`. Pending approval is **not**
+   available. Live HTTPS probes detect unavailable recipients even when cached
+   capability advertisements are stale.
 2. On A, `POST /api/v1/terminals/peer-authorizations` with
    `{"worker_id":"<B>"}` returns 201 with `authorization_id`, `worker_id`,
    `request_id`, `status: "pending"`, `used: false`, `expires_in` (seconds).
@@ -585,12 +587,15 @@ text and output are never logged.
 ## Remote implementation
 
 `app/network/terminal_relay.py` registers the `terminal` and `terminal-owner`
-control actions. The terminal recipient rejects all operations, including when
-`NETWORK_PEER_TERMINALS=true`: there is no independent owner-proof issuer or
-verifier yet. Its old source callback must never be promoted to authorization.
-Transport-only tests explicitly stub the closed recipient gate to retain byte
-relay regression coverage; separate malicious-member tests exercise the real
-registered handler without those stubs, with the setting both on and off.
+control actions. The recipient issues pending requests and accepts approval
+only through its own owner-authenticated HTTP routes. Its source callback is
+an additional revocation check, never an issuer of recipient authority. Each
+approval is single-use and bound to the authenticated source and source lease;
+revocation or replacement during spawn closes the newly created PTY.
+Tests drive the HTTP request/approval producer, a real relay PTY, the existing
+WebSocket, immediate close before the reader starts, and malicious-member
+requests with policy both on and off. The in-process transport is a test seam,
+not evidence of a working two-worker HTTPS deployment.
 All transport calls require `secure=True`; both inbound actions require the
 trusted HTTPS context. Plain HTTP and currently unsupported sealed-LAN control
 routes are refused rather than used as fallback.

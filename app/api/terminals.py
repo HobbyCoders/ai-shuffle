@@ -235,7 +235,7 @@ async def request_peer_terminal(body: PeerAuthorizationBody, request: Request,
         result = await _peer_call(body.worker_id, "request", lease)
         if result.get("status") == "unavailable":
             terminal_relay.forget(lease)
-        return {"authorization_id": lease, "worker_id": body.worker_id, **result}
+        return {**result, "authorization_id": lease, "worker_id": body.worker_id}
     except BaseException:
         terminal_relay.forget(lease)
         raise

@@ -50,6 +50,8 @@ async def test_peer_policy_controls_capability_but_never_implies_authorization(m
         "endpoints": ["https://peer.example"],
     }]})
     assert terminals.capability_version() == (2 if enabled else 1)
+    monkeypatch.setattr(control, "call", AsyncMock(return_value={
+        "available": False, "reason_code": "recipient_approval_required"}))
     rows = await terminal_targets.targets(None)
     assert rows[0]["available"] is False
     assert rows[0]["reason_code"] == ("recipient_approval_required" if enabled else "peer_terminals_disabled")

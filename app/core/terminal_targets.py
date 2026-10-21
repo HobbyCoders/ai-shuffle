@@ -25,13 +25,34 @@ def peer_reason(row):
     return {"available": False, "reason_code": code, "reason": reason}
 
 
+async def peer_availability(row):
+    state = peer_reason(row)
+    if state["reason_code"] != "recipient_approval_required":
+        return state
+    try:
+        probe = await control.call(row["id"], "terminal", {"op": "probe"}, timeout=3, secure=True)
+    except control.InsecureRoute:
+        code, reason = "https_required", "The peer needs an authenticated HTTPS route."
+    except Exception:
+        code, reason = "peer_unavailable", "The peer did not answer the terminal availability check."
+    else:
+        code = probe.get("reason_code") if isinstance(probe, dict) else None
+        if code == "recipient_approval_required":
+            return state
+        reasons = {"peer_terminals_disabled": "Enable NETWORK_PEER_TERMINALS on both workers.",
+                   "not_supported": "No usable PTY or shell on the peer worker."}
+        if code not in reasons:
+            code = "peer_unsupported_or_disabled"
+        reason = reasons.get(code, "The peer does not support owner-approved terminals.")
+    return {"available": False, "reason_code": code, "reason": reason}
+
+
 async def targets(session_id, who=None):
     rows = await run_sync(runners.directory)
+    workers = [row for row in rows["runners"] if not row["is_self"]]
+    states = await asyncio.gather(*(peer_availability(row) for row in workers))
     result = []
-    for row in rows["runners"]:
-        if row["is_self"]:
-            continue
-        state = peer_reason(row)
+    for row, state in zip(workers, states):
         target = {"kind": "worker", "worker_id": row["id"], "name": row["device_name"], **state}
         if who and state["reason_code"] == "recipient_approval_required":
             for lease in list(terminal_relay._owners):
@@ -101,6 +122,7 @@ class PeerTerminal(StreamTerminal):
         except PermissionError as exc:
             raise TerminalError("recipient_approval_required", str(exc), 403) from None
         self.pending_size = None
+        self._peer_closed = False
         try:
             info = (await self.call("open", options=options))["terminal"]
         except BaseException:
@@ -141,11 +163,26 @@ class PeerTerminal(StreamTerminal):
         except (Exception, asyncio.CancelledError):
             self._on_exit(-1)
         finally:
-            try:
-                await self.call("close")
-            except TerminalError:
-                pass  # The recipient's lease deadline kills an unreachable PTY.
+            await self._close_peer()
+
+    async def _close_peer(self):
+        if self._peer_closed:
+            return
+        self._peer_closed = True
+        try:
+            # Revocation only reduces access, so it remains valid if the owner
+            # credential expired or the reader was cancelled before starting.
+            await self.call("revoke")
+        except TerminalError:
+            pass  # The recipient's lease deadline kills an unreachable PTY.
+        finally:
             terminal_relay.forget(self.lease)
+
+    async def kill(self):
+        try:
+            await super().kill()
+        finally:
+            await self._close_peer()
 
     async def write(self, data):
         if self.state == service.STATE_EXITED:

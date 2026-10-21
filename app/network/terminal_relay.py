@@ -253,7 +253,10 @@ async def handle(body, from_device):
         try:
             terminal = await registry.create(created_by="peer-owner:" + from_device,
                 cwd=options.get("cwd"), shell=options.get("shell"), cols=options.get("cols"), rows=options.get("rows"))
-            await require_recipient_owner(key)  # Revocation during spawn must not orphan a shell.
+            # A replacement approval for the same source lease is new consent,
+            # not permission to finish a spawn authorized by a revoked request.
+            if await require_recipient_owner(key) is not approval:
+                raise PermissionError("Recipient approval replaced during open")
         except BaseException as exc:
             if terminal:
                 await registry.close(terminal.id, by="authorization-lost-during-open")
