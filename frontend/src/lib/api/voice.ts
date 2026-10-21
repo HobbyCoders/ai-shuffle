@@ -34,6 +34,7 @@ import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-own
 const voiceModelLabels: Record<string, string> = {
  'gpt-live-1': 'GPT Live 1',
  'grok-voice-latest': 'Grok Voice',
+ 'gpt-live-1-codex': 'ChatGPT voice (unofficial, unsupported)',
  'gpt-realtime-2.1': 'GPT Realtime 2.1',
  'gpt-realtime-2.1-mini': 'GPT Realtime 2.1 Mini',
  'gpt-realtime-2': 'GPT Realtime 2',
@@ -70,6 +71,12 @@ export function getVoiceSessionConfig(id: string): Promise<VoiceSessionConfig> {
 
 export interface VoiceModelDetails {
 	model: string;
+	/** Display name of the selected engine. Absent on older servers. */
+	label?: string;
+	/** Whether the selected engine can run on this system. Absent (treat as available) on older servers. */
+	available?: boolean;
+	/** Sanitized, user-safe explanation when `available` is false. Never a traceback. */
+	unavailable_reason?: string | null;
 	voices: { id: string; label: string }[];
 	transport: 'stream' | 'webrtc';
 	runtime_settings: { label: string; value: string }[];
