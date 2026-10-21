@@ -156,7 +156,10 @@ export function parseNodeContent(content: string, depth: number): SnapNode {
   };
 
   // ref
-  const refM = REF_RE.exec(content);
+  // Ref-shaped text in an accessible name or inline value is page text,
+  // not a Playwright attribute. Never register/count it as a control.
+  const attributes = content.replace(/"(?:[^"\\]|\\.)*"/g, '""').split(":", 1)[0];
+  const refM = REF_RE.exec(attributes);
   if (refM) node.ref = refM[1];
 
   // Detect a bare trailing colon (has children).

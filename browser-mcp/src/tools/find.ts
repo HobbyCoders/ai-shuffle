@@ -1,4 +1,5 @@
 /** Deterministic live locators first; semantic search only for descriptions. */
+import { parseAriaYaml, renderSnapshot, DEFAULT_MAX_CHARS } from "../snapshot.js";
 import type { Page, Locator } from "playwright-core";
 import type { Session } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
@@ -12,7 +13,10 @@ export interface FindInput {
   placeholder?: string;
   test_id?: string;
   text?: string;
+  index?: number;
 }
+
+const ROLES = new Set("alert alertdialog application article banner blockquote button caption cell checkbox code columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure form generic grid gridcell group heading img insertion link list listbox listitem log main marquee math menu menubar menuitem menuitemcheckbox menuitemradio meter navigation none note option paragraph presentation progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong subscript superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip tree treegrid treeitem".split(" "));
 
 /** Exact lookup: never choose the first of several equally valid controls. */
 export function findLocators(page: Page, input: FindInput): Locator[] {
@@ -32,15 +36,24 @@ export async function runFind(session: Session, input: FindInput): Promise<McpTo
       structured.length > 1 || (!structured.length && !input.query?.trim()) || (input.name !== undefined && !input.role)) {
     return errorResult("invalid_input: provide query or one of role (with optional name), label, placeholder, test_id, text");
   }
+  if (input.role && !ROLES.has(input.role)) return errorResult("invalid_input: unknown ARIA role");
+  if (input.index !== undefined && (!Number.isInteger(input.index) || input.index < 0)) return errorResult("invalid_input: index must be a nonnegative integer");
   const page = await session.ensurePage();
   let matchedRefs: string[] | undefined;
+  let candidateCount = 0;
   for (const locator of findLocators(page, input)) {
     const visible = locator.filter({ visible: true });
     const count = await visible.count();
-    if (count > 1) return jsonResult({ ok: false, code: "ambiguous_match", match_count: count,
-      error: "More than one element matches exactly; use role+name, label, placeholder or test_id to disambiguate." });
-    if (count === 1) {
-      matchedRefs = entriesFromSnapshot(await visible.ariaSnapshot({ mode: "ai", timeout: 5000 })).map(e => e.ref);
+    if (count > 0) {
+      candidateCount = count;
+      if (input.index !== undefined && input.index >= count) return errorResult(`invalid_input: index exceeds ${count} matching elements`);
+      matchedRefs = [];
+      const indexes = input.index === undefined ? Array.from({ length: Math.min(20, count) }, (_, i) => i) : [input.index];
+      for (const index of indexes) {
+        // Only the selected container itself, never every descendant control.
+        const root = parseAriaYaml(await visible.nth(index).ariaSnapshot({ mode: "ai", timeout: 5000 }))[0];
+        if (root?.ref) matchedRefs.push(root.ref);
+      }
       break;
     }
   }
@@ -53,8 +66,11 @@ export async function runFind(session: Session, input: FindInput): Promise<McpTo
   let result: FindResult;
   if (matchedRefs) {
     result = { matches: entries.filter(e => matchedRefs.includes(e.ref)).slice(0, 20), degraded: false };
-  } else if (!structured.length && isDescriptiveQuery(query)) {
-    result = await findElements({ query, snapshotText: snap.text, entries, env: {
+  } else if (!structured.length && (isDescriptiveQuery(query) || scoreDegraded(query, entries).length === 0)) {
+    // Keep local matching complete, but never send the full page's prose or
+    // uncapped tree to the semantic provider.
+    const semanticTree = renderSnapshot(snap.text, { filter: "interactive", maxChars: DEFAULT_MAX_CHARS });
+    result = await findElements({ query, snapshotText: semanticTree.text, entries, env: {
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
       ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
@@ -63,7 +79,10 @@ export async function runFind(session: Session, input: FindInput): Promise<McpTo
   } else {
     result = { matches: structured.length ? [] : scoreDegraded(query, entries), degraded: false };
   }
+  const ambiguous = matchedRefs !== undefined && candidateCount > 1 && input.index === undefined;
   return jsonResult({ ok: true, snapshot_id: snap.snapshot_id, match_count: result.matches.length,
+    ...(ambiguous ? { ambiguous: true, candidate_count: candidateCount,
+      hint: "Inspect nearby row text with browser_snapshot scope_ref, or select a zero-based find index. Candidates are in document order." } : {}),
     degraded: result.degraded, method: matchedRefs ? "locator" : structured.length ? "locator" : "search" },
     formatMatches(query, snap.snapshot_id, result));
 }

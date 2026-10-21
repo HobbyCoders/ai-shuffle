@@ -1,4 +1,4 @@
-import { observationRoots } from "./observation_scope.js";
+import { observationRoots, includeObservationRoot } from "./observation_scope.js";
 import type { Session } from "../session.js";
 import { raceWithTimeout } from "../session.js";
 import { jsonResult, errorResult, type McpToolResult } from "./result.js";
@@ -27,20 +27,23 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
     session.agentAdmission?.(); // a pending takeover interrupts a long wait, not the queue
     const check = async () => {
       if (input.condition === "url") return input.match === "exact" ? page.url() === input.url : page.url().includes(input.url!);
-      const locators = input.ref ? [await session.resolveRef(input.ref)]
-        : (await observationRoots(session, input.scope_ref)).map(root => input.selector
-          ? root.locator(input.selector) : root.getByText(input.text!, { exact: input.match === "exact" }));
-      let attached = false;
-      let visible = false;
-      for (const locator of locators) {
-        const count = await locator.count();
-        attached ||= count > 0;
-        for (let i = 0; i < count; i++) visible ||= await locator.nth(i).isVisible();
+      const present = async (locator: import("playwright-core").Locator) =>
+        state === "attached" || state === "detached" ? await locator.count() > 0
+          : await locator.filter({ visible: true }).count() > 0;
+      let any = false;
+      if (input.ref) any = await present(await session.resolveRef(input.ref));
+      else {
+        const roots = await observationRoots(session, input.scope_ref);
+        const checks = await Promise.allSettled(roots.map(root => raceWithTimeout((async () => {
+          if (!await includeObservationRoot(root)) return false;
+          const scope = root.primary && root.scope ? root.scope : root.frame;
+          const locator = input.selector ? scope.locator(input.selector)
+            : scope.getByText(input.text!, { exact: input.match === "exact" });
+          return present(locator);
+        })(), Math.max(1, Math.min(150, deadline - Date.now())), "frame wait timed out")));
+        any = checks.some(check => check.status === "fulfilled" && check.value);
       }
-      // Negative waits must hold in EVERY included document, not merely the
-      // main frame or the first duplicate (which might be hidden).
-      return state === "attached" ? attached : state === "detached" ? !attached
-        : state === "visible" ? visible : !visible;
+      return state === "hidden" || state === "detached" ? !any : any;
     };
     let matched = false;
     try { matched = await raceWithTimeout(check(), Math.max(1, deadline - Date.now()), "browser_wait timed out"); }

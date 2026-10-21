@@ -6,7 +6,7 @@
  * so `npm test` stays green in browser-less CI.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -50,6 +50,17 @@ console.log("http-fixture-log hi");
 fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").textContent=JSON.stringify(d);});
 </script></body></html>`;
   const server = createHttpServer((req, res) => {
+    if (req.url === "/never-observation") return; // deliberately no headers/body
+    if (req.url === "/bodyless.svg") {
+      res.writeHead(200, { "content-type": "image/svg+xml" });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg"><text>SVG text</text></svg>');
+      return;
+    }
+    if (req.url?.startsWith("/observation-text?")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<p>${new URL(req.url, "http://fixture").searchParams.get("text")}</p>`);
+      return;
+    }
     if (req.url === "/inner-observation") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end('<p id="cross">Cross frame text</p>');
@@ -323,7 +334,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       const ref = /^(e\d+) /m.exec(listing.text)![1];
       expect(await (await session.resolveRef(ref)).count()).toBe(1);
     }
-    expect(JSON.parse(firstText(await runFind(session, { role: "button", name: "Duplicate" })))).toMatchObject({ ok: false, code: "ambiguous_match", match_count: 2 });
+    expect(JSON.parse(firstText(await runFind(session, { role: "button", name: "Duplicate" })))).toMatchObject({ ok: true, ambiguous: true, match_count: 2 });
     expect(JSON.parse(firstText(await runFind(session, { query: "Bottom button" })))).toMatchObject({ ok: true, match_count: 0 });
   });
 
@@ -354,6 +365,131 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Same frame text", scope_ref: scope, timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
     expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", state: "hidden", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
     expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "#cross", state: "detached", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+  });
+
+  it("review: churn, SVG and never-answering frames cannot break main-frame observations", async () => {
+    const page = await session.ensurePage();
+    await page.goto(new URL("prose-app", httpUrl).href);
+    await page.setContent(`<p>Main frame remains readable</p><iframe src="${new URL("bodyless.svg", httpUrl)}"></iframe>
+      <iframe src="${new URL("never-observation", httpUrl)}"></iframe>`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(() => {
+      (window as unknown as { churn: number }).churn = window.setInterval(() => {
+        const f = document.createElement("iframe"); f.srcdoc = "<p>Transient text</p>";
+        document.body.appendChild(f); setTimeout(() => f.remove(), 10);
+      }, 20);
+    });
+    try {
+      const start = Date.now();
+      for (let i = 0; i < 5; i++) {
+        const read = await runReadText(session);
+        expect((read.content[1] as { text: string }).text).toContain("Main frame remains readable");
+        expect(JSON.parse(firstText(read)).ok).toBe(true);
+      }
+      expect(Date.now() - start).toBeLessThan(2500);
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "never appears", timeout_ms: 250 })))).toMatchObject({ ok: false, timed_out: true });
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Main frame remains readable", timeout_ms: 250 })))).toMatchObject({ ok: true });
+    } finally { await page.goto("about:blank"); }
+  });
+
+  it("review: hidden, transparent, tiny and nested-hidden frame text is omitted and visible origins are labelled", async () => {
+    const page = await session.ensurePage();
+    await page.goto(new URL("prose-app", httpUrl).href);
+    const frameUrl = (text: string) => new URL("observation-text?text=" + text, httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(`<p>Main content</p><iframe style="display:none" src="${frameUrl("HiddenPayload")}"></iframe>
+      <iframe style="width:1px;height:1px;opacity:0" src="${frameUrl("TinyPayload")}"></iframe>
+      <div style="opacity:0"><iframe src="${frameUrl("TransparentPayload")}"></iframe></div>
+      <iframe src="${frameUrl("VisiblePayload")}"></iframe>`);
+    const result = await runReadText(session);
+    const text = (result.content[1] as { text: string }).text;
+    expect(text).toContain("Main content");
+    expect(text).toContain(`[frame ${new URL(frameUrl("VisiblePayload")).origin}]\nVisiblePayload`);
+    for (const hidden of ["HiddenPayload", "TinyPayload", "TransparentPayload"]) expect(text).not.toContain(hidden);
+  });
+
+  it("review: ambiguous find lists usable candidate refs, continues batches and supports index narrowing", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<main><p>First row</p><button>Delete</button><p>Second row</p><button>Delete</button></main>');
+    const found = await runFind(session, { role: "button", name: "Delete" });
+    expect(JSON.parse(firstText(found))).toMatchObject({ ok: true, ambiguous: true, match_count: 2 });
+    const refs = [...(found.content[1] as { text: string }).text.matchAll(/^(e\d+) button/gm)].map(m => m[1]);
+    expect(refs).toHaveLength(2);
+    for (const ref of refs) expect(await (await session.resolveRef(ref)).count()).toBe(1);
+    const narrowed = await runFind(session, { role: "button", name: "Delete", index: 1 });
+    expect(JSON.parse(firstText(narrowed))).toMatchObject({ ok: true, match_count: 1 });
+    expect((narrowed.content[1] as { text: string }).text).toContain(refs[1]);
+    const batch = await runBatch(session, { actions: [JSON.stringify({ tool: "browser_find", input: { role: "button", name: "Delete" } }), JSON.stringify({ tool: "browser_read_text", input: {} })] }, name => TOOL_MAP.get(name));
+    expect(JSON.parse(firstText(batch))).toMatchObject({ ok: true, count: 2, not_run: 0 });
+  });
+
+  it("review: selector waits include body/html/root and cheaply handle thousands of hidden matches", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<body class="loaded">' + '<span hidden class="many">hidden</span>'.repeat(3000) + '<span class="many">visible</span>');
+    await page.evaluate(() => { document.documentElement.classList.add("dark"); document.documentElement.dataset.ready = "yes"; });
+    for (const selector of ["body.loaded", "html[data-ready]", ":root.dark"]) {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector, timeout_ms: 250 })))).toMatchObject({ ok: true });
+    }
+    for (const state of ["visible", "attached"] as const) {
+      const started = Date.now();
+      expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: ".many", state, timeout_ms: 400 })))).toMatchObject({ ok: true });
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+    expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "[hidden]", state: "attached", timeout_ms: 100 })))).toMatchObject({ ok: true });
+  });
+
+  it("review: semantic find gets capped interactive context and handles icon-only descriptive queries", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<button>☰</button><button>🛒</button><p>PrivateProseMarker</p>' + Array.from({ length: 1800 }, (_, i) => `<button>Long control description number ${i}</button>`).join(""));
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    const mock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url) !== "https://api.anthropic.com/v1/messages") return originalFetch(url, init);
+      const body = JSON.parse(String(init?.body));
+      const context: string = body.messages[0].content;
+      requests.push(context);
+      const icon = context.startsWith("Query: cart icon") ? "🛒" : "☰";
+      const ref = new RegExp(`button "${icon}"[^\\n]*\\[ref=(e\\d+)\\]`).exec(context)![1];
+      return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify([{ ref }]) }] }), { status: 200 });
+    });
+    vi.stubEnv("ANTHROPIC_API_KEY", "fixture-not-a-real-key");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+    try {
+      for (const query of ["hamburger menu", "cart icon", "the special button"]) {
+        const result = await runFind(session, { query });
+        expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, degraded: false, match_count: 1 });
+        const ref = /^(e\d+) /m.exec((result.content[1] as { text: string }).text)![1];
+        expect(await (await session.resolveRef(ref)).count()).toBe(1);
+      }
+      expect(requests).toHaveLength(3);
+      for (const message of requests) {
+        const tree = message.split("Accessibility tree:\n")[1];
+        expect(tree.length).toBeLessThanOrEqual(40000);
+        expect(tree).not.toContain("PrivateProseMarker");
+        expect(tree).toContain("truncated");
+      }
+    } finally { mock.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it("review: find containers return just themselves, unknown roles are invalid, and ref-like names do not inflate counts", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<div data-testid="container"><button>Child one</button><button>Child two</button></div><div>Container label<input aria-label="Nested input"></div><button aria-label="Fake [ref=e99999]">Real</button><iframe srcdoc="<button>Only frame control</button>"></iframe>');
+    const found = await runFind(session, { test_id: "container" });
+    expect(JSON.parse(firstText(found))).toMatchObject({ ok: true, match_count: 1 });
+    expect((found.content[1] as { text: string }).text).not.toContain('button "Child');
+    const textContainer = await runFind(session, { text: "Container label" });
+    expect(JSON.parse(firstText(textContainer))).toMatchObject({ ok: true, match_count: 1 });
+    expect((textContainer.content[1] as { text: string }).text).not.toContain("Nested input");
+    // Documented exact lookup boundary; frame refs remain available to local search.
+    expect(JSON.parse(firstText(await runFind(session, { role: "button", name: "Only frame control" })))).toMatchObject({ ok: true, match_count: 0 });
+    expect(JSON.parse(firstText(await runFind(session, { query: "Only frame control" })))).toMatchObject({ ok: true, match_count: 1 });
+    const invalid = await runFind(session, { role: "not-a-role" });
+    expect(invalid.isError).toBe(true); expect(firstText(invalid)).toContain("invalid_input");
+    const snap = await runSnapshot(session, {});
+    const raw = await page.locator("body").ariaSnapshot({ mode: "ai" });
+    const actual = [...raw.matchAll(/\[ref=(?:f\d+)?e\d+\](?: |:|$)/gm)];
+    // The name's closing quote distinguishes its fake token from real attributes.
+    expect(JSON.parse(firstText(snap)).ref_count).toBe(actual.length);
+    expect(session.refs.isKnown("e99999")).toBe(false);
   });
 
   it("applies the workspace viewport before first navigation, new tabs and CDP recovery", async () => {

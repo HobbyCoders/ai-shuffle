@@ -120,6 +120,7 @@ export const findSchema: JsonSchema = {
     placeholder: { type: "string", description: "Exact input placeholder." },
     test_id: { type: "string", description: "Exact data-testid." },
     text: { type: "string", description: "Exact visible text." },
+    index: { type: "integer", minimum: 0, description: "Zero-based exact-match candidate index; omit to list ambiguous candidates." },
   },
   additionalProperties: false,
 };

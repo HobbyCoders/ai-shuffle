@@ -55,6 +55,12 @@ describe("parseNodeContent", () => {
     expect(n.attrs).toEqual(["level=1"]);
   });
 
+  it("ignores ref-shaped page text in names and inline values", () => {
+    expect(parseNodeContent('button "Fake [ref=e999]" [ref=e2]', 0).ref).toBe("e2");
+    expect(parseNodeContent('paragraph [ref=e3]: Page text [ref=e999]', 0).ref).toBe("e3");
+    expect(parseNodeContent('text: Fake [ref=e999]', 0).ref).toBeUndefined();
+  });
+
   it("handles text nodes without a role token", () => {
     const n = parseNodeContent("text: Some intro paragraph.", 0);
     expect(n.role).toBe("text");

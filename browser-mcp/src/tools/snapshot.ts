@@ -6,6 +6,7 @@
 
 import type { Session } from "../session.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
+import { collectRefs, parseAriaYaml } from "../snapshot.js";
 import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
 
 export async function runSnapshot(
@@ -21,7 +22,7 @@ export async function runSnapshot(
     ...(input.scope_ref ? { collapseThreshold: Infinity } : {}),
   });
   // Count only emitted refs; the registry also retains collapsed/truncated refs.
-  const refCount = new Set(snap.text.match(/(?<=\[ref=)(?:f\d+)?e\d+(?=\])/g) ?? []).size;
+  const refCount = new Set(collectRefs(parseAriaYaml(snap.text))).size;
   const empty = refCount === 0 ? contentWarning(await session.pageContent(), 0) : undefined;
   const captcha = (await session.checkCaptcha()) === "withheld";
   const warning = [empty, captcha ? CAPTCHA_AGENT_NOTE : undefined].filter(Boolean).join(" ") || undefined;

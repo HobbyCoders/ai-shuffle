@@ -9,7 +9,7 @@
  */
 
 import { raceWithTimeout, type Session } from "../session.js";
-import { observationRoots } from "./observation_scope.js";
+import { observationRoots, includeObservationRoot } from "./observation_scope.js";
 import { jsonResult, capText, emptyContentWarning, type McpToolResult } from "./result.js";
 
 export const READ_TEXT_MAX_CHARS = 30000;
@@ -25,7 +25,9 @@ interface Extracted {
  * open shadow roots and slots. Closed roots remain inaccessible. Self-contained
  * for Playwright serialization; prefers substantial article/main content.
  */
-function extractInRoot(root: Element, scoped: boolean): string {
+function extractInRoot(root: Element | null, scoped: boolean): string {
+  if (!root || !root.ownerDocument.body) return "";
+  if (root.tagName === "HTML") root = root.ownerDocument.body;
   const norm = (s: string) => s.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const read = (node: Node): string => {
     if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
@@ -55,8 +57,17 @@ export async function runReadText(session: Session, input: { offset?: number; sc
   const page = await session.ensurePage();
   const extracted: Extracted = await raceWithTimeout((async () => {
     const roots = await observationRoots(session, input.scope_ref);
-    const parts = await Promise.all(roots.map(root => root.evaluate(extractInRoot, Boolean(input.scope_ref))));
-    return { title: await page.title(), url: page.url(), text: parts.filter(Boolean).join("\n\n") };
+    const parts = await Promise.allSettled(roots.map(root => raceWithTimeout((async () => {
+      if (!await includeObservationRoot(root)) return "";
+      // Evaluate the existing document root without auto-waiting for a body
+      // in SVG, uncommitted or indefinitely loading frames.
+      const text = root.primary && root.scope
+        ? await root.scope.evaluate(extractInRoot, true, { timeout: 200 })
+        : await root.frame.locator(":root").evaluate(extractInRoot, Boolean(input.scope_ref), { timeout: 200 });
+      if (!text) return "";
+      return root.frame === page.mainFrame() ? text : `[frame ${new URL(root.frame.url()).origin}]\n${text}`;
+    })(), root.primary ? 1000 : 200, "frame text timed out")));
+    return { title: await page.title(), url: page.url(), text: parts.flatMap(part => part.status === "fulfilled" && part.value ? [part.value] : []).join("\n\n") };
   })(), 5000, "read_text timed out");
 
   const offset = Math.max(0, Math.min(input.offset ?? 0, extracted.text.length));
