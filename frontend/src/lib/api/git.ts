@@ -934,6 +934,7 @@ export interface PullResponse {
     success: boolean;
     message: string;
     target?: string | null;
+    warning?: boolean;
     conflicts: string[];
     has_conflicts: boolean;
     /** Post-pull status + diff stats computed inline by the backend. */
@@ -945,6 +946,7 @@ interface RawPullResponse {
     success: boolean;
     message: string;
     target?: string | null;
+    warning?: boolean;
     conflicts?: string[];
     has_conflicts?: boolean;
     status?: RawGitStatus | null;
@@ -965,6 +967,7 @@ export async function pullFromRemote(
         success: raw.success,
         message: raw.message,
         target: raw.target ?? null,
+        warning: raw.warning ?? false,
         conflicts: raw.conflicts ?? [],
         has_conflicts: raw.has_conflicts ?? false,
         status: raw.status ? transformGitStatus(raw.status) : null,

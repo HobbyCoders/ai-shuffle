@@ -1428,6 +1428,7 @@ async def pull_from_remote(
     return PullResponse(
         success=True,
         message=error_msg or f"Pulled from {target} using {body.strategy}",
+        warning=bool(error_msg),
         target=target,
         status=inline_status,
         diff_stats=inline_diff,

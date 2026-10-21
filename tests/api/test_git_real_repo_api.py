@@ -453,7 +453,7 @@ def test_auth_failure_maps_to_502_fetch_400_push_and_failed_pull(api):
     assert pull.status_code == 200
     assert pull.json() == {
         "success": False, "message": "Failed to fetch from 'origin'",
-        "conflicts": [], "has_conflicts": False, "target": "origin/main", "status": None, "diff_stats": None,
+        "conflicts": [], "has_conflicts": False, "target": "origin/main", "warning": False, "status": None, "diff_stats": None,
     }
 
 
@@ -566,6 +566,37 @@ def test_pull_unrelated_history_reports_unchanged(api, strategy):
     assert body["has_conflicts"] is False and body["conflicts"] == []
     assert git(repo, "rev-parse", "HEAD") == before
     assert git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("remote", ["--all", "-v"])
+def test_pull_rejects_option_like_remote(api, remote):
+    client, repo, _ = api
+    before = git(repo, "rev-parse", "HEAD")
+    assert client.post(f"{BASE}/pull", json={"remote": remote}).status_code == 422
+    assert git(repo, "rev-parse", "HEAD") == before
+
+
+@pytest.mark.parametrize("strategy", ["merge", "rebase"])
+def test_pull_warns_when_real_stash_restoration_conflicts(api, strategy):
+    client, repo, tmp_path = api
+    bare = make_origin(tmp_path, repo)
+    other = clone(tmp_path, bare, "other")
+    remote_head = commit_file(other, "a.txt", "remote edits\n", "remote edit")
+    git(other, "push", "-q", "origin", "main")
+    write(repo / "a.txt", "uncommitted local edits\n")
+
+    response = client.post(f"{BASE}/pull", json={"strategy": strategy, "auto_stash": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True  # integration completed, restoration did not
+    assert body["warning"] is True
+    assert body["target"] == "origin/main"
+    assert body["message"].startswith("Pull from origin/main succeeded but failed to restore stashed changes:")
+    assert git(repo, "rev-parse", "HEAD") == remote_head
+    assert git(repo, "diff", "--name-only", "--diff-filter=U") == "a.txt"
+    assert "auto-stash before pull" in git(repo, "stash", "list")
+    assert git(repo, "show", "stash@{0}:a.txt") == "uncommitted local edits"
 
 
 def test_pull_rejects_unknown_strategy(api):

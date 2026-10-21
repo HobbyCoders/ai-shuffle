@@ -1,51 +1,39 @@
-import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-
-// Exercise MainPanel's actual action without mounting the unrelated workspace UI.
-const source = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8');
-const handler = source.match(/async function handlePull\(opts: PullOptions = \{\}\) \{[\s\S]*?(?=\n\s*async function handleCreatePR)/)?.[0];
-if (!handler) throw new Error('MainPanel handlePull was not found');
-const runPull = new Function('harness', `
-    const { git, notify, gitActionsBlocked, captureGitRetryGuard, markGitActivity,
-        gitActionPreferences, gitOperations, isApiError, errText } = harness;
-    ${handler.replace('opts: PullOptions = {}', 'opts = {}')}
-    return handlePull();
-`);
-
-async function pullNotification(response: { success: boolean; message: string; has_conflicts: boolean; conflicts: string[] }) {
-    const notify = vi.fn();
-    await runPull({
-        git: { pull: vi.fn().mockResolvedValue(response), refreshPrState: vi.fn().mockResolvedValue(undefined) },
-        notify,
-        gitActionsBlocked: () => false,
-        captureGitRetryGuard: () => (retry: () => void) => retry(),
-        markGitActivity: vi.fn(),
-        gitActionPreferences: { current: { pullStrategy: 'rebase', autoStash: false } },
-        gitOperations: { begin: vi.fn(), clear: vi.fn() },
-        isApiError: () => false,
-        errText: (error: unknown) => String(error)
-    });
-    return notify;
-}
+import { describe, expect, it } from 'vitest';
+import { pullNotification } from './git-pull-notification';
 
 describe('MainPanel Pull notifications', () => {
-    it('says a conflicting pull was stopped, naming the target and files without asking for a commit', async () => {
+    it('says a conflicting pull was stopped, naming the target and files without asking for a commit', () => {
         const message = 'Pull from other/main was stopped due to conflicts in a.txt. Nothing was changed.';
-        const notify = await pullNotification({ success: false, message, has_conflicts: true, conflicts: ['a.txt'] });
-        expect(notify).toHaveBeenCalledExactlyOnceWith(message, { severity: 'error' });
-        expect(notify.mock.calls[0][0]).not.toMatch(/resolve|then commit/i);
+        const notification = pullNotification({ success: false, message });
+        expect(notification).toEqual({ message, severity: 'error' });
+        expect(notification.message).not.toMatch(/resolve|then commit/i);
     });
 
-    it('reports unrelated histories as a stopped pull, not a success even without conflicts', async () => {
+    it('reports unrelated histories as a stopped pull rather than a success', () => {
         const message = 'Pull stopped: this branch and origin/main share no history (the remote may have changed). Nothing was changed.';
-        const notify = await pullNotification({ success: false, message, has_conflicts: false, conflicts: [] });
-        expect(notify).toHaveBeenCalledExactlyOnceWith(message, { severity: 'error' });
+        expect(pullNotification({ success: false, message })).toEqual({ message, severity: 'error' });
     });
 
-    it('retains the actual target in the successful pull message', async () => {
+    it('preserves shallow-clone recovery instructions', () => {
+        const message = "Pull stopped: the shared history with origin/main isn't in this shallow clone. Run `git fetch --unshallow` (or `--deepen`). Nothing was changed.";
+        expect(pullNotification({ success: false, message })).toEqual({ message, severity: 'error' });
+    });
+
+    it('shows a warning when integration succeeded but restoring stashed changes failed', () => {
+        const message = 'Pull from other/main succeeded but failed to restore stashed changes: conflict';
+        expect(pullNotification({ success: true, warning: true, message })).toEqual({ message, severity: 'warning' });
+        // Severity is driven by the structured flag, not by wording.
+        expect(pullNotification({ success: true, warning: true, message: 'Recovery required' }).severity).toBe('warning');
+    });
+
+    it('retains the actual target in the successful pull message', () => {
         const message = 'Pulled from other/main using rebase';
-        const notify = await pullNotification({ success: true, message, has_conflicts: false, conflicts: [] });
-        expect(notify).toHaveBeenCalledExactlyOnceWith(message, { severity: 'success' });
+        expect(pullNotification({ success: true, message })).toEqual({ message, severity: 'success' });
+    });
+
+    it('provides severity-appropriate fallback messages', () => {
+        expect(pullNotification({ success: false, message: '' })).toEqual({ message: 'Pull stopped. Nothing was changed.', severity: 'error' });
+        expect(pullNotification({ success: true, warning: true, message: '' }).severity).toBe('warning');
+        expect(pullNotification({ success: true, message: '' })).toEqual({ message: 'Pulled latest changes', severity: 'success' });
     });
 });

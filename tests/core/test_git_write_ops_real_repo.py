@@ -7,6 +7,7 @@ credentials, so nothing touches the network.
 """
 
 import os
+import subprocess
 
 import pytest
 
@@ -436,6 +437,103 @@ def test_pull_unrelated_history_is_refused(svc, repo, tmp_path, strategy):
     assert not (repo / ".git" / "MERGE_HEAD").exists()
     assert not (repo / ".git" / "rebase-merge").exists()
     assert not (repo / ".git" / "rebase-apply").exists()
+
+
+@pytest.mark.parametrize("strategy", ["merge", "rebase"])
+def test_pull_shallow_fork_requests_more_history(svc, tmp_path, strategy):
+    source = init_repo(tmp_path / "deep-source")
+    git(source, "branch", "topic")
+    commit_file(source, "main.txt", "main work\n", "main work")
+    git(source, "checkout", "-q", "topic")
+    commit_file(source, "topic.txt", "topic work\n", "topic work")
+    git(source, "checkout", "-q", "main")
+    shallow = tmp_path / "shallow"
+    git(tmp_path, "clone", "-q", "--depth", "1", "--no-single-branch", source.as_uri(), str(shallow))
+    git(shallow, "config", "branch.main.merge", "refs/heads/topic")
+    assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    before = git(shallow, "rev-parse", "HEAD")
+
+    ok, err, conflicts, target = svc.pull(str(shallow), strategy=strategy)
+
+    assert (ok, conflicts, target) == (False, [], "origin/topic")
+    assert err == "Pull stopped: the shared history with origin/topic isn't in this shallow clone. Run `git fetch --unshallow` (or `--deepen`). Nothing was changed."
+    assert "share no history" not in err
+    assert git(shallow, "rev-parse", "HEAD") == before
+    assert git(shallow, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("remote", ["--all", "-v"])
+def test_pull_rejects_option_like_remote_before_fetch(svc, repo, remote, monkeypatch):
+    def unexpected_fetch(*args):
+        pytest.fail("invalid remote must never reach fetch")
+    monkeypatch.setattr(svc, "fetch", unexpected_fetch)
+    before = git(repo, "rev-parse", "HEAD")
+
+    assert svc.pull(str(repo), remote=remote) == (False, f"Invalid remote name: {remote}", [], None)
+    assert git(repo, "rev-parse", "HEAD") == before
+
+
+@pytest.mark.parametrize("strategy", ["merge", "rebase"])
+def test_pull_terminates_options_before_integration_refs(svc, repo, remote_pair, strategy, monkeypatch):
+    _, other = remote_pair
+    commit_file(other, "new.txt", "new\n", "remote work")
+    git(other, "push", "-q", "origin", "main")
+    run_git = svc._run_git
+    calls = []
+
+    def record_run(working_dir, args, **kwargs):
+        calls.append(args)
+        return run_git(working_dir, args, **kwargs)
+
+    monkeypatch.setattr(svc, "_run_git", record_run)
+    assert svc.pull(str(repo), strategy=strategy) == (True, None, [], "origin/main")
+    assert ["merge-base", "--", "HEAD", "origin/main"] in calls
+    assert [strategy, "--", "origin/main"] in calls
+
+
+@pytest.mark.parametrize("broken_config", ["missing-remote", "unmapped-branch"])
+def test_pull_refuses_unresolvable_configured_upstream(svc, repo, two_remotes, broken_config, monkeypatch):
+    if broken_config == "missing-remote":
+        git(repo, "config", "--remove-section", "remote.other")
+    else:
+        git(repo, "config", "remote.other.fetch", "+refs/heads/different:refs/remotes/other/different")
+    before = git(repo, "rev-parse", "HEAD")
+
+    def unexpected_fetch(*args):
+        pytest.fail("a broken upstream must not silently fetch origin")
+
+    monkeypatch.setattr(svc, "fetch", unexpected_fetch)
+    ok, err, conflicts, target = svc.pull(str(repo))
+
+    assert (ok, conflicts, target) == (False, [], None)
+    assert err == "Pull stopped: the configured upstream for main could not be resolved. Check the remote and fetch refspec configuration. Nothing was changed."
+    assert git(repo, "rev-parse", "HEAD") == before
+    assert git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("strategy", ["merge", "rebase"])
+def test_pull_abort_failure_preserves_and_names_stash(svc, repo, remote_pair, strategy, monkeypatch):
+    _, other = remote_pair
+    commit_file(other, "a.txt", "theirs\n", "remote edit")
+    git(other, "push", "-q", "origin", "main")
+    commit_file(repo, "a.txt", "ours\n", "local edit")
+    write(repo / "src/app.py", "local edits\n")
+    run_git = svc._run_git
+
+    def fail_abort(working_dir, args, **kwargs):
+        if args == [strategy, "--abort"]:
+            return subprocess.CompletedProcess(args, 1, "", "simulated abort failure")
+        return run_git(working_dir, args, **kwargs)
+
+    monkeypatch.setattr(svc, "_run_git", fail_abort)
+    ok, err, conflicts, target = svc.pull(str(repo), strategy=strategy, auto_stash=True)
+
+    assert (ok, conflicts, target) == (False, ["a.txt"], "origin/main")
+    assert "could not be aborted" in err
+    assert "Your changes are saved in the stash." in err
+    assert "Nothing was changed" not in err
+    assert "auto-stash before pull" in git(repo, "stash", "list")
+    assert git(repo, "show", "stash@{0}:src/app.py") == "local edits"
 
 
 def test_pull_auto_stash_keeps_local_edits(svc, repo, remote_pair):

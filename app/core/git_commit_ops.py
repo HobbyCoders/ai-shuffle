@@ -473,8 +473,8 @@ class GitCommitMixin:
                     ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
                 )
                 if upstream.returncode != 0:
-                    # A configured upstream may not have been fetched yet (or may
-                    # have been pruned). Do not silently pull origin in that case.
+                    # Recover a mapped upstream whose tracking ref is missing.
+                    # An unmapped but configured upstream is refused below.
                     upstream = self._run_git(
                         working_dir,
                         ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"],
@@ -490,7 +490,18 @@ class GitCommitMixin:
                         return False, f"Cannot determine the remote for {target}", [], target
                     remote = tracked_remote.stdout.strip()
                 else:
+                    configured_merge = self._run_git(
+                        working_dir, ["config", "--get", f"branch.{branch}.merge"]
+                    )
+                    if configured_merge.returncode != 1:
+                        return (
+                            False,
+                            f"Pull stopped: the configured upstream for {branch} could not be resolved. Check the remote and fetch refspec configuration. Nothing was changed.",
+                            [], target,
+                        )
                     remote = "origin"
+            if remote.startswith("-"):
+                return False, f"Invalid remote name: {remote}", [], target
             target = target or f"{remote}/{branch}"
 
             if not self.fetch(working_dir, remote):
@@ -498,8 +509,17 @@ class GitCommitMixin:
 
             # Refuse unrelated histories before rebase can replay the whole branch,
             # and before auto-stash can modify the working tree or stash stack.
-            base = self._run_git(working_dir, ["merge-base", "HEAD", target])
+            base = self._run_git(working_dir, ["merge-base", "--", "HEAD", target])
             if base.returncode == 1:
+                shallow = self._run_git(working_dir, ["rev-parse", "--is-shallow-repository"])
+                if shallow.returncode != 0:
+                    return False, shallow.stderr.strip() or "Cannot check whether this repository is shallow", [], target
+                if shallow.stdout.strip() == "true":
+                    return (
+                        False,
+                        f"Pull stopped: the shared history with {target} isn't in this shallow clone. Run `git fetch --unshallow` (or `--deepen`). Nothing was changed.",
+                        [], target,
+                    )
                 return (
                     False,
                     f"Pull stopped: this branch and {target} share no history (the remote may have changed). Nothing was changed.",
@@ -511,7 +531,7 @@ class GitCommitMixin:
             if auto_stash:
                 stashed = self.stash_push(working_dir, "auto-stash before pull")
 
-            args = ["rebase" if strategy == "rebase" else "merge", target]
+            args = ["rebase" if strategy == "rebase" else "merge", "--", target]
 
             result = self._run_git(working_dir, args, timeout=120)
 
@@ -533,6 +553,8 @@ class GitCommitMixin:
                 files = ", ".join(conflicts)
                 if abort.returncode != 0:
                     message = f"Pull from {target} hit conflicts in {files} and could not be aborted: {abort.stderr.strip()}"
+                    if stashed:
+                        message += ". Your changes are saved in the stash."
                 else:
                     message = f"Pull from {target} was stopped due to conflicts in {files}. Nothing was changed."
                     if stashed:
