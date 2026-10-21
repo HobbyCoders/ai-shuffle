@@ -5,6 +5,105 @@ from app.core.provider.fluid_pg_store import PgFluidStore
 from fluid.events import ToolResult
 from fluid.events.bus import _retained_size
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["events_page", "iter_events"])
+async def test_live_replay_pages_obey_bytes_and_cursor_gaps(mock_db, monkeypatch, path):
+    from app.core.provider import fluid_pg_store as module
+    monkeypatch.setattr(module, "EVENT_PAGE_BYTES", 2048, raising=False)
+    store = PgFluidStore()
+    await store.create_session("live-pages")
+    sequences = [1, 3, 8, 9, 20, 21]
+    for seq in sequences:
+        await store.append_event("live-pages", ToolResult(session_id="live-pages", seq=seq,
+            tool_use_id=str(seq), name="large", output="猫" * 250))
+    original = module._events_page_sync
+    pages = []
+    def counted(*args):
+        page = original(*args)
+        pages.append([event.seq for event in page])
+        return page
+    monkeypatch.setattr(module, "_events_page_sync", counted)
+    if path == "iter_events":
+        received = [event.seq async for event in store.iter_events("live-pages", 0)]
+    else:
+        received = []
+        while page := await store.events_page("live-pages", received[-1] if received else 0):
+            received.extend(event.seq for event in page)
+    assert received == sequences
+    assert max(map(len, pages)) < len(sequences)
+    assert all(len(page) <= 2 for page in pages)
+
+
+
+
+@pytest.mark.asyncio
+async def test_small_live_pages_still_obey_requested_row_limit(mock_db):
+    store = PgFluidStore()
+    await store.create_session("row-cap")
+    for seq in range(1, 6):
+        await store.append_event("row-cap", ToolResult(session_id="row-cap", seq=seq,
+            tool_use_id=str(seq), name="small", output="ok"))
+    assert [event.seq for event in await store.events_page("row-cap", 0, limit=2)] == [1, 2]
+    assert [event.seq for event in await store.events_page("row-cap", 2, limit=2)] == [3, 4]
+    assert [event.seq async for event in store.iter_events("row-cap", 0, page_size=2)] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_live_replay_oversized_row_always_progresses(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+    monkeypatch.setattr(module, "EVENT_PAGE_BYTES", 1024, raising=False)
+    store = PgFluidStore()
+    await store.create_session("live-oversized")
+    for seq, size in [(2, 5000), (4, 10), (6, 5000)]:
+        await store.append_event("live-oversized", ToolResult(session_id="live-oversized", seq=seq,
+            tool_use_id=str(seq), name="varying", output="x" * size))
+    assert [event.seq for event in await store.events_page("live-oversized", 0)] == [2]
+    assert [event.seq for event in await store.events_page("live-oversized", 2)] == [4]
+    assert [event.seq for event in await store.events_page("live-oversized", 4)] == [6]
+    assert [event.seq async for event in store.iter_events("live-oversized", 0)] == [2, 4, 6]
+
+
+
+
+@pytest.mark.asyncio
+async def test_event_bus_catchup_drains_multiple_byte_bounded_pages(mock_db, monkeypatch):
+    import asyncio
+    from app.core.provider import fluid_pg_store as module
+    from fluid.events.bus import EventBus
+    from fluid.store.base import replay_source
+    monkeypatch.setattr(module, "EVENT_PAGE_BYTES", 2048)
+    store = PgFluidStore()
+    await store.create_session("bus-pages")
+    bus = EventBus(replay_source=replay_source(store), log_ring_size=1)
+    for seq in range(1, 10):
+        event = ToolResult(session_id="bus-pages", seq=seq, tool_use_id=str(seq),
+                           name="large", output="x" * 900)
+        await store.append_event("bus-pages", event)
+        await bus.publish(event)
+    received = []
+    async with asyncio.timeout(5):
+        async for event in bus.subscribe("bus-pages"):
+            received.append(event.seq)
+            if event.seq == 9:
+                break
+    assert received == list(range(1, 10))
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_compatibility_cache_preserves_negative_cursor_floor(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+    store = PgFluidStore()
+    await store.create_session("floor")
+    await store.append_event("floor", ToolResult(session_id="floor", seq=1,
+        tool_use_id="one", name="small", output="ok"))
+    await store.events_since("floor", -1)
+    def unexpected(*args):
+        pytest.fail("a complete cache should satisfy the original negative cursor")
+    monkeypatch.setattr(module, "_events_since_sync", unexpected)
+    assert [event.seq for event in await store.events_since("floor", -1)] == [1]
+
+
 
 @pytest.mark.asyncio
 async def test_event_cache_is_byte_bounded_and_replays_evicted_prefix(mock_db, monkeypatch):
@@ -58,7 +157,7 @@ async def test_node_byte_diagnostics_follow_cache_insert_and_cold_restore(mock_d
 
 
 @pytest.mark.asyncio
-async def test_legacy_replay_decodes_in_small_finite_pages(mock_db, monkeypatch):
+async def test_legacy_replay_uses_large_pages_for_small_rows(mock_db, monkeypatch):
     from app.core.provider import fluid_pg_store as module
     store = PgFluidStore()
     await store.create_session("paged")
@@ -72,7 +171,7 @@ async def test_legacy_replay_decodes_in_small_finite_pages(mock_db, monkeypatch)
         return original(sid, after, through, limit)
     monkeypatch.setattr(module, "_events_page_sync", counted)
     assert [e.seq for e in await store.events_since("paged", 0)] == list(range(1, 18))
-    assert calls == [(0, 17, 8), (8, 17, 8), (16, 17, 8)]
+    assert calls == [(0, 17, 128)]
 
 
 @pytest.mark.asyncio

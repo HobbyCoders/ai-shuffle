@@ -161,7 +161,7 @@ def _memory_projection(nodes: Optional[List[SessionNode]], node: SessionNode) ->
         node_id=node.node_id, parent_id=node.parent_id, ts=node.ts,
         message=Message(role="user", content=[Text(text=note)], context_pin=(0, len(note))),
     )]
-    return result if sum(len(n.message.text().encode("utf-8")) for n in result) <= MEMORY_PATH_BYTES else None
+    return result if sum(len(n.message.text().encode("utf-8", "surrogatepass")) for n in result) <= MEMORY_PATH_BYTES else None
 
 
 def _session_head_sync(session_id: str) -> Optional[str]:
@@ -250,12 +250,12 @@ def _load_path_sync(session_id: str, leaf_node_id: Optional[str]) -> List[Sessio
 def _events_since_sync(session_id: str, seq: int) -> List[Event]:
     # Compatibility API still returns the complete prefix, but libpq must not
     # retain another full-history JSON result while Python decodes that list.
-    # Eight potentially large tool results at a time, connections released
-    # between pages. New consumers should use iter_events/events_page instead.
+    # Byte- and row-bounded pages, with connections released between pages.
+    # New consumers should use iter_events/events_page instead.
     through = _last_event_seq_sync(session_id)
     events = []
     while seq < through:
-        page = _events_page_sync(session_id, seq, through, 8)
+        page = _events_page_sync(session_id, seq, through, PgFluidStore.EVENT_CACHE_LIMIT)
         if not page:
             break
         events.extend(page)
@@ -263,13 +263,32 @@ def _events_since_sync(session_id: str, seq: int) -> List[Event]:
     return events
 
 
+# Serialized JSON budget, not a Python heap limit. A single oversized event
+# must still be returned so catch-up always makes progress.
+EVENT_PAGE_BYTES = 8 * 1024 * 1024
+
+
 def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> List[Event]:
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT event FROM fluid_session_events WHERE session_id = %s "
-            "AND seq > %s AND seq <= %s ORDER BY seq LIMIT %s",
-            (session_id, seq, through, limit),
+            # Estimate a useful row ceiling from the first event, so large
+            # rows do not get repeatedly sized across many byte-limited pages.
+            # The running sum still enforces the budget for mixed row sizes.
+            "WITH first_size AS MATERIALIZED ("
+            "SELECT octet_length(CAST(event AS TEXT)) AS bytes FROM fluid_session_events "
+            "WHERE session_id = %s AND seq > %s AND seq <= %s ORDER BY seq LIMIT 1"
+            "), candidates AS MATERIALIZED ("
+            "SELECT seq, event FROM fluid_session_events WHERE session_id = %s "
+            "AND seq > %s AND seq <= %s ORDER BY seq "
+            "LIMIT LEAST(%s, COALESCE((SELECT GREATEST(1, %s / bytes) FROM first_size), 1))"
+            "), sized AS (SELECT seq, event, "
+            "SUM(octet_length(CAST(event AS TEXT))) OVER (ORDER BY seq "
+            "ROWS UNBOUNDED PRECEDING) AS page_bytes, "
+            "ROW_NUMBER() OVER (ORDER BY seq) AS row_num FROM candidates) "
+            "SELECT event FROM sized WHERE page_bytes <= %s OR row_num = 1 ORDER BY seq",
+            (session_id, seq, through, session_id, seq, through,
+             limit, EVENT_PAGE_BYTES, EVENT_PAGE_BYTES),
         )
         rows = cur.fetchall()
     return [event_from_dict(_as_dict(r["event"])) for r in rows]
@@ -1456,8 +1475,9 @@ class PgFluidStore:
         tail.reverse()
         self._events[session_id] = tail
         self._event_bytes[session_id] = size
-        evicted_through = tail[0].seq - 1 if tail else events[-1].seq if events else floor
-        self._event_floor[session_id] = max(floor, evicted_through)
+        if len(tail) < len(events):
+            floor = max(floor, tail[0].seq - 1 if tail else events[-1].seq)
+        self._event_floor[session_id] = floor
 
     async def _write_pending(self, session_id: str, extra: Optional[Event] = None) -> None:
         # Accepted deltas remain retryable until the transaction acknowledges
@@ -1642,6 +1662,10 @@ class PgFluidStore:
         self, session_id: str, seq: int, limit: int = EVENT_CACHE_LIMIT,
     ) -> List[Event]:
         """At most ``limit`` committed events after ``seq``, oldest first.
+
+        Pages also obey EVENT_PAGE_BYTES of serialized JSON. A single oversized
+        first event is returned alone, so callers must advance by the last seq
+        and continue until empty, not treat a short page as end-of-history.
 
         The EventBus replay source (``fluid.store.base.replay_source``): a
         subscriber behind the bus ring catches up one page per call instead of

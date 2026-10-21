@@ -46,6 +46,13 @@ def resident():
             for key, _, value in [line.partition(":")] if key in wanted}
 
 
+def process_cpu_seconds(pid):
+    # This PID belongs to the disposable cluster's current connection, not the
+    # running worker. /proc stat fields 14/15 are user/system CPU clock ticks.
+    fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
 def trim_lab():
     """This process owns the fixture. Never inject allocator calls into the app."""
     gc.collect()
@@ -105,8 +112,8 @@ async def exercise(get_db, args):
     released_native_trim = trim_lab()
     tracemalloc.stop()
 
-    # Real persistence -> real events_since decode -> drop caller-owned replay.
-    # ToolResult output is arbitrary JSON and can exceed a streaming delta.
+    # Real persistence -> the app's live page/iterator paths (compatibility
+    # events_since is opt-in). Tool output can exceed a streaming delta.
     store = module.PgFluidStore()
     await store.create_session("events")
     bus = EventBus()
@@ -116,27 +123,56 @@ async def exercise(get_db, args):
         await store.append_event("events", event)
         await bus.publish(event)
     del event
+    pages = []
+    original_page = module._events_page_sync
+    def observed_page(*page_args):
+        page = original_page(*page_args)
+        pages.append(dict(events=len(page), **resident()))
+        return page
+    module._events_page_sync = observed_page
+
+    async def replay(after):
+        if args.replay_path == "events_since":
+            return [event.seq for event in await store.events_since("events", after)]
+        if args.replay_path == "iter_events":
+            return [event.seq async for event in store.iter_events("events", after)]
+        sequences = []
+        while page := await store.events_page("events", after):
+            sequences.extend(event.seq for event in page)
+            after = page[-1].seq
+            del page
+        return sequences
+
+    with get_db() as conn:
+        backend_pid = conn.get_backend_pid()
     gc.collect()
     tracemalloc.start()
-    page = await store.events_since("events", 0)
-    assert len(page) == args.events
-    del page
+    client_cpu_start = time.process_time()
+    database_cpu_start = process_cpu_seconds(backend_pid)
+    start = time.perf_counter()
+    assert await replay(0) == list(range(1, args.events + 1))
+    replay_seconds = time.perf_counter() - start
+    client_cpu_seconds = time.process_time() - client_cpu_start
+    database_cpu_seconds = process_cpu_seconds(backend_pid) - database_cpu_start
     # Release the completed executor Future's result, not just our page ref.
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     gc.collect()
-    cached = store._events["events"]
-    event_result = dict(persisted=args.events, retained=len(cached),
+    cached = store._events.get("events", [])
+    event_result = dict(replay_path=args.replay_path, seconds=replay_seconds,
+                        client_cpu_seconds=client_cpu_seconds, database_cpu_seconds=database_cpu_seconds,
+                        page_calls=len(pages), max_page_events=max(p["events"] for p in pages),
+                        sampled_peak_rss_kib=max(p["VmRSS_kib"] for p in pages),
+                        persisted=args.events, retained=len(cached),
                         payload_bytes=sum(len(e.output.encode()) for e in cached),
                         traced_heap_bytes=tracemalloc.get_traced_memory()[0],
                         traced_peak_bytes=tracemalloc.get_traced_memory()[1],
                         bus=bus.memory_stats(), **resident())
     del cached
     # A cursor older than the retained cache must still receive every row.
-    replay = await store.events_since("events", 1)
-    assert [e.seq for e in replay] == list(range(2, args.events + 1))
-    del replay
-    assert await store.events_since("events", args.events) == []
+    assert await replay(1) == list(range(2, args.events + 1))
+    assert await replay(args.events) == []
+    module._events_page_sync = original_page
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     event_trim = trim_lab()
@@ -157,10 +193,12 @@ def main():
     parser.add_argument("--nodes", type=int, default=2048)
     parser.add_argument("--payload-bytes", type=int, default=8192)
     parser.add_argument("--read-path-every", type=int, default=1)
+    parser.add_argument("--replay-path", choices=("events_page", "iter_events", "events_since"),
+                        default="events_page")
     parser.add_argument("--events", type=int, default=128)
     parser.add_argument("--event-bytes", type=int, default=1024 * 1024)
     args = parser.parse_args()
-    if min(vars(args).values()) < 1:
+    if min(value for value in vars(args).values() if isinstance(value, int)) < 1:
         parser.error("all fixture sizes must be positive")
     with tempfile.TemporaryDirectory(prefix="shuffle-cache-lab-") as temporary:
         directory = Path(temporary)

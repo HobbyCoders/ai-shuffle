@@ -110,10 +110,13 @@ async def _collect_metrics() -> dict:
     metrics["harness_cache_by_provider"] = by_provider
     metrics["harness_retained_nodes"] = sum(g["retained_nodes"] for g in by_provider.values())
     metrics["harness_retained_message_json_bytes"] = sum(g["message_json_bytes"] for g in by_provider.values())
-    from app.core.session_pool import _session_pool
-    pooled = {id(state.adapter) for state in _session_pool._pool.values()} if _session_pool else set()
-    metrics["harness_stored_adapters_outside_pool"] = sum(
-        a._store is not None and id(a) not in pooled for a in adapters)
+    try:
+        from app.core.session_pool import _session_pool
+        pooled = {id(state.adapter) for state in _session_pool._pool.values()} if _session_pool else set()
+        metrics["harness_stored_adapters_outside_pool"] = sum(
+            a._store is not None and id(a) not in pooled for a in adapters)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to count adapters outside the session pool: {e}")
     del adapters
 
     # --- Session Pool ---

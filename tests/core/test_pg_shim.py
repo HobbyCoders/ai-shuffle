@@ -31,6 +31,18 @@ from tests.pg_shim import (
 )
 
 
+def test_octet_length_text_counts_utf8_bytes():
+    raw = new_sqlite_connection()
+    try:
+        raw.execute("CREATE TABLE payloads (event TEXT)")
+        raw.execute("INSERT INTO payloads VALUES (?)", ("猫é",))
+        cur = ShimConnection(raw).cursor()
+        cur.execute("SELECT octet_length(CAST(event AS TEXT)) AS size FROM payloads")
+        assert cur.fetchone()["size"] == len("猫é".encode("utf-8"))
+    finally:
+        close_connection(raw)
+
+
 class _FakeRaw:
     """Minimal stand-in for a sqlite3 connection whose commit/rollback raise."""
 
