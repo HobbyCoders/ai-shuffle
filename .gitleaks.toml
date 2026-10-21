@@ -14,6 +14,13 @@ condition = "AND"
 regexTarget = "match"
 paths = ['''^tests/core/test_claude_cloud_auth\.py$''']
 regexes = ['''^[A]KIAFAKEFAKEFAKE0000$''']
+
+[[rules.allowlists]]
+description = "Published AWS example IDs used to test credential redaction"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/(core/test_export_redaction|test_update_waiting_safety)\.py$''']
+regexes = ['''^(?:[A]KIA|[A]SIA)IOSFODNN7EXAMPLE$''']
 [[rules]]
 id = "github-token"
 description = "GitHub access token"
@@ -152,6 +159,13 @@ id = "postgres-password-url"
 description = "PostgreSQL URL containing a literal password (not interpolation/redaction)"
 regex = '''\bpostgres(?:ql)?(?:\+asyncpg|\+psycopg2?)?://[A-Za-z0-9_.%+-]+:([^\s@/\\"`]+)@[^\s/\\"'`<>${}]+(?:/[^\s\\"'`<>${}]*)?'''
 
+
+[[rules.allowlists]]
+description = "Synthetic URL used to test update-surface credential redaction"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/test_update_waiting_safety\.py$''']
+regexes = ['''^[p]ostgresql://admin:fixture-db-secret@db\.example\.com:5432/app$''']
 
 # These are complete placeholder passwords, not fixture or character exclusions.
 # Anchoring the whole URL keeps mixed passwords (including $, *, braces or

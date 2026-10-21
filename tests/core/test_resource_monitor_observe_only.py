@@ -31,6 +31,21 @@ import app.core.session_pool as sp
 from app.core.session_pool import SessionPool, SessionState
 
 
+@pytest.mark.asyncio
+async def test_metrics_survive_session_pool_import_failure(monkeypatch):
+    import builtins
+    from app.core import resource_monitor as rm
+    original = builtins.__import__
+    def unavailable(name, *args, **kwargs):
+        if name == "app.core.session_pool":
+            raise ImportError("session pool unavailable")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", unavailable)
+    metrics = await rm._collect_metrics()
+    assert "harness_adapters" in metrics
+    assert "harness_stored_adapters_outside_pool" not in metrics
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 

@@ -18,6 +18,54 @@ def clean_state():
     session_runtime._executions.clear()
 
 
+def test_idle_serving_task_is_named_as_real_work(mock_db, monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from app.core.task_registry import TaskRegistry
+    from app.core.update_workers import _busy_reason
+    from app.db import database
+    from app.mcp import builtin_tools
+
+    registry = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
+    monkeypatch.setattr(database, "get_session", lambda sid: {"title": "Build preview", "updated_at": datetime.now(timezone.utc)})
+    monkeypatch.setattr("app.core.config.settings.monitor_serving_idle_seconds", 900)
+    registry.start_task("idle-chat", "preview", "shell", "node scripts/dev-preview.js --port 8791")
+    registry.mark_monitor_shell_task("idle-chat", "preview", serves=True)
+    monkeypatch.setitem(builtin_tools._background_tasks, "preview", SimpleNamespace(is_running=lambda: True))
+    rows = desktop_lifecycle.busy_work()
+    assert rows[0]["running_turn"] is False
+    detail = rows[0]["task_details"][0]
+    assert detail["kind"] == "service" and detail["live"] is True
+    assert detail["port"] == 8791 and "dev-preview" in detail["label"]
+    assert detail["started_at"] == registry.get_task("idle-chat", "preview")["startedAt"]
+    assert detail["monitor_serving_idle_seconds"] == 900 and detail["idle_stop_at"] > datetime.now(timezone.utc).timestamp()
+    assert detail["stop_will_stop"] is True
+    assert "Preview server still running for Build preview" in _busy_reason(rows)
+    assert "8791" in _busy_reason(rows)
+    from app.core.update_workers import waiting_status
+    blocker = waiting_status({"phase": "ready", "version": "b" * 12})["blocked_by"][0]
+    assert blocker["kind"] == "service" and blocker["live"] is True
+    assert blocker["monitor_serving_idle_seconds"] == 900 and blocker["idle_stop_at"]
+
+
+@pytest.mark.parametrize("connected", [True, False, None])
+@pytest.mark.parametrize("kind", ["agent", "shell"])
+async def test_shutdown_stop_attributes_task_to_server(mock_db, monkeypatch, connected, kind):
+    from types import SimpleNamespace
+    from app.core import query_session_lifecycle
+    from app.core.task_registry import TaskRegistry, SERVER_SHUTDOWN_REASON
+
+    registry = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
+    state = SimpleNamespace(is_connected=connected, adapter=None) if connected is not None else None
+    monkeypatch.setattr(query_session_lifecycle, "get_session_pool", lambda: SimpleNamespace(peek=lambda sid: state))
+    monkeypatch.setattr("app.core.remote_task.report_owed", lambda sid: None)
+    registry.start_task("s", "task", kind, "work")
+    await desktop_lifecycle.stop_session_work("s", shutdown=True)
+    assert registry.get_task("s", "task")["reason"] == SERVER_SHUTDOWN_REASON
+
+
 def start(sid):
     turn = turns.enqueue_turn(sid, "user", prompt="work")
     run = runs.claim_run(sid, "desktop", 60)
@@ -72,7 +120,7 @@ async def test_close_waits_for_real_turn_settlement_and_lease_release(mock_db):
         with patch("app.core.query_session_lifecycle.interrupt_session", side_effect=interrupt),              patch("app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock()) as stop_bg,              patch("app.core.task_persistence.flush", new=AsyncMock()) as flush:
             await asyncio.wait_for(desktop_lifecycle.stop_running_sessions(), 5)
         assert task.done()
-        stop_bg.assert_any_await("closing", user_stop=True, respect_shell_preference=False)
+        stop_bg.assert_any_await("closing", user_stop=True, respect_shell_preference=False, source="server_shutdown")
         flush.assert_awaited_once()
         assert turns.get_turn(turn["id"])["state"] == "aborted"
         assert runs.get_active_run("closing") is None
@@ -85,7 +133,7 @@ async def test_close_includes_parked_background_only_session():
     with patch("app.core.task_registry.task_registry") as registry,          patch("app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock()) as stop,          patch("app.core.task_persistence.flush", new=AsyncMock()):
         registry.active_session_ids.return_value = ["parked"]
         await desktop_lifecycle.stop_running_sessions()
-        stop.assert_awaited_once_with("parked", user_stop=True, respect_shell_preference=False)
+        stop.assert_awaited_once_with("parked", user_stop=True, respect_shell_preference=False, source="server_shutdown")
 
 async def test_async_stop_recovers_orphan_once_and_writes_terminal_event(mock_db):
     turn, lease = start("orphan-async")
