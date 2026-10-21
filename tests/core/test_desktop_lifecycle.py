@@ -49,16 +49,19 @@ def test_idle_serving_task_is_named_as_real_work(mock_db, monkeypatch):
     assert blocker["monitor_serving_idle_seconds"] == 900 and blocker["idle_stop_at"]
 
 
-@pytest.mark.parametrize("connected", [True, False])
-async def test_shutdown_stop_attributes_task_to_server(mock_db, monkeypatch, connected):
+@pytest.mark.parametrize("connected", [True, False, None])
+@pytest.mark.parametrize("kind", ["agent", "shell"])
+async def test_shutdown_stop_attributes_task_to_server(mock_db, monkeypatch, connected, kind):
     from types import SimpleNamespace
+    from app.core import query_session_lifecycle
     from app.core.task_registry import TaskRegistry, SERVER_SHUTDOWN_REASON
 
     registry = TaskRegistry()
     monkeypatch.setattr("app.core.task_registry.task_registry", registry)
-    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: SimpleNamespace(is_connected=connected, adapter=None)))
+    state = SimpleNamespace(is_connected=connected, adapter=None) if connected is not None else None
+    monkeypatch.setattr(query_session_lifecycle, "get_session_pool", lambda: SimpleNamespace(peek=lambda sid: state))
     monkeypatch.setattr("app.core.remote_task.report_owed", lambda sid: None)
-    registry.start_task("s", "task", "agent", "work")
+    registry.start_task("s", "task", kind, "work")
     await desktop_lifecycle.stop_session_work("s", shutdown=True)
     assert registry.get_task("s", "task")["reason"] == SERVER_SHUTDOWN_REASON
 
