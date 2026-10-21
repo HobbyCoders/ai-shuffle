@@ -158,7 +158,8 @@ def make_handler(engine_supplier, session_supplier, *, provider_id_supplier):
             await task  # shared content-addressed artifacts must never be deleted
             raise
         except Exception:
-            return ToolOutcome(text=json.dumps(_failure("The generated video could not be safely saved.", observed)), is_error=True)
+            result = _failure("The generated video could not be safely saved.", observed)
+            return ToolOutcome(text=json.dumps(result), result_fields=result, is_error=True)
         result.update(video_url=f"/api/v1/artifacts/{artifact['hash']}/video.mp4?" + urlencode({"session_id": session_id}),
                       mime_type="video/mp4", model=options.model, source="supergrok_subscription",
                       billing_note="Provider-reported USD cost; not a verified invoice or subscription quota debit. Not free or unlimited.")

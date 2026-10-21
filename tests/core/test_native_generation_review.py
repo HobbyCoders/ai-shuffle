@@ -29,13 +29,19 @@ async def test_no_account_never_sends_an_image_request(tmp_path, overrides):
     assert result.is_error and "not yet verified; no request was made" in result.text
 
 
-@pytest.mark.parametrize("key,raw", [("native_generation:grok-a", "{broken"),
-    ("native_generation:grok-a", '{"image":null,"video":{"model":"unproven"}}'),
-    ("native_generation:grok-a", '{"image":{"model":"grok-imagine-image-2.0","size":"2k","format":"png"},"video":null}'),
-    ("native_images_grok", "{broken"),
-    ("native_images_grok", ""),
-    ("native_images_grok", '{"model":"unproven","size":"2k","format":"png"}')])
-def test_stale_account_falls_back_and_does_not_break_list(monkeypatch, key, raw):
+@pytest.mark.parametrize("key,raw,image_enabled,video_enabled", [
+    ("native_generation:grok-a", "{broken", True, True),
+    ("native_generation:grok-a", '{"image":null,"video":{"model":"unproven"}}', False, False),
+    ("native_generation:grok-a", '{"image":{"model":"grok-imagine-image-2.0","size":"2k","format":"png"},"video":null}', True, False),
+    ("native_generation:grok-a", '{"image":null}', False, False),
+    ("native_generation:grok-a", '{"video":null}', True, False),
+    ("native_generation:grok-a", 'null', True, False),
+    ("native_generation:grok-a", '[]', True, False),
+    ("native_images_grok", "{broken", True, True),
+    ("native_images_grok", "", True, True),
+    ("native_images_grok", '{"model":"unproven","size":"2k","format":"png"}', True, False),
+])
+def test_stale_account_falls_back_and_does_not_break_list(monkeypatch, key, raw, image_enabled, video_enabled):
     _, stored = accounts(monkeypatch)
     stored[key] = raw
     before = dict(stored)
@@ -43,11 +49,71 @@ def test_stale_account_falls_back_and_does_not_break_list(monkeypatch, key, raw)
     view = views["grok-a"]
     assert view["stale"] is True and "reason" in view
     assert "unproven" not in view["reason"] and "broken" not in view["reason"]
-    assert view["settings"]["image"]["model"] == "grok-imagine-image"
-    assert load("grok-a").video.duration == 1
+    assert (view["settings"]["image"] is not None) is image_enabled
+    assert (load("grok-a").video is not None) is video_enabled
+    if image_enabled:
+        assert view["settings"]["image"]["model"] == "grok-imagine-image"
+    if video_enabled:
+        assert load("grok-a").video.duration == 1
     assert stored == before
     if key.startswith("native_generation:"):
         assert not views["grok-b"].get("stale", False)
+
+
+
+
+@pytest.mark.parametrize("disabled", ["image", "video"])
+async def test_stale_peer_group_never_reenables_a_disabled_tool(monkeypatch, tmp_path, disabled):
+    _, stored = accounts(monkeypatch)
+    value = load("grok-a").model_dump()
+    value[disabled] = None
+    value["video" if disabled == "image" else "image"] = {"model": "unproven"}
+    stored["native_generation:grok-a"] = json.dumps(value)
+    engine = SimpleNamespace(provider=SimpleNamespace(name="openai_responses"), model="chat", record_auxiliary_usage=AsyncMock())
+    image = AsyncMock()
+    video = AsyncMock()
+    monkeypatch.setattr(supergrok_images, "generate", image)
+    monkeypatch.setattr(native_video, "generate", video)
+    handler = native_images.make_handler if disabled == "image" else native_video.make_handler
+    result = await handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "grok-a")({"prompt": "tree"}, ToolCtx(cwd=str(tmp_path)))
+    assert result.is_error and "disabled" in result.text
+    image.assert_not_called()
+    video.assert_not_called()
+    assert account_view("grok-a")["stale"] is True
+
+
+@pytest.mark.parametrize("invalid", ["image", "video"])
+def test_stale_group_keeps_valid_peer_unchanged(monkeypatch, invalid):
+    _, stored = accounts(monkeypatch)
+    value = load("grok-a").model_dump()
+    valid_peer = value["video" if invalid == "image" else "image"]
+    value[invalid] = {"model": "unproven"}
+    stored["native_generation:grok-a"] = json.dumps(value)
+    view = account_view("grok-a")
+    assert view["settings"]["video" if invalid == "image" else "image"] == valid_peer
+    assert view["stale"] is True
+    if invalid == "video":
+        assert view["settings"]["video"] is None
+
+
+async def test_video_save_failure_keeps_reported_cost_in_result_fields(monkeypatch, tmp_path):
+    from app.core import artifact_store
+    accounts(monkeypatch)
+    def generated(provider_id, prompt, options, *, usage):
+        usage.update(cost_in_usd_ticks=200000000, reported_cost_usd="0.02")
+        return {"success": True, "data": b"test-video", **usage}
+    monkeypatch.setattr(native_video, "generate", AsyncMock(side_effect=generated))
+    def failed_save(*args, **kwargs):
+        raise OSError("test-private-storage-detail")
+    monkeypatch.setattr(artifact_store, "store_bytes", failed_save)
+    engine = SimpleNamespace(record_auxiliary_usage=AsyncMock())
+    result = await native_video.make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "grok-a")({"prompt": "circle"}, ToolCtx(cwd=str(tmp_path)))
+    assert result.is_error and "safely saved" in result.text
+    assert result.result_fields["reported_cost_usd"] == "0.02"
+    assert result.result_fields["cost_in_usd_ticks"] == 200000000
+    assert json.loads(result.text) == result.result_fields
+    assert "test-private-storage-detail" not in result.text
+    engine.record_auxiliary_usage.assert_awaited_once()
 
 
 async def test_stale_settings_tools_use_verified_defaults(monkeypatch, tmp_path):

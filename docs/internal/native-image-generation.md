@@ -27,10 +27,13 @@ provider-selected model/auto size/auto quality/PNG and SuperGrok's
 OpenAI/xAI API-key accounts appear with locked, not-yet-verified options rather
 than inheriting a subscription's support. Native generation is account-scoped
 and does not change the AI Shuffle direct tools or their existing ChatGPT choice.
-Invalid/stale account or legacy settings fall back to verified defaults (or
-null for an unavailable group), with `stale: true` and a sanitized reason on
-GET. Tools use the same fallback without rewriting the stored row; one stale
-account cannot break the list. The unscoped direct `supergrok-subscription`
+Stale account/legacy settings return `stale: true` with a sanitized GET reason.
+When JSON parses, groups are validated independently: explicit null remains
+disabled, valid groups are preserved, invalid Image uses its verified default
+(or null if unavailable), and invalid Video becomes null. Only unparseable JSON
+falls back to both provider defaults. Tools use the same recovery without
+rewriting the stored row; one stale account cannot break the list. The settings
+UI is cancelled and superseded by #379 ("say what you want" generation). The unscoped direct `supergrok-subscription`
 model lane is not included. See the mirrored settings API reference for the GET/PUT schema. OpenAI's
 [image-tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
 documents the native tool, forced tool choice, final base64 output, and examples

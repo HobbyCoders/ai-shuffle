@@ -617,18 +617,21 @@ The id must be a model this install can run: a Claude alias from `GET /api/v1/mo
 
 ### Native generation (per provider account)
 
-Native generation is separate from the AI Shuffle direct tools. The API is
-intended for the **AI Shuffle tools / Native generation** switch under Default
-models; it does not change the existing ChatGPT subscription text-to-image choice.
-No settings UI is implemented by these endpoints.
+Native generation is separate from the AI Shuffle direct tools and does not
+change the existing ChatGPT subscription text-to-image choice. The proposed
+settings UI is cancelled and superseded by #379 ("say what you want" generation).
+These backend endpoints do not implement a settings UI.
 
 - Authenticated `GET /api/v1/settings/native-generation` returns
   `{"accounts": [{"provider_id": "...", "name": "...", "provider_kind": "grok", "settings": {"image": {...}, "video": {...}}, "capabilities": {...}}]}`.
 - `GET /api/v1/settings/native-generation/{provider_id}` returns one account.
-- Each account includes `stale: false`. Invalid or no-longer-verified stored
-  settings instead return verified defaults (or `null` for unavailable groups),
-  `stale: true`, and a sanitized `reason`. Reads/tools never rewrite the stored
-  row, and one stale account does not fail the list.
+- Each account includes `stale: false`. Stale settings return `stale: true` and
+  a sanitized `reason`. When JSON parses, each group is validated independently:
+  explicit `null` stays disabled and valid peer groups are unchanged. An invalid
+  Image group uses the verified image default (or `null` if unavailable); an
+  invalid Video group becomes `null`. Both groups use provider defaults only if
+  the JSON cannot be parsed. Reads/tools never rewrite the stored row, and one
+  stale account does not fail the list.
 - Owner-only `PUT` to that account path replaces both groups. Each group may be
   `null` (disabled); unsupported options, extra fields or unknown accounts return
   `422`. Image fields are `model`, `size`, `quality` (nullable) and `format`.

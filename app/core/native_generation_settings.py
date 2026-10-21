@@ -1,4 +1,6 @@
 """Account-scoped Native generation defaults and explicitly verified capabilities."""
+import json
+
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
 from app.db import database
 
@@ -106,25 +108,56 @@ def _account(provider_id):
     return row, provider_kind(row)
 
 
+def _validated_stored_groups(kind, data, defaults):
+    # Once JSON parses, preserve each explicit null and valid peer group. An
+    # invalid/missing video group is disabled, never silently enabled for billing.
+    if not isinstance(data, dict):
+        data = {}
+    stale = set(data) != {"image", "video"}
+    groups = {}
+    for name, model in (("image", NativeImageSettings), ("video", NativeVideoSettings)):
+        try:
+            raw = data[name]
+            value = model.model_validate(raw) if raw is not None else None
+            if value is not None:
+                if name == "image":
+                    validate(kind, value)
+                else:
+                    validate_generation(kind, NativeGenerationSettings(image=None, video=value))
+        except (KeyError, ValueError, TypeError):
+            value = defaults.image if name == "image" else None
+            stale = True
+        groups[name] = value
+    return NativeGenerationSettings(**groups), stale
+
+
 def _load_with_status(provider_id):
     _, kind = _account(provider_id)
     defaults = NativeGenerationSettings(image=_IMAGE_DEFAULTS.get(kind), video=_VIDEO_DEFAULT if kind == "grok" else None)
     raw = database.get_system_setting(f"native_generation:{provider_id}")
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            # Only unreadable JSON loses all knowledge of disabled groups.
+            return defaults, True
+        return _validated_stored_groups(kind, data, defaults)
+    # Read compatibility only; never rewrite an account or echo stored values.
+    legacy = database.get_system_setting(f"native_images_{kind}") if defaults.image else None
+    if legacy is None:
+        return defaults, False
     try:
-        if raw is not None:
-            return validate_generation(kind, NativeGenerationSettings.model_validate_json(raw)), False
-        # Read compatibility only; never rewrite an account or echo stored values.
-        legacy = database.get_system_setting(f"native_images_{kind}") if defaults.image else None
-        if legacy is not None:
-            old = NativeImageSettings.model_validate_json(legacy)
-            if kind == "grok" and old.quality == "default":
-                old.quality = None
-            defaults.image = validate(kind, old)
+        data = json.loads(legacy)
+    except (ValueError, TypeError):
+        return defaults, True
+    try:
+        old = NativeImageSettings.model_validate(data)
+        if kind == "grok" and old.quality == "default":
+            old.quality = None
+        defaults.image = validate(kind, old)
         return defaults, False
     except (ValueError, TypeError):
-        # One stale account must not break listing or tools on other accounts.
-        # Never turn an unverified provider/model into an available capability.
-        return defaults, True
+        return NativeGenerationSettings(image=defaults.image, video=None), True
 
 
 def load(provider_id):
@@ -144,7 +177,7 @@ def account_view(provider_id):
     result = {"provider_id": provider_id, "name": row.get("name", ""), "provider_kind": kind,
               "settings": value.model_dump(), "capabilities": capabilities(kind), "stale": stale}
     if stale:
-        result["reason"] = "Stored Native generation settings are invalid or no longer verified; using verified defaults."
+        result["reason"] = "Stored Native generation settings are invalid or no longer verified; disabled groups preserved and invalid groups reset safely."
     return result
 
 
