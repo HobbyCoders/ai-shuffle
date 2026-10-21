@@ -1,5 +1,7 @@
 """Regression timelines for desktop gestures and guardrails; no real desktop I/O."""
 
+import asyncio
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -271,6 +273,191 @@ async def test_held_key_survives_other_actions_and_is_released(gesture):
     gesture.keyboard.release.assert_called_once_with("shift")
 
 
+@pytest.mark.parametrize("end", ["stop", "cancel", "complete"])
+@pytest.mark.parametrize("cross_call", [False, True])
+async def test_drag_interrupt_event_order(gesture, monkeypatch, end, cross_call):
+    t = gesture.tools
+    await t["screenshot"]({})
+
+    def finish():
+        if end == "stop":
+            abort.request_stop("test", reason="user")
+        elif end == "cancel":
+            abort.cancel_inflight("test")
+
+    if cross_call:
+        await t["mouse_down"]({"button": "right"})
+        await t["mouse_move"]({"coordinate": [30, 30]})
+        finish()
+        if end == "complete":
+            assert payload(await t["mouse_up"]({"button": "right"}))["success"]
+    else:
+        original_sleep = safety.SafeInput.sleep
+
+        def sleep(self, seconds):
+            if (self.mouse, "right") in self.held:
+                finish()
+            original_sleep(self, seconds)
+
+        monkeypatch.setattr(safety.SafeInput, "sleep", sleep)
+        result = await t["left_click_drag"]({"coordinate": [30, 30], "button": "right"})
+        assert bool(result.get("isError")) == (end != "complete")
+
+    expected = [("mouse_down", "right")]
+    if end != "complete":
+        expected += [("key_down", "esc"), ("key_up", "esc")]
+    expected += [("mouse_up", "right")]
+    assert [e for e in gesture.events if e[0] in
+            ("mouse_down", "mouse_up", "key_down", "key_up")] == expected
+
+
+@pytest.mark.parametrize("text", ["ctrl", "alt", "ctrl+shift"])
+@pytest.mark.parametrize("cross_call", [False, True])
+async def test_stop_drag_releases_modifiers_before_escape(gesture, monkeypatch, text, cross_call):
+    held_keys = set()
+    escape_modifiers = []
+    original_press = gesture.keyboard.press.side_effect
+    original_release = gesture.keyboard.release.side_effect
+
+    def press(key):
+        if key == "esc":
+            escape_modifiers.append(set(held_keys))
+        held_keys.add(key)
+        original_press(key)
+
+    def release(key):
+        held_keys.discard(key)
+        original_release(key)
+
+    gesture.keyboard.press.side_effect = press
+    gesture.keyboard.release.side_effect = release
+    await gesture.tools["screenshot"]({})
+    if cross_call:
+        assert payload(await gesture.tools["mouse_down"]({"text": text}))["success"]
+        assert payload(await gesture.tools["mouse_move"]({"coordinate": [30, 30]}))["success"]
+        abort.request_stop("test", reason="user")
+    else:
+        original_sleep = safety.SafeInput.sleep
+
+        def sleep(self, seconds):
+            if (self.mouse, "left") in self.held:
+                abort.request_stop("test", reason="user")
+            original_sleep(self, seconds)
+
+        monkeypatch.setattr(safety.SafeInput, "sleep", sleep)
+        assert (await gesture.tools["left_click_drag"]({
+            "text": text, "coordinate": [30, 30]}))["isError"]
+    assert escape_modifiers == [set()], "Escape must not form a held-key shortcut"
+    mods = text.split("+")
+    assert [e for e in gesture.events if e[0] in
+            ("mouse_down", "mouse_up", "key_down", "key_up")] == [
+        *[("key_down", key) for key in mods], ("mouse_down", "left"),
+        *[("key_up", key) for key in reversed(mods)],
+        ("key_down", "esc"), ("key_up", "esc"), ("mouse_up", "left")]
+
+
+async def test_stop_drag_skips_escape_when_keyboard_release_fails(gesture, caplog):
+    assert payload(await gesture.tools["mouse_down"]({"text": "ctrl"}))["success"]
+    original_release = gesture.keyboard.release.side_effect
+
+    def fail_once(key):
+        original_release(key)
+        gesture.keyboard.release.side_effect = original_release
+        raise RuntimeError("Keyboard release failed")
+
+    gesture.keyboard.release.side_effect = fail_once
+    abort.request_stop("test", reason="user")
+    assert [e for e in gesture.events if e[0] in
+            ("mouse_down", "mouse_up", "key_down", "key_up")] == [
+        ("key_down", "ctrl"), ("mouse_down", "left"),
+        ("key_up", "ctrl"), ("mouse_up", "left"), ("key_up", "ctrl")]
+    assert "Skipping Escape drag cancellation" in caplog.text
+    gesture.mouse.release.assert_called_once_with("left")
+
+
+@pytest.mark.parametrize("reason", ["escape", "completed"])
+async def test_physical_escape_and_turn_end_do_not_inject_escape(gesture, reason):
+    await gesture.tools["screenshot"]({})
+    assert payload(await gesture.tools["mouse_down"]({}))["success"]
+    assert payload(await gesture.tools["mouse_move"]({"coordinate": [30, 30]}))["success"]
+    if reason == "escape":
+        assert abort.stop_active("escape") == 1
+    else:
+        abort.request_stop("test", reason=reason)
+    assert [e for e in gesture.events if e[0] in
+            ("mouse_down", "mouse_up", "key_down", "key_up")] == [
+        ("mouse_down", "left"), ("mouse_up", "left")]
+
+
+@pytest.mark.parametrize("failure", ["press", "release"])
+async def test_stop_drag_escape_failure_still_releases_button(gesture, caplog, failure):
+    await gesture.tools["mouse_down"]({})
+    original = getattr(gesture.keyboard, failure).side_effect
+
+    def fail(key):
+        original(key)
+        getattr(gesture.keyboard, failure).side_effect = original
+        raise RuntimeError("Escape injection failed")
+
+    getattr(gesture.keyboard, failure).side_effect = fail
+    abort.request_stop("test", reason="user")
+    expected = [("mouse_down", "left"), ("key_down", "esc"), ("key_up", "esc")]
+    if failure == "release":
+        expected += [("key_up", "esc")]  # emergency cleanup retries the failed release
+    expected += [("mouse_up", "left")]
+    assert [e for e in gesture.events if e[0] in
+            ("mouse_down", "mouse_up", "key_down", "key_up")] == expected
+    assert "Escape" in caplog.text
+    gesture.mouse.release.assert_called_once_with("left")
+
+
+async def test_cancelled_drag_task_sends_escape_before_mouse_up(desktop):
+    # Exercise the real async cancellation -> cancel_inflight producer, not just
+    # the cleanup consumer. All injected input still goes to fake controllers.
+    events = []
+    started = asyncio.Event()
+    exited = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_sleep = safety.SafeInput.sleep
+
+    def sleep(self, seconds):
+        try:
+            original_sleep(self, seconds)
+        finally:
+            if seconds == 60:
+                exited.set()
+
+    def down(button):
+        events.append(("mouse_down", button))
+        loop.call_soon_threadsafe(started.set)
+
+    desktop.mouse.press.side_effect = down
+    desktop.mouse.release.side_effect = lambda button: events.append(("mouse_up", button))
+    desktop.keyboard.press.side_effect = lambda key: events.append(("key_down", key))
+    desktop.keyboard.release.side_effect = lambda key: events.append(("key_up", key))
+    await desktop.tools["screenshot"]({})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(safety.SafeInput, "sleep", sleep)
+        running = asyncio.create_task(desktop.tools["left_click_drag"]({
+            "coordinate": [30, 30], "hold": 60}))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert await asyncio.to_thread(exited.wait, 1), "cancelled drag worker did not exit"
+    assert not abort.is_stopped("test")
+    assert events == [("mouse_down", "left"), ("key_down", "esc"),
+                      ("key_up", "esc"), ("mouse_up", "left")]
+
+
+@pytest.mark.parametrize("held_key", [False, True])
+async def test_stop_without_drag_sends_no_escape(gesture, held_key):
+    if held_key:
+        await gesture.tools["key_down"]({"text": "shift"})
+    abort.request_stop("test", reason="user")
+    assert gesture.events == ([("key_down", "shift"), ("key_up", "shift")] if held_key else [])
+
+
 @pytest.mark.parametrize("end", ["error", "stop", "completed", "release_control"])
 async def test_cross_call_keys_and_buttons_cleanup(gesture, end):
     t = gesture.tools
@@ -282,8 +469,12 @@ async def test_cross_call_keys_and_buttons_cleanup(gesture, end):
         await t[end]({})
     else:
         abort.request_stop("test", reason=end)
-    gesture.mouse.release.assert_called_once_with("right")
-    gesture.keyboard.release.assert_called_once_with("ctrl")
+    assert [e for e in gesture.events if e[0] in
+            ("mouse_down", "mouse_up", "key_down", "key_up")] == [
+        ("key_down", "ctrl"), ("mouse_down", "right"),
+        *([("key_up", "ctrl"), ("key_down", "esc"), ("key_up", "esc"),
+           ("mouse_up", "right")] if end == "stop" else
+          [("mouse_up", "right"), ("key_up", "ctrl")])]
 
 
 async def test_cross_call_system_key_grant_and_escape_refusals(gesture, monkeypatch):
