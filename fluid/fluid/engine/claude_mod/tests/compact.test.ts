@@ -3,7 +3,7 @@
 // beneath the mod: it records the instructions the summarizer would get and
 // answers as the CLI would.
 import type { On } from 'claude-code'
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import { FLUID_SUMMARY_NOTE, withFluidNote } from '../hooks/compact.ts'
 
 const TRANSCRIPT = [
@@ -15,6 +15,7 @@ const KEPT = { messages: SUMMARY, tokensBefore: 150000, tokensAfter: 9000 }
 
 /** Claude Code's compaction beneath the mod; collects what it was told. */
 function engine(on: On, answer: unknown = KEPT) {
+  mock.env(on, {}) // The default-off path, including compaction before start.
   const told: (string | undefined)[] = []
   on('session.compact', (_$, e) => {
     told.push(e.instructions)
