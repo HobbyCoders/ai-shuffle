@@ -1404,7 +1404,7 @@ async def pull_from_remote(
             detail="Cannot pull: you have uncommitted changes. Commit or stash them first."
         )
 
-    success, error_msg, conflicts = await run_git(
+    success, error_msg, conflicts, target = await run_git(
         git_service.pull,
         working_dir,
         remote=body.remote,
@@ -1416,6 +1416,7 @@ async def pull_from_remote(
         return PullResponse(
             success=False,
             message=error_msg or "Failed to pull",
+            target=target,
             conflicts=conflicts,
             has_conflicts=len(conflicts) > 0
         )
@@ -1426,7 +1427,8 @@ async def pull_from_remote(
 
     return PullResponse(
         success=True,
-        message=f"Pulled from {body.remote} using {body.strategy}",
+        message=error_msg or f"Pulled from {target} using {body.strategy}",
+        target=target,
         status=inline_status,
         diff_stats=inline_diff,
     )

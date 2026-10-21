@@ -811,9 +811,9 @@
 			const res = await git.pull(strategy, autoStash);
 			git.refreshPrState(true).catch(() => {});
 			gitOperations.clear();
-			if (res.has_conflicts) {
-				const files = res.conflicts.length ? res.conflicts.join(', ') : 'some files';
-				notify(`Pull hit conflicts in ${files}. Resolve them, then commit to finish the merge.`, { severity: 'error' });
+			if (!res.success) {
+				// The backend names the target and explains why integration stopped.
+				notify(res.message || 'Pull stopped. Nothing was changed.', { severity: 'error' });
 			} else {
 				notify(res.message || 'Pulled latest changes', { severity: 'success' });
 			}
