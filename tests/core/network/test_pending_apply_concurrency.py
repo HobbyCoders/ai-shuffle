@@ -9,8 +9,13 @@ import pytest
 
 from app.db import base, database, network as store
 from app.network import engine
-from tests.core.network.test_pending_apply_budget import backlog, pg_workers, private_cluster  # noqa: F401
+from tests.core.network.test_pending_apply_budget import (  # noqa: F401
+    backlog, pending_semantics_clock, pg_workers, private_cluster,
+)
 from tests.db.schema_lifecycle_helpers import pg_connect
+
+
+pytestmark = pytest.mark.usefixtures("pending_semantics_clock")
 
 
 class PerThread:
