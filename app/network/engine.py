@@ -81,6 +81,10 @@ _PROVIDER_CREDENTIAL_FIELDS = (
 )
 
 
+class _KeepObservation(Exception):
+    """Reject a value without adopting its clock/origin as our record's source."""
+
+
 class NotEnrolled(RuntimeError):
     """This worker has no network yet."""
 
@@ -661,15 +665,16 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             incoming = json.loads(record.get("value") or "{}")
             current = json.loads((existing or {}).get("value") or "{}")
         except (ValueError, TypeError):
-            return existing
+            raise _KeepObservation from None
         if not isinstance(incoming, dict) or not _number(incoming.get("observed_at")):
-            return existing
+            raise _KeepObservation
         if (isinstance(current, dict) and _number(current.get("observed_at"))
                 and current.get("credential_revision") == incoming.get("credential_revision")
                 and incoming["observed_at"] < current["observed_at"]):
-            return existing
-        # Provenance is authenticated by the record's signed envelope, not an
-        # assertion made inside its value (also preserved when forwarded).
+            raise _KeepObservation
+        # Use the sync record's origin, not a claim inside the value. Envelopes
+        # sign this origin; unsigned snapshot items rely on their publisher.
+        # A rejected value must not replace the stored origin or clock either.
         incoming["source_worker"] = origin_device_id
         record["value"] = json.dumps(incoming)
     new_agent = False
@@ -1603,7 +1608,13 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
-        row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
+        try:
+            row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
+        except _KeepObservation:
+            # Consume/forward the origin stream without relabelling the value
+            # we kept. A snapshot must still carry that value's original source.
+            store.insert_op(cursor, env.to_dict(), _lane(coll))
+            return "lost"
         _after_mirror(cursor, coll, plaintext)
         if coll.name == "presence":
             _learn_presence_alias(cursor, ctx, plaintext, env.origin_device_id)
@@ -2574,8 +2585,11 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
                                        ctx=ctx)
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
-            row = materialize(cursor, coll, item["record_id"], prepared,
-                              origin_device_id=item["origin_device_id"])
+            try:
+                row = materialize(cursor, coll, item["record_id"], prepared,
+                                  origin_device_id=item["origin_device_id"])
+            except _KeepObservation:
+                continue
             _after_mirror(cursor, coll, prepared)
             # Snapshot items have no per-item signature. In particular,
             # their claimed origin is not evidence for an instance alias.

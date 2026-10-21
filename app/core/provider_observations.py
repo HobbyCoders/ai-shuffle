@@ -126,11 +126,12 @@ def _binding(source, row):
             generation = generation or model_key_generation(row)
         parts.append(key)
         guards["expected_credential_generation"] = generation
-    from app.network import engine
+    from app.network import crypto, engine
     ctx = engine.cached_context()
     if ctx is None:
         return None
-    revision = hmac.new(ctx.network_key, b"provider-observation-v1\0" + json.dumps(parts).encode(),
+    hmac_key = crypto._hkdf(ctx.network_key, b"shuffle-provider-observation-hmac-v1")
+    revision = hmac.new(hmac_key, b"provider-observation-v1\0" + json.dumps(parts).encode(),
                         hashlib.sha256).hexdigest()
     provider_id = row["id"] if row else _snapshot_id(source, row)
     return PREFIX + source.id + ":" + provider_id, row, _snapshot_id(source, row), guards, revision

@@ -34,6 +34,23 @@ def snapshot(row, value):
     value = {**value, "credential": credential_fingerprint(row)}
     with get_db() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT balance_snapshot FROM model_providers WHERE id = %s FOR UPDATE", (row["id"],))
+        stored_row = cur.fetchone() or {}
+        try:
+            stored = json.loads(stored_row.get("balance_snapshot") or "{}")
+        except (ValueError, TypeError):
+            stored = {}
+        fetched = value.get("fetched_at") or 0
+        # An import runs independently of a local poll. A deferred/stale poll
+        # must never restore the cached reading it captured before the import.
+        if (stored.get("fetched_at") or 0) > fetched:
+            if value.get("last_error_kind") and (value.get("last_attempted_at") or 0) >= stored["fetched_at"]:
+                value = {**stored, **{k: value[k] for k in
+                         ("last_error_kind", "last_error_scope", "last_attempted_at")}}
+            else:
+                return False
+        elif value.get("source_worker") and (stored.get("last_attempted_at") or 0) >= fetched:
+            return False  # a newer local failure won the race with this import
         cur.execute("""
             UPDATE model_providers SET balance_snapshot = %s
             WHERE id = %s AND revision = %s AND balance_key = %s

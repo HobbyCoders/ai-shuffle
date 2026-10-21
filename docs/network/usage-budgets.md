@@ -38,15 +38,24 @@ budget would defer them, and only the requesting row records the failure.
 HTTP responses never leave the requesting worker. Successful **normalized**
 readings are published through authenticated, encrypted settings sync under
 `provider_observation:` keys, scoped to a non-secret source/provider identity.
-A network-keyed HMAC credential revision prevents cross-credential imports without
-naming rows after secrets. Rotations replace rather than accumulate row names;
+An HMAC credential revision, using an HKDF-derived key separate from payload
+encryption, prevents cross-credential imports without naming rows after secrets.
+Upgrading the earlier draft's direct-key HMAC invalidates its revisions: each
+worker may need one extra refresh/budget attempt, not a new upstream allowance.
+A fingerprint-gated startup cleanup removes earlier 64-hex secret-derived row
+names; normal reconciliation then publishes their missing-row tombstones.
+Rotations replace rather than accumulate row names;
 credential edits, provider deletion and explicit billing disconnect delete old
 observations and publish their tombstones after commit.
 Receiving workers import the latest matching observation without claiming a
 budget or forcing a full pass. Its original `observed_at` is retained, never
-stamped as newly fetched; `source_worker` comes from the signed envelope origin.
+stamped as newly fetched; `source_worker` comes from the stored sync origin
+(signed for envelopes; asserted by the trusted publisher for snapshot items).
 An older observation cannot replace a newer one for the same credential, nor
-clear a newer local attempt/error. Billing-key arrival schedules a post-commit
+clear a newer local attempt/error. Rejected values retain the stored sync
+origin/clock as well as the value, including when forwarded by snapshot. Poll and
+import writes do not move successful observation time backwards, so a deferred
+poll cannot restore its pre-import cache. Billing-key arrival schedules a post-commit
 refresh (including the real paged enrollment path), with one follow-up if a pass
 was already running. Local binding and credential/revision guards still authorize
 writes. Secrets, local binding IDs, denial fingerprints and raw provider bodies

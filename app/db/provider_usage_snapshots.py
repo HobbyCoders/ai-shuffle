@@ -135,6 +135,10 @@ def upsert_provider_usage_snapshot(
                     THEN provider_usage_snapshots.raw ELSE EXCLUDED.raw END,
                 fetched_at = EXCLUDED.fetched_at,
                 updated_at = EXCLUDED.updated_at
+            WHERE provider_usage_snapshots.provider_type <> EXCLUDED.provider_type
+               OR provider_usage_snapshots.fetched_at IS NULL
+               OR (EXCLUDED.fetched_at IS NOT NULL
+                   AND EXCLUDED.fetched_at >= provider_usage_snapshots.fetched_at)
             """,
             (
                 provider_id,
@@ -147,7 +151,7 @@ def upsert_provider_usage_snapshot(
                 now,
             ),
         )
-    return True
+        return cursor.rowcount > 0
 
 
 def record_provider_usage_failure(
