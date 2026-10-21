@@ -10,7 +10,8 @@ import pytest
 import app.core.provider_observations as provider_observations
 from app.core import api_key_balances as balances, encryption, usage_polling
 from app.core.config import settings
-from app.core.provider_usage import ProviderUsageMonitor, provider_usage_monitor
+from app.core import provider_usage
+from app.core.provider_usage import ProviderUsageMonitor
 from app.core.usage_sources import SOURCES
 from app.db import database as db, provider_balances
 from app.network import engine, startup, usage_budget
@@ -207,7 +208,9 @@ def test_sync_arrival_schedules_refresh_after_commit(workers, monkeypatch, secre
 
     loop = SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda fn, *args: fn(*args))
     monkeypatch.setattr(global_events, "_loop", loop)
-    monkeypatch.setattr(provider_usage_monitor, "request_refresh", refresh)
+    monitor = ProviderUsageMonitor()
+    monkeypatch.setattr(provider_usage, "provider_usage_monitor", monitor)
+    monkeypatch.setattr(monitor, "request_refresh", refresh)
     monkeypatch.setattr(startup, "_emit_resource", lambda resource: None)
     engine.on_applied(lambda touched: startup._on_applied([t for t in touched if t[0] == "provider_billing"]))
     def change(value):
