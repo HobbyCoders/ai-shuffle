@@ -243,6 +243,23 @@ def _validate_base_url(base_url: Optional[str], *, required: bool) -> None:
                             detail="base_url is required")
 
 
+def _validate_local_models(
+    models: Optional[List[Dict[str, Any]]], provider_type: Optional[str], api_dialect: Optional[str]
+) -> None:
+    from app.core.local_model_settings import validate_local_settings
+
+    for entry in models or []:
+        config = entry.get("local_settings")
+        if config is None:
+            continue
+        if provider_type != "custom" or api_dialect != "openai":
+            raise HTTPException(status_code=400, detail="local_settings requires a custom OpenAI provider")
+        try:
+            validate_local_settings(config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _validate_models(models: Optional[List[Dict[str, Any]]]) -> None:
     if models is None:
         return
@@ -804,6 +821,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     _validate_base_url(body.base_url, required=True)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
+    _validate_local_models(body.models, body.provider_type, body.api_dialect)
     _validate_extra_env(body.extra_env)
 
     encrypted_token = None
@@ -856,6 +874,11 @@ async def update_provider(
     _validate_base_url(body.base_url, required=False)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
+    _validate_local_models(
+        body.models if body.models is not None else existing.get("models_json"),
+        body.provider_type if body.provider_type is not None else existing.get("provider_type"),
+        body.api_dialect if body.api_dialect is not None else existing.get("api_dialect"),
+    )
     _validate_extra_env(body.extra_env)
 
     updates: Dict[str, Any] = {}
