@@ -32,7 +32,56 @@ describe('BrowserPicker', () => {
 		expect(screen.getByRole('status', { name: 'Loading options' })).toBeTruthy();
 		resolve(choices);
 		await fireEvent.click(await screen.findByText('Austria'));
-		expect(onApply).toHaveBeenCalledWith({ index: 0 });
+		// The label it showed goes along: a list the page refilled since is refused.
+		expect(onApply).toHaveBeenCalledWith({ index: 0, label: 'Austria' });
+	});
+
+	it('shows a refused choice in place, with the list closed until it is read again', async () => {
+		const load = vi.fn().mockResolvedValue(choices);
+		const { onApply } = setup(select, load);
+		onApply.mockRejectedValueOnce(new Error('This list changed. Open it again.'));
+		await fireEvent.click(await screen.findByText('Austria'));
+		expect((await screen.findByRole('alert')).textContent).toContain('This list changed');
+		expect(screen.queryByRole('listbox')).toBeNull(); // the stale list is not offered
+		await fireEvent.click(screen.getByRole('button', { name: /Open the list again/ }));
+		expect(load).toHaveBeenCalledTimes(2);
+		await fireEvent.click(await screen.findByText('Belgium'));
+		expect(onApply).toHaveBeenLastCalledWith({ index: 1, label: 'Belgium' });
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('waits for the page to take a date, one choice at a time, and keeps the picker on a refusal', async () => {
+		let reject!: (e: Error) => void;
+		const { onApply } = setup({ ...select, type: 'date', label: 'Arrival', value: '2026-10-21' });
+		onApply.mockImplementationOnce(() => new Promise<void>((_, r) => (reject = r)));
+		await fireEvent.click(screen.getByRole('gridcell', { name: /October 24, 2026/ }));
+		const body = document.querySelector('.bp-body')!;
+		expect(body.getAttribute('aria-busy')).toBe('true');
+		await fireEvent.click(screen.getByRole('gridcell', { name: /October 25, 2026/ }));
+		expect(onApply).toHaveBeenCalledTimes(1);
+		reject(new Error("The page didn't accept that value."));
+		expect((await screen.findByRole('alert')).textContent).toContain("didn't accept");
+		expect(body.getAttribute('aria-busy')).toBe('false');
+		await fireEvent.click(screen.getByRole('gridcell', { name: /October 25, 2026/ }));
+		expect(onApply).toHaveBeenLastCalledWith({ value: '2026-10-25' });
+	});
+
+	it('offers only on-step days counted from the value attribute', () => {
+		setup({ ...select, type: 'date', label: 'Weekly', value: '2026-10-21', step: '7', base: '2026-10-21' });
+		expect(screen.getByRole('gridcell', { name: /October 28, 2026/ }).getAttribute('aria-disabled')).toBe('false');
+		expect(screen.getByRole('gridcell', { name: /October 22, 2026/ }).getAttribute('aria-disabled')).toBe('true');
+	});
+
+	it('marks today by the page’s clock and says whose clock it is', () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			vi.setSystemTime(new Date(Date.UTC(2026, 9, 21, 20, 0)));
+			setup({ ...select, type: 'date', label: 'Arrival', value: '', zone: 'Pacific/Kiritimati' });
+			expect(screen.getByRole('gridcell', { name: /October 22, 2026/ }).getAttribute('aria-current')).toBe('date');
+			expect(screen.getByText('Page time zone: Pacific/Kiritimati')).toBeTruthy();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('shows a failed lookup with a retry', async () => {

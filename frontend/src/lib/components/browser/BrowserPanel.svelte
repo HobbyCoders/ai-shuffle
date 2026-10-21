@@ -65,7 +65,7 @@
 		type BrowserEditor,
 		type BrowserWorkspaceState,
 	} from '$lib/browser-panel/workspace';
-	import type { BrowserChoices } from '$lib/browser-panel/pickers';
+	import type { BrowserChoices, PickerChoice } from '$lib/browser-panel/pickers';
 
 	interface Props {
 		/** Session whose browser page is streamed. */
@@ -606,6 +606,15 @@
 		return reply.choices;
 	}
 
+	// A picker's choice, set in the page. Like the list it came from, its
+	// refusal ("This list changed…") is shown in the picker, not the error line.
+	async function setChoice(field: BrowserEditor, choice: PickerChoice): Promise<void> {
+		const scope = operation;
+		if (!scope) throw new Error('Browser is not connected.');
+		await ensureControl();
+		await acknowledged(scope, 'edit', { field: field.id, action: 'set', ...choice }, (id) => quietRequests.add(id));
+	}
+
 	// Copy from the remote page to this device's clipboard. The text travels
 	// only to this viewer; it never enters workspace state or the agent's view.
 	let copyNotice = $state('');
@@ -946,6 +955,8 @@
 							onEdit={(args) => workspaceCommand('edit', args)}
 							onPickFiles={pickFiles}
 							onChoices={loadChoices}
+							onChoose={setChoice}
+							revision={workspace?.revision ?? 0}
 							viewport={workspace?.viewport}
 							inspecting={inspectMode && isLive && frameMatchesWorkspace}
 							{hoverRect}

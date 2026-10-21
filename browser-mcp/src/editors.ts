@@ -25,7 +25,7 @@ export async function uploadField(page: Page, args: Record<string, unknown>): Pr
   const pending = page.evaluateHandle((id) => {
     const host = window as typeof window & { __aisEditors?: { nodes: Map<string, HTMLInputElement> } };
     const el = host.__aisEditors?.nodes.get(id);
-    if (!el?.isConnected || el.disabled || el.type !== 'file') throw new Error('File field changed. Choose the files again.');
+    if (!el?.isConnected || el.matches(':disabled') || el.type !== 'file') throw new Error('File field changed. Choose the files again.');
     return el;
   }, args.field as string);
   // A handle that arrives after the deadline is released, not leaked.
@@ -58,6 +58,8 @@ export async function readEditors(page: Page, typography = process.env._AIS_BROW
     let focusedEl: Element | null = document.activeElement;
     while (focusedEl?.shadowRoot?.activeElement) focusedEl = focusedEl.shadowRoot.activeElement;
     const fields = []; let budget = 24000;
+    // The page's own clock zone: the panel's Today/Now must match the page's, not the viewer's.
+    const zone = (() => { try { const z = Intl.DateTimeFormat().resolvedOptions().timeZone; return z && z.length <= 64 ? z : ''; } catch { return ''; } })();
     // querySelectorAll stops at shadow boundaries. Reddit's auth fields (and
     // many other web components) are native inputs inside open shadow roots.
     function* inputs(root: Document | ShadowRoot): Generator<Field> {
@@ -96,7 +98,8 @@ export async function readEditors(page: Page, typography = process.env._AIS_BROW
       if (fields.length >= 32) break;
       const type = el instanceof HTMLTextAreaElement ? 'textarea' : el instanceof HTMLSelectElement ? 'select' : el.type;
       const picker = PICKERS.includes(type);
-      if (!['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file', ...PICKERS].includes(type) || el.disabled || ('readOnly' in el && el.readOnly)) continue;
+      // :disabled also covers a control inside <fieldset disabled>.
+      if (!['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file', ...PICKERS].includes(type) || el.matches(':disabled') || ('readOnly' in el && el.readOnly)) continue;
       // A list box (multiple or size > 1) is drawn in the page itself: clicks reach it.
       if (el instanceof HTMLSelectElement && (el.multiple || el.size > 1)) continue;
       // Rich text widgets need the page's real pointer and keyboard handlers.
@@ -141,11 +144,13 @@ export async function readEditors(page: Page, typography = process.env._AIS_BROW
       // Pickers draw no editable text in the panel: no typography needed.
       const css = typography && !picker ? getComputedStyle(el) : null;
       // Date/time limits travel as the page wrote them (the panel parses them).
+      // Without min, HTML steps count from the value attribute: that is `base`.
       const limits: Record<string, string> = {};
-      if (picker && el instanceof HTMLInputElement) for (const name of ['min', 'max', 'step'] as const) {
-        const v = el.getAttribute(name)?.trim();
+      if (picker && el instanceof HTMLInputElement) for (const [name, attr] of [['min', 'min'], ['max', 'max'], ['step', 'step'], ['base', 'value']] as const) {
+        const v = el.getAttribute(attr)?.trim();
         if (v && v.length <= 64) limits[name] = v;
       }
+      if (picker && type !== 'select' && zone) limits.zone = zone;
       const style = css ? {
         fontSize: parseFloat(css.fontSize), lineHeight: css.lineHeight === 'normal' ? null : parseFloat(css.lineHeight),
         paddingLeft: parseFloat(css.paddingLeft), paddingTop: parseFloat(css.paddingTop), fontFamily: css.fontFamily.slice(0, 200),
@@ -158,44 +163,57 @@ export async function readEditors(page: Page, typography = process.env._AIS_BROW
   }, { seed: randomUUID(), typography });
 }
 
-/** Most options a select's list carries to the panel (and their total label characters). */
+/**
+ * Most options a select's list carries to the panel, and their total label
+ * length in code points, group labels included: the server counts the same way.
+ */
 export const MAX_CHOICES = 1000;
 export const CHOICE_TEXT_BUDGET = 24000;
+/** Longest option or group label, in code points. */
+export const CHOICE_LABEL = 200;
 
 /**
  * A select's options for the panel's own list: labels, groups and disabled
  * state, read when the viewer opens it. Option values never leave the page;
- * the panel picks by index.
+ * the panel picks by index and sends the label it showed, so a list that
+ * changed in between is refused rather than set to a different option.
  */
 export async function readChoices(page: Page, args: Record<string, unknown>): Promise<BrowserChoices> {
-  return page.evaluate(({ field, max, budget }) => {
+  return page.evaluate(({ field, max, budget, labelMax }) => {
+    // A label as the panel shows it: control characters and unpaired
+    // surrogates dropped, whitespace collapsed, at most `max` code points.
+    // Each kept code point then costs at most 4 bytes of JSON, so a full list
+    // stays far inside the report body limit. Same code in editField's check.
+    const clean = (text: string, max: number) => {
+      const points = Array.from(text.replace(/[\u0000-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, ' ').replace(/\s+/g, ' ').trim());
+      return points.length > max ? points.slice(0, max).join('').trimEnd() : points.join('');
+    };
     const host = window as typeof window & { __aisEditors?: { nodes: Map<string, Element> } };
     const el = host.__aisEditors?.nodes.get(field);
-    if (!(el instanceof HTMLSelectElement) || !el.isConnected || el.disabled) throw new Error('This list changed. Tap it again.');
+    if (!(el instanceof HTMLSelectElement) || !el.isConnected || el.matches(':disabled')) throw new Error('This list changed. Tap it again.');
     const groups: string[] = [];
     const groupIndex = new Map<HTMLOptGroupElement, number>();
     const options: { label: string; disabled: boolean; group?: number }[] = [];
     let left = budget, truncated = false;
+    const size = (text: string) => Array.from(text).length;
     for (const option of Array.from(el.options)) {
       if (options.length >= max) { truncated = true; break; }
       const parent = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
-      let group: number | undefined;
-      if (parent) {
-        group = groupIndex.get(parent);
-        if (group === undefined) {
-          group = groups.length;
-          groupIndex.set(parent, group);
-          groups.push(parent.label.replace(/\s+/g, ' ').trim().slice(0, 200));
-        }
-      }
-      const label = option.label.replace(/\s+/g, ' ').trim().slice(0, 200);
-      left -= label.length;
-      if (left < 0) { truncated = true; break; }
-      options.push({ label, disabled: option.disabled || !!parent?.disabled, ...(group === undefined ? {} : { group }) });
+      const label = clean(option.label, labelMax);
+      // A new group's label is paid for together with its first option.
+      const newGroup = parent && !groupIndex.has(parent) ? clean(parent.label, labelMax) : null;
+      const cost = size(label) + (newGroup === null ? 0 : size(newGroup));
+      if (cost > left) { truncated = true; break; }
+      left -= cost;
+      if (parent && newGroup !== null) { groupIndex.set(parent, groups.length); groups.push(newGroup); }
+      const group = parent ? groupIndex.get(parent) : undefined;
+      // A hidden option is not offered by the page's own popup either.
+      const disabled = option.disabled || !!parent?.disabled || option.hidden;
+      options.push({ label, disabled, ...(group === undefined ? {} : { group }) });
     }
     const selected = el.selectedIndex < options.length ? el.selectedIndex : -1;
     return { selected, groups, options, ...(truncated ? { truncated } : {}) };
-  }, { field: args.field as string, max: MAX_CHOICES, budget: CHOICE_TEXT_BUDGET });
+  }, { field: args.field as string, max: MAX_CHOICES, budget: CHOICE_TEXT_BUDGET, labelMax: CHOICE_LABEL });
 }
 
 export async function editField(page: Page, args: Record<string, unknown>): Promise<void> {
@@ -205,7 +223,7 @@ export async function editField(page: Page, args: Record<string, unknown>): Prom
     const el = host.__aisEditors?.nodes.get(a.field as string);
     const PICKERS = ['date', 'time', 'datetime-local', 'month', 'week'];
     const picker = el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && PICKERS.includes(el.type));
-    if (!el?.isConnected || el.disabled || ('readOnly' in el && el.readOnly) || (el instanceof HTMLInputElement && el.type === 'file')) throw new Error('Text field changed. Tap the field again.');
+    if (!el?.isConnected || el.matches(':disabled') || ('readOnly' in el && el.readOnly) || (el instanceof HTMLInputElement && el.type === 'file')) throw new Error('Text field changed. Tap the field again.');
     const initial = host.__aisEditors!.initial;
     if (a.action === 'set') {
       // The panel's own list/calendar stands in for the popup Chrome would draw
@@ -217,7 +235,15 @@ export async function editField(page: Page, args: Record<string, unknown>): Prom
       const before = el.value;
       if (el instanceof HTMLSelectElement) {
         const option = el.options[a.index as number];
-        if (!option || option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled))
+        // The same label cleaning as readChoices: the panel sends back the
+        // label it showed, so a list the page refilled since is not set to
+        // whatever now sits at that index.
+        const clean = (text: string, max: number) => {
+          const points = Array.from(text.replace(/[\u0000-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, ' ').replace(/\s+/g, ' ').trim());
+          return points.length > max ? points.slice(0, max).join('').trimEnd() : points.join('');
+        };
+        if (!option || clean(option.label, a.labelMax as number) !== a.label) throw new Error('This list changed. Open it again.');
+        if (option.disabled || option.hidden || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled))
           throw new Error('That option is unavailable. Open the list again.');
         if (el.selectedIndex === a.index) return;
         el.selectedIndex = a.index as number;
@@ -252,7 +278,7 @@ export async function editField(page: Page, args: Record<string, unknown>): Prom
     // Native input events cross open shadow roots so host/framework listeners
     // receive edits just as they do with physical typing.
     el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: null }));
-  }, args);
+  }, { ...args, labelMax: CHOICE_LABEL } as Record<string, unknown>);
 }
 
 /** Longest copy a viewer can take in one go (matches the edit limit). */

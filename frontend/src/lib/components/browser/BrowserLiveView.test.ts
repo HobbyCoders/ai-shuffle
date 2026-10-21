@@ -9,7 +9,7 @@ import {
 import { tick } from 'svelte';
 import BrowserLiveView from './BrowserLiveView.svelte';
 import type { BrowserEditor } from '$lib/browser-panel/workspace';
-import type { BrowserChoices } from '$lib/browser-panel/pickers';
+import type { BrowserChoices, PickerChoice } from '$lib/browser-panel/pickers';
 
 beforeEach(() => {
 	vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -45,7 +45,7 @@ afterEach(() => {
 let keyboardView: BrowserLiveView;
 
 async function setup(
-	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void; editors?: BrowserEditor[]; onEdit?: (args: Record<string, unknown>) => void; onChoices?: (field: BrowserEditor) => Promise<BrowserChoices> } = {},
+	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void; editors?: BrowserEditor[]; onEdit?: (args: Record<string, unknown>) => void; onChoices?: (field: BrowserEditor) => Promise<BrowserChoices>; onChoose?: (field: BrowserEditor, choice: PickerChoice) => Promise<void>; revision?: number } = {},
 ) {
 	const onInput = vi.fn();
 	const onInspect = vi.fn();
@@ -795,7 +795,7 @@ describe('panel pickers for select and date/time controls', () => {
 		expect(trigger.getAttribute('aria-expanded')).toBe('true');
 		expect(onChoices).toHaveBeenCalledWith(select);
 		await fireEvent.click(await screen.findByText('Austria'));
-		expect(onEdit).toHaveBeenCalledWith({ field: 'sel-1', action: 'set', index: 0 });
+		expect(onEdit).toHaveBeenCalledWith({ field: 'sel-1', action: 'set', index: 0, label: 'Austria' });
 		expect(screen.queryByRole('dialog')).toBeNull();
 		expect(document.activeElement).toBe(surface); // keys go back to the page
 		expect(sent(onInput).filter((p) => p.kind === 'mouse')).toEqual([]); // the page never saw a click
@@ -827,6 +827,68 @@ describe('panel pickers for select and date/time controls', () => {
 		surface.focus();
 		await fireEvent.keyDown(surface, { key: 'ArrowDown', code: 'ArrowDown' });
 		expect(sent(onInput).filter((p) => p.kind === 'key').map((p) => p.key)).toEqual(['ArrowDown']);
+	});
+
+	it('does not trust a focus flag older than the last key: Tab then Space reaches the page', async () => {
+		const onChoices = vi.fn().mockResolvedValue(choices);
+		const { surface, onInput, rerender } = await setup({ editors: [{ ...select, focused: true }], revision: 4, onEdit: vi.fn(), onChoices });
+		surface.focus();
+		// Tab leaves the select in the page; the state saying so has not arrived yet.
+		await fireEvent.keyDown(surface, { key: 'Tab', code: 'Tab' });
+		await fireEvent.keyUp(surface, { key: 'Tab', code: 'Tab' });
+		await fireEvent.keyDown(surface, { key: ' ', code: 'Space' });
+		await fireEvent.keyUp(surface, { key: ' ', code: 'Space' });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(sent(onInput).filter((p) => p.kind === 'key').map((p) => [p.event, p.key])).toEqual([
+			['down', 'Tab'], ['up', 'Tab'], ['down', ' '], ['up', ' '],
+		]);
+		// A newer state that still has the select focused (Shift+Tab came back) is trusted.
+		await rerender({ editors: [{ ...select, focused: true }], revision: 5 });
+		await fireEvent.keyDown(surface, { key: ' ', code: 'Space' });
+		expect(screen.getByRole('dialog', { name: 'List: Country' })).toBeTruthy();
+	});
+
+	it('trusts the focus flag again once the page has had a moment with no change to report', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			const { surface } = await setup({ editors: [{ ...select, focused: true }], revision: 4, onEdit: vi.fn(), onChoices: vi.fn().mockResolvedValue(choices) });
+			surface.focus();
+			await fireEvent.keyDown(surface, { key: 'ArrowDown', code: 'ArrowDown' });
+			await fireEvent.keyDown(surface, { key: ' ', code: 'Space' });
+			expect(screen.queryByRole('dialog')).toBeNull();
+			vi.setSystemTime(Date.now() + 1500);
+			await fireEvent.keyDown(surface, { key: ' ', code: 'Space' });
+			expect(screen.getByRole('dialog', { name: 'List: Country' })).toBeTruthy();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('modifier keys alone do not hide the focus flag', async () => {
+		const { surface } = await setup({ editors: [{ ...select, focused: true }], revision: 4, onEdit: vi.fn(), onChoices: vi.fn().mockResolvedValue(choices) });
+		surface.focus();
+		await fireEvent.keyDown(surface, { key: 'Alt', code: 'AltLeft', altKey: true });
+		await fireEvent.keyDown(surface, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+		expect(screen.getByRole('dialog', { name: 'List: Country' })).toBeTruthy();
+	});
+
+	it('keeps the picker open until the page takes the choice, and shows a refusal there', async () => {
+		let settle!: { resolve: () => void; reject: (e: Error) => void };
+		const onChoose = vi.fn(() => new Promise<void>((resolve, reject) => (settle = { resolve, reject })));
+		const onEdit = vi.fn();
+		await setup({ editors: [select], onEdit, onChoose, onChoices: vi.fn().mockResolvedValue(choices) });
+		await fireEvent.click(screen.getByRole('button', { name: 'Country: Belgium' }));
+		await fireEvent.click(await screen.findByText('Austria'));
+		expect(onChoose).toHaveBeenCalledWith(select, { index: 0, label: 'Austria' });
+		expect(onEdit).not.toHaveBeenCalled();
+		expect(screen.getByRole('dialog')).toBeTruthy();
+		settle.reject(new Error('This list changed. Open it again.'));
+		expect((await screen.findByRole('alert')).textContent).toContain('This list changed');
+		expect(screen.getByRole('dialog')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /Open the list again/ }));
+		await fireEvent.click(await screen.findByText('Belgium'));
+		settle.resolve();
+		await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 	});
 
 	it('closes the picker when its control leaves the page or input stops', async () => {

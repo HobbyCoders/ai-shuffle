@@ -19,6 +19,7 @@ import {
 	placePopup,
 	TypeAhead,
 	typeAheadMatch,
+	wallClock,
 	weekIndexOf,
 	type BrowserChoice,
 } from './pickers';
@@ -150,6 +151,31 @@ describe('min, max and step', () => {
 		expect(nearestAllowed(l, d(14))).toBe(d(12));
 		expect(nearestAllowed(l, d(1))).toBe(d(5));
 		expect(nearestAllowed(l, d(31) + 30)).toBe(d(26));
+	});
+
+	it('steps from the value attribute when there is no min, as HTML does', () => {
+		// <input type=date value=2026-10-21 step=7>: Wednesdays, not 1970's Thursdays.
+		const l = limitsFor('date', undefined, undefined, '7', '2026-10-21');
+		const d = (n: number) => daysFromCivil(2026, 10, n);
+		expect(allowed(l, d(28))).toBe(true);
+		expect(allowed(l, d(14))).toBe(true);
+		expect(allowed(l, d(22))).toBe(false);
+		// min wins over the value attribute; an unparseable base falls back to the default.
+		expect(limitsFor('date', '2026-10-05', undefined, '7', '2026-10-21').base).toBe(d(5));
+		expect(limitsFor('date', undefined, undefined, '7', 'soon').base).toBe(0);
+		const t = limitsFor('time', undefined, undefined, '900', '10:05');
+		expect(allowed(t, ((10 * 60 + 20) * 60) * 1000)).toBe(true);
+		expect(allowed(t, ((10 * 60 + 15) * 60) * 1000)).toBe(false);
+	});
+
+	it('reads the wall clock in the page’s time zone', () => {
+		const at = new Date(Date.UTC(2026, 9, 21, 20, 30, 15));
+		const kiritimati = wallClock('Pacific/Kiritimati', at); // UTC+14: already the 22nd
+		expect([kiritimati.getFullYear(), kiritimati.getMonth() + 1, kiritimati.getDate(), kiritimati.getHours(), kiritimati.getMinutes(), kiritimati.getSeconds()]).toEqual([2026, 10, 22, 10, 30, 15]);
+		const honolulu = wallClock('Pacific/Honolulu', at); // UTC−10
+		expect([honolulu.getDate(), honolulu.getHours()]).toEqual([21, 10]);
+		expect(wallClock(undefined, at)).toBe(at);
+		expect(wallClock('Not/AZone', at)).toBe(at);
 	});
 
 	it('uses the default step and base for each kind', () => {

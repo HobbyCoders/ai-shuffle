@@ -3,7 +3,7 @@
 	import BrowserFileInput from './BrowserFileInput.svelte';
 	import BrowserPicker from './BrowserPicker.svelte';
 	import type { BrowserEditor } from '$lib/browser-panel/workspace';
-	import { isPickerKind, opensPicker, type BrowserChoices } from '$lib/browser-panel/pickers';
+	import { isPickerKind, opensPicker, type BrowserChoices, type PickerChoice } from '$lib/browser-panel/pickers';
 	import { browserTextChunks } from '$lib/browser-panel/text-chunks';
 	/**
 	 * BrowserLiveView — draws the screencast frames into a letterboxed,
@@ -71,6 +71,14 @@
 		onPickFiles?: (field: BrowserEditor) => (files: File[]) => Promise<void>;
 		/** Read a select's options from the page for the panel's own list. */
 		onChoices?: (field: BrowserEditor) => Promise<BrowserChoices>;
+		/**
+		 * Set a picker's choice in the page, resolving once the page has it. A
+		 * rejection keeps the picker open with the reason. Without it the
+		 * choice is sent through onEdit and the picker closes at once.
+		 */
+		onChoose?: (field: BrowserEditor, choice: PickerChoice) => Promise<void>;
+		/** The workspace state revision `editors` came from. */
+		revision?: number;
 		/** Whether input is accepted (true only while the stream is live). */
 		interactive?: boolean;
 		/** Keyboard ownership is independent of the coordinate/frame gate. */
@@ -102,6 +110,8 @@
 		onEdit,
 		onPickFiles,
 		onChoices,
+		onChoose,
+		revision = 0,
 		interactive: inputEnabled = true,
 		keyboardEnabled: keyboardAllowed = inputEnabled,
 		keyboardOpen = $bindable(false),
@@ -148,10 +158,40 @@
 		if (refocus) wrapperEl?.focus({ preventScroll: true });
 	}
 
-	function applyPicker(choice: { index: number } | { value: string }) {
-		const id = pickerId;
-		closePicker();
-		if (id !== null) onEdit?.({ field: id, action: 'set', ...choice });
+	async function applyPicker(choice: PickerChoice) {
+		const field = pickerField;
+		if (!field) return;
+		if (!onChoose) {
+			closePicker();
+			onEdit?.({ field: field.id, action: 'set', ...choice });
+			return;
+		}
+		await onChoose(field, choice); // a refusal stays in the picker
+		if (pickerId === field.id) closePicker();
+	}
+
+	/**
+	 * The page's `focused` flag in `editors` lags the keys and presses this
+	 * view sends: after a Tab, the state still names the control Tab left, so
+	 * a quick Space would open that control's picker instead of reaching the
+	 * page. After sending one, the flag is ignored until a newer state
+	 * revision arrives (or, if the page reported no change, a moment passes).
+	 */
+	let focusStale: { revision: number; at: number } | null = null;
+	const FOCUS_SETTLE_MS = 1000;
+	const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock']);
+	function forward(payload: Record<string, unknown>) {
+		const movesFocus =
+			payload.kind === 'text' ||
+			(payload.kind === 'key' && !MODIFIER_KEYS.has(String(payload.key))) ||
+			(payload.kind === 'mouse' && (payload.event === 'down' || payload.event === 'up'));
+		if (movesFocus) focusStale = { revision, at: Date.now() };
+		onInput(payload);
+	}
+	function focusKnown() {
+		if (focusStale && revision <= focusStale.revision && Date.now() - focusStale.at < FOCUS_SETTLE_MS) return false;
+		focusStale = null;
+		return true;
 	}
 
 	// The control left the page, or input stopped: nothing to choose for.
@@ -484,7 +524,7 @@
 			noticeTimer = setTimeout(() => (notice = null), 5000);
 		}
 		for (const chunk of browserTextChunks(text))
-			onInput({ type: 'input', kind: 'text', text: chunk });
+			forward({ type: 'input', kind: 'text', text: chunk });
 	}
 
 	function commitText(text: string) {
@@ -518,7 +558,7 @@
 
 	function keyPair(key: string, code: string, keyCode: number, modifiers = 0) {
 		for (const event of ['down', 'up']) {
-			onInput({
+			forward({
 				type: 'input',
 				kind: 'key',
 				event,
@@ -638,7 +678,7 @@
 		if (!p) return;
 		// Left/right/middle/back/forward only: a pen eraser's 32 is not a mouse button.
 		const buttons = (e.buttons ?? 0) & 31;
-		onInput({
+		forward({
 			type: 'input',
 			kind: 'mouse',
 			event,
@@ -928,7 +968,7 @@
 	}
 
 	function sendKey(event: 'down' | 'up', e: KeyboardEvent) {
-		onInput({ type: 'input', kind: 'key', event, ...remoteKey(e, event) });
+		forward({ type: 'input', kind: 'key', event, ...remoteKey(e, event) });
 	}
 
 	/** Ctrl/Cmd+V: let the native paste event bring this device's clipboard. */
@@ -1008,7 +1048,7 @@
 		}
 		// A focused select/date control: open the panel's picker, not Chrome's
 		// invisible popup (which would swallow the next keys).
-		const pagePicker = editors.find((f) => f.focused && isPickerKind(f.type));
+		const pagePicker = focusKnown() ? editors.find((f) => f.focused && isPickerKind(f.type)) : undefined;
 		if (pagePicker && onEdit && isPickerKind(pagePicker.type) && opensPicker(pagePicker.type, e)) {
 			swallowKeyUp = e.key;
 			openPicker(pagePicker);

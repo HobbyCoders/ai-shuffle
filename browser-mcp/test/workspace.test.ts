@@ -300,11 +300,12 @@ describe("typed command validation", () => {
   ])("rejects %s %j", (op, args) => {
     const { ws } = make(); expect(() => validateCommand(command(ws, op as string, args), ws.runtimeId)).toThrow();
   });
-  it("accepts picker choices: options lookups and set by index or value", () => {
+  it("accepts picker choices: options lookups and set by index with its label, or by value", () => {
     const { ws } = make();
     for (const [op, args] of [
       ["options", { field: "f-1" }],
-      ["edit", { field: "f-1", action: "set", index: 3 }],
+      ["edit", { field: "f-1", action: "set", index: 3, label: "Vienna" }],
+      ["edit", { field: "f-1", action: "set", index: 0, label: "" }],
       ["edit", { field: "f-1", action: "set", value: "2026-10-21" }],
       ["edit", { field: "f-1", action: "set", value: "" }],
     ] as const) expect(validateCommand(command(ws, op, args), ws.runtimeId).op).toBe(op);
@@ -312,8 +313,12 @@ describe("typed command validation", () => {
   it.each([
     ["options", {}], ["options", { field: "f-1", extra: 1 }],
     ["edit", { field: "f-1", action: "set" }],
-    ["edit", { field: "f-1", action: "set", index: 1, value: "x" }],
-    ["edit", { field: "f-1", action: "set", index: -1 }], ["edit", { field: "f-1", action: "set", index: 1.5 }],
+    ["edit", { field: "f-1", action: "set", index: 1, value: "x", label: "x" }],
+    ["edit", { field: "f-1", action: "set", index: 1 }], // no label: a refilled list could not be noticed
+    ["edit", { field: "f-1", action: "set", index: 1, label: "x".repeat(401) }],
+    ["edit", { field: "f-1", action: "set", value: "x", label: "x" }],
+    ["edit", { field: "f-1", action: "focus", label: "x" }],
+    ["edit", { field: "f-1", action: "set", index: -1, label: "x" }], ["edit", { field: "f-1", action: "set", index: 1.5, label: "x" }],
     ["edit", { field: "f-1", action: "set", value: "x".repeat(65) }],
     ["edit", { field: "f-1", action: "replace", index: 1, value: "", start: 0, end: 0 }],
   ])("rejects picker command %s %j", (op, args) => {

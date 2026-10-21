@@ -407,7 +407,7 @@ def picker_field(**extra):
 
 
 @pytest.mark.parametrize("field", [
-    picker_field(min="2026-01-01", max="2026-12-31", step="7", focused=True),
+    picker_field(min="2026-01-01", max="2026-12-31", step="7", base="2026-10-21", zone="Asia/Tokyo", focused=True),
     picker_field(type="select", value="Germany"),
     *(picker_field(type=kind, value="") for kind in ("time", "datetime-local", "month", "week")),
 ])
@@ -420,6 +420,8 @@ def test_picker_controls_are_valid_state(field):
 @pytest.mark.parametrize("change", [
     {"type": "color"}, {"min": 5}, {"max": "x" * 65}, {"step": None}, {"focused": "yes"},
     {"type": "text", "step": "1"}, {"type": "text", "focused": True},
+    {"base": 7}, {"base": "x" * 65}, {"type": "text", "base": "2026-10-21"},
+    {"zone": 9}, {"zone": "x" * 65}, {"type": "text", "zone": "UTC"},
 ])
 def test_invalid_picker_state_is_rejected(change):
     value = state()
@@ -429,17 +431,22 @@ def test_invalid_picker_state_is_rejected(change):
 
 
 @pytest.mark.asyncio
-async def test_picker_set_accepts_an_index_or_a_short_value_only(broker):
+async def test_picker_set_accepts_an_index_with_its_label_or_a_short_value_only(broker):
     await broker.report("runtime", state(revision=1, viewer="viewer"), [])
-    for index, args in enumerate(({"field": "f", "action": "set", "index": 2},
+    for index, args in enumerate(({"field": "f", "action": "set", "index": 2, "label": "Vienna"},
                                   {"field": "f", "action": "set", "value": "2026-10-21T08:30"},
                                   {"field": "f", "action": "set", "value": ""})):
         await broker.submit("viewer", command(f"set{index}", "edit", args))
-    assert [c["args"] for c in await broker.poll("runtime")][0] == {"field": "f", "action": "set", "index": 2}
+    assert [c["args"] for c in await broker.poll("runtime")][0] == {"field": "f", "action": "set", "index": 2, "label": "Vienna"}
     for index, bad in enumerate(({"field": "f", "action": "set"},
-                                 {"field": "f", "action": "set", "index": 1, "value": "x"},
-                                 {"field": "f", "action": "set", "index": -1},
-                                 {"field": "f", "action": "set", "index": True},
+                                 {"field": "f", "action": "set", "index": 1, "value": "x", "label": "x"},
+                                 {"field": "f", "action": "set", "index": 1},  # no label: a refill would go unnoticed
+                                 {"field": "f", "action": "set", "index": 1, "label": "x" * 201},
+                                 {"field": "f", "action": "set", "index": 1, "label": None},
+                                 {"field": "f", "action": "set", "value": "x", "label": "x"},
+                                 {"field": "f", "action": "focus", "label": "x"},
+                                 {"field": "f", "action": "set", "index": -1, "label": "x"},
+                                 {"field": "f", "action": "set", "index": True, "label": "x"},
                                  {"field": "f", "action": "set", "value": "x" * 65},
                                  {"field": "f", "action": "set", "value": "x", "start": 0, "end": 0},
                                  {"field": "f", "action": "focus", "index": 1})):
@@ -501,6 +508,31 @@ async def test_select_options_reach_only_the_asking_viewer_and_never_workspace_s
 def test_invalid_select_options_are_rejected(bad):
     with pytest.raises(control.ControlError):
         control.validate_choices(bad)
+
+
+def _long(i):
+    return str(i).zfill(3) + "x" * 197
+
+
+@pytest.mark.parametrize("groups, labels, ok", [
+    # The same lists browser-mcp/test/editors.test.ts reads from a real page:
+    # the runtime keeps 119 of these 120 grouped options (the group label
+    # counts too) and sends the "Exact" list whole.
+    (["G"], [_long(i) for i in range(120)], False),
+    (["G"], [_long(i) for i in range(119)], True),
+    (["G"], [_long(i) for i in range(119)] + ["y" * 199], True),
+    (["G"], [_long(i) for i in range(119)] + ["y" * 200], False),
+    # Code points, not UTF-16 units: an emoji counts once.
+    ([], ["\U0001F600" * 150] * 2, True),
+])
+def test_option_budget_counts_group_labels_and_code_points_like_the_runtime(groups, labels, ok):
+    value = {"selected": 0, "groups": groups,
+             "options": [{"label": label, "disabled": False, **({"group": 0} if groups else {})} for label in labels]}
+    if ok:
+        assert control.validate_choices(value) is value
+    else:
+        with pytest.raises(control.ControlError, match="Options too long"):
+            control.validate_choices(value)
 
 
 def test_report_payload_allows_long_option_lists_but_stays_finite():

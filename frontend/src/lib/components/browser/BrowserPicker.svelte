@@ -4,15 +4,17 @@
 	 * Chrome draws outside the screencast (a `<select>` list, date and time
 	 * pickers). It opens next to the field inside the live view (a bottom sheet
 	 * when the view is small), rings the page field it stands in for, and hands
-	 * the choice back to be set in the page. Escape, a click outside or the
-	 * close button cancel without touching the page.
+	 * the choice back to be set in the page. It stays open until the page has
+	 * the value; a refusal (the list changed, the page rejected the value) is
+	 * shown here with a way to re-open the list or try again. Escape, a click
+	 * outside or the close button cancel without touching the page.
 	 */
 	import { onMount } from 'svelte';
 	import { X, RotateCw } from 'lucide-svelte';
 	import BrowserSelectList from './BrowserSelectList.svelte';
 	import BrowserDateTimePicker from './BrowserDateTimePicker.svelte';
 	import type { BrowserEditor } from '$lib/browser-panel/workspace';
-	import { isPickerKind, limitsFor, placePopup, type BrowserChoices, type DateKind } from '$lib/browser-panel/pickers';
+	import { isPickerKind, limitsFor, placePopup, wallClock, type BrowserChoices, type DateKind, type PickerChoice } from '$lib/browser-panel/pickers';
 
 	let {
 		field,
@@ -33,7 +35,8 @@
 		boundary?: HTMLElement;
 		/** Reads a select's options from the page. */
 		loadChoices?: (field: BrowserEditor) => Promise<BrowserChoices>;
-		onApply: (choice: { index: number } | { value: string }) => void;
+		/** Sets the choice in the page; a rejection is shown in the popup. */
+		onApply: (choice: PickerChoice) => void | Promise<void>;
 		onCancel: () => void;
 	} = $props();
 
@@ -51,6 +54,8 @@
 	let choices = $state<BrowserChoices | null>(null);
 	let loadError = $state<string | null>(null);
 	let loading = $state(false);
+	let applying = $state(false);
+	let applyError = $state<string | null>(null);
 
 	async function load() {
 		if (kind !== 'select') return;
@@ -60,6 +65,8 @@
 		}
 		loading = true;
 		loadError = null;
+		applyError = null;
+		choices = null;
 		try {
 			choices = await loadChoices(field);
 		} catch (error) {
@@ -69,8 +76,31 @@
 		}
 	}
 
+	async function apply(choice: PickerChoice) {
+		if (applying) return;
+		applying = true;
+		applyError = null;
+		try {
+			await onApply(choice);
+		} catch (error) {
+			applyError = error instanceof Error && error.message ? error.message : "The page didn't take that choice. Try again.";
+		} finally {
+			applying = false;
+		}
+	}
+
+	function chooseOption(index: number) {
+		const option = choices?.options[index];
+		if (option) void apply({ index, label: option.label });
+	}
+
 	// The panel's limits come from the page's own attributes.
-	const limits = $derived(kind === 'select' ? null : limitsFor(kind as DateKind, field.min, field.max, field.step));
+	const limits = $derived(kind === 'select' ? null : limitsFor(kind as DateKind, field.min, field.max, field.step, field.base));
+	// Today and Now follow the page's clock, which may be in another time zone.
+	// svelte-ignore state_referenced_locally
+	const now = wallClock(field.zone);
+	// svelte-ignore state_referenced_locally
+	const zoneNote = field.zone && field.zone !== Intl.DateTimeFormat().resolvedOptions().timeZone ? field.zone : null;
 
 	const sheet = $derived(viewWidth < 480 || viewHeight < 380);
 	const preferred = $derived.by(() => {
@@ -167,10 +197,22 @@
 		</button>
 	</header>
 
-	<div class="bp-body">
+	<div class="bp-body" class:busy={applying} aria-busy={applying}>
+		{#if applyError}
+			<div class="bp-error" class:inline={kind !== 'select'} role="alert">
+				<p>{applyError}</p>
+				{#if kind === 'select'}
+					<button type="button" class="bp-retry" onclick={load} disabled={loading}>
+						<RotateCw size={13} strokeWidth={2} /> Open the list again
+					</button>
+				{/if}
+			</div>
+		{/if}
 		{#if kind === 'select'}
-			{#if choices}
-				<BrowserSelectList {choices} label={field.label} onChoose={(index) => onApply({ index })} {onCancel} />
+			{#if applyError}
+				<!-- The list on screen may no longer be the page's: no choosing from it. -->
+			{:else if choices}
+				<BrowserSelectList {choices} label={field.label} onChoose={chooseOption} {onCancel} />
 			{:else if loadError}
 				<div class="bp-error" role="alert">
 					<p>{loadError}</p>
@@ -190,10 +232,14 @@
 				kind={kind as DateKind}
 				value={field.value}
 				{limits}
+				{now}
 				label={field.label}
-				onChoose={(value) => onApply({ value })}
+				onChoose={(value) => void apply({ value })}
 				{onCancel}
 			/>
+			{#if zoneNote}
+				<p class="bp-zone" title="Today and Now follow the page's clock, not this device's">Page time zone: {zoneNote.replace(/_/g, ' ')}</p>
+			{/if}
 		{/if}
 	</div>
 </div>
@@ -342,6 +388,19 @@
 		flex-direction: column;
 		flex: 1;
 		min-height: 0;
+		transition: opacity 120ms ease;
+	}
+	/* Waiting for the page to take the choice: one at a time. */
+	.bp-body.busy {
+		opacity: 0.6;
+		pointer-events: none;
+		cursor: progress;
+	}
+	.bp-zone {
+		margin: 2px 14px 0;
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
 	}
 
 	.bp-loading {
@@ -370,6 +429,9 @@
 		align-items: flex-start;
 		gap: 10px;
 		padding: 4px 14px 8px;
+	}
+	.bp-error.inline {
+		padding-bottom: 4px;
 	}
 	.bp-error p {
 		margin: 0;
@@ -402,11 +464,12 @@
 
 	@media (pointer: coarse) {
 		.bp-close {
-			width: 40px;
-			height: 40px;
+			width: 44px;
+			height: 44px;
 		}
 		.bp-retry {
-			height: 40px;
+			height: 44px;
+			padding: 0 16px;
 		}
 	}
 

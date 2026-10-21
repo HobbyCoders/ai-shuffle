@@ -17,8 +17,10 @@ export interface BrowserEditor {
   /** For a select, `value` is the chosen option's label (what it shows). */
   id: string; type: string; label: string; value: string;
   accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
-  /** Date/time pickers: the page's own min/max/step attributes, unparsed. */
-  min?: string; max?: string; step?: string;
+  /** Date/time pickers: the page's own min/max/step attributes, unparsed; its
+   * value attribute (`base`, where steps count from without a min); and the
+   * remote browser's IANA time zone (`zone`), for Today and Now. */
+  min?: string; max?: string; step?: string; base?: string; zone?: string;
   /** A picker control (select, date, time…) that has the page's focus. */
   focused?: boolean;
   x: number; y: number; width: number; height: number;
@@ -67,8 +69,8 @@ const TEXT_FIELDS = ['text', 'search', 'email', 'url', 'tel', 'password', 'texta
 /** Picker limits (short strings) and the focus flag: valid, and only on pickers. */
 function pickerDetailsOk(field: Record<string, unknown>): boolean {
 	if (!(PICKER_KINDS as readonly string[]).includes(String(field.type)))
-		return ['min', 'max', 'step', 'focused'].every((k) => field[k] === undefined);
-	return ['min', 'max', 'step'].every((k) => field[k] === undefined || (typeof field[k] === 'string' && (field[k] as string).length <= 64)) &&
+		return ['min', 'max', 'step', 'base', 'zone', 'focused'].every((k) => field[k] === undefined);
+	return ['min', 'max', 'step', 'base', 'zone'].every((k) => field[k] === undefined || (typeof field[k] === 'string' && (field[k] as string).length <= 64)) &&
 		(field.focused === undefined || typeof field.focused === 'boolean');
 }
 

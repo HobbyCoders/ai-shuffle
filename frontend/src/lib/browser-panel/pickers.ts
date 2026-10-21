@@ -18,6 +18,9 @@ export const PICKER_KINDS = ['select', 'date', 'time', 'datetime-local', 'month'
 export type PickerKind = (typeof PICKER_KINDS)[number];
 export type DateKind = Exclude<PickerKind, 'select'>;
 
+/** A picker's choice for the page: an option by index with the label shown for it, or a date/time value. */
+export type PickerChoice = { index: number; label: string } | { value: string };
+
 export function isPickerKind(type: string): type is PickerKind {
 	return (PICKER_KINDS as readonly string[]).includes(type);
 }
@@ -320,7 +323,12 @@ export interface Limits {
 const DEFAULT_STEP: Record<DateKind, number> = { date: 1, month: 1, week: 1, time: 60, 'datetime-local': 60 };
 
 /** The page's min/max/step attributes in the kind's unit, by the HTML rules. */
-export function limitsFor(kind: DateKind, min?: string, max?: string, step?: string): Limits {
+/**
+ * The panel's limits for a date/time control, from the page's attributes.
+ * Steps count from min; without one, from the value attribute (`base`), as
+ * HTML does, and otherwise from the kind's default (1970-01-01, 00:00…).
+ */
+export function limitsFor(kind: DateKind, min?: string, max?: string, step?: string, base?: string): Limits {
 	const lo = parseValue(kind, min);
 	const hi = parseValue(kind, max);
 	const timed = kind === 'time' || kind === 'datetime-local';
@@ -333,7 +341,27 @@ export function limitsFor(kind: DateKind, min?: string, max?: string, step?: str
 		s = timed ? Math.max(1, Math.round(raw * 1000)) : Math.max(1, Math.round(raw));
 	}
 	const wraps = kind === 'time' && lo !== null && hi !== null && lo > hi;
-	return { kind, min: lo, max: hi, step: s, base: lo ?? 0, wraps };
+	return { kind, min: lo, max: hi, step: s, base: lo ?? parseValue(kind, base) ?? 0, wraps };
+}
+
+/**
+ * The wall-clock time now in the page's time zone (an IANA name the runtime
+ * reports), as a local Date the pickers can read with getHours() and friends.
+ * Falls back to this device's clock when the zone is missing or unknown.
+ */
+export function wallClock(zone?: string, at: Date = new Date()): Date {
+	if (!zone) return at;
+	try {
+		const parts = new Intl.DateTimeFormat('en-US', {
+			timeZone: zone, hourCycle: 'h23',
+			year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+		}).formatToParts(at);
+		const part = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+		const local = new Date(part('year'), part('month') - 1, part('day'), part('hour'), part('minute'), part('second'));
+		return Number.isNaN(local.getTime()) ? at : local;
+	} catch {
+		return at; // an unknown zone name
+	}
 }
 
 const mod = (a: number, b: number) => ((a % b) + b) % b;

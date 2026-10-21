@@ -173,14 +173,16 @@ def validate_state(state, runtime_id):
     if not isinstance(editors, list) or len(editors) > 32:
         raise ControlError("Invalid text fields")
     for field in editors:
-        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys", "style", "min", "max", "step", "focused"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
+        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys", "style", "min", "max", "step", "base", "zone", "focused"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
             raise ControlError("Invalid text field")
         identifier(field["id"])
         if field["type"] not in TEXT_FIELDS + PICKER_FIELDS:
             raise ControlError("Invalid text field type")
-        if field["type"] not in PICKER_FIELDS and {"min", "max", "step", "focused"} & set(field):
+        if field["type"] not in PICKER_FIELDS and {"min", "max", "step", "base", "zone", "focused"} & set(field):
             raise ControlError("Picker details on a text field")
-        for name in ("min", "max", "step"):
+        # base: the page's value attribute, which steps count from without a
+        # min; zone: the browser's IANA time zone, for the panel's Today/Now.
+        for name in ("min", "max", "step", "base", "zone"):
             if name in field and (not isinstance(field[name], str) or len(field[name]) > 64):
                 raise ControlError("Invalid picker limit")
         if "focused" in field and type(field["focused"]) is not bool:
@@ -486,7 +488,7 @@ class Broker:
             "tabs": {"action", "tab_id", "url"},
             "viewport": {"mode", "width", "height"},
             "input": {"method", "params"},
-            "edit": {"field", "action", "value", "start", "end", "index"},
+            "edit": {"field", "action", "value", "start", "end", "index", "label"},
             "upload": {"field", "paths"},
             "options": {"field"},
         }
@@ -537,16 +539,20 @@ class Broker:
             identifier(args.get("field"))
             if args.get("action") not in ("focus", "blur", "replace", "set"):
                 raise ControlError("Invalid text edit")
-            if "index" in args and args["action"] != "set":
+            if ("index" in args or "label" in args) and args["action"] != "set":
                 raise ControlError("Invalid text edit")
             if args["action"] == "set":
-                # A picker choice: a select option by index, or a date/time value.
+                # A picker choice: a select option by index with the label the
+                # panel showed (a refilled list is refused by the runtime), or a
+                # date/time value.
                 if "start" in args or "end" in args:
                     raise ControlError("Invalid choice")
                 if "index" in args:
                     if "value" in args or type(args["index"]) is not int or not 0 <= args["index"] <= 9999:
                         raise ControlError("Invalid choice")
-                elif not isinstance(args.get("value"), str) or len(args["value"]) > 64:
+                    if not isinstance(args.get("label"), str) or len(args["label"]) > CHOICE_LABEL:
+                        raise ControlError("Invalid choice")
+                elif "label" in args or not isinstance(args.get("value"), str) or len(args["value"]) > 64:
                     raise ControlError("Invalid choice")
             elif args["action"] == "replace":
                 value = args.get("value")
