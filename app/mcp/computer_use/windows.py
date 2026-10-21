@@ -675,8 +675,18 @@ def start_search_focused() -> bool:
         return False
     # Do not trust a window title (an arbitrary app can have a matching title).
     process = os.path.basename(_exe_path(_pid(hwnd))).lower()
-    return process in {"startmenuexperiencehost.exe", "searchhost.exe", "searchapp.exe",
-                       "searchui.exe"}
+    if process in {"startmenuexperiencehost.exe", "searchhost.exe", "searchapp.exe", "searchui.exe"}:
+        return True
+    if process == "explorer.exe":
+        user32 = _api()[2]
+        cls = _text(user32.GetClassNameW, hwnd, 256)
+        if cls in {"DV2ControlHost", "ImmersiveLauncher", "SearchPane"}:
+            return True
+        # Some Windows builds host Start/Search as Explorer CoreWindows. Their
+        # title is evidence only in combination with the trusted shell process/class.
+        return cls == "Windows.UI.Core.CoreWindow" and _text(
+            user32.GetWindowTextW, hwnd, 256).casefold() in {"start", "search"}
+    return False
 
 
 def occluders(win: WindowInfo, listed: list[WindowInfo]) -> list[int]:

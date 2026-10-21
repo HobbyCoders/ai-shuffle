@@ -6,6 +6,7 @@ The model emits chords like ``ctrl+c``, ``alt+Tab``, ``Return``, ``cmd+space``,
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 
@@ -41,7 +42,11 @@ for _name, _canonical in (("control", "ctrl"), ("ctrl", "ctrl"), ("super", "cmd"
     for _side in ("l", "r"):
         _SPECIAL[f"{_name}_{_side}"] = _canonical
 
-_CHARACTERS = {"plus": "+", "minus": "-", "kp_add": "+", "kp_subtract": "-"}
+_CHARACTERS = {"plus": "+", "minus": "-"}
+# Real keypad events: Windows virtual keys, Darwin hardware keycodes, X11 keysyms.
+_KEYPAD = {"win32": {"kp_add": 0x6B, "kp_subtract": 0x6D},
+           "darwin": {"kp_add": 0x45, "kp_subtract": 0x4E},
+           "x11": {"kp_add": 0xFFAB, "kp_subtract": 0xFFAD}}
 _MODIFIERS = {name for name, value in _SPECIAL.items() if value in {"ctrl", "alt", "shift", "cmd"}}
 
 # Function keys F1..F20.
@@ -59,6 +64,10 @@ def _resolve(name: str) -> Any:
 
     token = name.strip()
     low = token.lower()
+    if low in ("kp_add", "kp_subtract"):
+        from pynput.keyboard import KeyCode
+        platform = sys.platform if sys.platform in _KEYPAD else "x11"
+        return KeyCode.from_vk(_KEYPAD[platform][low])
     if low in _CHARACTERS:
         return _CHARACTERS[low]
     if low in _SPECIAL:

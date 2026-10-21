@@ -125,8 +125,11 @@ async def test_paste_checks_readable_field_without_duplicate_fallback(gesture, l
     t = gesture.tools
     await t["request_access"]({"apps": [], "reason": "test", "clipboardWrite": True})
     text = "x" * 45
-    values = iter([((1,), "old"), ((1,), text if landed else "old")])
-    gesture.uia.focused_value = lambda: next(values)
+    reads = []
+    def focused_value():
+        reads.append(1)
+        return ((1,), text if landed and len(reads) > 1 else "old")
+    gesture.uia.focused_value = focused_value
     result = payload(await t["type"]({"text": text}))
     if landed:
         assert result["method"] == "clipboard"
@@ -174,7 +177,6 @@ async def test_macos_native_click_count(gesture, monkeypatch, action, count):
 
 @pytest.mark.parametrize("text,keys", [
     ("ctrl++", ["ctrl", "+"]), ("plus", ["+"]), ("minus", ["-"]),
-    ("Control_L+KP_Add", ["ctrl", "+"]), ("ctrl+KP_Subtract", ["ctrl", "-"]),
     ("Super_L+a", ["cmd", "a"]),
 ])
 async def test_key_spellings_send_expected_chord(gesture, text, keys):
@@ -358,6 +360,8 @@ def test_start_search_detection_uses_foreground_process_not_title(monkeypatch, p
     monkeypatch.setattr(windows, "foreground_window", lambda: 99)
     monkeypatch.setattr(windows, "_pid", lambda hwnd: 1)
     monkeypatch.setattr(windows, "_exe_path", lambda pid: process)
+    monkeypatch.setattr(windows, "_api", lambda: (None, None, SimpleNamespace(GetClassNameW=None)))
+    monkeypatch.setattr(windows, "_text", lambda fn, hwnd, size: "CabinetWClass")
     assert windows.start_search_focused() is expected
 
 
@@ -427,3 +431,240 @@ async def test_timeout_releases_cross_call_tools_without_next_call(gesture, monk
     await gesture.tools["mouse_up"]({"button": "right"})
     gesture.keyboard.release.assert_not_called()
     await gesture.tools["key_up"]({"text": "ctrl"})
+
+# Review repros: each formerly unsafe timeline must now refuse or report honestly.
+async def test_mouse_modifier_cannot_bypass_system_grant_into_win_r(gesture):
+    t = gesture.tools
+    await t["screenshot"]({})
+    assert payload(await t["mouse_down"]({"text": "cmd"}))["code"] == "PERMISSION_REQUIRED"
+    assert payload(await t["type"]({"text": "r"}))["success"]
+    assert ("key_down", "cmd") not in gesture.events
+    assert ("type", "r") in gesture.events
+    gesture.mouse.press.assert_not_called()
+
+
+@pytest.mark.parametrize("modifier,text", [("alt", "\t"), ("ctrl", "a"), ("cmd", "r")])
+async def test_type_with_held_system_modifier_requires_grant(gesture, modifier, text):
+    t = gesture.tools
+    if modifier == "cmd":
+        await t["request_access"]({"apps": [], "reason": "test", "systemKeyCombos": True})
+    await t["key_down"]({"text": modifier})
+    if modifier == "cmd":
+        # Simulate an earlier grant no longer being available to this held input.
+        from app.mcp.computer_use import access
+        access.revoke("test")
+        access.grant("test")
+    result = payload(await t["type"]({"text": text}))
+    assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "rejected"
+    assert not any(e[0] == "type" or e == ("key_down", "tab") for e in gesture.events)
+    gesture.keyboard.release.assert_called_with(modifier)
+
+
+@pytest.mark.parametrize("action,args", [
+    ("left_mouse_down", {}), ("left_click", {"coordinate": [20, 20]}),
+    ("right_click", {"coordinate": [20, 20]}), ("double_click", {"coordinate": [20, 20]}),
+    ("left_click_drag", {"coordinate": [20, 20]}),
+    ("scroll", {"coordinate": [20, 20], "scroll_direction": "down", "scroll_amount": 1})])
+async def test_pointer_modifiers_enforce_system_grant(gesture, action, args):
+    await gesture.tools["screenshot"]({})
+    result = payload(await gesture.tools[action]({**args, "text": "Super_L"}))
+    assert result["code"] == "PERMISSION_REQUIRED"
+    gesture.mouse.press.assert_not_called()
+    gesture.keyboard.press.assert_not_called()
+    gesture.mouse.scroll.assert_not_called()
+
+
+async def test_pointer_modifiers_combine_with_held_modifiers(gesture):
+    await gesture.tools["screenshot"]({})
+    await gesture.tools["key_down"]({"text": "ctrl"})
+    result = payload(await gesture.tools["scroll"]({"coordinate": [20, 20], "text": "alt"}))
+    assert result["code"] == "PERMISSION_REQUIRED"
+    assert ("key_down", "alt") not in gesture.events
+    gesture.mouse.scroll.assert_not_called()
+
+
+async def test_window_moving_drag_succeeds_then_next_action_is_stale(gesture, monkeypatch):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    shot = payload(await t["screenshot"]({"window_id": 101}))["screenshot_id"]
+    original = safety.SafeInput.press
+    def press(self, device, key):
+        original(self, device, key)
+        if device is self.mouse:
+            gesture.windows[0] = replace(gesture.windows[0], bounds=(30, 10, 100, 50))
+    monkeypatch.setattr(safety.SafeInput, "press", press)
+    result = payload(await t["left_click_drag"]({"start_coordinate": [5, 2],
+                                               "coordinate": [20, 2], "screenshot_id": shot}))
+    assert result["success"]
+    next_action = payload(await t["left_click"]({"coordinate": [20, 2], "screenshot_id": shot}))
+    assert next_action["code"] == "STALE_OBSERVATION" and next_action["outcome"] == "rejected"
+    gesture.mouse.press.assert_called_once_with("left")
+
+
+@pytest.mark.parametrize("action,args", [
+    ("left_click_drag", {"coordinate": [30, 20]}),
+    ("scroll", {"coordinate": [20, 20], "scroll_amount": 2, "scroll_direction": "down"})])
+async def test_mid_gesture_target_change_reports_partial(gesture, monkeypatch, action, args):
+    t = gesture.tools
+    await t["screenshot"]({})
+    if action == "left_click_drag":
+        original = gesture.mouse.press.side_effect
+        def press(button):
+            original(button)
+            monkeypatch.setattr(windows, "window_blocks_input", lambda hwnd: True)
+        gesture.mouse.press.side_effect = press
+    else:
+        original = gesture.mouse.scroll.side_effect
+        def scroll(x, y):
+            original(x, y)
+            monkeypatch.setattr(windows, "window_blocks_input", lambda hwnd: True)
+        gesture.mouse.scroll.side_effect = scroll
+    result = payload(await t[action](args))
+    assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "partial"
+
+
+async def test_mouse_up_validates_mapping_before_pressing_modifiers(gesture):
+    t = gesture.tools
+    await t["screenshot"]({})
+    await t["mouse_down"]({})
+    gesture.events.clear()
+    result = payload(await t["mouse_up"]({"coordinate": [20, 20], "screenshot_id": "old", "text": "shift"}))
+    assert result["code"] == "STALE_OBSERVATION" and result["outcome"] == "rejected"
+    assert ("key_down", "shift") not in gesture.events
+    assert gesture.events == [("mouse_up", "left")]
+
+
+@pytest.mark.parametrize("pin", ["ui_tree", "zoom", "click_element"])
+async def test_full_display_mapping_allows_shell_click_after_pin(gesture, pin):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    await t["screenshot"]({})
+    if pin == "click_element":
+        tree = payload(await t["ui_tree"]({"window_id": 101}))
+        assert payload(await t[pin]({"element_id": tree["elements"][0]["element_id"]}))["success"]
+    else:
+        assert payload(await t[pin]({"window_id": 101}))["success"]
+    gesture.uia.window_hit = 999
+    assert payload(await t["left_click"]({"coordinate": [140, 70]}))["success"]
+    # A full-display observation is also the documented way to clear keyboard pinning.
+    assert payload(await t["type"]({"text": "no"}))["code"] == "TARGET_CHANGED"
+    await t["screenshot"]({})
+    assert payload(await t["type"]({"text": "ok"}))["success"]
+
+
+@pytest.mark.parametrize("action,args", [("mouse_up", {"button": "left"}), ("key_up", {"text": "shift"})])
+async def test_up_after_timeout_reports_no_release(gesture, monkeypatch, action, args):
+    callbacks = []
+    monkeypatch.setattr(safety.threading, "Timer", lambda seconds, callback:
+                        callbacks.append(callback) or SimpleNamespace(daemon=False, start=lambda: None,
+                                                                     cancel=lambda: None))
+    await gesture.tools["mouse_down"]({})
+    await gesture.tools["key_down"]({"text": "shift"})
+    callbacks[0]()
+    if action == "mouse_up":
+        args = {**args, "coordinate": [20, 20], "screenshot_id": "expired", "text": "shift"}
+    gesture.events.clear()
+    result = payload(await gesture.tools[action](args))
+    assert result["released"] is False and "screenshot" in result["note"]
+    assert gesture.events == []
+
+
+async def test_paste_waits_for_delayed_value_delivery(gesture):
+    t = gesture.tools
+    await t["request_access"]({"apps": [], "reason": "test", "clipboardWrite": True})
+    reads = []
+    text = "x" * 45
+    def focused_value():
+        reads.append(1)
+        return ((1,), text if len(reads) >= 8 else "old")
+    gesture.uia.focused_value = focused_value
+    assert payload(await t["type"]({"text": text}))["method"] == "clipboard"
+    assert len(reads) == 8
+    gesture.keyboard.type.assert_not_called()
+
+
+async def test_paste_polling_respects_elapsed_deadline(gesture, monkeypatch):
+    await gesture.tools["request_access"]({"apps": [], "reason": "test", "clipboardWrite": True})
+    times = iter([0.0, 0.0, 1.1])
+    monkeypatch.setattr(sdk, "monotonic", lambda: next(times))
+    probes = []
+    gesture.uia.focused_value = lambda: probes.append(1) or ((1,), "old")
+    result = payload(await gesture.tools["type"]({"text": "x" * 45}))
+    assert result["outcome"] == "unknown"
+    assert len(probes) == 2  # pre-paste plus one read that consumed the deadline
+
+
+async def test_start_waits_for_cold_launcher_focus(gesture, monkeypatch):
+    await gesture.tools["request_access"]({"apps": ["Paint"], "reason": "test"})
+    monkeypatch.setattr(sdk.sys, "platform", "win32")
+    probes = []
+    def focused():
+        probes.append(1)
+        return len(probes) == 30
+    monkeypatch.setattr(windows, "start_search_focused", focused)
+    assert payload(await gesture.tools["open_application"]({"app": "Paint"}))["method"] == "start_menu"
+    assert len(probes) == 30 and ("type", "P") in gesture.events
+
+
+async def test_start_polling_respects_elapsed_deadline(gesture, monkeypatch):
+    await gesture.tools["request_access"]({"apps": ["Paint"], "reason": "test"})
+    monkeypatch.setattr(sdk.sys, "platform", "win32")
+    times = iter([0.0, 0.0, 2.1])
+    monkeypatch.setattr(sdk, "monotonic", lambda: next(times))
+    probes = []
+    monkeypatch.setattr(windows, "start_search_focused", lambda: probes.append(1) or False)
+    result = payload(await gesture.tools["open_application"]({"app": "Paint"}))
+    assert result["code"] == "FOCUS_BLOCKED" and result["outcome"] == "partial"
+    assert len(probes) == 1
+    gesture.keyboard.type.assert_not_called()
+
+
+async def test_system_grant_allows_authorized_pointer_and_typed_chords(gesture):
+    t = gesture.tools
+    await t["request_access"]({"apps": [], "reason": "test", "systemKeyCombos": True})
+    await t["screenshot"]({})
+    assert payload(await t["mouse_down"]({"text": "cmd"}))["success"]
+    assert payload(await t["type"]({"text": "r"}))["success"]
+    assert ("key_down", "cmd") in gesture.events and ("type", "r") in gesture.events
+    await t["mouse_up"]({})
+
+
+@pytest.mark.parametrize("cls,title,expected", [("DV2ControlHost", "", True),
+    ("SearchPane", "", True), ("Windows.UI.Core.CoreWindow", "Start", True),
+    ("Windows.UI.Core.CoreWindow", "Search", True),
+    ("Windows.UI.Core.CoreWindow", "Other", False), ("CabinetWClass", "Start", False)])
+def test_explorer_start_search_host_detection(monkeypatch, cls, title, expected):
+    api = SimpleNamespace(GetClassNameW="class", GetWindowTextW="title")
+    monkeypatch.setattr(windows, "_api", lambda: (None, None, api))
+    monkeypatch.setattr(windows, "foreground_window", lambda: 99)
+    monkeypatch.setattr(windows, "_pid", lambda hwnd: 1)
+    monkeypatch.setattr(windows, "_exe_path", lambda pid: "explorer.exe")
+    monkeypatch.setattr(windows, "_text", lambda fn, hwnd, size: cls if fn == "class" else title)
+    assert windows.start_search_focused() is expected
+
+
+async def test_window_bounds_validation_cached_per_action_not_path_point(gesture, monkeypatch):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    await t["screenshot"]({"window_id": 101})
+    original, calls = windows.find_window, []
+    def find(window_id, displays):
+        calls.append(window_id)
+        return original(window_id, displays)
+    monkeypatch.setattr(windows, "find_window", find)
+    assert payload(await t["left_click_drag"]({"start_coordinate": [5, 5],
+        "coordinate": [30, 30], "path": [[10, 10], [15, 20], [20, 10]]}))["success"]
+    assert calls == [101]
+    assert payload(await t["left_click"]({"coordinate": [20, 20]}))["success"]
+    assert calls == [101, 101]
+
+
+@pytest.mark.parametrize("platform,add,subtract", [("win32", 0x6B, 0x6D),
+    ("darwin", 0x45, 0x4E), ("linux", 0xFFAB, 0xFFAD)])
+async def test_keypad_arithmetic_sends_native_key_codes(gesture, monkeypatch, platform, add, subtract):
+    monkeypatch.setattr(sdk.sys, "platform", platform)
+    assert payload(await gesture.tools["key"]({"text": "Control_L+KP_Add"}))["success"]
+    assert payload(await gesture.tools["key"]({"text": "KP_Subtract"}))["success"]
+    assert [e for e in gesture.events if e[0] != "sleep"] == [
+        ("key_down", "ctrl"), ("key_down", ("vk", add)), ("key_up", ("vk", add)),
+        ("key_up", "ctrl"), ("key_down", ("vk", subtract)), ("key_up", ("vk", subtract))]

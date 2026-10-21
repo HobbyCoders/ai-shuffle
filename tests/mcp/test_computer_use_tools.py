@@ -121,7 +121,9 @@ def desktop(monkeypatch):
     keys = SimpleNamespace(**{name: name for name in ["ctrl", "shift", "alt", "cmd", "enter", "esc", "tab"]})
     monkeypatch.setitem(sys.modules, "pynput.mouse", SimpleNamespace(
         Controller=lambda: mouse, Button=SimpleNamespace(left="left", right="right", middle="middle")))
-    monkeypatch.setitem(sys.modules, "pynput.keyboard", SimpleNamespace(Controller=lambda: keyboard, Key=keys))
+    monkeypatch.setitem(sys.modules, "pynput.keyboard", SimpleNamespace(
+        Controller=lambda: keyboard, Key=keys,
+        KeyCode=SimpleNamespace(from_vk=lambda vk: ("vk", vk))))
     monkeypatch.setattr(sdk, "computer_use_available", lambda: (True, "ok"))
     monkeypatch.setattr(sdk, "foreground_display", lambda displays: None)
     # Register every tool (the Windows-only ones too) on the Linux test host.

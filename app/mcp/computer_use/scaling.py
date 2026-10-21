@@ -389,6 +389,7 @@ class DisplayManager:
         # Per-display scale map, filled on each screenshot, consumed by actions.
         # index -> {"scale","pw","ph","left","top","vw","vh"}
         self._map: dict[int, dict] = {}
+        self._checked_windows: Optional[set[str]] = None
         _ensure_dpi_awareness()
         displays = self.list_displays()
         if target_display is not None and any(d.index == target_display for d in displays):
@@ -505,6 +506,13 @@ class DisplayManager:
         m = self._map.get(self.selected_index)
         return m.get("id") if m else None
 
+    def begin_action(self) -> None:
+        """Cache native window validation only within one serialized action."""
+        self._checked_windows = set()
+
+    def end_action(self) -> None:
+        self._checked_windows = None
+
     def mapped_geometry(self, screenshot_id: Optional[str] = None) -> dict:
         """The current screenshot's mapping. Refuses input based on an image
         that is gone (never taken, invalidated, or captured before a topology
@@ -524,16 +532,19 @@ class DisplayManager:
             self._map.pop(self.selected_index, None)
             raise stale("The display layout changed since the screenshot (layout changed). "
                         "Take a fresh screenshot before acting.")
-        if m.get("window_id") is not None:
+        if (m.get("window_id") is not None
+                and (self._checked_windows is None or m["id"] not in self._checked_windows)):
             from app.mcp.computer_use import windows
             try:
-                win = windows.find_window(m["window_id"], self.list_displays())
+                win = windows.find_window(m["window_id"], [geo])
             except ValueError:
                 win = None
             if win is None or win.bounds != m["window_bounds"] or win.display != self.selected_index:
                 self._map.pop(self.selected_index, None)
                 raise stale("The window moved, resized or disappeared since the screenshot. "
                             "Take a fresh screenshot before acting.")
+            if self._checked_windows is not None:
+                self._checked_windows.add(m["id"])
         return m
 
     @staticmethod
