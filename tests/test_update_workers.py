@@ -834,6 +834,96 @@ def busy(setup, monkeypatch):
     return running
 
 
+def test_waiting_turn_timestamp_is_wire_safe(setup, monkeypatch):
+    from datetime import datetime, timezone
+    started = datetime.now(timezone.utc)
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: [{"session_id": "s", "title": "Live turn"}])
+    monkeypatch.setattr("app.core.session_runtime.active_executions", lambda: {"run": "s"})
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: SimpleNamespace(turn={"started_at": started}))
+    row = fleet.waiting_status({"phase": "ready", "version": B[:12]})
+    assert row["blocked_by"][0]["since"] == started.isoformat()
+    json.dumps(row)  # authenticated peer transport is JSON, not FastAPI's encoder
+
+
+@pytest.mark.parametrize("running,stopped,liveness", [(True, False, "live"), (False, True, "stale"), (False, False, "unknown")])
+def test_waiting_blocker_reports_real_registry_shell_liveness(setup, monkeypatch, running, stopped, liveness):
+    from app.core.task_registry import TaskRegistry
+
+    registry = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", registry.active_session_ids)
+    monkeypatch.setattr(updates.database, "get_session", lambda sid: {"title": "Build application"})
+    monkeypatch.setattr("app.mcp.builtin_tools.is_background_shell_running", lambda tid: running)
+    registry.start_task("s", "shell", "shell", "Run build")
+    if stopped:
+        registry.mark_user_stopped("s")
+    state = fleet.waiting_status({"phase": "ready", "version": B[:12]})
+    blocker = state["blocked_by"][0]
+    assert blocker["kind"] == "shell" and blocker["live"] is running
+    assert blocker["liveness"] == liveness
+    assert blocker["since"] == registry.get_task("s", "shell")["startedAt"]
+    registry.complete_task("s", "shell", "killed", reason="user_stop")
+    assert fleet.waiting_status({"phase": "ready", "version": B[:12]})["blocked_by"] == []
+
+
+@pytest.mark.parametrize("mode,expected", [("when_idle", "waiting_for_idle"), ("stop", "stopping")])
+def test_waiting_contract_tracks_owner_choice_and_expiry(busy, monkeypatch, mode, expected):
+    async def hold(*args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fleet, "_stop_then_restart", hold)
+    async def scenario():
+        result = fleet.local_action("install", "contract-choice", mode)
+        assert result["install_state"] == expected
+        row = (await fleet.snapshot())["workers"][0]
+        assert row["install_state"] == expected
+        assert bool(row["restart_expires_at"]) is (mode == "when_idle")
+        if fleet._deferred:
+            task = fleet._deferred["task"]
+            fleet._cancel_deferred()
+            await asyncio.gather(task, return_exceptions=True)
+        for task in list(fleet._stop_tasks):
+            task.cancel()
+        await asyncio.gather(*fleet._stop_tasks, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_waiting_contract_keeps_staged_identity_beside_new_offer(setup):
+    updates.desktop_exchange({"phase": "available", "version": "c" * 12, "staged_version": B})
+    row = asyncio.run(fleet.snapshot())["workers"][0]
+    assert row["version"] == "c" * 12 and row["staged_version"] == B
+    assert row["install_state"] == "unavailable" and row["wait_reason"] == "newer_offer"
+    result = fleet.local_action("install", "staged-older-offer")
+    assert not result["accepted"] and "previous download is retained" in result["reason"]
+
+
+@pytest.mark.parametrize("mode", ["stop", "when_idle"])
+def test_followup_install_ids_stay_within_request_limit(busy, monkeypatch, mode):
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=lambda *args, **kwargs: busy.clear()))
+    async def scenario():
+        fleet.local_action("install", "x" * 100, mode)
+        if mode == "stop":
+            await asyncio.gather(*fleet._stop_tasks)
+        else:
+            task = fleet._deferred["task"]
+            busy.clear()
+            await task
+        assert updates._desktop_request["action"] == "install"
+    asyncio.run(scenario())
+
+
+def test_ready_is_staged_but_install_is_blocked(busy):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12]})
+    row = asyncio.run(fleet.snapshot())["workers"][0]
+    assert row["staged_version"] == B[:12]
+    assert row["install_state"] == "blocked"
+    assert row["wait_reason"] == "running_work"
+    blocker = row["blocked_by"][0]
+    assert blocker["session_id"] == "s1" and blocker["title"] == "Fix login"
+    assert {"kind", "since", "live", "liveness"} <= blocker.keys()
+
+
 def test_refused_restart_names_the_running_work_and_leaves_no_failed_install(busy):
     result = asyncio.run(fleet.dispatch("install"))
     row = result["results"][-1]

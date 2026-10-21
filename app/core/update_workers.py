@@ -48,6 +48,75 @@ _stop_tasks = set()
 logger = logging.getLogger(__name__)
 
 
+def waiting_status(state):
+    """Owner-only restart state; staging and a busy install are independent.
+
+    Call on the event loop, not in run_sync: runtime/registry liveness belongs
+    to that loop. Do not attach session titles to the ordinary authenticated
+    policy endpoint. Old producers only prove staging in the ready phase.
+    """
+    from app.core.desktop_lifecycle import busy_work
+    from app.core.session_runtime import active_executions, get_live_runtime
+    from app.core.task_registry import task_registry
+    from app.core.session_pool import get_session_pool
+    from app.core.provider_agent_supervisor import live_workers
+    from app.mcp.builtin_tools import is_background_shell_running
+
+    staged = state.get("staged_version") or (state.get("version") if state.get("phase") == "ready" else None)
+    blocked = []
+    executing = set(active_executions().values())
+    for row in busy_work():
+        sid = row["session_id"]
+        base = {"session_id": sid, "title": row["title"]}
+        tasks = task_registry.get_active(sid)
+        if sid in executing:
+            runtime = get_live_runtime(sid)
+            turn = getattr(runtime, "turn", {})
+            since = turn.get("started_at")
+            if hasattr(since, "isoformat"):
+                since = since.isoformat()
+            blocked.append({**base, "kind": "turn", "since": since,
+                            "live": True, "liveness": "live"})
+        state_in_pool = get_session_pool().peek(sid)
+        adapter = getattr(state_in_pool, "adapter", None)
+        pending = getattr(getattr(adapter, "_engine", None), "_background_pending", None)
+        workers = {worker.task_id for worker in live_workers(sid)}
+        for task in tasks:
+            tid = task["id"]
+            kind = "remote" if task.get("worker") else task.get("kind") or "registry"
+            if kind == "remote":
+                live, liveness = False, "unknown"
+            elif kind == "shell":
+                live = is_background_shell_running(tid)
+                liveness = "live" if live else "stale" if task_registry.is_user_stopped(sid) else "unknown"
+            else:
+                live = tid in workers or (isinstance(pending, dict) and tid in pending)
+                liveness = "live" if live else "unknown"
+            blocked.append({**base, "task_id": tid, "subject": task.get("subject"),
+                            "kind": kind, "since": task.get("startedAt"),
+                            "live": live, "liveness": liveness})
+        if sid not in executing and not tasks:
+            blocked.append({**base, "kind": "registry", "since": None,
+                            "live": False, "liveness": "unknown"})
+    if _stop_tasks:
+        install, reason = "stopping", "stopping_work"
+    elif _deferred:
+        install, reason = "waiting_for_idle", "running_work"
+    elif state.get("request_pending") and state.get("phase") == "ready":
+        install, reason = "queued", "updater_acknowledgement"
+    elif staged and state.get("phase") != "ready":
+        install = "unavailable"
+        reason = ("newer_offer" if state.get("phase") == "available" else
+                  "preparing_update" if state.get("phase") in ("checking", "downloading") else "updater_error")
+    elif staged:
+        install, reason = ("blocked", "running_work") if blocked else ("ready", None)
+    else:
+        install, reason = "idle", None
+    return {"staged_version": staged, "install_state": install,
+            "blocked_by": blocked, "wait_reason": reason,
+            "restart_expires_at": (_deferred or {}).get("expires_at")}
+
+
 def _busy_reason(busy):
     names = ", ".join(row["title"] for row in busy) or "a chat"
     return f"Busy with running work: {names}"
@@ -70,7 +139,7 @@ async def _restart_when_idle(request_id):
             from app.core.desktop_lifecycle import active_session_ids
             if active_session_ids():
                 continue
-            result = local_action("install", f"{request_id}:idle:{uuid.uuid4().hex[:8]}")
+            result = local_action("install", f"{request_id[:64]}:idle:{uuid.uuid4().hex[:8]}")
             if result.get("busy"):
                 continue  # a new turn started between the two reads
             logger.info("Application update: deferred restart %s", result["reason"])
@@ -95,7 +164,7 @@ async def _stop_then_restart(request_id):
         await asyncio.sleep(0.1)
     # Do not bypass the normal guard: both runtimes check again before exit.
     # A failed stop must remain a named refusal, never a misleading queue ack.
-    result = local_action("install", f"{request_id}:stopped")
+    result = local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
 
 
@@ -138,7 +207,8 @@ def local_action(action, request_id, mode=None):
     elif action == "download" and state["phase"] not in ("idle", "available", "error"):
         reason = f"Cannot download while the updater is {state['phase']}"
     elif action == "install" and state["phase"] != "ready":
-        reason = "No staged update; current version left running"
+        reason = ("A previous download is retained; finish checking or downloading the offered update before restarting"
+                  if state.get("staged_version") else "No staged update; current version left running")
     busy = None
     if action == "install" and not reason:
         from app.core.desktop_lifecycle import active_session_ids, busy_work
@@ -160,7 +230,7 @@ def local_action(action, request_id, mode=None):
                     queued = "Stopping running work, then restarting"
                 result = {"accepted": True, "reason": queued, "phase": state["phase"],
                           "version": state.get("version"), "busy": busy,
-                          "deferred": mode == "when_idle"}
+                          "deferred": mode == "when_idle", **waiting_status(state)}
                 _receipts[request_id] = (time.monotonic() + 60, result)
                 return result
     if not reason:
@@ -178,6 +248,8 @@ def local_action(action, request_id, mode=None):
               "version": state.get("version")}
     if busy:
         result["busy"] = busy
+    if action == "install":
+        result.update(waiting_status({**state, "request_pending": reason is None}))
     _receipts[request_id] = (time.monotonic() + 60, result)
     while len(_receipts) > 256:
         _receipts.popitem(last=False)
@@ -198,7 +270,8 @@ async def peer_action(body, from_device):
     if not member or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE:
         raise PermissionError("Only active account workers may request application updates")
     if body.get("operation") == "status":
-        return {**await run_sync(updates.status), **_build(), "deferred": _deferred is not None}
+        state = await run_sync(updates.status)
+        return {**state, **waiting_status(state), **_build(), "deferred": _deferred is not None}
     if body.get("operation") != "action":
         raise ValueError("Unknown update operation")
     if not isinstance(body.get("request_id"), str) or not body["request_id"]:
@@ -221,7 +294,8 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
                   "request_pending", "checked_at", "channel", "release", "notes", "kind",
-                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start")
+                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start",
+                  "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
@@ -434,7 +508,7 @@ async def snapshot(*, fresh=False):
     local = await run_sync(updates.status)
     listing = await run_sync(runners.directory)
     rows = [{"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", "is_self": True,
-             "online": True, **local, "deferred": _deferred is not None}]
+             "online": True, **local, **waiting_status(local), "deferred": _deferred is not None}]
     operation = await run_sync(progress.load)
     # A completed install is terminal (progress.observe returns it as saved), so
     # its cohort no longer needs reading.
@@ -463,7 +537,7 @@ async def snapshot(*, fresh=False):
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
               "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice",
-              "remedy", "data_kept")
+              "remedy", "data_kept", "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
     return {"allow_updates": local["allow_updates"], "update_all_workers": all_workers,

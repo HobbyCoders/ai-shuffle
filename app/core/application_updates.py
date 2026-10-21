@@ -327,7 +327,7 @@ def status():
                 saved = json.loads(path.read_text())
             # notice: a coming update needs a newer Docker image (#1821).
             result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
-                                                           "release", "notes", "channel", "notice")})
+                                                           "release", "notes", "channel", "notice", "staged_version")})
             # When the supervisor last asked the feed. Older supervisors do not
             # say, but they write an available status when a check ends and an
             # idle one mostly then too (also at startup and after an install),

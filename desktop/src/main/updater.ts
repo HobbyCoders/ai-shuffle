@@ -10,6 +10,7 @@ export interface UpdateState {
   phase: UpdatePhase; version: string | null; percent: number | null;
   error: string | null; checkedAt: string | null; message?: string | null;
   running_version?: string | null;
+  staged_version?: string | null;
   channel_config?: { channel: 'stable' | 'nightly'; source: 'file' | 'default'; editable: boolean };
   /** What this install runs: lets the worker check a return from nightly to stable. */
   installed_release?: InstalledRelease;
@@ -229,7 +230,11 @@ export class Updater {
     this.installers = installers; this.saved = saved;
     this.set({ phase: 'idle', version: null, error: null, message: null, percent: null, release: null, notes: null });
   }
-  get current(): UpdateState { return { ...this.state, running_version: this.applications?.version ?? null }; }
+  get current(): UpdateState {
+    const staged = this.applications?.pendingVersion;
+    return { ...this.state, running_version: this.applications?.version ?? null,
+      staged_version: staged && staged !== this.applications?.version ? staged : null };
+  }
   subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   private set(patch: Partial<UpdateState>): void {
     const phase = this.state.phase;

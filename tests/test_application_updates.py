@@ -922,6 +922,7 @@ def test_a_staged_build_does_not_hide_a_newer_release(feed):
     status = status_of(updater)
     assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
     assert status["phase"] == "available" and status["version"] == C[:12] and status["release"] == "1.0.1"
+    assert status["staged_version"] == B
     assert updater.state == {"pending": B}, "a check downloads nothing; B can still be installed"
     updater.check(download=True)
     assert updater.state == {"pending": C}
