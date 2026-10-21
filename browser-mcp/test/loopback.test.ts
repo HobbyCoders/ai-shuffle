@@ -95,11 +95,14 @@ describe("browser_navigate loopback retry", () => {
         return { headers: () => headers };
       },
       title: async () => "Dev server",
+      evaluate: async () => ({ controls: true, loading: false }),
+      locator: () => ({ first: () => ({ isVisible: async () => true }) }),
       mainFrame: () => frame,
       frames: () => [frame],
     };
     return {
       ensurePage: async () => page,
+      beginWatch: async () => {},
       currentTabId: () => "tab1",
       notifyNavigation: () => {},
       pageContent: async () => ({ title: "Dev server", textChars: 200 }),

@@ -4,8 +4,9 @@
  * snapshot so the model has an immediate map of the landing page.
  */
 
-import type { Session } from "../session.js";
+import { raceWithTimeout, type Session } from "../session.js";
 import { runWait } from "./wait.js";
+import { collectRefs, parseAriaYaml } from "../snapshot.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
 import {
@@ -121,6 +122,7 @@ export async function runNavigate(
   // A committed navigation invalidates all refs.
   session.notifyNavigation();
 
+  const dispatchStart = performance.now();
   let rewroteTo: string | undefined;
   if (target === "back" || target === "forward") {
     await (target === "back"
@@ -179,27 +181,61 @@ export async function runNavigate(
     }
   }
 
-  // DOMContentLoaded can precede hydration. A landmark can have a ref before
-  // controls exist, so ref_count alone is not a readiness check. Bound this
-  // wait, never wait for network idle, and keep human takeover interruptible.
-  await runWait(session, {
-    condition: "element",
-    selector: 'button:visible, a[href]:visible, input:visible, select:visible, textarea:visible, [role="button"]:visible, [role="link"]:visible, [role="textbox"]:visible, [tabindex]:visible, [contenteditable="true"]:visible',
-    timeout_ms: 1500,
-  });
+  const dispatchMs = performance.now() - dispatchStart;
+  const settleStart = performance.now();
+  let textChurnIgnored = false;
+  // Readiness inspection can race a page's own redirect or a blocked main
+  // thread. Fall through to the bounded locator wait, never fail navigation
+  // merely because this optional page evaluate lost its execution context.
+  const readiness = await raceWithTimeout(page.evaluate(() => {
+    const visible = (el: Element) => {
+      const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const body = document.body;
+    const content = body?.innerText.trim() ?? "";
+    const controls = Array.from(body?.querySelectorAll('button, a[href], input, select, textarea, [role="button"], [role="link"], [role="textbox"], [role="combobox"], [role="listbox"], [tabindex], [contenteditable="true"]') ?? []).some(visible);
+    // Media is rendered content, not an actionable control. Small/animated
+    // spinner images must not make a loading shell look hydrated.
+    const renderedMedia = Array.from(body?.querySelectorAll("canvas, img") ?? []).some(el =>
+      visible(el) && el.getBoundingClientRect().width >= 64 && el.getBoundingClientRect().height >= 64);
+    const loading = (!content && !renderedMedia) || (content.length < 200 && /(?:^|\n)\s*(loading\b|please wait\b|redirecting\b)/i.test(content));
+    return { controls, loading };
+  }), 500, "navigation readiness timed out").catch(() => ({ controls: false, loading: true }));
+  if (!readiness.controls) {
+    if (readiness.loading) await runWait(session, {
+      condition: "element",
+      selector: 'button:visible, a[href]:visible, input:visible, select:visible, textarea:visible, [role="button"]:visible, [role="link"]:visible, [role="textbox"]:visible, [role="combobox"]:visible, [role="listbox"]:visible, [tabindex]:visible, [contenteditable="true"]:visible',
+      timeout_ms: 1500,
+    });
+    else {
+      // Rendered control-free pages still get a short DOM-quiet observation,
+      // not an unconditional 1.5s control wait nor an immediate early return.
+      await session.beginWatch(false, false);
+      textChurnIgnored = (await session.settle(page.url())).textChurnIgnored;
+    }
+  }
+  // Preserve passive pre-action text history even on pages with controls.
+  await session.beginWatch(true);
+  const settleMs = performance.now() - settleStart;
   session.agentAdmission?.();
+  const snapshotStart = performance.now();
   const snap = await session.snapshot({ filter: "interactive" });
+  const snapshotMs = performance.now() - snapshotStart;
+  // The registry can include refs hidden by collapse/truncation. Count only
+  // refs the caller actually received (compatible with pre-registration snapshots).
+  const emittedRefCount = new Set(collectRefs(parseAriaYaml(snap.text))).size;
   // Emptiness is judged from the page, never from this interactive-filtered
   // snapshot: a login form, a canvas fixture and a prose page all have few or
   // no refs while being perfectly rendered.
   // Only zero-ref snapshots need the extra content diagnostic. Refs are not
   // proof that hydration finished or that the requested app view succeeded.
-  const content = snap.refs.length === 0 ? await session.pageContent() : undefined;
+  const content = emittedRefCount === 0 ? await session.pageContent() : undefined;
   // The title comes from Playwright, which does not depend on a page eval
   // succeeding; only the body measurement does.
   const title = await page.title().catch(() => content?.title ?? "");
   const warning = content
-    ? contentWarning({ ...content, title }, snap.refs.length)
+    ? contentWarning({ ...content, title }, emittedRefCount)
     : undefined;
   const landed = page.url();
   const requestedOrigin =
@@ -226,8 +262,10 @@ export async function runNavigate(
       url: landed,
       title,
       snapshot_id: snap.snapshot_id,
-      ref_count: snap.refs.length,
+      ref_count: emittedRefCount,
       truncated: snap.truncated,
+      text_churn_ignored: textChurnIgnored,
+      timings: { dispatch_ms: Math.round(dispatchMs), settle_ms: Math.round(settleMs), snapshot_ms: Math.round(snapshotMs) },
       ...(rewroteTo ? { rewrote_loopback_to: rewroteTo, note: rewriteNote } : {}),
       ...(redirected ? { redirected_to_origin: landedOrigin } : {}),
       ...(warning ? { warning } : {}),

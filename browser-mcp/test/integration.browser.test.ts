@@ -50,6 +50,37 @@ console.log("http-fixture-log hi");
 fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").textContent=JSON.stringify(d);});
 </script></body></html>`;
   const server = createHttpServer((req, res) => {
+    if (req.url?.startsWith("/review/")) {
+      const url = new URL(req.url, "http://fixture.test");
+      const pages: Record<string, string> = {
+        "/review/single": '<title>Single</title><label>Size<select><option value="s">Small</option><option value="m">Medium</option></select></label>',
+        "/review/repeated": '<title>Repeated</title><main aria-label="Repeated">' + '<button>Same</button>'.repeat(20) + '</main>',
+        "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
+        "/review/reload": '<title>Reload</title><form method="post" action="/review/reload"><button>Save</button></form>',
+        "/review/slowreload": '<title>Reload</title><form method="post" action="/review/slowreload"><button>Save</button></form>',
+        "/review/latereload": '<title>Reload</title><button onclick="setTimeout(()=>location.reload(),400)">Later</button>',
+      };
+      let html = pages[url.pathname];
+      if (url.pathname === "/review/loading") {
+        const media: Record<string, string> = {
+          svg: '<svg width="20" height="20"><circle r="5" cx="10" cy="10"></circle></svg>',
+          img: '<img width="20" height="20" alt="" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E">',
+          canvas: '<canvas width="20" height="20"></canvas>',
+          hidden: '<button hidden>Hidden control</button>',
+          spinner: '<svg width="20" height="20"><circle r="5" cx="10" cy="10"></circle></svg>',
+        };
+        const kind = url.searchParams.get("kind")!;
+        html = `<title>Loading app</title><main id="root">${media[kind] ?? ""}${kind === "spinner" ? "" : "Loading your dashboard…"}</main><script>setTimeout(()=>root.innerHTML='<button>Hydrated</button>',600)</script>`;
+      }
+      const send = () => { res.writeHead(200, { "content-type": "text/html" }); res.end(html ?? "not found"); };
+      if (url.pathname === "/review/slowreload" && req.method === "POST") setTimeout(send, 400);
+      else send();
+      return;
+    }
+    if (req.url === "/action-late" || req.url === "/action-pending") {
+      setTimeout(() => { res.writeHead(200, { "content-type": "text/html" }); res.end('<button>Network result</button>'.repeat(15)); }, req.url === "/action-late" ? 700 : 2200);
+      return;
+    }
     if (req.url === "/never-observation") return; // deliberately no headers/body
     if (req.url === "/bodyless.svg") {
       res.writeHead(200, { "content-type": "image/svg+xml" });
@@ -293,6 +324,553 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         }
       }
     }
+  });
+
+  describe("action and settle regressions", () => {
+    async function load(html: string) {
+      await runNavigate(session, { url: httpUrl + "prose-app" });
+      const page = await session.ensurePage();
+      await page.setContent(html);
+      session.notifyNavigation();
+      return page;
+    }
+    async function ref(name: string) {
+      const snap = await session.snapshot({ filter: "all" });
+      const line = snap.text.split("\n").find(line => line.includes(`"${name}"`));
+      const match = line?.match(/ref=([^\]\s]+)/);
+      if (!match) throw new Error(`missing ${name}: ${snap.text}`);
+      return match[1];
+    }
+    const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    it("counts only emitted navigate refs after repeated children collapse", async () => {
+      const result = await runNavigate(session, { url: httpUrl + "review/repeated" });
+      const tree = (result.content[1] as { text: string }).text;
+      const emitted = new Set([...tree.matchAll(/\[ref=((?:f\d+)?e\d+)\]/g)].map(match => match[1]));
+      expect(tree).toContain("more similar items");
+      expect(body(result).ref_count).toBe(emitted.size);
+      const raw = await (await session.ensurePage()).locator("body").ariaSnapshot({ mode: "ai" });
+      const all = [...raw.matchAll(/\[ref=((?:f\d+)?e\d+)\]/g)].map(match => match[1]);
+      expect(emitted.size).toBeLessThan(all.length);
+      expect(session.refs.isKnown(all.at(-1)!)).toBe(true);
+    });
+    it("does not resample a mature plain page across repeated actions", async () => {
+      await load('<button>Plain</button><label>Name<input></label>');
+      const target = await ref("Plain"), field = await ref("Name");
+      for (const input of [
+        { kind: "click", ref: target }, { kind: "click", ref: target },
+        { kind: "fill", ref: field, value: "name" }, { kind: "type", ref: field, value: "x" },
+        { kind: "key", key: "Tab" },
+      ] as const) {
+        const result = body(await runAct(session, input));
+        expect(result).toMatchObject({ ok: true, text_churn_ignored: false });
+        expect(result.timings.dispatch_ms).toBeLessThan(90);
+      }
+    });
+    it("does not ignore a newly started ticker that has never mutated before dispatch", async () => {
+      const page = await load('<button>Unobserved</button><span id="clock"></span>');
+      const target = await ref("Unobserved");
+      await page.evaluate(() => { setInterval(() => { document.getElementById("clock")!.textContent = String(Date.now()); }, 100); });
+      const result = body(await runAct(session, { kind: "click", ref: target }));
+      expect(result).toMatchObject({ ok: true, settle_capped: true, text_churn_ignored: false });
+      expect(result.timings.dispatch_ms).toBeLessThan(90);
+      await page.goto("about:blank");
+    });
+    it("does not retain replaced iframe documents while the agent is idle", async () => {
+      const page = await load('<button>Idle</button><div id="frames"><iframe srcdoc="<p>Initial</p>"></iframe></div>');
+      await runAct(session, { kind: "click", ref: await ref("Idle") }); // active frame watch -> passive
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Performance.enable");
+      async function documents() {
+        await cdp.send("HeapProfiler.collectGarbage");
+        const metrics = (await cdp.send("Performance.getMetrics")).metrics;
+        return metrics.find(metric => metric.name === "Documents")!.value;
+      }
+      const before = await documents();
+      await page.evaluate(() => new Promise<void>(resolve => {
+        let n = 0;
+        const timer = setInterval(() => {
+          document.getElementById("frames")!.innerHTML = `<iframe srcdoc="<p>Frame ${n}</p>"></iframe>`;
+          if (++n === 20) { clearInterval(timer); resolve(); }
+        }, 50);
+      }));
+      expect(await documents()).toBeLessThanOrEqual(before + 4);
+      // The next active scan must still pick up the surviving frame.
+      await page.evaluate(() => {
+        document.querySelector("button")!.onclick = () => {
+          document.querySelector("iframe")!.contentDocument!.body.innerHTML = '<button>Frame result</button>'.repeat(15);
+        };
+      });
+      const result = await runAct(session, { kind: "click", ref: await ref("Idle") });
+      expect(body(result)).toMatchObject({ dom_mutated: "major", snapshot_stale: true });
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Frame result") });
+      await cdp.detach();
+    });
+    it.each(["timer", "raf", "fetch"])("settles a %s text result on a ticker once non-baseline text is quiet", async kind => {
+      const trigger = kind === "timer" ? "setTimeout(done,150)" : kind === "fetch" ? "fetch('/hydrate').then(r=>r.text()).then(done)" : "const start=performance.now();(function tick(){performance.now()-start>=150?done():requestAnimationFrame(tick)})()";
+      const page = await load(`<button onclick="go()">Save label</button><p id="status">Waiting</p><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100);function go(){const done=()=>{document.getElementById('status').textContent='Saved';window.done=true};${trigger}}</script>`);
+      await page.waitForTimeout(250); // the clock, unlike the result, is already churning
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Save label") }));
+      expect(result).toMatchObject({ ok: true, dom_mutated: "minor", settle_capped: false, text_churn_ignored: true });
+      expect(await page.locator("#status").innerText()).toBe("Saved");
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(kind === "fetch" ? 650 : 450);
+      expect(result.timings.settle_ms).toBeLessThan(1200);
+      await page.goto("about:blank");
+    });
+    it.each(["plain", "top", "shadow", "frame", "staticshadow", "staticframe", "blankframe", "crossframe"])("avoids repeat sampling for spaced %s actions", async kind => {
+      const shapes: Record<string, string> = {
+        plain: '<p>Plain</p>',
+        top: '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>',
+        shadow: '<div id="host"></div><script>const r=host.attachShadow({mode:"open"});r.innerHTML="<span id=c></span>";setInterval(()=>r.getElementById("c").textContent=String(Date.now()),100)</script>',
+        frame: '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>',
+        staticshadow: '<div id="host"></div><script>host.attachShadow({mode:"open"}).innerHTML="<span>Static</span>"</script>',
+        staticframe: '<iframe srcdoc="<p>Static frame</p>"></iframe>',
+        blankframe: '<iframe style="display:none"></iframe>',
+        crossframe: `<iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe>`,
+      };
+      const page = await load('<button>Shape action</button>' + shapes[kind]);
+      await page.waitForTimeout(400);
+      const rows = [];
+      for (let i = 0; i < 3; i++) {
+        await page.waitForTimeout(1000);
+        const result = body(await runAct(session, { kind: "click", ref: await ref("Shape action") }));
+        rows.push({ dispatch: Math.round(result.timings.dispatch_ms), settle: Math.round(result.timings.settle_ms), capped: result.settle_capped, dom: result.dom_mutated, stale: result.snapshot_stale });
+      }
+      console.info("ROOT_DISPATCH", JSON.stringify({ kind, rows }));
+      await page.goto("about:blank");
+      for (let i = 0; i < rows.length; i++) {
+        expect(rows[i]).toMatchObject({ capped: false, stale: false });
+        // Frame tickers prove their baseline afresh each action; static frames
+        // sample once, and passive/empty roots do not pay repeated samples.
+        if (kind === "frame") expect(rows[i].dispatch).toBeLessThan(450);
+        else if (i > 0 || kind !== "staticframe") expect(rows[i].dispatch).toBeLessThan(90);
+      }
+    }, 15000);
+    for (const where of ["top", "frame"]) it(`REVIEWSTALE ${where} once-churned node later streams`, async () => {
+      const inner = '<p id=s>Init</p>';
+      const page = await load('<button id=b>Go</button>' + (where === "frame" ? `<iframe srcdoc="${inner}"></iframe>` : inner));
+      await page.waitForTimeout(400);
+      const docOf = where === "frame" ? "document.querySelector('iframe').contentDocument" : "document";
+      // a brief ticker that is running during action 1's sample, then stops
+      await page.evaluate(`(()=>{const d=${docOf};let n=0;window.t=setInterval(()=>{d.getElementById('s').textContent='Connecting'+'.'.repeat(n++%4)},20)})()`);
+      await page.waitForTimeout(150);
+      const r1 = body(await runAct(session, { kind: "click", ref: await ref("Go") }));
+      await page.evaluate(`clearInterval(window.t); ${docOf}.getElementById('s').textContent='Ready'`);
+      await page.waitForTimeout(2000);
+      await page.evaluate(`document.getElementById('b').onclick=()=>{const d=${docOf};let n=0;window.done=false;const t=setInterval(()=>{d.getElementById('s').textContent+=' tok'+n;if(++n>=15){clearInterval(t);d.body.insertAdjacentHTML('beforeend','<button>Answer</button>'.repeat(15));window.done=true}},60)}`);
+      const started = Date.now();
+      const response = await runAct(session, { kind: "click", ref: await ref("Go") });
+      const r2 = body(response);
+      const done = await page.evaluate(() => (window as unknown as { done: boolean }).done);
+      console.log("REVIEWSTALE", where, JSON.stringify({ r1: { d: Math.round(r1.timings.dispatch_ms), s: Math.round(r1.timings.settle_ms), ign: r1.text_churn_ignored }, r2: { ms: Date.now() - started, s: Math.round(r2.timings.settle_ms), dom: r2.dom_mutated, stale: r2.snapshot_stale, capped: r2.settle_capped, ign: r2.text_churn_ignored, doneAtReturn: done } }));
+      expect(r2).toMatchObject({ dom_mutated: "major", snapshot_stale: true, settle_capped: false });
+      expect(done).toBe(true);
+      expect(r2.text_churn_ignored).not.toBe(true);
+      expect(response.content[1]).toMatchObject({ text: expect.stringContaining("Answer") });
+      await page.goto("about:blank");
+    }, 20000);
+    it("recovers a late-starting frame clock after at most one capped action", async () => {
+      const page = await load('<button>Late frame</button><iframe srcdoc="<p>Static</p><span id=clock></span>"></iframe>');
+      await runAct(session, { kind: "click", ref: await ref("Late frame") }); // sample the static document once
+      await page.mainFrame().childFrames()[0].evaluate(() => { setInterval(() => { document.getElementById("clock")!.textContent = String(Date.now()); }, 100); });
+      const rows = [];
+      for (let i = 0; i < 3; i++) {
+        await page.waitForTimeout(1000);
+        rows.push(body(await runAct(session, { kind: "click", ref: await ref("Late frame") })));
+      }
+      console.info("LATE_FRAME_CLOCK", JSON.stringify(rows.map(row => ({ capped: row.settle_capped, dispatch: row.timings.dispatch_ms, settle: row.timings.settle_ms }))));
+      await page.goto("about:blank");
+      expect(rows[0]).toMatchObject({ settle_capped: true, text_churn_ignored: false });
+      for (const row of rows.slice(1)) expect(row).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
+      expect(rows[2].timings.dispatch_ms).toBeLessThan(450); // ticker evidence is per-action
+    }, 15000);
+    it("prunes detached passive shadow observers and observes roots attached while idle", async () => {
+      const page = await load('<button>Shadow lifecycle</button><div id="hosts"></div>');
+      await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") });
+      const cdp = await page.context().newCDPSession(page);
+      const nodes = async () => { await cdp.send("HeapProfiler.collectGarbage"); return (await cdp.send("Memory.getDOMCounters")).nodes; };
+      const before = await nodes();
+      await page.evaluate(() => new Promise<void>(resolve => {
+        let n = 0;
+        const interval = setInterval(() => {
+          const hosts = document.getElementById("hosts")!;
+          hosts.innerHTML = '<div></div>';
+          hosts.firstElementChild!.attachShadow({ mode: "open" }).innerHTML = '<span>Static shadow</span>';
+          // A never-inserted host must not acquire a retained passive observer.
+          document.createElement("div").attachShadow({ mode: "open" }).innerHTML = '<p>Detached</p>';
+          if (++n === 30) { clearInterval(interval); hosts.innerHTML = ''; resolve(); }
+        }, 20);
+      }));
+      expect(await nodes()).toBeLessThanOrEqual(before + 25);
+      await page.evaluate(() => {
+        const root = document.getElementById("hosts")!.attachShadow({ mode: "open" });
+        root.innerHTML = '<span id="clock"></span>';
+        setInterval(() => { root.querySelector("span")!.textContent = String(Date.now()); }, 100);
+      });
+      await page.waitForTimeout(400);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") }));
+      expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
+      expect(result.timings.dispatch_ms).toBeLessThan(450); // idle late attachment gets its first sample
+      await cdp.detach();
+      await page.goto("about:blank");
+    });
+    it("restores native attachShadow while idle and samples an idle late-attached clock", async () => {
+      const page = await load('<button>Native shadow</button><div id="late"></div>');
+      const native = () => page.evaluate(() => Element.prototype.attachShadow.toString().includes("[native code]"));
+      expect(await native()).toBe(true);
+      await runAct(session, { kind: "click", ref: await ref("Native shadow") });
+      expect(await native()).toBe(true);
+      await page.evaluate(() => {
+        const root = document.getElementById("late")!.attachShadow({ mode: "open" });
+        root.innerHTML = '<p>Idle clock</p>';
+        setInterval(() => { root.querySelector("p")!.textContent = String(Date.now()); }, 60);
+      });
+      await page.waitForTimeout(400);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Native shadow") }));
+      expect(result).toMatchObject({ settle_capped: false, snapshot_stale: false, text_churn_ignored: true });
+      expect(result.timings.dispatch_ms).toBeGreaterThanOrEqual(100);
+      expect(await native()).toBe(true);
+      await page.goto("about:blank");
+    });
+    it.each(["light", "shadow"])("skips whitespace-only frames but samples a script-filled %s blank frame when text arrives", async kind => {
+      const page = await load('<button>Blank frame</button><iframe srcdoc="   "></iframe>');
+      await page.waitForTimeout(400);
+      const first = body(await runAct(session, { kind: "click", ref: await ref("Blank frame") }));
+      expect(first.timings.dispatch_ms).toBeLessThan(90);
+      await page.mainFrame().childFrames()[0].evaluate(kind => {
+        const root = kind === "shadow" ? document.body.attachShadow({ mode: "open" }) : document.body;
+        root.innerHTML = '<p id="clock">Clock</p>';
+        setInterval(() => { root.querySelector("p")!.textContent = String(Date.now()); }, 60);
+      }, kind);
+      await page.waitForTimeout(400);
+      const second = body(await runAct(session, { kind: "click", ref: await ref("Blank frame") }));
+      expect(second).toMatchObject({ settle_capped: false, snapshot_stale: false, text_churn_ignored: true });
+      expect(second.timings.dispatch_ms).toBeGreaterThanOrEqual(100);
+      await page.goto("about:blank");
+    });
+    it("finishes a new frame sample discovered during the initial sample wait", async () => {
+      const page = await load('<button>Sample arrival</button><iframe srcdoc="<p>Initial</p>"></iframe><div id="spawn"></div>');
+      const target = await ref("Sample arrival");
+      await page.evaluate(() => { setTimeout(() => {
+        document.getElementById("spawn")!.innerHTML = '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>';
+      }, 60); });
+      const result = body(await runAct(session, { kind: "click", ref: target }));
+      expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
+      await page.goto("about:blank");
+    });
+    it.each(["top", "shadow", "frame", "mixed"])("baselines an idle %s ticker across spaced actions", async kind => {
+      const top = '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>';
+      const shadow = '<div id="host"></div><script>const r=host.attachShadow({mode:"open"});r.innerHTML="<span id=c></span>";setInterval(()=>r.getElementById("c").textContent=String(Date.now()),100)</script>';
+      const frame = '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>';
+      const page = await load('<button>Spaced action</button>' + (kind === "top" ? top : kind === "shadow" ? shadow : kind === "frame" ? frame : top + shadow));
+      await page.waitForTimeout(250);
+      const rows = [];
+      for (let i = 0; i < 3; i++) {
+        await page.waitForTimeout(1000); // frame documents have no idle observer
+        const target = await ref("Spaced action");
+        const start = Date.now();
+        const result = body(await runAct(session, { kind: "click", ref: target }));
+        rows.push({ ms: Date.now() - start, settle_ms: Math.round(result.timings.settle_ms), dispatch_ms: Math.round(result.timings.dispatch_ms),
+          ok: result.ok, settle_capped: result.settle_capped, dom_mutated: result.dom_mutated, snapshot_stale: result.snapshot_stale, text_churn_ignored: result.text_churn_ignored });
+      }
+      console.info("SECONDARY_ROOT_TICKER", JSON.stringify({ kind, rows }));
+      await page.goto("about:blank");
+      for (const row of rows) expect(row).toMatchObject({ ok: true, settle_capped: false, dom_mutated: "minor", snapshot_stale: false, text_churn_ignored: true });
+    }, 15000);
+    it("settles a 100ms text ticker quickly without navigation or expiring refs", async () => {
+      const page = await load('<button>Tick action</button><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      await page.waitForTimeout(200); // an already-running ticker, outside act timing
+      const target = await ref("Tick action");
+      const start = Date.now();
+      const result = body(await runAct(session, { kind: "click", ref: target }));
+      expect(result).toMatchObject({ ok: true, url_changed: false, settle_capped: false, snapshot_stale: false, dom_mutated: "minor", text_churn_ignored: true });
+      expect(Date.now() - start).toBeLessThan(800);
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
+      expect(result.timings.settle_ms).toBeLessThan(500);
+      expect(await (await session.resolveRef(target)).count()).toBe(1);
+      await page.goto("about:blank"); // stop the ticker before the next test
+    });
+    const actionTextCases = [
+      { name: "rAF result count", html: `<button onclick="go()">Start</button><p id="count">0 results</p><ul id="out"></ul><script>function go(){const start=performance.now();(function tick(){const n=Math.min(20,Math.floor((performance.now()-start)/45));count.textContent=n+' results';if(n<20)requestAnimationFrame(tick);else{out.innerHTML=Array.from({length:20},(_,i)=>'<li><a href=#'+i+'>Result '+i+'</a></li>').join('');window.done=true}})()}</script>`, expected: "Result 0" },
+      { name: "Saving typewriter", html: `<button onclick="go()">Start</button><p id="progress"></p><div id="out"></div><script>function go(){let n=0;const timer=setInterval(()=>{progress.textContent='Saving'+'.'.repeat(n++%4);if(n>=15){clearInterval(timer);progress.textContent='Saved';out.innerHTML='<button>View result</button>'.repeat(15);window.done=true}},60)}</script>`, expected: "View result" },
+      { name: "chat token stream into an action-created paragraph", html: `<button onclick="go()">Start</button><div id="out"></div><script>function go(){out.innerHTML='<div>Question</div><div><p id="answer"></p></div>';let n=0;const timer=setInterval(()=>{answer.textContent+='token '+n+++' ';if(n>=18){clearInterval(timer);out.insertAdjacentHTML('beforeend','<button>Regenerate</button><button>Copy</button>');window.done=true}},60)}</script>`, expected: "Regenerate" },
+    ];
+    for (const background of [false, true]) {
+      it.each(actionTextCases)(`observes action-started $name through completion (background ticker: ${background})`, async ({ html, expected }) => {
+        const page = await load(html + (background ? '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>' : ''));
+        if (background) await page.waitForTimeout(200);
+        const started = Date.now();
+        const result = await runAct(session, { kind: "click", ref: await ref("Start") });
+        expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true, settle_capped: false, text_churn_ignored: background });
+        expect(await page.evaluate(() => (window as unknown as { done: boolean }).done)).toBe(true);
+        expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+        expect(result.content[1]).toMatchObject({ text: expect.stringContaining(expected) });
+        // Snapshot lists intentionally collapse after five siblings. Verify all
+        // twenty produced results on the page, not just the emitted preview.
+        if (expected === "Result 0") expect(await page.getByRole("link").count()).toBe(20);
+        await page.goto("about:blank");
+      });
+    }
+    it("reuses pre-action ticker history after settle without retaining active timer hooks", async () => {
+      const page = await load('<button>Tick again</button><span id="clock"></span><script>window.originalSetTimeout=window.setTimeout;setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      await page.waitForTimeout(200);
+      const target = await ref("Tick again");
+      for (let i = 0; i < 3; i++) {
+        const started = Date.now();
+        expect(body(await runAct(session, { kind: "click", ref: target }))).toMatchObject({ text_churn_ignored: true, settle_capped: false, snapshot_stale: false });
+        expect(Date.now() - started).toBeLessThan(i === 0 ? 800 : 500);
+        expect(await page.evaluate(() => window.setTimeout === (window as unknown as { originalSetTimeout: typeof window.setTimeout }).originalSetTimeout)).toBe(true);
+      }
+      await page.goto("about:blank");
+    });
+    it("handles repeated 5ms script redirects without poisoning later navigations", async () => {
+      for (let i = 0; i < 5; i++) {
+        const result = body(await runNavigate(session, { url: httpUrl + "review/jsredir" }));
+        expect(result.ok).toBe(true);
+        expect(result.url).toBe(httpUrl + "review/single");
+        expect(result.ref_count).toBeGreaterThan(0);
+      }
+      expect(body(await runNavigate(session, { url: httpUrl + "review/single" })).ok).toBe(true);
+    });
+    it.each(["svg", "img", "canvas", "hidden", "spinner"])("does not mistake a %s loading shell for hydration", async kind => {
+      const started = Date.now();
+      const result = await runNavigate(session, { url: httpUrl + "review/loading?kind=" + kind });
+      expect(body(result).ref_count).toBeGreaterThan(0);
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Hydrated") });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(550);
+      expect(Date.now() - started).toBeLessThan(2200);
+    });
+    it("reports ignored text churn on same-document control-free navigation as well as actions", async () => {
+      const page = await load('<p id="clock">Clock</p><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      await page.waitForTimeout(200);
+      const result = body(await runNavigate(session, { url: page.url() + "#clock" }));
+      expect(result).toMatchObject({ ok: true, ref_count: 0, text_churn_ignored: true });
+      expect(result.timings.settle_ms).toBeLessThan(800);
+      await (await session.ensurePage()).goto("about:blank");
+    });
+    it("caps unobserved text churn in a fresh cross-document control-free navigation", async () => {
+      const page = await session.ensurePage();
+      const before = await page.evaluate(() => performance.timeOrigin);
+      const url = 'data:text/html,' + encodeURIComponent('<p id="clock">Fresh clock</p><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      // Navigate exposes the churn flag/timing, not settle_capped. Observe its
+      // real quiet-window result without replacing the producing implementation.
+      const observation = vi.spyOn(session, "settle");
+      try {
+        const result = body(await runNavigate(session, { url }));
+        expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
+        expect(observation).toHaveBeenCalledTimes(1);
+        expect(await observation.mock.results[0].value).toMatchObject({ settleCapped: true, textChurnIgnored: false });
+        expect(result).toMatchObject({ ok: true, ref_count: 0, text_churn_ignored: false });
+        expect(result.timings.settle_ms).toBeGreaterThanOrEqual(1400);
+      } finally {
+        observation.mockRestore();
+        await page.goto("about:blank");
+      }
+    });
+    it("gives prose with CSS-only animation a short quiet wait rather than a 1.5s control wait", async () => {
+      const page = await session.ensurePage();
+      const url = 'data:text/html,' + encodeURIComponent('<style>@keyframes spin{to{transform:rotate(360deg)}}i{display:inline-block;animation:spin .1s infinite}</style><p>Rendered article content, without any actionable controls.</p><i>◌</i>');
+      const result = body(await runNavigate(session, { url }));
+      expect(result.ref_count).toBe(0);
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
+      expect(result.timings.settle_ms).toBeLessThan(600);
+      expect(await page.locator("p").innerText()).toContain("Rendered article");
+    });
+    it.each(["reload", "slowreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
+      await runNavigate(session, { url: httpUrl + "review/" + path });
+      const page = await session.ensurePage();
+      const before = await page.evaluate(() => performance.timeOrigin);
+      const result = await runAct(session, { kind: "click", ref: await ref(path === "latereload" ? "Later" : "Save") });
+      expect(body(result)).toMatchObject({ url_changed: false, dom_mutated: "major", snapshot_stale: true, settle_capped: false });
+      if (path === "latereload") expect(body(result).observation_failed).toBe(true);
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining(path === "latereload" ? "Later" : "Save") });
+      expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
+    });
+    it("does not claim none when a 3s blocked main thread prevents observation", async () => {
+      const page = await load(`<button onclick="setTimeout(()=>{const t=Date.now();while(Date.now()-t<3000);out.innerHTML='<button>Busy result</button>'.repeat(20)},0)">Busy</button><div id="out"></div>`);
+      const result = await runAct(session, { kind: "click", ref: await ref("Busy") });
+      expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true });
+      expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Busy result") });
+      expect(await page.locator("#out button").count()).toBe(20);
+    }, 10000);
+    it("ignores a 5s toast dismissal without skipping a short 700ms render", async () => {
+      await load(`<button onclick="out.textContent='Saved';setTimeout(()=>out.textContent='',5000)">Toast</button><div id="out"></div>`);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Toast") }));
+      expect(result).toMatchObject({ settle_capped: false, pending_timers: 0, dom_mutated: "minor" });
+      expect(result.timings.settle_ms).toBeLessThan(500);
+      await load(`<button onclick="setTimeout(()=>out.textContent='',5000);setTimeout(()=>out.innerHTML='<button>Late result</button>'.repeat(20),700)">Both timers</button><div id="out"></div>`);
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Both timers") }))).toMatchObject({ dom_mutated: "major", snapshot_stale: true, settle_capped: false });
+    });
+    it("still caps attribute churn and wide text churn rather than treating them as a stable ticker", async () => {
+      const page = await load('<button>Churn</button><div id="out"></div><script>setInterval(()=>out.dataset.tick=String(Date.now()),100)</script>');
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Churn") }));
+      expect(result).toMatchObject({ settle_capped: true, url_changed: false, dom_mutated: "minor" });
+      await page.goto("about:blank");
+      await load('<button>Churn</button><div id="out">' + '<span>old</span>'.repeat(6) + '</div><script>setInterval(()=>document.querySelectorAll("span").forEach(el=>el.textContent=String(Date.now())),100)</script>');
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Churn") })).settle_capped).toBe(true);
+      await page.goto("about:blank");
+    }, 10000);
+    it("omits evidence when scrolling removes the virtualised source row", async () => {
+      const page = await load(`<div role="region" aria-label="List" id="sc" style="height:100px;overflow:auto"><div id="inner" style="height:3000px;position:relative"></div></div><script>function render(){const start=Math.floor(sc.scrollTop/20);inner.innerHTML='';for(let i=start;i<start+6;i++){const row=document.createElement('div');row.textContent='Row '+i;row.role='button';row.style.cssText='position:absolute;top:'+(i*20)+'px';inner.appendChild(row)}}sc.onscroll=render;render()</script>`);
+      const target = await ref("Row 0");
+      const start = Date.now();
+      const result = body(await runAct(session, { kind: "scroll", ref: target, direction: "down", amount: 1000 }));
+      expect(result.ok).toBe(true);
+      expect(result.scroll).toBeUndefined();
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(await page.getByRole("button", { name: "Row 0", exact: true }).count()).toBe(0);
+    });
+    it("bounds fill evidence on replaced inputs and select pre-checks on removed refs", async () => {
+      const page = await load(`<label>Size<select id="size"><option value="s">Small</option><option value="m">Medium</option></select></label><label>Name<input oninput="const clone=this.cloneNode();clone.value=this.value;this.replaceWith(clone)"></label>`);
+      const input = await ref("Name"), select = await ref("Size");
+      let start = Date.now();
+      const filled = body(await runAct(session, { kind: "fill", ref: input, value: "hello" }));
+      expect(filled.ok).toBe(true);
+      expect(filled.actual_value).toBeUndefined();
+      expect(Date.now() - start).toBeLessThan(1500);
+      expect(await page.getByRole("textbox", { name: "Name" }).inputValue()).toBe("hello");
+      await page.locator("#size").evaluate(el => el.remove());
+      start = Date.now();
+      expect(body(await runAct(session, { kind: "select", ref: select, value: "m" }))).toMatchObject({ code: "stale_ref", outcome: "not_executed" });
+      expect(Date.now() - start).toBeLessThan(3500);
+    });
+    it("reports a covered ARIA combobox as not executed, but uses unknown after opening it", async () => {
+      const page = await load('<button role="combobox" aria-label="Covered combo" aria-controls="choices" onclick="choices.hidden=false">Choose</button><div id="choices" role="listbox" hidden><div role="option">Known</div></div><div id="overlay" style="position:fixed;inset:0"></div>');
+      const target = await ref("Covered combo");
+      expect(body(await runAct(session, { kind: "select", ref: target, value: "Known" }))).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
+      await page.locator("#overlay").evaluate(el => el.remove());
+      const missing = body(await runAct(session, { kind: "select", ref: target, value: "Missing" }));
+      expect(missing).toMatchObject({ code: "outcome_unknown", outcome: "unknown" });
+      expect(await page.locator("#choices").isVisible()).toBe(true);
+    }, 10000);
+    it("echoes only capped native fill mismatches, not matching values or contenteditable text", async () => {
+      await load('<label>Plain<input></label><label>Mask<input oninput="this.value+=\'x\'.repeat(700)"></label><div contenteditable="true" role="textbox" aria-label="Editor"></div>');
+      const plain = body(await runAct(session, { kind: "fill", ref: await ref("Plain"), value: "match" }));
+      expect(plain.value_matches).toBe(true);
+      expect(plain.actual_value).toBeUndefined();
+      const mask = body(await runAct(session, { kind: "fill", ref: await ref("Mask"), value: "a" }));
+      expect(mask).toMatchObject({ value_matches: false, actual_value_truncated: true });
+      expect(mask.actual_value).toHaveLength(500);
+      const editor = body(await runAct(session, { kind: "fill", ref: await ref("Editor"), value: "a\nb" }));
+      expect(editor.ok).toBe(true);
+      expect(editor.actual_value).toBeUndefined();
+      expect(editor.note).toBeUndefined();
+    });
+    it("waits for a timer-rendered result 700ms after the click", async () => {
+      const page = await load('<button onclick="setTimeout(()=>out.innerHTML=\'<button>Result</button>\'.repeat(20),700)">Late</button><div id="out"></div>');
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Late") }));
+      expect(result).toMatchObject({ dom_mutated: "major", snapshot_stale: true, pending_timers: 0 });
+      expect(await page.locator("#out button").count()).toBe(20);
+    });
+    it("starts the quiet window after dispatch, not watcher installation", async () => {
+      await load('<button>Ready</button>');
+      await session.beginWatch();
+      await delay(400); // slow dispatch/actionability
+      const start = Date.now();
+      expect(await session.settle()).toMatchObject({ domMutated: "none" });
+      expect(Date.now() - start).toBeGreaterThanOrEqual(290);
+    });
+    it("waits for action-started network work and reports pending work at the cap", async () => {
+      await load(`<button onclick="fetch('/action-late').then(r=>r.text()).then(h=>out.innerHTML=h)">Fetch</button><div id="out"></div>`);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Fetch") }));
+      expect(result).toMatchObject({ dom_mutated: "major", snapshot_stale: true, pending_requests: 0 });
+      await load(`<button onclick="fetch('/action-pending').then(r=>r.text()).then(h=>out.innerHTML=h)">Fetch</button><div id="out"></div>`);
+      const pending = body(await runAct(session, { kind: "click", ref: await ref("Fetch") }));
+      expect(pending.settle_capped).toBe(true);
+      expect(pending.pending_requests).toBeGreaterThan(0);
+    });
+    it.each(["frame", "shadow"])("observes structural changes inside an open %s", async kind => {
+      const page = await load('<div id="host"></div><iframe srcdoc="<button>Frame action</button><div id=out></div>"></iframe>');
+      await page.evaluate(kind => {
+        if (kind === "shadow") {
+          const root = document.querySelector("#host")!.attachShadow({ mode: "open" });
+          root.innerHTML = '<button>Shadow action</button><div id="out"></div>';
+          root.querySelector("button")!.onclick = () => { root.querySelector("#out")!.innerHTML = '<button>New</button>'.repeat(20); };
+        } else {
+          const doc = document.querySelector("iframe")!.contentDocument!;
+          doc.querySelector("button")!.onclick = () => { doc.querySelector("#out")!.innerHTML = '<button>New</button>'.repeat(20); };
+        }
+      }, kind);
+      const result = body(await runAct(session, { kind: "click", ref: await ref(kind === "shadow" ? "Shadow action" : "Frame action") }));
+      expect(result).toMatchObject({ dom_mutated: "major", snapshot_stale: true });
+    });
+    it("observes an open shadow root attached during the action", async () => {
+      await load(`<button onclick="host.attachShadow({mode:'open'}).innerHTML='<button>New shadow control</button>'.repeat(20)">Attach shadow</button><div id="host"></div>`);
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Attach shadow") }))).toMatchObject({ dom_mutated: "major", snapshot_stale: true });
+    });
+    it("uses aliases, rejects unknown keys and malformed dates as input errors", async () => {
+      const page = await load('<label>Entry<input id="entry" onkeydown="this.dataset.key=event.key"></label><label>Date<input type="date"></label><button>Not select</button>');
+      const entry = await ref("Entry");
+      expect(body(await runAct(session, { kind: "key", ref: entry, key: "Return" })).ok).toBe(true);
+      expect(await page.locator("#entry").getAttribute("data-key")).toBe("Enter");
+      expect(body(await runAct(session, { kind: "key", ref: entry, key: "Esc" })).ok).toBe(true);
+      for (const input of [
+        { kind: "key", ref: entry, key: "NoSuchKey" },
+        { kind: "fill", ref: await ref("Date"), value: "10/20/2026" },
+        { kind: "select", ref: await ref("Not select"), value: "x" },
+      ] as const) expect(body(await runAct(session, input)).code).toBe("invalid_input");
+    });
+    it.each(["click", "dblclick", "hover"] as const)("holds Ctrl for %s and releases it afterwards", async kind => {
+      const page = await load('<button onmousedown="this.dataset.ctrl=event.ctrlKey" onmousemove="this.dataset.ctrl=event.ctrlKey">Modified</button>');
+      expect(body(await runAct(session, { kind, ref: await ref("Modified"), modifiers: ["Ctrl"] })).ok).toBe(true);
+      expect(await page.locator("button").getAttribute("data-ctrl")).toBe("true");
+      // Acknowledge listener installation before sending the key. Starting an
+      // unresolved evaluate and press concurrently can lose the event entirely.
+      await page.evaluate(() => {
+        document.addEventListener("keydown", event => { document.body.dataset.nextCtrl = String(event.ctrlKey); }, { once: true });
+      });
+      await page.keyboard.press("x");
+      expect(await page.locator("body").getAttribute("data-next-ctrl")).toBe("false");
+    });
+    it("selects multiple native options by value or label and validates bad values", async () => {
+      const page = await load('<label>Toppings<select multiple><option value="h">Ham</option><option value="o">Olives</option></select></label>');
+      const target = await ref("Toppings");
+      expect(body(await runAct(session, { kind: "select", ref: target, values: ["Ham", "o"] })).ok).toBe(true);
+      expect(await page.locator("select").evaluate(el => Array.from((el as HTMLSelectElement).selectedOptions).map(o => o.value))).toEqual(["h", "o"]);
+      const bad = body(await runAct(session, { kind: "select", ref: target, value: "Ham,Olives" }));
+      expect(bad).toMatchObject({ code: "invalid_input", outcome: "not_executed" });
+      expect(bad.error).toContain("values:");
+    });
+    it("adds to a native selection with Ctrl-click rather than replacing it", async () => {
+      const page = await load('<select multiple aria-label="Toppings"><option>Ham</option><option>Olives</option></select>');
+      await runAct(session, { kind: "click", ref: await ref("Ham") });
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Olives"), modifiers: ["Ctrl"] })).ok).toBe(true);
+      expect(await page.locator("select").evaluate(el => Array.from((el as HTMLSelectElement).selectedOptions).map(o => o.value))).toEqual(["Ham", "Olives"]);
+    });
+    it("selects an exact label from ARIA comboboxes and listboxes", async () => {
+      const page = await load('<button role="combobox" aria-label="Country" aria-controls="list" onclick="list.hidden=false">Country</button><div role="listbox" aria-label="Choices" id="list" hidden><div role="option" onclick="document.body.dataset.selected=this.textContent">China</div></div>');
+      expect(body(await runAct(session, { kind: "select", ref: await ref("Country"), value: "China" })).ok).toBe(true);
+      expect(await page.locator("body").getAttribute("data-selected")).toBe("China");
+      expect(body(await runAct(session, { kind: "select", ref: await ref("Choices"), value: "China" })).ok).toBe(true);
+    });
+    it("drags between refs without a screenshot, including hold/drop delay", async () => {
+      const page = await load('<button style="position:absolute;left:10px;top:10px">Source</button><button style="position:absolute;left:250px;top:10px" onmouseup="this.dataset.drop=1">Destination</button>');
+      const result = body(await runAct(session, { kind: "drag", ref: await ref("Source"), to_ref: await ref("Destination"), hold_ms: 20, drop_delay_ms: 20 }));
+      expect(result.ok).toBe(true);
+      expect(await page.getByRole("button", { name: "Destination" }).getAttribute("data-drop")).toBe("1");
+    });
+    it("drags through multiple screenshot waypoints and rejects odd paths", async () => {
+      const page = await load('<button style="position:absolute;left:10px;top:10px" onmousedown="window.moves=[]">Source</button><script>document.onmousemove=e=>{if(e.buttons===1)moves.push([e.clientX,e.clientY])}</script>');
+      const source = await ref("Source");
+      const shot = JSON.parse(firstText(await runScreenshot(session, {})));
+      const result = body(await runAct(session, { kind: "drag", ref: source, screenshot_id: shot.screenshot_id, path: [100, 100, 150, 60, 200, 120] }));
+      expect(result.ok).toBe(true);
+      const moves = await page.evaluate(() => (window as unknown as { moves: number[][] }).moves);
+      expect(moves).toContainEqual([100, 100]);
+      expect(moves).toContainEqual([150, 60]);
+      expect(moves.at(-1)).toEqual([200, 120]);
+      // Invalid input is rejected before any mouse down (source is a ref).
+      expect(body(await runAct(session, { kind: "drag", ref: source, path: [1] })).code).toBe("invalid_input");
+    });
+    it("reports scroll position/at-end and masked fill differences", async () => {
+      await load('<div role="region" aria-label="Scroller" style="height:100px;width:150px;overflow:auto"><div style="height:900px">content</div></div><label>Mask<input oninput="this.value=this.value.replace(/[^0-9]/g,\'\')"></label>');
+      const scroller = await ref("Scroller");
+      const scroll = body(await runAct(session, { kind: "scroll", ref: scroller, direction: "down", amount: 2000 }));
+      expect(scroll.scroll.y).toBeGreaterThan(0);
+      expect(scroll.scroll.at_end).toBe(true);
+      const fill = body(await runAct(session, { kind: "fill", ref: await ref("Mask"), value: "12a3" }));
+      expect(fill).toMatchObject({ actual_value: "123", value_matches: false });
+      expect(fill.note).toContain("kind=type");
+    });
   });
 
   it("expands every scoped child and keeps collapsed refs registered", async () => {
@@ -782,6 +1360,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const body = JSON.parse(firstText(await runNavigate(session, { url: httpUrl + kind + "-app" })));
     expect(Date.now() - started).toBeLessThan(4500);
     expect(body.ref_count).toBe(0);
+    if (kind !== "blank") {
+      expect(body.timings.settle_ms).toBeLessThan(500);
+      expect(body.timings.snapshot_ms).toBeGreaterThanOrEqual(0);
+    }
     expect(body.warning).toContain("no actionable refs yet");
     expect(body.warning).not.toContain("likely a blank/errored app");
     if (kind === "blank") expect(body.warning).toContain("No body text or visible media was observed");
