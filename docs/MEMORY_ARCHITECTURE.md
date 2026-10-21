@@ -46,8 +46,17 @@ winner as fact. Saved text is data, not an instruction layer.
 ## Grounded prose workflow proposals
 
 Python helper synthesis remains separate from prose `SKILL.md` workflows.
-Synthesizer can queue at most two workflow proposals per pass; it never installs
-one. The conservative first slice requires two distinct project-scoped journal
+**Partial feature: automatic proposals are currently inert in normal per-session
+use.** Each session's closing synthesis consumes its own journal slice; the next
+session cannot combine its evidence with a retained accepted episode from that
+previous pass. Only a single synthesis slice containing both complete accepted
+sessions can currently produce a proposal. There is no retained cross-pass
+accepted-episode index yet; issue #206 remains open. Promotion also fails closed
+when source evidence has been reaped or changed. Same-slice producer tests do
+not establish normal cross-session learning.
+
+In that same-slice case, Synthesizer can queue at most two workflow proposals
+per pass; it never installs one. The conservative first slice requires two distinct project-scoped journal
 sessions with successful execution, a completion reply and an explicit user
 receipt `workflow accepted: <name>`. Tool output cannot provide that receipt.
 `workflow corrected: <name>` or `workflow rejected: <name>` blocks the workflow.
@@ -70,7 +79,12 @@ Standalone Fluid's local owner can inspect with `fluid workflows list` and
 `fluid workflows show <digest>`, then `fluid workflows approve <digest> --cwd
 <project>` (or `reject`). Supply `--skills-dir` when using a custom store. Approval
 requires an interactive terminal and typing the full digest after reviewing the
-complete source work, scope, exceptions and successful outcomes. Source evidence
+complete source work, scope, exceptions and successful outcomes. **This is a
+convenience gate, not authentication.** Approval refuses shells with the app's
+`AI_SHUFFLE_MANAGED_BY` attribution marker, `AIS_SESSION_ID`, or a nonempty
+`CLAUDECODE`, even with a fabricated TTY. These ambient markers are not a security
+boundary: arbitrary local code can remove them or write skill files directly.
+Authenticated in-app owner approval is still required for a real identity gate. Source evidence
 is revalidated; stale/reaped/corrected evidence fails closed. Approval creates a
 new `.fluid/skills/<name>/SKILL.md` exclusively in the same project, with no tool
 grants or permission bypass. A fresh native/delegated session uses ordinary

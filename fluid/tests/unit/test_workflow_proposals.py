@@ -72,6 +72,54 @@ async def test_workflow_prompt_only_after_repeated_user_acceptance(tmp_path):
     assert synth._synthesis_system(entries) == _SYNTH_SYSTEM
 
 
+@pytest.mark.asyncio
+async def test_separate_session_synthesis_passes_leave_workflow_proposals_inert(tmp_path, monkeypatch):
+    # Known partial feature: each normal session drains its own slice, so the
+    # next pass has no retained accepted episode to ground repeated learning.
+    from fluid.codemode.workflows import WorkflowProposals
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    store = SkillStore(tmp_path / "store")
+    synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
+    systems = []
+
+    async def complete(prompt, system):
+        systems.append(system)
+        return (output() if "<workflow>JSON</workflow>" in system else ""), {}
+
+    monkeypatch.setattr(synth, "_complete", complete)
+    for session in ("first", "second"):
+        await journal_success(store, cwd, session)
+        assert await synth._run_locked() == []
+    assert len(systems) == 2
+    assert all("<workflow>JSON</workflow>" not in system for system in systems)
+    assert WorkflowProposals(store).list() == []
+    assert not (cwd / ".fluid" / "skills").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["AI_SHUFFLE_MANAGED_BY", "AIS_SESSION_ID", "CLAUDECODE"])
+async def test_agent_shell_cannot_approve_even_with_forged_tty(tmp_path, monkeypatch, marker):
+    import io
+    from types import SimpleNamespace
+    from fluid.cli.workflows import cmd_workflows
+    from fluid.config.loader import BUILTIN_DEFAULTS
+    from fluid.config.model import HarnessConfig
+
+    cwd, store, queue, row = await propose(tmp_path)
+    args = SimpleNamespace(workflows_command="approve", proposal_id=row["id"])
+    config = HarnessConfig.from_dict({**BUILTIN_DEFAULTS, "cwd": str(cwd), "skills_dir": str(store.root)})
+    for name in ("AI_SHUFFLE_MANAGED_BY", "AIS_SESSION_ID", "CLAUDECODE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(marker, "fixture-agent")
+    monkeypatch.setattr("sys.stdin", io.StringIO("approve " + row["id"]))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: "approve " + row["id"])
+    assert cmd_workflows(args, config) == 1
+    assert queue.list()[0]["status"] == "pending"
+    assert not (cwd / ".fluid" / "skills").exists()
+
+
 async def propose(tmp_path):
     from fluid.codemode.workflows import WorkflowProposals
     cwd = tmp_path / "project"
@@ -98,6 +146,9 @@ async def test_owner_gate_then_fresh_session_loads_and_uses_workflow(tmp_path, m
     from .test_cli_smoke import ScriptedProvider, _tool, _text
 
     cwd, store, queue, row = await propose(tmp_path)
+    # This test models a separate local terminal, not an inherited agent shell.
+    for name in ("AI_SHUFFLE_MANAGED_BY", "AIS_SESSION_ID", "CLAUDECODE"):
+        monkeypatch.delenv(name, raising=False)
     # Both a direct missing approval and noninteractive CLI must fail closed.
     with pytest.raises(ValueError, match="approval"):
         queue.promote(row["id"], cwd)

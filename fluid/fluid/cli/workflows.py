@@ -1,7 +1,8 @@
-"""Local-owner review for prose proposals. Deliberately no --yes/auto approval."""
+"""Interactive convenience review, not authentication. No --yes/auto approval."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from fluid.codemode.skills import SkillStore
@@ -10,6 +11,15 @@ from fluid.cli.evolve import skills_root
 
 
 def cmd_workflows(args, config):
+    # Managed CLI/tool children inherit the app's process attribution marker;
+    # browser-backed tools and stock Claude shells also carry session markers.
+    # Reject before prompting even if an agent manufactures a terminal. These
+    # ambient markers are a convenience guard, not authenticated owner identity.
+    if args.workflows_command == "approve" and any(
+        os.environ.get(name) for name in ("AI_SHUFFLE_MANAGED_BY", "AIS_SESSION_ID", "CLAUDECODE")
+    ):
+        print("Workflow approval is unavailable in agent sessions; use a separate local terminal. No changes made.", file=sys.stderr)
+        return 1
     queue = WorkflowProposals(SkillStore(skills_root(config)))
     rows = queue.list()
     if args.workflows_command == "list":
