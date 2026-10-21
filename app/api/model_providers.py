@@ -243,6 +243,25 @@ def _validate_base_url(base_url: Optional[str], *, required: bool) -> None:
                             detail="base_url is required")
 
 
+def _validate_local_models(
+    models: Optional[List[Dict[str, Any]]], provider_type: Optional[str], api_dialect: Optional[str]
+) -> None:
+    from app.core.local_model_settings import validate_local_settings
+
+    for entry in models or []:
+        if not isinstance(entry, dict):
+            continue
+        config = entry.get("local_settings")
+        if config is None:
+            continue
+        if provider_type != "custom" or api_dialect != "openai":
+            raise HTTPException(status_code=400, detail="local_settings requires a custom OpenAI provider")
+        try:
+            validate_local_settings(config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _validate_models(models: Optional[List[Dict[str, Any]]]) -> None:
     if models is None:
         return
@@ -307,6 +326,14 @@ def _iso(value: Any) -> Optional[str]:
 
 def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
     """Shape a DB row (public columns only, no token) into the response model."""
+    models = []
+    for entry in row.get("models_json") or []:
+        # Legacy/synced catalogs may contain bare IDs or malformed entries.
+        # Normalize only the response; unrelated updates must not rewrite them.
+        if isinstance(entry, str):
+            entry = {"id": entry, "label": entry}
+        if isinstance(entry, dict):
+            models.append(entry)
     return ModelProviderResponse(
         id=row["id"],
         name=row["name"],
@@ -315,7 +342,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         api_dialect=row.get("api_dialect"),
         auth_token_set=bool(row.get("_auth_token_set")),
         auth_token_masked=row.get("_auth_token_masked", ""),
-        models=row.get("models_json") or [],
+        models=models,
         default_model=row.get("default_model"),
         small_fast_model=row.get("small_fast_model"),
         extra_env=row.get("extra_env_json") or {},
@@ -804,6 +831,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     _validate_base_url(body.base_url, required=True)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
+    _validate_local_models(body.models, body.provider_type, body.api_dialect)
     _validate_extra_env(body.extra_env)
 
     encrypted_token = None
@@ -856,6 +884,11 @@ async def update_provider(
     _validate_base_url(body.base_url, required=False)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
+    _validate_local_models(
+        body.models if body.models is not None else existing.get("models_json"),
+        body.provider_type if body.provider_type is not None else existing.get("provider_type"),
+        body.api_dialect if body.api_dialect is not None else existing.get("api_dialect"),
+    )
     _validate_extra_env(body.extra_env)
 
     updates: Dict[str, Any] = {}

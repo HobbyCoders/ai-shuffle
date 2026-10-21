@@ -482,6 +482,19 @@ describe("browser_navigate redirect onto a refused address", () => {
     expect(message).toContain("Policy detail: IPv4 loopback: blocked");
   });
 
+  it.each(["back", "forward"])("normalizes %s history navigation failures", async direction => {
+    const page = {
+      url: () => "https://blocked.example/",
+      _timeoutSettings: { navigationTimeout: () => 30000 },
+      goBack: async () => { throw new Error("net::ERR_BLOCKED_BY_CLIENT"); },
+      goForward: async () => { throw new Error("net::ERR_BLOCKED_BY_CLIENT"); },
+    };
+    const session = {
+      ensurePage: async () => page, notifyNavigation: () => {},
+      ssrfBlockReason: () => "blocked destination",
+    } as unknown as Session;
+    await expect(runNavigate(session, { url: direction })).rejects.toThrow("blocked by SSRF policy: blocked destination");
+  });
   it("passes a navigation timeout through unchanged", async () => {
     const page = {
       goto: async () => { throw new Error("page.goto: Timeout 30000ms exceeded."); },

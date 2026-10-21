@@ -27,6 +27,51 @@ def test_divergent_event_compaction_reconciles_ids_and_rewinds(mock_db):
     assert [(row["id"], row["seq"]) for row in actual] == [(survivor["id"], survivor["seq"])]
 
 
+@pytest.mark.parametrize("insert_batch", [200, 1])
+def test_import_reports_statement_and_commit_cost_without_transcript_text(mock_db, caplog, monkeypatch, insert_batch):
+    import logging
+    from app.db import network
+    from tests.pg_shim import ShimCursor
+
+    inserts = []
+    execute = ShimCursor.execute
+    insert_rows = network._insert_rows
+
+    def spy_execute(self, sql, params=None):
+        if sql.startswith("INSERT INTO fluid_session_events "):
+            inserts.append(len(params) // 3)  # session_id, seq, event per row
+        return execute(self, sql, params)
+
+    def insert(cur, table, columns, values, conflict="", *, batch=0):
+        return insert_rows(cur, table, columns, values, conflict,
+                           batch=insert_batch if table == "fluid_session_events" else batch)
+
+    monkeypatch.setattr(ShimCursor, "execute", spy_execute)
+    monkeypatch.setattr(network, "_insert_rows", insert)
+
+    sid = "statement-metrics"
+    database.create_session(sid, "default")
+    data = {"sdk_session_id": "ses_source", "_prepare_history": True, "history": {
+        "fluid_session_events": [{"seq": i, "event": {"text": "private-transcript-canary"}}
+                                 for i in range(401)]}}
+    with caplog.at_level(logging.INFO, logger=handoff.__name__):
+        handoff.install_history(sid, data, ".")
+    metrics = data["_history_metrics"]["fluid_session_events"]
+    assert metrics["rows"] == 401
+    expected = [200, 200, 1] if insert_batch == 200 else [1] * 401
+    assert inserts == expected  # Inspect actual SQL, not the import's chunk loop.
+    assert metrics["statements"] == len(inserts)
+    assert metrics["execute_seconds"] >= metrics["max_statement_seconds"] >= 0
+    assert metrics["commit_seconds"] >= 0
+    assert metrics["connection_seconds"] >= 0
+    assert metrics["seconds"] >= metrics["execute_seconds"]
+    assert all(value == round(value, 3) for key, value in metrics.items() if key.endswith("seconds"))
+    assert any("install_history.fluid_session_events" in r.message and f"statements={len(inserts)}" in r.message
+               for r in caplog.records)
+    assert not any("install_history.turns:" in r.message for r in caplog.records)
+    assert "private-transcript-canary" not in caplog.text
+
+
 def test_messages_reconcile_changed_and_deleted_rows_without_duplicates(mock_db):
     sid = "review-messages"
     database.create_session(sid, "default")

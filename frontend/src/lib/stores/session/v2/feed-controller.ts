@@ -21,6 +21,7 @@ import {
 	reduce,
 	parseWireEvent,
 	initialState,
+	reconcileRunningTasks,
 	releaseMessages,
 	sealState,
 	type V2SessionState,
@@ -145,6 +146,11 @@ let usageApplied = false;
 // the indicator back to false (the turn-start stutter).
 let optimisticStreaming = false;
 
+// The task registry's running list from a `/live` snapshot that landed while
+// the feed was still backfilling (#320). Applied at `caught_up`, after the
+// history it must be compared against; see `reconcileRunningTasks`.
+let pendingRegistryTasks: readonly Task[] | null = null;
+
 // ─── No progressive paint ─────────────────────────────────────────────────────
 //
 // Hydration is atomic: nothing paints until `caught_up` (or the floor below).
@@ -230,6 +236,13 @@ function armCatchupFallback(generation: number): void {
 	}, budget);
 }
 
+/** Fold a held registry running list into the reducer (see `reconcileRunningTasks`). */
+function applyPendingRegistryTasks(keep: boolean): void {
+	if (!pendingRegistryTasks) return;
+	reducerState = reconcileRunningTasks(reducerState, pendingRegistryTasks);
+	if (!keep) pendingRegistryTasks = null;
+}
+
 /**
  * Surface the degraded "still hydrating, taking a while" state exactly once per
  * feed. Distinct from `isLoadingSession`, which stays TRUE throughout: this only
@@ -255,6 +268,9 @@ function completeHydration(premature: boolean): void {
 	everCaughtUp = true;
 	sentinelPending = premature;
 	clearCatchupFallback();
+	// Still owed a sentinel: keep the list so `caught_up` applies it again
+	// after whatever history is left.
+	applyPendingRegistryTasks(premature);
 	fold(true);
 	// A floor-driven completion intentionally leaves sentinelPending=true, but
 	// the durable rows are still authoritative now; force this one recovery read.
@@ -731,6 +747,15 @@ export interface FeedController {
 	 */
 	hasAppliedUsage: (sessionId: string) => boolean;
 
+	/**
+	 * Reconcile the running strip with the task registry's running list (the
+	 * `/live` snapshot's `activeTasks`). Returns false when this session is not
+	 * the one being fed, so the caller can fall back to seeding the strip.
+	 * While the feed is still backfilling the list is held until `caught_up`,
+	 * so older history cannot override it; see `reconcileRunningTasks` (#320).
+	 */
+	reconcileRunningTasks: (sessionId: string, tasks: readonly Task[]) => boolean;
+
 	/** The reducer's own current `isStreaming` for a session (false when it is
 	 *  not the session being fed). Lets a caller that must withdraw an optimistic
 	 *  flip restore the authoritative value instead of guessing `false` and
@@ -760,6 +785,7 @@ function resetFeedFlags(): void {
 	hydrationSlow = false;
 	usageApplied = false;
 	resumeFromSeq = 0;
+	pendingRegistryTasks = null;
 }
 
 /**
@@ -877,6 +903,7 @@ export const feedController: FeedController = {
 					everCaughtUp = true;
 					sentinelPending = false;
 					clearCatchupFallback();
+					applyPendingRegistryTasks(false);
 					fold(true);
 					schedulePendingResync(sessionId, generation);
 					// Hydration finished on a REAL sentinel — the only state exact
@@ -1111,6 +1138,20 @@ export const feedController: FeedController = {
 	hasAppliedUsage(sessionId: string) {
 		if (currentSessionId === sessionId) return usageApplied;
 		return readCachedTranscript(sessionId)?.usageApplied ?? false;
+	},
+
+	reconcileRunningTasks(sessionId: string, tasks: readonly Task[]) {
+		if (feed === null || currentSessionId !== sessionId) return false;
+		if (!caughtUp) {
+			pendingRegistryTasks = tasks;
+			return true;
+		}
+		const next = reconcileRunningTasks(reducerState, tasks);
+		if (next !== reducerState) {
+			reducerState = next;
+			scheduleFlush('immediate');
+		}
+		return true;
 	},
 
 	isReducerStreaming(sessionId: string | null) {
