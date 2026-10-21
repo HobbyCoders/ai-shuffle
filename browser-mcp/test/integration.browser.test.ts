@@ -416,6 +416,89 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.timings.settle_ms).toBeLessThan(1200);
       await page.goto("about:blank");
     });
+    it.each(["plain", "top", "shadow", "frame", "staticshadow", "staticframe", "blankframe", "crossframe"])("avoids repeat sampling for spaced %s actions", async kind => {
+      const shapes: Record<string, string> = {
+        plain: '<p>Plain</p>',
+        top: '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>',
+        shadow: '<div id="host"></div><script>const r=host.attachShadow({mode:"open"});r.innerHTML="<span id=c></span>";setInterval(()=>r.getElementById("c").textContent=String(Date.now()),100)</script>',
+        frame: '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>',
+        staticshadow: '<div id="host"></div><script>host.attachShadow({mode:"open"}).innerHTML="<span>Static</span>"</script>',
+        staticframe: '<iframe srcdoc="<p>Static frame</p>"></iframe>',
+        blankframe: '<iframe style="display:none"></iframe>',
+        crossframe: `<iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe>`,
+      };
+      const page = await load('<button>Shape action</button>' + shapes[kind]);
+      await page.waitForTimeout(400);
+      const rows = [];
+      for (let i = 0; i < 3; i++) {
+        await page.waitForTimeout(1000);
+        const result = body(await runAct(session, { kind: "click", ref: await ref("Shape action") }));
+        rows.push({ dispatch: Math.round(result.timings.dispatch_ms), settle: Math.round(result.timings.settle_ms), capped: result.settle_capped, dom: result.dom_mutated, stale: result.snapshot_stale });
+      }
+      console.info("ROOT_DISPATCH", JSON.stringify({ kind, rows }));
+      await page.goto("about:blank");
+      for (let i = 0; i < rows.length; i++) {
+        expect(rows[i]).toMatchObject({ capped: false, stale: false });
+        // Non-empty frame documents may sample once; all other shapes are
+        // already covered by passive history or have nothing to sample.
+        if (i > 0 || !["frame", "staticframe"].includes(kind)) expect(rows[i].dispatch).toBeLessThan(90);
+      }
+    }, 15000);
+    it("recovers a late-starting frame clock after at most one capped action", async () => {
+      const page = await load('<button>Late frame</button><iframe srcdoc="<p>Static</p><span id=clock></span>"></iframe>');
+      await runAct(session, { kind: "click", ref: await ref("Late frame") }); // sample the static document once
+      await page.mainFrame().childFrames()[0].evaluate(() => { setInterval(() => { document.getElementById("clock")!.textContent = String(Date.now()); }, 100); });
+      const rows = [];
+      for (let i = 0; i < 3; i++) {
+        await page.waitForTimeout(1000);
+        rows.push(body(await runAct(session, { kind: "click", ref: await ref("Late frame") })));
+      }
+      console.info("LATE_FRAME_CLOCK", JSON.stringify(rows.map(row => ({ capped: row.settle_capped, dispatch: row.timings.dispatch_ms, settle: row.timings.settle_ms }))));
+      await page.goto("about:blank");
+      expect(rows[0]).toMatchObject({ settle_capped: true, text_churn_ignored: false });
+      for (const row of rows.slice(1)) expect(row).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
+      expect(rows[2].timings.dispatch_ms).toBeLessThan(90);
+    }, 15000);
+    it("prunes detached passive shadow observers and observes roots attached while idle", async () => {
+      const page = await load('<button>Shadow lifecycle</button><div id="hosts"></div>');
+      await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") });
+      const cdp = await page.context().newCDPSession(page);
+      const nodes = async () => { await cdp.send("HeapProfiler.collectGarbage"); return (await cdp.send("Memory.getDOMCounters")).nodes; };
+      const before = await nodes();
+      await page.evaluate(() => new Promise<void>(resolve => {
+        let n = 0;
+        const interval = setInterval(() => {
+          const hosts = document.getElementById("hosts")!;
+          hosts.innerHTML = '<div></div>';
+          hosts.firstElementChild!.attachShadow({ mode: "open" }).innerHTML = '<span>Static shadow</span>';
+          // A never-inserted host must not acquire a retained passive observer.
+          document.createElement("div").attachShadow({ mode: "open" }).innerHTML = '<p>Detached</p>';
+          if (++n === 30) { clearInterval(interval); hosts.innerHTML = ''; resolve(); }
+        }, 20);
+      }));
+      expect(await nodes()).toBeLessThanOrEqual(before + 25);
+      await page.evaluate(() => {
+        const root = document.getElementById("hosts")!.attachShadow({ mode: "open" });
+        root.innerHTML = '<span id="clock"></span>';
+        setInterval(() => { root.querySelector("span")!.textContent = String(Date.now()); }, 100);
+      });
+      await page.waitForTimeout(400);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") }));
+      expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
+      expect(result.timings.dispatch_ms).toBeLessThan(90);
+      await cdp.detach();
+      await page.goto("about:blank");
+    });
+    it("finishes a new frame sample discovered during the initial sample wait", async () => {
+      const page = await load('<button>Sample arrival</button><iframe srcdoc="<p>Initial</p>"></iframe><div id="spawn"></div>');
+      const target = await ref("Sample arrival");
+      await page.evaluate(() => { setTimeout(() => {
+        document.getElementById("spawn")!.innerHTML = '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>';
+      }, 60); });
+      const result = body(await runAct(session, { kind: "click", ref: target }));
+      expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
+      await page.goto("about:blank");
+    });
     it.each(["top", "shadow", "frame", "mixed"])("baselines an idle %s ticker across spaced actions", async kind => {
       const top = '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>';
       const shadow = '<div id="host"></div><script>const r=host.attachShadow({mode:"open"});r.innerHTML="<span id=c></span>";setInterval(()=>r.getElementById("c").textContent=String(Date.now()),100)</script>';
@@ -424,7 +507,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.waitForTimeout(250);
       const rows = [];
       for (let i = 0; i < 3; i++) {
-        await page.waitForTimeout(1000); // secondary roots have no idle observer
+        await page.waitForTimeout(1000); // frame documents have no idle observer
         const target = await ref("Spaced action");
         const start = Date.now();
         const result = body(await runAct(session, { kind: "click", ref: target }));

@@ -63,23 +63,38 @@ export async function installMutationWatcher(input: string | { key: string; pass
   const passive = typeof input !== "string" && input.passive;
   const w = window as unknown as Record<string, unknown>;
   type TextHistory = WeakMap<Node, { samples: number; first: number; last: number }>;
-  const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory; passive: boolean; observedSince: number } | undefined;
+  const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory;
+    sampledDocuments?: WeakSet<Document>; frameTextTargets?: WeakSet<Node>;
+    passive: boolean; observedSince: number } | undefined;
   const installedAt = Date.now();
-  // Continuous passive history establishes presence/absence only in the top document.
+  // Top-document history includes its attached open shadow roots.
   const observedSince = prev?.passive && Number.isFinite(prev.observedSince) ? prev.observedSince : installedAt;
   let sampleSince = observedSince;
-  let hasUncoveredRoots = false;
+  let hasUncoveredFrames = false;
+  const canSample = typeof input === "string" || input.sample !== false;
   prev?.observer?.disconnect();
   const textHistory: TextHistory = prev?.textHistory ?? new WeakMap();
+  const sampledDocuments = prev?.sampledDocuments ?? new WeakSet<Document>();
+  const frameTextTargets = prev?.frameTextTargets ?? new WeakSet<Node>();
+  const newDocuments = new WeakSet<Document>();
   const cleanups: (() => void)[] = [];
   const activeCleanups: (() => void)[] = [];
   const roots = new WeakSet<Node>();
   const documents = new WeakSet<Document>();
+  // Retain only attached top-document roots. A removed host must not leave an
+  // observer closure in cleanups (which would retain every former shadow tree).
+  const shadows = new Map<ShadowRoot, MutationObserver>();
+  const pruneShadows = () => {
+    for (const [root, observer] of shadows) if (!root.host.isConnected || root.ownerDocument !== document) {
+      observer.disconnect(); shadows.delete(root); roots.delete(root);
+    }
+  };
+  cleanups.push(() => { for (const observer of shadows.values()) observer.disconnect(); shadows.clear(); });
   const state = {
     addedNodes: 0, removedNodes: 0, attributeChanges: 0, characterDataChanges: 0,
     startUrl: location.href, lastMutation: Date.now(), pendingRequests: 0, pendingTimers: 0,
     deadline: 0, textSamples: 0, textTargets: new Set<Node>(), lastNonTextMutation: Date.now(), lastPendingWork: 0,
-    textHistory, knownTextTargets: new WeakSet<Node>(), hasKnownText: false,
+    textHistory, sampledDocuments, frameTextTargets, knownTextTargets: new WeakSet<Node>(), hasKnownText: false,
     observedSince, lastNonBaselineTextMutation: Date.now(),
     nonBaselineTextChanges: 0, sampling: true, passive,
     schedule: window.setTimeout.bind(window),
@@ -88,6 +103,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
         state.passive = true;
         for (const cleanup of activeCleanups.splice(0).reverse()) cleanup();
         state.textTargets.clear(); // do not retain detached frame/root nodes
+        pruneShadows();
       },
       disconnect: () => { state.observer.pause(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); },
     },
@@ -99,7 +115,8 @@ export async function installMutationWatcher(input: string | { key: string; pass
   const baseline = (node: Node) => {
     if (!state.sampling) return; // eligibility is frozen before dispatch
     const history = textHistory.get(node);
-    if (history && history.samples >= 2 && history.last - history.first >= 50 && installedAt - history.last <= 250) {
+    if ((node.ownerDocument !== document && frameTextTargets.has(node)) ||
+        (history && history.samples >= 2 && history.last - history.first >= 50 && installedAt - history.last <= 250)) {
       state.knownTextTargets.add(node); state.hasKnownText = true;
     }
   };
@@ -109,19 +126,20 @@ export async function installMutationWatcher(input: string | { key: string; pass
     if ("querySelectorAll" in root) for (const el of Array.from((root as Document).querySelectorAll("*"))) inspect(el);
   };
   const observe = (root: Node, realm: Window) => {
-    // Passive history watches the top document only. Secondary roots and frame
-    // load closures must not retain documents removed while the agent is idle.
-    if (state.passive && root !== document) return;
+    const topRoot = root === document || root.ownerDocument === document;
+    if (state.passive && !topRoot) return;
+    // Detached roots will be discovered if their host is later inserted.
+    if (topRoot && root !== document && !(root as ShadowRoot).host.isConnected) return;
     if (roots.has(root)) return;
     roots.add(root);
-    if (root !== document) {
-      // Idle observation never covered this root. Neither an old top-document
-      // window nor a known top-level clock can replace its pre-dispatch sample.
-      hasUncoveredRoots = true;
+    const doc = root.nodeType === 9 ? root as Document : root.ownerDocument!;
+    if (!topRoot && newDocuments.has(doc) && doc.createTreeWalker(root, 4 /* SHOW_TEXT */).nextNode()) {
+      hasUncoveredFrames = true;
       sampleSince = Math.max(sampleSince, Date.now());
     }
     const Observer = (realm as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver;
     const observer = new Observer(records => {
+      pruneShadows();
       for (const r of records) {
         const textOnly = r.type === "characterData" || (r.type === "childList" &&
           [...Array.from(r.addedNodes), ...Array.from(r.removedNodes)].every(node => node.nodeType === 3));
@@ -133,6 +151,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
             : { samples: 1, first: now, last: now });
           if (state.sampling && !state.passive) {
             state.knownTextTargets.add(target); state.hasKnownText = true;
+            if (target.ownerDocument !== document) frameTextTargets.add(target);
           }
           if (!state.passive && !state.sampling) {
             if (state.knownTextTargets.has(target)) {
@@ -140,6 +159,9 @@ export async function installMutationWatcher(input: string | { key: string; pass
             } else {
               state.nonBaselineTextChanges++;
               state.lastNonBaselineTextMutation = Date.now();
+              // A late-starting frame clock gets at most one conservative
+              // action before the next call establishes its baseline.
+              if (target.ownerDocument && target.ownerDocument !== document) sampledDocuments.delete(target.ownerDocument);
             }
           }
         } else state.lastNonTextMutation = Date.now();
@@ -159,8 +181,22 @@ export async function installMutationWatcher(input: string | { key: string; pass
       changed();
     });
     observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
-    (root === document ? cleanups : activeCleanups).push(() => observer.disconnect());
+    if (topRoot && root !== document) shadows.set(root as ShadowRoot, observer);
+    else (topRoot ? cleanups : activeCleanups).push(() => observer.disconnect());
     scan(root);
+  };
+  const watchShadows = (win: Window) => {
+    const realm = win as unknown as typeof window;
+    const attach = realm.Element.prototype.attachShadow;
+    const attachWrapper: typeof attach = function (this: Element, init) {
+      const root = attach.call(this, init);
+      if (init.mode === "open" && this.isConnected) observe(root, win);
+      return root;
+    };
+    realm.Element.prototype.attachShadow = attachWrapper;
+    (win === window ? cleanups : activeCleanups).push(() => {
+      if (realm.Element.prototype.attachShadow === attachWrapper) realm.Element.prototype.attachShadow = attach;
+    });
   };
   const watchWindow = (win: Window) => {
     // Reading document intentionally enforces same-origin access. A frame's
@@ -168,7 +204,10 @@ export async function installMutationWatcher(input: string | { key: string; pass
     const doc = win.document;
     if (documents.has(doc)) return;
     documents.add(doc);
-    if (state.passive) { if (win === window) observe(doc, win); return; }
+    if (state.passive) { if (win === window) { watchShadows(win); observe(doc, win); } return; }
+    if (state.sampling && canSample && win !== window && !sampledDocuments.has(doc)) {
+      sampledDocuments.add(doc); newDocuments.add(doc);
+    }
     const realm = win as unknown as typeof window;
     // Timers scheduled by the action matter too (e.g. debounce/700ms render).
     // Existing intervals are deliberately not tracked: clocks must not hold refs hostage.
@@ -198,21 +237,14 @@ export async function installMutationWatcher(input: string | { key: string; pass
       if (realm.setTimeout === setWrapper) realm.setTimeout = set as typeof realm.setTimeout;
       if (realm.clearTimeout === clearWrapper) realm.clearTimeout = clear as typeof realm.clearTimeout;
     });
-    const attach = realm.Element.prototype.attachShadow;
-    const attachWrapper: typeof attach = function (this: Element, init) {
-      const root = attach.call(this, init);
-      if (init.mode === "open") observe(root, win);
-      return root;
-    };
-    realm.Element.prototype.attachShadow = attachWrapper;
-    activeCleanups.push(() => { if (realm.Element.prototype.attachShadow === attachWrapper) realm.Element.prototype.attachShadow = attach; });
+    watchShadows(win);
     observe(doc, win);
   };
   function inspect(el: Element) {
     baseline(el);
-    if (state.passive) return;
     const win = el.ownerDocument.defaultView!;
     if (el.shadowRoot) observe(el.shadowRoot, win);
+    if (state.passive) return;
     if (el.tagName === "IFRAME") {
       const frame = el as HTMLIFrameElement;
       const loaded = () => { try { if (frame.contentWindow) watchWindow(frame.contentWindow); } catch { /* cross-origin */ } };
@@ -223,12 +255,15 @@ export async function installMutationWatcher(input: string | { key: string; pass
   w[key] = state;
   watchWindow(window);
   if (passive) { state.sampling = false; state.observer.pause(); return; }
-  // Reuse the top-document window, but finish 100ms from the newest secondary
-  // root's discovery. These samples overlap; they are not 100ms per root.
-  // Navigation explicitly opts out of all pre-action sampling.
-  const remainingSample = typeof input !== "string" && input.sample === false
-    ? 0 : Math.max(0, 100 - (Date.now() - sampleSince));
-  if ((!state.hasKnownText || hasUncoveredRoots) && remainingSample) await new Promise<void>(resolve => state.schedule(resolve, remainingSample));
+  // Only new/non-baseline-churning, non-empty frame documents need a new
+  // sample. Re-check discovery time if another frame arrives during the wait;
+  // bound extension under continuous frame churn. Navigation never samples.
+  const sampleLimit = Date.now() + 300;
+  while (canSample && (!state.hasKnownText || hasUncoveredFrames)) {
+    const remaining = Math.min(100 - (Date.now() - sampleSince), sampleLimit - Date.now());
+    if (remaining <= 0) break;
+    await new Promise<void>(resolve => state.schedule(resolve, remaining));
+  }
   state.sampling = false;
   state.addedNodes = state.removedNodes = state.attributeChanges = state.characterDataChanges = 0;
   state.lastMutation = state.lastNonTextMutation = state.lastNonBaselineTextMutation = Date.now();
