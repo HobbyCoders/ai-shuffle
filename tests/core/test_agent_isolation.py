@@ -266,6 +266,21 @@ def test_maintenance_prepares_custom_service_account_without_migration(runtime, 
     assert (ident.suid, ident.sgid) == (64001, 64002)
 
 
+def test_required_maintenance_account_command_failure_reports_refusal(runtime, monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    module = runtime.isolation()
+    record = {"state": "enabled", "puid": PUID, "pgid": PGID, "service_uid": SUID, "service_gid": SGID}
+    monkeypatch.setattr(module, "read_record", lambda *a: record)
+
+    def fail_account(ident):
+        raise runtime.subprocess.CalledProcessError(1, ["usermod"])
+
+    monkeypatch.setattr(module, "ensure_account", fail_account)
+    with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused; CalledProcessError"):
+        runtime.maintenance_isolation(SimpleNamespace(effective_data_dir=tmp_path),
+                                      SimpleNamespace(pw_uid=PUID, pw_gid=PGID))
+
+
 @pytest.mark.parametrize("action", ["dump", "restore"])
 def test_main_marks_maintenance_actions(runtime, monkeypatch, action):
     monkeypatch.setattr(runtime, "load_settings", lambda: object())

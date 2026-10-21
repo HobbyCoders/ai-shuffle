@@ -804,7 +804,7 @@ def maintenance_isolation(settings, account):
     # Prepare its service account for custom IDs without touching retained data.
     try:
         module.ensure_account(ident)
-    except (module.IsolationError, OSError) as error:
+    except (module.IsolationError, OSError, subprocess.CalledProcessError) as error:
         reason = str(error) if isinstance(error, module.IsolationError) else type(error).__name__
         raise RuntimeFailure(prefix + reason) from None
     return ident
