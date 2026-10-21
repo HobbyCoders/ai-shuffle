@@ -183,6 +183,7 @@ describe("content warning via browser_navigate", () => {
       url: () => landing,
       title: async () => page.title,
       evaluate: async () => ({ controls: true, loading: false }),
+      waitForFunction: async () => ({ dispose: async () => {} }),
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
       mainFrame: () => frame,
       frames: () => [frame],

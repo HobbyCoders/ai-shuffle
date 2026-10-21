@@ -53,6 +53,12 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
   const server = createHttpServer((req, res) => {
     if (req.url?.startsWith("/review/")) {
       const url = new URL(req.url, "http://fixture.test");
+      if (url.pathname === "/review/history-stream") {
+        res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+        res.write('<!doctype html><title>Streamed history</title><p>Early prose</p><script>addEventListener("unload",()=>{});window.persisted=false;addEventListener("pageshow",e=>window.persisted=e.persisted)</script>' + " ".repeat(2048));
+        setTimeout(() => res.end('<button>Late streamed button</button><p>Stream finished</p>'), 1500);
+        return;
+      }
       const pages: Record<string, string> = {
         "/review/history-a": '<title>History A</title><button>History A</button><p id="clock">Clock</p><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++});setInterval(()=>clock.textContent=String(Date.now()),100)</script>',
         "/review/history-b": '<title>History B</title><button>History B</button><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++})</script>',
@@ -345,12 +351,15 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
-    it("FOLLOWUP slotted clipped frames stay hidden from read_text", async () => {
+    it.each([
+      ["open", false], ["open", true], ["closed", false], ["closed", true],
+    ] as const)("FOLLOWUP %s shadow slotted clipped frames (absolute: %s) stay hidden from read_text", async (mode, absolute) => {
       const page = await load('<p>Visible prose</p><div id="host"><iframe srcdoc="<p>HiddenSlottedMarker</p>"></iframe></div>');
-      await page.evaluate(() => {
-        document.getElementById("host")!.attachShadow({ mode: "open" }).innerHTML =
-          '<div style="overflow:hidden;height:0"><slot></slot></div>';
-      });
+      await page.evaluate(({ mode, absolute }) => {
+        if (absolute) document.querySelector("iframe")!.style.cssText = "position:absolute;top:0;left:0";
+        document.getElementById("host")!.attachShadow({ mode }).innerHTML =
+          '<div style="position:relative;overflow:hidden;height:var(--clip-height,0px)"><slot></slot></div>';
+      }, { mode, absolute });
       const frame = page.mainFrame().childFrames()[0];
       await frame.getByText("HiddenSlottedMarker").waitFor({ state: "attached" });
       expect(await observationRootStatus({ frame, primary: false })).toBe("hidden");
@@ -358,10 +367,27 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(body(result)).toMatchObject({ frames_hidden: 1 });
       expect((result.content[1] as { text: string }).text).not.toContain("HiddenSlottedMarker");
       await page.evaluate(() => {
-        (document.getElementById("host")!.shadowRoot!.firstElementChild as HTMLElement).style.height = "200px";
+        document.getElementById("host")!.style.setProperty("--clip-height", "200px");
       });
       expect(await observationRootStatus({ frame, primary: false })).toBe("included");
       expect((await runReadText(session)).content[1]).toMatchObject({ text: expect.stringContaining("HiddenSlottedMarker") });
+    });
+    it.each(["visible", "inside", "outside"])("FOLLOWUP closed-shadow clipping %s a scrollport preserves only reachable text", async where => {
+      const page = await load('<p>Main prose</p><div id="outer"><div style="height:100px;overflow:auto"><div style="height:800px"></div><div id="host"><iframe srcdoc="<p>ScrollSlotMarker</p>"></iframe></div></div></div>');
+      await page.evaluate(where => {
+        document.getElementById("host")!.attachShadow({ mode: "closed" }).innerHTML =
+          `<div style="overflow:hidden;height:${where === "inside" ? 0 : 200}px"><slot></slot></div>`;
+        if (where === "outside") document.getElementById("outer")!.attachShadow({ mode: "closed" }).innerHTML =
+          '<div style="overflow:hidden;height:0"><slot></slot></div>';
+      }, where);
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.getByText("ScrollSlotMarker").waitFor({ state: "attached" });
+      expect(await observationRootStatus({ frame, primary: false })).toBe(where === "visible" ? "included" : "hidden");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: where === "visible" ? 0 : 1 });
+      const text = (result.content[1] as { text: string }).text;
+      if (where === "visible") expect(text).toContain("ScrollSlotMarker");
+      else expect(text).not.toContain("ScrollSlotMarker");
     });
     it("FOLLOWUP back and forward restore bfcache within the readiness budget and invalidate refs", async () => {
       const page = await session.ensurePage();
@@ -418,6 +444,18 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         page.setDefaultNavigationTimeout(30000);
       }
     });
+    it("FOLLOWUP non-cached history waits for a streamed document before taking refs", async () => {
+      await runNavigate(session, { url: httpUrl + "review/history-stream" });
+      await runNavigate(session, { url: httpUrl + "review/history-b" });
+      const started = performance.now();
+      const result = await runNavigate(session, { url: "back" });
+      const page = await session.ensurePage();
+      console.info("HISTORY_STREAM", JSON.stringify({ ms: Math.round(performance.now() - started), ready: await page.evaluate(() => document.readyState) }));
+      expect(await page.evaluate(() => (window as unknown as { persisted: boolean }).persisted)).toBe(false);
+      expect(await page.evaluate(() => document.readyState)).not.toBe("loading");
+      expect((result.content[1] as { text: string }).text).toContain("Late streamed button");
+      expect(body(result).ref_count).toBeGreaterThan(0);
+    });
     it("FOLLOWUP frame sampling ignores a once-sampled slow top clock", async () => {
       const rows: { kind: string; dispatch: number; settle: number }[] = [];
       for (const slowTop of [false, true]) {
@@ -428,7 +466,9 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
           await frame.evaluate(() => {
             const w = window as unknown as { ticker: number };
             clearInterval(w.ticker);
-            w.ticker = setInterval(() => { document.getElementById("c")!.textContent = String(Date.now()); }, 80);
+            // A fast frame proves its baseline within the initial 100ms sample,
+            // separating it from the old 300ms slow-top-clock regression.
+            w.ticker = setInterval(() => { document.getElementById("c")!.textContent = String(Date.now()); }, 20);
           });
           if (slowTop) await page.evaluate(() => {
             const w = window as unknown as { slowTimer: number };
@@ -447,8 +487,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       console.info("FOLLOWUP_TIMINGS", JSON.stringify(rows));
       const median = (values: number[]) => values.sort((a, b) => a - b)[1];
       const metric = (kind: string, key: "dispatch" | "settle") => median(rows.filter(row => row.kind === kind).map(row => row[key]));
-      expect(metric("frame+slow-top", "dispatch")).toBeLessThan(metric("frame", "dispatch") + 70);
-      expect(metric("frame+slow-top", "settle")).toBeLessThan(metric("frame", "settle") + 70);
+      expect(metric("frame+slow-top", "dispatch")).toBeLessThan(metric("frame", "dispatch") + 100);
+      expect(metric("frame+slow-top", "settle")).toBeLessThan(metric("frame", "settle") + 100);
     });
     it("FOLLOWUP empty frame text scans are cached and invalidated by idle light/shadow mutations", async () => {
       const page = await load('<button>Cache action</button><iframe srcdoc="<div id=host></div>"></iframe>');

@@ -65,7 +65,7 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
   while (frame.parentFrame()) {
     const element = await frame.frameElement();
     try {
-      const visible = mode === "attached" || (mode === "visible" ? await element.isVisible() : await element.evaluate(el => {
+      const visible = mode === "attached" || (mode === "visible" ? await element.isVisible() : await element.evaluate(async el => {
         if (!(el instanceof Element)) return false;
         const rect = el.getBoundingClientRect();
         const ownStyle = getComputedStyle(el);
@@ -88,7 +88,7 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
         // Slotted light-DOM children inherit clipping from the slot's shadow
         // ancestors before reaching the host, not from their light-DOM parent.
         const parent = (node: Element): Element | null => node.assignedSlot ?? node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
-        const fixedContainer = (node: Element): Element | null => {
+        const containingBlock = (node: Element, fixed: boolean): Element | null => {
           for (let ancestor = parent(node); ancestor; ancestor = parent(ancestor)) {
             const style = getComputedStyle(ancestor);
             const effect = ["transform", "filter", "perspective", "backdrop-filter", "-webkit-backdrop-filter", "translate", "scale", "rotate"]
@@ -99,12 +99,19 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
             // Non-default will-change may establish a containing block even
             // before its effect is applied. Keep clipping for unfamiliar hints
             // too: uncertain ancestors must retain the base fail-closed behavior.
-            if (effect || (style.willChange && style.willChange !== "auto") ||
+            if (style.display === "contents") continue;
+            if ((!fixed && style.position !== "static") || effect || (style.willChange && style.willChange !== "auto") ||
                 style.transformStyle === "preserve-3d" || style.contentVisibility === "auto" ||
                 /(?:layout|paint|strict|content)/.test(style.contain)) return ancestor;
           }
-          return null; // viewport-fixed descendants escape ordinary overflow
+          return fixed ? null : document.documentElement;
         };
+        // Layout sees clipping inside closed shadow roots even when assignedSlot
+        // is null. Check each scroll-reachable segment separately: expanding a
+        // scrollport root admits its reachable content without ignoring closed
+        // shadow clips inside it or around the scrollport itself.
+        const segments: { target: Element; root: Element | null }[] = [];
+        let layoutTarget = el;
         let overflowRoot: Element | null = null;
         let clipOverflow = true;
         let node: Element | null = el;
@@ -130,6 +137,7 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
           }
           if (node === overflowRoot) clipOverflow = true;
           if (node !== el && clipOverflow) {
+            let scrollable = false;
             // Scrollable ancestors expose their full scrollable content, not
             // just today's scrollport. Non-scrollable overflow really clips.
             for (const axis of ["x", "y"] as const) {
@@ -147,18 +155,21 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
               else { top = Math.max(top, lo); bottom = Math.min(bottom, hi); }
               if (!intersects()) return false;
               if (overflow === "auto" || overflow === "scroll") {
+                scrollable = true;
                 // Project reachable content back to its scrollport before
                 // checking outer ancestors/the document's scrollable area.
                 if (axis === "x") { left = origin; right = origin + size; }
                 else { top = origin; bottom = origin + size; }
               }
             }
+            if (scrollable) { segments.push({ target: layoutTarget, root: node }); layoutTarget = node; }
           }
           if (!intersects()) return false;
           // Overflow clips along containing blocks, not every DOM ancestor.
           // A positioned portal can therefore escape a zero-height wrapper.
           if (clipOverflow && (style.position === "fixed" || style.position === "absolute")) {
-            overflowRoot = style.position === "fixed" ? fixedContainer(node) : (node as HTMLElement).offsetParent;
+            // offsetParent follows light DOM for slotted frames in Chromium.
+            overflowRoot = containingBlock(node, style.position === "fixed");
             clipOverflow = false;
           }
           node = parent(node);
@@ -166,7 +177,21 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
         const doc = document.scrollingElement ?? document.documentElement;
         clip(-scrollX, -scrollY, Math.max(doc.scrollWidth, innerWidth) - scrollX,
           Math.max(doc.scrollHeight, innerHeight) - scrollY);
-        return intersects();
+        if (!intersects()) return false;
+        segments.push({ target: layoutTarget, root: null });
+        const results = await Promise.all(segments.map(({ target, root }) => new Promise<boolean>((resolve, reject) => {
+          const box = target.getBoundingClientRect();
+          const margin = Math.max(Math.abs(box.left), Math.abs(box.top), Math.abs(box.right), Math.abs(box.bottom),
+            root?.scrollWidth ?? doc.scrollWidth, root?.scrollHeight ?? doc.scrollHeight, innerWidth, innerHeight) + 1;
+          const timer = setTimeout(() => { observer.disconnect(); reject(new Error("layout visibility timed out")); }, 250);
+          const observer = new IntersectionObserver(entries => {
+            clearTimeout(timer); observer.disconnect();
+            const intersection = entries[0].intersectionRect;
+            resolve(intersection.width > 2 && intersection.height > 2);
+          }, { root, rootMargin: `${margin}px` });
+          observer.observe(target);
+        })));
+        return results.every(Boolean);
       }));
       hidden ||= !visible;
       if (root.scope && frame.parentFrame() === root.owner) {

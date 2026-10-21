@@ -126,11 +126,16 @@ export async function runNavigate(
   const dispatchStart = performance.now();
   let rewroteTo: string | undefined;
   if (target === "back" || target === "forward") {
-    // A bfcache restore commits without a fresh DOMContentLoaded. The bounded
-    // readiness check below works for both restored and newly loaded documents.
+    // Restores commit without a fresh DOMContentLoaded, but uncached history
+    // must still finish parsing (a streaming response can pause longer than our
+    // DOM-quiet window). Share a bounded navigation budget across both waits.
+    const timeout = 30_000;
     await (target === "back"
-      ? page.goBack({ waitUntil: "commit" })
-      : page.goForward({ waitUntil: "commit" }));
+      ? page.goBack({ waitUntil: "commit", timeout })
+      : page.goForward({ waitUntil: "commit", timeout }));
+    const ready = await page.waitForFunction(() => document.readyState !== "loading", undefined,
+      { timeout: Math.max(1, timeout - (performance.now() - dispatchStart)) });
+    await ready.dispose();
   } else {
     const requested = normalizeUrl(input.url);
     const refusal = (url: string) => {
