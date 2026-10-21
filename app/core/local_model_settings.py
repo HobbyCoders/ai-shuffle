@@ -5,8 +5,11 @@ knobs leave server defaults intact; existing provider entries are unchanged.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Qwen3 model card: https://huggingface.co/Qwen/Qwen3-8B#best-practices
 # Explicit opt-in only: these are recommendations, not measured quality wins.
@@ -49,7 +52,13 @@ def local_request_extra(row: dict | None, model: str | None) -> dict:
     entry = next((m for m in (row.get("models_json") or [])
                   if isinstance(m, dict) and m.get("id") == model), {})
     config = entry.get("local_settings")
-    validate_local_settings(config)
+    try:
+        validate_local_settings(config)
+    except ValueError:
+        # Synced rows can come from newer workers or hand-edited catalogs.
+        # Never leak configuration values (or exception text) into the log.
+        logger.warning("Ignoring unsupported local model settings; using server defaults")
+        return {}
     if config is None:
         return {}
     preset = config.get("preset")

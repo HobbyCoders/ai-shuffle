@@ -51,6 +51,22 @@ def test_vendor_presets_are_explicit_and_overridable(preset, temp, top_p, thinki
     assert extra["chat_template_kwargs"] == {"enable_thinking": not thinking}
 
 
+@pytest.mark.parametrize("config", [
+    {"server": "sglang"},
+    {"server": "vllm", "sampling": {"temperature": "private-invalid-value"}},
+    {"server": "vllm", "future_setting": "private-invalid-value"},
+    "private-invalid-value",
+])
+def test_invalid_synced_settings_keep_sessions_usable_without_logging_values(caplog, config):
+    with caplog.at_level("WARNING", logger="app.core.local_model_settings"):
+        assert local_request_extra(row(config), "local") == {}
+    assert len(caplog.records) == 1
+    assert "local model settings" in caplog.text
+    assert "private-invalid-value" not in caplog.text
+    assert "sglang" not in caplog.text
+    assert "temperature" not in caplog.text
+
+
 def test_unset_unknown_models_and_other_routes_keep_server_defaults():
     assert local_request_extra(row(None), "local") == {}
     assert local_request_extra(row({"server": "vllm"}), "local") == {}

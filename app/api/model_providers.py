@@ -249,6 +249,8 @@ def _validate_local_models(
     from app.core.local_model_settings import validate_local_settings
 
     for entry in models or []:
+        if not isinstance(entry, dict):
+            continue
         config = entry.get("local_settings")
         if config is None:
             continue
@@ -324,6 +326,14 @@ def _iso(value: Any) -> Optional[str]:
 
 def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
     """Shape a DB row (public columns only, no token) into the response model."""
+    models = []
+    for entry in row.get("models_json") or []:
+        # Legacy/synced catalogs may contain bare IDs or malformed entries.
+        # Normalize only the response; unrelated updates must not rewrite them.
+        if isinstance(entry, str):
+            entry = {"id": entry, "label": entry}
+        if isinstance(entry, dict):
+            models.append(entry)
     return ModelProviderResponse(
         id=row["id"],
         name=row["name"],
@@ -332,7 +342,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         api_dialect=row.get("api_dialect"),
         auth_token_set=bool(row.get("_auth_token_set")),
         auth_token_masked=row.get("_auth_token_masked", ""),
-        models=row.get("models_json") or [],
+        models=models,
         default_model=row.get("default_model"),
         small_fast_model=row.get("small_fast_model"),
         extra_env=row.get("extra_env_json") or {},

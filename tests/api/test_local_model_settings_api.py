@@ -45,5 +45,25 @@ def test_invalid_settings_return_400(authenticated_client, mock_db, config):
     assert create(authenticated_client, config).status_code == 400
 
 
+def test_rename_ignores_legacy_non_dict_model_entries(authenticated_client, mock_db):
+    from app.db import model_providers
+
+    response = create(authenticated_client, None)
+    assert response.status_code == 200, response.text
+    provider_id = response.json()["id"]
+    models = ["legacy-model", None, {"id": "local", "label": "Local"}]
+    model_providers.update_model_provider(provider_id, models_json=models)
+    response = authenticated_client.patch(ROOT + "/" + provider_id, json={"name": "Renamed"})
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "Renamed"
+    expected = [{"id": "legacy-model", "label": "legacy-model"}, {"id": "local", "label": "Local"}]
+    assert response.json()["models"] == expected
+    saved = next(p for p in authenticated_client.get(ROOT).json()["providers"]
+                 if p["id"] == provider_id)
+    assert saved["models"] == expected
+    # A rename must not rewrite synced/legacy model data.
+    assert model_providers.get_model_provider(provider_id)["models_json"] == models
+
+
 def test_local_settings_are_not_sent_to_cloud_routes(authenticated_client, mock_db):
     assert create(authenticated_client, {"server": "vllm"}, provider_type="openrouter").status_code == 400
