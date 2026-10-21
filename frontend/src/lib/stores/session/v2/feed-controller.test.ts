@@ -90,6 +90,13 @@ vi.mock('./sse-feed', () => ({
 	},
 }));
 
+// The phone panel asks the worker whether it has the emulator API.
+const emulatorStatus = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/emulator', async (orig) => ({
+	...(await orig<typeof import('$lib/api/emulator')>()),
+	fetchEmulatorStatus: emulatorStatus,
+}));
+
 import {
 	feedController,
 	CATCHUP_FALLBACK_MS,
@@ -104,6 +111,7 @@ import { pendingQueue } from '../pending-queue';
 import { swarms } from '../../swarms';
 import { get } from 'svelte/store';
 import { browserPanel } from '../../browser-panel.svelte';
+import { phonePanel } from '../../phone-panel.svelte';
 import { sidePanel, sessionPanelKey } from '../../side-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
 import type { ChatMessage } from '../../types';
@@ -1535,6 +1543,94 @@ describe('feedController browser-panel auto-open', () => {
 		browserPanel.closePanel('browser-dismissed');
 		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
 		expect(browserPanel.forSession('browser-dismissed').open).toBe(false);
+	});
+});
+
+// ─── Phone-panel auto-open on a live Emulator tool.use ───────────────────────
+
+describe('feedController phone-panel auto-open', () => {
+	beforeEach(async () => {
+		phonePanel.reset();
+		emulatorStatus.mockReset().mockResolvedValue({});
+		await phonePanel.ensureCapability();
+	});
+
+	function live(id: string, state: Partial<ActiveSessionState> = {}) {
+		const deps = makeDeps({ sessionId: id, ...state });
+		feedController.attach(deps);
+		feedController.start(id);
+		hoisted.onEvent!(caughtUp(0));
+		return deps;
+	}
+
+	// Every leg's name for the two tools: native (bridged), delegated CLI
+	// (wrapped by the bundled server) and bare.
+	it.each([
+		'mcp__builtins__Emulator',
+		'mcp__builtins__EmulatorScreenshot',
+		'mcp__fluid_bundled__mcp__builtins__Emulator',
+		'mcp__fluid_bundled__mcp__builtins__EmulatorScreenshot',
+		'Emulator',
+		'EmulatorScreenshot',
+	])('opens on a LIVE %s tool.use', (name) => {
+		const id = `phone-live-${name}`;
+		live(id);
+		expect(phonePanel.isOpen(id)).toBe(false);
+		hoisted.onEvent!(toolUse('t1', name));
+		expect(phonePanel.isOpen(id)).toBe(true);
+	});
+
+	it('does NOT open during history replay (before caught_up)', () => {
+		const id = 'phone-history';
+		feedController.attach(makeDeps({ sessionId: id }));
+		feedController.start(id);
+		hoisted.onEvent!(toolUse('t1', 'mcp__builtins__Emulator'));
+		hoisted.onEvent!(toolUse('t2', 'mcp__builtins__EmulatorScreenshot'));
+		hoisted.onEvent!(caughtUp(2));
+		expect(phonePanel.isOpen(id)).toBe(false);
+	});
+
+	it('stays closed for the session after the user closes it, until the user reopens it', () => {
+		const id = 'phone-closed';
+		live(id);
+		hoisted.onEvent!(toolUse('t1', 'mcp__builtins__Emulator'));
+		expect(phonePanel.isOpen(id)).toBe(true);
+		phonePanel.close(id);
+		hoisted.onEvent!(toolUse('t2', 'mcp__builtins__EmulatorScreenshot'));
+		expect(phonePanel.isOpen(id)).toBe(false);
+		// "Show phone" on the tool row: the user's choice, and the agent's calls open it again later.
+		phonePanel.open(id);
+		expect(phonePanel.isOpen(id)).toBe(true);
+	});
+
+	it('ignores other tools, a third-party "Emulator", and chats on another worker', () => {
+		live('phone-other');
+		hoisted.onEvent!(toolUse('t1', 'Bash'));
+		hoisted.onEvent!(toolUse('t2', 'mcp__someone__Emulator'));
+		expect(phonePanel.isOpen('phone-other')).toBe(false);
+		live('phone-remote', { isRemote: true });
+		hoisted.onEvent!(toolUse('t3', 'mcp__builtins__Emulator'));
+		expect(phonePanel.isOpen('phone-remote')).toBe(false);
+	});
+
+	it('takes the Changes list but not a terminal the user is looking at', () => {
+		const id = 'phone-panels';
+		live(id);
+		sidePanel.open(sessionPanelKey(id), 'changes');
+		hoisted.onEvent!(toolUse('t1', 'mcp__builtins__Emulator'));
+		expect(sidePanel.forScope(sessionPanelKey(id)).active).toBe('phone');
+		sidePanel.open(sessionPanelKey(id), 'terminal');
+		hoisted.onEvent!(toolUse('t2', 'mcp__builtins__Emulator'));
+		expect(sidePanel.forScope(sessionPanelKey(id)).active).toBe('terminal');
+	});
+
+	it('does not open on a worker without the emulator API', async () => {
+		phonePanel.reset();
+		emulatorStatus.mockReset().mockRejectedValue({ status: 404 });
+		await phonePanel.ensureCapability();
+		live('phone-none');
+		hoisted.onEvent!(toolUse('t1', 'mcp__builtins__Emulator'));
+		expect(phonePanel.isOpen('phone-none')).toBe(false);
 	});
 });
 

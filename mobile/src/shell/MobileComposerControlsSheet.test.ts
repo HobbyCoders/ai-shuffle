@@ -324,6 +324,14 @@ describe('Chat controls panel', () => {
 		expect(onBrowserToggle).toHaveBeenCalledOnce();
 	});
 
+	it('has no Phone cell: the phone opens when the agent uses it', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle: vi.fn(),
+			terminal: { open: false, disabledReason: null, toggle: vi.fn(), preload: vi.fn() } }) });
+		const actions = within(panel()).getByRole('group', { name: 'More actions' });
+		expect(within(actions).getByRole('button', { name: 'Terminal' })).toBeTruthy();
+		expect(within(panel()).queryByRole('button', { name: /phone|emulator/i })).toBeNull();
+	});
+
 	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {
 		const { unmount } = render(MobileComposerControlsSheet, { props: props({ open: true }) });
 		expect(within(panel()).queryByRole('button', { name: 'Terminal' })).toBeNull();
