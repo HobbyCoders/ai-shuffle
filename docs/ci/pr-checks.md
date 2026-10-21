@@ -461,12 +461,15 @@ also independently supports safe ancestors and rechecks its own pointer.
   `ci-folder-confinement.yml`.
 - The Linux `backend-linux` local suite runs both container runtime and image
   contracts serially. `check` runs their plain cases for container/startup changes;
-  `full` also enables the real-PostgreSQL functional cases when local PostgreSQL
-  binaries are available. These cases create disposable clusters, not connections
-  to a configured database. Checkpoint timing measurements remain explicit while
-  [#350](https://github.com/HobbyCoders/ai-shuffle/issues/350) is unresolved:
-  `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`. The gate prints
-  a coverage note when these measurements or PostgreSQL cases are not enabled.
+  `full` also runs the plain cases by default. While
+  [#350](https://github.com/HobbyCoders/ai-shuffle/issues/350) is unresolved, the
+  real-PostgreSQL functional cases require
+  `LOCAL_CI_CONTAINER_PG=1 python scripts/local_ci.py full`; checkpoint timing
+  measurements require `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`
+  (which also enables PG). Both opt-ins require local PostgreSQL binaries and
+  create disposable clusters, not connections to a configured database. The gate
+  prints a coverage note naming #350 and both opt-ins. Restore the PG functional
+  cases to default full coverage once #350 is fixed.
   The manual hosted backend job still covers other network-database and agent
   isolation contracts when a local run cannot answer the release question;
   do not dispatch it to discover failures.

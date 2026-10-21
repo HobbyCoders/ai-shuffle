@@ -472,10 +472,13 @@ def backend_linux(ctx: Context) -> None:
     # globals and measure idle/checkpoint timing under bounded disk pressure.
     # Each real-PG case creates its own cluster under tmp_path; no shared server
     # or TEST_POSTGRES_DSN is needed. Override inherited opt-ins/DSNs explicitly.
-    # Keep check deterministic and cheap on a busy developer machine. Full
-    # runs real-PG functional cases; host-sensitive timing stays explicit (#350).
-    container_pg = ctx.mode == "full" and bool(pg_bin)
-    container_pressure = container_pg and os.environ.get("LOCAL_CI_CONTAINER_PRESSURE") == "1"
+    # Keep check/full deterministic on busy developer machines. Until #350 is
+    # fixed, even the functional crash-recovery case hits a host-sensitive
+    # checkpoint budget. Both real-PG groups therefore require explicit opt-in.
+    pressure_optin = os.environ.get("LOCAL_CI_CONTAINER_PRESSURE") == "1"
+    container_pg = (ctx.mode == "full" and bool(pg_bin)
+                    and (os.environ.get("LOCAL_CI_CONTAINER_PG") == "1" or pressure_optin))
+    container_pressure = container_pg and pressure_optin
     container_env = {
         **env, "ALLOW_REAL_PG": "0", "TEST_POSTGRES_DSN": "",
         "AI_SHUFFLE_ENV_FILE": "/dev/null",
@@ -490,9 +493,10 @@ def backend_linux(ctx: Context) -> None:
     elif not pg_bin:
         ctx.notes.append("Container PostgreSQL and disk-pressure cases skipped: "
                          "no PostgreSQL binaries (set SMOKE_PG_BIN).")
-    if not container_pressure:
-        ctx.notes.append("Container checkpoint timing measurements disabled pending #350; "
-                         "run full with LOCAL_CI_CONTAINER_PRESSURE=1 and PostgreSQL binaries to opt in.")
+    ctx.notes.append("Container real-PG coverage is opt-in pending #350: run full with "
+                     "LOCAL_CI_CONTAINER_PG=1 for functional cases or "
+                     "LOCAL_CI_CONTAINER_PRESSURE=1 for measurements (implies PG); "
+                     "both require PostgreSQL binaries.")
     run([ctx.python, "-m", "pytest", "tests/core/test_container_runtime.py",
          "tests/core/test_container_image_contract.py", "-rs",
          *pytest_args(ctx.python, timeout=120, parallel=False)], env=container_env)

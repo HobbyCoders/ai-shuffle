@@ -172,10 +172,10 @@ jobs:
 
       - name: Measure managed PostgreSQL checkpoints and crash recovery
         # local_ci backend-linux also runs these files serially: plain cases
-        # in check, real-PG functional cases in full. Both stay outside the
-        # parallel fast subset. Local checkpoint measurements require explicit
-        # LOCAL_CI_CONTAINER_PRESSURE=1 while #350 is unresolved; this manual
-        # hosted measurement step opts into them below.
+        # in check and full, outside the parallel fast subset. While #350 is
+        # unresolved, local full PG cases require LOCAL_CI_CONTAINER_PG=1;
+        # LOCAL_CI_CONTAINER_PRESSURE=1 adds measurements and implies PG.
+        # This manual hosted measurement step opts into both below.
         env:
           ALLOW_REAL_PG: '1'
           TEST_POSTGRES_DSN: postgresql://shuffle_safety_test:safety-test-only@127.0.0.1:5432/shuffle_safety_test
