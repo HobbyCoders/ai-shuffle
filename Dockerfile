@@ -186,16 +186,18 @@ RUN mkdir -p /app/app/static
 COPY --from=frontend-builder --chown=root:root /src/frontend/build/ /app/app/static/
 
 # ── Copy pre-built AI tools from builder stage ──
-COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
+COPY --from=tools-builder --chown=root:root /tools/ /opt/ai-tools/
 
 # ── Copy the built browser-automation MCP server from its builder stage ──
 # Fluid launches `node /opt/browser-mcp/dist/index.js` when the tool is used (see
 # app/core/builtin_mcp_servers.py DEFAULT_BROWSER_MCP_ENTRY). node_modules here
 # is the pruned prod-only set; package.json ships so its `"type": "module"`
 # resolves at runtime.
-COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/dist/ /opt/browser-mcp/dist/
-COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
-COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
+COPY --from=browser-mcp-builder --chown=root:root /browser-mcp/dist/ /opt/browser-mcp/dist/
+COPY --from=browser-mcp-builder --chown=root:root /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
+COPY --from=browser-mcp-builder --chown=root:root /browser-mcp/package.json /opt/browser-mcp/package.json
+# Runtime tools read these trees; generated files belong in the workspace/data.
+RUN chmod -R go-w /opt/ai-tools /opt/browser-mcp
 
 COPY --chown=root:root .env.example .
 COPY --chown=root:root THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md

@@ -1,6 +1,29 @@
 #!/bin/bash
 set -e
 
+# Tool code and production dependencies are supplied by the image. Startup
+# validates them, but never repairs or installs packages with root privileges.
+require_bundled_tools() {
+    case "${1:-run}" in
+        dump|restore) return 0 ;;
+    esac
+    local tool entry
+    for tool in /opt/ai-tools /opt/browser-mcp; do
+        if [ ! -f "$tool/package.json" ] || [ ! -f "$tool/dist/index.js" ] || [ ! -d "$tool/node_modules" ] ||
+                [ -z "$(find "$tool/node_modules" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            echo "Bundled tool assets are missing in $tool; replace or rebuild the image. Startup will not install packages." >&2
+            return 1
+        fi
+    done
+    for entry in /opt/ai-tools/dist/worker.js /opt/browser-mcp/dist/egress-launch.js; do
+        if [ ! -f "$entry" ]; then
+            echo "Bundled tool assets are missing: $entry; replace or rebuild the image. Startup will not install packages." >&2
+            return 1
+        fi
+    done
+}
+require_bundled_tools "$@"
+
 # PostgreSQL is not up yet. This atomic marker mirrors the worker setting.
 # Until migration writes it, retain only an existing Claude user's install.
 claude_cli_keep_installed() {
@@ -57,7 +80,6 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     chown -R appuser:appuser /home/appuser
     # Image code stays root-owned. Retained DATA_DIR/postgres is validated by
     # the runtime, never recursively chowned.
-    find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
 else
     echo "UID/GID already correct, skipping user modification" >&2
 fi
