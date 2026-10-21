@@ -1,4 +1,4 @@
-import { observationRoots, includeObservationRoot, observationTask, boundedObservation } from "./observation_scope.js";
+import { observationRoots, observationRootStatus, observationTask, boundedObservation } from "./observation_scope.js";
 import type { Frame } from "playwright-core";
 import type { Session } from "../session.js";
 import { raceWithTimeout } from "../session.js";
@@ -46,7 +46,8 @@ export async function runWait(session: Session, input: WaitInput): Promise<McpTo
         if (!task) {
           task = observationTask(root, key, async () => {
             if (root.primary && root.frame.isDetached()) throw new Error("primary document detached");
-            if (!await includeObservationRoot(root, false)) return false;
+            const mode = state === "attached" || state === "detached" ? "attached" : "visible";
+            if (await observationRootStatus(root, mode) !== "included") return false;
             const scope = root.primary && root.scope ? root.scope : root.frame;
             const locator = input.selector ? scope.locator(input.selector)
               : scope.getByText(input.text!, { exact: input.match === "exact" });
