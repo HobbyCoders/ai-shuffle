@@ -133,6 +133,30 @@ describe('in-place editing on a fine pointer', () => {
   expect(onEdit).toHaveBeenLastCalledWith({ field: 'f', action: 'replace', value: 'helloX world', start: 6, end: 6 });
  });
 });
+describe('reported field metrics', () => {
+ it('uses the page field font, padding and line height, scaled to the view', async () => {
+  pointer(true);
+  // 40px input, 12px padding, 14px text; a 16px/1.5 textarea.
+  render(BrowserNativeEditor, { ...base, scale: 0.5, field: { id: 'f', type: 'text', label: 'Search', value: 'abc', x: 0, y: 0, width: 300, height: 40,
+   style: { fontSize: 14, lineHeight: null, paddingLeft: 12, paddingTop: 10, fontFamily: '"Segoe UI", Roboto, sans-serif' } } });
+  render(BrowserNativeEditor, { ...base, scale: 0.5, field: { id: 't', type: 'textarea', label: 'Notes', value: '', x: 0, y: 60, width: 300, height: 120,
+   style: { fontSize: 16, lineHeight: 24, paddingLeft: 8, paddingTop: 6, fontFamily: 'x;background:url(https://evil.example)' } } });
+  await tick();
+  const input = screen.getByRole('textbox', { name: 'Search' }) as HTMLInputElement;
+  const area = screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
+  // Text starts at (1px page border + padding) × scale, inside the overlay's own 1px border.
+  expect([input.style.fontSize, input.style.paddingLeft, input.style.paddingTop, input.style.lineHeight]).toEqual(['7px', '5.5px', '0px', 'normal']);
+  expect(input.style.fontFamily).toContain('Segoe UI');
+  expect([area.style.fontSize, area.style.paddingLeft, area.style.paddingTop, area.style.lineHeight]).toEqual(['8px', '3.5px', '2.5px', '12px']);
+  // A family that would smuggle in another declaration is dropped.
+  expect(area.style.fontFamily).toBe('');
+  expect(area.style.background).toBe('');
+  // Same metrics before and after focus: the text does not jump.
+  input.focus();
+  await tick();
+  expect([input.style.fontSize, input.style.paddingLeft]).toEqual(['7px', '5.5px']);
+ });
+});
 describe('navigation keys', () => {
  it('forwards arrows, paging, Tab and Escape to the page and leaves text keys local', async () => {
   pointer(true);

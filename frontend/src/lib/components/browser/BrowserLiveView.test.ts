@@ -646,7 +646,7 @@ describe('field overlay fill', () => {
 		await tick();
 		expect(getImageData).toHaveBeenCalled();
 		expect(overlay.style.getPropertyValue('--field-bg')).toBe('rgb(250 248 240)');
-		expect(overlay.style.getPropertyValue('--field-fg')).toBe('#141414');
+		expect(overlay.style.getPropertyValue('--field-fg')).toBe('#000');
 	});
 });
 
@@ -708,6 +708,15 @@ describe('desktop keyboard input', () => {
 			vi.advanceTimersByTime(1);
 			expect(sent(onInput).map((p) => [p.event, p.key, p.modifiers])).toEqual([['down', 'v', 2], ['up', 'v', 2]]);
 			onInput.mockClear();
+			// A paste that turns up after the fallback (150 ms) is dropped: the
+			// remote already pasted, and the text must not land twice.
+			vi.advanceTimersByTime(50);
+			const late = new Event('paste', { bubbles: true, cancelable: true });
+			Object.assign(late, { clipboardData: { getData: () => 'late' } });
+			surface.dispatchEvent(late);
+			expect(late.defaultPrevented).toBe(true);
+			expect(onInput).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1000);
 			// A paste event in time cancels the fallback.
 			await fireEvent.keyDown(surface, { key: 'v', code: 'KeyV', keyCode: 86, ctrlKey: true });
 			const e = new Event('paste', { bubbles: true, cancelable: true });
@@ -729,7 +738,8 @@ describe('desktop keyboard input', () => {
 		const text = sent(onInput).map((p) => p.text).join('');
 		expect(text).toBe('a'.repeat(65535)); // never half an emoji
 		await tick();
-		expect(screen.getByRole('status').textContent).toContain('first 65,536 characters');
+		// The count is what was really sent (one short: the emoji stayed whole).
+		expect(screen.getByRole('status').textContent).toContain('first 65,535 characters');
 	});
 
 	it('forwards navigation keys typed in a field overlay and hands Tab back to the live view', async () => {

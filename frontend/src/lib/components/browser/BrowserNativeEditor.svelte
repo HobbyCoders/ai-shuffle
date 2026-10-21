@@ -69,19 +69,36 @@
 		onEdit({ field: field.id, action: 'blur' });
 	}
 	onDestroy(() => { if (focused) onActive(false); });
+	const round = (n: number) => Math.round(n * 10) / 10;
 	const style = $derived.by(() => {
 		const box = `left:${left + field.x * scale}px;top:${top + field.y * scale}px;width:${field.width * scale}px;height:${field.height * scale}px`;
 		if (finePointer && !keys) {
-			// Roughly the page's own type size: a single-line field's text is about
-			// 0.62 of its height (13.33px in a 21px default input), capped at 16px;
-			// a textarea's rows are unknown, so use the default 13.5px. Applied while
-			// idle too: the click that focuses the field places the caret with
-			// these metrics, so they must already be the ones shown after focus.
-			const pageFont = field.type === 'textarea' ? 13.5 : Math.min(field.height * 0.62, 16);
-			const font = Math.max(6, Math.round(pageFont * scale * 10) / 10);
-			const pad = Math.max(1, Math.round(3 * scale * 10) / 10);
+			// Match the page's own text so the click that focuses the field puts
+			// the caret where that text really is (applied while idle too, so the
+			// text never moves on focus). Overlay border is 1px; the page border is
+			// taken as 1px too, so text starts at (border + padding) × scale.
+			const m = field.style;
+			const textarea = field.type === 'textarea';
+			let font: number, padX: number, padY: number, lineHeight: string, family = '';
+			if (m) {
+				font = m.fontSize * scale;
+				padX = Math.max(0, (m.paddingLeft + 1) * scale - 1);
+				padY = textarea ? Math.max(0, (m.paddingTop + 1) * scale - 1) : 0;
+				lineHeight = m.lineHeight ? `${round(m.lineHeight * scale)}px` : 'normal';
+				// A page-supplied value goes into a style attribute: keep it to a
+				// plain font list so it can never add other declarations.
+				if (/^[\w\s,"'.-]{1,256}$/.test(m.fontFamily)) family = `;font-family:${m.fontFamily}, system-ui, sans-serif`;
+			} else {
+				// Old runtimes report no metrics. A single-line field's text is about
+				// 0.62 of its height (13.33px in a 21px default input), capped at
+				// 16px; a textarea's rows are unknown, so use the default 13.5px.
+				font = (textarea ? 13.5 : Math.min(field.height * 0.62, 16)) * scale;
+				padX = Math.max(1, 3 * scale);
+				padY = textarea ? padX : 0;
+				lineHeight = '1.2';
+			}
 			const colors = inPlace && fill ? `;--field-bg:${fill.background};--field-fg:${fill.color}` : '';
-			return `${box};font-size:${font}px;line-height:1.2;padding:${field.type === 'textarea' ? pad : 0}px ${pad}px${colors}`;
+			return `${box};font-size:${Math.max(6, round(font))}px;line-height:${lineHeight};padding:${round(padY)}px ${round(padX)}px${family}${colors}`;
 		}
 		if (!enlarged) return box;
 		// A desktop page can be thumbnail-sized on a phone. Keep the hit target

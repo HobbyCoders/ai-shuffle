@@ -12,6 +12,16 @@ const state = {
 	control: { owner: 'agent', viewer_id: null, pending_viewer_id: null },
 };
 describe('workspace wire validation', () => {
+	it('accepts optional text metrics on a field and rejects malformed ones', () => {
+		const field = { id: 'f', type: 'text', label: 'Name', value: '', x: 0, y: 0, width: 100, height: 20 };
+		const style = { fontSize: 14, lineHeight: null, paddingLeft: 12, paddingTop: 4, fontFamily: 'Arial, sans-serif' };
+		expect(isBrowserWorkspaceState({ ...state, editors: [field] })).toBe(true);
+		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style }] })).toBe(true);
+		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: { ...style, lineHeight: 21 } }] })).toBe(true);
+		for (const bad of [null, 'big', { ...style, fontSize: 0 }, { ...style, paddingLeft: -1 }, { ...style, lineHeight: 'normal' }, { ...style, fontFamily: 'x'.repeat(257) }, { ...style, paddingTop: Infinity }]) {
+			expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: bad }] })).toBe(false);
+		}
+	});
 	it('accepts a short plain notice and rejects anything else', () => {
 		expect(isBrowserWorkspaceState({ ...state, notice: 'This step needs your own browser.' })).toBe(true);
 		for (const notice of [3, null, 'x'.repeat(513)]) {

@@ -4,10 +4,24 @@ export interface BrowserViewport {
 	height: number;
 }
 
+/** A page field's computed text metrics in unscaled CSS px (newer runtimes). */
+export interface BrowserEditorStyle {
+  fontSize: number; lineHeight: number | null; paddingLeft: number; paddingTop: number; fontFamily: string;
+}
+
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
   accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
   x: number; y: number; width: number; height: number;
+  style?: BrowserEditorStyle;
+}
+
+const metric = (v: unknown, max: number) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max;
+function editorStyle(v: unknown): boolean {
+	if (v === undefined) return true;
+	if (!object(v)) return false;
+	return metric(v.fontSize, 400) && (v.fontSize as number) > 0 && (v.lineHeight === null || metric(v.lineHeight, 800)) &&
+		metric(v.paddingLeft, 400) && metric(v.paddingTop, 400) && typeof v.fontFamily === 'string' && v.fontFamily.length <= 256;
 }
 
 export interface BrowserWorkspaceState {
@@ -96,7 +110,7 @@ export function isBrowserWorkspaceState(
 		(field.accept === undefined || (typeof field.accept === 'string' && field.accept.length <= 1024)) &&
 		(field.multiple === undefined || typeof field.multiple === 'boolean') &&
 		(field.chooser === undefined || typeof field.chooser === 'boolean') &&
-		(field.keys === undefined || typeof field.keys === 'boolean') &&
+		(field.keys === undefined || typeof field.keys === 'boolean') && editorStyle(field.style) &&
 		(field.type !== 'password' || field.value === '') && ['x', 'y', 'width', 'height'].every(k => typeof field[k] === 'number' && Number.isFinite(field[k])) &&
 		(field.width as number) > 0 && (field.height as number) > 0))) return false;
 	const ids = new Set<string>();

@@ -177,44 +177,53 @@
 	}
 
 	/**
-	 * The page field's fill as drawn in the current frame, so the focused editor
-	 * can wear the same colour instead of a theme box. It is the most common
-	 * colour inside the field (text, carets and resize grips are a minority).
-	 * Text gets black or white for contrast.
+	 * The page field's fill in the current frame, so the focused editor can wear
+	 * the same colour instead of a theme box. Only the field's rectangle is
+	 * copied from the decoded frame (never read back from the on-screen canvas,
+	 * which carries inspect highlights) and a grid across it is sampled: the
+	 * most common colour wins, since text, carets and resize grips are a
+	 * minority. Text is pure black or white, whichever contrasts more.
 	 */
 	function fieldSurface(f: BrowserEditor): { background: string; color: string } | null {
 		const meta = currentMeta;
-		if (!canvasEl || !currentBitmap || !metaIsDrawable(meta)) return null;
+		const bitmap = currentBitmap;
+		if (!bitmap || !metaIsDrawable(meta)) return null;
 		try {
-			const ctx = canvasEl.getContext('2d');
-			const rect = canvasEl.getBoundingClientRect();
-			if (!ctx || rect.width <= 0) return null;
-			const box = { left: 0, top: 0, width: rect.width, height: rect.height };
-			const scale = fitScale(box, meta);
-			const off = letterbox(box, meta, scale);
-			const dpr = canvasEl.width / rect.width;
+			// The JPEG can be smaller than the CSS viewport it shows.
+			const kx = (bitmap.width || meta.deviceWidth) / meta.deviceWidth;
+			const ky = (bitmap.height || meta.deviceHeight) / meta.deviceHeight;
 			// Stay clear of the border (and its blur in the scaled JPEG).
 			const ix = Math.min(4, f.width / 4);
 			const iy = Math.min(4, f.height / 4);
-			const x0 = Math.round((off.x + (f.x + ix) * scale) * dpr);
-			const y0 = Math.round((off.y + (f.y + iy) * scale) * dpr);
-			const w = Math.round((f.width - 2 * ix) * scale * dpr);
-			const h = Math.round((f.height - 2 * iy) * scale * dpr);
+			const sx = Math.round((f.x + ix) * kx);
+			const sy = Math.round((f.y + iy) * ky);
+			const w = Math.min(512, Math.round((f.width - 2 * ix) * kx));
+			const h = Math.min(512, Math.round((f.height - 2 * iy) * ky));
 			if (w < 1 || h < 1) return null;
-			const data = ctx.getImageData(x0, y0, w, h).data;
-			const step = Math.max(1, Math.floor((w * h) / 600));
+			const scratch: OffscreenCanvas | HTMLCanvasElement =
+				typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : Object.assign(document.createElement('canvas'), { width: w, height: h });
+			const ctx = scratch.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+			if (!ctx) return null;
+			ctx.drawImage(bitmap, sx, sy, w, h, 0, 0, w, h);
+			const data = ctx.getImageData(0, 0, w, h).data;
+			const cols = Math.min(w, 24);
+			const rows = Math.min(h, 8);
 			const groups = new Map<number, { n: number; r: number; g: number; b: number }>();
-			for (let i = 0; i < w * h; i += step) {
-				const o = i * 4;
-				if (data[o + 3] < 200) continue; // letterbox / outside the frame
-				// JPEG noise: group near-identical colours.
-				const key = ((data[o] >> 4) << 8) | ((data[o + 1] >> 4) << 4) | (data[o + 2] >> 4);
-				const grp = groups.get(key) ?? { n: 0, r: 0, g: 0, b: 0 };
-				grp.n++;
-				grp.r += data[o];
-				grp.g += data[o + 1];
-				grp.b += data[o + 2];
-				groups.set(key, grp);
+			for (let row = 0; row < rows; row++) {
+				for (let col = 0; col < cols; col++) {
+					const px = Math.floor(((col + 0.5) * w) / cols);
+					const py = Math.floor(((row + 0.5) * h) / rows);
+					const o = (py * w + px) * 4;
+					if (data[o + 3] < 200) continue; // outside the frame
+					// JPEG noise: group near-identical colours.
+					const key = ((data[o] >> 4) << 8) | ((data[o + 1] >> 4) << 4) | (data[o + 2] >> 4);
+					const grp = groups.get(key) ?? { n: 0, r: 0, g: 0, b: 0 };
+					grp.n++;
+					grp.r += data[o];
+					grp.g += data[o + 1];
+					grp.b += data[o + 2];
+					groups.set(key, grp);
+				}
 			}
 			let best: { n: number; r: number; g: number; b: number } | undefined;
 			for (const grp of groups.values()) if (!best || grp.n > best.n) best = grp;
@@ -222,7 +231,10 @@
 			const [r, g, b] = [best.r, best.g, best.b].map((c) => Math.round(c / best!.n));
 			const lin = (c: number) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 			const luminance = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-			return { background: `rgb(${r} ${g} ${b})`, color: luminance > 0.18 ? '#141414' : '#f2f2f2' };
+			// Contrast against black is (L + 0.05) / 0.05, against white 1.05 / (L + 0.05).
+			const onBlack = (luminance + 0.05) / 0.05;
+			const onWhite = 1.05 / (luminance + 0.05);
+			return { background: `rgb(${r} ${g} ${b})`, color: onBlack >= onWhite ? '#000' : '#fff' };
 		} catch {
 			return null; // no readable frame: the editor falls back to theme colours
 		}
@@ -421,7 +433,7 @@
 			// Never end on half of a surrogate pair.
 			const end = /[\uD800-\uDBFF]/.test(text[PASTE_LIMIT - 1]) ? PASTE_LIMIT - 1 : PASTE_LIMIT;
 			text = text.slice(0, end);
-			notice = `Pasted the first ${PASTE_LIMIT.toLocaleString('en-US')} characters; the rest was too long to send.`;
+			notice = `Pasted the first ${end.toLocaleString('en-US')} characters; the rest was too long to send.`;
 			clearTimeout(noticeTimer);
 			noticeTimer = setTimeout(() => (notice = null), 5000);
 		}
@@ -881,12 +893,17 @@
 	// Safari raises no paste event on non-editable content, so if none follows
 	// the shortcut promptly, the remote pastes from its own clipboard instead.
 	let pasteFallback: ReturnType<typeof setTimeout> | undefined;
+	/** When the fallback Ctrl+V went out: a paste event arriving after it is late. */
+	let pasteFallbackAt = -Infinity;
+	const LATE_PASTE_MS = 1000;
 	onDestroy(() => clearTimeout(pasteFallback));
 	function expectPaste() {
 		clearTimeout(pasteFallback);
 		pasteFallback = setTimeout(() => {
 			pasteFallback = undefined;
-			if (interactive && !inspecting && !disposed) keyPair('v', 'KeyV', 86, MOD_CTRL);
+			if (!interactive || inspecting || disposed) return;
+			pasteFallbackAt = Date.now();
+			keyPair('v', 'KeyV', 86, MOD_CTRL);
 		}, 100);
 	}
 
@@ -907,6 +924,9 @@
 		pasteFallback = undefined;
 		e.preventDefault();
 		e.stopPropagation();
+		// The remote already pasted its own clipboard for this shortcut: a late
+		// local paste would put the text in twice.
+		if (Date.now() - pasteFallbackAt < LATE_PASTE_MS) return;
 		const text = e.clipboardData?.getData('text/plain') ?? '';
 		// Nothing textual (an image, an empty clipboard): let the remote browser
 		// paste from its own clipboard, as Ctrl+V did before.
