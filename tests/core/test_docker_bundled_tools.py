@@ -67,7 +67,7 @@ def test_entrypoint_never_installs_or_chowns_bundled_tools():
     source = (ROOT / "entrypoint.sh").read_text()
     assert not re.search(r"\bnpm\s+(?:install|ci)\b", source)
     assert not re.search(r"^.*(?:chown.*?/opt/|/opt/.*?chown).*", source, re.M)
-    assert source.index('require_bundled_tools "$@"') < source.index('if [ "$(id -u)" != "0" ]')
+    assert source.index('require_bundled_tools "$@"') < source.index('if [ "$(/usr/bin/id -u)" != "0" ]')
 
 
 def test_docker_tool_assets_are_root_owned_and_not_group_writable():
