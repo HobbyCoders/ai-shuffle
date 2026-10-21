@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fluid.tools.registry import ToolCtx
 
-from app.core.native_generation_settings import account_view, list_accounts, load
+from app.core.native_generation_settings import account_view, list_accounts, load, save
 from app.core.provider import native_images, native_video, supergrok_images
 from tests.core.test_native_generation import accounts
 from tests.core.test_native_image_settings import jpeg
@@ -30,15 +30,15 @@ async def test_no_account_never_sends_an_image_request(tmp_path, overrides):
 
 
 @pytest.mark.parametrize("key,raw,image_enabled,video_enabled", [
-    ("native_generation:grok-a", "{broken", True, True),
+    ("native_generation:grok-a", "{broken", True, False),
     ("native_generation:grok-a", '{"image":null,"video":{"model":"unproven"}}', False, False),
     ("native_generation:grok-a", '{"image":{"model":"grok-imagine-image-2.0","size":"2k","format":"png"},"video":null}', True, False),
     ("native_generation:grok-a", '{"image":null}', False, False),
     ("native_generation:grok-a", '{"video":null}', True, False),
     ("native_generation:grok-a", 'null', True, False),
     ("native_generation:grok-a", '[]', True, False),
-    ("native_images_grok", "{broken", True, True),
-    ("native_images_grok", "", True, True),
+    ("native_images_grok", "{broken", True, False),
+    ("native_images_grok", "", True, False),
     ("native_images_grok", '{"model":"unproven","size":"2k","format":"png"}', True, False),
 ])
 def test_stale_account_falls_back_and_does_not_break_list(monkeypatch, key, raw, image_enabled, video_enabled):
@@ -82,6 +82,24 @@ async def test_stale_peer_group_never_reenables_a_disabled_tool(monkeypatch, tmp
     assert account_view("grok-a")["stale"] is True
 
 
+async def test_disabled_video_with_corrupt_row_never_calls_provider(monkeypatch, tmp_path):
+    _, stored = accounts(monkeypatch)
+    settings = load("grok-a")
+    settings.video = None
+    save("grok-a", settings)
+    assert json.loads(stored["native_generation:grok-a"])["video"] is None
+    stored["native_generation:grok-a"] = "{broken"
+    video = AsyncMock()
+    monkeypatch.setattr(native_video, "generate", video)
+    engine = SimpleNamespace(record_auxiliary_usage=AsyncMock())
+    result = await native_video.make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "grok-a")({"prompt": "tree"}, ToolCtx(cwd=str(tmp_path)))
+    assert result.is_error and "disabled" in result.text
+    video.assert_not_called()
+    view = account_view("grok-a")
+    assert view["stale"] is True
+    assert view["reason"] == "Stored Native generation settings are invalid or no longer verified; disabled groups preserved and invalid groups reset safely."
+
+
 @pytest.mark.parametrize("invalid", ["image", "video"])
 def test_stale_group_keeps_valid_peer_unchanged(monkeypatch, invalid):
     _, stored = accounts(monkeypatch)
@@ -116,7 +134,7 @@ async def test_video_save_failure_keeps_reported_cost_in_result_fields(monkeypat
     engine.record_auxiliary_usage.assert_awaited_once()
 
 
-async def test_stale_settings_tools_use_verified_defaults(monkeypatch, tmp_path):
+async def test_stale_settings_image_uses_verified_default_and_video_refuses(monkeypatch, tmp_path):
     _, stored = accounts(monkeypatch)
     stored["native_generation:grok-a"] = "{broken"
     image = AsyncMock(return_value=([{"result": base64.b64encode(jpeg()).decode()}], None))
@@ -126,9 +144,10 @@ async def test_stale_settings_tools_use_verified_defaults(monkeypatch, tmp_path)
     engine = SimpleNamespace(provider=SimpleNamespace(name="openai_responses"), model="chat", record_auxiliary_usage=AsyncMock())
     outcome = await native_images.make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "grok-a")({"prompt": "tree"}, ToolCtx(cwd=str(tmp_path)))
     assert not outcome.is_error, outcome.text
-    await native_video.make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "grok-a")({"prompt": "tree"}, ToolCtx(cwd=str(tmp_path)))
+    result = await native_video.make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "grok-a")({"prompt": "tree"}, ToolCtx(cwd=str(tmp_path)))
     assert image.call_args.args[2].model == "grok-imagine-image"
-    assert video.call_args.args[2].duration == 1
+    assert result.is_error and "disabled" in result.text
+    video.assert_not_called()
 
 
 @pytest.mark.parametrize("provider_id,exposed", [(None, False), ("openai-api", False), ("xai-api", False), ("grok-a", True), ("chatgpt-a", True)])

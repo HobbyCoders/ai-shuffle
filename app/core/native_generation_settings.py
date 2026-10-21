@@ -139,8 +139,8 @@ def _load_with_status(provider_id):
         try:
             data = json.loads(raw)
         except (ValueError, TypeError):
-            # Only unreadable JSON loses all knowledge of disabled groups.
-            return defaults, True
+            # Unknown owner choices must not enable billed video.
+            return NativeGenerationSettings(image=defaults.image, video=None), True
         return _validated_stored_groups(kind, data, defaults)
     # Read compatibility only; never rewrite an account or echo stored values.
     legacy = database.get_system_setting(f"native_images_{kind}") if defaults.image else None
@@ -149,7 +149,7 @@ def _load_with_status(provider_id):
     try:
         data = json.loads(legacy)
     except (ValueError, TypeError):
-        return defaults, True
+        return NativeGenerationSettings(image=defaults.image, video=None), True
     try:
         old = NativeImageSettings.model_validate(data)
         if kind == "grok" and old.quality == "default":

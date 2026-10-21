@@ -629,9 +629,11 @@ These backend endpoints do not implement a settings UI.
   a sanitized `reason`. When JSON parses, each group is validated independently:
   explicit `null` stays disabled and valid peer groups are unchanged. An invalid
   Image group uses the verified image default (or `null` if unavailable); an
-  invalid Video group becomes `null`. Both groups use provider defaults only if
-  the JSON cannot be parsed. Reads/tools never rewrite the stored row, and one
-  stale account does not fail the list.
+  invalid Video group becomes `null`. Unparseable JSON uses the verified Image
+  default (or `null` if unavailable) and disables Video because the owner's
+  choice is unknown. Accounts with no stored settings keep provider defaults,
+  including Video on SuperGrok. Reads/tools never rewrite the stored row, and
+  one stale account does not fail the list.
 - Owner-only `PUT` to that account path replaces both groups. Each group may be
   `null` (disabled); unsupported options, extra fields or unknown accounts return
   `422`. Image fields are `model`, `size`, `quality` (nullable) and `format`.

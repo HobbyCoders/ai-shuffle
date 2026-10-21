@@ -8,8 +8,9 @@ provider row and credential, not chat-model name sniffing. ChatGPT uses a separa
 the native `image_generation` tool and matching `tool_choice`. SuperGrok
 subscription sessions instead use the tested xAI `/v1/images/generations`
 endpoint with `grok-imagine-image`, `n=1`, square `1k` and base64 output. No
-OpenAI-specific fields reach xAI and neither route falls back to another provider. The assistant-facing function participates in the ordinary
-tool permissions and allow/deny lists.
+OpenAI-specific fields reach xAI and neither route falls back to another provider.
+The assistant-facing function participates in the ordinary tool permissions and
+allow/deny lists.
 
 This route does not require fal.ai. A failure in either route says nothing about
 the other route. The provider settings panel explains this separation. Provider
@@ -30,11 +31,14 @@ and does not change the AI Shuffle direct tools or their existing ChatGPT choice
 Stale account/legacy settings return `stale: true` with a sanitized GET reason.
 When JSON parses, groups are validated independently: explicit null remains
 disabled, valid groups are preserved, invalid Image uses its verified default
-(or null if unavailable), and invalid Video becomes null. Only unparseable JSON
-falls back to both provider defaults. Tools use the same recovery without
-rewriting the stored row; one stale account cannot break the list. The settings
-UI is cancelled and superseded by #379 ("say what you want" generation). The unscoped direct `supergrok-subscription`
-model lane is not included. See the mirrored settings API reference for the GET/PUT schema. OpenAI's
+(or null if unavailable), and invalid Video becomes null. Unparseable JSON
+uses the verified Image default (or null if unavailable) and disables Video
+because the owner's choice is unknown. Accounts with no stored settings retain
+their provider defaults, including Video on SuperGrok. Tools use the same
+recovery without rewriting the stored row; one stale account cannot break the
+list. The settings UI is cancelled and superseded by #379 ("say what you want"
+generation). The unscoped direct `supergrok-subscription` model lane is not
+included. See the mirrored settings API reference for the GET/PUT schema. OpenAI's
 [image-tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
 documents the native tool, forced tool choice, final base64 output, and examples
 using GPT-6 Astra with GPT Image 2.5 Sunburst. These examples do not establish
