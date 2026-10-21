@@ -129,11 +129,13 @@ export async function runNavigate(
     // Restores commit without a fresh DOMContentLoaded, but uncached history
     // must still finish parsing (a streaming response can pause longer than our
     // DOM-quiet window). Share the page's navigation budget across both waits.
+    // Playwright has no public timeout getter. Prefer its resolver to preserve
+    // context defaults and 0 (no timeout); fall back to Playwright's default if
+    // an upgrade removes or renames this private API.
+    const settings = (page as unknown as { _timeoutSettings?: { navigationTimeout?: (options: object) => number } })
+      ._timeoutSettings;
+    const timeout = typeof settings?.navigationTimeout === "function" ? settings.navigationTimeout({}) : 30_000;
     try {
-      // Playwright has no public timeout getter. Use the same resolver as its
-      // navigation methods, including context defaults and 0 (no timeout).
-      const timeout = (page as unknown as { _timeoutSettings: { navigationTimeout(options: object): number } })
-        ._timeoutSettings.navigationTimeout({});
       await (target === "back"
         ? page.goBack({ waitUntil: "commit", timeout })
         : page.goForward({ waitUntil: "commit", timeout }));

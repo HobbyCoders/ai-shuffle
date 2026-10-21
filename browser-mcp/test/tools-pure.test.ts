@@ -264,6 +264,21 @@ describe("content warning via browser_navigate", () => {
       else { expect(options.timeout).toBeGreaterThan(0); expect(options.timeout).toBeLessThanOrEqual(timeout); }
     } finally { wait.mockRestore(); }
   });
+  it.each(["back", "forward"])("uses Playwright's default for %s without private timeout settings", async direction => {
+    const session = navSession(RICH_SNAPSHOT, 2, RENDERED);
+    const page = await session.ensurePage();
+    Reflect.deleteProperty(page, "_timeoutSettings");
+    const move = vi.spyOn(page, direction === "back" ? "goBack" : "goForward");
+    const wait = vi.spyOn(page, "waitForFunction");
+    try {
+      await runNavigate(session, { url: direction });
+      expect(move).toHaveBeenCalledWith({ waitUntil: "commit", timeout: 30_000 });
+      const options = wait.mock.calls[0][2]!;
+      expect(options.polling).toBe(100);
+      expect(options.timeout).toBeGreaterThan(0);
+      expect(options.timeout).toBeLessThanOrEqual(30_000);
+    } finally { move.mockRestore(); wait.mockRestore(); }
+  });
   it("does not flag a same-origin redirect or a history move", async () => {
     const same = bodyOf(
       await runNavigate(
