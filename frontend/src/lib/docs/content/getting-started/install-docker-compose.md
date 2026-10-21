@@ -377,6 +377,12 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/sessions
 
 Earlier versions let `docker exec <container> curl http://localhost:8000/...` (and the host itself, with `network_mode: host`) act as the owner without a password; those calls now get `401` or `403`. Requests from the host through the published port always needed a sign-in, so they are unchanged, and so is the health check. Keep the token out of project folders and the container's environment, where agents could read it. Details: [Calling a Docker worker from scripts](/docs/api-reference/authentication#calling-a-docker-worker-from-scripts).
 
+## Bundled tool assets
+
+The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`.
+
+If startup reports `Bundled tool assets are missing`, replace or rebuild the image and remove any mount hiding `/opt/ai-tools` or `/opt/browser-mcp`. Startup does not install packages or continue with incomplete bundled tools. Database dump and restore remain available without these assets.
+
 ## Optional settings
 
 These are only needed in special cases. Uncomment the matching line under `environment:` in `compose.yaml` (or add `-e NAME=value` to `docker run`), then run `docker compose up -d`. A line in `.env` alone does not reach the container.
