@@ -125,13 +125,15 @@ import pytest
 from tests.smoke import test_app_boot as boot
 from tests.smoke.test_app_boot import server
 
-@pytest.fixture(autouse=True)
-def fake_startup(monkeypatch):
-    monkeypatch.setattr(boot, "_pg16_bindir", lambda: "/unused")
-    monkeypatch.setattr(boot, "_load_container_runtime", lambda: Mock())
-    def crash(*args, **kwargs):
-        raise RuntimeError("intentional startup crash")
-    monkeypatch.setattr(boot.subprocess, "Popen", crash)
+@pytest.fixture(scope="module", autouse=True)
+def fake_startup():
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(boot, "_pg16_bindir", lambda: "/unused")
+        monkeypatch.setattr(boot, "_load_container_runtime", lambda: Mock())
+        def crash(*args, **kwargs):
+            raise RuntimeError("intentional startup crash")
+        monkeypatch.setattr(boot.subprocess, "Popen", crash)
+        yield
 
 def test_boot(server):
     pass
