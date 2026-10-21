@@ -845,6 +845,126 @@ def mounted_directory(path):
     return os.path.ismount(path) or path in mount_points()
 
 
+HOME_VOLUMES = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
+
+
+def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entries=20000, max_seconds=5):
+    """Best-effort, bounded repair of root writes in the fixed application home.
+
+    Descriptors pin every parent and changed inode. No symlinks, shared files,
+    retained storage aliases or unlisted mounts participate in ownership repair.
+    """
+    home = Path(os.path.abspath(home))
+    protected = [Path(os.path.abspath(path)) for path in (data_dir, workspace_dir)]
+    protected_inodes = set()
+    result = {"repaired": 0, "skipped": 0, "reasons": {}, "visited": 0, "limited": False}
+    sample = []
+    started = time.monotonic()
+
+    def skip(reason):
+        result["skipped"] += 1
+        result["reasons"][reason] = result["reasons"].get(reason, 0) + 1
+
+    def storage(path, info):
+        return ((info.st_dev, info.st_ino) in protected_inodes
+                or any(path == parent or parent in path.parents for parent in protected))
+
+    def limited():
+        result["limited"] = result["visited"] >= max_entries or time.monotonic() - started >= max_seconds
+        return result["limited"]
+
+    def walk(root, mounts):
+        root_fd = open_directory(root)
+        try:
+            root_info = os.fstat(root_fd)
+            if storage(root, root_info):
+                skip("storage")
+                return
+            for directory, dirs, files, fd in os.fwalk(
+                    ".", dir_fd=root_fd, follow_symlinks=False, onerror=lambda _: skip("unavailable")):
+                path = root / directory
+                current = os.fstat(fd)
+                if current.st_dev != root_info.st_dev or storage(path, current):
+                    dirs[:] = []
+                    skip("storage" if storage(path, current) else "device")
+                    continue
+                kept = []
+                for name in (["."] if path == root else []) + dirs + files:
+                    if limited():
+                        dirs[:] = []
+                        return
+                    result["visited"] += 1
+                    child = path if name == "." else path / name
+                    try:
+                        entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if storage(child, entry):
+                            skip("storage")
+                            continue
+                        if entry.st_dev != root_info.st_dev:
+                            skip("device")
+                            continue
+                        if name != "." and (child in mounts or os.path.ismount(child)):
+                            skip("mount")
+                            continue
+                        if stat.S_ISDIR(entry.st_mode):
+                            if name != ".":
+                                kept.append(name)
+                        elif not stat.S_ISREG(entry.st_mode):
+                            skip("type")
+                            continue
+                        elif entry.st_nlink != 1:
+                            skip("hardlink")
+                            continue
+                        if entry.st_uid != 0:
+                            skip("not-root")
+                            continue
+                        child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                        try:
+                            pinned = os.fstat(child_fd)
+                            if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
+                                    or pinned.st_uid != 0
+                                    or not (stat.S_ISDIR(pinned.st_mode)
+                                            or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                                skip("changed")
+                                continue
+                            os.fchown(child_fd, uid, gid)
+                            result["repaired"] += 1
+                            if len(sample) < 5:
+                                sample.append(str(child.relative_to(home))[:120])
+                        finally:
+                            os.close(child_fd)
+                    except OSError:
+                        skip("unavailable")
+                dirs[:] = kept
+        finally:
+            os.close(root_fd)
+
+    try:
+        if min(uid, gid) <= 0:
+            raise OSError("non-root destination required")
+        for path in protected:
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue
+            protected_inodes.add((info.st_dev, info.st_ino))
+        mounts = mount_points()
+        roots = [home, *(home / name for name in HOME_VOLUMES if home / name in mounts)]
+        for root in roots:
+            if limited():
+                break
+            try:
+                walk(root, mounts)
+            except OSError:
+                skip("unavailable")
+    except OSError:
+        skip("unavailable")
+    log(f"home ownership repair: repaired={result['repaired']} skipped={result['skipped']} "
+        f"reasons={json.dumps(result['reasons'], sort_keys=True)} visited={result['visited']} "
+        f"limit_reached={result['limited']} sample={json.dumps(sample)}")
+    return result
+
+
 def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
     """Migrate agent-owned home entries, never service data or shared inodes."""
     home, data_dir = safe_path(home), safe_path(data_dir)
@@ -865,9 +985,8 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
         if module.setting() == "required":
             raise RuntimeFailure(str(error)) from None
         service_uid = module.DEFAULT_SERVICE_ID
-    volumes = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
     roots = [(home, old_uid, old_gid, False)]
-    roots += [(home / name, None, None, True) for name in volumes if home / name in mounts]
+    roots += [(home / name, None, None, True) for name in HOME_VOLUMES if home / name in mounts]
     for root, previous_uid, previous_gid, mounted in roots:
         root_fd = None
         try:
@@ -1377,8 +1496,12 @@ def main(argv=None):
         if args.action == "remap-home":
             if os.geteuid() != 0 or min(args.old_uid, args.old_gid, args.new_uid, args.new_gid) <= 0:
                 raise RuntimeFailure("home remapping requires root and non-root account IDs")
-            remap_home(Path("/home/appuser"), load_startup_settings().effective_data_dir,
+            settings = load_startup_settings()
+            home = Path("/home/appuser")
+            remap_home(home, settings.effective_data_dir,
                        args.old_uid, args.old_gid, args.new_uid, args.new_gid)
+            repair_home_root_files(home, settings.effective_data_dir, settings.effective_workspace_dir,
+                                   args.new_uid, args.new_gid)
             return 0
         drop_privileges(load_startup_settings(), maintenance=args.action in {"dump", "restore"})
         # Only unprivileged code may import the application (or hand over to a

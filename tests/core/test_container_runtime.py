@@ -824,6 +824,162 @@ def home_ownership(monkeypatch):
     return configure
 
 
+@pytest.mark.parametrize("kind", ["exec-file", "hardlink", "symlink", "mount", "swap"])
+def test_home_root_repair_safety(tmp_path, monkeypatch, home_ownership, kind):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    victim = home / "exec-file"
+    victim.write_text("docker exec style write")
+    outside = tmp_path / "shadow-like"
+    outside.write_text("protected fixture")
+    owners = {victim: (0, 0), outside: (0, 0)}
+    if kind == "hardlink":
+        (home / "linked").hardlink_to(victim)
+        owners[home / "linked"] = (0, 0)
+    elif kind == "symlink":
+        victim.unlink()
+        victim.symlink_to(outside)
+    elif kind == "mount":
+        victim.unlink()
+        victim.mkdir()
+        (victim / "foreign").write_text("another mount")
+        owners[victim / "foreign"] = (0, 0)
+    changed = home_ownership(owners)
+    if kind == "mount":
+        monkeypatch.setattr(runtime, "mount_points", lambda: {victim})
+    elif kind == "swap":
+        original_open = os.open
+        def swapped(name, flags, *args, **kwargs):
+            return original_open(outside if name == "exec-file" else name, flags, *args, **kwargs)
+        monkeypatch.setattr(runtime.os, "open", swapped)
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == ([(victim, 41002, 41002)] if kind == "exec-file" else [])
+    assert result["repaired"] == (1 if kind == "exec-file" else 0)
+    assert result["reasons"].get({"hardlink": "hardlink", "symlink": "type", "mount": "mount", "swap": "changed"}.get(kind, "not-root"), 0)
+
+
+def test_home_root_repair_fixed_mounts_and_storage_aliases(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    volume = home / ".local"
+    for directory in (volume, data, workspace):
+        directory.mkdir(parents=True)
+    paths = [volume / "repair", home / "data-alias", home / "workspace-alias"]
+    paths[0].write_text("fixture")
+    for alias in paths[1:]:
+        alias.mkdir()
+        (alias / "untouched").write_text("retained storage")
+    changed = home_ownership({path: (0, 0) for path in [volume, *paths, *(p / "untouched" for p in paths[1:])]},
+                             aliases={paths[1]: data.stat(), paths[2]: workspace.stat()})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert {entry[0] for entry in changed} == {volume, paths[0]}
+    assert result["reasons"]["storage"] == 2
+    again = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert again["repaired"] == 0
+    assert len(changed) == 2
+
+
+def test_home_root_repair_is_bounded_and_logs_capped_relative_sample(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    files = [home / f"file-{index}" for index in range(20)]
+    for path in files:
+        path.write_text("contents never logged")
+    changed = home_ownership({path: (0, 0) for path in files})
+    messages = []
+    monkeypatch.setattr(runtime, "log", messages.append)
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=10)
+    assert result["visited"] == 10
+    assert result["limited"]
+    assert 0 < len(changed) < len(files)
+    assert len(messages) == 1
+    assert "limit" in messages[0] and "repaired=" in messages[0] and "skipped=" in messages[0]
+    assert str(home) not in messages[0] and "contents never logged" not in messages[0]
+    sample = json.loads(messages[0].split("sample=", 1)[1])
+    assert len(sample) <= 5
+
+
+def test_home_root_repair_refuses_symlinked_fixed_volume_parent(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace, outside = (tmp_path / name for name in ("home", "data", "workspace", "outside"))
+    for directory in (home, data, workspace, outside / "gh"):
+        directory.mkdir(parents=True)
+    (home / ".config").symlink_to(outside, target_is_directory=True)
+    changed = home_ownership({outside / "gh": (0, 0)})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {home / ".config" / "gh"})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["unavailable"] == 1
+
+
+@pytest.mark.parametrize("change", ["device", "hardlink-after-open"])
+def test_home_root_repair_rechecks_device_and_link_count(tmp_path, monkeypatch, home_ownership, change):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    victim = home / "victim"
+    victim.write_text("fixture")
+    aliases = {}
+    if change == "device":
+        info = list(victim.stat())
+        info[2] += 1
+        aliases[victim] = os.stat_result(info)
+    changed = home_ownership({victim: (0, 0)}, aliases=aliases)
+    if change == "hardlink-after-open":
+        original_open = os.open
+        def linked(name, flags, *args, **kwargs):
+            fd = original_open(name, flags, *args, **kwargs)
+            if name == "victim":
+                (home / "late-link").hardlink_to(victim)
+            return fd
+        monkeypatch.setattr(runtime.os, "open", linked)
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["device" if change == "device" else "changed"] == 1
+
+
+@pytest.mark.parametrize("storage", ["data", "workspace"])
+def test_home_root_repair_never_repairs_home_used_as_storage(tmp_path, home_ownership, storage):
+    home, outside = tmp_path / "home", tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    victim = home / "victim"
+    victim.write_text("fixture")
+    changed = home_ownership({home: (0, 0), victim: (0, 0)})
+    result = runtime.repair_home_root_files(home, home if storage == "data" else outside,
+                                           home if storage == "workspace" else outside, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["storage"] == 1
+
+
+def test_home_root_repair_time_budget_does_not_block_startup(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    changed = home_ownership({home: (0, 0)})
+    clock = iter([0, 6])
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(clock))
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == [] and result["limited"] and result["visited"] == 0
+
+
+def test_remap_home_startup_repairs_as_root_before_drop(monkeypatch):
+    from types import SimpleNamespace
+    settings = SimpleNamespace(effective_data_dir=Path("/data"), effective_workspace_dir=Path("/workspace"))
+    monkeypatch.setattr(runtime, "load_startup_settings", lambda: settings)
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime, "drop_privileges", lambda *a, **kw: pytest.fail("repair must precede drop"))
+    monkeypatch.setattr(runtime, "load_settings", lambda: pytest.fail("no root application imports"))
+    calls = []
+    monkeypatch.setattr(runtime, "remap_home", lambda *args: calls.append(("remap", args)))
+    monkeypatch.setattr(runtime, "repair_home_root_files", lambda *args: calls.append(("repair", args)))
+    assert runtime.main(["remap-home", "--old-uid", "41001", "--old-gid", "41001",
+                         "--new-uid", "41002", "--new-gid", "41002"]) == 0
+    assert [name for name, _ in calls] == ["remap", "repair"]
+    assert calls[1][1] == (Path("/home/appuser"), Path("/data"), Path("/workspace"), 41002, 41002)
+
+
 def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch, home_ownership):
     home, data = tmp_path / "home", tmp_path / "data"
     home.mkdir()

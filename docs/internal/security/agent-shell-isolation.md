@@ -133,7 +133,14 @@ does not release it. The root startup phase reads only mount-path settings
 through image-installed dependencies and the image's `docker/` helpers, with
 an image-only executable PATH and isolated Python imports. Full application
 settings and any source-update handover load only after dropping privileges.
-Runtime writes stay in the data volume or home.
+Runtime writes stay in the data volume or home. Before dropping privileges,
+startup also repairs root-owned directories and single-link regular files in
+`/home/appuser` and its fixed home volumes. The pinned-descriptor walk never
+follows symlinks or enters retained data/workspace aliases or unlisted mounts;
+it rechecks ownership, inode identity and link count before `fchown`. A
+20,000-entry/five-second scan budget bounds this best-effort repair. Its one-line
+summary reports repairs, skips by reason, the scan limit and at most five
+relative-path samples; it never logs file contents.
 
 **Deviations from the recommendation and remaining exposure**
 
