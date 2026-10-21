@@ -689,7 +689,7 @@ class Broker:
             raise AccessDenied("Name an installed plugin (plugin) and one service it declares (service).")
         if plugin or service:
             if kind != "service" or not (plugin and service):
-                raise AccessDenied("A plugin sign-in request needs kind service, the plugin id (plugin) and the service name (service).")
+                raise AccessDenied("A plugin sign-in request needs kind service, the plugin id and the service name (fields: plugin, service).")
             if service_provider or suggested_url:
                 raise AccessDenied("A plugin service's address comes from the plugin; omit service_provider and suggested_url.")
             config = await _plugin_config(plugin, service)
