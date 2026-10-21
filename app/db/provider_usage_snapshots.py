@@ -27,6 +27,30 @@ from app.db.base import get_db, rows_to_list
 logger = logging.getLogger(__name__)
 
 
+def delete_shared_observations(conn, provider_id: str, *, source_id: str | None = None) -> None:
+    """Remove obsolete readings atomically; publish their tombstones after commit."""
+    from app.db.base import after_commit
+
+    cursor = conn.cursor()
+    prefix = "provider_observation:"
+    cursor.execute("SELECT key FROM system_settings WHERE key LIKE %s", (prefix + "%",))
+    keys = []
+    for row in cursor.fetchall():
+        source, _, provider = row["key"][len(prefix):].partition(":")
+        if provider == provider_id and (source_id is None or source == source_id):
+            keys.append(row["key"])
+    for key in keys:
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
+    if keys:
+        def publish():
+            from app.db.settings import invalidate_system_setting_memo
+            from app.network import engine
+            for key in keys:
+                invalidate_system_setting_memo(key)
+                engine.record_after_commit("system_settings", key)
+        after_commit(conn, publish)
+
+
 def _parse_json_list(raw: Any) -> List[Dict[str, Any]]:
     """Parse a JSON list field, handling both str and list (JSONB)."""
     if isinstance(raw, str):
@@ -62,6 +86,7 @@ def upsert_provider_usage_snapshot(
     expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
     expected_admin_key: Optional[str] = None,
+    expected_provider_revision: Optional[tuple[str, str]] = None,
 ) -> bool:
     """Insert or replace a snapshot, rejecting observations of an old binding."""
     now = datetime.now(timezone.utc).isoformat()
@@ -69,6 +94,13 @@ def upsert_provider_usage_snapshot(
         raw = {**(raw or {}), "billing_fetched_at": fetched_at}
     with get_db() as conn:
         cursor = conn.cursor()
+        if expected_provider_revision is not None:
+            provider_id_guard, revision = expected_provider_revision
+            cursor.execute("SELECT revision, enabled FROM model_providers WHERE id = %s FOR UPDATE",
+                           (provider_id_guard,))
+            current_provider = cursor.fetchone() or {}
+            if current_provider.get("revision") != revision or not current_provider.get("enabled"):
+                return False
         if provider_type in {"fal", "openrouter_account"}:
             if not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
                 return False

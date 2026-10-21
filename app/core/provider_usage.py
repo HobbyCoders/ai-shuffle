@@ -1152,12 +1152,15 @@ class ProviderUsageMonitor:
         # Seconds within which the running pass treats a snapshot as just
         # refreshed (0 for credential saves, which must probe the new key).
         self._recent_window: float = FORCED_REFRESH_COOLDOWN_SECONDS
+        self._network_refresh_queued = False
+        self._stopping = False
 
     def start(self) -> None:
         # Account refreshes are demand-driven. Never launch billing browser tabs.
-        pass
+        self._stopping = False
 
     async def stop(self) -> None:
+        self._stopping = True
         if self._poll_task:
             self._poll_task.cancel()
             await asyncio.gather(self._poll_task, return_exceptions=True)
@@ -1183,6 +1186,23 @@ class ProviderUsageMonitor:
         self._recent_window = cooldown if force else FORCED_REFRESH_COOLDOWN_SECONDS
         self._poll_task = asyncio.create_task(self._run_poll())
         return self._poll_task
+
+    def request_network_refresh(self) -> None:
+        """Do not lose a sync arrival racing the currently running pass."""
+        if self._stopping:
+            return
+        if self.refreshing:
+            if not self._network_refresh_queued:
+                self._network_refresh_queued = True
+
+                def follow_up(_task):
+                    self._network_refresh_queued = False
+                    if not self._stopping:
+                        self.request_refresh(force=True)
+
+                self._poll_task.add_done_callback(follow_up)
+        else:
+            self.request_refresh(force=True)
 
     async def poll_once(self) -> None:
         task = self.request_refresh(force=True)
@@ -1220,10 +1240,12 @@ class ProviderUsageMonitor:
 
         semaphore = asyncio.Semaphore(4)
 
-        async def bounded(fn, *args):
+        async def bounded(source, *args):
             async with semaphore:
                 try:
-                    return await fn(*args)
+                    from app.core.provider_observations import poll_shared
+                    return await poll_shared(source, args[0] if args else None,
+                                             getattr(self, source.poller))
                 except Exception:
                     logger.warning("Provider usage job failed")
                     return False
@@ -1231,12 +1253,12 @@ class ProviderUsageMonitor:
         # The registry decides which sources apply to which rows; this loop
         # only schedules them. Rows no source applies to (xAI API keys, custom
         # hosts, Claude API keys) have no polled usage.
-        jobs = [bounded(getattr(self, source.poller)) for source in usage_sources.global_sources()
+        jobs = [bounded(source) for source in usage_sources.global_sources()
                 if _snapshot_id(source, None) not in cooling]
         for row in rows or []:
             for source in usage_sources.polled_sources(row or {}):
                 if _snapshot_id(source, row) not in cooling:
-                    jobs.append(bounded(getattr(self, source.poller), row))
+                    jobs.append(bounded(source, row))
         # Rows that share a credential share one observation per pass rather
         # than the later rows being deferred by the budget the first one spent.
         with usage_polling.shared_pass():
