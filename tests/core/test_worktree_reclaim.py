@@ -419,3 +419,49 @@ def test_real_run_lease_protects_inactive_session(mock_db, tmp_path, monkeypatch
     assert path.exists()
 
 
+def test_remote_read_failure_is_not_treated_as_no_pr(repository, monkeypatch):
+    path = checkout(repository)
+    original = rc.wr._git
+
+    def unreadable(repo, *args, **kwargs):
+        return None if args == ("remote",) else original(repo, *args, **kwargs)
+
+    monkeypatch.setattr(rc.wr, "_git", unreadable)
+    with pytest.raises(ValueError, match="remote configuration unavailable"):
+        reclaim(dry_run=False)
+    assert path.exists()
+
+
+def test_missing_directory_ref_read_error_does_not_forget_registry(repository, monkeypatch, tmp_path):
+    path = checkout(repository)
+    path.rename(tmp_path / "moved-fixture")
+    original = rc.git_service._run_git
+
+    def unreadable(repo, args, **kwargs):
+        if args[:3] == ["show-ref", "--verify", "--quiet"]:
+            return SimpleNamespace(returncode=128)
+        return original(repo, args, **kwargs)
+
+    monkeypatch.setattr(rc.git_service, "_run_git", unreadable)
+    result = reclaim(dry_run=False)
+    assert result["reclaimed"] == 0 and result["items"][0]["error"] is True
+    rc._archive.assert_not_called()
+    assert git(repository[0], "rev-parse", "feature")
+
+
+def test_ref_moved_during_removal_is_not_deleted(repository, monkeypatch):
+    repo, _ = repository
+    checkout(repository)
+    original = rc.git_service.remove_worktree
+    late_head = git(repo, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "late work")
+
+    def changed(main, path, force):
+        result = original(main, path, force)
+        git(repo, "update-ref", "refs/heads/feature", late_head)
+        return result
+
+    monkeypatch.setattr(rc.git_service, "remove_worktree", changed)
+    result = reclaim(dry_run=False)
+    assert result["reclaimed"] == 0 and result["items"][0]["error"] is True
+    assert git(repo, "rev-parse", "feature") == late_head
+    rc._archive.assert_not_called()

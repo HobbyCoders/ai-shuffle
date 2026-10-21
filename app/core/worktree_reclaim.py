@@ -102,12 +102,32 @@ def _context(source):
     default_sha = (wr._git(repo, "rev-parse", "--verify", ref + "^{commit}") or "").strip()
     if not default_sha:
         raise ValueError("default branch unavailable")
-    remote = wr._git(repo, "remote", "get-url", "origin") or ""
+    remotes = wr._git(repo, "remote")
+    if remotes is None:
+        raise ValueError("remote configuration unavailable")
+    remote = wr._git(repo, "remote", "get-url", "origin") if "origin" in remotes.splitlines() else ""
+    if remote is None:
+        raise ValueError("origin URL unavailable; PR status unknown")
     github_repo = github_service.get_repo_from_remote(repo) if remote else None
     if "github.com" in remote and not github_repo:
         raise ValueError("PR repository could not be resolved")
     return {"items": items, "default_branch": branch, "default_sha": default_sha,
             "sessions": _project_sessions(source), "github_repo": github_repo}
+
+
+def _branch_head(repo, branch):
+    if not branch:
+        return None
+    ref = f"refs/heads/{branch}"
+    probe = git_service._run_git(repo, ["show-ref", "--verify", "--quiet", ref], timeout=10)
+    if probe.returncode == 1:
+        return None  # positively absent, not an unreadable ref
+    if probe.returncode != 0:
+        raise ValueError("branch existence could not be verified")
+    head = (wr._git(repo, "rev-parse", "--verify", ref + "^{commit}") or "").strip()
+    if not head:
+        raise ValueError("branch HEAD unavailable")
+    return head
 
 
 def _contained(repo, default_sha, head):
@@ -165,8 +185,8 @@ def _plan(source, registered, context):
         if not item or not wr._is_checkout_root(path):
             return keep("not a linked worktree of this repository")
         actual = (wr._git(path, "symbolic-ref", "--short", "HEAD") or "").strip() or None
-        if actual != registered.get("branch"):
-            return keep("checkout branch differs from registration")
+        if actual != registered.get("branch") or actual != item.get("branch"):
+            return keep("checkout branch differs from registration or Git listing")
         row["branch"] = actual
         status = wr._git(path, "status", "--porcelain", "--untracked-files=all")
         if status is None or status.strip():
@@ -187,8 +207,7 @@ def _plan(source, registered, context):
             return keep("PR history truncated; status unknown")
         if any(pr.state.lower() == "open" for pr in prs):
             return keep("open PR head branch")
-    branch_head = ((wr._git(repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}") or "").strip()
-                   if branch else None)
+    branch_head = _branch_head(repo, branch)
     head = ((wr._git(path, "rev-parse", "HEAD") or "").strip() if not missing
             else branch_head or (item or {}).get("head"))
     row["head_sha"] = head
@@ -248,7 +267,10 @@ def _apply(source, registered, preview, *, automatic=False):
                 raise ValueError("safe worktree removal failed")
             # remove_worktree performs sever_runtime_links BEFORE Git recurses.
             # Never use rmtree here, including as an error fallback.
-            if row["branch"] and wr._git(repo, "show-ref", "--verify", "refs/heads/" + row["branch"]):
+            branch_head = _branch_head(repo, row["branch"])
+            if branch_head:
+                if branch_head != row["head_sha"]:
+                    raise ValueError("branch changed during removal; branch retained")
                 if not git_service.delete_branch(repo, row["branch"], True):
                     raise ValueError("merged branch removal failed; retry metadata cleanup")
             _archive(source, row)
