@@ -177,7 +177,18 @@ async def test_sdk_saved_connection_refuses_real_hints_without_comparing_targets
 
 
 @pytest.mark.asyncio
-async def test_sdk_lists_and_requests_saved_service_without_private_details(broker, saved_vault, monkeypatch):
+@pytest.mark.parametrize("hints,conflicts", [
+    ({}, []),
+    ({"service_provider": "custom", "suggested_url": ""}, []),
+    ({"service_provider": "custom", "suggested_url": None}, []),
+    ({"service_provider": "custom", "suggested_url": " \t"}, []),
+    ({"service_provider": "cloudflare", "suggested_url": ""}, ["service_provider"]),
+    ({"service_provider": "custom", "suggested_url": "https://other.example/api"},
+     ["service_provider", "suggested_url"]),
+])
+async def test_sdk_lists_and_requests_saved_service_without_private_details(
+    broker, saved_vault, monkeypatch, hints, conflicts,
+):
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
     from app.mcp import chat_access_sdk
     monkeypatch.setattr(chat_access_sdk, "broker", broker)
@@ -188,7 +199,16 @@ async def test_sdk_lists_and_requests_saved_service_without_private_details(brok
     assert not response.get("isError")
     metadata = json.loads(response["content"][0]["text"])
     assert metadata["saved_connections"] == [{"id": saved_id, "kind": "service", "label": "Inventory"}]
-    response = await tools["RequestChatAccess"].handler({"kind": "service", "purpose": "Inspect inventory", "saved_id": saved_id})
+    response = await tools["RequestChatAccess"].handler({
+        "kind": "service", "purpose": "Inspect inventory", "saved_id": saved_id, **hints,
+    })
+    if conflicts:
+        assert response.get("isError")
+        message = response["content"][0]["text"]
+        assert "Omit:" in message
+        assert all(field in message for field in conflicts)
+        assert not (await broker.snapshot("chat"))["requests"] and not broker.grants
+        return
     assert not response.get("isError")
     pending = json.loads(response["content"][0]["text"])
     assert broker.requests[pending["request_id"]].public()["saved_id"] == saved_id

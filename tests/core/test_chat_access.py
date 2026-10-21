@@ -757,7 +757,8 @@ async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind,use_saved,port", [
-    ("machine", True, 22), ("machine", True, 0), ("machine", False, 22), ("folder", False, 22),
+    ("machine", True, 22), ("machine", True, 0), ("machine", False, 22), ("machine", False, 0),
+    ("folder", False, 22),
 ])
 async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
     broker, saved_vault, ssh_target, monkeypatch, tmp_path, kind, use_saved, port,
@@ -801,7 +802,7 @@ async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
         assert card["kind"] == kind
         for field in ("suggested_host", "suggested_username", "suggested_path", "suggested_url", "service_provider"):
             assert not card.get(field)
-        expected_port = 22 if kind == "machine" and not use_saved else None
+        expected_port = port if kind == "machine" and not use_saved and port else None
         assert card.get("suggested_port") == expected_port
         assert not broker.grants  # Creating a card is not approval.
         submission = GrantSubmission(saved_id=args["saved_id"]) if use_saved else GrantSubmission(connection=spec)

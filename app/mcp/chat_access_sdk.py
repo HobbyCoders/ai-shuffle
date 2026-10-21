@@ -44,15 +44,19 @@ def create_chat_access_server(session_id: str):
                     "suggested_username": "machine", "suggested_path": "folder",
                     "service_provider": "service", "suggested_url": "service",
                 }
+                url = args.get("suggested_url")
+                blank_url = url is None or (isinstance(url, str) and not url.strip())
                 hints = {}
                 for name, hint_kind in hint_kinds.items():
                     value = args.get(name)
                     if value is None or (isinstance(value, str) and not value.strip()):
                         continue
+                    if name == "suggested_port" and type(value) is int and value == 0:
+                        continue
                     if saved_id:
-                        if name == "suggested_port" and type(value) is int and value in (0, 22):
+                        if name == "suggested_port" and type(value) is int and value == 22:
                             continue
-                        if name == "service_provider" and kind != "service" and value == "custom":
+                        if name == "service_provider" and value == "custom" and (kind != "service" or blank_url):
                             continue
                     elif kind != hint_kind:
                         continue
