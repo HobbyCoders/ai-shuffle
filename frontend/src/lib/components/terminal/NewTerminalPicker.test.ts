@@ -35,7 +35,7 @@ const pending = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => { peerTerminals.reset(); Object.values(api).forEach((fn) => fn.mockReset()); });
 afterEach(() => { cleanup(); peerTerminals.reset(); });
 
-const openButton = (ui: ReturnType<typeof render>) => ui.getByRole('button', { name: 'Open terminal' }) as HTMLButtonElement;
+const openButton = (ui: { getByRole: (role: string, options: { name: string }) => HTMLElement }) => ui.getByRole('button', { name: 'Open terminal' }) as HTMLButtonElement;
 
 describe('without peer workers (peer terminals off: the picker as before)', () => {
 	it('shows no target choice for this worker alone', () => {
@@ -91,7 +91,7 @@ describe('target selection with peer workers', () => {
 });
 
 describe('requesting a peer shell', () => {
-	async function requested(result = pending()) {
+	async function requested(result: Record<string, unknown> = pending()) {
 		api.requestPeer.mockResolvedValue(result);
 		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer()]), onOpen: vi.fn(), onCancel: vi.fn() });
 		await fireEvent.click(ui.getByRole('radio', { name: /^Peer/ }));
@@ -188,17 +188,37 @@ describe('requesting a peer shell', () => {
 		expect((ui.getByRole('button', { name: 'Request again' }) as HTMLButtonElement).disabled).toBe(true);
 	});
 
-	it('shows why an approved open failed (bad folder) and allows a new request', async () => {
-		const onOpen = vi.fn().mockResolvedValue({ ok: false, code: 'bad_folder', message: "The folder /nope doesn't exist on this worker." });
+	it('keeps the approval when the peer rejects the folder, so the owner can fix it and open again', async () => {
+		const onOpen = vi.fn()
+			.mockResolvedValueOnce({ ok: false, code: 'bad_folder', message: "The folder /nope doesn't exist on this worker." })
+			.mockResolvedValueOnce({ ok: true });
 		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer({ available: true, reason_code: null, reason: null, authorization_id: LEASE })]), onOpen });
 		await fireEvent.click(ui.getByRole('radio', { name: /^Peer/ }));
 		expect(ui.getByText('Approved for one shell. Open it below.')).toBeTruthy();
-		await fireEvent.input(ui.getByRole('textbox'), { target: { value: '/nope' } });
+		const box = ui.getByRole('textbox') as HTMLInputElement;
+		await fireEvent.input(box, { target: { value: '/nope' } });
 		await fireEvent.click(openButton(ui));
-		expect(onOpen).toHaveBeenCalledWith({ cwd: '/nope', shell: null, target: { kind: 'worker', worker_id: 'peer', authorization_id: LEASE } });
+		expect(onOpen).toHaveBeenLastCalledWith({ cwd: '/nope', shell: null, target: { kind: 'worker', worker_id: 'peer', authorization_id: LEASE } });
+		const alert = await ui.findByRole('alert');
+		expect(alert.textContent).toContain("The folder /nope doesn't exist on this worker.");
+		expect(alert.textContent).toContain('the approval still stands');
+		expect(box.getAttribute('aria-invalid')).toBe('true');
+		expect(ui.queryByRole('button', { name: /Request/ })).toBeNull();
+		expect(openButton(ui).disabled).toBe(true);
+		await fireEvent.input(box, { target: { value: '/workspace' } });
+		expect(openButton(ui).disabled).toBe(false);
+		await fireEvent.click(openButton(ui));
+		expect(onOpen).toHaveBeenLastCalledWith({ cwd: '/workspace', shell: null, target: { kind: 'worker', worker_id: 'peer', authorization_id: LEASE } });
+	});
+
+	it('explains any other refused open and allows a new request', async () => {
+		const onOpen = vi.fn().mockResolvedValue({ ok: false, code: 'peer_unavailable', message: 'The terminal worker is unavailable or owner access expired.' });
+		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer({ available: true, reason_code: null, reason: null, authorization_id: LEASE })]), onOpen });
+		await fireEvent.click(ui.getByRole('radio', { name: /^Peer/ }));
+		await fireEvent.click(openButton(ui));
 		const alert = await ui.findByRole('alert');
 		expect(within(alert).getByText("The shell on Peer didn't open")).toBeTruthy();
-		expect(alert.textContent).toContain("The folder /nope doesn't exist on this worker. Leave the folder empty to use Peer's default.");
+		expect(alert.textContent).toContain('Peer stopped answering before the shell opened.');
 	});
 
 	it('revokes an unused approval', async () => {

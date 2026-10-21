@@ -84,11 +84,11 @@
 {/if}
 
 <style>
-	.peer-requests { display: grid; gap: 8px; padding: 10px; max-height: 60%; overflow-y: auto; flex-shrink: 0;
+	.peer-requests { display: grid; grid-auto-rows: max-content; gap: 8px; padding: 10px; max-height: 60%; overflow-y: auto; flex-shrink: 0; overscroll-behavior: contain;
 		border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--primary) 4%, var(--background)); font-family: var(--font-sans); }
 	.req { position: relative; display: grid; gap: 10px; padding: 12px 14px; border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
-		border-radius: var(--radius); background: var(--card); animation: req-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); overflow: hidden; }
-	.req::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--primary); }
+		border-radius: var(--radius); background: var(--card); animation: req-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
+	.req::before { content: ''; position: absolute; inset: -1px auto -1px -1px; width: 3px; border-radius: var(--radius) 0 0 var(--radius); background: var(--primary); }
 	.req.approved { border-color: color-mix(in oklch, var(--success) 30%, var(--border)); }
 	.req.approved::before { background: var(--success); }
 	.req-head { display: flex; gap: 10px; align-items: flex-start; }

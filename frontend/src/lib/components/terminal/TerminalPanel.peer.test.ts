@@ -100,6 +100,7 @@ describe('a shell on a peer worker', () => {
 		const status = view.container.querySelector('.status .meta')!;
 		expect(status.textContent).toContain('Desk');
 		expect(status.textContent).not.toContain('ServerWorker');
+		expect(view.container.querySelector('.tab .tab-host')?.textContent).toBe('Desk');
 	});
 
 	it('does not offer Restart once the remote shell exits', async () => {
@@ -115,21 +116,36 @@ describe('a shell on a peer worker', () => {
 		expect(within(ended).getByRole('button', { name: /Restart/ })).toBeTruthy();
 	});
 
-	it('explains a refused peer open in the picker and probes the targets again', async () => {
-		const view = await mount(withPeer({ available: true, reason_code: null, reason: null, authorization_id: 'a'.repeat(24) }));
-		api.create.mockRejectedValue(new TerminalApiError("The folder /nope doesn't exist on this worker.", 400, 'bad_folder'));
-		api.targets.mockResolvedValue(withPeer());
+	it('shows a rejected folder in the picker, keeps the approval and retries the same target', async () => {
+		const approved = withPeer({ available: true, reason_code: null, reason: null, authorization_id: 'a'.repeat(24) });
+		const view = await mount(approved);
+		api.create.mockRejectedValueOnce(new TerminalApiError("The folder /nope doesn't exist on this worker.", 400, 'bad_folder'));
 		await fireEvent.click(view.getByRole('radio', { name: /Desk/ }));
 		await fireEvent.input(view.getByRole('textbox'), { target: { value: '/nope' } });
 		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
-		expect(api.create).toHaveBeenCalledWith(expect.objectContaining({
-			cwd: '/nope', shell: null, target: { kind: 'worker', worker_id: 'dev_b', authorization_id: 'a'.repeat(24) },
-		}));
-		const alert = await view.findByText("The shell on Desk didn't open");
-		expect(alert.closest('[role="alert"]')!.textContent).toContain("The folder /nope doesn't exist");
+		const target = { kind: 'worker', worker_id: 'dev_b', authorization_id: 'a'.repeat(24) };
+		expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/nope', shell: null, target }));
+		const alert = await view.findByRole('alert');
+		expect(alert.textContent).toContain("The folder /nope doesn't exist");
 		expect(view.container.querySelector('.notice')).toBeNull();
 		await waitFor(() => expect(api.targets).toHaveBeenCalledTimes(2));
-		expect(view.getByRole('button', { name: 'Request again' })).toBeTruthy();
+		api.create.mockResolvedValueOnce(info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner' }));
+		await fireEvent.input(view.getByRole('textbox'), { target: { value: '' } });
+		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
+		expect(api.create).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: null, target }));
+		await waitFor(() => expect(view.container.querySelector('.status .meta')?.textContent).toContain('Desk'));
+	});
+
+	it('explains any other refused peer open in the picker, not the notice bar', async () => {
+		const view = await mount(withPeer({ available: true, reason_code: null, reason: null, authorization_id: 'a'.repeat(24) }));
+		api.create.mockRejectedValue(new TerminalApiError('The terminal worker is unavailable or owner access expired.', 503, 'peer_unavailable'));
+		api.targets.mockResolvedValue(withPeer());
+		await fireEvent.click(view.getByRole('radio', { name: /Desk/ }));
+		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
+		expect((await view.findByText("The shell on Desk didn't open")).closest('[role="alert"]')).toBeTruthy();
+		expect(view.container.querySelector('.notice')).toBeNull();
+		await waitFor(() => expect(api.targets).toHaveBeenCalledTimes(2));
+		expect(await view.findByRole('button', { name: 'Request again' })).toBeTruthy();
 	});
 });
 

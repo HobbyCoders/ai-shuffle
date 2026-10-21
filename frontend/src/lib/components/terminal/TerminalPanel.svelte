@@ -309,6 +309,7 @@
 							onclick={() => terminals.select(sessionId, id)} onkeydown={(e) => tabKeydown(e, index)}>
 							<span class="dot" data-tone={info?.state === 'exited' ? 'bad' : link.status === 'live' ? (info?.busy ? 'run' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'wait'} aria-hidden="true"></span>
 							<span class="tab-shell">{info?.shell ?? 'shell'}</span>
+							{#if hostName(info) !== ready.worker}<span class="tab-host">{hostName(info)}</span>{/if}
 							<span class="tab-folder">{folderName(info?.cwd)}</span>
 						</button>
 						<button class="tab-close" aria-label={`Close terminal ${index + 1}`} title="Close terminal" onclick={() => closeTab(id)}><X size={12} /></button>
@@ -459,6 +460,8 @@
 	.tab.current .tab-select { color: var(--foreground); }
 	.tab-select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
 	.tab-shell { flex-shrink: 0; }
+	.tab-host { flex-shrink: 0; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
+		color: var(--primary); background: color-mix(in oklch, var(--primary) 13%, transparent); }
 	.tab-folder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
 	.tab-close { position: absolute; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); cursor: pointer; opacity: 0; transition: opacity 0.12s; }
 	.tab:hover .tab-close, .tab.current .tab-close, .tab-close:focus-visible { opacity: 1; }
@@ -499,7 +502,7 @@
 		repeating-linear-gradient(0deg, transparent 0 23px, color-mix(in oklch, var(--foreground) 3%, transparent) 23px 24px); }
 	.state p { margin: 0; max-width: 34ch; line-height: 1.5; }
 	.state-title { font-size: 13.5px; font-weight: 600; color: var(--foreground); }
-	.state.empty { align-items: stretch; justify-content: center; padding: 24px clamp(16px, 8cqi, 48px); text-align: left; }
+	.state.empty { align-items: stretch; justify-content: safe center; overflow-y: auto; padding: 24px clamp(16px, 8cqi, 48px); text-align: left; }
 	.state.empty > :global(*) { align-self: center; }
 	.err { color: var(--destructive); }
 	.retry { margin-top: 8px; min-height: 32px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: calc(var(--radius) - 4px); background: transparent; color: var(--foreground); cursor: pointer; }

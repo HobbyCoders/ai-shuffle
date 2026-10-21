@@ -45,7 +45,7 @@ describe('formatting', () => {
 	});
 
 	it('explains failed opens without losing the server message', () => {
-		expect(openErrorMessage('bad_folder', "The folder /x doesn't exist on this worker.", 'B')).toBe("The folder /x doesn't exist on this worker. Leave the folder empty to use B's default.");
+		expect(openErrorMessage('peer_unavailable', 'x', 'B')).toBe('B stopped answering before the shell opened.');
 		expect(openErrorMessage('recipient_approval_required', 'x', 'B')).toBe('The approval on B expired or was revoked.');
 		expect(openErrorMessage('other', '', 'B')).toBe("The shell on B didn't open.");
 	});

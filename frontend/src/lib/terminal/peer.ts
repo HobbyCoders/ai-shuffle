@@ -93,10 +93,13 @@ export function requestErrorMessage(error: unknown, name: string): string {
 	return `Couldn't reach ${name}. Try again.`;
 }
 
-/** Why opening an approved peer shell failed. The approval is spent either way. */
+/**
+ * Why opening an approved peer shell failed. A rejected folder (`bad_folder`)
+ * is not here: it spends nothing, so the picker keeps the approval and asks
+ * for another folder instead.
+ */
 export function openErrorMessage(code: string, message: string, name: string): string {
 	switch (code) {
-		case 'bad_folder': return `${message || `That folder isn't on ${name}.`} Leave the folder empty to use ${name}'s default.`;
 		case APPROVAL_REQUIRED: return `The approval on ${name} expired or was revoked.`;
 		case 'peer_unavailable': return `${name} stopped answering before the shell opened.`;
 		case 'limit_reached': return message || 'Too many terminals are open. Close one first.';

@@ -1,5 +1,6 @@
 <script lang="ts">
 	/** Folder and shell for a new terminal. Used as the "+" popover and as the empty state. */
+	import { tick } from 'svelte';
 	import { Folder, TerminalSquare, ShieldCheck, LoaderCircle, TriangleAlert } from 'lucide-svelte';
 	import { cwdProblem, type ProbeState } from '$lib/terminal/gating';
 	import type { CreateTerminal, TerminalTarget } from '$lib/api/terminals';
@@ -54,7 +55,10 @@
 	const unavailable = $derived(destination?.available === false || (remote && !destination));
 	const ssh = $derived(destination?.kind === 'ssh');
 	let input = $state<HTMLInputElement>();
+	/** The peer refused the folder (`bad_folder`). The approval is kept: fix it and open again. */
+	let remoteFolder = $state<{ folder: string; message: string } | null>(null);
 	const folderError = $derived(folder.trim() ? cwdProblem(folder.trim()) ?? '' : '');
+	const remoteFolderError = $derived(remoteFolder && remoteFolder.folder === folder ? remoteFolder.message : '');
 
 	// ── Peer workers (#196): only when the worker lists one ────────────────
 	const localId = $derived(localWorkerId(destinations));
@@ -94,9 +98,16 @@
 		const name = peer.name;
 		opening = true;
 		try {
+			const tried = folder;
 			const result = await onOpen({ cwd: folder.trim() || null, shell: null,
 				target: { kind: 'worker', worker_id: workerId, authorization_id: authorizationId } });
-			if (result && !result.ok) peerTerminals.fail(workerId, name, `The shell on ${name} didn't open`, openErrorMessage(result.code, result.message, name));
+			remoteFolder = null;
+			if (result && !result.ok && result.code === 'bad_folder') {
+				// Nothing was spent on either worker: correct the folder and open again.
+				remoteFolder = { folder: tried, message: result.message || `That folder isn't on ${name}.` };
+				await tick();
+				input?.focus();
+			} else if (result && !result.ok) peerTerminals.fail(workerId, name, `The shell on ${name} didn't open`, openErrorMessage(result.code, result.message, name));
 			else peerTerminals.clear(workerId);
 		} finally {
 			opening = false;
@@ -177,12 +188,12 @@
 			<p class="approved" role="status"><ShieldCheck size={15} aria-hidden="true" /><span>Approved on {peer.name} for one shell{#if flow?.phase === 'approved'} · <time>{Math.ceil(left(flow.expiresAt) / 60)} min</time> left{/if}</span></p>
 			<label class="field">
 				<span class="label">Folder</span>
-				<span class="input-wrap" class:invalid={!!folderError}>
+				<span class="input-wrap" class:invalid={!!folderError || !!remoteFolderError}>
 					<Folder size={14} aria-hidden="true" />
 					<input bind:this={input} bind:value={folder} spellcheck="false" autocomplete="off" autocapitalize="off"
-						placeholder={`Default folder on ${peer.name}`} aria-describedby="terminal-folder-note" aria-invalid={!!folderError} />
+						placeholder={`Default folder on ${peer.name}`} aria-describedby="terminal-folder-note" aria-invalid={!!folderError || !!remoteFolderError} />
 				</span>
-				<span class="note" id="terminal-folder-note">{#if folderError}{folderError}{:else}A full path on {peer.name}, or empty for its default.{/if}</span>
+				<span class="note" id="terminal-folder-note" role={remoteFolderError ? 'alert' : undefined}>{#if folderError}{folderError}{:else if remoteFolderError}{remoteFolderError} Fix the folder, or leave it empty for {peer.name}'s default; the approval still stands.{:else}A full path on {peer.name}, or empty for its default.{/if}</span>
 			</label>
 		{:else if stage === 'ended' && flow?.phase === 'ended'}
 			<div class="ended" role="alert">
@@ -224,7 +235,7 @@
 				</button>
 			{/if}
 			{#if stage === 'approved'}
-				<button type="submit" class="go" disabled={busy || opening || !!disabledReason || !!folderError}>{busy || opening ? 'Opening…' : 'Open terminal'}</button>
+				<button type="submit" class="go" disabled={busy || opening || !!disabledReason || !!folderError || !!remoteFolderError}>{busy || opening ? 'Opening…' : 'Open terminal'}</button>
 			{:else if stage !== 'pending'}
 				<button type="submit" class="go" disabled={busy || !!disabledReason || stage === 'requesting' || stage === 'blocked' || (flow?.phase === 'ended' && (!flow.retry || !selectable(peer)))}>
 					{stage === 'requesting' ? 'Requesting…' : stage === 'ended' ? 'Request again' : 'Request approval'}
@@ -306,7 +317,7 @@
 	.chip[data-tone='off']::before { background: var(--subtle-foreground); }
 	.peer-note { margin: 0; line-height: 1.45; }
 	.pending, .ended { display: grid; gap: 10px; padding: 12px; border-radius: calc(var(--radius) - 4px);
-		border: 1px dashed color-mix(in oklch, var(--primary) 45%, var(--border)); background: color-mix(in oklch, var(--primary) 5%, transparent);
+		border: 1px dashed color-mix(in oklch, var(--primary) 50%, transparent); background: color-mix(in oklch, var(--primary) 5%, transparent);
 		animation: drop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 	.ended { border-style: solid; border-color: color-mix(in oklch, var(--warning) 40%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
 	.pending p, .ended p { margin: 0; line-height: 1.45; }
