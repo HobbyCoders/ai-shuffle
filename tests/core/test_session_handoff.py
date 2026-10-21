@@ -393,15 +393,28 @@ async def test_owner_move_is_queued_while_running_and_runs_when_the_turn_ends():
 
 
 @pytest.mark.parametrize("draining", [False, True])
-async def test_agent_move_starts_after_turn_finalization_without_more_input(draining, monkeypatch, caplog):
+@pytest.mark.parametrize("linger_run", [False, True])
+async def test_agent_move_starts_after_turn_finalization_without_more_input(draining, linger_run, monkeypatch, caplog):
     """Drive the durable turn state and real finalizer, not a fake idle flag."""
     import logging
-    from app.core import turn_finalize, session_pr_state, pg_session_store
-    from app.db import turns
+    from app.core import turn_finalize, session_pr_state, pg_session_store, streaming_status
+    from app.db import turns, runs
 
     _chat()
+    run = runs.claim_run("s1", "handoff-worker", 600) if linger_run else None
     tid = turns.enqueue_turn("s1", "user", prompt="move after this turn")["id"]
-    assert turns.start_turn(tid, run_id="handoff-turn")
+    assert turns.start_turn(tid, run_id=run["id"] if run else "handoff-turn")
+    monkeypatch.setattr(streaming_status, "CACHE_TTL_SECONDS", 0)
+    settled_but_active = threading.Event()
+    busy_state = sh.busy_state
+
+    def observe_busy(sid):
+        state = busy_state(sid)
+        if not turns.session_has_unsettled_turns(sid) and state["running"]:
+            settled_but_active.set()
+        return state
+
+    monkeypatch.setattr(sh, "busy_state", observe_busy)
     if draining:
         turns.interrupt_turn("s1", "stop")
         assert turns.escalate_to_draining(tid)
@@ -413,7 +426,6 @@ async def test_agent_move_starts_after_turn_finalization_without_more_input(drai
     with patch.object(sh, "_record", AsyncMock()), \
             patch.object(sh, "_open_prompt", return_value=False), \
             patch.object(sh, "_moved", AsyncMock(return_value="moved")), \
-            patch("app.core.streaming_status.has_active_run", return_value=False), \
             patch("app.api.sessions.move_session_to", move), \
             caplog.at_level(logging.INFO, logger=sh.__name__):
         sh.request("s1", "DesktopWorker")
@@ -423,6 +435,11 @@ async def test_agent_move_starts_after_turn_finalization_without_more_input(drai
                                          for r in caplog.records))
         move.assert_not_awaited()
         assert turns.settle_turn(tid, "aborted" if draining else "completed")
+        if run:
+            # Settlement alone must not bypass a still-valid runner lease.
+            assert await _settle(settled_but_active.is_set)
+            move.assert_not_awaited()
+            assert runs.release_run(run["id"], run["fence_token"])
         assert await _settle(lambda: move.await_count == 1)
     assert turns.get_queued_turns("s1") == []
     move.assert_awaited_once()
