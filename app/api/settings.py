@@ -1201,6 +1201,38 @@ async def update_text_generation_settings(
 
 
 # ============================================================================
+# Commit and PR attribution
+# ============================================================================
+
+class CommitAttributionResponse(BaseModel):
+    enabled: bool
+
+
+class CommitAttributionUpdateRequest(BaseModel):
+    enabled: StrictBool
+
+
+@router.get("/commit-attribution", response_model=CommitAttributionResponse)
+async def get_commit_attribution(token: str = Depends(require_auth)):
+    """Owner-wide attribution policy (enabled by default)."""
+    from app.core import commit_attribution
+
+    return CommitAttributionResponse(enabled=await run_sync(commit_attribution.read))
+
+
+@router.put("/commit-attribution", response_model=CommitAttributionResponse)
+async def update_commit_attribution(
+    request: CommitAttributionUpdateRequest,
+    token: str = Depends(require_admin),
+):
+    """Save the network-shared policy. Applies at the next session connect."""
+    from app.core import commit_attribution
+
+    await run_sync(commit_attribution.write, request.enabled)
+    return CommitAttributionResponse(enabled=request.enabled)
+
+
+# ============================================================================
 # Subagent default (#1827)
 # ============================================================================
 
