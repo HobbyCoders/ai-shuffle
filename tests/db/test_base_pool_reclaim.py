@@ -294,6 +294,15 @@ def test_return_after_pool_close_discards_without_warning(retaining_pool, caplog
     assert not caplog.records
 
 
+def test_closed_pool_does_not_close_unowned_connection(retaining_pool):
+    pool, _ = retaining_pool
+    foreign = _FakeConn()
+    pool.closeall()
+    with pytest.raises(psycopg2.pool.PoolError, match="closed"):
+        pool.putconn(foreign)
+    assert not foreign.closed
+
+
 def test_shutdown_races_with_connection_return(retaining_pool, monkeypatch, caplog):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -415,6 +424,34 @@ def test_shutdown_drain_is_bounded_for_stuck_borrower(retaining_pool, caplog):
     assert pool.closed and conn.closed
     assert "1 borrowed connection" in caplog.text
     pool.putconn(conn)
+    assert not pool._used and not pool._rused
+
+
+@pytest.mark.parametrize("cancel_fails", [False, True])
+def test_force_close_warns_and_cancels_all_before_close(retaining_pool, monkeypatch, caplog, cancel_fails):
+    pool, _ = retaining_pool
+    borrowed = [pool.getconn(), pool.getconn()]
+    cancelled = []
+
+    def cancel(conn):
+        cancelled.append(conn)
+        if cancel_fails and conn is borrowed[0]:
+            raise psycopg2.OperationalError("cancel failed")
+
+    for conn in borrowed:
+        monkeypatch.setattr(conn, "cancel", lambda conn=conn: cancel(conn), raising=False)
+    closeall = pool._closeall
+
+    def close():
+        assert cancelled == borrowed
+        assert "2 borrowed connection" in caplog.text
+        closeall()
+
+    monkeypatch.setattr(pool, "_closeall", close)
+    pool.shutdown(timeout=0)
+    assert all(conn.closed for conn in borrowed)
+    for conn in borrowed:
+        pool.putconn(conn)
     assert not pool._used and not pool._rused
 
 

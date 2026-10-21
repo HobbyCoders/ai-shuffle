@@ -272,7 +272,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
 
     def _putconn(self, conn, key=None, close=False):
         try:
-            if self.closed:
+            if self.closed and id(conn) in self._rused:
                 # closeall() also closes checked-out sockets, but psycopg2
                 # retains their bookkeeping and rejects their later returns.
                 # A borrower finishing during shutdown must discard, not try
@@ -316,14 +316,24 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 remaining = deadline - time.monotonic()
                 if not self._used or remaining <= 0:
                     borrowed = len(self._used)
+                    if borrowed:
+                        # close() itself takes the connection lock, so closing
+                        # an executing query can outlive the drain deadline.
+                        # Cancel first to release that lock before socket close.
+                        logger.warning("Closing PostgreSQL pool with %d borrowed connection(s) "
+                                       "after %.1fs shutdown drain", borrowed, timeout)
+                        for conn in self._used.values():
+                            try:
+                                conn.cancel()
+                            except Exception:
+                                # Best effort: one failed cancellation must not
+                                # prevent cancelling the remaining borrowers.
+                                pass
                     self._closeall()
                     break
             with self._available:
                 if generation == self._generation:
                     self._available.wait(max(0, remaining))
-        if borrowed:
-            logger.warning("Closing PostgreSQL pool with %d borrowed connection(s) "
-                           "after %.1fs shutdown drain", borrowed, timeout)
 
     def _closeall(self):
         try:
@@ -541,8 +551,7 @@ def _close_connection(conn) -> None:
     ``except: pass``, which both leaked the slot and hid the leak entirely.
     Here we log it and force the slot free.
     """
-    # Keep one pool throughout return/reclaim: shutdown can clear the global
-    # while putconn waits for the driver lock, or reinitialization can swap it.
+    # Keep one pool throughout return/reclaim while shutdown clears the global.
     pool = _pg_pool
     if pool is None:
         return
