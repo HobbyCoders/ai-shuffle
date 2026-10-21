@@ -82,8 +82,14 @@ def model_details(model: str, options: dict | None = None) -> dict:
             *[{"label": f"Context retention · {key}", "value": str(value)} for key, value in TRUNCATION_CONFIG.items()],
         ]
         note = "Calls append the available agent roster and any client-supplied device instructions. Phone appendices apply only in the named mode; app-tool instructions apply only when those tools are admitted. Conversation replay is context, not a system prompt."
+    available, unavailable_reason = True, None
+    if model == CODEX_MODEL:
+        from app.core.voice_dependencies import availability
+        available, unavailable_reason = availability()
     return {
         "model": model,
+        "available": available,
+        "unavailable_reason": unavailable_reason,
         "label": "ChatGPT voice (unofficial, unsupported)" if model == CODEX_MODEL else model,
         "voices": [{"id": voice, "label": voice if model == PERSONAPLEX_MODEL else voice.capitalize()} for voice in voices_for(model)],
         "transport": transport_for(model),
@@ -93,6 +99,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
         "prompt_note": note,
         # Preview generation uses the same Live transport and voice as new calls.
         "preview_note": ("Unofficial, unsupported ChatGPT subscription access. Off by default; explicitly select this engine to opt in. Previews are unavailable."
+                         + (" " + unavailable_reason if unavailable_reason else "")
                          if model == CODEX_MODEL else "Previews use the selected engine and voice with your API key."),
     }
 

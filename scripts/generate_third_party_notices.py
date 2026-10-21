@@ -36,8 +36,8 @@ except ImportError:  # pip always vendors packaging
 
 ROOT = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parent / "third_party_notices"
-REQUIREMENT_FILES = ["requirements.txt", "requirements-dev.txt", "requirements-native.txt"]
-PYTHON_LOCK_FILES = ["requirements.lock", "requirements-native.lock"]
+REQUIREMENT_FILES = ["requirements.txt", "requirements-dev.txt", "requirements-native.txt", "requirements-voice.txt"]
+PYTHON_LOCK_FILES = ["requirements.lock", "requirements-native.lock", "requirements-voice.lock"]
 NPM_PROJECTS = [("frontend", True), ("browser-mcp", False), ("tools", False), ("desktop", False)]
 # Android declarations are not npm dependencies; licenses come from their Maven POMs.
 ANDROID_LICENSES = {
@@ -219,7 +219,7 @@ def render() -> str:
     parts.append(
         "## Python packages\n\n"
         "Installed into the Docker image and the desktop installer's Python runtime "
-        "(`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the "
+        "(`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt`, optional `requirements-voice.lock` and the "
         "fluid harness, with their dependencies). No Claude Code CLI binary is bundled; "
         "the user's separately installed stock CLI is licensed by Anthropic under its "
         "own terms. Platform-specific dependencies "

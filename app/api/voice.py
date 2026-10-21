@@ -824,6 +824,11 @@ async def create_voice_session(
     api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     model = voice_settings["voice_model"]
+    if model == CODEX_MODEL:
+        from app.core.voice_dependencies import availability
+        available, reason = availability()
+        if not available:
+            raise HTTPException(400, reason)
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
     options = voice_settings.get("voice_options", {})

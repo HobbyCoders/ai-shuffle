@@ -1128,6 +1128,8 @@ class ContainerUpdates:
         # the signed source's lock, so a hostile index release cannot slip in.
         pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
         self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
+        # Optional media failure must not block an otherwise valid app update.
+        self.run_build([str(python), "app/core/voice_dependencies.py", "--install"], source, env)
         self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
         for package in ("frontend", "tools", "browser-mcp"):
             self.publish("downloading", f"Building {package}…", version=revision)

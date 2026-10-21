@@ -255,6 +255,7 @@ async function installPython() {
 	const pip = ['-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', '--timeout', '120', '--retries', '10'];
 	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements.lock')], { env, cwd: repoDir });
 	run(py, [...pip, '--find-links', path.join(repoDir, 'desktop/vendor'), '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
+	run(py, [path.join(repoDir, 'app/core/voice_dependencies.py'), '--install'], { env, cwd: repoDir });
 	run(py, [...pip, '--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')], { env, cwd: repoDir });
 	run(py, ['-c', 'import importlib.util; import fluid, mcp, psycopg2, pygit2, fastapi; assert importlib.util.find_spec("claude_agent_sdk") is None; print("python deps ok (no agent SDK)")'], { env });
 	return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple };

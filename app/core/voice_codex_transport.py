@@ -71,8 +71,11 @@ class CodexPeer:
 
     def make_peer(self):
         # Lazy import: the supported API-key transports do not depend on aiortc.
-        from aiortc import AudioStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
-        from av import AudioFrame
+        from app.core.voice_dependencies import load_native
+        native, media = load_native()
+        AudioStreamTrack, RTCConfiguration = native.AudioStreamTrack, native.RTCConfiguration
+        RTCPeerConnection, RTCSessionDescription = native.RTCPeerConnection, native.RTCSessionDescription
+        AudioFrame = media.AudioFrame
         frames = deque(maxlen=50)  # At most one second of caller audio.
         pending = bytearray()
 

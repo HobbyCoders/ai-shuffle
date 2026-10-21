@@ -219,6 +219,11 @@ def install_dependencies():
                 "warning",
             )
 
+    # A missing/unsupported media wheel disables only unofficial ChatGPT voice.
+    try:
+        subprocess.run([str(get_venv_python()), str(project_root / "app/core/voice_dependencies.py"), "--install"], check=True)
+    except (OSError, subprocess.SubprocessError):
+        print_status("Unofficial ChatGPT voice is not available on this system.", "warning")
     return True
 
 

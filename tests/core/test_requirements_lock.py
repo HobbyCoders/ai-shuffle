@@ -76,6 +76,24 @@ def test_image_and_updater_install_only_from_the_lock():
     assert '"requirements.txt"' not in updater
 
 
+
+def test_optional_voice_closure_is_hash_pinned_without_changing_shared_pins():
+    main, voice = locked(), locked("requirements-voice.lock")
+    for name, versions in voice.items():
+        assert all(hashes for _, hashes in versions), name
+        if name in main:
+            assert [v for v, _ in versions] == [v for v, _ in main[name]], name
+    for name, version in {"aiortc": "1.15.0", "av": "17.1.0", "pylibsrtp": "1.0.0"}.items():
+        assert name not in main
+        assert voice[name][0][0] == Version(version)
+    image = (ROOT / "Dockerfile").read_text()
+    assert "--only-binary=:all: --require-hashes --no-deps -r requirements-voice.lock" in image
+    assert "requirements-voice.txt -c requirements.lock" in (ROOT / "scripts/lock_requirements.sh").read_text()
+    for source in ("docker/application_updates.py", "desktop/scripts/build-worker.mjs",
+                   "desktop/src/main/source-build.ts", "run_local.py"):
+        assert "app/core/voice_dependencies.py" in (ROOT / source).read_text()
+
+
 def native_requirements():
     lines = [line.split("#", 1)[0].strip() for line in (ROOT / "requirements-native.txt").read_text().splitlines()]
     return [Requirement(line) for line in lines if line and not line.startswith("--")]
@@ -169,5 +187,5 @@ def test_desktop_installs_only_from_the_locks():
     assert "'--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')" in runtime
     # The bundled runtime's fingerprint and the source build's must hash the same inputs.
     contract = (ROOT / "desktop/scripts/runtime-contract.mjs").read_text()
-    assert "['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml']" in contract
-    assert "['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml']" in build
+    assert "['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml']" in contract
+    assert "['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml']" in build

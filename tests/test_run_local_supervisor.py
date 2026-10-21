@@ -202,5 +202,5 @@ def test_native_install_failure_does_not_skip_dependencies_to_report_success(mon
     monkeypatch.setattr(run_local.subprocess, "run", run)
     monkeypatch.setattr(run_local, "print_status", lambda *args: statuses.append(args))
     assert run_local.install_dependencies(), "optional computer-use failure must not block worker startup"
-    assert len(calls) == 4, "never bypass the lock with a --no-deps fallback"
+    assert len(calls) == 5, "four required/native steps plus one isolated optional voice installer"
     assert statuses[-1][1] == "warning" and "unavailable" in statuses[-1][0]

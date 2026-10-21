@@ -155,8 +155,10 @@ RUN groupadd -g 64000 shuffle && \
 # requirements.lock is the hash-pinned closure of requirements.txt, fluid's own
 # dependencies and its build backend (scripts/lock_requirements.sh). A changed
 # or substituted package on the index fails the build instead of shipping.
-COPY requirements.lock .
+COPY requirements.lock requirements-voice.lock ./
 RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir --require-hashes -r requirements.lock
+# Trixie's glibc supports the optional media wheels; never compile native media.
+RUN pip install --no-cache-dir --only-binary=:all: --require-hashes --no-deps -r requirements-voice.lock
 
 # ── Dev / test dependencies ──
 # The runtime image is also the agent's workbench: it checks out this repo and

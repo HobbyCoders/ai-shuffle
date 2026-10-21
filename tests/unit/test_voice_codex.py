@@ -116,6 +116,7 @@ def test_codex_is_explicit_and_never_funds_api_key_models():
 async def test_subclass_waits_for_acceptance_with_same_chat_history_and_no_api_socket(monkeypatch):
     from app.core.voice_codex import CodexVoiceStream
     from app.core import http_client
+    monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
     from app.core.provider import fluid_credentials
     peer = AsyncMock()
     peer.enqueue = Mock()
@@ -138,6 +139,7 @@ async def test_subclass_waits_for_acceptance_with_same_chat_history_and_no_api_s
 async def test_subclass_sanitizes_provider_exceptions(monkeypatch):
     from app.core.voice_codex import CodexVoiceStream
     from app.core import http_client
+    monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
     from app.core.provider import fluid_credentials
     monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(return_value=("fake-token", None)))
     monkeypatch.setattr(http_client, "get_http_client", lambda: "fake-http")

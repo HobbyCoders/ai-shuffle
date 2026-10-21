@@ -24,6 +24,10 @@ class CodexVoiceStream(VoiceStream):
         return None
 
     async def start_live(self, history):
+        from app.core.voice_dependencies import availability
+        available, reason = availability()
+        if not available:
+            raise ValueError(reason)
         from app.core.http_client import get_http_client
         from app.core.provider.fluid_credentials import _load_codex_access_token
         from app.core.voice_bridge import conversation_instructions

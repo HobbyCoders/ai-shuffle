@@ -1,0 +1,5 @@
+# Optional unofficial ChatGPT voice. Never part of the mandatory app install.
+# Exact modern closure approved for glibc 2.28+ and macOS ARM64 14+.
+aiortc==1.15.0
+av==17.1.0
+pylibsrtp==1.0.0

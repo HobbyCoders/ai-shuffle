@@ -56,6 +56,8 @@ RUNTIME_PATHS = (
     "requirements-build.txt",
     "requirements-native.txt",
     "requirements-native.lock",
+    "requirements-voice.txt",
+    "requirements-voice.lock",
     ".env.example",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",

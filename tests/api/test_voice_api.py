@@ -391,10 +391,27 @@ class TestVoicePreview:
 
 
 class TestCreateVoiceSession:
+    def test_unofficial_codex_unavailable_does_not_create_a_session(self, authenticated_client, mock_db, monkeypatch):
+        from unittest.mock import AsyncMock, Mock
+        from app.core.provider import fluid_credentials
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove")
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(return_value=("fake-token", None)))
+        reason = "Unofficial ChatGPT voice is not available on this system."
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (False, reason))
+        create = Mock(side_effect=AssertionError("must refuse before creating a session"))
+        monkeypatch.setattr(db, "create_session", create)
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "profile_id":"default"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == reason
+        create.assert_not_called()
+
     def test_unofficial_codex_pins_subscription_without_minting_a_client_secret(self, authenticated_client, mock_db, monkeypatch):
         from unittest.mock import AsyncMock
         from app.api import voice
         from app.core.provider import fluid_credentials
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
         _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove")
         _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
         db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")

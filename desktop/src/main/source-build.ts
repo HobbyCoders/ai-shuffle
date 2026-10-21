@@ -55,7 +55,7 @@ async function run(executable: string, args: string[], cwd: string, opts: BuildO
 }
 
 /** The files that decide the Python environment; desktop/scripts/runtime-contract.mjs hashes the same list. */
-export const PYTHON_INPUTS = ['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml'];
+export const PYTHON_INPUTS = ['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml'];
 
 /**
  * pip arguments for the Python environment, the same way the container
@@ -70,6 +70,8 @@ export function pythonInstallSteps(): string[][] {
     [...pip, '--require-hashes', '-r', 'requirements.lock'],
     // The signed source carries a metadata-corrected, hash-pinned pynput wheel.
     [...pip, '--find-links', 'desktop/vendor', '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', 'requirements-native.lock'],
+    // This helper fails closed for voice, not for the app installation.
+    ['app/core/voice_dependencies.py', '--install'],
     [...pip, '--no-deps', '--no-build-isolation', './fluid'],
   ];
 }

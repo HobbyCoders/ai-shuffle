@@ -38,7 +38,7 @@ def test_python_locks_are_noticed_for_every_platform():
     rows = {(notices.canonicalize_name(cells[1].strip()), cells[2].strip())
             for line in text.splitlines() if line.startswith("| ")
             for cells in [line.split("|")]}
-    for filename in ("requirements.lock", "requirements-native.lock"):
+    for filename in ("requirements.lock", "requirements-native.lock", "requirements-voice.lock"):
         pins = re.findall(r"^([A-Za-z0-9_.-]+)==([^ ;\\\n]+)",
                           (ROOT / filename).read_text(), flags=re.MULTILINE)
         assert pins, filename
@@ -54,6 +54,7 @@ def test_generator_keeps_all_lock_versions_regardless_of_host_platform(tmp_path,
         'example==1.0 ; sys_platform == "win32" \\\n    --hash=sha256:abc\n'
     )
     (tmp_path / "requirements-native.lock").write_text('example==2.0 ; sys_platform == "darwin"\n')
+    (tmp_path / "requirements-voice.lock").write_text('example==1.0\n')
     meta = Message()
     meta["Name"] = "example"
     meta["License-Expression"] = "MIT"
