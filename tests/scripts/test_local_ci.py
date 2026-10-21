@@ -74,13 +74,16 @@ def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
     ["docker/container_runtime.py"],
     ["docker/nested/helper.py"],
     ["Dockerfile"],
+    ["entrypoint.sh"],
+    ["docker-compose.yml"],
     ["app/main.py"],
     ["tests/core/test_container_runtime.py"],
     ["tests/core/test_container_image_contract.py"],
     None,  # full mode must run the dedicated files despite fast-subset exclusions
 ])
 @pytest.mark.parametrize("pg_source", ["path", "smoke", None])
-def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source):
+@pytest.mark.parametrize("pressure_optin", [False, True])
+def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, pressure_optin):
     ctx = local_ci.Context(mode="full" if files is None else "changed", base="base",
                            files=files, python=sys.executable)
     suite = next(suite for suite in local_ci.SUITES if suite.name == "backend-linux")
@@ -101,6 +104,9 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source):
     monkeypatch.setenv("TEST_POSTGRES_DSN", "postgresql://never@external.invalid/live")
     monkeypatch.setenv("CONTAINER_RUNTIME_TEST_PG", "1")
     monkeypatch.setenv("CONTAINER_RUNTIME_TEST_PRESSURE", "1")
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PRESSURE", raising=False)
+    if pressure_optin:
+        monkeypatch.setenv("LOCAL_CI_CONTAINER_PRESSURE", "1")
 
     suite.run(ctx)
 
@@ -122,7 +128,10 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source):
     assert env["AI_SHUFFLE_ENV_FILE"] == "/dev/null"
     expected = "1" if pg_source and ctx.mode == "full" else "0"
     assert env["CONTAINER_RUNTIME_TEST_PG"] == expected
-    assert env["CONTAINER_RUNTIME_TEST_PRESSURE"] == expected
+    expected_pressure = "1" if expected == "1" and pressure_optin else "0"
+    assert env["CONTAINER_RUNTIME_TEST_PRESSURE"] == expected_pressure
+    if expected_pressure == "0":
+        assert any("#350" in note and "LOCAL_CI_CONTAINER_PRESSURE=1" in note for note in ctx.notes)
     assert env["PATH"] == ("/test/pg/bin:" if pg_source else "") + "/test/original-path"
     if ctx.mode != "full":
         assert any("Container" in note and "full" in note for note in ctx.notes)

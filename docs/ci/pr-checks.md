@@ -459,9 +459,17 @@ also independently supports safe ancestors and rechecks its own pointer.
   revision that already passed, or test the tip.
 - Mac-only checks, when the release changes them: `ios.yml` and
   `ci-folder-confinement.yml`.
-- The real-PostgreSQL and container contracts that only run in the hosted
-  backend job: `gh workflow run ci-backend.yml --ref main`, when the release
-  touches the container runtime, the network database or agent isolation.
+- The Linux `backend-linux` local suite runs both container runtime and image
+  contracts serially. `check` runs their plain cases for container/startup changes;
+  `full` also enables the real-PostgreSQL functional cases when local PostgreSQL
+  binaries are available. These cases create disposable clusters, not connections
+  to a configured database. Checkpoint timing measurements remain explicit while
+  [#350](https://github.com/HobbyCoders/ai-shuffle/issues/350) is unresolved:
+  `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`. The gate prints
+  a coverage note when these measurements or PostgreSQL cases are not enabled.
+  The manual hosted backend job still covers other network-database and agent
+  isolation contracts when a local run cannot answer the release question;
+  do not dispatch it to discover failures.
 - The release workflow itself builds and verifies the container image, the
   buyer install and the Windows installer on a clean Windows runner (see
   [release-channels.md](release-channels.md)).

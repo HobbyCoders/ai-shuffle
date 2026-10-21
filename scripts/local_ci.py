@@ -473,22 +473,26 @@ def backend_linux(ctx: Context) -> None:
     # Each real-PG case creates its own cluster under tmp_path; no shared server
     # or TEST_POSTGRES_DSN is needed. Override inherited opt-ins/DSNs explicitly.
     # Keep check deterministic and cheap on a busy developer machine. Full
-    # retains the real-PG and disk-pressure measurements (and their failures).
+    # runs real-PG functional cases; host-sensitive timing stays explicit (#350).
     container_pg = ctx.mode == "full" and bool(pg_bin)
+    container_pressure = container_pg and os.environ.get("LOCAL_CI_CONTAINER_PRESSURE") == "1"
     container_env = {
         **env, "ALLOW_REAL_PG": "0", "TEST_POSTGRES_DSN": "",
         "AI_SHUFFLE_ENV_FILE": "/dev/null",
         "CONTAINER_RUNTIME_TEST_PG": "1" if container_pg else "0",
-        "CONTAINER_RUNTIME_TEST_PRESSURE": "1" if container_pg else "0",
+        "CONTAINER_RUNTIME_TEST_PRESSURE": "1" if container_pressure else "0",
     }
     if pg_bin:
         container_env["PATH"] = pg_bin + os.pathsep + os.environ.get("PATH", "")
     if ctx.mode != "full":
-        ctx.notes.append("Container PostgreSQL and disk-pressure cases are full-mode only; "
+        ctx.notes.append("Container PostgreSQL functional cases are full-mode only; "
                          "check runs the plain serial container contracts.")
     elif not pg_bin:
         ctx.notes.append("Container PostgreSQL and disk-pressure cases skipped: "
                          "no PostgreSQL binaries (set SMOKE_PG_BIN).")
+    if not container_pressure:
+        ctx.notes.append("Container checkpoint timing measurements disabled pending #350; "
+                         "run full with LOCAL_CI_CONTAINER_PRESSURE=1 and PostgreSQL binaries to opt in.")
     run([ctx.python, "-m", "pytest", "tests/core/test_container_runtime.py",
          "tests/core/test_container_image_contract.py", "-rs",
          *pytest_args(ctx.python, timeout=120, parallel=False)], env=container_env)
@@ -635,13 +639,14 @@ def android_unavailable() -> str | None:
 
 
 def linux_only() -> str | None:
-    return None if sys.platform.startswith("linux") else "Linux only (bubblewrap, PostgreSQL boot smoke)"
+    return None if sys.platform.startswith("linux") else "Linux only (bubblewrap, PostgreSQL boot smoke, container contracts)"
 
 
 SUITES = [
     Suite("backend", BACKEND_PATHS, backend, "Backend pytest: the files a change reaches (full: the whole fast subset)"),
     Suite("backend-linux", ["app/core/chat_shell.py", "app/core/confined_files.py", "app/db/*", "app/main.py",
-                            "docker/*", "Dockerfile", "tests/smoke/*", "tests/core/test_chat_shell.py",
+                            "docker/*", "Dockerfile", "entrypoint.sh", "docker-compose.yml",
+                            "tests/smoke/*", "tests/core/test_chat_shell.py",
                             "tests/core/test_container_runtime.py", "tests/core/test_container_image_contract.py"],
           backend_linux, "Sandbox shell, PostgreSQL boot smoke and serial container contracts", linux_only),
     Suite("fluid", ["fluid/*"], fluid, "fluid unit suite"),
