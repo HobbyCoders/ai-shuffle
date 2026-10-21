@@ -122,9 +122,9 @@ stay held until up; modifiers supplied on up are held through the drop and relea
 including pointer modifiers combined with already-held modifiers. `type` while
 Ctrl, Alt or Win/Command is held requires system-key permission too. X11 refuses
 held Escape. `open_application`, `focus_window`, `click_element` and `set_value`
-refuse while any key is held, even with a system-key grant: release held keys
-first, because these actions can send their own keys or clicks. Application names
-must not contain control characters.
+refuse while keys or buttons are held, even with a system-key grant: release held
+keys or buttons first, because these actions can send their own keys or clicks.
+Application names must not contain control characters.
 Cross-call holds auto-release after **15 seconds**, as well as on errors, Stop,
 turn end and `release_control`. Use a short `computer_batch` for a held gesture.
 Timeout/Stop release does not send Escape to cancel a drag. If an up action finds

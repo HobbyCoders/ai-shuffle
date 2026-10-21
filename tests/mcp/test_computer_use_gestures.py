@@ -692,7 +692,7 @@ async def test_implicit_input_actions_refuse_held_keys(gesture, monkeypatch, act
             "set_value": {"element_id": element, "value": "no"}}[action]
     result = payload(await t[action](args))
     assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "partial"
-    assert "release held keys first" in result["error"].lower()
+    assert "release held keys or buttons first" in result["error"].lower()
     assert gesture.native.focused == [] and gesture.uia.performed == []
     gesture.mouse.press.assert_not_called()
     assert gesture.events == [("key_up", key) for key in reversed(held.split("+"))]
@@ -748,3 +748,42 @@ async def test_batch_first_step_failure_counts_release_of_prior_call_hold(gestur
     failure = payload(result)
     assert failure["outcome"] == "partial" and failure["completed_actions"] == []
     assert gesture.events == [("mouse_up", "left")]
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("held", [None, "shift", "mouse"])
+async def test_invalid_modifiers_keep_argument_error_after_cleanup(gesture, batch, held):
+    t = gesture.tools
+    await t["screenshot"]({})
+    if held == "mouse":
+        await t["mouse_down"]({})
+    elif held:
+        await t["key_down"]({"text": held})
+    gesture.events.clear()
+    args = {"coordinate": [20, 20], "text": "bogus"}
+    result = payload(await (t["computer_batch"]({"actions": [{"action": "left_click", **args}]})
+                            if batch else t["left_click"](args)))
+    assert result["code"] == "INVALID_ARGUMENT"
+    assert result["outcome"] == ("partial" if held else "rejected")
+    assert gesture.events == ([("mouse_up", "left")] if held == "mouse" else
+                              [("key_up", held)] if held else [])
+
+
+@pytest.mark.parametrize("action", ["open_application", "focus_window", "click_element", "set_value"])
+@pytest.mark.parametrize("button", ["left", "right", "middle"])
+async def test_implicit_input_actions_refuse_held_buttons(gesture, action, button):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad", "Paint"], "reason": "test"})
+    await t["screenshot"]({})
+    tree = payload(await t["ui_tree"]({"window_id": 101}))
+    element = tree["elements"][0]["element_id"]
+    assert payload(await t["mouse_down"]({"button": button}))["success"]
+    gesture.events.clear()
+    args = {"open_application": {"app": "Paint"}, "focus_window": {"window_id": 101},
+            "click_element": {"element_id": element},
+            "set_value": {"element_id": element, "value": "no"}}[action]
+    result = payload(await t[action](args))
+    assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "partial"
+    assert "release held keys or buttons first" in result["error"].lower()
+    assert gesture.native.focused == [] and gesture.uia.performed == []
+    assert gesture.events == [("mouse_up", button)]

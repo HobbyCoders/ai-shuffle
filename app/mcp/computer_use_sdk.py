@@ -627,9 +627,8 @@ def create_computer_use_server(
     def _enforce_grant(action: str, p: dict) -> None:
         # What the access card showed the owner is what the session may do, in
         # every permission mode (#1700). Checked before any input is sent.
-        if action in ("open_application", "focus_window", "click_element", "set_value") and any(
-                device is keyboard for device, key in inputs.held):
-            raise ActionError("PERMISSION_REQUIRED", "Release held keys first; " + action +
+        if action in ("open_application", "focus_window", "click_element", "set_value") and any(inputs.held):
+            raise ActionError("PERMISSION_REQUIRED", "Release held keys or buttons first; " + action +
                               " may send its own keys or clicks.")
         if action == "open_application" and any(
                 ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in str(p.get("app") or "")):
@@ -1395,13 +1394,12 @@ def create_computer_use_server(
         except asyncio.CancelledError:
             _cancelled(action)
             raise
-        except ActionError as e:
-            result = e.payload()
+        except (ActionError, ValueError) as e:
+            error = e if isinstance(e, ActionError) else ActionError("INVALID_ARGUMENT", str(e))
+            result = error.payload()
             if inputs.sent > sent_before and result["outcome"] == "rejected":
                 result["outcome"] = "partial"
             return _fail(result)
-        except ValueError as e:
-            return _fail(_failure(e, sent_before, "INVALID_ARGUMENT"))
         except Exception as e:
             logger.exception("computer-use %s failed", action)
             return _fail(_failure(e, sent_before, "ACTION_FAILED", f"{action} failed: {e}"))
