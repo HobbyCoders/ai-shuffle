@@ -23,9 +23,10 @@ def test_voice_file_worker_prefers_live_model_over_last_launch():
 
 
 @pytest.fixture()
-def agents(mock_db):
+def agents(mock_db, tmp_path):
     from app.db import database
 
+    database.create_project("task-project", "Task project", None, str(tmp_path))
     database.create_profile("root-agent", "Root Agent", None, {"model": "opus"})
     database.create_profile("helper", "Helper", None, {"model": "sonnet"})
     database.create_profile(
@@ -87,7 +88,7 @@ def report_dir(tmp_path, monkeypatch):
 def _mk_session(database, session_id, profile_id, parent=None):
     database.create_session(
         session_id=session_id, profile_id=profile_id,
-        title=session_id, parent_session_id=parent,
+        title=session_id, parent_session_id=parent, project_id="task-project",
     )
 
 
@@ -826,6 +827,43 @@ def test_fluid_dispatcher_returns_structured_background_receipt(monkeypatch):
     assert outcome.background_task.task_id == "worker-42"
     assert outcome.background_task.worker_session_id == "worker-42"
     assert outcome.background_task.description == "research"
+
+
+
+
+async def test_no_project_task_resolves_registered_project_before_dispatch(agents, monkeypatch, tmp_path):
+    from app.core import provider_agent
+    from app.core.config import settings
+    from app.db import database, projects_v2, checkouts
+    project = projects_v2.upsert_project("folder:target", name="Target")
+    checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(tmp_path))
+    database.create_session("coordinator", "root-agent", title="Coordinate", mode="chat", is_active=True)
+    seen = {}
+
+    async def worker(**kwargs):
+        seen.update(kwargs)
+        return provider_agent.WorkerOutcome(ok=True, session_id="child", report="Done.")
+
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    result = await td.dispatch_task_tool({"agent": "helper", "prompt": "Work", "project": "Target"}, caller_session_id="coordinator")
+    assert result["ok"], result
+    assert seen["project_override"] == project["id"]
+    assert seen["parent_session_id"] == "coordinator"
+
+
+async def test_no_project_code_task_must_name_a_project(agents, monkeypatch):
+    from app.core import provider_agent
+    from app.db import database
+    database.create_session("coordinator", "root-agent", title="Coordinate", mode="chat", is_active=True)
+    seen = []
+
+    async def worker(**kwargs):
+        seen.append(kwargs)
+
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    result = await td.dispatch_task_tool({"agent": "helper", "prompt": "Work"}, caller_session_id="coordinator")
+    assert not result["ok"] and "must name" in result["error"]
+    assert seen == []
 
 
 def test_root_routing_passes_root_as_parent(agents, monkeypatch):

@@ -84,11 +84,13 @@ Besides subagents, agents can coordinate with your other open chats:
 - send a message to another chat;
 - start a new, separate chat with a short brief.
 
-A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 4 new chats and 32 actions until you send a new message. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, archive and ownership checks always apply.
+A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 32 new chats and 256 actions until you send a new message. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, archive and ownership checks always apply.
 
-### Work the personal assistant starts
+### Coordinating without a project
 
-Chats the personal assistant starts report back to it when they finish. When one of them needs your approval, the assistant asks you one plain question in its conversation. Only your own reply there counts.
+An owner conversation without a project uses your selected agent and effort. It can coordinate sessions, start work in any registered project on an eligible worker, use subagents and app tools, browse the web, and use resources you grant through the access card. It can read registered project folders with Read, Glob and Grep, but cannot edit worker files, run a shell or Python kernel, or write skills or plugins. Start a session in the project for code changes; code-capable subagents must name a project and receive their own checkout there. App configuration writes still ask for your approval. API-key and non-owner conversations do not gain this surface. Remote Task uses the existing committed-branch transfer; when the project is only checked out on the target worker, use StartSession in that project instead of Task.
+
+Chats started by an owner conversation report back automatically. If the starting conversation is settled, it stays settled: the report remains on the child chat and you receive a notification instead. Approval prompts can be answered in the starting conversation; only your own reply there counts. The existing Assistant daily spending limit also covers no-project coordination and the work it starts; the setting remains on the Assistant page during this transition.
 
 ## A subagent's chat
 

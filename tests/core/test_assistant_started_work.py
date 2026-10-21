@@ -81,25 +81,25 @@ def wakes(session_id):
 # Ordinary chats: unchanged
 # ---------------------------------------------------------------------------
 
-async def test_ordinary_start_session_is_unchanged(mock_db, monkeypatch):
+async def test_ordinary_owner_start_session_reports_automatically(mock_db, monkeypatch):
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
     chat("caller")
-    report = AsyncMock(side_effect=AssertionError("ordinary chats never report"))
+    report = AsyncMock()
     monkeypatch.setattr(turn_scheduler, "on_started_session_terminal", report)
     outcome = await call("caller", "start", start_args())
     assert not outcome.is_error, outcome.text
     result = json.loads(outcome.text)
-    assert "peers must use MessageSession" in result["note"] and "project" not in result
+    assert "reports back to you automatically" in result["note"] and "project" not in result
     new_id = result["session_id"]
-    assert orch.started_by_home(new_id) is None
-    assert not away_mode.answers_questions(new_id) and away_mode.turn_note(new_id) is None
-    assert approvals.assistant_route(new_id) is None
+    assert orch.started_by_home(new_id) == "caller"
+    assert away_mode.answers_questions(new_id)
+    assert approvals.assistant_route(new_id).parent_session_id == "caller"
     run(new_id, result["turn_id"], "Done.")
     await turn_scheduler.on_turn_settled(new_id, result["turn_id"], "completed")
-    report.assert_not_awaited()
-    assert wakes("caller") == []
-    assert await away_mode.answer_if_away(new_id, [{"question": "Which?", "options": ["A", "B"]}]) is None
+    report.assert_awaited_once()
+    assert report.await_args.args[0] == "caller"
+    assert wakes("caller") == []  # delivery was captured above
 
 
 @pytest.mark.parametrize("source", ["binding", "live"])
@@ -133,13 +133,13 @@ async def test_local_start_session_uses_child_model_fast_pick(mock_db, monkeypat
     assert turn["overrides"].get("fast", False) is expected
 
 
-async def test_ordinary_chat_cannot_name_a_project(mock_db, monkeypatch):
+async def test_api_chat_cannot_name_a_project(mock_db, monkeypatch):
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
-    chat("caller")
+    chat("caller", api_user_id="api")
     projects_v2.upsert_project("git:shuffle", name="ai-shuffle")
     outcome = await call("caller", "start", start_args(project="ai-shuffle"))
-    assert outcome.is_error and "only in the owner's assistant conversation" in outcome.text
+    assert outcome.is_error and "owner top-level session" in outcome.text
     message = await call("caller", "message", {"session_id": "x", "message": "hi", "request_id": "m", "project": "p"})
     assert message.is_error
 

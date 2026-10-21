@@ -7,9 +7,9 @@ mode          stored value    what it is
 ============  ==============  ===========================================
 ``code``      ``NULL``        the full agentic surface (projects, agents,
                               branches, worktrees, every tool)
-``chat``      ``'chat'``      a lightweight chat: model, effort, attachments,
-                              transcription, usage — the web, the files you
-                              attach, question cards, and no checkout
+``chat``      ``'chat'``      no checkout; owner top-level sessions coordinate
+                              projects, sessions and app tools with read-only
+                              registered-project access; other chats stay narrow
 ``voice``     ``'voice'``     an OpenAI Realtime call
 ============  ==============  ===========================================
 
@@ -83,11 +83,29 @@ CHAT_MODE_RESOURCE_TOOLS: List[str] = [
 # a chat agent whose picker shows the question tool enabled could not call it,
 # and the model rightly answered "AskUser isn't available".
 CHAT_MODE_QUESTION_TOOLS: List[str] = ["AskUser"]
-CHAT_MODE_TOOL_SURFACE: List[str] = [
+CHAT_MODE_BASIC_TOOL_SURFACE: List[str] = [
     "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
     # Native generation stores only session-owned artifacts in chat mode.
     "GenerateNativeImage",
     *CHAT_MODE_QUESTION_TOOLS, *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
+]
+
+# Owner top-level chats coordinate work without acquiring worker execution.
+CHAT_MODE_ORCHESTRATION_TOOLS = [
+    "ListSessions", "SessionView", "SessionSearch", "StartSession", "MessageSession",
+    "SettleSession", "UnsettleSession", "ArchiveSession", "HandOffSession",
+    "ListAgents", "Task", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "SendMessage",
+]
+CHAT_MODE_APP_TOOLS = [
+    "GetAppLogs", "GetAppErrors", "DeployStatus", "GetUsage", "NotifyDevices",
+    "ScheduleWakeup", "CronCreate", "CronList", "CronDelete",
+]
+CHAT_MODE_TOOL_SURFACE: List[str] = [
+    *CHAT_MODE_BASIC_TOOL_SURFACE, "Glob", "Grep",
+    "mcp__attachments__Glob", "mcp__attachments__Grep", "mcp__app-config__*",
+    *CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS,
+    *(f"mcp__builtins__{name}" for name in
+      [*CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS]),
 ]
 
 # Where the chat lane's attachments land, under the workspace root. ONE shared
@@ -149,6 +167,20 @@ def session_mode_of(session_row: Optional[Mapping[str, Any]]) -> str:
     if not session_row:
         return DEFAULT_SESSION_MODE
     return normalize_session_mode(session_row.get("mode"))
+
+
+def runtime_session_mode(row: Optional[Mapping[str, Any]]) -> str:
+    """No-project owner sessions share the read-only coordination ceiling.
+
+    The old mode column remains readable and unchanged until the step-4 UI
+    migration. A legacy code-lane row with no project must not grant a shell.
+    """
+    mode = session_mode_of(row)
+    if row and not row.get("hidden") and mode != "voice" and not (row.get("project_id") or row.get("project_v2_id")):
+        from app.core.session_orchestration import is_owner_session
+        if is_owner_session(row):
+            return "chat"
+    return mode
 
 
 def storage_session_mode(mode: Any) -> Optional[str]:
@@ -338,7 +370,7 @@ def safety_check_denial(reason: Optional[str]) -> str:
     )
 
 
-def narrow_tool_access_for_mode(access: ToolAccess, mode: Any) -> ToolAccess:
+def narrow_tool_access_for_mode(access: ToolAccess, mode: Any, *, owner_session: bool = False) -> ToolAccess:
     """Compose an agent's own ``ToolAccess`` with the ceiling its mode imposes.
 
     Only chat mode has a ceiling. Code mode is the full surface by definition,
@@ -357,7 +389,8 @@ def narrow_tool_access_for_mode(access: ToolAccess, mode: Any) -> ToolAccess:
     if normalize_session_mode(mode) != "chat":
         return access
 
-    surface = intersect_tool_surfaces(access.allowed, CHAT_MODE_TOOL_SURFACE)
+    ceiling = CHAT_MODE_TOOL_SURFACE if owner_session else CHAT_MODE_BASIC_TOOL_SURFACE
+    surface = intersect_tool_surfaces(access.allowed, ceiling)
     if not surface:
         return ToolAccess(
             allowed=None, disallowed=[DENY_ALL, *(access.disallowed or [])]

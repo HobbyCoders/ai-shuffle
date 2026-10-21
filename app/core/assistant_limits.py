@@ -177,12 +177,12 @@ def _home_id(cursor):
     return (row_to_dict(cursor.fetchone()) or {}).get("home_session_id")
 
 
-def _tracked(cursor):
-    """``{session_id: counted-from}`` for the home (None: all day) and its jobs."""
+def _tracked(cursor, roles):
+    """``{session_id: counted-from}`` for coordinators and their jobs."""
     home = _home_id(cursor)
-    if not home:
-        return {}
-    tracked: dict = {home: None}
+    tracked: dict = {sid: None for sid in roles}
+    if home:
+        tracked[home] = None
     cursor.execute("SELECT session_id, created_at FROM assistant_runs WHERE assistant_id=%s "
                    "AND session_id IS NOT NULL", (assistant_id(),))
     for row in cursor.fetchall():
@@ -268,12 +268,14 @@ def _remote_booked(cursor, start):
 def _measure(now=None) -> dict:
     """Spend today plus what enforcement needs, from one connection."""
     day, start, resets_at, tz_name = day_window(now)
+    from app.core.orchestration_limits import tracked_roles
+    roles = tracked_roles()
     with get_db() as conn:
         cursor = conn.cursor()
-        tracked = _tracked(cursor)
+        tracked = _tracked(cursor, roles)
         live = _live_turns(cursor, tracked) if tracked else []
-        spent = (_booked(cursor, tracked, start) + _in_flight(cursor, tracked, live)
-                 + _remote_booked(cursor, start)) if tracked else 0.0
+        spent = ((_booked(cursor, tracked, start) + _in_flight(cursor, tracked, live)) if tracked else 0.0)
+        spent += _remote_booked(cursor, start)
     return dict(day=day, start=start, resets_at=resets_at, timezone=tz_name,
                 spent=spent, tracked=tracked, live=live)
 
@@ -327,14 +329,8 @@ def start_refusal(session_id):
     Covers Task workers, StartSession, MessageSession and research admission
     for the home and every job linked to it.
     """
-    try:
-        if role(session_id) is None:
-            return None
-        state = status()
-    except Exception:  # noqa: BLE001 - never break unrelated orchestration
-        logger.warning("Assistant limits: start check failed for %s", session_id, exc_info=True)
-        return None
-    return _reached_text(state) if state["limit_reached"] else None
+    from app.core.orchestration_limits import start_refusal as check
+    return check(session_id)
 
 
 def assert_can_start(session_id):
@@ -376,20 +372,8 @@ def turn_refusal(session_id, source=None):
     unattended turn at the limit or past its job time limit; a turn the owner
     started in it runs.
     """
-    try:
-        kind = role(session_id)
-        if kind is None or (kind == "job" and source in PERSON_SOURCES):
-            return None
-        state = status()
-        if state["limit_reached"]:
-            return _reached_text(state)
-        if (kind == "job" and state["job_limit_enabled"]
-                and _job_over_time(session_id, state["max_job_minutes"], datetime.now(timezone.utc))):
-            return (f"This background job passed its {_duration(state['max_job_minutes'])} limit, so it does not "
-                    f"start again; only the owner can change the limit on the Assistant page under Limits.")
-    except Exception:  # noqa: BLE001 - a failed check must not block unrelated turns
-        logger.warning("Assistant limits: turn check failed for %s", session_id, exc_info=True)
-    return None
+    from app.core.orchestration_limits import turn_refusal as check
+    return check(session_id, source)
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +390,8 @@ ROLE_CONTEXT = (
 def role_context(session_id):
     """Static text for the home's system prompt (no per-turn values)."""
     try:
-        return ROLE_CONTEXT if service.is_primary_session(session_id) else ""
+        from app.core.orchestration_limits import role as coordination_role
+        return ROLE_CONTEXT if coordination_role(session_id) else ""
     except Exception:  # noqa: BLE001
         logger.debug("Assistant limits: role context unavailable", exc_info=True)
         return ""
@@ -458,19 +443,23 @@ def plan(now=None):
         limit_reached=bool(limits["spend_limit_enabled"] and measured["spent"] >= limits["daily_spend_limit_usd"]),
     )
     tracked = measured["tracked"]
-    home = next((sid for sid, since in tracked.items() if since is None), None)
     stops = []
+    from app.core.orchestration_limits import tracked_roles
+    coordinators = {sid for sid, kind in tracked_roles().items() if kind == "coordinator"}
     with get_db() as conn:
         cursor = conn.cursor()
+        home = _home_id(cursor)
+        if home:
+            coordinators.add(home)
         for turn in measured["live"]:
             sid = turn["session_id"]
             if limits_db.stopped(turn["id"]):
                 continue
-            person = sid != home and turn.get("source") in PERSON_SOURCES
+            person = sid not in coordinators and turn.get("source") in PERSON_SOURCES
             if state["limit_reached"] and not person:
                 stops.append((sid, turn["id"], "daily_limit", _label(cursor, sid) if sid != home else None))
                 continue
-            if sid == home or person or not limits["job_limit_enabled"]:
+            if sid in coordinators or person or not limits["job_limit_enabled"]:
                 continue
             cursor.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
             session = row_to_dict(cursor.fetchone())
@@ -481,41 +470,9 @@ def plan(now=None):
 
 
 async def enforce(now=None):
-    """Stop work past the limits and post the owner's notices. Never raises."""
-    from app.core import turn_manager
-    try:
-        observed = await refresh_remote(now)
-    except Exception:
-        logger.exception("Assistant limits: could not collect the spend of jobs on other workers")
-        observed = []
-    try:
-        state, stops = await run_sync(plan, now)
-        remote = await run_sync(plan_remote, state, observed)
-    except Exception:
-        logger.exception("Assistant limits: could not measure today's spend")
-        return
-    aid = assistant_id()
-    for session_id, turn_id, reason, label in stops:
-        try:
-            row = await turn_manager.interrupt_async(session_id, "stop", turn_id=turn_id, source="assistant")
-            if row is not None:
-                await run_sync(limits_db.record_stop, aid, session_id, turn_id, reason, label)
-                logger.info("Assistant limits: stopped turn %s in %s (%s)", turn_id, session_id, reason)
-        except Exception:
-            logger.exception("Assistant limits: could not stop turn %s", turn_id)
-    for stop in remote:
-        try:
-            if await _stop_remote(stop):
-                await run_sync(limits_db.record_stop, aid, stop["session_id"], stop["turn_ids"][0],
-                               stop["reason"], stop["label"])
-                logger.info("Assistant limits: stopped %s %s on %s (%s)", stop["kind"], stop["session_id"],
-                            stop["device_id"], stop["reason"])
-        except Exception:
-            logger.exception("Assistant limits: could not stop %s on %s", stop["session_id"], stop["device_id"])
-    try:
-        await _post_notices(state)
-    except Exception:
-        logger.exception("Assistant limits: notices failed")
+    """Compatibility for the existing Assistant API and background loop."""
+    from app.core.orchestration_limits import enforce as apply
+    return await apply(now)
 
 
 # ---------------------------------------------------------------------------

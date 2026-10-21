@@ -171,6 +171,25 @@ def upload(root: Path, directory: str, filename: str, content: bytes) -> Path:
     raise AccessDenied("Too many duplicate filenames.")
 
 
+def list_confined(root: Path, relative: str):
+    """Names and directory flags through a pinned, no-follow directory handle."""
+    names = _relative(relative, empty=True)
+    with ExitStack() as stack:
+        if os.name == 'nt':
+            parent = stack.enter_context(_windows_directory(root, names))
+        else:
+            fd = stack.enter_context(_linux_root(root))
+            parent = stack.enter_context(chat_files.directory(fd, names))
+        with os.scandir(parent) as entries:
+            result = []
+            for entry in entries:
+                if len(result) >= 10000:
+                    raise AccessDenied("Directory too large; choose a subfolder.")
+                if not entry.is_symlink():
+                    result.append((entry.name, entry.is_dir(follow_symlinks=False)))
+            return result
+
+
 @contextmanager
 def open_attachment(root: Path, path: Path):
     """Resolve in-root aliases, then open the resolved entry without following links.

@@ -857,6 +857,10 @@ def build_task_contract(
     }
     from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE, EFFORT_PROPERTY
 
+    properties["project"] = {
+        "type": "string", "minLength": 1, "maxLength": 500,
+        "description": "Registered project name, id or path. Required for code-capable subagents from a no-project owner session; the host provisions a checkout there.",
+    }
     properties["base_commit"] = {
         "type": "string",
         "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",

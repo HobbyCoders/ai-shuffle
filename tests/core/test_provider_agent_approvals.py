@@ -736,6 +736,7 @@ class TestDispatchWiring:
             model_id="gpt-5.5",
             prompt="review this",
             label="reviewer",
+            tool_allowlist=["Read"],  # This wiring-only worker has no project.
         ))
 
         assert created["worker"] == outcome.session_id

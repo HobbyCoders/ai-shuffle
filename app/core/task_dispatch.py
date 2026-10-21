@@ -1523,6 +1523,16 @@ async def dispatch_task_tool(
     that left nothing running), the work runs here and the receipt carries
     ``worker_note``, one line saying why. Every other call runs here.
     """
+    if args.get("project") is not None:
+        from app.core.session_orchestration import _project_placement
+        try:
+            placement = await _project_placement(caller_session_id, args)
+        except (ValueError, PermissionError) as exc:
+            return {"ok": False, "error": str(exc)}
+        args = {**args, "project": placement["project"]["id"]}
+        if placement["remote"]:
+            args["worker"] = placement["remote"]["device_id"]
+        return await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)
     if args.get("worker") is not None:
         return await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)
     from app.core import assistant_worker
@@ -1819,6 +1829,24 @@ async def _dispatch_task_tool(
     if scope_error:
         return {"ok": False, "error": scope_error}
 
+    from app.core.session_modes import runtime_session_mode
+    project_override = None
+    if args.get("project") is not None:
+        from app.core.session_orchestration import is_owner_session, _resolve_project
+        if not is_owner_session(caller_row):
+            return {"ok": False, "error": "project requires an owner top-level session."}
+        try:
+            project_override = _resolve_project(args["project"])["id"]
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        caller_row = {**caller_row, "project_id": None, "project_v2_id": project_override,
+                      "branch": None, "worktree_id": None, "worktree_branch": None, "worktree_path": None,
+                      "_task_named_project": True}
+    elif runtime_session_mode(caller_row) == "chat" and not (caller_row.get("project_id") or caller_row.get("project_v2_id")):
+        from app.core.worker_checkout import _is_shared_surface
+        if not _is_shared_surface(declared_tools):
+            return {"ok": False, "error": "Code-capable subagents must name a registered project. Pass project= or start a session in that project instead."}
+
     # ``worker``: omitted or this worker runs here exactly as before; another
     # worker is validated here and started below, before any local admission.
     remote_worker: Optional[Dict[str, Any]] = None
@@ -1916,6 +1944,8 @@ async def _dispatch_task_tool(
         roster_name=roster_name,
         launch_tool_use_id=launch_tool_use_id,
     )
+    if project_override is not None:
+        kwargs["project_override"] = project_override
     if base_commit is not None:
         kwargs["base_commit"] = base_commit
     if system_prompt_append:

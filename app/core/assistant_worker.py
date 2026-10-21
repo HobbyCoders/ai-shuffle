@@ -114,15 +114,16 @@ def write(device_id: Optional[str]) -> dict[str, Any]:
 def default_for(session_id: str) -> Optional[dict]:
     """The directory row of the worker ``session_id``'s Task calls default to.
 
-    None unless ``session_id`` is the assistant home or a job it started and
-    the owner chose another worker that is still an active member. Never
+    An owner top-level session (never an API session), or a legacy assistant
+    job, may use the owner's chosen active worker. Never
     raises: a lookup failure means the work runs here, as it always did.
     """
     try:
         from app.core import assistant_limits
         from app.network import runners
 
-        if assistant_limits.role(session_id) is None:
+        from app.core.session_orchestration import is_owner_session
+        if not is_owner_session(session_id) and assistant_limits.role(session_id) is None:
             return None
         return _choice(runners.other_workers())
     except Exception:  # noqa: BLE001 - the default must never break dispatch

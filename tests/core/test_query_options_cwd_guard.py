@@ -172,9 +172,8 @@ def test_v2_worktree_on_wrong_branch_names_the_branch_instead_of_missing():
     assert exc_info.value.branch_name == "feat/x"
 
 
-def test_orphan_session_falls_to_workspace(tmp_path, monkeypatch):
-    """A session with no project_v2 and no live legacy project (resolve_cwd None,
-    resolve_project_v2 None) → default workspace (legacy parity)."""
+def test_orphan_owner_session_uses_confined_chat_cwd(tmp_path, monkeypatch):
+    """No project means coordination, never an implicit worker workspace grant."""
     ws = tmp_path / "ws"
     monkeypatch.setattr(qo.settings, "workspace_dir", ws)
     session = {"id": "ses-1", "project_v2_id": None, "branch": None}
@@ -190,11 +189,13 @@ def test_orphan_session_falls_to_workspace(tmp_path, monkeypatch):
             profile=query_profile(), session_id="ses-1"
         )
 
-    assert str(opts.cwd) == str(ws)
+    from app.core.session_modes import chat_uploads_dir
+    assert str(opts.cwd) == str(chat_uploads_dir())
+    assert "Bash" not in (opts.aih_tool_allowlist or [])
 
 
-def test_orphan_session_uses_profile_config_cwd(tmp_path):
-    """An orphan session with a profile-config cwd → that cwd (legacy parity)."""
+def test_orphan_owner_session_cannot_escape_with_profile_config_cwd(tmp_path):
+    """An agent-config cwd cannot lift a no-project owner's file ceiling."""
     cfg_dir = tmp_path / "cfgcwd"
     cfg_dir.mkdir()
     session = {"id": "ses-1", "project_v2_id": None, "branch": None}
@@ -210,7 +211,9 @@ def test_orphan_session_uses_profile_config_cwd(tmp_path):
             profile=query_profile({"cwd": str(cfg_dir)}), session_id="ses-1"
         )
 
-    assert str(opts.cwd) == str(cfg_dir)
+    from app.core.session_modes import chat_uploads_dir
+    assert str(opts.cwd) == str(chat_uploads_dir())
+    assert str(opts.cwd) != str(cfg_dir)
 
 
 def test_sync_builder_lost_claim_does_not_wait(tmp_path):

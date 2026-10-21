@@ -5693,7 +5693,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             return await self._finish_tool(
                 sid, turn_id, name, tool_use_id,
                 ToolOutcome(
-                    text=f"tool not available in this session: {name}", is_error=True
+                    text=(self.ctx.extra.get("tool_surface_denial")
+                          or f"tool not available in this session: {name}"), is_error=True
                 ),
                 input=input,
             )

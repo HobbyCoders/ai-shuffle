@@ -1794,8 +1794,11 @@ async def _stream_to_websocket_impl(
     # inside the options builder, so without the same narrowing the callback
     # would happily approve a tool the options surface excluded — a real
     # divergence, not a redundancy.
-    session_mode = session_mode_of(session)
-    _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode)
+    from app.core.session_modes import runtime_session_mode
+    session_mode = runtime_session_mode(session)
+    from app.core.session_orchestration import is_owner_session
+    owner_coordinator = session_mode == "chat" and is_owner_session(session)
+    _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode, owner_session=owner_coordinator)
     from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = (overrides or {}).get("_assistant_proactive")
     _tool_access = narrow_tool_access_for_proactive(_tool_access, assistant_proactive)
@@ -1909,9 +1912,9 @@ async def _stream_to_websocket_impl(
     # The owner's assistant limits: past the daily spending limit the
     # assistant home starts no new turn, nor does an unattended turn in a job
     # it started (or one past its job time limit).
-    from app.core import assistant_limits
+    from app.core import orchestration_limits
 
-    _limited = await asyncio.to_thread(assistant_limits.turn_refusal, session_id, turn_source)
+    _limited = await asyncio.to_thread(orchestration_limits.turn_refusal, session_id, turn_source)
     if _limited:
         logger.warning(f"[WS] Turn refused for session {session_id}: assistant limit")
         yield {"type": "error", "message": _limited, "code": "assistant_limit"}
@@ -1995,7 +1998,7 @@ async def _stream_to_websocket_impl(
                     # Re-stamped like the tool lists: the pooled client outlives
                     # a single turn, so a stale mode here would let the callback
                     # enforce the wrong lane's ceiling on a reused subprocess.
-                    "session_mode": session_mode,
+                    "session_mode": session_mode, "owner_coordinator": owner_coordinator,
                     "profile_id": profile_id,
                     "config": config,
                     "session_id": session_id,
@@ -2075,7 +2078,7 @@ async def _stream_to_websocket_impl(
             # The session's sidepanel lane. Lives here, beside the tool lists,
             # because the chat ceiling has a path half the lists cannot express
             # and the reuse path re-stamps it every turn.
-            "session_mode": session_mode,
+            "session_mode": session_mode, "owner_coordinator": owner_coordinator,
             "profile_id": profile_id,
             "config": config,
             "session_id": session_id,
@@ -2131,6 +2134,13 @@ async def _stream_to_websocket_impl(
                 _ctx_reason_type     = getattr(context, 'decision_reason_type', None)
                 _ctx_classifier_ok   = getattr(context, 'classifier_approvable', None)
 
+                if refs.get("session_mode") == "chat" and tool_name in {
+                    "Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Monitor", "run_python",
+                    "save_skill", "delete_skill", "save_plugin",
+                }:
+                    from app.core.coordinator_files import DENIAL
+                    return PermissionResultDeny(message=DENIAL)
+
                 # Check profile-level tool restrictions FIRST. Entries may be
                 # exact names or fnmatch patterns (``mcp__browser__*``, ``*``),
                 # so matching goes through the shared helper rather than a
@@ -2164,7 +2174,12 @@ async def _stream_to_websocket_impl(
                         chat_mode_read_permitted,
                     )
 
-                    if not chat_mode_read_permitted(tool_name, tool_input):
+                    if refs.get("owner_coordinator"):
+                        from app.core.coordinator_files import permitted
+                        read_permitted = permitted(tool_name, tool_input)
+                    else:
+                        read_permitted = chat_mode_read_permitted(tool_name, tool_input)
+                    if not read_permitted:
                         logger.debug(
                             f"[WS] Tool {tool_name} blocked: chat session read "
                             f"outside the chat uploads directory"
@@ -2777,6 +2792,7 @@ async def _stream_to_websocket_impl(
             # the engine; the callback keeps the resolved mode, as before.
             engine_mode = ("bypassPermissions"
                            if isinstance(getattr(options, "aih_assistant_scope", None), dict)
+                           and not getattr(options, "aih_owner_coordinator", False)
                            else permission_mode)
             applied_mode = getattr(state.connect_options, "permission_mode", None)
             if engine_mode != applied_mode:

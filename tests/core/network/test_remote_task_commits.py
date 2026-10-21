@@ -147,6 +147,21 @@ def world(workers, monkeypatch, kicks, tmp_path):  # noqa: F811 — the imported
 
 # --- the normal path ------------------------------------------------------------
 
+def test_named_project_task_without_local_source_refuses_instead_of_running_unbound(world):
+    from tests.core.network.test_remote_task_control import dispatch
+    with world.b.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE checkouts SET status='unavailable',path=%s WHERE project_id=%s",
+                              (str(world.parent / "missing"), world.project_id))
+    with world.b.active():
+        row = {**database.get_session("caller"), "_task_named_project": True}
+        result = dispatch(world.a, world.b, caller_row=row)
+        assert not result["ok"] and "StartSession(project=" in result["error"]
+    with world.a.active(), get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE is_worker=TRUE")
+        assert cursor.fetchall() == []
+
+
 def test_commits_are_pushed_there_and_fetched_here_without_touching_the_parent(world):
     before = world.parent_state()
     child = world.start()

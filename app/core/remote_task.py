@@ -367,7 +367,7 @@ async def dispatch_remote(
     """
     from app.core.task_registry import task_registry
     from app.core.worker_checkout import (
-        REMOTE_BRANCH, WorkerCheckoutError, publish_worker_branch, release_worker_branch,
+        REMOTE_BRANCH, REMOTE_NONE, WorkerCheckoutError, publish_worker_branch, release_worker_branch,
     )
     from app.network import control, engine
 
@@ -414,6 +414,10 @@ async def dispatch_remote(
             legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
+    if caller_row.get("_task_named_project") and state.mode == REMOTE_NONE:
+        return {"ok": False, "error": (
+            "The named project has no Git checkout on this worker to transfer. "
+            "Use StartSession(project=..., worker=...) on the project worker instead; nothing was dispatched.")}
     if state.mode == REMOTE_BRANCH and not state.pushed:
         return {"ok": False, "error": (
             f"Could not publish the worker's branch to origin for {name}: "
@@ -879,6 +883,9 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         permission_mode=permission_mode, context_window=context_window,
         permission_ceiling=permission_mode, fast=fast,
     )
+    if not project_v2_id:
+        # A remote research child without a project has no worker file/shell grant.
+        fields["mode"] = "chat"
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=effort,
         cwd=received.cwd, permission_mode=permission_mode, checkout=checkout,

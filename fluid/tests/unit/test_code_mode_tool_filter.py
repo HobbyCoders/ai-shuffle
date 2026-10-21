@@ -105,6 +105,19 @@ def test_projection_excludes_a_filtered_tool() -> None:
 # ── the host-call gate ────────────────────────────────────────────────────
 
 
+async def test_native_surface_denial_can_explain_the_host_boundary() -> None:
+    loop = NativeLoop(provider=_IdleProvider(), store=MemoryStore(), model="test",
+                      registry=_registry(), allowed_tools=["Read"],
+                      ctx=ToolCtx(extra={"tool_surface_denial": "Start a session in that project instead."}))
+    try:
+        meta = await loop._ensure_session()
+        refused = await loop._gated_call(meta.session_id, "turn", "Bash", "call", {"command": "touch forbidden"})
+        assert refused.is_error
+        assert refused.text == "Start a session in that project instead."
+    finally:
+        await loop.aclose()
+
+
 async def test_host_bridge_refuses_a_filtered_tool() -> None:
     registry = _registry()
     bridge = HostBridge(

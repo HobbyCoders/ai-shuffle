@@ -247,9 +247,9 @@ async def on_owner_message(session_id: Optional[str], text: Optional[str]) -> Op
     if not session_id or not isinstance(text, str):
         return None
     try:
-        from app.core.assistant_service import is_primary_session
+        from app.core.session_orchestration import is_owner_session
 
-        if not await asyncio.to_thread(is_primary_session, session_id):
+        if not await asyncio.to_thread(is_owner_session, session_id):
             return None
         request = await asyncio.to_thread(current_request, session_id)
         if request is None or not request.get("request_id"):

@@ -392,9 +392,9 @@ def _assistant_confirm(
         return None
     try:
         from app.core import assistant_confirm
-        from app.core.assistant_service import is_primary_session
+        from app.core.session_orchestration import is_owner_session
 
-        if not is_primary_session(target):
+        if not is_owner_session(target):
             return None
         chat = job = None
         if route is not None and route.requester == ASSISTANT_REQUESTER:

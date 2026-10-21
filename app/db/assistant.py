@@ -650,16 +650,19 @@ def link_job(assistant_id, session_id, kind="delegated"):
 REMOTE_COST_RETENTION = timedelta(days=35)
 
 
-def link_remote_job(assistant_id, session_id, device_id, kind, label=None):
+def link_remote_job(assistant_id, session_id, device_id, kind, label=None, *, starter_session_id=None):
     """Link a job the assistant started on worker ``device_id``. Idempotent."""
     with get_db() as conn:
-        state = lock_state(conn, assistant_id)
-        if not state or not state["home_session_id"]:
+        # Ordinary owner sessions can be the first coordinators on a worker;
+        # create only the accounting row, not a legacy assistant conversation.
+        state = lock_state(conn, assistant_id) or configure(assistant_id, {}, _conn=conn)
+        report_to = starter_session_id or state.get("home_session_id")
+        if not report_to:
             raise ValueError("Assistant home is not configured")
         cursor = conn.cursor()
         cursor.execute("INSERT INTO assistant_remote_jobs (assistant_id,session_id,device_id,kind,home_session_id,label,"
                        "created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (assistant_id,session_id) DO NOTHING",
-                       (assistant_id, session_id, device_id, kind, state["home_session_id"],
+                       (assistant_id, session_id, device_id, kind, report_to,
                         (label or None) and str(label)[:160], now()))
         cursor.execute("SELECT * FROM assistant_remote_jobs WHERE assistant_id=%s AND session_id=%s",
                        (assistant_id, session_id))

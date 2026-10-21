@@ -29,7 +29,7 @@ def test_no_session_no_project_defaults_to_effective_workspace(effective):
     assert str(opts.cwd) == str(effective)
 
 
-def test_orphan_session_defaults_to_effective_workspace(effective):
+def test_orphan_owner_session_uses_chat_uploads_under_effective_workspace(effective):
     session = {"id": "ses-1", "project_v2_id": None, "branch": None}
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
@@ -37,4 +37,4 @@ def test_orphan_session_defaults_to_effective_workspace(effective):
         "app.core.project_resolver.resolve_project_v2", return_value=None
     ):
         opts, _ = qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
-    assert str(opts.cwd) == str(effective)
+    assert str(opts.cwd) == str(effective / "chat-uploads")

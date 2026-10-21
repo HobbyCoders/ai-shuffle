@@ -17,8 +17,10 @@ from fluid.tools.hardening import defang_harness_markers
 from fluid.tools.registry import ToolOutcome
 
 log = logging.getLogger(__name__)
-MAX_ACTIONS = 32
-MAX_STARTS = 4
+# A human turn may coordinate a substantial batch; descendants share this budget.
+# Loop detection and the owner's daily spend cap remain independent guards.
+MAX_ACTIONS = 256
+MAX_STARTS = 32
 # A StartSession on another worker is recorded here as a settled receipt turn
 # under the chain's origin, so dedupe and the chain budget stay on the caller.
 # The prefix keeps the row off every real session (including the new chat's
@@ -126,6 +128,28 @@ def _owner(row):
     # A handed-off chat can retain only its owner label. Do not turn a foreign
     # labelled chat into an install-owner chat just because no credential is here.
     return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")))
+
+
+def _legacy_home(session_id):
+    from app.core.assistant_service import is_primary_session
+    return is_primary_session(session_id)
+
+
+def is_owner_session(row_or_id):
+    """Owner top-level authority, independent of the legacy assistant home.
+
+    Settled sessions retain ownership for report validation, never wake authority.
+    API users, delegated workers and foreign paired principals fail closed.
+    """
+    from app.db import sessions
+    try:
+        row = sessions.get_session(row_or_id) if isinstance(row_or_id, str) else row_or_id
+        return bool(row and not row.get("is_worker") and not row.get("parent_session_id")
+                    and row.get("mode") != "voice" and not row.get("api_user_id")
+                    and (not row.get("hidden") or _legacy_home(row["id"]))
+                    and _owner(row) == _OWNER_CHAT)
+    except Exception:  # noqa: BLE001 — an unreadable identity grants nothing
+        return False
 
 
 def _caller(session_id, *, allow_settled=False):
@@ -461,17 +485,17 @@ def _start_turn(session_id):
 
 
 def _home_of_start(session_id, start):
-    from app.core import assistant_service
     payload = (start or {}).get("payload") or {}
-    home = assistant_service.get_primary_session_id()
-    if (not home or home == session_id or payload.get("orchestration_sender") != home
-            or payload.get("orchestration_remote_origin")):
+    home = payload.get("orchestration_sender")
+    if not home or home == session_id or payload.get("orchestration_remote_origin"):
         return None
-    return home if assistant_service.is_primary_session(home) else None
+    return home if is_owner_session(home) else None
 
 
 def started_by_home(session_id):
-    """The owner's assistant home that started this local chat, else None.
+    """The owner top-level starter of this local chat, else None.
+
+    The historic function name is retained for approval/away-mode consumers.
 
     Durable: read from the chat's StartSession turn, whose sender and command id
     the host wrote. Never raises; any doubt answers None (ordinary behaviour).
@@ -479,9 +503,6 @@ def started_by_home(session_id):
     if not session_id:
         return None
     try:
-        from app.core import assistant_service
-        if not assistant_service.get_primary_session_id():
-            return None
         return _home_of_start(session_id, _start_turn(session_id))
     except Exception:  # noqa: BLE001 — absent marker means an ordinary chat
         log.debug("started_by_home failed for %s", session_id, exc_info=True)
@@ -523,13 +544,12 @@ async def _project_placement(sender_id, data):
     """Where StartSession's ``project`` runs: the project and None (this worker)
     or the online worker that has it checked out.
 
-    Only the owner's assistant home may name a project. The name is resolved
+    Only an owner top-level, non-API session may name a project. The name is resolved
     against registered projects only and grants nothing: the chat uses the
     checkout and grants the chosen worker already has.
     """
-    from app.core.assistant_service import is_primary_session
-    if not await asyncio.to_thread(is_primary_session, sender_id):
-        raise ValueError("project is available only in the owner's assistant conversation; omit it.")
+    if not await asyncio.to_thread(is_owner_session, sender_id):
+        raise ValueError("project requires an owner top-level session, not an API or delegated session.")
     project = await asyncio.to_thread(_resolve_project, data.get("project"))
     name = project.get("name") or project["id"]
     if data.get("worker") is not None:
@@ -878,13 +898,21 @@ def accept_remote_start(body, from_device):
                                                 ("permission_mode", permission_mode)) if value}
     if fast is not None:
         overrides["fast"] = fast
-    with transaction() as conn:
+    checkout = (_start_checkout({"project_v2_id": project_v2_id, "profile_id": profile_id}, session_id,
+                                named_project=True) if project_v2_id else None)
+    with _UnusedCheckout(checkout) as unused, transaction() as conn:
         sessions.create_session(
             session_id=session_id, title=title, profile_id=profile_id, project_v2_id=project_v2_id,
             is_active=True, provider_id=provider_id,
             derive_provider_from_profile=provider_id is None and choice is None,
             model=model, effort=effort, permission_mode=permission_mode,
-            context_window=context_window, fast=fast, _conn=conn)
+            context_window=context_window, fast=fast,
+            worktree_path=checkout.path if checkout else None,
+            worktree_branch=checkout.branch if checkout else None, _conn=conn)
+        if checkout:
+            conn.cursor().execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, session_id))
+            overrides["system_prompt_append"] = _checkout_note(checkout)
+            unused.kept = True
         if report_back:
             # Approvals cannot travel back to the assistant's worker, so Away
             # mode applies as is: questions get the recommended option and
@@ -1009,7 +1037,7 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
         cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%' "
                        "AND payload ->> 'orchestration_reply_to' IS NULL", (root_id,))
         if reply_to is None and len(cursor.fetchall()) >= MAX_ACTIONS:
-            raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); "
+            raise ValueError(f"Orchestration budget reached ({MAX_ACTIONS} actions / {MAX_STARTS} new sessions per chain); "
                              "ask the user to continue.")
         if context.get("state") == "aborted":
             raise ValueError("A participating session was aborted; the user must continue it first.")
@@ -1182,7 +1210,7 @@ async def _wake_peer(session_id):
         log.exception("Peer message queued, but queue broadcast failed")
 
 
-def _start_checkout(sender, new_id):
+def _start_checkout(sender, new_id, *, named_project=False):
     """The new chat's own worktree and branch, or None when the caller has none.
 
     A chat bound to a branch never hands that branch to the chat it starts:
@@ -1192,7 +1220,7 @@ def _start_checkout(sender, new_id):
     an origin restricted to fix/, feat/ and chore/ branches accepts. A caller
     in the project's main checkout (no branch) keeps sharing it, as before.
     """
-    if not (sender.get("branch") or sender.get("worktree_branch")):
+    if not named_project and not (sender.get("branch") or sender.get("worktree_branch")):
         return None
     from app.core.worker_checkout import WorkerCheckoutError, chat_branch, prepare_worker_checkout
     try:
@@ -1201,7 +1229,7 @@ def _start_checkout(sender, new_id):
     except WorkerCheckoutError as exc:
         raise ValueError(f"Could not give the new chat its own checkout: {exc} "
                          "Nothing was started.") from exc
-    if checkout is None:
+    if checkout is None and not named_project:
         raise ValueError("This chat's branch has no Git checkout on this worker, so the new chat "
                          "cannot get its own branch. Nothing was started.")
     return checkout
@@ -1249,7 +1277,6 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     from app.db import sessions, turns, mobile_tool_identity
     from app.db.base import transaction
     from app.core import turn_scheduler
-    from app.core.assistant_service import is_primary_session
     from app.core.task_registry import task_registry
 
     sender = _caller(sender_id)
@@ -1257,8 +1284,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     if ((context.get("payload") or {}).get("_assistant_proactive") is not None
             or (context.get("overrides") or {}).get("_assistant_proactive") is not None):
         raise PermissionError("Background observation cannot start or message sessions.")
-    from app.core import assistant_limits
-    assistant_limits.assert_can_start(sender_id)  # The owner's daily spending limit.
+    from app.core import orchestration_limits
+    orchestration_limits.assert_can_start(sender_id)  # The owner's daily spending limit.
     request_id = _text(data, "request_id", 120)
     text = _text(data, "prompt" if action == "start" else "message", 8000)
     # Human input starts a fresh budget; all automated descendants share it.
@@ -1291,7 +1318,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         remote = _remote_worker(data.get("worker")) if action == "start" else None
     # Chats the owner's assistant starts report back to it and route their
     # approvals to its conversation; every other caller is unchanged.
-    assistant = action == "start" and is_primary_session(sender_id)
+    assistant = action == "start" and is_owner_session(sender)
     project_v2_id = placement["project"]["id"] if placement is not None else None
     if remote is not None:
         from app.core.mobile_tool_identity import owner_principal
@@ -1338,8 +1365,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     # The new chat's own checkout is made before the chain lock below: Git
     # work and its nested connections must not run under that lock.
     new_id = str(uuid4()) if action == "start" else None
-    checkout = (_start_checkout(sender, new_id)
-                if action == "start" and placement is None and remote is None else None)
+    checkout_parent = sender
+    if placement is not None:
+        checkout_parent = {"project_v2_id": project_v2_id}
+    checkout = (_start_checkout(checkout_parent, new_id, named_project=placement is not None)
+                if action == "start" and remote is None else None)
     with _UnusedCheckout(checkout) as unused, transaction() as conn:
         cursor = conn.cursor()
         # Lock both session rows in a stable order before the chain root:
@@ -1381,7 +1411,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         commands = [row["command_id"] for row in cursor.fetchall()]
         if ((reply_to is None and len(commands) >= MAX_ACTIONS)
                 or (action == "start" and sum(c.startswith("orchestration:start:") for c in commands) >= MAX_STARTS)):
-            raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); ask the user to continue.")
+            raise ValueError(f"Orchestration budget reached ({MAX_ACTIONS} actions / {MAX_STARTS} new sessions per chain); ask the user to continue.")
         # A receipt may be read after Stop, but fresh work must still fail closed.
         if context.get("state") == "aborted" or target_context.get("state") == "aborted":
             raise ValueError("A participating session was aborted; the user must continue it first.")
@@ -1457,7 +1487,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                 model=run["model"], effort=run["effort"],
                 permission_mode=started_mode,
                 context_window=run["context_window"], fast=run["fast"],
-                mode=sender.get("mode"), _conn=conn, **workspace,
+                mode=None if placement is not None else sender.get("mode"), _conn=conn, **workspace,
             )
             if checkout is not None:
                 cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, new_id))
@@ -1722,6 +1752,44 @@ def build_started_report(session_id, settled, outcome):
     return home, (None if home else device), frame
 
 
+async def record_started_report(starter_id, frame):
+    """Step 2 hook: feed the owner working record; deliberately a no-op for now."""
+
+
+async def defer_started_report(starter_id, frame):
+    """A settled starter retains the report on its child, never receives a wake.
+
+    Called under the scheduler's delivery lock, for both local and remote reports.
+    The stable event also deduplicates repeated settlement/transport deliveries.
+    """
+    from app.db import sessions, session_events
+    from app.core.task_registry import task_registry
+    row = await asyncio.to_thread(sessions.get_session, starter_id)
+    if row and row.get("is_active") and row.get("status") != "archived" and not task_registry.is_user_stopped(starter_id):
+        return False
+    event_id = "deferred-report:" + hashlib.sha256(
+        f"{starter_id}:{frame.get('task_id')}:{frame.get('agent_message_turn_id')}".encode()).hexdigest()
+    def record():
+        from app.db.base import transaction
+        with transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (starter_id,))
+            cursor.execute("SELECT id FROM session_events WHERE id=%s", (event_id,))
+            if cursor.fetchone():
+                return False
+            session_events.append_events(starter_id, [{"id": event_id, "type": "orchestration.report_deferred",
+                "payload": {"child_session_id": frame.get("task_id"),
+                            "child_turn_id": frame.get("agent_message_turn_id")}}], _conn=conn)
+            return True
+    if await asyncio.to_thread(record):
+        from app.services.notification_service import emit_notification
+        await record_started_report(starter_id, frame)
+        await emit_notification("admin", title="Session work finished",
+            message=f"{frame.get('title') or 'Started session'}: {frame.get('status') or 'finished'}. Open the child session for its report.",
+            category="session_report:" + str(frame.get("task_id")), session_id=frame.get("task_id"), push=True)
+    return True
+
+
 async def report_settled_start(session_id, settled, outcome):
     """Settlement hook: send a started chat's report to the assistant. Never raises."""
     try:
@@ -1746,7 +1814,6 @@ def accept_remote_report(body, from_device):
     Only the worker that holds the chat may report it, only for a StartSession
     receipt the assistant made there, and only into the current home.
     """
-    from app.core.assistant_service import is_primary_session
     from app.db import turns
     from app.db.base import get_db
     from app.network import engine, membership
@@ -1767,8 +1834,8 @@ def accept_remote_report(body, from_device):
     home = payload.get("report_to")
     if not receipt or payload.get("remote_device_id") != from_device or not home:
         raise PermissionError("No report was requested for this chat.")
-    if not is_primary_session(home):
-        raise ValueError("The assistant conversation that started this chat is gone.")
+    if not is_owner_session(home):
+        raise ValueError("The owner session that started this chat is gone.")
     status = report.get("status")
     if status not in REPORT_STATUSES:
         raise ValueError("Invalid report status")
