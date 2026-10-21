@@ -2,7 +2,12 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
 import BrowserNativeEditor from './BrowserNativeEditor.svelte';
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+function pointer(fine: boolean) {
+ vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(pointer: fine)' && fine, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+}
+const box = (el: HTMLElement) => ['left', 'top', 'width', 'height'].map((k) => Math.round(parseFloat(el.style.getPropertyValue(k)) * 10) / 10);
+const base = { scale: 1, left: 0, top: 0, viewWidth: 390, viewHeight: 700, onEdit: vi.fn(), onActive: vi.fn(), onEnter: vi.fn() };
 describe('native remote text fields', () => {
  it('keeps existing text available to native selection and forwards replacement once', async () => {
   const onEdit = vi.fn(), onActive = vi.fn(), onEnter = vi.fn();
@@ -51,5 +56,60 @@ describe('native remote text fields', () => {
   await fireEvent.input(input, { target: { value: 'Ada', selectionStart: 3, selectionEnd: 3 } });
   expect(onEdit).toHaveBeenLastCalledWith({ field: 'f', action: 'replace', value: 'Ada', start: 3, end: 3 });
   expect(onText).not.toHaveBeenCalled();
+ });
+});
+describe('focused overlay geometry', () => {
+ it.each(['text', 'textarea'])('keeps the page field box and stays see-through on a fine pointer (%s)', async (type) => {
+  pointer(true);
+  render(BrowserNativeEditor, { ...base, field: { id: 'f', type, label: 'Notes', value: 'hello', x: 10, y: 20, width: 120, height: 22 } });
+  await tick();
+  const input = screen.getByRole('textbox') as HTMLInputElement;
+  input.focus();
+  await tick();
+  // No enlargement, no clamping into the view: nothing next to the field is covered.
+  expect(box(input)).toEqual([10, 20, 120, 22]);
+  expect(input.classList.contains('focused')).toBe(true);
+  expect(input.classList.contains('enlarged')).toBe(false);
+ });
+ it('still enlarges a readable editor for touch thumbnails', async () => {
+  pointer(false);
+  render(BrowserNativeEditor, { ...base, scale: 0.3, field: { id: 'f', type: 'textarea', label: 'Notes', value: '', x: 10, y: 20, width: 120, height: 22 } });
+  await tick();
+  const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+  expect(box(input)).toEqual([3, 6, 36, 6.6]);
+  input.focus();
+  await tick();
+  expect(box(input)).toEqual([8, 8, 240, 80]);
+  expect(input.classList.contains('enlarged')).toBe(true);
+  input.blur();
+  await tick();
+  expect(input.classList.contains('enlarged')).toBe(false);
+ });
+});
+describe('navigation keys', () => {
+ it('forwards arrows, paging, Tab and Escape to the page and leaves text keys local', async () => {
+  pointer(true);
+  const onNavKey = vi.fn();
+  render(BrowserNativeEditor, { ...base, onNavKey, field: { id: 'f', type: 'text', label: 'City', value: '', x: 0, y: 0, width: 100, height: 30 } });
+  await tick();
+  const input = screen.getByRole('textbox') as HTMLInputElement;
+  input.focus();
+  // The local caret still moves, so the next replacement carries the same selection.
+  expect(await fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' })).toBe(true);
+  expect(await fireEvent.keyDown(input, { key: 'PageUp', code: 'PageUp' })).toBe(true);
+  expect(await fireEvent.keyDown(input, { key: 'ArrowLeft', code: 'ArrowLeft', shiftKey: true, ctrlKey: true })).toBe(true);
+  // Tab moves the page's focus, never this app's.
+  expect(await fireEvent.keyDown(input, { key: 'Tab', code: 'Tab', shiftKey: true })).toBe(false);
+  await fireEvent.keyDown(input, { key: 'a', code: 'KeyA' });
+  await fireEvent.keyDown(input, { key: 'ArrowUp', code: 'ArrowUp', isComposing: true });
+  expect(onNavKey.mock.calls).toEqual([
+   ['ArrowDown', 'ArrowDown', 40, 0],
+   ['PageUp', 'PageUp', 33, 0],
+   ['ArrowLeft', 'ArrowLeft', 37, 10],
+   ['Tab', 'Tab', 9, 8],
+  ]);
+  await fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' });
+  expect(onNavKey).toHaveBeenLastCalledWith('Escape', 'Escape', 27, 0);
+  expect(document.activeElement).not.toBe(input);
  });
 });
