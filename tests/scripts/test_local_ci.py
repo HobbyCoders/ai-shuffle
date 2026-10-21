@@ -112,6 +112,12 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, press
     if pressure_optin:
         monkeypatch.setenv("LOCAL_CI_CONTAINER_PRESSURE", "1")
 
+    if ctx.mode == "full" and (pg_optin or pressure_optin) and not pg_source:
+        with pytest.raises(local_ci.Failure, match="opt-in.*no PostgreSQL binaries"):
+            suite.run(ctx)
+        assert commands == []
+        return
+
     suite.run(ctx)
 
     container_files = {
@@ -134,8 +140,18 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, press
     assert env["CONTAINER_RUNTIME_TEST_PG"] == expected
     expected_pressure = "1" if expected == "1" and pressure_optin else "0"
     assert env["CONTAINER_RUNTIME_TEST_PRESSURE"] == expected_pressure
-    assert any("#350" in note and "LOCAL_CI_CONTAINER_PG=1" in note
-               and "LOCAL_CI_CONTAINER_PRESSURE=1" in note for note in ctx.notes)
+    coverage_notes = [note for note in ctx.notes if "#350" in note]
+    if expected_pressure == "1":
+        assert coverage_notes == []  # both opt-in groups actually ran
+    elif expected == "1":
+        assert len(coverage_notes) == 1
+        assert "checkpoint" in coverage_notes[0].lower()
+        assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
+        assert "LOCAL_CI_CONTAINER_PG=1" not in coverage_notes[0]
+    else:
+        assert len(coverage_notes) == 1
+        assert "LOCAL_CI_CONTAINER_PG=1" in coverage_notes[0]
+        assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
     assert env["PATH"] == ("/test/pg/bin:" if pg_source else "") + "/test/original-path"
     if ctx.mode != "full":
         assert any("Container" in note and "full" in note for note in ctx.notes)

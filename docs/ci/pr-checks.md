@@ -467,9 +467,11 @@ also independently supports safe ancestors and rechecks its own pointer.
   `LOCAL_CI_CONTAINER_PG=1 python scripts/local_ci.py full`; checkpoint timing
   measurements require `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`
   (which also enables PG). Both opt-ins require local PostgreSQL binaries and
-  create disposable clusters, not connections to a configured database. The gate
-  prints a coverage note naming #350 and both opt-ins. Restore the PG functional
-  cases to default full coverage once #350 is fixed.
+  create disposable clusters, not connections to a configured database. A full
+  run with a requested opt-in but no binaries fails clearly. Disabled opt-in
+  groups get a coverage note naming #350 and their opt-in; enabled groups do not.
+  Staged full receipts include both opt-ins in their identity, so changing them
+  reruns the gate. Restore PG functional cases to default full after #350 is fixed.
   The manual hosted backend job still covers other network-database and agent
   isolation contracts when a local run cannot answer the release question;
   do not dispatch it to discover failures.

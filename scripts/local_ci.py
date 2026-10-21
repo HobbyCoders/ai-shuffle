@@ -455,13 +455,18 @@ def backend_linux(ctx: Context) -> None:
     """Steps CI Backend ran on Linux with real PostgreSQL and bubblewrap."""
     env = python_env()
     args = pytest_args(ctx.python, timeout=240)
+    pg_ctl = shutil.which("pg_ctl")
+    pg_bin = os.environ.get("SMOKE_PG_BIN") or (str(Path(pg_ctl).parent) if pg_ctl else "")
+    pressure_optin = os.environ.get("LOCAL_CI_CONTAINER_PRESSURE") == "1"
+    pg_optin = os.environ.get("LOCAL_CI_CONTAINER_PG") == "1" or pressure_optin
+    if ctx.mode == "full" and pg_optin and not pg_bin:
+        raise Failure("Container PostgreSQL opt-in requested but no PostgreSQL binaries were found; "
+                      "install PostgreSQL or set SMOKE_PG_BIN.")
     if shutil.which("bwrap"):
         run([ctx.python, "-m", "pytest", "tests/core/test_chat_shell.py", "-rs", *args],
             env={**env, "CHAT_SHELL_REQUIRE_SANDBOX": "1"})
     else:
         ctx.notes.append("Isolated folder shell tests not run: bubblewrap (bwrap) is not installed here.")
-    pg_ctl = shutil.which("pg_ctl")
-    pg_bin = os.environ.get("SMOKE_PG_BIN") or (str(Path(pg_ctl).parent) if pg_ctl else "")
     if pg_bin:
         run([ctx.python, "-m", "pytest", "tests/smoke", "tests/db/test_schema_lifecycle.py", "-m", "boot_smoke",
              "-rs", *pytest_args(ctx.python, timeout=240, parallel=False)],
@@ -475,9 +480,7 @@ def backend_linux(ctx: Context) -> None:
     # Keep check/full deterministic on busy developer machines. Until #350 is
     # fixed, even the functional crash-recovery case hits a host-sensitive
     # checkpoint budget. Both real-PG groups therefore require explicit opt-in.
-    pressure_optin = os.environ.get("LOCAL_CI_CONTAINER_PRESSURE") == "1"
-    container_pg = (ctx.mode == "full" and bool(pg_bin)
-                    and (os.environ.get("LOCAL_CI_CONTAINER_PG") == "1" or pressure_optin))
+    container_pg = ctx.mode == "full" and bool(pg_bin) and pg_optin
     container_pressure = container_pg and pressure_optin
     container_env = {
         **env, "ALLOW_REAL_PG": "0", "TEST_POSTGRES_DSN": "",
@@ -493,13 +496,17 @@ def backend_linux(ctx: Context) -> None:
     elif not pg_bin:
         ctx.notes.append("Container PostgreSQL and disk-pressure cases skipped: "
                          "no PostgreSQL binaries (set SMOKE_PG_BIN).")
-    ctx.notes.append("Container real-PG coverage is opt-in pending #350: run full with "
-                     "LOCAL_CI_CONTAINER_PG=1 for functional cases or "
-                     "LOCAL_CI_CONTAINER_PRESSURE=1 for measurements (implies PG); "
-                     "both require PostgreSQL binaries.")
     run([ctx.python, "-m", "pytest", "tests/core/test_container_runtime.py",
          "tests/core/test_container_image_contract.py", "-rs",
          *pytest_args(ctx.python, timeout=120, parallel=False)], env=container_env)
+    if not container_pg:
+        ctx.notes.append("Container real-PG coverage is opt-in pending #350: run full with "
+                         "LOCAL_CI_CONTAINER_PG=1 for functional cases or "
+                         "LOCAL_CI_CONTAINER_PRESSURE=1 for measurements (implies PG); "
+                         "both require PostgreSQL binaries.")
+    elif not container_pressure:
+        ctx.notes.append("Container checkpoint measurements disabled pending #350; run full with "
+                         "LOCAL_CI_CONTAINER_PRESSURE=1 to opt in (implies PG).")
 
 
 FLUID_TESTS = "fluid/tests/unit"
