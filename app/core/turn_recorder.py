@@ -908,6 +908,8 @@ class TurnRecorder:
         if self._closed or self._superseded or self._recording_failed or not frames:
             return 0
         try:
+            from app.core.task_registry import task_registry
+
             events: List[Dict[str, Any]] = []
             for frame in frames:
                 if not isinstance(frame, dict):
@@ -916,6 +918,17 @@ class TurnRecorder:
                 if not task_id:
                     continue
                 task_id = str(task_id)
+                # A continuation report can reach the parent while the worker
+                # keeps going: its next turn was already queued, so the task
+                # row stays running for it (agent_messaging
+                # .finish_message_resume). The report is delivered, but the task
+                # is not over: a terminal chip here would drop a running worker
+                # from the parent's running-agents panel (#320).
+                if frame.get("agent_message_turn_id") and (
+                    (task_registry.get_task(self.session_id, task_id) or {}).get("status")
+                    == "running"
+                ):
+                    continue
                 status = frame.get("status")
                 state = (
                     str(status) if status in _TERMINAL_FRAME_STATES else "completed"
@@ -925,7 +938,6 @@ class TurnRecorder:
                     kind = {"kind": str(frame["kind"])}
                 tool_use_id = frame.get("tool_use_id")
                 if not tool_use_id:
-                    from app.core.task_registry import task_registry
                     tool_use_id = task_registry.get_task_tool_use_id(
                         self.session_id, task_id
                     )

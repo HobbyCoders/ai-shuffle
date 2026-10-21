@@ -471,3 +471,41 @@ async def test_a_turn_after_stop_or_archive_never_stands_in(env, ending):
 
     assert _parent_completions(env) == []
     assert turns.get_queued_turns(PARENT) == []
+
+
+def _worker_task_states(session_id=PARENT):
+    from app.db import session_events
+    return [row["payload"].get("state") for row in session_events.get_events(session_id)
+            if row["event_type"] == "task.updated" and row["payload"].get("task_id") == WORKER]
+
+
+async def test_a_report_delivered_while_the_worker_keeps_going_leaves_it_running(env):
+    """#320: the continuation's turn ends while the worker's own ScheduleWakeup
+    turn is already queued. The parent is sent that round's report and wakes,
+    but the worker is still at work, so the task row stays running. The
+    parent's wake turn must not write a terminal task.updated for it: that frame
+    is what emptied the running agents panel while TaskList still said running.
+    The worker's last turn then closes the row and that settle is recorded."""
+    continuation = await _continued(env)
+    wakeup = turns.enqueue_turn(WORKER, "wakeup", prompt="Check the survey.", profile_id="default")
+    await _run(env.reg, continuation, _text("Survey started; checking back."), expect="completed")
+    assert env.reg.get_task(PARENT, WORKER)["status"] == "running"  # busy: wakeup queued
+    assert [f["summary"] for f in _parent_completions(env)] == ["Survey started; checking back."]
+    (parent_wake,) = turns.get_queued_turns(PARENT)
+    states_before_wake = _worker_task_states()
+
+    await _run(env.reg, parent_wake, _text("Noted, it is still going."), expect="parked")
+
+    # The wake delivered the report, but the log never says the worker stopped.
+    assert _worker_task_states() == states_before_wake
+    assert states_before_wake[-1] == "running"
+    assert env.reg.get_task(PARENT, WORKER)["status"] == "running"
+    # ...and the parent parked on it (the frontend's turn.parked task_ids).
+    assert turns.get_turn(parent_wake["id"])["state"] == "parked"
+    assert WORKER in turns.get_turn(parent_wake["id"])["payload"]["task_ids"]
+
+    await _run(env.reg, wakeup, _text("Survey finished."), expect="completed")
+
+    # The worker's last turn closes the row; that settle reaches the panel.
+    assert env.reg.get_task(PARENT, WORKER)["status"] == "completed"
+    assert _worker_task_states()[-1] == "completed"
