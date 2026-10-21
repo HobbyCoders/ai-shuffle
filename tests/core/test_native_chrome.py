@@ -4,7 +4,7 @@ Tests for native-install browser support:
   * ``builtin_mcp_servers._browser_mcp_entry`` — the env → docker-path → repo
     fallback resolution order.
   * ``native_chrome.resolve_chrome_executable`` — Chrome/Edge/Chromium discovery.
-  * ``native_chrome.ensure_started`` — the no-op guards (container).
+  * ``native_chrome.ensure_started`` — Docker watchdog/native launch guards.
 
 Pure/logic tests only: nothing here spawns Chrome or binds a port, and no
 POSIX-only APIs are exercised (the module and these tests import on Linux CI).
@@ -139,19 +139,35 @@ class TestBrowserLabel:
 
 
 # =============================================================================
-# ensure_started — no-op guards
+# ensure_started — Docker health supervision without a second process launcher
 # =============================================================================
 class TestEnsureStartedNoOps:
     @pytest.mark.asyncio
-    async def test_noop_in_container(self):
-        nc._supervisor_task = None
+    async def test_container_starts_one_health_watchdog_but_never_launches_chrome(self, monkeypatch):
+        monkeypatch.setattr(nc, "_supervisor_task", None)
+        monkeypatch.setattr(nc, "_proc", None)
+        monkeypatch.setattr(nc, "_stopping", False)
+        monkeypatch.setattr(nc, "_HEALTH_INTERVAL_S", 0.001)
+        checked = asyncio.Event()
+
+        async def health(port, *, docker):
+            assert docker and port == nc._cdp_port()
+            checked.set()
+
+        monkeypatch.setattr(nc, "_check_health", health)
         with patch("app.core.native_chrome._in_container", return_value=True), \
              patch(
                  "app.core.native_chrome.asyncio.create_subprocess_exec",
                  new=AsyncMock(side_effect=AssertionError("must not spawn")),
              ):
             await nc.ensure_started()
-        assert nc._supervisor_task is None
+            task = nc._supervisor_task
+            assert task is not None
+            await nc.ensure_started()
+            assert nc._supervisor_task is task
+            await asyncio.wait_for(checked.wait(), 1)
+            await nc.stop()
+            assert task.cancelled()
 
 
 class TestCreatePage:
@@ -349,7 +365,8 @@ def test_the_browser_is_launched_without_the_server_run_marker(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "close", "replacement"])
-async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(monkeypatch, failure):
+@pytest.mark.parametrize("docker", [False, True])
+async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(monkeypatch, failure, docker):
     """Real fake CDP socket: browser commands answer, page commands can hang."""
     import json
     import websockets
@@ -388,15 +405,24 @@ async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(mo
         monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.05)
         profile = Mock(side_effect=AssertionError("health recovery must not alter the profile"))
         monkeypatch.setattr(nc, "_profile_dir", profile)
-        assert await nc._pages_answer(port) is (failure is None)
+        if docker:
+            process = Mock(pid=123)
+            process.create_time.return_value = 10
+            monkeypatch.setattr(nc, "_docker_chrome_process", lambda port: process)
+            monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
+            monkeypatch.setattr(nc, "_docker_restarts", [])
+            await nc._check_health(port, docker=True)
+            assert process.kill.call_count == (failure is not None)
+        else:
+            assert await nc._pages_answer(port) is (failure is None)
         assert "Target.closeTarget" in calls
-        if failure != "close":
-            assert "Target.createTarget" in calls
+        assert "Target.createTarget" in calls
         profile.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_supervisor_restarts_when_page_repair_fails(monkeypatch):
+    monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
     monkeypatch.setattr(nc, "_stopping", False)
     monkeypatch.setattr(nc, "_HEALTH_INTERVAL_S", 0.01)
     monkeypatch.setattr(nc, "_RELAUNCH_BACKOFF_S", 0)

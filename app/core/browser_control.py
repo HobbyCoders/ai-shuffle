@@ -379,6 +379,9 @@ class Broker:
             )
 
     async def submit(self, viewer_id, data, internal=False):
+        from app.core.native_chrome import wait_for_recovery
+
+        await wait_for_recovery()
         self.identity(data)
         command_id = identifier(data.get("id"))
         if command_id in self.seen:
@@ -565,6 +568,17 @@ class Broker:
 
 
 _brokers = {}
+
+
+def recovery_blocked():
+    """Do not repair shared Chrome while a viewer or queued command owns it."""
+    return any(
+        broker.pending or broker.reserved_viewer or broker.state.get("busy")
+        or broker.state["control"].get("viewer_id")
+        or broker.state["control"].get("pending_viewer_id")
+        or broker.state["control"].get("owner") == "human"
+        for broker in _brokers.values()
+    )
 
 
 def get(session_id):

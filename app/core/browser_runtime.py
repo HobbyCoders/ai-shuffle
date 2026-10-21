@@ -210,6 +210,9 @@ class Runtime:
         self.idle = asyncio.create_task(self._idle())
 
     async def _start(self):
+        from app.core.native_chrome import wait_for_recovery
+
+        await wait_for_recovery()
         # Cold/reopened actors are busy before their first tool or viewer exists.
         # The idle timer must not cancel that connection or consume its grace.
         self.active += 1
@@ -288,6 +291,9 @@ class Runtime:
         return copy.deepcopy(broker.state)
 
     async def call(self, tool, arguments):
+        from app.core.native_chrome import wait_for_recovery
+
+        await wait_for_recovery()
         if self.active >= MAX_CALLS:
             raise RuntimeUnavailable("Browser runtime busy")
         self.active += 1
@@ -365,6 +371,11 @@ class Runtime:
 
 
 _runtimes = {}
+
+
+def recovery_blocked():
+    """Includes cold connections and calls whose caller already timed out."""
+    return any(runtime.active for runtime in _runtimes.values())
 
 
 def get(session_id):
