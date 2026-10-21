@@ -31,6 +31,72 @@ def settings_factory(monkeypatch, tmp_path):
     return lambda **kw: Settings(_env_file=None, **kw)
 
 
+
+
+@pytest.mark.parametrize("action", ["run", "dump", "restore"])
+def test_root_phase_imports_only_image_bootstrap_and_installed_dependencies(tmp_path, action):
+    """Stop at the real privilege boundary in a fresh, isolated interpreter."""
+    import subprocess
+    project = Path(__file__).resolve().parents[2]
+    script = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("rt", sys.argv[1])
+rt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rt)
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[1]))
+def boundary(settings):
+    rt.isolation()
+    origins = {name: str(pathlib.Path(mod.__file__).resolve())
+               for name, mod in sys.modules.copy().items() if getattr(mod, "__file__", None)}
+    print(json.dumps(origins))
+    raise SystemExit(0)
+rt.drop_privileges = boundary
+rt.main(sys.argv[2:])
+"""
+    env = dict(os.environ, DATA_DIR=str(tmp_path), WORKSPACE_DIR=str(tmp_path / "workspace"),
+               AI_SHUFFLE_ENV_FILE="/dev/null")
+    args = [action] + (["--file", "-"] if action != "run" else [])
+    result = subprocess.run([sys.executable, "-I", "-c", script,
+                             str(project / "docker/container_runtime.py"), *args],
+                            cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    origins = json.loads(result.stdout)
+    assert not any(name == "app" or name.startswith("app.") for name in origins), origins
+    for origin in origins.values():
+        path = Path(origin)
+        assert not path.is_relative_to(tmp_path), origin
+        if path.is_relative_to(project):
+            assert path.parent == project / "docker", origin
+        else:
+            assert path.is_relative_to(Path(sys.base_prefix)), origin
+
+
+@pytest.mark.parametrize("local_mode", ["false", "true"])
+@pytest.mark.parametrize("source", ["defaults", "file", "environment"])
+def test_startup_paths_match_application_settings(settings_factory, tmp_path, monkeypatch, local_mode, source):
+    monkeypatch.setenv("LOCAL_MODE", local_mode)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    if source != "defaults":
+        (tmp_path / ".env").write_text('data_dir="./file data"\nworkspace_dir=./file-workspace\n')
+    if source == "environment":
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "env-data"))
+        monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path / "env-workspace"))
+    startup, app = runtime.load_startup_settings(), runtime.load_settings()
+    assert startup.effective_data_dir == app.effective_data_dir
+    assert startup.effective_workspace_dir == app.effective_workspace_dir
+
+
+def test_startup_paths_honor_referenced_env_file(settings_factory, tmp_path, monkeypatch):
+    config = tmp_path / "referenced-config"
+    config.write_text('WORKSPACE_DIR="./quoted workspace"\n')
+    monkeypatch.setenv("AI_SHUFFLE_ENV_FILE", str(config))
+    assert runtime.load_startup_settings().effective_workspace_dir == runtime.load_settings().effective_workspace_dir
+
+
 def test_fresh_defaults_to_embedded(settings_factory):
     assert runtime.Database(settings_factory()).mode == "embedded"
 

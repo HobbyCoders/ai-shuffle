@@ -16,13 +16,18 @@ claude_cli_keep_installed() {
 
 # Direct --user launches cannot mutate accounts. The Python runtime validates
 # identity and mount ownership and gives a clear error instead of chowning data.
-if [ "$(id -u)" != "0" ]; then
+if [ "$(/usr/bin/id -u)" != "0" ]; then
     case "${1:-run}" in
         dump|restore) ;;
         *) if claude_cli_keep_installed; then bash /app/docker/install-claude-cli.sh || true; fi ;;
     esac
-    exec python /app/docker/container_runtime.py "$@"
+    exec /usr/local/bin/python3 -I /app/docker/container_runtime.py "$@"
 fi
+
+# Root uses only image executables. Restore the configured tool PATH only after
+# the privilege drop (and for commands explicitly launched as appuser).
+export SHUFFLE_CONTAINER_PATH=$PATH
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Get PUID and PGID from environment, default to 99:100 (Unraid)
 PUID=${PUID:-99}
@@ -48,12 +53,10 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     usermod -o -u "$PUID" appuser
 
     # Fix ownership of critical directories (skip node_modules to avoid slow recursive chown)
-    echo "Updating ownership of /app and /home/appuser" >&2
+    echo "Updating ownership of /home/appuser" >&2
     chown -R appuser:appuser /home/appuser
-    # Only chown app code and static assets, not the massive node_modules trees
-    chown -R appuser:appuser /app/app
-    # Retained DATA_DIR/postgres is validated by the runtime, never chowned.
-    chown appuser:appuser /app /app/.env.example 2>/dev/null || true
+    # Image code stays root-owned. Retained DATA_DIR/postgres is validated by
+    # the runtime, never recursively chowned.
     find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
 else
     echo "UID/GID already correct, skipping user modification" >&2
@@ -78,7 +81,7 @@ fi
 
 # Maintenance never starts provider setup, Chromium or application services.
 case "${1:-run}" in
-    dump|restore) exec python /app/docker/container_runtime.py "$@" ;;
+    dump|restore) exec /usr/local/bin/python3 -I /app/docker/container_runtime.py "$@" ;;
 esac
 
 # Ensure config directories exist with correct permissions
@@ -94,7 +97,7 @@ chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuse
 mkdir -p /home/appuser/.local/bin
 chown appuser:appuser /home/appuser/.local /home/appuser/.local/bin
 if HOME=/home/appuser claude_cli_keep_installed; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         bash /app/docker/install-claude-cli.sh || true
 fi
 
@@ -130,10 +133,10 @@ if [ -f /home/appuser/.config/gh/hosts.yml ]; then
     echo "GitHub CLI credentials found in volume"
 
     # Verify GitHub auth status and configure git credential helper for appuser
-    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser gh auth status 2>/dev/null; then
+    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" gh auth status 2>/dev/null; then
         echo "GitHub CLI: Authentication verified"
         # Configure git to use gh as credential helper (as appuser so it goes to appuser's .gitconfig)
-        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
             git config --global credential.helper '!gh auth git-credential'
         echo "Git configured to use GitHub CLI for authentication"
     else
@@ -150,7 +153,7 @@ if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.ym
     cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
     chown -R appuser:appuser /home/appuser/.config/gh
     # Configure git credential helper as appuser
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global credential.helper '!gh auth git-credential'
     echo "GitHub CLI auth copied and git configured"
 fi
@@ -163,24 +166,17 @@ fi
 # identity when it is unset; an identity already present in the mounted config
 # is never overwritten. Override the defaults with GIT_USER_NAME /
 # GIT_USER_EMAIL.
-if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global --get user.name >/dev/null 2>&1; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global user.name "${GIT_USER_NAME:-AI Shuffle Worker}"
     echo "Git: seeded user.name=${GIT_USER_NAME:-AI Shuffle Worker}"
 fi
-if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global --get user.email >/dev/null 2>&1; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global user.email "${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
     echo "Git: seeded user.email=${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
-fi
-
-# Ensure AI tools node_modules exist (in case Docker image was built without them)
-if [ -d /opt/ai-tools ] && [ -f /opt/ai-tools/package.json ] && [ ! -d /opt/ai-tools/node_modules ]; then
-    echo "Installing AI tools Node.js dependencies..."
-    cd /opt/ai-tools && npm install --omit=dev 2>/dev/null || echo "AI tools npm install failed (continuing anyway)"
-    cd /app
 fi
 
 # Mount roots and retained database permissions are handled non-recursively
@@ -192,4 +188,4 @@ chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuse
 # Python owns PostgreSQL, the existing Chromium supervisor, and the app. It
 # drops root itself after safely preparing empty mount roots. tini must forward
 # only to this supervisor (not -g), so application cleanup precedes PG shutdown.
-exec python /app/docker/container_runtime.py "$@"
+exec /usr/local/bin/python3 -I /app/docker/container_runtime.py "$@"

@@ -176,14 +176,14 @@ COPY fluid/ /opt/fluid/
 RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid, importlib.util; assert importlib.util.find_spec('claude_agent_sdk') is None"
 
 # ── Backend code ──
-COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=root:root app/ ./app/
 
 # ── Maintenance / migration scripts (e.g. credential_keys, backup, usage backfills) ──
-COPY --chown=appuser:appuser scripts/ ./scripts/
+COPY --chown=root:root scripts/ ./scripts/
 
 # ── Copy pre-built frontend assets from builder stage ──
 RUN mkdir -p /app/app/static
-COPY --from=frontend-builder --chown=appuser:appuser /src/frontend/build/ /app/app/static/
+COPY --from=frontend-builder --chown=root:root /src/frontend/build/ /app/app/static/
 
 # ── Copy pre-built AI tools from builder stage ──
 COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
@@ -197,8 +197,8 @@ COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/dist/ /opt/
 COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
 COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
 
-COPY --chown=appuser:appuser .env.example .
-COPY --chown=appuser:appuser THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+COPY --chown=root:root .env.example .
+COPY --chown=root:root THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
@@ -212,8 +212,9 @@ COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
 COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
 RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
 
-# Ensure /app is owned by appuser
-RUN chown appuser:appuser /app
+# Image code and its parent stay read-only regardless of agent isolation or PUID.
+# Runtime state, generated assets and update builds live on /data or in the home.
+RUN chown root:root /app && chmod -R go-w /app
 
 # Limit glibc arena retention after threaded JSON decoding. Docker -e overrides it.
 ENV MALLOC_ARENA_MAX=2

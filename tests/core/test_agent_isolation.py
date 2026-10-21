@@ -345,7 +345,9 @@ def test_protect_and_release_code(app_dir):
     assert ops.lstat(app / "frontend").st_uid == PUID
     assert any("/app/frontend" in m for m in messages)
     iso.release_code(app, IDENT, ops)
-    assert all(ops.lstat(p).st_uid == PUID for p in [app, *app.rglob("*")])
+    assert ops.lstat(app).st_uid == 0
+    assert ops.lstat(app / "app" / "core" / "x.py").st_uid == 0
+    assert ops.lstat(app / "frontend").st_uid == PUID
 
 
 def test_a_mounted_source_tree_is_never_chowned(app_dir):
@@ -386,7 +388,8 @@ def test_bootstrap_on_then_off(data, app_dir, monkeypatch):
     monkeypatch.setenv(iso.SETTING, "off")
     assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=lambda _m: None) is None
     assert all(ops.lstat(p).st_uid == PUID for p in _protected(root))
-    assert ops.lstat(app_dir[0] / "app").st_uid == PUID
+    assert ops.lstat(app_dir[0] / "app").st_uid == 0
+    assert ops.lstat(app_dir[0]).st_uid == 0
     assert not (root / iso.RECORD_NAME).exists()
 
 
@@ -398,7 +401,7 @@ def test_bootstrap_failure_rolls_back_and_runs_unisolated(data, app_dir, monkeyp
     messages = []
     assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=messages.append) is None
     assert any("could NOT be enabled" in m for m in messages)
-    assert ops.lstat(app_dir[0] / "app").st_uid == PUID  # code protection undone
+    assert ops.lstat(app_dir[0] / "app").st_uid == 0  # image code stays protected
 
 
 def test_bootstrap_ignores_an_invalid_setting(data, monkeypatch):

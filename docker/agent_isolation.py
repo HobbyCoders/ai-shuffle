@@ -51,8 +51,8 @@ UPDATES = "application-updates"
 PROTECTED = ("managed-postgres.json", "database-mode.json", ".credential-keys",
              ".managed-connection", "preview-access.key", "postgres", UPDATES)
 # Image code the app (which holds the service account as its saved uid) loads.
-# The image ships these owned by appuser; an agent able to edit them could run
-# code inside the app. Root owns them while the mode is on.
+# New images ship these root-owned in every mode. protect_code also supports
+# older images; disabling isolation never gives image code back to the agent.
 CODE_TREES = ("app", "scripts")
 CODE_FILES = (".env.example", "THIRD_PARTY_NOTICES.md")
 # Passed to the app (SHUFFLE_*) so it routes agent children through the runner.
@@ -392,11 +392,11 @@ def protect_code(app_dir, ident, ops=None, log=print):
 
 
 def release_code(app_dir, ident, ops=None):
-    """Give the image code back to appuser, as the image and entrypoint do."""
-    ops = ops or Ops()
-    for path, info in list(_code_entries(app_dir, ops, strict=False)):
-        if info.st_uid == 0:
-            ops.lchown(path, ident.puid, ident.pgid)
+    """Keep image assets root-owned even when isolation is disabled.
+
+    Retained data is still handed back by disable(). Kept as a no-op for
+    supervisors calling the older isolation rollback interface.
+    """
 
 
 # --- The service account ---------------------------------------------------
