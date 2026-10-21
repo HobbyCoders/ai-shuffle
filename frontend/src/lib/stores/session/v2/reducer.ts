@@ -169,6 +169,12 @@ export interface V2SessionState {
 	speculativelySettledCardIds: string[];
 	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
 	speculativelySettledTaskIds: string[];
+	/** Task id → turn id of the terminal `task.updated` that settled its
+	 *  summary, for frames written inside a turn only (an out-of-turn settle has
+	 *  no turn). A park of that same turn which still names the task proves the
+	 *  frame was a delivered report, not an ending (#320). Optional so a cached
+	 *  state from before the field reads as none. */
+	taskSettleTurnIds?: Record<string, string>;
 	/** Seq of the last event that ended a model attempt's streamed output: a
 	 *  turn start, a user message, a tool result, a provider retry. Messages
 	 *  created after it are the current attempt's output, which a
@@ -1237,22 +1243,27 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					speculativelySettledTaskIds: [],
 				};
 			}
-			// `task_ids` is the backend's own list of work this turn parked on:
-			// what its task registry still has running, re-checked against the
-			// durable rows the moment the park was written. A summary named there
-			// that reads 'completed' got a terminal frame for a run that did not
-			// end — a worker's report delivered while its next turn was already
-			// queued (#320). Keep it on the running strip. The card is left alone:
-			// it shows the report that was delivered. When the work really ends,
-			// its terminal task.updated lands after this park and settles it.
-			const parkedOn = Array.isArray(event.task_ids)
-				? new Set(event.task_ids.filter((id): id is string => typeof id === 'string' && !!id))
+			// Logs written before #320 was fixed: a parent's wake turn delivered a
+			// worker's report with a terminal task.updated while the worker went
+			// on, then parked on that same worker. The park (`task_ids`, the task
+			// registry's running list) names it, so that settle was a delivered
+			// report, not an ending: keep the agent on the running strip. Only an
+			// agent settled 'completed' by a frame of THIS turn qualifies. Work
+			// that really finished while the park was being written settles out
+			// of turn (no turn id) and stays settled. The card is left alone: it
+			// shows the report that was delivered.
+			const parkTurn = str(event.turn_id);
+			const settledIn = next.taskSettleTurnIds;
+			const parkedOn = parkTurn && settledIn && Array.isArray(event.task_ids)
+				? new Set(event.task_ids.filter((id): id is string =>
+					typeof id === 'string' && !!id && settledIn[id] === parkTurn))
 				: null;
-			if (parkedOn?.size && next.activeTaskSummaries.some((t) => parkedOn.has(t.id) && t.status === 'completed')) {
+			const revived = (t: Task) => !!parkedOn?.has(t.id) && t.kind === 'agent' && t.status === 'completed';
+			if (parkedOn?.size && next.activeTaskSummaries.some(revived)) {
 				next = {
 					...next,
 					activeTaskSummaries: next.activeTaskSummaries.map((t) =>
-						parkedOn.has(t.id) && t.status === 'completed' ? { ...t, status: 'running' as const } : t
+						revived(t) ? { ...t, status: 'running' as const } : t
 					),
 				};
 			}
@@ -2235,6 +2246,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				? state.activeTaskSummaries.map((t) => (t.id === taskId ? summary : t))
 				: [...state.activeTaskSummaries, summary];
 			const taskOriginSeq = withOrigin(state.taskOriginSeq, taskId, seq);
+			const settleTurn = status === 'running' ? '' : str(event.turn_id);
+			let taskSettleTurnIds = state.taskSettleTurnIds;
+			if ((taskSettleTurnIds?.[taskId] ?? '') !== settleTurn) {
+				taskSettleTurnIds = { ...taskSettleTurnIds };
+				if (settleTurn) taskSettleTurnIds[taskId] = settleTurn;
+				else delete taskSettleTurnIds[taskId];
+			}
 			let messages = state.messages;
 			let speculativelySettledCardIds = state.speculativelySettledCardIds;
 			let speculativelySettledTaskIds = state.speculativelySettledTaskIds;
@@ -2294,6 +2312,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				messages,
 				activeTaskSummaries,
 				taskOriginSeq,
+				taskSettleTurnIds,
 				speculativelySettledCardIds,
 				speculativelySettledTaskIds,
 			};
@@ -2479,6 +2498,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				}
 				return false;
 			});
+			const keptTasks = new Set(activeTaskSummaries.map((t) => t.id));
+			const taskSettleTurnIds = state.taskSettleTurnIds && Object.fromEntries(
+				Object.entries(state.taskSettleTurnIds).filter(([id]) => keptTasks.has(id))
+			);
 			// Clear open pointers if their target message was truncated away.
 			const liveIds = new Set(keptMessages.map((m) => m.id));
 			const openTextId = state.openTextId && liveIds.has(state.openTextId) ? state.openTextId : null;
@@ -2491,6 +2514,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				messages: keptMessages,
 				messageOriginSeq,
 				taskOriginSeq,
+				taskSettleTurnIds,
 				hasRetryCards,
 				mayHaveLiveRetry: state.mayHaveLiveRetry && hasRetryCards,
 				activeTaskSummaries,

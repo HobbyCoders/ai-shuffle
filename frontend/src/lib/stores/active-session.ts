@@ -699,7 +699,12 @@ const draftManager = createDraftManager({
 	wsSend: (data) => wsConn.send(data),
 	wsIsConnected: () => wsConn.isConnected(),
 	feedRestart: (id) => feedController.restart(id),
-	feedRevive: (id) => feedController.revive(id),
+	feedRevive: (id) => {
+		feedController.revive(id);
+		// Resuming at the cursor brings no snapshot; re-read the registry's
+		// running list for the strip, as a reconnect does (#320).
+		void switcher.refreshRunningTasks(id);
+	},
 });
 
 // Message sender needs a reference to activeSession for recursive calls

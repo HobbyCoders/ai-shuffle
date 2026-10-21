@@ -1401,15 +1401,18 @@ describe('feedController running strip vs the task registry (#320)', () => {
 	const at = (iso: string) => ({ created_at: iso });
 	const registryRow = {
 		id: W, subject: 'Backend fix', status: 'running' as const, kind: 'agent' as const, summary: null,
-		toolUseId: W, startedAt: '2026-10-21T00:44:29.900+00:00', updatedAt: '2026-10-21T00:51:40.000+00:00',
+		// Resumed again at 00:55 (after the log's settle at 00:51:34.309) with
+		// its start frame lost: only the registry knows it is running.
+		toolUseId: W, startedAt: '2026-10-21T00:55:02.000+00:00', updatedAt: '2026-10-21T00:55:02.000+00:00',
 	};
 	// The parent's log around the delivered report: resumed (running), parked on
 	// it, the report delivered with a terminal frame, parked on it again.
 	const history = (parkNames: string[]) => [
-		{ ...taskUpdated(W, 'running', { description: 'Backend fix' }), seq: 1, ...at('2026-10-21T00:44:29.874Z') },
-		{ type: 'turn.parked', id: 'park-1', seq: 2, session_id: 's1', task_ids: [W] },
-		{ ...taskUpdated(W, 'completed'), seq: 3, ...at('2026-10-21T00:51:34.309Z') },
-		{ type: 'turn.parked', id: 'park-2', seq: 4, session_id: 's1', task_ids: parkNames },
+		{ ...taskUpdated(W, 'running', { description: 'Backend fix', kind: 'agent' }), seq: 1, ...at('2026-10-21T00:44:29.874Z') },
+		{ type: 'turn.parked', id: 'park-1', seq: 2, session_id: 's1', turn_id: 'turn-p', task_ids: [W] },
+		// Pre-fix backend: the wake turn wrote a terminal frame for the report.
+		{ ...taskUpdated(W, 'completed', { kind: 'agent' }), seq: 3, turn_id: 'turn-p', ...at('2026-10-21T00:51:34.309Z') },
+		{ type: 'turn.parked', id: 'park-2', seq: 4, session_id: 's1', turn_id: 'turn-p', task_ids: parkNames },
 	];
 
 	it('keeps a worker the park names on the published strip after its report', () => {
@@ -1425,7 +1428,7 @@ describe('feedController running strip vs the task registry (#320)', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
-		// An older log whose park did not name the worker: only the registry knows.
+		// A log whose last park does not name the worker: only the registry knows.
 		hoisted.onEvent!(history([])[0]);
 		expect(feedController.reconcileRunningTasks('s1', [registryRow])).toBe(true);
 		for (const e of history([]).slice(1)) hoisted.onEvent!(e);

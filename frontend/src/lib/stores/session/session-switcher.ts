@@ -941,6 +941,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	async function refreshRunningTasks(sessionId: string) {
 		if (!feedController.isFeeding(sessionId)) return;
+		const generation = _switchGeneration;
 		let snap: LiveSnapshot | null;
 		try {
 			snap = await api.get<LiveSnapshot>(
@@ -950,7 +951,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			console.warn('[ActiveSession] running-tasks refresh failed:', e);
 			return;
 		}
-		if (!snap || getState().sessionId !== sessionId) return;
+		if (!snap || generation !== _switchGeneration || getState().sessionId !== sessionId) return;
 		feedController.reconcileRunningTasks(sessionId, runningSnapshotTasks(snap));
 	}
 

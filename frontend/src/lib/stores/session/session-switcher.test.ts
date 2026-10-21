@@ -1272,6 +1272,21 @@ describe('the running strip follows the task registry (#320)', () => {
 		vi.mocked(feedController.isFeeding).mockImplementation(() => false);
 		switcher.destroy();
 	});
+
+	it('drops a running-list reply that lands after the user switched away', async () => {
+		vi.mocked(feedController.isFeeding).mockImplementation(() => true);
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise((done) => (resolve = done)));
+		const { switcher } = makeSwitcher(fullState({ sessionId: 'session-A' }));
+		const refresh = switcher.refreshRunningTasks('session-A');
+		_mockSessions.current = [{ id: 'session-B' }];
+		await switcher.switchSession('session-B');
+		resolve({ activeTasks: [running] });
+		await refresh;
+		expect(feedController.reconcileRunningTasks).not.toHaveBeenCalled();
+		vi.mocked(feedController.isFeeding).mockImplementation(() => false);
+		switcher.destroy();
+	});
 });
 
 describe('session mode lanes', () => {
