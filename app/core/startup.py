@@ -902,5 +902,7 @@ async def shutdown_services() -> None:
     # step above may still persist durable state (terminal chips, reap
     # attribution, parked markers) and would otherwise die on a closed pool.
     from app.db.base import close_pool
-    close_pool()
+    # Keep the loop running so coroutine-held connections can return during
+    # the bounded drain, and cancellation/socket close cannot block the loop.
+    await asyncio.to_thread(close_pool)
 
