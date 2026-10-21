@@ -26,3 +26,16 @@ class TestVoiceModelDetails:
         sent = live_session_config({"voice": response.json()["voice_voice"]}, [])
         assert details["prompts"][0]["text"] == sent["instructions"]
         assert sent["delegation"] == {"type": "client"}
+
+    def test_unofficial_codex_requires_explicit_engine_selection(self, authenticated_client, mock_db):
+        c = authenticated_client
+        assert c.get(VOICE_SETTINGS).json()["voice_model"] == "gpt-live-1"
+        response = c.put(VOICE_SETTINGS, json={"voice_model": "gpt-live-1-codex", "voice_provider_id": None})
+        assert response.status_code == 200
+        saved = response.json()
+        assert saved["voice_model"] == "gpt-live-1-codex"
+        assert saved["voice_voice"] == "cove"
+        assert saved["model_details"]["transport"] == "stream"
+        assert "Unofficial, unsupported" in saved["model_details"]["preview_note"]
+        assert saved["voice_mode_enabled"] is False
+        assert c.put(VOICE_SETTINGS, json={"voice_model":"gpt-live-1", "voice_provider_id":None}).status_code == 200

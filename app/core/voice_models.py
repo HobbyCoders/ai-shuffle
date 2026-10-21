@@ -1,6 +1,7 @@
 """Voice engines and their distinct transport/delegation contracts."""
 
 LIVE_MODEL = "gpt-live-1"
+CODEX_MODEL = "gpt-live-1-codex"  # Unofficial subscription path; explicit opt-in only.
 GROK_MODEL = "grok-voice-latest"
 GROK_URL = "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
 # Built-ins shared by xAI speech-to-speech and TTS, checked 2026-10-18.
@@ -13,6 +14,8 @@ FAL_VOICES = tuple(f"{prefix}{i}" for prefix, count in (("NATF", 4), ("NATM", 4)
 
 
 def voices_for(model: str) -> tuple[str, ...]:
+    if model == CODEX_MODEL:
+        return ("cove",)  # The voice exercised by the approved subscription probe.
     if model == GROK_MODEL:
         return GROK_VOICES
     if model == PERSONAPLEX_MODEL:
@@ -21,7 +24,7 @@ def voices_for(model: str) -> tuple[str, ...]:
 
 
 def transport_for(model: str) -> str:
-    return "stream" if model in (LIVE_MODEL, GROK_MODEL, PERSONAPLEX_MODEL) else "webrtc"
+    return "stream" if model in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL, PERSONAPLEX_MODEL) else "webrtc"
 
 
 def model_details(model: str, options: dict | None = None) -> dict:
@@ -37,7 +40,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
     options = validate_options(model, options or {})
     prompts = []
     runtime = []
-    if model in (LIVE_MODEL, GROK_MODEL):
+    if model in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL):
         prompts = [
             {"label": "Voice conversation prompt", "key": "instructions", "text": options["instructions"] or LIVE_INSTRUCTIONS, "default_text": LIVE_INSTRUCTIONS},
             {"label": "Chat agent prompt", "key": "delegation_instructions", "text": options["delegation_instructions"] or DELEGATION_INSTRUCTIONS, "default_text": DELEGATION_INSTRUCTIONS},
@@ -81,6 +84,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
         note = "Calls append the available agent roster and any client-supplied device instructions. Phone appendices apply only in the named mode; app-tool instructions apply only when those tools are admitted. Conversation replay is context, not a system prompt."
     return {
         "model": model,
+        "label": "ChatGPT voice (unofficial, unsupported)" if model == CODEX_MODEL else model,
         "voices": [{"id": voice, "label": voice if model == PERSONAPLEX_MODEL else voice.capitalize()} for voice in voices_for(model)],
         "transport": transport_for(model),
         "runtime_settings": runtime,
@@ -88,7 +92,8 @@ def model_details(model: str, options: dict | None = None) -> dict:
         "prompts": prompts,
         "prompt_note": note,
         # Preview generation uses the same Live transport and voice as new calls.
-        "preview_note": "Previews use the selected engine and voice with your API key. Subscription voice access is not verified; an API key is required.",
+        "preview_note": ("Unofficial, unsupported ChatGPT subscription access. Off by default; explicitly select this engine to opt in. Previews are unavailable."
+                         if model == CODEX_MODEL else "Previews use the selected engine and voice with your API key."),
     }
 
 

@@ -48,13 +48,13 @@ class GrokOptions(PromptOptions):
 
 
 def validate_options(model: str, value: dict) -> dict:
-    from app.core.voice_models import GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL
+    from app.core.voice_models import CODEX_MODEL, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL
 
     cls = (
         GrokOptions
         if model == GROK_MODEL
         else LiveOptions
-        if model == LIVE_MODEL
+        if model in (LIVE_MODEL, CODEX_MODEL)
         else PromptOptions
         if model == PERSONAPLEX_MODEL
         else RealtimeOptions

@@ -3,9 +3,9 @@
 Deliberately small surface:
 
 * ``GET  /api/v1/voice/providers`` — which ``model_providers`` rows can fund a
-  realtime call. OpenAI Realtime is **API-key only**: a ChatGPT/Codex
-  subscription row can never be used, so those are filtered out
-  here rather than failing at mint time.
+  realtime call. Supported engines require API keys. ChatGPT subscriptions
+  are eligible only for the explicitly selected, unofficial Codex engine;
+  they are never used for API-key engines.
 * ``POST /api/v1/voice/sessions`` — create the session row (a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
   mint a short-lived OpenAI client secret for the browser's WebRTC leg, so the
@@ -46,7 +46,7 @@ from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
-    FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, session_config, transport_for,
+    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, session_config, transport_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,24 +81,29 @@ MAX_REMEMBERED_SECRETS = 64
 def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
     """Whether a provider row can fund an OpenAI or xAI voice call.
 
-    Requires an enabled ``openai`` or ``xai`` row carrying a stored API
-    key. ChatGPT/Codex subscription rows are excluded via the same discriminator
-    the fluid credential layer uses — Realtime has no subscription-OAuth path.
+    API-key engines require enabled ``openai`` / ``xai`` rows. The unofficial
+    Codex engine requires an enabled subscription bundle without a reauth flag.
+    ``provider_matches_model`` keeps these funding paths strictly separate.
     """
     from app.core.provider.fluid_credentials import _is_codex_subscription
 
-    if row.get("provider_type") not in ("openai", "xai"):
-        return False
     if not row.get("enabled"):
         return False
     if _is_codex_subscription(row):
+        return bool(row.get("codex_access_token")) and not row.get("needs_reauth")
+    if row.get("provider_type") not in ("openai", "xai"):
         return False
     return bool(row.get("auth_token"))
 
 
 def provider_matches_model(row: dict, model: str) -> bool:
+    from app.core.provider.fluid_credentials import _is_codex_subscription
     if model == PERSONAPLEX_MODEL:
         return row.get("id") == FAL_PROVIDER_ID
+    if model == CODEX_MODEL:
+        return _is_codex_subscription(row)
+    if _is_codex_subscription(row):
+        return False  # Never fund the default/API-key engine with a subscription.
     return row.get("provider_type") == ("xai" if model == GROK_MODEL else "openai")
 
 
@@ -128,11 +133,13 @@ def list_eligible_voice_providers(
     OpenAI audio models in :mod:`app.api.settings_audio`; there is no per-user
     OpenAI policy). fal.ai is listed when the caller's fal key resolves.
     """
+    from app.core.provider.fluid_credentials import _is_codex_subscription
     rows = database.get_enabled_model_providers(include_token=True)
     providers = [
-        {"id": row["id"], "name": row.get("name") or row["id"], "provider_type": row["provider_type"]}
+        {"id": row["id"], "name": row.get("name") or row["id"],
+         "provider_type": "chatgpt" if _is_codex_subscription(row) else row["provider_type"]}
         for row in rows
-        if _is_eligible_voice_provider(row)
+        if _is_eligible_voice_provider(row) and (api_user is None or not _is_codex_subscription(row))
     ]
     if api_user is None:
         from app.core import fal_credential
@@ -164,7 +171,10 @@ def _eligible_provider_row(
             return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
         return None
     row = database.get_model_provider(provider_id, include_token=True)
+    from app.core.provider.fluid_credentials import _is_codex_subscription
     if row and _is_eligible_voice_provider(row):
+        if api_user is not None and _is_codex_subscription(row):
+            return None  # Personal subscription voice is owner/paired-device only.
         return row
     return None
 
@@ -619,7 +629,11 @@ async def _provider_api_key(
             raise HTTPException(status_code=400, detail=fal_credential.OFF_MESSAGE)
         api_key = await run_sync(fal_credential.api_key)
     else:
-        api_key = await run_sync(_decrypt_auth_token, provider_row)
+        from app.core.provider.fluid_credentials import _is_codex_subscription, _load_codex_access_token
+        if _is_codex_subscription(provider_row):
+            api_key, _ = await _load_codex_access_token(provider_row["id"])
+        else:
+            api_key = await run_sync(_decrypt_auth_token, provider_row)
     if not api_key:
         raise HTTPException(
             status_code=400,
@@ -814,7 +828,7 @@ async def create_voice_session(
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
     options = voice_settings.get("voice_options", {})
     selected_model, selected_effort = request.model, request.effort
-    if model in (LIVE_MODEL, GROK_MODEL) and not (selected_model or "").strip():
+    if model in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL) and not (selected_model or "").strip():
         raise HTTPException(400, "Choose a chat model in the composer before starting a voice call.")
     client_secret, expires_at = "", None
     if transport_for(model) == "webrtc":
@@ -840,8 +854,8 @@ async def create_voice_session(
     session_create_overrides = {
         "title": "Voice session",
         "is_active": True,
-        "provider_id": None if model in (LIVE_MODEL, GROK_MODEL) else provider_row["id"],
-        "derive_provider_from_profile": model not in (LIVE_MODEL, GROK_MODEL),
+        "provider_id": None if model in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL) else provider_row["id"],
+        "derive_provider_from_profile": model not in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL),
         "model": selected_model,
         "effort": selected_effort,
         "permission_mode": request.permission_mode,
@@ -1414,7 +1428,9 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
             raise HTTPException(429, "Too many voice calls are connected.")
         from app.core.voice_grok import GrokVoiceStream
-        stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
+        from app.core.voice_codex import CodexVoiceStream
+        stream_cls = (CodexVoiceStream if config["model"] == CODEX_MODEL else
+                      GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream)
         call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],
                                         api_user_id=(api_user or {}).get("id"))
         # Reserve before accepting: there is no await between capacity check

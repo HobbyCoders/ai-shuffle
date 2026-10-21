@@ -391,6 +391,27 @@ class TestVoicePreview:
 
 
 class TestCreateVoiceSession:
+    def test_unofficial_codex_pins_subscription_without_minting_a_client_secret(self, authenticated_client, mock_db, monkeypatch):
+        from unittest.mock import AsyncMock
+        from app.api import voice
+        from app.core.provider import fluid_credentials
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove")
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(return_value=("fake-token", None)))
+        mint = AsyncMock(side_effect=AssertionError("Subscription voice must never mint an API-key secret"))
+        monkeypatch.setattr(voice, "_mint_client_secret", mint)
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "profile_id":"default"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["model"] == "gpt-live-1-codex" and body["client_secret"] == ""
+        assert "fake-token" not in response.text
+        row = db.get_session(body["session_id"])
+        config = json.loads(row["voice_config"])
+        assert config["provider_id"] == "prov-sub"
+        assert row["model"] == "sonnet"  # The selected chat agent remains independent.
+        mint.assert_not_called()
+
     def test_disabled_flag_returns_403(self, authenticated_client, mock_db):
         _make_provider()
         resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
