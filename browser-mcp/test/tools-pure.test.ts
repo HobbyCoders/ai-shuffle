@@ -180,7 +180,9 @@ describe("content warning via browser_navigate", () => {
       goForward: async () => {},
       url: () => landing,
       title: async () => page.title,
-      locator: () => ({ first: () => ({ isVisible: async () => true }) }),
+      frames: () => [{ locator: () => ({ locator: () => ({
+        count: async () => 1, nth: () => ({ isVisible: async () => true }),
+      }) }) }],
     };
     return {
       ensurePage: async () => handle,
@@ -259,8 +261,10 @@ describe("content warning via browser_navigate", () => {
 describe("emptyContentWarning via browser_read_text", () => {
   function readSession(text: string): Session {
     return {
-      ensurePage: async () => ({}),
-      evaluate: async () => ({ title: "App", url: "http://127.0.0.1:5173/", text }),
+      ensurePage: async () => ({
+        title: async () => "App", url: () => "http://127.0.0.1:5173/",
+        frames: () => [{ locator: () => ({ evaluate: async () => text }) }],
+      }),
       checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }

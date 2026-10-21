@@ -93,7 +93,9 @@ describe("browser_navigate loopback retry", () => {
         return { headers: () => headers };
       },
       title: async () => "Dev server",
-      locator: () => ({ first: () => ({ isVisible: async () => true }) }),
+      frames: () => [{ locator: () => ({ locator: () => ({
+        count: async () => 1, nth: () => ({ isVisible: async () => true }),
+      }) }) }],
     };
     return {
       ensurePage: async () => page,

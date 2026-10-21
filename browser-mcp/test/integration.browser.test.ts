@@ -50,6 +50,11 @@ console.log("http-fixture-log hi");
 fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").textContent=JSON.stringify(d);});
 </script></body></html>`;
   const server = createHttpServer((req, res) => {
+    if (req.url === "/inner-observation") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<p id="cross">Cross frame text</p>');
+      return;
+    }
     if (req.url === "/delayed-hydration") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end('<title>Loading app</title><main id="app">Loading...</main><script>fetch("/hydrate").then(r=>r.text()).then(html=>document.getElementById("app").innerHTML=html)</script>');
@@ -279,6 +284,78 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     }
   });
 
+  it("expands every scoped child and keeps collapsed refs registered", async () => {
+    const page = await session.ensurePage();
+    await page.goto("about:blank");
+    await page.setContent('<main aria-label="Repeated">' + '<button>Same</button>'.repeat(12) + '</main>');
+    const initial = await runSnapshot(session, {});
+    const tree = initial.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(tree).toContain("more similar items");
+    const parent = /scope_ref=(e\d+)/.exec(tree)![1];
+    // Hidden refs are already known, without needing another snapshot first.
+    const raw = await page.locator("body").ariaSnapshot({ mode: "ai" });
+    const hidden = [...raw.matchAll(/button "Same" \[ref=(e\d+)\]/g)].at(-1)![1];
+    const locator = await session.resolveRef(hidden);
+    expect(await locator.count()).toBe(1);
+    const expanded = await runSnapshot(session, { scope_ref: parent });
+    const expandedTree = expanded.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(expandedTree.match(/button "Same"/g)).toHaveLength(12);
+    expect(expandedTree).not.toContain("more similar items");
+    const capped = await runSnapshot(session, { filter: "interactive", max_chars: 300 });
+    const cappedTree = capped.content.slice(1).filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(JSON.parse(firstText(capped)).ref_count).toBe((cappedTree.match(/\[ref=/g) ?? []).length);
+    expect(cappedTree).not.toContain("filter=interactive");
+  });
+
+  it("find locates past-budget controls by query and structured live locators, with explicit ambiguity", async () => {
+    const page = await session.ensurePage();
+    await page.goto("about:blank");
+    await page.setContent(Array.from({ length: 1500 }, (_, i) => `<div><button>Product ${i}</button></div>`).join("") +
+      '<button>Duplicate</button><button>Duplicate</button><label>Email label<input placeholder="Email placeholder" data-testid="email-id"></label>');
+    const capped = await runSnapshot(session, { filter: "interactive" });
+    expect(JSON.parse(firstText(capped)).truncated).toBe(true);
+    expect(capped.content.map(c => c.type === "text" ? c.text : "").join("\n")).not.toContain('"Product 1499"');
+    for (const input of [{ query: "Product 1499" }, { role: "button", name: "Product 1499" },
+      { label: "Email label" }, { placeholder: "Email placeholder" }, { test_id: "email-id" }, { text: "Product 1499" }]) {
+      const result = await runFind(session, input);
+      expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, match_count: 1, method: "locator", degraded: false });
+      const listing = result.content[1] as { text: string };
+      const ref = /^(e\d+) /m.exec(listing.text)![1];
+      expect(await (await session.resolveRef(ref)).count()).toBe(1);
+    }
+    expect(JSON.parse(firstText(await runFind(session, { role: "button", name: "Duplicate" })))).toMatchObject({ ok: false, code: "ambiguous_match", match_count: 2 });
+    expect(JSON.parse(firstText(await runFind(session, { query: "Bottom button" })))).toMatchObject({ ok: true, match_count: 0 });
+  });
+
+  it("read_text and waits include frame and shadow text, with subtree scopes", async () => {
+    const page = await session.ensurePage();
+    await page.goto(new URL("prose-app", httpUrl).href);
+    // A real cross-origin document, not merely a mocked consumer of frame text.
+    await page.setContent(`<main aria-label="Inside"><p>Scoped prose</p><div id="host"></div>
+      <iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe></main><p>Outside prose</p>
+      <iframe srcdoc="<p id='same'>Same frame text</p>"></iframe>`);
+    await page.locator("#host").evaluate(host => { host.attachShadow({ mode: "open" }).innerHTML = '<p id="shadow">Open shadow prose</p><button>Shadow action</button>'; });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text" })))).toMatchObject({ ok: true, matched: true });
+    for (const target of [{ condition: "text", text: "Same frame text" }, { condition: "element", selector: "#cross" },
+      { condition: "text", text: "Open shadow prose" }, { condition: "element", selector: "#shadow" }] as const) {
+      expect(JSON.parse(firstText(await runWait(session, target)))).toMatchObject({ ok: true, matched: true });
+    }
+    const all = await runReadText(session);
+    const allText = all.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    for (const part of ["Cross frame text", "Same frame text", "Open shadow prose", "Outside prose"]) expect(allText).toContain(part);
+    const snap = await runSnapshot(session, {});
+    const scope = /main "Inside"[^\n]*\[ref=(e\d+)\]/.exec((snap.content[1] as { text: string }).text)![1];
+    const scoped = await runReadText(session, { scope_ref: scope });
+    const scopedText = scoped.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(scopedText).toContain("Cross frame text");
+    expect(scopedText).toContain("Open shadow prose");
+    expect(scopedText).not.toContain("Outside prose");
+    expect(scopedText).not.toContain("Same frame text");
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Same frame text", scope_ref: scope, timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", state: "hidden", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "#cross", state: "detached", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+  });
+
   it("applies the workspace viewport before first navigation, new tabs and CDP recovery", async () => {
     const viewportManager = new BrowserManager({ endpoint: cdpEndpoint });
     const viewportSession = new Session(viewportManager);
@@ -368,10 +445,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(snapText).toMatch(/\[ref=e\d+\]/);
   });
 
-  it("snapshot collapses the long list of rows", async () => {
+  it("snapshot preserves all distinct list rows", async () => {
     const res = await runSnapshot(session, { filter: "all" });
     const snapText = res.content[1] && res.content[1].type === "text" ? res.content[1].text : "";
-    expect(snapText).toContain("more similar items");
+    expect(snapText).not.toContain("more similar items");
+    for (let i = 1; i <= 20; i++) expect(snapText).toContain(`link "Item ${i}"`);
   });
 
   it("act(fill) then act(click) mutates the DOM and reflects the value", async () => {
@@ -693,7 +771,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     delete process.env.ANTHROPIC_BASE_URL;
 
     await runNavigate(session, { url: fixtureUrl });
-    const res = await runFind(session, { query: "submit button" });
+    const res = await runFind(session, { query: "the submit button" });
     const body = JSON.parse(firstText(res));
     expect(body.ok).toBe(true);
     expect(body.degraded).toBe(true);

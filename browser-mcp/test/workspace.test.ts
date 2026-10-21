@@ -367,8 +367,8 @@ describe("navigation interruption", () => {
 describe("bounded wait", () => {
   function fixture() {
     const {session, ws} = make();
-    const locator = { first() {return this;}, isVisible: vi.fn(async () => true), count: vi.fn(async () => 1) };
-    const page = { url: () => "https://example.com/ready", locator: () => locator, getByText: () => locator };
+    const locator = { first() {return this;}, nth() {return this;}, locator() {return this;}, getByText() {return this;}, isVisible: vi.fn(async () => true), count: vi.fn(async () => 1) };
+    const page = { url: () => "https://example.com/ready", frames: () => [{ locator: () => locator }], locator: () => locator, getByText: () => locator };
     vi.spyOn(session, "ensurePage").mockResolvedValue(page as never);
     vi.spyOn(session, "resolveRef").mockReturnValue(locator as never);
     return {session, ws, locator};

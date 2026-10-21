@@ -141,8 +141,10 @@ describe("capText", () => {
 describe("browser_read_text truncation", () => {
   function readSession(text: string): Session {
     return {
-      ensurePage: async () => undefined,
-      evaluate: async () => ({ title: "Long", url: "http://h/long", text }),
+      ensurePage: async () => ({
+        title: async () => "Long", url: () => "http://h/long",
+        frames: () => [{ locator: () => ({ evaluate: async () => text }) }],
+      }),
       checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }

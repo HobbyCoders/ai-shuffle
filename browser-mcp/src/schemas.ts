@@ -57,6 +57,7 @@ export const waitSchema: JsonSchema = {
     text: { type: "string", description: "Text to wait for." },
     ref: { type: "string", description: "Element ref (condition=element)." },
     selector: { type: "string", description: "CSS or Playwright selector (condition=element)." },
+    scope_ref: { type: "string", description: "Limit text/selector waits to this subtree and descendant frames." },
     state: { type: "string", enum: ["visible", "hidden", "attached", "detached"] },
     match: { type: "string", enum: ["contains", "exact"] },
     timeout_ms: { type: "integer", minimum: 0, maximum: 15000 },
@@ -112,9 +113,14 @@ export const screenshotSchema: JsonSchema = {
 export const findSchema: JsonSchema = {
   type: "object",
   properties: {
-    query: { type: "string", description: 'What to find, e.g. "the checkout button".' },
+    query: { type: "string", description: 'Exact label first, then descriptive search, e.g. "the checkout button".' },
+    role: { type: "string", description: "Exact ARIA role; combine with name to disambiguate." },
+    name: { type: "string", description: "Exact accessible name (with role)." },
+    label: { type: "string", description: "Exact input label." },
+    placeholder: { type: "string", description: "Exact input placeholder." },
+    test_id: { type: "string", description: "Exact data-testid." },
+    text: { type: "string", description: "Exact visible text." },
   },
-  required: ["query"],
   additionalProperties: false,
 };
 
@@ -122,6 +128,7 @@ export const readTextSchema: JsonSchema = {
   type: "object",
   properties: {
     offset: { type: "integer", minimum: 0, description: "Start character; use next_offset from a cut read." },
+    scope_ref: { type: "string", description: "Read this subtree and its descendant frames only." },
   },
   additionalProperties: false,
 };
