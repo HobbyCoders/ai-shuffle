@@ -122,15 +122,61 @@ async def _approved():
 
 
 @pytest.mark.asyncio
-async def test_recipient_cwd_refusal_does_not_spawn(peers, monkeypatch):
-    monkeypatch.setattr(api, "_validated_terminal_cwd", Mock(side_effect=service.TerminalError("bad_folder", "Outside workspace", 400)))
+async def test_recipient_cwd_refusal_does_not_spawn(peers, monkeypatch, tmp_path):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "workspace_dir", tmp_path)
     create = AsyncMock(wraps=peers[0].create)
     monkeypatch.setattr(peers[0], "create", create)
     target = await _approved()
     result = await relay.handle({"op": "open", "lease": target.authorization_id,
                                  "options": {"cwd": "/"}}, "source")
     assert result["error"]["code"] == "bad_folder"
+    assert result["error"]["status"] == 400
+    assert "workspace" in result["error"]["message"].lower()
+    assert not relay._approvals[("source", target.authorization_id)]["used"]
     create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bad_folder_preserves_source_and_recipient_consent_for_retry(peers, monkeypatch, tmp_path):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "workspace_dir", tmp_path)
+    source = service.TerminalRegistry()
+    request = SimpleNamespace(valid=True)
+    target = await _approved()
+    with pytest.raises(service.TerminalError) as failed:
+        await targets.create(source, api.CreateTerminal(target=target, cwd="/"), "owner", request)
+    assert failed.value.code == "bad_folder" and failed.value.status == 400
+    assert target.authorization_id in relay._owners
+    assert not relay._approvals[("source", target.authorization_id)]["used"]
+    terminal = await targets.create(source, api.CreateTerminal(target=target, cwd=str(tmp_path)), "owner", request)
+    assert terminal.cwd == str(tmp_path)
+    await source.close(terminal.id, by="test")
+    assert source.count == peers[0].count == 0
+
+
+@pytest.mark.asyncio
+async def test_request_owner_callback_has_deadline_and_creates_no_late_request(peers, monkeypatch):
+    monkeypatch.setattr(relay, "REQUEST_CALLBACK_SECONDS", .02, raising=False)
+    observed = []
+    cancelled = asyncio.Event()
+
+    async def blackhole(*args, **kwargs):
+        observed.append(transport.connect_timeout.get())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(control, "call", blackhole)
+    previous = transport.connect_timeout.get()
+    async with asyncio.timeout(.2):
+        with pytest.raises(TimeoutError):
+            await relay.handle({"op": "request", "lease": "slow-source-lease-1234567890"}, "source")
+    assert cancelled.is_set()
+    assert observed and all(value is not None and value <= 1 for value in observed)
+    assert transport.connect_timeout.get() == previous
+    assert not relay._approvals
 
 
 def test_source_whitelists_peer_response_keys(peer, monkeypatch):

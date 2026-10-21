@@ -73,8 +73,12 @@ def test_source_http_contract_opens_real_peer_pty_and_existing_websocket(peer, m
     target = next(t for t in tc.get("/api/v1/terminals/targets").json()["targets"]
                   if t.get("worker_id") == "destination")
     assert target["available"] and target["authorization_id"] == authorization_id
-    opened = tc.post("/api/v1/terminals", json={"target": {
-        "kind": "worker", "worker_id": "destination", "authorization_id": authorization_id}})
+    chosen = {"kind": "worker", "worker_id": "destination", "authorization_id": authorization_id}
+    rejected = tc.post("/api/v1/terminals", json={"target": chosen, "cwd": "/"})
+    assert rejected.status_code == 400 and rejected.json()["code"] == "bad_folder"
+    assert source.count == peer.reg.count == 0
+    assert tc.get(f"/api/v1/terminals/peer-authorizations/{authorization_id}").json()["used"] is False
+    opened = tc.post("/api/v1/terminals", json={"target": chosen})
     assert opened.status_code == 201, opened.text
     terminal = opened.json()["terminal"]
     with wsc(tc, ws_url(terminal["id"])) as ws:

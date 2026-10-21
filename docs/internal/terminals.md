@@ -55,7 +55,9 @@ real two-worker HTTPS acceptance are complete.
    `confirmation_code` (six random base32 characters), `source_name` (the
    requesting member's name) and `age_seconds` (since the request was created).
    B checks A's existing owner callback before creating the request; that
-   callback is still not a substitute for B's independent owner approval.
+   callback has a one-second connect cap and three-second total deadline,
+   shorter than A's request timeout, and is still not a substitute for B's
+   independent owner approval. A timed-out callback creates no pending request.
    A disabled/unsupported recipient can instead return `status: "unavailable"`
    plus `available: false`, `reason_code`, `reason`; never open in that state.
 3. Directly on B, `GET /api/v1/terminals/peer-requests` returns
@@ -78,7 +80,10 @@ real two-worker HTTPS acceptance are complete.
    Optional `session_id` is only A's UI association; optional `cwd`/`shell`
    are resolved on B, never from a mirrored session. B applies the same workspace
    cwd validation and pinned-root spawn rules as local opens. Returns existing
-   `201 {"terminal":...}`. Each approval opens at most one shell.
+   `201 {"terminal":...}`. A rejected folder returns HTTP 400 with
+   `{detail, code: "bad_folder"}` on A without consuming either worker's
+   authorization. Let the owner correct the folder and retry the same target;
+   do not report this as peer unavailability. Each approval opens at most one shell.
 6. Attach/reconnect, input/output and resize use the existing A socket
    `/api/v1/ws/terminals/{terminal_id}` (protocol below); its bounded replay
    buffer survives viewer reconnects while the relay remains alive. Close via

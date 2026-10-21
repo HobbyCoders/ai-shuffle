@@ -13,12 +13,13 @@ import secrets
 import time
 
 from app.db.async_database import run_sync
-from app.network import control, engine, membership
+from app.network import control, engine, membership, transport
 
 logger = logging.getLogger(__name__)
 LEASE_SECONDS = 30
 MAX_LIFETIME_SECONDS = 600
 PENDING_SECONDS = 120
+REQUEST_CALLBACK_SECONDS = 3
 AUTH_RECHECK_SECONDS = 15
 MAX_APPROVALS = 64
 _owners = {}
@@ -207,7 +208,12 @@ async def handle(body, from_device):
         state = availability()
         if state["reason_code"] != "recipient_approval_required":
             return {"status": "unavailable", **state}
-        proof = await control.call(from_device, "terminal-owner", {"lease": lease}, timeout=10, secure=True)
+        capped = transport.connect_timeout.set(1)
+        try:
+            proof = await asyncio.wait_for(control.call(from_device, "terminal-owner", {"lease": lease},
+                                                       timeout=REQUEST_CALLBACK_SECONDS, secure=True), REQUEST_CALLBACK_SECONDS)
+        finally:
+            transport.connect_timeout.reset(capped)
         if proof.get("authorized") is not True:
             logger.info("peer terminal request refused source=%s", from_device)
             raise PermissionError("Source terminal owner authorization required")
@@ -257,13 +263,21 @@ async def handle(body, from_device):
     if op == "open":
         if key in _sessions or key in _opening or approval["used"]:
             raise PermissionError("Recipient approval already used; request a new terminal")
-        approval["used"] = True
         options = body.get("options") or {}
         _opening.add(key)
         terminal = None
         try:
+            from fastapi import HTTPException
             from app.api.terminals import _validated_terminal_cwd
-            cwd, cwd_root = await run_sync(_validated_terminal_cwd, options.get("cwd"))
+            try:
+                cwd, cwd_root = await run_sync(_validated_terminal_cwd, options.get("cwd"))
+            except HTTPException as exc:
+                return {"error": {"code": "bad_folder", "message": str(exc.detail), "status": 400}}
+            except service.TerminalError as exc:
+                return {"error": {"code": exc.code, "message": exc.message, "status": exc.status}}
+            if await require_recipient_owner(key) is not approval:
+                raise PermissionError("Recipient approval replaced during folder validation")
+            approval["used"] = True
             terminal = await registry.create(created_by="peer-owner:" + from_device,
                 cwd=cwd, cwd_root=cwd_root, shell=options.get("shell"), cols=options.get("cols"), rows=options.get("rows"))
             # A replacement approval for the same source lease is new consent,

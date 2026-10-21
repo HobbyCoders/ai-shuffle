@@ -118,7 +118,8 @@ async def test_peer_open_refusal_preserves_error_and_releases_reservation(peers,
                              cwd=str(tmp_path / "missing")), "owner", request)
     assert exc.value.code == "bad_folder"
     assert source.count == peers[0].count == 0
-    assert not relay._owners and not relay._opening
+    assert target.authorization_id in relay._owners and not relay._opening
+    assert not relay._approvals[("source", target.authorization_id)]["used"]
 
 
 @pytest.mark.asyncio
