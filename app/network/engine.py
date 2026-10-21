@@ -608,6 +608,18 @@ def _project_legacy_agent(coll: policy.Collection, record_id: str,
     return {**record, "is_builtin": False}
 
 
+def _billing_refresh_needed(cursor, coll, record_id, record):
+    """Private post-commit signal; never a synced collection or trust marker."""
+    if coll.name != "model_providers" or not record:
+        return False
+    previous = _read_row(cursor, coll, record_id) or {}
+    return any(record.get(secret) and (
+        previous.get(binding) != _my_instance_id()
+        or _provider_value_changed(coll, previous, secret, record[secret]))
+        for secret, binding in (("balance_key", "balance_instance_id"),
+                                ("openai_admin_key", "openai_billing_instance_id")))
+
+
 def materialize(cursor, coll: policy.Collection, record_id: str, record: Optional[Mapping[str, Any]],
                 *, origin_device_id: Optional[str] = None) -> Optional[dict]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
@@ -1563,6 +1575,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                                    losing_record=redact_secrets(local_plain), winning_clock=env.clock,
                                    winning_device_id=env.origin_device_id)
 
+    refresh_billing = False
     if env.op == OP_DELETE:
         if coll.name == "presence":
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
@@ -1571,6 +1584,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
+        refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
         _after_mirror(cursor, coll, plaintext)
         if coll.name == "presence":
@@ -1594,6 +1608,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     # leave an op in the log that this worker never materialized.
     store.insert_op(cursor, env.to_dict(), _lane(coll))
     result.touched.append((env.collection, env.record_id, env.op))
+    if refresh_billing:
+        result.touched.append(("provider_billing", env.record_id, OP_UPSERT))
     return "applied"
 
 
@@ -2536,6 +2552,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
                                        ctx=ctx)
+            refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
             row = materialize(cursor, coll, item["record_id"], prepared,
                               origin_device_id=item["origin_device_id"])
             _after_mirror(cursor, coll, prepared)
@@ -2556,6 +2573,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                          deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
         applied += 1
         touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
+        if not item["deleted"] and refresh_billing:
+            touched.append(("provider_billing", item["record_id"], OP_UPSERT))
     return applied, touched
 
 

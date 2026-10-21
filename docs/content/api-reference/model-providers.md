@@ -427,7 +427,12 @@ budget reachable, readings refresh about every five minutes, not once per worker
 per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
 remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
 `fresh_until` is supplied by the server. Status includes the source and last
-successful fetched time. Failed/expired readings never expose old credit as
+successful fetched time. A newly synchronized billing key schedules a refresh
+only after commit. Workers share successful normalized readings without adding
+upstream calls; `observed_at` and `source_worker` retain the original time and
+source. Configured access with no reading or error is `pending`; a shared-budget
+wait is `deferred`, with `last_deferred_reason` and nullable `deferred_until`
+(epoch milliseconds). A failed first reading remains `unavailable`. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference or billing key invalidate old

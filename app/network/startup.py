@@ -345,6 +345,15 @@ def _on_applied(touched) -> None:
     from app.core.global_events import global_events
     resources = set()
     session_sources = set()
+    if any((c == "provider_billing" and op == "upsert") or
+           (c == "system_settings" and r.startswith("provider_observation:"))
+           for c, r, op in touched):
+        # Applied notifications run after commit, including bootstrap imports.
+        # Hop from the sync/DB thread to the app loop; never poll under its locks.
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            from app.core.provider_usage import provider_usage_monitor
+            loop.call_soon_threadsafe(provider_usage_monitor.request_network_refresh)
     if any(collection == "membership" for collection, _record, _op in touched):
         loop = getattr(global_events, "_loop", None)
         if loop and not loop.is_closed():

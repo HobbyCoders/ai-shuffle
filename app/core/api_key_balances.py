@@ -106,7 +106,11 @@ def status(row):
             "invoice_error_kind": snap.get("invoice_error_kind"),
             "spending_limit_error_kind": snap.get("spending_limit_error_kind"),
             "last_error_kind": error, "needs_reauth": error == "billing_access_denied",
-            "status": "fresh" if fresh else "stale" if fetched else "unavailable",
+            "deferred_until": snap.get("deferred_until"),
+            "last_deferred_reason": snap.get("last_deferred_reason"),
+            "observed_at": fetched, "source_worker": snap.get("source_worker"),
+            "status": ("fresh" if fresh else "stale" if fetched else "unavailable"
+                       if error or not configured else "deferred" if snap.get("last_deferred_reason") else "pending"),
             # A stale or failed reading is never advertised as current credit.
             "credits": snap.get("credits") if fresh else None}
 
@@ -170,9 +174,14 @@ async def poll(row):
         await run_sync(provider_balances.snapshot, row, {"credits": credits, "team_id": team,
             "invoice_error_kind": invoice_error, "spending_limit_error_kind": limit_error,
             "fetched_at": int(time.time() * 1000)})
-    except UsageDeferred:
-        if team and not cached.get("team_id"):
-            await run_sync(provider_balances.snapshot, row, {"team_id": team})
+    except UsageDeferred as deferred:
+        # Discovery may be deferred before a team exists. Always persist the
+        # wait and keep both discovery progress and the last successful reading.
+        await run_sync(provider_balances.snapshot, row, {
+            **cached, "team_id": team,
+            "deferred_until": deferred.deferred_until,
+            "last_deferred_reason": deferred.reason,
+        })
         return
     except Exception as error:
         code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None

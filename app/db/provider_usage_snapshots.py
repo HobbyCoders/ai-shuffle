@@ -62,6 +62,7 @@ def upsert_provider_usage_snapshot(
     expected_binding: Optional[tuple[str, str]] = None,
     expected_credential_generation: Optional[str] = None,
     expected_admin_key: Optional[str] = None,
+    expected_provider_revision: Optional[tuple[str, str]] = None,
 ) -> bool:
     """Insert or replace a snapshot, rejecting observations of an old binding."""
     now = datetime.now(timezone.utc).isoformat()
@@ -69,6 +70,13 @@ def upsert_provider_usage_snapshot(
         raw = {**(raw or {}), "billing_fetched_at": fetched_at}
     with get_db() as conn:
         cursor = conn.cursor()
+        if expected_provider_revision is not None:
+            provider_id_guard, revision = expected_provider_revision
+            cursor.execute("SELECT revision, enabled FROM model_providers WHERE id = %s FOR UPDATE",
+                           (provider_id_guard,))
+            current_provider = cursor.fetchone() or {}
+            if current_provider.get("revision") != revision or not current_provider.get("enabled"):
+                return False
         if provider_type in {"fal", "openrouter_account"}:
             if not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
                 return False

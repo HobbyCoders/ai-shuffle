@@ -35,9 +35,29 @@ budgeted request, the others wait for it and write the same successful reading,
 so every row refreshes at the cost of one upstream request. Only a successful
 response is shared; on a failure the other rows are deferred exactly as the
 budget would defer them, and only the requesting row records the failure.
-Nothing is reused across passes or across workers. Responses still never leave
-the worker that made the request, so a second worker with a mirrored credential
-keeps its own last reading until it wins a later lease.
+HTTP responses never leave the requesting worker. Successful **normalized**
+readings are published through authenticated, encrypted settings sync under
+`provider_observation:` keys, scoped to the source and a credential digest.
+Receiving workers import the latest matching observation before attempting a
+poll; its original `observed_at` and `source_worker` are retained, never stamped
+as newly fetched. Arrival of a billing key or observation schedules a post-commit
+refresh, including one follow-up if a refresh was already running. Local binding
+and credential/revision guards still authorize writes. Secrets, local binding IDs,
+denial fingerprints and raw provider bodies are not shared as observations.
+
+This covers API balances and polled provider snapshots (including OpenRouter,
+fal, Admin spend and subscription windows). No per-worker allowance is added:
+the existing upstream budget, backoff and auth pauses are unchanged. The registry
+intervals are application budgets, not documented provider rate guarantees, so
+multiplying requests by worker count is deliberately avoided. During a partition,
+a worker keeps its last reading until observation sync or budget access returns.
+
+A configured balance without a snapshot or error is `pending`; a budget refusal
+is `deferred`, with a fixed `last_deferred_reason` and nullable `deferred_until`
+(epoch milliseconds; null when the coordinator's deadline is unknown). A failed
+first reading is `unavailable`. A previous successful reading remains `fresh` or
+`stale` using its original timestamp. xAI discovery deferrals persist this state
+even before a team ID is known, and keep any discovered team and prior reading.
 
 Ordinary usage reads never wait on an upstream request. A stale provider
 reading starts one shared background refresh; explicit refreshes join the same

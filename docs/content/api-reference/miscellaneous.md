@@ -139,6 +139,8 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 - Each server worker starts at most one refresh every 30 seconds. Inside that window the endpoint returns the cached rows.
 - A refresh skips a provider whose row was refreshed or attempted in the last 30 seconds, including by another worker that shares the database.
 - Each credential still makes at most one request per provider interval (300 seconds, or 900 seconds for OpenAI Admin).
+- Synchronized billing keys schedule a first refresh after commit. Successful normalized readings are shared across workers using the same credential; `observed_at` and `source_worker` identify the original observation, not the time it was received.
+- For a configured API balance with no reading, `status` is `pending` until a first attempt, `deferred` when the shared budget delays it, or `unavailable` on failure. `last_deferred_reason` is a fixed category; `deferred_until` is an epoch-millisecond deadline when known (otherwise `null`). Existing readings remain `fresh`/`stale` at their original age.
 - On the Claude side nothing is requested: the stored windows are saved and sent to connected clients again, at most once every 30 seconds.
 
 **Response fields** (among others):
