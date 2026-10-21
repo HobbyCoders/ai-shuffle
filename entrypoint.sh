@@ -67,12 +67,14 @@ echo "Starting with PUID=${PUID} and PGID=${PGID}" >&2
 CURRENT_UID=$(id -u appuser)
 CURRENT_GID=$(id -g appuser)
 
+# Prepare mounted home roots even when the image account already matches.
+/usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py remap-home \
+    --old-uid "$CURRENT_UID" --old-gid "$CURRENT_GID" --new-uid "$PUID" --new-gid "$PGID"
+
 # Only modify user if PUID/PGID differs from current
 if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     echo "Adjusting appuser UID:GID from ${CURRENT_UID}:${CURRENT_GID} to ${PUID}:${PGID}" >&2
 
-    /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py remap-home \
-        --old-uid "$CURRENT_UID" --old-gid "$CURRENT_GID" --new-uid "$PUID" --new-gid "$PGID"
     groupmod -o -g "$PGID" appuser
     # The temporary root-owned home suppresses usermod's automatic recursive
     # ownership walk. Restore the image home immediately, without moving it.
@@ -81,6 +83,8 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
 else
     echo "UID/GID already correct, skipping user modification" >&2
 fi
+# Recover an interrupted remap even when UID/GID already match on this start.
+[ "$(getent passwd appuser | cut -d: -f6)" = /home/appuser ] || usermod -d /home/appuser appuser
 
 # Android emulator: `--device /dev/kvm` keeps the host's group on the device.
 # Add appuser to that group so the emulator can open it (app/core/android_emulator).

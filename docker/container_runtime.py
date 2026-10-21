@@ -820,49 +820,73 @@ def mounted_directory(path):
 
 
 def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
-    """Migrate only the previous agent's own entries, not retained service data.
-
-    Known home volumes are separate walk roots. Never cross another mount,
-    follow a symlink, change a multiply-linked file, or enter DATA_DIR through
-    any path (including a bind alias with the same device/inode).
-    """
+    """Migrate agent-owned home entries, never service data or shared inodes."""
     home, data_dir = safe_path(home), safe_path(data_dir)
     try:
         data = data_dir.stat()
         data_inode = (data.st_dev, data.st_ino)
     except FileNotFoundError:
         data_inode = None
+    # Bind aliases on one host mount share this identity. Aliases reached through
+    # two distinct host filesystems may not: keep retained data on its own volume.
     mounts = mount_points()
+    service_uid = isolation()._id(os.environ, "AGENT_ISOLATION_SERVICE_UID")
     volumes = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
-    roots = [home, *(home / name for name in volumes if home / name in mounts)]
-    for root in roots:
-        if root.is_symlink() or not root.is_dir():
+    roots = [(home, old_uid, old_gid, False)]
+    roots += [(home / name, None, None, True) for name in volumes if home / name in mounts]
+    for root, previous_uid, previous_gid, mounted in roots:
+        info = root.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeFailure(f"home volume {root} must be a real directory; set its host ownership to PUID:PGID")
+        if (info.st_dev, info.st_ino) == data_inode:
+            raise RuntimeFailure(f"home volume {root} overlaps DATA_DIR; use separate home and data volumes")
+        if mounted:
+            previous_uid, previous_gid = info.st_uid, info.st_gid
+            if previous_uid == service_uid:
+                raise RuntimeFailure(f"home volume {root} belongs to the service account; set its host ownership to PUID:PGID")
+        if (previous_uid, previous_gid) == (new_uid, new_gid):
             continue
-        device = root.stat().st_dev
-        for directory, dirs, files in os.walk(root, followlinks=False):
+        for directory, dirs, files, fd in os.fwalk(root, follow_symlinks=False):
             path = Path(directory)
-            info = path.lstat()
-            if (info.st_dev, info.st_ino) == data_inode:
+            current = os.fstat(fd)
+            if path == root and (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise RuntimeFailure(f"home volume {root} changed during preparation; retry startup")
+            if (current.st_dev, current.st_ino) == data_inode:
                 dirs[:] = []
                 continue
+            # A fresh Docker bind can have a root-owned root. Change only that
+            # directory inode, never any root-owned contents beneath it.
+            if mounted and previous_uid == 0:
+                os.fchown(fd, new_uid, new_gid)
+                break
             kept = []
             for name in dirs:
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 child = path / name
-                entry = child.lstat()
-                if (stat.S_ISDIR(entry.st_mode) and entry.st_dev == device
+                if (stat.S_ISDIR(entry.st_mode) and entry.st_dev == info.st_dev
                         and child not in mounts and not os.path.ismount(child)
                         and (entry.st_dev, entry.st_ino) != data_inode):
                     kept.append(name)
             dirs[:] = kept
-            for entry_path in [path, *(path / name for name in files)]:
-                entry = entry_path.lstat()
-                if entry.st_uid != old_uid or stat.S_ISLNK(entry.st_mode):
+            for name in [".", *files]:
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if entry.st_uid != previous_uid or not (
+                        stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1):
                     continue
-                if not stat.S_ISDIR(entry.st_mode) and (
-                        not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1):
-                    continue
-                gid = new_gid if entry.st_gid == old_gid else entry.st_gid
-                os.chown(entry_path, new_uid, gid, follow_symlinks=False)
+                # Pin the inode as well as its parent: even a concurrent hardlink
+                # or parent-directory swap cannot redirect the ownership change.
+                child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    pinned = os.fstat(child_fd)
+                    if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
+                            or pinned.st_uid != previous_uid
+                            or not (stat.S_ISDIR(pinned.st_mode)
+                                    or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                        continue
+                    gid = new_gid if pinned.st_gid == previous_gid else pinned.st_gid
+                    os.fchown(child_fd, new_uid, gid)
+                finally:
+                    os.close(child_fd)
 
 
 def validate_mount_root(name, path):
@@ -885,6 +909,8 @@ def drop_privileges(settings):
         account = pwd.getpwnam("appuser")
         if not account.pw_uid or not account.pw_gid:
             raise RuntimeFailure("PUID/PGID must identify a non-root account")
+        if account.pw_dir != "/home/appuser":
+            raise RuntimeFailure("appuser home must be /home/appuser; recreate the container to repair its account")
         roots = [validate_mount_root(name, Path(path)) for name, path in (
             ("DATA_DIR", settings.effective_data_dir),
             ("WORKSPACE_DIR", settings.effective_workspace_dir))]

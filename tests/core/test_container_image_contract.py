@@ -47,7 +47,10 @@ def test_startup_code_and_parent_directories_are_read_only_image_assets():
     assert entrypoint.index('export PATH=') < entrypoint.index('require_bundled_tools "$@"')
     assert not re.search(r"(?m)^\s*chown ", entrypoint)
     assert 'usermod -o -u "$PUID" -d / appuser' in entrypoint
-    assert "container_runtime.py remap-home" in entrypoint
+    assert entrypoint.index("container_runtime.py remap-home") < entrypoint.index('# Only modify user')
+    home_repair = '[ "$(getent passwd appuser | cut -d: -f6)" = /home/appuser ] || usermod -d /home/appuser appuser'
+    assert home_repair in entrypoint
+    assert entrypoint.index(home_repair) > entrypoint.index('UID/GID already correct')
     assert "/home/appuser/.local/bin /home/appuser/chrome-profile" in image
     assert "cp /root/.config/gh" not in entrypoint
     assert "/usr/bin/tar --no-same-owner -C /home/appuser/.config/gh -xf -" in entrypoint

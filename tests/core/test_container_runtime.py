@@ -77,7 +77,7 @@ rt.main(sys.argv[2:])
         else:
             assert any(path.is_relative_to(Path(prefix)) for prefix in (sys.prefix, sys.base_prefix)), origin
             info = path.stat()
-            assert info.st_uid == 0 and not info.st_mode & 0o022, origin
+            assert info.st_uid == Path(sys.prefix).stat().st_uid and not info.st_mode & 0o022, origin
 
 
 @pytest.mark.parametrize("local_mode", ["false", "true"])
@@ -755,7 +755,7 @@ def test_root_rejects_image_storage_before_any_preparation(settings_factory, tmp
     from types import SimpleNamespace
     cfg = settings_factory(**{field: Path("/app/docker/__pycache__")})
     monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000))
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/appuser"))
     monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
     mkdir, chown = Mock(), Mock()
     monkeypatch.setattr(Path, "mkdir", mkdir)
@@ -789,7 +789,40 @@ def test_root_mount_detection_includes_same_device_bind_mounts(monkeypatch, path
 
 
 
-def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch):
+@pytest.fixture
+def home_ownership(monkeypatch):
+    """Real walks/inodes/hardlinks with simulated IDs and no privileged writes."""
+    def configure(owners=None, aliases=None):
+        owners, aliases = dict(owners or {}), dict(aliases or {})
+        original_stat, original_fstat = os.stat, os.fstat
+        changed = []
+        def fd_path(fd):
+            return Path(os.readlink(f"/proc/self/fd/{fd}"))
+        def decorate(path, info):
+            result = list(aliases.get(path, info))
+            owner = owners.get(path, (41001, 41001))
+            result[4], result[5] = owner
+            return os.stat_result(result)
+        def stat_path(path, *, dir_fd=None, follow_symlinks=True):
+            info = original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            resolved = fd_path(path) if isinstance(path, int) else (fd_path(dir_fd) / path if dir_fd is not None else Path(path))
+            return decorate(resolved, info)
+        def fstat(fd):
+            return decorate(fd_path(fd), original_fstat(fd))
+        def fchown(fd, uid, gid):
+            path = fd_path(fd)
+            changed.append((path, uid, gid))
+            owners[path] = (uid, gid)
+        monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "64000")
+        monkeypatch.setattr(runtime.os, "stat", stat_path)
+        monkeypatch.setattr(runtime.os, "fstat", fstat)
+        monkeypatch.setattr(runtime.os, "fchown", fchown)
+        monkeypatch.setattr(runtime, "mount_points", lambda: set())
+        return changed
+    return configure
+
+
+def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch, home_ownership):
     home, data = tmp_path / "home", tmp_path / "data"
     home.mkdir()
     data.mkdir()
@@ -797,24 +830,13 @@ def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch
         (home / name).write_text("fixture")
     (home / "owned-link").hardlink_to(home / "owned")
     (home / "root-link").hardlink_to(home / "root-file")
-    original = Path.lstat
-    def owner(path):
-        info = list(original(path))
-        info[4] = {"root-file": 0, "root-link": 0, "service-file": 64000}.get(path.name, 41001)
-        info[5] = 41001
-        return os.stat_result(info)
-    monkeypatch.setattr(Path, "lstat", owner)
-    monkeypatch.setattr(runtime, "mount_points", lambda: set())
-    chown = Mock()
-    monkeypatch.setattr(runtime.os, "chown", chown)
+    changed = home_ownership({home / name: (uid, 41001) for name, uid in
+                              (("root-file", 0), ("root-link", 0), ("service-file", 64000))})
     runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
-    changed = {call.args[0] for call in chown.call_args_list}
-    assert changed == {home, home / "single"}
-    assert all(call.args[1:] == (41002, 41002) and call.kwargs == {"follow_symlinks": False}
-               for call in chown.call_args_list)
+    assert changed == [(home, 41002, 41002), (home / "single", 41002, 41002)]
 
 
-def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeypatch):
+def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeypatch, home_ownership):
     home, data = tmp_path / "home", tmp_path / "data"
     data.mkdir()
     volume = home / ".claude"
@@ -823,18 +845,55 @@ def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeyp
         directory.mkdir(parents=True)
         (directory / "untouched").write_text("fixture")
     (volume / "migrate").write_text("fixture")
-    original = Path.lstat
-    def owner(path):
-        info = list(data.stat() if path == alias else original(path))
-        info[4], info[5] = 41001, 41001
-        return os.stat_result(info)
-    monkeypatch.setattr(Path, "lstat", owner)
+    changed = home_ownership(aliases={alias: data.stat()})
     monkeypatch.setattr(runtime, "mount_points", lambda: {volume, nested})
-    chown = Mock()
-    monkeypatch.setattr(runtime.os, "chown", chown)
     runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
-    changed = {call.args[0] for call in chown.call_args_list}
-    assert changed == {home, volume, volume / "migrate"}
+    assert {entry[0] for entry in changed} == {home, volume, volume / "migrate"}
+
+
+@pytest.mark.parametrize("owner", [0, 41003, 64000])
+def test_mounted_home_root_preparation_without_image_id_change(tmp_path, monkeypatch, home_ownership, owner):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".local"
+    volume.mkdir(parents=True)
+    (volume / "own-file").write_text("fixture")
+    changed = home_ownership({volume: (owner, owner), volume / "own-file": (owner, owner)})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    if owner == 64000:
+        with pytest.raises(runtime.RuntimeFailure, match="belongs to the service account.*PUID:PGID"):
+            runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+        assert changed == []
+    else:
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+        expected = {volume} if owner == 0 else {volume, volume / "own-file"}
+        assert {entry[0] for entry in changed} == expected
+        count = len(changed)
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+        assert len(changed) == count
+
+
+def test_home_remap_rechecks_pinned_inode_after_entry_swap(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    for name in ("victim", "protected"):
+        (home / name).write_text("fixture")
+    changed = home_ownership({home / "protected": (0, 0)})
+    original_open = os.open
+    def swapped(name, flags, *args, **kwargs):
+        return original_open("protected" if name == "victim" else name, flags, *args, **kwargs)
+    monkeypatch.setattr(runtime.os, "open", swapped)
+    runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+    assert changed == [(home, 41002, 41002)]
+
+
+def test_drop_refuses_interrupted_account_home(settings_factory, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir="/"))
+    with pytest.raises(runtime.RuntimeFailure, match="appuser home must be /home/appuser"):
+        runtime.drop_privileges(settings_factory())
 
 
 def test_isolated_drop_keeps_full_agent_path_but_trusts_supervisor(settings_factory, tmp_path, monkeypatch):
@@ -848,7 +907,7 @@ def test_isolated_drop_keeps_full_agent_path_but_trusts_supervisor(settings_fact
     monkeypatch.setattr(runtime, "_agent_path", None)
     monkeypatch.setattr(runtime.os, "geteuid", lambda: effective[0])
     monkeypatch.setattr(runtime.os, "chown", Mock())
-    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir=str(tmp_path)))
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir="/home/appuser"))
     split = object()
     monkeypatch.setattr(runtime, "isolate", lambda *args: split)
     def drop(ident):
@@ -873,7 +932,7 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     monkeypatch.delenv("PUID", raising=False)
     monkeypatch.delenv("PGID", raising=False)
     monkeypatch.setattr(runtime.os, "geteuid", lambda: uid[0])
-    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="appuser", pw_dir=str(tmp_path)))
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="appuser", pw_dir="/home/appuser"))
     chown = Mock()
     monkeypatch.setattr(runtime.os, "chown", chown)
     monkeypatch.setattr(runtime.os, "initgroups", Mock())
