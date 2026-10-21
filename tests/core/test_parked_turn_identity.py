@@ -8,7 +8,7 @@ from app.db import database, turns
 def _park(sid, source, payload, **session_fields):
     database.create_session(session_id=sid, profile_id="default", **session_fields)
     first = turns.enqueue_turn(
-        sid, source, prompt="work", payload=payload,
+        sid, source, prompt="work", payload=payload, profile_id="default",
         command_id="orchestration:start:x" if source == "agent_message" else None,
     )
     assert turns.start_turn(first["id"])
@@ -17,7 +17,7 @@ def _park(sid, source, payload, **session_fields):
 
 
 def _wake(sid, source, payload=None):
-    queued = turns.enqueue_turn(sid, source, prompt="next", payload=payload or {})
+    queued = turns.enqueue_turn(sid, source, prompt="next", payload=payload or {}, profile_id="default")
     resumed = turns.start_turn(queued["id"], can_resume=session_runtime.SessionRuntime._can_resume_parked)
     return queued, resumed
 
@@ -59,8 +59,9 @@ def test_human_parked_wake_resets_budget_not_launch_identity(mock_db, source):
 
 
 @pytest.mark.parametrize("remote", [False, True])
-@pytest.mark.parametrize("later_turn", [False, True])
-def test_started_report_survives_parked_wake(mock_db, monkeypatch, remote, later_turn):
+@pytest.mark.parametrize("later_turn", [None, "auto_continue", "failover"])
+@pytest.mark.parametrize("wake_source", ["unpark", "away"])
+def test_started_report_survives_parked_wake(mock_db, monkeypatch, remote, later_turn, wake_source):
     from app.core import assistant_service
 
     database.create_session("home", "default")
@@ -70,11 +71,21 @@ def test_started_report_survives_parked_wake(mock_db, monkeypatch, remote, later
     if remote:
         payload.update(orchestration_remote_origin="starter-device", orchestration_report_device="starter-device")
     first = _park("reporting", "agent_message", payload)
-    _, resumed = _wake("reporting", "unpark")
+    if wake_source == "away":
+        from app.db import interactions
+        question = interactions.create_interaction("reporting", "question", {"request_id": "continue"}, None)
+        assert interactions.answer_question_and_enqueue(
+            question, {"Continue?": "Yes"}, None, "Continue with Yes", first, human_input=False,
+        )
+        [answer] = turns.get_queued_turns("reporting")
+        assert answer["payload"]["question_answer_human_input"] is False
+        resumed = turns.start_turn(answer["id"], can_resume=session_runtime.SessionRuntime._can_resume_parked)
+    else:
+        _, resumed = _wake("reporting", "unpark")
     assert resumed["id"] == first["id"]
     settled = turns.settle_turn(first["id"], "completed")
     if later_turn:
-        continuation = turns.enqueue_turn("reporting", "auto_continue", parent_turn_id=first["id"])
+        continuation = turns.enqueue_turn("reporting", later_turn, parent_turn_id=first["id"])
         assert turns.start_turn(continuation["id"])
         settled = turns.settle_turn(continuation["id"], "completed")
     origin = session_orchestration._origin_turn("reporting", settled)

@@ -820,6 +820,20 @@ def start_turn(
                     for key in _PARKED_IDENTITY_PAYLOAD_KEYS:
                         if key in original_payload:
                             payload[key] = original_payload[key]
+                    # Credit accounting belongs to the original delivery, not
+                    # the wake. Keep its spent receipt even when reply text is
+                    # dropped. Legacy continuations with erased reply ancestry
+                    # cannot prove eligibility and therefore earn no new credit.
+                    payload["orchestration_reply_eligible"] = original_payload.get(
+                        "orchestration_reply_eligible",
+                        not original_payload.get("continued_turn") and not original_payload.get("orchestration_reply_to"),
+                    )
+                    credit_receipt = (original_payload.get("orchestration_reply_receipt")
+                                      or original_payload.get("orchestration_reply_to"))
+                    if credit_receipt:
+                        payload["orchestration_reply_receipt"] = credit_receipt
+                    else:
+                        payload.pop("orchestration_reply_receipt", None)
                     if _is_human_input(queued["source"], payload):
                         payload["orchestration_root"] = queued["id"]
                         payload.pop("orchestration_depth", None)
