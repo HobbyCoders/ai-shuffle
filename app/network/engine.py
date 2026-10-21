@@ -2538,6 +2538,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             item = {**item, "record": projected}
         existing = known.get(item["record_id"]) if known is not None else store.get_record(
             cursor, coll.name, item["record_id"])
+        conflict = None
         if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
             comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
                                               int(existing["clock"]), existing["origin_device_id"])
@@ -2552,12 +2553,14 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 else:
                     losing_record = dict(item["record"] or {})
                 losing_record = redact_secrets(losing_record)
-                store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
-                                   losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
-                                   losing_record=losing_record, winning_clock=int(winner["clock"]),
-                                   winning_device_id=winner["origin_device_id"])
+                conflict = dict(collection=coll.name, record_id=item["record_id"],
+                                losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
+                                losing_record=losing_record, winning_clock=int(winner["clock"]),
+                                winning_device_id=winner["origin_device_id"])
         if existing is not None and envelope_mod.compare(
                 int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
+            if conflict:
+                store.add_conflict(cursor, **conflict)
             if not item["deleted"] and _merge_losing_provider_credentials(
                     cursor, coll, item["record_id"], item["record"], existing):
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
@@ -2603,6 +2606,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                     pass
             if row is not None and _provider_credentials_kept(coll, prepared, row):
                 local_hash = ""  # scan publishes only a genuinely merged bundle
+        # An observation rejected by materialize did not win this record and
+        # must not create another misleading conflict on every snapshot round.
+        if conflict:
+            store.add_conflict(cursor, **conflict)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
                          deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))

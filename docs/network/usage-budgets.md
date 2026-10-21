@@ -53,9 +53,13 @@ stamped as newly fetched; `source_worker` comes from the stored sync origin
 (signed for envelopes; asserted by the trusted publisher for snapshot items).
 An older observation cannot replace a newer one for the same credential, nor
 clear a newer local attempt/error. Rejected values retain the stored sync
-origin/clock as well as the value, including when forwarded by snapshot. Poll and
-import writes do not move successful observation time backwards, so a deferred
-poll cannot restore its pre-import cache. Billing-key arrival schedules a post-commit
+origin/clock as well as the value, including when forwarded by snapshot; rejected
+snapshot readings do not generate repeated conflicts. A deferred poll never
+republishes an imported peer reading as its own. Poll and import writes normally
+do not move successful observation time backwards, so a deferred poll cannot
+restore its pre-import cache. To recover after a clock correction, local storage
+ignores a stored success timestamp more than five minutes ahead of local time.
+Future-dated readings are stale, not fresh. Billing-key arrival schedules a post-commit
 refresh (including the real paged enrollment path), with one follow-up if a pass
 was already running. Local binding and credential/revision guards still authorize
 writes. Secrets, local binding IDs, denial fingerprints and raw provider bodies

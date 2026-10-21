@@ -3,9 +3,11 @@
 Poll commits compare the binding and credential revision under a lock.
 """
 import json
+import time
 from uuid import uuid4
 
 from app.db.base import get_db
+from app.db.provider_usage_snapshots import MAX_FUTURE_SKEW_MS
 
 
 def bind(row, instance_id, encrypted_key):
@@ -43,6 +45,9 @@ def snapshot(row, value):
         fetched = value.get("fetched_at") or 0
         # An import runs independently of a local poll. A deferred/stale poll
         # must never restore the cached reading it captured before the import.
+        # A fast clock later corrected must not freeze readings or hide a 401.
+        if (stored.get("fetched_at") or 0) > time.time() * 1000 + MAX_FUTURE_SKEW_MS:
+            stored = {}
         if (stored.get("fetched_at") or 0) > fetched:
             if value.get("last_error_kind") and (value.get("last_attempted_at") or 0) >= stored["fetched_at"]:
                 value = {**stored, **{k: value[k] for k in
