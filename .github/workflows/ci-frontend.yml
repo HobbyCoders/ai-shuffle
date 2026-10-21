@@ -89,7 +89,14 @@ jobs:
 
       - name: Browser MCP build and tests
         working-directory: browser-mcp
-        run: npm ci --ignore-scripts && npm run build && npm test && npm audit --audit-level=high
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          # Use the same supported, isolated Chromium as browser-workspace CI,
+          # not an arbitrary preinstalled Chrome or snap launcher on the runner.
+          npx --no-install playwright-core install --with-deps chromium
+          CHROMIUM_PATH="$(node -p 'require("playwright-core").chromium.executablePath()')" npm test
+          npm audit --audit-level=high
 
       # The in-app Docs panel bundles its own copy of docs/content; the backend
       # serves docs/content itself. tests/test_buyer_docs.py checks the same

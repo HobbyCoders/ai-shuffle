@@ -206,6 +206,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function findBrowser(): string | null {
+  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
   if (process.platform === "win32") {
     for (const base of [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA]) {
       if (!base) continue;
@@ -294,6 +295,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     writeFileSync(uploadFilePath, "hello upload\n");
     const port = await freePort();
     userDataDir = mkdtempSync(join(tmpdir(), "browser-mcp-it-"));
+    let startupStderr = "";
+    let startupFailure = "";
     proc = spawn(
       browserPath!,
       [
@@ -307,9 +310,17 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         `--user-data-dir=${userDataDir}`,
         "about:blank",
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "ignore", "pipe"] },
     );
-    await waitForCdp(port);
+    proc.stderr?.on("data", (chunk) => {
+      startupStderr = (startupStderr + chunk.toString()).slice(-4096);
+    });
+    proc.on("error", (error) => { startupFailure = error.message; });
+    try {
+      await waitForCdp(port);
+    } catch (error) {
+      throw new Error(`${String(error)}; browser=${browserPath}; exit=${proc.exitCode}; ${startupFailure}; ${startupStderr}`);
+    }
     cdpEndpoint = `http://127.0.0.1:${port}`;
     manager = new BrowserManager({ endpoint: cdpEndpoint });
     session = new Session(manager);

@@ -67,6 +67,12 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
           pip install -e ./fluid
 
+      # setup-python's hosted tool cache can contain group/world-writable
+      # stdlib files. Match the image's trusted dependency permissions rather
+      # than weakening the root-phase import provenance assertions.
+      - name: Secure hosted Python dependency permissions
+        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+
       - name: Reject blocking database calls on the event loop
         # The only run of tests/test_scan_blocking_db.py: the fast subset
         # ignores it.
