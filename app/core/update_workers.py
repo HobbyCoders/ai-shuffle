@@ -102,7 +102,7 @@ def waiting_status(state):
         install, reason = "stopping", "stopping_work"
     elif _deferred:
         install, reason = "waiting_for_idle", "running_work"
-    elif state.get("request_pending") and state.get("phase") == "ready":
+    elif state.get("install_pending") and state.get("phase") == "ready":
         install, reason = "queued", "updater_acknowledgement"
     elif staged and state.get("phase") != "ready":
         install = "unavailable"
@@ -249,7 +249,7 @@ def local_action(action, request_id, mode=None):
     if busy:
         result["busy"] = busy
     if action == "install":
-        result.update(waiting_status({**state, "request_pending": reason is None}))
+        result.update(waiting_status({**state, "install_pending": reason is None or state.get("install_pending", False)}))
     _receipts[request_id] = (time.monotonic() + 60, result)
     while len(_receipts) > 256:
         _receipts.popitem(last=False)

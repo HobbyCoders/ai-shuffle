@@ -888,6 +888,20 @@ def test_waiting_contract_tracks_owner_choice_and_expiry(busy, monkeypatch, mode
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("transport", ["desktop", "container"])
+@pytest.mark.parametrize("action,expected", [("check", "ready"), ("install", "queued")])
+def test_queued_check_is_not_reported_as_a_restart(setup, action, expected, transport, monkeypatch, tmp_path):
+    if transport == "container":
+        root = tmp_path / "control"
+        root.mkdir()
+        monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(root))
+        (root / "status.json").write_text(json.dumps({"phase": "ready", "version": B[:12]}))
+    else:
+        updates.desktop_exchange({"phase": "ready", "version": B[:12]})
+    assert fleet.local_action(action, "queue-kind")["accepted"]
+    assert asyncio.run(fleet.snapshot())["workers"][0]["install_state"] == expected
+
+
 def test_waiting_contract_keeps_staged_identity_beside_new_offer(setup):
     updates.desktop_exchange({"phase": "available", "version": "c" * 12, "staged_version": B})
     row = asyncio.run(fleet.snapshot())["workers"][0]
