@@ -1,21 +1,40 @@
 # Where tests run
 
-Tests run on the machine where the change was made, before it is pushed.
-GitHub Actions does not test pull requests: no workflow starts on a pull
-request or a push to a branch. The daily schedule only publishes an attested
-nightly; it never runs tests. CI minutes go only to work no local machine can do: release builds, signing, publishing, deploys, and the
-macOS and iOS checks we have no Mac for.
+Before a push, run affected tests plus the offline secret scan. Every pull
+request, including drafts and forks, runs the full hosted suites in parallel.
+Merge requires green CI and review. Edge/nightly publication remains separate:
+the attested full run on main stays local on the publication worker.
 
-Public-app workflows use standard GitHub-hosted `ubuntu-latest`,
-`windows-latest` and `macos-latest` runners (some existing jobs pin an OS
-version). These runners are free when the repository is public; larger paid
-runners are not required. Docker jobs use the official Buildx/build-push
-actions with the GitHub Actions layer cache (`type=gha`, scope `Dockerfile`).
-Cache access follows GitHub branch isolation: a branch can restore the default
-branch cache, not another branch's private cache. No sticky disk is required.
-The cloud-service workflows are being moved separately to the private
-repository; their runner migration is not part of this change. Cancelling the
-Blacksmith subscription is an owner action after that migration.
+PR workflows use only free standard GitHub-hosted `ubuntu-latest` and
+`windows-latest` runners. No larger/paid runners and no macOS PR jobs are used.
+macOS and iOS native checks remain manual. Docker uses the official Buildx and
+build-push actions with branch-isolated GitHub Actions layer caching.
+
+## Every pull request
+
+These workflows retain manual dispatch and also run on unfiltered
+`pull_request` events (no path filters or draft skips):
+
+- `ci-backend.yml`: backend tests, real PostgreSQL and isolation contracts.
+- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment.
+- `ci-frontend.yml`: frontend, mobile, tools and browser-mcp checks.
+- `desktop.yml`: desktop typecheck and unit tests; packaging stays manual.
+- `desktop-source-checks.yml`: source-update protocol regressions.
+- `windows-suite.yml`: the full parallel Windows suite, not its selected-test mode.
+- `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
+- `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
+- `ci-browser-workspace.yml`: editor and real browser-workspace integration checks.
+- `container-postgres.yml`: candidate image lifecycle, isolation and install checks,
+  without publishing or signing. This is broader than a small policy check but
+  covers the production container path without requiring secrets.
+
+`ci-folder-confinement.yml` stays manual because it is macOS-only; Linux folder
+confinement is already covered by CI Backend. Publication workflows are unchanged.
+Each PR workflow groups concurrency by workflow plus PR number (or ref for manual
+runs), cancelling superseded PR runs only. Permissions are `contents: read`;
+none of these workflows references secrets or requires private checkout access.
+Fork PRs use the ordinary read-only `pull_request` context, never
+`pull_request_target`.
 
 Cloud service checks and deploy workflows live in the private
 [HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
@@ -27,27 +46,26 @@ and its README; the app still checks `docs/content` against the frontend copy.
 
 ```bash
 python scripts/local_ci.py install   # once per clone: turns on the pre-push hook
-python scripts/local_ci.py           # the suites this branch's changes reach
+python scripts/local_ci.py fast      # affected tests + offline secret scan
 python scripts/local_ci.py list      # what each suite runs, and when
 ```
 
-`local_ci.py` compares the branch with `main` on the remote whose URL points to
-`HobbyCoders/ai-shuffle` (`origin` is preferred when it matches), and runs each
-suite the change reaches. This works even when `origin` points elsewhere and the
-public repository has another remote name. For forks or another comparison
-branch, set `LOCAL_CI_BASE=<remote>/<branch>` or
-`git config local-ci.base <remote>/<branch>`; the environment takes precedence.
-The comparison branch is fetched before changed-suite checks; fetch failures and
-unrelated histories stop with an explanation. `full --attest` ignores these
-overrides for publication authorization: it fetches the public repository's
-`main` and requires a clean checkout at that exact revision.
+`fast` compares against the remote main merge-base (the push remote when called
+by the hook, otherwise the configured public comparison ref). It reuses the
+existing `SUITES` area map. Backend files use the recorded dependency map when
+available, otherwise per-file test-name/import matching. If any backend path
+has no known test mapping, it runs the whole backend area, even if another
+changed path did match. Other areas run their unit suites; frontend and mobile
+use all area tests as a safe fallback for dynamic source-reading tests, without
+a production build. Docs paths and Markdown/reStructuredText files run docs
+checks only. Unknown top-level areas conservatively run all local suites.
 
-The suites are: backend (the same function-level selection the backend test
-map gives), fluid, frontend, mobile, tools, browser-mcp, docs, desktop, the
-Android app and download bridge, the workflow policy tests and the in-app update
-reach check. It runs at low CPU priority with at most two test workers
-(`LOCAL_CI_WORKERS`), because every worker host is shared with other sessions
-and, on Unraid, with everything else the server runs.
+`check` remains the existing changed-suite check with dependency audits, and
+`full` still runs every local suite and records the backend dependency map.
+Comparison overrides (`LOCAL_CI_BASE` or `git config local-ci.base`) remain
+available for explicit checks. `full --attest` ignores these overrides and
+requires a clean checkout at the public repository's current main revision.
+Attestation format and publication authorization are unchanged.
 
 A pass on a clean checkout is recorded against the commit's tree in
 `.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`, which
@@ -61,10 +79,14 @@ commit other than `HEAD`, or uncommitted changes) is refused, because the
 checks would not test what is being pushed. Never skip the hook with
 `--no-verify`.
 
-Agents run `local_ci.py` through the Monitor tool before pushing, so the hook
-finds a recorded pass instead of running a long check inside a shell call.
+Agents run `local_ci.py fast` through the Monitor tool before pushing, so the
+hook finds a recorded affected-test pass. A full local pass is not required.
+The secret scan still runs on every invocation and every outgoing push.
+The installed hook is shared across worktrees and delegates to each branch's
+own script; older branches retain their old gate until updated. Do not reinstall
+the shared hook as part of a branch change.
 
-The selected Python is checked **before suites or commit statuses**: all required
+For `check` and `full`, the selected Python is checked **before suites or commit statuses**: all required
 `requirements-dev.txt` imports (including distlib, xdist and PyYAML) must work.
 An installed `claude_agent_sdk`, an external `docker` package shadowing the
 checkout namespace, or inherited `PYTHONPATH` entries outside this checkout

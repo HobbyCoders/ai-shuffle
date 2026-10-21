@@ -303,9 +303,10 @@ def test_old_pass_cannot_skip_security_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("refs/heads/a head refs/heads/a remote\n"))
     calls = []
     monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
-    monkeypatch.setattr(local_ci, "cmd_check", lambda args: calls.append("check") or 0)
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
     assert local_ci.cmd_pre_push(argparse.Namespace()) == 0
-    assert calls == ["scan", "check"]
+    assert calls == ["scan", "fast"]
 
 
 def test_check_security_steps_run_even_with_only(monkeypatch):
@@ -467,7 +468,10 @@ def test_uncached_push_never_invokes_network_audits(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(local_ci, 'clean_checkout', lambda: True)
     monkeypatch.setattr(local_ci, 'choose_python', lambda: sys.executable)
     monkeypatch.setattr(local_ci, 'save_record', lambda *args: None)
-    monkeypatch.setattr(local_ci, 'run_suites', lambda *args: ([], [], []))
+    monkeypatch.setattr(local_ci, 'fetch_base', lambda *args: None)
+    monkeypatch.setattr(local_ci, 'comparison_base', lambda *args: 'base')
+    monkeypatch.setattr(local_ci, 'changed_files', lambda *args: [])
+    monkeypatch.setattr(local_ci, 'push_update_reach', lambda *args: None)
     monkeypatch.setenv("LOCAL_CI_HOOK", "4")
     monkeypatch.setenv(local_ci.PUSH_REMOTE_ENV, "public")
     calls = []

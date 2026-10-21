@@ -4,7 +4,8 @@ name: Windows full suite
 # GitHub-hosted Windows runner, so a release does not wait for an owner's
 # Windows PC. Standard GitHub-hosted runners are free in public repositories.
 #
-# Manual only. Dispatch it on main at the release candidate:
+# Full suite on every PR, including drafts. For release evidence, dispatch
+# it on main at the release candidate:
 #   gh workflow run windows-suite.yml --ref main
 # It posts nothing. scripts/ci/ship_release_status.py counts a successful run
 # the owner dispatched on main at the candidate as local/windows-suite.
@@ -28,6 +29,7 @@ name: Windows full suite
 # mirrors a desktop install: requirements, the native extras, fluid editable.
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       tests:
@@ -39,8 +41,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-suite-${{ github.sha }}
-  cancel-in-progress: true
+  group: windows-suite-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   TZ: UTC
@@ -49,7 +51,7 @@ env:
 jobs:
   suite:
     name: Windows ${{ matrix.part }}
-    if: inputs.tests == ''
+    if: github.event_name == 'pull_request' || inputs.tests == ''
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -107,7 +109,7 @@ jobs:
 
   selected:
     name: Selected tests on Windows
-    if: inputs.tests != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.tests != ''
     runs-on: windows-latest
     timeout-minutes: 120
     steps:

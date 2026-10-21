@@ -1,14 +1,10 @@
 name: CI Backend
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} test workers)"
 
-# Manual only. Pull requests run no CI: scripts/local_ci.py runs the backend
-# tests on the developer's machine before a push, and edge publication waits
-# for a local full-suite pass on main (scripts/ci/edge_publication_gate.py).
-# Dispatch this for what a local machine cannot run: the real-PostgreSQL
-# contracts and root-account isolation steps below, before a stable release.
-#
-# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
+# Full backend checks on every PR, including drafts. Edge publication still
+# requires a separate attested local full run on main.
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       runner_cpus:
@@ -23,8 +19,8 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-backend-${{ github.ref }}-${{ inputs.runner_cpus || '2' }}
-  cancel-in-progress: true
+  group: ci-backend-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   backend:

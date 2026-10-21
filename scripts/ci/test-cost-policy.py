@@ -1,9 +1,7 @@
-"""CI cost policy: GitHub Actions does not test code.
+"""CI policy: fast local push checks, full PR suites on standard free runners.
 
-Tests run on the developer's machine (scripts/local_ci.py and the pre-push
-hook). Workflows start automatically only to publish: a release tag, and
-daily nightly publication from main after a worker posts a local full-suite pass.
-Everything else is a manual dispatch for what no local machine can do.
+Publishing still requires explicit dispatch or an attested local full pass.
+PR checks have no secrets, publishing permissions, draft skips or path filters.
 """
 from pathlib import Path
 import unittest
@@ -12,9 +10,15 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github/workflows"
+PR_CHECKS = {
+    "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
+    "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
+    "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
+}
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch"},
+    **{name: {"pull_request", "workflow_dispatch"} for name in PR_CHECKS},
 }
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
              "check_run", "check_suite", "issue_comment", "pull_request_review"}
@@ -32,7 +36,7 @@ def triggers(config):
 
 
 class CostPolicyTests(unittest.TestCase):
-    def test_no_workflow_tests_pull_requests_or_runs_on_its_own(self):
+    def test_only_pr_checks_and_attested_publication_run_automatically(self):
         names = sorted(path.name for path in WORKFLOWS.glob("*.yml"))
         self.assertGreater(len(names), 10)
         for name in names:
@@ -46,6 +50,29 @@ class CostPolicyTests(unittest.TestCase):
                     self.assertLessEqual(found, {"workflow_dispatch", "workflow_call"},
                                          f"{name} must be manual or called by a release")
 
+    def test_pr_suites_are_unfiltered_read_only_and_cancel_superseded_runs(self):
+        for name in sorted(PR_CHECKS):
+            config = workflow(name)
+            text = (WORKFLOWS / name).read_text(encoding="utf-8")
+            with self.subTest(workflow=name):
+                self.assertEqual(config["on"]["pull_request"], "")
+                self.assertEqual(config["permissions"], {"contents": "read"})
+                self.assertEqual(config["concurrency"], {
+                    "group": name[:-4] + "-${{ github.event.pull_request.number || github.ref }}",
+                    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+                })
+                for forbidden in ("secrets.", "pull_request_target", ".draft", "secrets: inherit"):
+                    self.assertNotIn(forbidden, text)
+                for job in config["jobs"].values():
+                    self.assertEqual(job.get("permissions", {"contents": "read"}), {"contents": "read"})
+                    runner = job.get("runs-on")
+                    if runner == "${{ matrix.os }}":
+                        self.assertEqual(job["strategy"]["matrix"]["os"],
+                            "${{ fromJSON(github.event_name == 'pull_request' && "
+                            "'[\"windows-latest\"]' || '[\"windows-latest\", \"macos-latest\"]') }}")
+                    else:
+                        self.assertIn(runner, {"ubuntu-latest", "windows-latest"})
+
     def test_stable_release_requires_explicit_dispatch(self):
         self.assertEqual(triggers(workflow("release.yml")), {"workflow_dispatch"})
         self.assertEqual(workflow("desktop-source.yml")["on"]["schedule"], [{"cron": "0 6 * * *"}])
@@ -54,8 +81,7 @@ class CostPolicyTests(unittest.TestCase):
         for path in sorted(WORKFLOWS.glob("*.yml")):
             text = path.read_text(encoding="utf-8")
             with self.subTest(workflow=path.name):
-                for leftover in ("github.event.pull_request", "ci:full", "require-full-ci.py",
-                                 "android-inputs.py", "github.base_ref", "paths-filter"):
+                for leftover in ("ci:full", "require-full-ci.py", "android-inputs.py", "paths-filter"):
                     self.assertNotIn(leftover, text)
         self.assertFalse((ROOT / "scripts/ci/require-full-ci.py").exists())
 
@@ -138,7 +164,11 @@ class CostPolicyTests(unittest.TestCase):
                         continue
                     runner = job["runs-on"]
                     if runner == "${{ matrix.os }}":
-                        self.assertLessEqual(set(job["strategy"]["matrix"]["os"]), allowed)
+                        matrix = job["strategy"]["matrix"]["os"]
+                        if isinstance(matrix, list):
+                            self.assertLessEqual(set(matrix), allowed)
+                        else:
+                            self.assertIn("fromJSON(github.event_name == 'pull_request'", matrix)
                     else:
                         self.assertIn(runner, allowed)
 
