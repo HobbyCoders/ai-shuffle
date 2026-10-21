@@ -160,6 +160,15 @@ describe('ToolUseMessage — Show phone on Emulator rows', () => {
 		await waitFor(() => expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull());
 	});
 
+	it('hands keyboard focus to the panel it opens, since the pill unmounts', async () => {
+		await withEmulator(() => Promise.resolve({}));
+		emulatorRow('card-focus');
+		await fireEvent.click(screen.getByRole('button', { name: 'Show phone' }));
+		await waitFor(() => expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull());
+		// The panel (mounted by the main panel) claims this on mount.
+		expect(phonePanel.takeFocusRequest()).toBe(true);
+	});
+
 	it('works on the delegated leg\'s wrapped name too', async () => {
 		await withEmulator(() => Promise.resolve({}));
 		emulatorRow('card-wrapped', 'mcp__fluid_bundled__mcp__builtins__Emulator');

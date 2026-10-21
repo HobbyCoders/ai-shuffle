@@ -1613,6 +1613,22 @@ describe('feedController phone-panel auto-open', () => {
 		expect(phonePanel.isOpen('phone-remote')).toBe(false);
 	});
 
+	it('does not replace a browser panel the user is viewing, nor reopen over a closed terminal', () => {
+		live('phone-browser');
+		browserPanel.openPanel('phone-browser');
+		sidePanel.open(sessionPanelKey('phone-browser'), 'browser');
+		hoisted.onEvent!(toolUse('t1', 'mcp__builtins__Emulator'));
+		expect(sidePanel.forScope(sessionPanelKey('phone-browser')).active).toBe('browser');
+		expect(phonePanel.isOpen('phone-browser')).toBe(false);
+
+		// The user closed the terminal: the empty panel is dismissed, so the phone does not pop in.
+		live('phone-term-closed');
+		sidePanel.open(sessionPanelKey('phone-term-closed'), 'terminal');
+		sidePanel.close(sessionPanelKey('phone-term-closed'), 'terminal');
+		hoisted.onEvent!(toolUse('t2', 'mcp__builtins__EmulatorScreenshot'));
+		expect(phonePanel.isOpen('phone-term-closed')).toBe(false);
+	});
+
 	it('takes the Changes list but not a terminal the user is looking at', () => {
 		const id = 'phone-panels';
 		live(id);

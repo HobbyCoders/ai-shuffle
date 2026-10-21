@@ -10,9 +10,11 @@
  * leave it closed for that session; only the user reopens it.
  *
  * `capability` decides whether the phone is offered at all: a worker without
- * the emulator API (404) or a viewer it refuses (401/403) never sees it. Any
- * other answer, including "no KVM", offers it so the panel can explain what
- * is missing.
+ * the emulator API (404) never sees it. Any other answer, including "no KVM",
+ * offers it so the panel can explain what is missing. A refusal (401/403) is
+ * not remembered: it usually means the page probed during sign-in or a
+ * restart, so the phone stays hidden for now and the next ask (opening or
+ * switching to a chat, or an Emulator call from the agent) probes again.
  *
  * The panel always talks to the worker this page is connected to. A chat that
  * runs on another worker drives that worker's emulator, which the panel cannot
@@ -24,6 +26,8 @@ import { fetchEmulatorStatus, errorStatus } from '$lib/api/emulator';
 type Capability = 'unknown' | 'loading' | 'available' | 'hidden';
 let capability = $state<Capability>('unknown');
 let probe: Promise<void> | null = null;
+/** "Show phone" was clicked: the panel takes focus when it mounts (see `takeFocusRequest`). */
+let focusRequested = false;
 /** Sessions whose phone panel the user closed; agent calls leave them closed. */
 let userClosed = $state<Record<string, true>>({});
 /** Sessions known to run on another worker than the one this page talks to. */
@@ -49,15 +53,22 @@ export const phonePanel = {
 	ensureCapability(): Promise<void> {
 		if (probe) return probe;
 		capability = 'loading';
-		probe = fetchEmulatorStatus().then(
+		const attempt: Promise<void> = fetchEmulatorStatus().then(
 			() => { capability = 'available'; },
 			(error) => {
 				const status = errorStatus(error);
-				// Older workers and refused viewers: no phone. A network blip or a
-				// 5xx keeps it, so the panel can say what is wrong.
-				capability = status === 404 || status === 401 || status === 403 || status === 405 ? 'hidden' : 'available';
+				if (status === 401 || status === 403) {
+					// Not signed in (yet) or refused: hidden for now, asked again next time.
+					capability = 'unknown';
+					if (probe === attempt) probe = null;
+					return;
+				}
+				// Older workers: no phone. A network blip or a 5xx keeps it, so the
+				// panel can say what is wrong.
+				capability = status === 404 || status === 405 ? 'hidden' : 'available';
 			},
 		);
+		probe = attempt;
 		return probe;
 	},
 	/** Record whether a session runs on another worker (fed by the main panel). */
@@ -71,10 +82,16 @@ export const phonePanel = {
 	isOpen(sessionId: string | null): boolean {
 		return !!sessionId && sidePanel.forScope(sessionPanelKey(sessionId)).active === 'phone';
 	},
-	/** The user asked for the phone: open it and let the agent's calls open it again. */
+	/**
+	 * The user asked for the phone ("Show phone"): open it, let the agent's
+	 * calls open it again, and have the panel take keyboard focus when it
+	 * mounts (the button that asked has just unmounted, so focus would
+	 * otherwise fall to the page).
+	 */
 	open(sessionId: string | null) {
 		if (!sessionId) return;
 		delete userClosed[sessionId];
+		focusRequested = true;
 		sidePanel.open(sessionPanelKey(sessionId), 'phone');
 	},
 	/** The user closed the phone: the agent's later calls in this session leave it closed. */
@@ -83,6 +100,12 @@ export const phonePanel = {
 		userClosed[sessionId] = true;
 		sidePanel.close(sessionPanelKey(sessionId), 'phone');
 	},
+	/** The panel asks once on mount whether the user just opened it; true at most once per `open`. */
+	takeFocusRequest(): boolean {
+		const asked = focusRequested;
+		focusRequested = false;
+		return asked;
+	},
 	userClosedFor(sessionId: string | null): boolean {
 		return !!sessionId && !!userClosed[sessionId];
 	},
@@ -90,16 +113,19 @@ export const phonePanel = {
 	 * The agent used an Emulator tool (a LIVE event; history replay never calls
 	 * this). Opens the phone unless the user closed it for this session, the
 	 * chat runs on another worker, or the user is looking at the terminal or
-	 * the browser: the phone takes an empty panel or the Changes list, as the
-	 * browser does.
+	 * the browser: the phone takes the Changes list, or an empty panel the user
+	 * has not dismissed, as the browser does.
 	 */
 	autoOpenFor(sessionId: string | null, opts: { remote?: boolean } = {}): Promise<void> {
 		if (!sessionId || opts.remote) return Promise.resolve();
 		const openNow = () => {
 			if (capability !== 'available' || userClosed[sessionId] || remote[sessionId]) return;
 			const key = sessionPanelKey(sessionId);
-			const active = sidePanel.forScope(key).active;
-			if (active === null || active === 'changes') sidePanel.open(key, 'phone');
+			const { active, dismissed } = sidePanel.forScope(key);
+			if (active === 'changes' || (active === null && !dismissed)) {
+				focusRequested = false; // the agent opened it: never steal focus
+				sidePanel.open(key, 'phone');
+			}
 		};
 		// Usually already probed (the main panel asks on opening a chat): open
 		// in the same tick as the event. Otherwise ask first.
@@ -113,6 +139,7 @@ export const phonePanel = {
 	reset() {
 		capability = 'unknown';
 		probe = null;
+		focusRequested = false;
 		userClosed = {};
 		remote = {};
 	},

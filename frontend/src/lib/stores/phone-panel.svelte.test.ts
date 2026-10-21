@@ -14,7 +14,6 @@ describe('phone panel', () => {
 	it.each([
 		['an answer of any kind', () => Promise.resolve({}), 'available'],
 		['a worker without the API (404)', () => Promise.reject({ status: 404 }), 'hidden'],
-		['a refused viewer (403)', () => Promise.reject({ status: 403 }), 'hidden'],
 		['a server error (still worth explaining)', () => Promise.reject({ status: 500 }), 'available'],
 	])('after %s the phone is %s', async (_label, impl, expected) => {
 		fetchStatus.mockImplementation(impl);
@@ -22,6 +21,34 @@ describe('phone panel', () => {
 		expect(phonePanel.capability).toBe(expected);
 		await phonePanel.ensureCapability();
 		expect(fetchStatus).toHaveBeenCalledOnce();
+	});
+
+	it.each([401, 403])('a %s answer hides the phone for now but is not remembered: the next ask probes again', async (code) => {
+		fetchStatus.mockRejectedValueOnce({ status: code });
+		await phonePanel.ensureCapability();
+		expect(phonePanel.capability).toBe('unknown');
+		expect(phonePanel.offeredFor('s1')).toBe(false);
+		// Signed in now (a session switch or the agent's next Emulator call asks again).
+		fetchStatus.mockResolvedValue({});
+		await phonePanel.ensureCapability();
+		expect(fetchStatus).toHaveBeenCalledTimes(2);
+		expect(phonePanel.capability).toBe('available');
+		expect(phonePanel.offeredFor('s1')).toBe(true);
+	});
+
+	it('an agent-driven open after a refused first probe re-probes and opens', async () => {
+		fetchStatus.mockRejectedValueOnce({ status: 401 }).mockResolvedValue({});
+		await phonePanel.ensureCapability();
+		await phonePanel.autoOpenFor('s2');
+		expect(phonePanel.isOpen('s2')).toBe(true);
+	});
+
+	it('a 404 stays hidden without probing again', async () => {
+		fetchStatus.mockRejectedValue({ status: 404 });
+		await phonePanel.ensureCapability();
+		await phonePanel.ensureCapability();
+		expect(fetchStatus).toHaveBeenCalledOnce();
+		expect(phonePanel.capability).toBe('hidden');
 	});
 
 	it('opens and closes the side panel for that chat only', () => {
@@ -40,6 +67,35 @@ describe('phone panel', () => {
 		phonePanel.close('c');
 		expect(sidePanel.forScope(sessionPanelKey('c')).active).toBe('terminal');
 		expect(phonePanel.userClosedFor('c')).toBe(false);
+	});
+
+	it('the agent does not open the phone over an empty panel the user dismissed, but does over Changes', async () => {
+		fetchStatus.mockResolvedValue({});
+		await phonePanel.ensureCapability();
+		// The user opened the terminal, then closed it: the panel is empty and dismissed.
+		sidePanel.open(sessionPanelKey('f'), 'terminal');
+		sidePanel.close(sessionPanelKey('f'), 'terminal');
+		expect(sidePanel.forScope(sessionPanelKey('f'))).toMatchObject({ active: null, dismissed: true });
+		await phonePanel.autoOpenFor('f');
+		expect(phonePanel.isOpen('f')).toBe(false);
+		// A fresh chat's empty panel is fair game.
+		await phonePanel.autoOpenFor('g');
+		expect(phonePanel.isOpen('g')).toBe(true);
+		sidePanel.open(sessionPanelKey('h'), 'changes');
+		await phonePanel.autoOpenFor('h');
+		expect(phonePanel.isOpen('h')).toBe(true);
+	});
+
+	it('asks the panel to take focus after a user open, once, and never after an agent open', async () => {
+		fetchStatus.mockResolvedValue({});
+		await phonePanel.ensureCapability();
+		phonePanel.open('i');
+		expect(phonePanel.takeFocusRequest()).toBe(true);
+		expect(phonePanel.takeFocusRequest()).toBe(false);
+		phonePanel.open('j');
+		phonePanel.close('j');
+		await phonePanel.autoOpenFor('k');
+		expect(phonePanel.takeFocusRequest()).toBe(false);
 	});
 
 	it('probes before an agent-driven open when nothing has asked yet', async () => {
