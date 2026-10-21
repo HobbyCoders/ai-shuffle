@@ -368,6 +368,73 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
   });
 
   it.each([
+    ["fixed portal", '<div style="overflow:hidden;height:0"><div style="position:fixed;top:10px;left:10px">FRAME</div></div>'],
+    ["fixed iframe", '<div style="overflow:hidden;height:0">FRAME</div>', 'position:fixed;top:10px;left:10px'],
+    ["absolute iframe", '<div style="position:relative"><div style="overflow:hidden;height:20px">FRAME</div></div>', 'position:absolute;top:30px'],
+  ])("follow-up: %s escapes overflow outside its containing blocks", async (_name, layout, position) => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=PortalProse", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(layout.replace("FRAME", `<iframe style="${position ?? ""}" src="${src}"></iframe>`));
+    expect(await page.locator("iframe").isVisible()).toBe(true);
+    const read = await runReadText(session);
+    expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_hidden: 0, frames_skipped: 0 });
+    expect((read.content[1] as { text: string }).text).toContain("PortalProse");
+  });
+
+  it.each(["transform:translateZ(0)", "filter:blur(0px)", "contain:layout"])("follow-up: %s makes fixed descendants subject to its overflow", async containingBlock => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    await page.setContent(`<p>Main</p><div style="${containingBlock};overflow:hidden;height:0"><iframe style="position:fixed;top:10px;left:10px" srcdoc="<p>ClippedFixedProse</p>"></iframe></div>`);
+    const read = await runReadText(session);
+    expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_hidden: 1, frames_skipped: 0 });
+    expect((read.content[1] as { text: string }).text).not.toContain("ClippedFixedProse");
+  });
+
+  it("follow-up: scoped reader classifies each frame in one traversal", async () => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    await page.setContent('<main aria-label="Scoped article"><p>Main</p><iframe srcdoc="<p>ScopedFrameProse</p>"></iframe></main>');
+    const snap = await runSnapshot(session, {});
+    const ref = /main "Scoped article"[^\n]*\[ref=(e\d+)\]/.exec((snap.content[1] as { text: string }).text)![1];
+    const child = page.frames().find(frame => frame !== page.mainFrame())!;
+    const spy = vi.spyOn(child, "frameElement");
+    try {
+      const read = await runReadText(session, { scope_ref: ref });
+      expect((read.content[1] as { text: string }).text).toContain("ScopedFrameProse");
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each([
+    ["display none", "display:none", "", false],
+    ["visibility hidden", "visibility:hidden", "", false],
+    ["zero size", "width:0;height:0;border:0", "", false],
+    ["hidden parent", "", "display:none", false],
+    // Playwright visibility deliberately ignores opacity and viewport position.
+    ["transparent", "opacity:0", "", true],
+    ["off-document", "position:absolute;left:-10000px", "", true],
+  ] as const)("follow-up: waits honor ancestor iframe visibility for %s", async (_name, style, parentStyle, visible) => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=WaitFrameProse", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(`<p>Main</p><div style="${parentStyle}"><iframe style="${style}" src="${src}"></iframe></div>`);
+    expect(await page.locator("iframe").isVisible()).toBe(visible);
+    const child = page.frames().find(frame => frame !== page.mainFrame())!;
+    await child.locator("p").evaluate(el => { el.id = "wait-frame-target"; });
+    for (const target of [{ condition: "text", text: "WaitFrameProse" }, { condition: "element", selector: "#wait-frame-target" }] as const) {
+      expect(JSON.parse(firstText(await runWait(session, { ...target, timeout_ms: 400 })))).toMatchObject({ matched: visible });
+      expect(JSON.parse(firstText(await runWait(session, { ...target, state: "hidden", timeout_ms: 150 })))).toMatchObject({ matched: !visible });
+      expect(JSON.parse(firstText(await runWait(session, { ...target, state: "attached", timeout_ms: 400 })))).toMatchObject({ matched: true });
+    }
+  });
+
+  it("follow-up: nested frame waits require every ancestor iframe to be visible", async () => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=NestedFrameProse", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(`<iframe style="visibility:hidden" srcdoc="<iframe src='${src}'></iframe>"></iframe>`);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "NestedFrameProse", timeout_ms: 400 })))).toMatchObject({ matched: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "NestedFrameProse", state: "hidden", timeout_ms: 400 })))).toMatchObject({ matched: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "NestedFrameProse", state: "attached", timeout_ms: 400 })))).toMatchObject({ matched: true });
+  });
+
+  it.each([
     ["below fold", '<div style="height:3000px"></div>FRAME'],
     ["transparent overlay", '<div style="position:relative;width:320px">FRAME<div style="position:absolute;inset:0;background:transparent"></div></div>'],
     ["click shield", '<div style="position:relative;width:320px">FRAME<div style="position:absolute;inset:0;opacity:0;pointer-events:auto"></div></div>'],
@@ -519,7 +586,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(text).not.toContain("HiddenInjection");
     expect(JSON.parse(firstText(read))).toMatchObject({ frames_hidden: 1, frames_skipped: 0 });
     const child = page.frames().find(frame => frame.url() === src)!;
-    const visible = await child.getByText("HiddenInjection").filter({ visible: true }).count() > 0;
+    const visible = await page.locator(`iframe[src="${src}"]`).isVisible() &&
+      await child.getByText("HiddenInjection").filter({ visible: true }).count() > 0;
     expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", timeout_ms: 400 })))).toMatchObject({ matched: visible });
     expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", state: "hidden", timeout_ms: 150 })))).toMatchObject({ matched: !visible });
   });

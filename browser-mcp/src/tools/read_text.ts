@@ -9,7 +9,7 @@
  */
 
 import { raceWithTimeout, type Session } from "../session.js";
-import { observationRoots, includeObservationRoot, observationTask, boundedObservation, observationReady } from "./observation_scope.js";
+import { observationRoots, observationRootStatus, observationTask, boundedObservation, observationReady } from "./observation_scope.js";
 import { jsonResult, errorResult, capText, emptyContentWarning, type McpToolResult } from "./result.js";
 
 export const READ_TEXT_MAX_CHARS = 30000;
@@ -63,8 +63,8 @@ export async function runReadText(session: Session, input: { offset?: number; sc
   try {
     const key = Symbol("read");
     const read = (root: typeof roots[number], budget: number) => observationTask<ReadPart>(root, key, async () => {
-      if (!await includeObservationRoot(root, false)) return { text: "", excluded: true };
-      if (!await includeObservationRoot(root)) return { text: "", hidden: true };
+      const status = await observationRootStatus(root);
+      if (status !== "included") return { text: "", hidden: status === "hidden", excluded: status === "excluded" };
       const text = root.primary && root.scope
         ? await root.scope.evaluate(extractInRoot, true, { timeout: budget })
         : await root.frame.locator(":root").evaluate(extractInRoot, Boolean(input.scope_ref), { timeout: budget });
