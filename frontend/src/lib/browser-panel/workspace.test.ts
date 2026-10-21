@@ -18,6 +18,11 @@ describe('workspace wire validation', () => {
 		expect(isBrowserWorkspaceState({ ...state, editors: [field] })).toBe(true);
 		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style }] })).toBe(true);
 		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: { ...style, lineHeight: 21 } }] })).toBe(true);
+		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: { ...style, borderLeft: 2, borderTop: 0 } }] })).toBe(true);
+		for (const border of [-1, 101, NaN, '1px', null]) {
+			expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: { ...style, borderLeft: border } }] })).toBe(false);
+			expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: { ...style, borderTop: border } }] })).toBe(false);
+		}
 		for (const bad of [null, 'big', { ...style, fontSize: 0 }, { ...style, paddingLeft: -1 }, { ...style, lineHeight: 'normal' }, { ...style, fontFamily: 'x'.repeat(257) }, { ...style, paddingTop: Infinity }]) {
 			expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field, style: bad }] })).toBe(false);
 		}

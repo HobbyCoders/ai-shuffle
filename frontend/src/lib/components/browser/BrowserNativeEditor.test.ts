@@ -152,9 +152,25 @@ describe('reported field metrics', () => {
   expect(area.style.fontFamily).toBe('');
   expect(area.style.background).toBe('');
   // Same metrics before and after focus: the text does not jump.
+  // (Reported border widths are covered in the next test.)
   input.focus();
   await tick();
   expect([input.style.fontSize, input.style.paddingLeft]).toEqual(['7px', '5.5px']);
+ });
+});
+describe('reported border widths', () => {
+ it('starts the text after the page border when the runtime reports it', async () => {
+  pointer(true);
+  const style = { fontSize: 16, lineHeight: 24, paddingLeft: 8, paddingTop: 6, fontFamily: 'Georgia, serif' };
+  render(BrowserNativeEditor, { ...base, scale: 0.5, field: { id: 't', type: 'textarea', label: 'Thick', value: '', x: 0, y: 0, width: 300, height: 120, style: { ...style, borderLeft: 3, borderTop: 5 } } });
+  render(BrowserNativeEditor, { ...base, scale: 0.5, field: { id: 'z', type: 'text', label: 'Borderless', value: '', x: 0, y: 200, width: 300, height: 40, style: { ...style, paddingLeft: 0.5, borderLeft: 0, borderTop: 0 } } });
+  await tick();
+  const thick = screen.getByRole('textbox', { name: 'Thick' }) as HTMLTextAreaElement;
+  const none = screen.getByRole('textbox', { name: 'Borderless' }) as HTMLInputElement;
+  // (8 + 3) × 0.5 − 1 and (6 + 5) × 0.5 − 1, after the overlay's own 1px border.
+  expect([thick.style.paddingLeft, thick.style.paddingTop]).toEqual(['4.5px', '4.5px']);
+  // (0.5 + 0) × 0.5 − 1 would be negative: clamped at zero.
+  expect(none.style.paddingLeft).toBe('0px');
  });
 });
 describe('navigation keys', () => {

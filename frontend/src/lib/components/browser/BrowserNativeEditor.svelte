@@ -75,15 +75,16 @@
 		if (finePointer && !keys) {
 			// Match the page's own text so the click that focuses the field puts
 			// the caret where that text really is (applied while idle too, so the
-			// text never moves on focus). Overlay border is 1px; the page border is
-			// taken as 1px too, so text starts at (border + padding) × scale.
+			// text never moves on focus). Text starts at (page border + padding) ×
+			// scale; the overlay's own 1px border comes off that. Runtimes that do
+			// not report border widths get the common 1px.
 			const m = field.style;
 			const textarea = field.type === 'textarea';
 			let font: number, padX: number, padY: number, lineHeight: string, family = '';
 			if (m) {
 				font = m.fontSize * scale;
-				padX = Math.max(0, (m.paddingLeft + 1) * scale - 1);
-				padY = textarea ? Math.max(0, (m.paddingTop + 1) * scale - 1) : 0;
+				padX = Math.max(0, (m.paddingLeft + (m.borderLeft ?? 1)) * scale - 1);
+				padY = textarea ? Math.max(0, (m.paddingTop + (m.borderTop ?? 1)) * scale - 1) : 0;
 				lineHeight = m.lineHeight ? `${round(m.lineHeight * scale)}px` : 'normal';
 				// A page-supplied value goes into a style attribute: keep it to a
 				// plain font list so it can never add other declarations.

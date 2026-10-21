@@ -7,6 +7,8 @@ export interface BrowserViewport {
 /** A page field's computed text metrics in unscaled CSS px (newer runtimes). */
 export interface BrowserEditorStyle {
   fontSize: number; lineHeight: number | null; paddingLeft: number; paddingTop: number; fontFamily: string;
+  /** Computed border widths; absent from runtimes that predate them. */
+  borderLeft?: number; borderTop?: number;
 }
 
 export interface BrowserEditor {
@@ -21,7 +23,8 @@ function editorStyle(v: unknown): boolean {
 	if (v === undefined) return true;
 	if (!object(v)) return false;
 	return metric(v.fontSize, 400) && (v.fontSize as number) > 0 && (v.lineHeight === null || metric(v.lineHeight, 800)) &&
-		metric(v.paddingLeft, 400) && metric(v.paddingTop, 400) && typeof v.fontFamily === 'string' && v.fontFamily.length <= 256;
+		metric(v.paddingLeft, 400) && metric(v.paddingTop, 400) && typeof v.fontFamily === 'string' && v.fontFamily.length <= 256 &&
+		(v.borderLeft === undefined || metric(v.borderLeft, 100)) && (v.borderTop === undefined || metric(v.borderTop, 100));
 }
 
 export interface BrowserWorkspaceState {
