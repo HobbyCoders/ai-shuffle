@@ -12,7 +12,7 @@ from tests.test_update_waiting_safety import service
 
 @pytest.mark.parametrize("mode", ["stop", "when_idle"])
 @pytest.mark.parametrize("peer", [False, True])
-async def test_inflight_stop_refuses_another_restart(busy, setup, monkeypatch, mode, peer):
+async def test_inflight_stop_accepts_duplicate_without_starting_another_restart(busy, setup, monkeypatch, mode, peer):
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
     async def stop(sid, **kwargs):
@@ -31,7 +31,7 @@ async def test_inflight_stop_refuses_another_restart(busy, setup, monkeypatch, m
                                                "request_id": "duplicate", "expires_at": time.time() + 10}, "peer")
         else:
             result = await fleet._local_action("install", "duplicate", mode)
-        assert result["accepted"] is False
+        assert result["accepted"] is True
         assert result["install_state"] == "stopping"
         assert "already in progress" in result["reason"]
         assert len(fleet._stop_tasks) == 1
@@ -96,7 +96,8 @@ async def test_mixed_staged_and_retained_idle_fleet_checks_before_restart(setup,
 
 @pytest.mark.parametrize("age,session,since_delta,expected", [
     (0, "chat", -10, "still_busy_after_stop"),
-    (600, "chat", -1000, "running_work"),
+    (300, "chat", -1000, "still_busy_after_stop"),
+    (660, "chat", -1000, "running_work"),
     (10, "chat", 0, "running_work"),
     (0, "different-chat", -10, "running_work"),
 ])

@@ -140,7 +140,7 @@ def _recent_stop_refusal(blocked):
     completed = result.get("completed_at")
     if result.get("accepted") is not False or not isinstance(completed, (int, float)):
         return False
-    if not 0 <= time.time() - completed <= 60:
+    if not 0 <= time.time() - completed <= 10 * 60:
         return False
     sessions = {row["session_id"] for row in result.get("busy", [])}
     for blocker in blocked:
@@ -332,7 +332,13 @@ def local_action(action, request_id, mode=None, *, busy_rows=None):
     elif action == "download" and state["phase"] not in ("idle", "available", "error"):
         reason = f"Cannot download while the updater is {state['phase']}"
     elif action == "install" and mode in ("stop", "when_idle") and _stop_tasks:
-        reason = "A stop and restart request is already in progress"
+        # Another tab/request joins the existing stop, rather than recording a
+        # skipped worker in its fleet progress. Never spawn a second stop.
+        result = {"accepted": True, "reason": "A stop and restart request is already in progress",
+                  "phase": state["phase"], "version": state.get("version"),
+                  **_safe_waiting_status(state, busy_rows or [])}
+        _receipts[request_id] = (time.monotonic() + 60, result)
+        return result
     elif action == "install" and state["phase"] != "ready":
         reason = ("A previous download is retained; finish checking or downloading the offered update before restarting"
                   if state.get("staged_version") else "No staged update; current version left running")

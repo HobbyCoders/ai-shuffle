@@ -920,6 +920,24 @@ def test_first_boot_does_not_publish_running_revision_as_staged(feed):
     assert status_of(updater)["staged_version"] is None
 
 
+@pytest.mark.parametrize("offered", [A, C])
+def test_unreadable_active_metadata_keeps_verified_download_ready(feed, offered):
+    updater, publish, _, _, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    publish(revision=C, sequence=3)
+    updater.check(download=True)
+    # The active metadata can become unreadable independently of the valid download.
+    (updater.directory(B) / "release.json").write_text("unreadable")
+    publish(revision=offered, sequence=1 if offered == A else 3)
+    updater.check()
+    assert updater.state["pending"] == C
+    assert status_of(updater)["phase"] == "ready"
+
+
 @pytest.mark.parametrize("offered", [A, "0" * 40])
 def test_check_for_current_or_older_offer_unselects_withdrawn_download(feed, offered):
     updater, publish, _, requests, _ = feed

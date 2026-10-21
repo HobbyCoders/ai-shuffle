@@ -1175,9 +1175,16 @@ class ContainerUpdates:
         # Said ahead of the release that needs it, while this one still installs.
         lacking = set(manifest["container"].get("recommends") or []) - set(self.image.get("provides") or [])
         self.notice = IMAGE_NOTICE if lacking else None
-        active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
+        try:
+            active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
+        except (OSError, UpdateError):
+            if not staged:
+                raise
+            # Unknown running metadata cannot justify withdrawing a download.
+            # Still allow the verified staged offer to survive a plain check.
+            active = None
         staged_manifest = self.manifest(staged) if staged else None
-        if (staged and revision != staged
+        if (staged and active is not None and revision != staged
                 and (revision in (self.state.get("active"), self.image["revision"])
                      or manifest["container"]["sequence"] <= active["sequence"])
                 and not self.install_requested.is_set() and not self.state.get("booting")
@@ -1199,6 +1206,9 @@ class ContainerUpdates:
                 self.remember(staged_manifest)
                 self.publish("ready", "Update ready. Choose Update and restart.")
                 return
+        if active is None:
+            # Outside the retained-offer path, preserve fail-closed validation.
+            active = self.manifest(self.state["active"])["container"]
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
             self.publish("idle", "You are up to date.")
             return
