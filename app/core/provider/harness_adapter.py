@@ -1086,7 +1086,7 @@ class HarnessAdapter(ProviderAdapter):
                 # priority``, merged into the request body by fluid's
                 # ``request_extra``. The anthropic and openrouter native lanes
                 # have no equivalent knob and ignore ``fast`` entirely.
-                request_extra=request_extra,
+                request_extra=request_extra or None,
                 **native_caps,
                 # Full recoverable context management is explicit host policy:
                 # fluid compacts only the rendered model view, persists mechanical
