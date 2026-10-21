@@ -65,8 +65,10 @@ export async function installMutationWatcher(input: string | { key: string; pass
   type TextHistory = WeakMap<Node, { samples: number; first: number; last: number }>;
   const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory; passive: boolean; observedSince: number } | undefined;
   const installedAt = Date.now();
-  // A continuous passive window can establish the absence of a ticker too.
+  // Continuous passive history establishes presence/absence only in the top document.
   const observedSince = prev?.passive && Number.isFinite(prev.observedSince) ? prev.observedSince : installedAt;
+  let sampleSince = observedSince;
+  let hasUncoveredRoots = false;
   prev?.observer?.disconnect();
   const textHistory: TextHistory = prev?.textHistory ?? new WeakMap();
   const cleanups: (() => void)[] = [];
@@ -112,6 +114,12 @@ export async function installMutationWatcher(input: string | { key: string; pass
     if (state.passive && root !== document) return;
     if (roots.has(root)) return;
     roots.add(root);
+    if (root !== document) {
+      // Idle observation never covered this root. Neither an old top-document
+      // window nor a known top-level clock can replace its pre-dispatch sample.
+      hasUncoveredRoots = true;
+      sampleSince = Math.max(sampleSince, Date.now());
+    }
     const Observer = (realm as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver;
     const observer = new Observer(records => {
       for (const r of records) {
@@ -215,11 +223,12 @@ export async function installMutationWatcher(input: string | { key: string; pass
   w[key] = state;
   watchWindow(window);
   if (passive) { state.sampling = false; state.observer.pause(); return; }
-  // Only finish the initial 100ms observation window, not a fresh 100ms on
-  // every plain-page action. Navigation explicitly opts out of sampling.
+  // Reuse the top-document window, but finish 100ms from the newest secondary
+  // root's discovery. These samples overlap; they are not 100ms per root.
+  // Navigation explicitly opts out of all pre-action sampling.
   const remainingSample = typeof input !== "string" && input.sample === false
-    ? 0 : Math.max(0, 100 - (Date.now() - observedSince));
-  if (!state.hasKnownText && remainingSample) await new Promise<void>(resolve => state.schedule(resolve, remainingSample));
+    ? 0 : Math.max(0, 100 - (Date.now() - sampleSince));
+  if ((!state.hasKnownText || hasUncoveredRoots) && remainingSample) await new Promise<void>(resolve => state.schedule(resolve, remainingSample));
   state.sampling = false;
   state.addedNodes = state.removedNodes = state.attributeChanges = state.characterDataChanges = 0;
   state.lastMutation = state.lastNonTextMutation = state.lastNonBaselineTextMutation = Date.now();

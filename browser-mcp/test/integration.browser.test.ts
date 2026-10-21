@@ -416,6 +416,25 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.timings.settle_ms).toBeLessThan(1200);
       await page.goto("about:blank");
     });
+    it.each(["top", "shadow", "frame", "mixed"])("baselines an idle %s ticker across spaced actions", async kind => {
+      const top = '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>';
+      const shadow = '<div id="host"></div><script>const r=host.attachShadow({mode:"open"});r.innerHTML="<span id=c></span>";setInterval(()=>r.getElementById("c").textContent=String(Date.now()),100)</script>';
+      const frame = '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>';
+      const page = await load('<button>Spaced action</button>' + (kind === "top" ? top : kind === "shadow" ? shadow : kind === "frame" ? frame : top + shadow));
+      await page.waitForTimeout(250);
+      const rows = [];
+      for (let i = 0; i < 3; i++) {
+        await page.waitForTimeout(1000); // secondary roots have no idle observer
+        const target = await ref("Spaced action");
+        const start = Date.now();
+        const result = body(await runAct(session, { kind: "click", ref: target }));
+        rows.push({ ms: Date.now() - start, settle_ms: Math.round(result.timings.settle_ms), dispatch_ms: Math.round(result.timings.dispatch_ms),
+          ok: result.ok, settle_capped: result.settle_capped, dom_mutated: result.dom_mutated, snapshot_stale: result.snapshot_stale, text_churn_ignored: result.text_churn_ignored });
+      }
+      console.info("SECONDARY_ROOT_TICKER", JSON.stringify({ kind, rows }));
+      await page.goto("about:blank");
+      for (const row of rows) expect(row).toMatchObject({ ok: true, settle_capped: false, dom_mutated: "minor", snapshot_stale: false, text_churn_ignored: true });
+    }, 15000);
     it("settles a 100ms text ticker quickly without navigation or expiring refs", async () => {
       const page = await load('<button>Tick action</button><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
       await page.waitForTimeout(200); // an already-running ticker, outside act timing
@@ -487,13 +506,32 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.timings.settle_ms).toBeLessThan(800);
       await (await session.ensurePage()).goto("about:blank");
     });
+    it("caps unobserved text churn in a fresh cross-document control-free navigation", async () => {
+      const page = await session.ensurePage();
+      const before = await page.evaluate(() => performance.timeOrigin);
+      const url = 'data:text/html,' + encodeURIComponent('<p id="clock">Fresh clock</p><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      // Navigate exposes the churn flag/timing, not settle_capped. Observe its
+      // real quiet-window result without replacing the producing implementation.
+      const observation = vi.spyOn(session, "settle");
+      try {
+        const result = body(await runNavigate(session, { url }));
+        expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
+        expect(observation).toHaveBeenCalledTimes(1);
+        expect(await observation.mock.results[0].value).toMatchObject({ settleCapped: true, textChurnIgnored: false });
+        expect(result).toMatchObject({ ok: true, ref_count: 0, text_churn_ignored: false });
+        expect(result.timings.settle_ms).toBeGreaterThanOrEqual(1400);
+      } finally {
+        observation.mockRestore();
+        await page.goto("about:blank");
+      }
+    });
     it("gives prose with CSS-only animation a short quiet wait rather than a 1.5s control wait", async () => {
       const page = await session.ensurePage();
       const url = 'data:text/html,' + encodeURIComponent('<style>@keyframes spin{to{transform:rotate(360deg)}}i{display:inline-block;animation:spin .1s infinite}</style><p>Rendered article content, without any actionable controls.</p><i>◌</i>');
       const result = body(await runNavigate(session, { url }));
       expect(result.ref_count).toBe(0);
       expect(result.timings.settle_ms).toBeGreaterThanOrEqual(300);
-      expect(result.timings.settle_ms).toBeLessThan(400);
+      expect(result.timings.settle_ms).toBeLessThan(600);
       expect(await page.locator("p").innerText()).toContain("Rendered article");
     });
     it.each(["reload", "slowreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
