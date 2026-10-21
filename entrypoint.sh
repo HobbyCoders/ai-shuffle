@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Root uses only image executables, including during bundled-asset validation.
+# Restore the configured tool PATH only after dropping privileges.
+if [ "$(/usr/bin/id -u)" = "0" ]; then
+    export SHUFFLE_CONTAINER_PATH=$PATH
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
+
 # Tool code and production dependencies are supplied by the image. Startup
 # validates them, but never repairs or installs packages with root privileges.
 require_bundled_tools() {
@@ -31,7 +38,7 @@ claude_cli_keep_installed() {
     if [ -f "$marker" ]; then
         [ "$(cat "$marker")" = "1" ]
     else
-        command -v claude >/dev/null 2>&1 ||
+        PATH="${SHUFFLE_CONTAINER_PATH:-$PATH}" command -v claude >/dev/null 2>&1 ||
             [ -n "$(find "${HOME}/.claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] ||
             [ -n "$(find "${HOME}/.config/claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
     fi
@@ -39,12 +46,12 @@ claude_cli_keep_installed() {
 
 # Direct --user launches cannot mutate accounts. The Python runtime validates
 # identity and mount ownership and gives a clear error instead of chowning data.
-if [ "$(id -u)" != "0" ]; then
+if [ "$(/usr/bin/id -u)" != "0" ]; then
     case "${1:-run}" in
         dump|restore) ;;
         *) if claude_cli_keep_installed; then bash /app/docker/install-claude-cli.sh || true; fi ;;
     esac
-    exec python /app/docker/container_runtime.py "$@"
+    exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@"
 fi
 
 # Get PUID and PGID from environment, default to 99:100 (Unraid)
@@ -60,26 +67,24 @@ echo "Starting with PUID=${PUID} and PGID=${PGID}" >&2
 CURRENT_UID=$(id -u appuser)
 CURRENT_GID=$(id -g appuser)
 
+# Prepare mounted home roots even when the image account already matches.
+/usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py remap-home \
+    --old-uid "$CURRENT_UID" --old-gid "$CURRENT_GID" --new-uid "$PUID" --new-gid "$PGID"
+
 # Only modify user if PUID/PGID differs from current
 if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     echo "Adjusting appuser UID:GID from ${CURRENT_UID}:${CURRENT_GID} to ${PUID}:${PGID}" >&2
 
-    # Modify group first
     groupmod -o -g "$PGID" appuser
-
-    # Modify user
-    usermod -o -u "$PUID" appuser
-
-    # Fix ownership of critical directories (skip node_modules to avoid slow recursive chown)
-    echo "Updating ownership of /app and /home/appuser" >&2
-    chown -R appuser:appuser /home/appuser
-    # Only chown app code and static assets, not the massive node_modules trees
-    chown -R appuser:appuser /app/app
-    # Retained DATA_DIR/postgres is validated by the runtime, never chowned.
-    chown appuser:appuser /app /app/.env.example 2>/dev/null || true
+    # The temporary root-owned home suppresses usermod's automatic recursive
+    # ownership walk. Restore the image home immediately, without moving it.
+    usermod -o -u "$PUID" -d / appuser
+    usermod -d /home/appuser appuser
 else
     echo "UID/GID already correct, skipping user modification" >&2
 fi
+# Recover an interrupted remap even when UID/GID already match on this start.
+[ "$(getent passwd appuser | cut -d: -f6)" = /home/appuser ] || usermod -d /home/appuser appuser
 
 # Android emulator: `--device /dev/kvm` keeps the host's group on the device.
 # Add appuser to that group so the emulator can open it (app/core/android_emulator).
@@ -100,12 +105,13 @@ fi
 
 # Maintenance never starts provider setup, Chromium or application services.
 case "${1:-run}" in
-    dump|restore) exec python /app/docker/container_runtime.py "$@" ;;
+    dump|restore) exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@" ;;
 esac
 
-# Ensure config directories exist with correct permissions
-mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
-chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude
+# Home volume roots are initialized with appuser ownership in the image.
+# Startup creates missing directories only as appuser; no root ownership walk.
+setpriv --reuid=appuser --regid=appuser --init-groups \
+    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh /home/appuser/.local/bin
 
 # =============================================================================
 # Claude Code CLI
@@ -113,10 +119,8 @@ chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuse
 # The delegated Claude leg runs the stock `claude` from PATH and nothing else.
 # Download only while Keep Claude Code installed is on. The CLI then updates
 # itself in ~/.local. Never pinned, patched or wrapped here.
-mkdir -p /home/appuser/.local/bin
-chown appuser:appuser /home/appuser/.local /home/appuser/.local/bin
 if HOME=/home/appuser claude_cli_keep_installed; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         bash /app/docker/install-claude-cli.sh || true
 fi
 
@@ -130,8 +134,8 @@ fi
 CLAUDE_JSON_REAL="/home/appuser/.claude/.claude.json"
 CLAUDE_JSON_LINK="/home/appuser/.claude.json"
 if [ ! -e "$CLAUDE_JSON_LINK" ] && [ ! -L "$CLAUDE_JSON_LINK" ]; then
-    ln -s "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
-    chown -h appuser:appuser "$CLAUDE_JSON_LINK"
+    setpriv --reuid=appuser --regid=appuser --init-groups \
+        ln -s "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
     echo "Routed .claude.json into the retained provider volume without creating or rewriting provider data"
 fi
 
@@ -152,10 +156,10 @@ if [ -f /home/appuser/.config/gh/hosts.yml ]; then
     echo "GitHub CLI credentials found in volume"
 
     # Verify GitHub auth status and configure git credential helper for appuser
-    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser gh auth status 2>/dev/null; then
+    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" gh auth status 2>/dev/null; then
         echo "GitHub CLI: Authentication verified"
         # Configure git to use gh as credential helper (as appuser so it goes to appuser's .gitconfig)
-        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
             git config --global credential.helper '!gh auth git-credential'
         echo "Git configured to use GitHub CLI for authentication"
     else
@@ -168,11 +172,12 @@ fi
 # Legacy: Copy GitHub CLI auth from root if it exists (for backwards compatibility)
 if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.yml ]; then
     echo "Copying GitHub CLI auth from root to appuser (legacy migration)..."
-    cp /root/.config/gh/hosts.yml /home/appuser/.config/gh/ 2>/dev/null || true
-    cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
-    chown -R appuser:appuser /home/appuser/.config/gh
+    # Root reads its legacy files, but only appuser writes into the home.
+    /usr/bin/tar -C /root/.config/gh -cf - . 2>/dev/null |
+        setpriv --reuid=appuser --regid=appuser --init-groups \
+            /usr/bin/tar --no-same-owner -C /home/appuser/.config/gh -xf - 2>/dev/null || true
     # Configure git credential helper as appuser
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global credential.helper '!gh auth git-credential'
     echo "GitHub CLI auth copied and git configured"
 fi
@@ -185,15 +190,15 @@ fi
 # identity when it is unset; an identity already present in the mounted config
 # is never overwritten. Override the defaults with GIT_USER_NAME /
 # GIT_USER_EMAIL.
-if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global --get user.name >/dev/null 2>&1; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global user.name "${GIT_USER_NAME:-AI Shuffle Worker}"
     echo "Git: seeded user.name=${GIT_USER_NAME:-AI Shuffle Worker}"
 fi
-if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+if ! setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global --get user.email >/dev/null 2>&1; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global user.email "${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
     echo "Git: seeded user.email=${GIT_USER_EMAIL:-worker@ai-shuffle.local}"
 fi
@@ -201,10 +206,7 @@ fi
 # Mount roots and retained database permissions are handled non-recursively
 # by the Python runtime after resolving DATA_DIR through Settings.
 
-# Final ownership fix for active Fluid settings and provider compatibility data.
-chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
-
 # Python owns PostgreSQL, the existing Chromium supervisor, and the app. It
 # drops root itself after safely preparing empty mount roots. tini must forward
 # only to this supervisor (not -g), so application cleanup precedes PG shutdown.
-exec python /app/docker/container_runtime.py "$@"
+exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@"

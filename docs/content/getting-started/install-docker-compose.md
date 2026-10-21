@@ -379,9 +379,15 @@ Earlier versions let `docker exec <container> curl http://localhost:8000/...` (a
 
 ## Bundled tool assets
 
-The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`.
+The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`. The application and startup files under `/app` are also root-owned in every isolation mode. Runtime state and application-update builds remain in the data volume or the app user’s home; `PUID`/`PGID` still control your project files.
 
 If startup reports `Bundled tool assets are missing`, replace or rebuild the image and remove any mount hiding `/opt/ai-tools` or `/opt/browser-mcp`. Startup does not install packages or continue with incomplete bundled tools. Database dump and restore remain available without these assets.
+
+### Startup path troubleshooting
+
+If startup says `DATA_DIR` or `WORKSPACE_DIR` is inside an image tree, mount a volume at that exact path or choose a path outside the image’s application, tool, Python and system directories. For example, a volume mounted at `/app/data` still works; an unmounted directory there is not prepared by root. The default `/data` and `/workspace` paths are unchanged.
+
+For a home-volume ownership error, stop the container and set the host directory’s ownership to the configured PUID:PGID. Keep home and retained data on separate volumes. Startup migrates the previous account’s own single-link files and automatically repairs root-owned directories and single-link regular files in the application home, including its fixed `.fluid`, `.config`, `.config/gh`, `.claude`, `.local` and `chrome-profile` volumes. It never follows symlinks or repairs data/workspace storage, shared files or other nested mounts. Repair scans `.fluid` and `.claude` first, then the home root’s direct entries without descending, followed by the other fixed home paths and remaining subtrees, so caches and package installs do not precede those common destinations. It uses a 20,000-entry/five-second scan budget and a 64-level depth limit, then logs a summary and continues if a limit is reached. Use `docker exec -u appuser` for home-file writes; for multi-link files, other mounts or files left beyond the repair limit, stop the container and manually set only the affected files’ host ownership to PUID:PGID when needed.
 
 ## Optional settings
 
@@ -426,7 +432,7 @@ The default is still **off**. `on` retains the optional, rollback-and-continue b
 
 **Turn it off**
 
-Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives every file back to `PUID` exactly as it was.
+Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives the protected data files back to `PUID` exactly as they were. Image application and startup files stay root-owned.
 
 **Good to know**
 
