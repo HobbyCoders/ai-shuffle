@@ -392,6 +392,42 @@ async def test_owner_move_is_queued_while_running_and_runs_when_the_turn_ends():
     assert sh.pending_for("s1") is None
 
 
+@pytest.mark.parametrize("draining", [False, True])
+async def test_agent_move_starts_after_turn_finalization_without_more_input(draining, monkeypatch, caplog):
+    """Drive the durable turn state and real finalizer, not a fake idle flag."""
+    import logging
+    from app.core import turn_finalize, session_pr_state, pg_session_store
+    from app.db import turns
+
+    _chat()
+    tid = turns.enqueue_turn("s1", "user", prompt="move after this turn")["id"]
+    assert turns.start_turn(tid, run_id="handoff-turn")
+    if draining:
+        turns.interrupt_turn("s1", "stop")
+        assert turns.escalate_to_draining(tid)
+    monkeypatch.setattr(sh, "POLL_S", 0.01)
+    monkeypatch.setattr(turn_finalize, "_write_parked_task_kind", AsyncMock())
+    monkeypatch.setattr(session_pr_state, "schedule_session_pr_reconcile", lambda *a, **kw: None)
+    monkeypatch.setattr(pg_session_store, "flush_summary_folds", lambda *a: None)
+    move = AsyncMock()
+    with patch.object(sh, "_record", AsyncMock()), \
+            patch.object(sh, "_open_prompt", return_value=False), \
+            patch.object(sh, "_moved", AsyncMock(return_value="moved")), \
+            patch("app.core.streaming_status.has_active_run", return_value=False), \
+            patch("app.api.sessions.move_session_to", move), \
+            caplog.at_level(logging.INFO, logger=sh.__name__):
+        sh.request("s1", "DesktopWorker")
+        # Finalization can be called before the reader releases a draining turn.
+        await turn_finalize.persist_turn_end_state("s1", resync_branch=False)
+        assert await _settle(lambda: any("Hand-off waiting for session s1: the turn" in r.message
+                                         for r in caplog.records))
+        move.assert_not_awaited()
+        assert turns.settle_turn(tid, "aborted" if draining else "completed")
+        assert await _settle(lambda: move.await_count == 1)
+    assert turns.get_queued_turns("s1") == []
+    move.assert_awaited_once()
+
+
 async def test_owner_move_of_an_idle_chat_runs_at_once():
     busy = _Busy()
     busy.idle = True

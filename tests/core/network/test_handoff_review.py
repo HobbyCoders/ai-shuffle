@@ -27,6 +27,27 @@ def test_divergent_event_compaction_reconciles_ids_and_rewinds(mock_db):
     assert [(row["id"], row["seq"]) for row in actual] == [(survivor["id"], survivor["seq"])]
 
 
+def test_import_reports_statement_and_commit_cost_without_transcript_text(mock_db, caplog):
+    import logging
+
+    sid = "statement-metrics"
+    database.create_session(sid, "default")
+    data = {"sdk_session_id": "ses_source", "_prepare_history": True, "history": {
+        "fluid_session_events": [{"seq": i, "event": {"text": "private-transcript-canary"}}
+                                 for i in range(401)]}}
+    with caplog.at_level(logging.INFO, logger=handoff.__name__):
+        handoff.install_history(sid, data, ".")
+    metrics = data["_history_metrics"]["fluid_session_events"]
+    assert metrics["rows"] == 401
+    assert metrics["statements"] == 3  # Bounded multi-row INSERTs, never per-row commits.
+    assert metrics["execute_seconds"] >= metrics["max_statement_seconds"] >= 0
+    assert metrics["commit_seconds"] >= 0
+    assert metrics["seconds"] >= metrics["execute_seconds"]
+    assert any("install_history.fluid_session_events" in r.message and "statements=3" in r.message
+               for r in caplog.records)
+    assert "private-transcript-canary" not in caplog.text
+
+
 def test_messages_reconcile_changed_and_deleted_rows_without_duplicates(mock_db):
     sid = "review-messages"
     database.create_session(sid, "default")

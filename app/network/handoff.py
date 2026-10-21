@@ -1483,12 +1483,15 @@ def install_history(sid, data, cwd):
                                 value["cwd"] = cwd
                     values.append(value)
                 rows.append((destination_id, *values))
+            statements = 0
+            execute_seconds = commit_seconds = max_statement_seconds = 0.0
             for start in range(0, len(rows), 200):
                 part = rows[start:start + 200]
                 # get_db commits each bounded chunk. Staging never changes the
                 # visible app mirror or its SDK pointer, including on failure.
                 with get_db() as conn:
                     cur = conn.cursor()
+                    write_started = monotonic()
                     if table in APP_TABLES:
                         cur.execute("INSERT INTO handoff_history_chunks "
                                     "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
@@ -1500,7 +1503,21 @@ def install_history(sid, data, cwd):
                                              for c, v in zip(columns, r[1:])]) for r in part]
                         _insert_rows(cur, table, ("session_id", *columns), adapted,
                                      _history_conflict(table, ("session_id", *columns)), batch=200)
-            facts[table] = {"rows": len(rows), "seconds": round(monotonic() - started, 3)}
+                    written = monotonic()
+                    statement_seconds = written - write_started
+                    execute_seconds += statement_seconds
+                    max_statement_seconds = max(max_statement_seconds, statement_seconds)
+                    statements += 1
+                commit_seconds += monotonic() - written
+            facts[table] = {"rows": len(rows), "seconds": monotonic() - started,
+                            "statements": statements, "execute_seconds": execute_seconds,
+                            "max_statement_seconds": max_statement_seconds, "commit_seconds": commit_seconds}
+            # Log each completed table immediately, not only when ownership
+            # finally commits. No SQL parameters or transcript content here.
+            logger.info("Hand-off import for session %s install_history.%s: rows=%d statements=%d "
+                        "total=%.3fs execute=%.3fs max_statement=%.3fs commit=%.3fs",
+                        sid, table, len(rows), statements, facts[table]["seconds"],
+                        execute_seconds, max_statement_seconds, commit_seconds)
         if not data.get("_prepare_history"):
             with get_db() as conn:
                 _publish_history(conn.cursor(), sid, token)
