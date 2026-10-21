@@ -1555,9 +1555,12 @@ test('#98: a waiting build takes precedence over a failed-start retry offer', as
 });
 test('a verified current feed unselects a withdrawn unchosen download without deleting its files',async t=>{
  for(const legacy of [false,true])await t.test(legacy?'legacy pending':'explicit staged',async t=>{
-  const {f,u}=await stagedOver(t);
-  if(legacy){const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));state.pending=state.staged;delete state.staged;await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(state));}
-  const manager=legacy?f.create():u;if(legacy)await manager.load();
+  let f,manager;
+  if(legacy){
+   f=await fixture(t);await f.release(A);manager=f.create();await manager.load();
+   await manager.download();await manager.select();await manager.databaseStarting();await manager.healthy();
+   await f.release(B);await manager.download();
+  }else{const staged=await stagedOver(t);f=staged.f;manager=staged.u;}
   await f.release(A);f.requests.length=0;const builds=f.builds;
   assert.equal((await manager.check()).kind,'current');assert.equal(manager.pendingVersion,null);
   assert.equal(f.builds,builds);assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);

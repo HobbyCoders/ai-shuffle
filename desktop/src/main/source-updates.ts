@@ -686,20 +686,6 @@ export class SourceUpdates {
       }
       const { signed, manifest } = feed;
       let stagedNotice: string | undefined;
-      const running = this.version;
-      if (staged && running && manifest.revision !== staged) {
-        const runningSequence = running === this.options.baseline?.revision && !this.state.active
-          ? this.options.baseline.sequence : await this.sequence(running);
-        if (manifest.revision === running || manifest.sequence <= runningSequence) {
-          // A successful current/older feed check withdraws only an unchosen,
-          // never-started download. Keep files and all migration/restore fences.
-          if (!await this.replaceable(staged)) return this.ready(staged);
-          if (this.state.staged === staged) delete this.state.staged;
-          if (this.state.pending === staged) delete this.state.pending;
-          await this.save();
-          return { kind: 'current' };
-        }
-      }
       if (staged) {
         let stagedSequence = 0;
         try { stagedSequence = (await this.release(staged)).sequence; }
@@ -707,6 +693,20 @@ export class SourceUpdates {
           // An unselected, unfenced download with bad metadata must not block
           // recovery by a verified newer release. Retain it only if no new offer follows.
           stagedNotice = "The downloaded update's release information could not be verified. It is still staged; download a newer update before installing.";
+        }
+        const running = this.version;
+        if (!stagedNotice && running && manifest.revision !== staged) {
+          const runningSequence = running === this.options.baseline?.revision && !this.state.active
+            ? this.options.baseline.sequence : await this.sequence(running);
+          if (manifest.revision === running || manifest.sequence <= runningSequence) {
+            // A successful current/older feed check withdraws only an unchosen,
+            // never-started download. Keep files and all migration/restore fences.
+            if (!await this.replaceable(staged)) return this.ready(staged);
+            if (this.state.staged === staged) delete this.state.staged;
+            if (this.state.pending === staged) delete this.state.pending;
+            await this.save();
+            return { kind: 'current' };
+          }
         }
         // Prefer the waiting build over a failed newer release: returning ready intentionally
         // defers the failed-start retry offer until there is no staged build to install.

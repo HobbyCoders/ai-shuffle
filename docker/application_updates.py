@@ -1176,6 +1176,7 @@ class ContainerUpdates:
         lacking = set(manifest["container"].get("recommends") or []) - set(self.image.get("provides") or [])
         self.notice = IMAGE_NOTICE if lacking else None
         active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
+        staged_manifest = self.manifest(staged) if staged else None
         if (staged and revision != staged
                 and (revision in (self.state.get("active"), self.image["revision"])
                      or manifest["container"]["sequence"] <= active["sequence"])
@@ -1191,7 +1192,6 @@ class ContainerUpdates:
             self.publish("idle", "You are up to date.")
             return
         if staged:
-            staged_manifest = self.manifest(staged)
             if (revision == staged or manifest["container"]["sequence"] <= staged_manifest["container"]["sequence"]
                     or unsatisfied_capabilities(manifest["container"], self.image)
                     or (revision in self.state.get("failed", []) and not download)):
