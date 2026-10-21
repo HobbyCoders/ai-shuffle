@@ -1,7 +1,8 @@
 /**
  * browser_navigate — url or "back"/"forward". Doubles as session bootstrap: the
  * first call acquires the page. Returns {url, title} plus an interactive-filtered
- * snapshot so the model has an immediate map of the landing page.
+ * snapshot so the model has an immediate map of the landing page. snapshot_stale
+ * refers to the pre-navigation refs, not the fresh refs returned alongside it.
  */
 
 import { raceWithTimeout, type Session } from "../session.js";
@@ -125,9 +126,25 @@ export async function runNavigate(
   const dispatchStart = performance.now();
   let rewroteTo: string | undefined;
   if (target === "back" || target === "forward") {
-    await (target === "back"
-      ? page.goBack({ waitUntil: "domcontentloaded" })
-      : page.goForward({ waitUntil: "domcontentloaded" }));
+    // Restores commit without a fresh DOMContentLoaded, but uncached history
+    // must still finish parsing (a streaming response can pause longer than our
+    // DOM-quiet window). Share the page's navigation budget across both waits.
+    // Playwright has no public timeout getter. Prefer its resolver to preserve
+    // context defaults and 0 (no timeout); fall back to Playwright's default if
+    // an upgrade removes or renames this private API.
+    const settings = (page as unknown as { _timeoutSettings?: { navigationTimeout?: (options: object) => number } })
+      ._timeoutSettings;
+    const timeout = typeof settings?.navigationTimeout === "function" ? settings.navigationTimeout({}) : 30_000;
+    try {
+      await (target === "back"
+        ? page.goBack({ waitUntil: "commit", timeout })
+        : page.goForward({ waitUntil: "commit", timeout }));
+      const ready = await page.waitForFunction(() => document.readyState !== "loading", undefined,
+        { polling: 100, timeout: timeout === 0 ? 0 : Math.max(1, timeout - (performance.now() - dispatchStart)) });
+      await ready.dispose();
+    } catch (err) {
+      throw navigationFailure(session, page.url(), err);
+    }
   } else {
     const requested = normalizeUrl(input.url);
     const refusal = (url: string) => {
@@ -262,6 +279,7 @@ export async function runNavigate(
       url: landed,
       title,
       snapshot_id: snap.snapshot_id,
+      snapshot_stale: true, // refs from the previous document are never reusable
       ref_count: emittedRefCount,
       truncated: snap.truncated,
       text_churn_ignored: textChurnIgnored,
