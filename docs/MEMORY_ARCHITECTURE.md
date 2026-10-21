@@ -43,6 +43,60 @@ render with a hint to confirm them with Remember. Recall exposes a conflict's
 ID and revision for an explicit correction, rather than presenting a guessed
 winner as fact. Saved text is data, not an instruction layer.
 
+## Grounded prose workflow proposals
+
+Python helper synthesis remains separate from prose `SKILL.md` workflows.
+**Partial feature: automatic proposals are currently inert in normal per-session
+use.** Each session's closing synthesis consumes its own journal slice; the next
+session cannot combine its evidence with a retained accepted episode from that
+previous pass. Only a single synthesis slice containing both complete accepted
+sessions can currently produce a proposal. There is no retained cross-pass
+accepted-episode index yet; issue #206 remains open. Promotion also fails closed
+when source evidence has been reaped or changed. Same-slice producer tests do
+not establish normal cross-session learning.
+
+In that same-slice case, Synthesizer can queue at most two workflow proposals
+per pass; it never installs one. The conservative first slice requires two distinct project-scoped journal
+sessions with successful execution, a completion reply and an explicit user
+receipt `workflow accepted: <name>`. Tool output cannot provide that receipt.
+`workflow corrected: <name>` or `workflow rejected: <name>` blocks the workflow.
+These receipts support evidence; they are **not** installation approval. Natural
+language corrections must also be considered during owner review. Ordinary
+fact/helper passes include no workflow-proposal instructions: that prompt cost
+is added only after two distinct user-accepted episodes for the same workflow
+appear in the project slice. Full evidence validation still gates the queue.
+
+Proposals retain owner/project identity, exact content digests and bounded
+source episodes/hashes. Content and evidence pass secret/injection screening;
+capability metadata and executable substitutions are rejected. Installed skill
+names and near-identical descriptions are checked at proposal time when the
+host supplies the working directory, and always checked again at promotion.
+The per-owner queue/audit holds at most 32 records and 256 KiB including rejected
+and promoted records. Capacity exhaustion refuses new proposals, not old audit.
+There is no automatic skill target count, deletion or overwrite.
+
+Standalone Fluid's local owner can inspect with `fluid workflows list` and
+`fluid workflows show <digest>`, then `fluid workflows approve <digest> --cwd
+<project>` (or `reject`). Supply `--skills-dir` when using a custom store. Approval
+requires an interactive terminal and typing the full digest after reviewing the
+complete source work, scope, exceptions and successful outcomes. **This is a
+convenience gate, not authentication.** Approval refuses shells with the app's
+`AI_SHUFFLE_MANAGED_BY` attribution marker, `AIS_SESSION_ID`, or a nonempty
+`CLAUDECODE`, even with a fabricated TTY. These ambient markers are not a security
+boundary: arbitrary local code can remove them or write skill files directly.
+Authenticated in-app owner approval is still required for a real identity gate. Source evidence
+is revalidated; stale/reaped/corrected evidence fails closed. Approval creates a
+new `.fluid/skills/<name>/SKILL.md` exclusively in the same project, with no tool
+grants or permission bypass. A fresh native/delegated session uses ordinary
+skill discovery and the Skill loader, not a new injection surface.
+
+API-owner and application-ID project promotion is deliberately refused by this
+local CLI: an authenticated application approval UI and project-location binding
+remain product work. No API-owner proposal may install into shared global
+roots. Global promotion and replacing an owner-authored skill are not supported.
+Pending proposals are inert until this explicit local-owner approval; production
+skills must not be installed merely to test the learner.
+
 ## Automatic lifecycle
 
 Hard limits and expiry are enforced by code at ingestion and maintenance, not by
@@ -62,7 +116,7 @@ Current per-owner defaults:
 | Retained fact revisions | At most 2, for at most 30 days |
 | Fact text | 500 characters; oversize saves fail rather than truncate meaning |
 | Fact document | 2 MiB; commit rejected if exceeded |
-| Prompt fact lines | 8,000 characters in the stable, task-independent base: unprotected facts reserve up to 3,000; the remainder goes to profile and other protected facts. An additional task slice delivers at most 1,000 new fact-line characters per owner turn and at most 2,000 held total, requiring two distinct whole-word matches. It never displaces base facts. Previously delivered task facts stay across topic changes while live, safe and in scope; actual corrections or removals reconcile normally. Task-only additions never cause a full base re-send. All selection follows owner, scope, checkout, conflict and injection screening; archived facts still require explicit Recall. No query log, model call or embeddings. Additions use the existing provenance-marked user-tail memory/change-list chain and its compaction preservation, never the cached system prefix. A closing note counts what is left out that Recall finds in that session: live facts omitted for space and archived facts in scope ("(144 saved facts omitted for space and 12 archived; Recall finds them by keyword.)"). Other projects' facts and setup receipts for other checkouts have their own notes; another worker's environment facts are neither shown nor counted |
+| Prompt fact lines | 8,000 characters in the stable, task-independent base: unprotected facts reserve up to 3,000; the remainder goes to profile and other protected facts. An additional task slice delivers at most 1,000 new fact-line characters per owner turn and at most 2,000 held total, requiring two distinct whole-word matches. It never displaces base facts. When full, oldest-admitted task-only facts that no longer match the current query can yield space to a new two-term match; matching facts and all base facts are preserved. Admission age is recovered from the provenance-marked chain, not a query log. Topic-driven changes have an 8,000-character cumulative allowance since the trusted full snapshot (including change-list wrappers and retired IDs), then explicit Recall is the fallback until a genuine restore/base update. This bounds 100-turn topic-switch history to the initial snapshot plus 8,000 characters, rather than buying another base snapshot on every switch. Actual source corrections, deletion, safety and scope removals reconcile even after the novelty allowance is spent. Task-only changes never cause a full base re-send. All selection follows owner, scope, checkout, conflict and injection screening; archived facts still require explicit Recall. No query log, model call or embeddings. Additions use the existing provenance-marked user-tail memory/change-list chain and its compaction preservation, never the cached system prefix. A closing note counts what is left out that Recall finds in that session: live facts omitted for space and archived facts in scope ("(144 saved facts omitted for space and 12 archived; Recall finds them by keyword.)"). Other projects' facts and setup receipts for other checkouts have their own notes; another worker's environment facts are neither shown nor counted |
 | Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, the oldest unsynthesized lines (never explicit ones) are dropped down to half the cap with a warning; events may still be skipped under lock contention |
 | Model-assisted inference | At most 48 attempted calls per UTC day, per store, spread over the day: by a given time a store may have used 2 calls plus its share of the day so far, a pass starts at least 15 minutes after the previous call, and it runs ahead of that pace only while the journal is past 60% of its cap; a pending Remember entry is not paced until a pass has read it. A pass makes one call per project in its slice and stops the slice before a project the day's remaining calls cannot pay for; when a later project's call fails or is refused, the entries the answered projects cover are still consumed. Input capped at 32,000 characters plus the fixed system prompt (6,000 for saved facts, the journal slice of up to 400 lines, then the skill library) when the learner model's context window is unknown or small, as for most local models; a known window raises it, up to 96,000. Successful read-only calls and cells (Read, Glob, Grep, LS, TaskList, ToolSearch) are consumed without being shown, unless they contain a top-level function/class definition or a lambda assigned to a name, import a saved skill, cannot be parsed safely, or name a path outside the session's working directory and the temp directory (home config, notes, another checkout); other working cells are shown with code and output clipped to their head and tail, failed ones whole. Output bounded by the configured synthesis token limit; a failed call backs off per model, 5 minutes doubling to 6 hours, shared by every session on the store |
 | Recent deletion records | 256, plus a fixed 16 KiB monotonic deletion filter (32 KiB as hexadecimal JSON) |

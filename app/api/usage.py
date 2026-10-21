@@ -352,7 +352,7 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                         source_worker=raw.get("source_worker"),
                         status=(
                             "stale" if fetched_at and (
-                                error or now_ms - fetched_at > interval_ms
+                                error or not 0 <= now_ms - fetched_at <= interval_ms
                             ) else "fresh" if fetched_at else
                             "unavailable" if error else "never_fetched"
                         ),

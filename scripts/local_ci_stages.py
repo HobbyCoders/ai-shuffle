@@ -113,6 +113,8 @@ def _plan(ci, args, python: str, revision: str) -> tuple[list, list, list, dict]
     identity = {"revision": revision, "tree": ci.tree_of("HEAD"),
                 "python": str(Path(python).absolute()), "machine": ci.machine(),
                 "workers": ci.WORKERS, "strict_audit": getattr(args, "strict_audit", False),
+                "container_optins": {name: os.environ.get(name) == "1" for name in
+                                     ("LOCAL_CI_CONTAINER_PG", "LOCAL_CI_CONTAINER_PRESSURE")},
                 "plan": plan, "batches": batches, "fluid": fluid}
     return batches, fluid, plan, identity
 
