@@ -8,6 +8,7 @@ import pytest
 from app.core import application_updates as updates
 from app.core import update_workers as fleet
 from app.core import desktop_lifecycle
+from app.core.desktop_lifecycle import active_session_ids as real_active_session_ids
 
 
 @pytest.fixture
@@ -895,6 +896,82 @@ def test_stop_them_and_restart_stops_each_session_then_installs(busy, monkeypatc
     asyncio.run(scenario())
     assert stopped == ["s1"]
     assert updates._desktop_request["action"] == "install"
+
+
+def test_stop_then_restart_reaps_real_adapterless_registry_ghost(setup, monkeypatch, mock_db):
+    from types import SimpleNamespace
+    from app.core.task_registry import TaskRegistry
+
+    registry = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", real_active_session_ids)
+    registry.start_task("ghost-s", "ghost-task", "agent", "Finished task")
+    original_enqueue = updates.enqueue
+
+    def enqueue(action):
+        assert real_active_session_ids() == set(), "never queue past a live or stale busy entry"
+        original_enqueue(action)
+
+    monkeypatch.setattr(updates, "enqueue", enqueue)
+    async def scenario():
+        assert real_active_session_ids() == {"ghost-s"}
+        result = await fleet.dispatch("install", "stop")
+        assert result["results"][-1]["accepted"]
+        await asyncio.wait_for(asyncio.gather(*fleet._stop_tasks), timeout=5)
+        assert real_active_session_ids() == set()
+
+    asyncio.run(scenario())
+    assert registry.get_task("ghost-s", "ghost-task")["status"] == "killed"
+    assert updates._desktop_request["action"] == "install"
+
+
+def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypatch, caplog):
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+    with caplog.at_level("INFO"):
+        asyncio.run(scenario())
+    assert updates._desktop_request is None
+    assert "could not stop s1 before restarting" in caplog.text
+    assert "Busy with running work: Fix login" in caplog.text
+    snapshot = asyncio.run(fleet.snapshot())
+    assert snapshot["refusals"]["self"] == "Busy with running work: Fix login"
+    assert snapshot["operation"]["phase"] == "error"
+    worker = snapshot["operation"]["workers"][0]
+    assert worker["status"] == "skipped" and worker["message"] == "Busy with running work: Fix login"
+
+
+def test_late_stop_refusal_cannot_change_a_newer_install(busy, monkeypatch):
+    async def stop(*args, **kwargs):
+        fleet.progress.begin("newer-operation", [{"device_id": "self", "device_name": "Current worker"}])
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", stop)
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+    asyncio.run(scenario())
+    operation = fleet.progress.load()
+    assert operation["id"] == "newer-operation" and operation["workers"][0]["accepted"] is None
+    assert "self" not in fleet._refusals
+
+
+def test_stop_refusal_reporting_failure_is_logged(busy, monkeypatch, caplog):
+    async def stop(*args, **kwargs):
+        def broken():
+            raise RuntimeError("directory unavailable")
+        monkeypatch.setattr(fleet.runners, "directory", broken)
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", stop)
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+    with caplog.at_level("INFO"):
+        asyncio.run(scenario())
+    assert "Busy with running work: Fix login" in caplog.text
+    assert "could not publish stop refusal" in caplog.text
 
 
 def test_a_mode_only_applies_to_install(setup):

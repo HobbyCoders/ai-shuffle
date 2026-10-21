@@ -107,6 +107,7 @@ for _name in ("claude-haiku-4-5", "claude-haiku-4-5-20251001"):
 _OPENAI = {name: _capability(["none", "low", "medium", "high", "xhigh", "max"], "medium")
            for name in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")}
 _OPENAI["gpt-6-astra"] = _capability(["low", "medium", "high", "xhigh", "max"])
+_OPENAI["gpt-6.1-sol"] = _capability(["low", "medium", "high", "xhigh", "max"], "medium")
 _OPENAI.update({name: _capability(["none", "low", "medium", "high", "xhigh"], "none")
                 for name in ("gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano")})
 _OPENAI["gpt-5.5"] = _capability(["none", "low", "medium", "high", "xhigh"], "medium")
