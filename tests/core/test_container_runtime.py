@@ -76,8 +76,10 @@ rt.main(sys.argv[2:])
             assert path.parent == project / "docker", origin
         else:
             assert any(path.is_relative_to(Path(prefix)) for prefix in (sys.prefix, sys.base_prefix)), origin
+            prefix = next(Path(prefix) for prefix in (sys.prefix, sys.base_prefix)
+                          if path.is_relative_to(Path(prefix)))
             info = path.stat()
-            assert info.st_uid == Path(sys.prefix).stat().st_uid and not info.st_mode & 0o022, origin
+            assert info.st_uid == prefix.stat().st_uid and not info.st_mode & 0o022, origin
 
 
 @pytest.mark.parametrize("local_mode", ["false", "true"])
@@ -833,7 +835,7 @@ def test_home_remap_skips_foreign_owners_and_all_hardlinks(tmp_path, monkeypatch
     changed = home_ownership({home / name: (uid, 41001) for name, uid in
                               (("root-file", 0), ("root-link", 0), ("service-file", 64000))})
     runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
-    assert changed == [(home, 41002, 41002), (home / "single", 41002, 41002)]
+    assert changed == [(home / "single", 41002, 41002), (home, 41002, 41002)]
 
 
 def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeypatch, home_ownership):
@@ -873,19 +875,63 @@ def test_mounted_home_root_preparation_without_image_id_change(tmp_path, monkeyp
         assert len(changed) == count
 
 
-def test_home_remap_rechecks_pinned_inode_after_entry_swap(tmp_path, monkeypatch, home_ownership):
+@pytest.mark.parametrize("owner", [0, 41001])
+def test_home_remap_rechecks_pinned_inode_after_entry_swap(tmp_path, monkeypatch, home_ownership, owner):
     home, data = tmp_path / "home", tmp_path / "data"
     home.mkdir()
     data.mkdir()
-    for name in ("victim", "protected"):
-        (home / name).write_text("fixture")
-    changed = home_ownership({home / "protected": (0, 0)})
+    (home / "victim").write_text("fixture")
+    protected = tmp_path / "protected"
+    protected.write_text("outside the walk")
+    changed = home_ownership({protected: (owner, 41001)})
     original_open = os.open
     def swapped(name, flags, *args, **kwargs):
-        return original_open("protected" if name == "victim" else name, flags, *args, **kwargs)
+        return original_open(protected if name == "victim" else name, flags, *args, **kwargs)
     monkeypatch.setattr(runtime.os, "open", swapped)
     runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
     assert changed == [(home, 41002, 41002)]
+
+
+def test_mounted_home_migration_commits_root_last_and_resumes(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".local"
+    (volume / "sub").mkdir(parents=True)
+    for path in (volume / "first", volume / "second", volume / "sub" / "tail"):
+        path.write_text("fixture")
+    entries = [volume, volume / "sub", volume / "first", volume / "second", volume / "sub" / "tail"]
+    changed = home_ownership({path: (41003, 41003) for path in entries})
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    original = os.fchown
+    class Interrupted(Exception):
+        pass
+    def interrupt(fd, uid, gid):
+        if len(changed) == 2:
+            raise Interrupted
+        original(fd, uid, gid)
+    monkeypatch.setattr(runtime.os, "fchown", interrupt)
+    with pytest.raises(Interrupted):
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert volume.stat().st_uid == 41003
+    monkeypatch.setattr(runtime.os, "fchown", original)
+    runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert all(path.stat().st_uid == 41002 for path in entries)
+    assert changed[-1] == (volume, 41002, 41002)
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "standalone"])
+def test_home_prepare_tolerates_unused_isolation_setting(tmp_path, monkeypatch, home_ownership, raw):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    changed = home_ownership()
+    monkeypatch.setenv("AGENT_ISOLATION", "off")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", raw)
+    if raw == "standalone":
+        monkeypatch.setattr(runtime, "_isolation", None)
+        monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert changed == []
 
 
 def test_drop_refuses_interrupted_account_home(settings_factory, monkeypatch):

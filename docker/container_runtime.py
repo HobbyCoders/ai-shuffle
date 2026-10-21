@@ -830,7 +830,15 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
     # Bind aliases on one host mount share this identity. Aliases reached through
     # two distinct host filesystems may not: keep retained data on its own volume.
     mounts = mount_points()
-    service_uid = isolation()._id(os.environ, "AGENT_ISOLATION_SERVICE_UID")
+    module = isolation()
+    try:
+        service_uid = module._id(os.environ, "AGENT_ISOLATION_SERVICE_UID")
+    except AttributeError:
+        service_uid = 64000  # standalone bootstrap copy without isolation helpers
+    except module.IsolationError as error:
+        if module.setting() != "off":
+            raise RuntimeFailure(str(error)) from None
+        service_uid = module.DEFAULT_SERVICE_ID
     volumes = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
     roots = [(home, old_uid, old_gid, False)]
     roots += [(home / name, None, None, True) for name in volumes if home / name in mounts]
@@ -846,47 +854,61 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
                 raise RuntimeFailure(f"home volume {root} belongs to the service account; set its host ownership to PUID:PGID")
         if (previous_uid, previous_gid) == (new_uid, new_gid):
             continue
-        for directory, dirs, files, fd in os.fwalk(root, follow_symlinks=False):
-            path = Path(directory)
-            current = os.fstat(fd)
-            if path == root and (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-                raise RuntimeFailure(f"home volume {root} changed during preparation; retry startup")
-            if (current.st_dev, current.st_ino) == data_inode:
-                dirs[:] = []
-                continue
-            # A fresh Docker bind can have a root-owned root. Change only that
-            # directory inode, never any root-owned contents beneath it.
-            if mounted and previous_uid == 0:
-                os.fchown(fd, new_uid, new_gid)
-                break
-            kept = []
-            for name in dirs:
-                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                child = path / name
-                if (stat.S_ISDIR(entry.st_mode) and entry.st_dev == info.st_dev
-                        and child not in mounts and not os.path.ismount(child)
-                        and (entry.st_dev, entry.st_ino) != data_inode):
-                    kept.append(name)
-            dirs[:] = kept
-            for name in [".", *files]:
-                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                if entry.st_uid != previous_uid or not (
-                        stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1):
+        root_fd = None
+        try:
+            for directory, dirs, files, fd in os.fwalk(root, follow_symlinks=False):
+                path = Path(directory)
+                current = os.fstat(fd)
+                if path == root and (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                    raise RuntimeFailure(f"home volume {root} changed during preparation; retry startup")
+                if path == root:
+                    root_fd = os.dup(fd)
+                if (current.st_dev, current.st_ino) == data_inode:
+                    dirs[:] = []
                     continue
-                # Pin the inode as well as its parent: even a concurrent hardlink
-                # or parent-directory swap cannot redirect the ownership change.
-                child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-                try:
-                    pinned = os.fstat(child_fd)
-                    if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
-                            or pinned.st_uid != previous_uid
-                            or not (stat.S_ISDIR(pinned.st_mode)
-                                    or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                # A fresh Docker bind can have a root-owned root. Change only that
+                # directory inode, never any root-owned contents beneath it.
+                if mounted and previous_uid == 0:
+                    break
+                kept = []
+                for name in dirs:
+                    entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    child = path / name
+                    if (stat.S_ISDIR(entry.st_mode) and entry.st_dev == info.st_dev
+                            and child not in mounts and not os.path.ismount(child)
+                            and (entry.st_dev, entry.st_ino) != data_inode):
+                        kept.append(name)
+                dirs[:] = kept
+                for name in (files if path == root else [".", *files]):
+                    entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if entry.st_uid != previous_uid or not (
+                            stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1):
                         continue
-                    gid = new_gid if pinned.st_gid == previous_gid else pinned.st_gid
-                    os.fchown(child_fd, new_uid, gid)
-                finally:
-                    os.close(child_fd)
+                    # Pin the inode as well as its parent: even a concurrent hardlink
+                    # or parent-directory swap cannot redirect the ownership change.
+                    child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        pinned = os.fstat(child_fd)
+                        if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
+                                or pinned.st_uid != previous_uid
+                                or not (stat.S_ISDIR(pinned.st_mode)
+                                        or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                            continue
+                        gid = new_gid if pinned.st_gid == previous_gid else pinned.st_gid
+                        os.fchown(child_fd, new_uid, gid)
+                    finally:
+                        os.close(child_fd)
+            if root_fd is None:
+                raise RuntimeFailure(f"home volume {root} changed during preparation; retry startup")
+            # Commit last: an interrupted walk leaves the previous volume owner
+            # as its retry marker, even after the container has been recreated.
+            current = os.fstat(root_fd)
+            if current.st_uid == previous_uid:
+                gid = new_gid if current.st_gid == previous_gid else current.st_gid
+                os.fchown(root_fd, new_uid, gid)
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
 
 
 def validate_mount_root(name, path):
