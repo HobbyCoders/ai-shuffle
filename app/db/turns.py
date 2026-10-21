@@ -59,6 +59,19 @@ _INTEGRITY_ERRORS = (psycopg2.IntegrityError, sqlite3.IntegrityError)
 # Terminal states — settle/park are idempotent no-ops once a turn is here.
 TERMINAL_STATES = ("completed", "aborted", "parked")
 
+# Birth identity read from the original turn by remote_task, loop_guard,
+# session_orchestration, model_override and assistant_limits. A compatible
+# wake replaces attempt input, not who launched the work or what it owes.
+# Keep this explicit: merging the entire old payload would replay attachments,
+# question answers, task_ids and other per-attempt state. Original values win
+# even if a wake supplies conflicting identity keys.
+_PARKED_IDENTITY_PAYLOAD_KEYS = (
+    "task_report_device", "task_report", "task_start_fingerprint", "task_checkout_mode",
+    "orchestration_remote_origin", "loop_guard_origin",
+    "orchestration_root", "orchestration_depth", "orchestration_sender",
+    "orchestration_fingerprint", "orchestration_report_device", "model_override",
+)
+
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Normalize a fetched turn row: decode JSONB columns to Python objects."""
@@ -773,7 +786,11 @@ def start_turn(
                     # Persist the new prompt before retiring that row so a crash
                     # can requeue the SAME turn without losing the user's send.
                     payload = dict(queued.get("payload") or {})
-                    reply_to = (previous.get("payload") or {}).get("agent_message_reply_to")
+                    original_payload = previous.get("payload") or {}
+                    for key in _PARKED_IDENTITY_PAYLOAD_KEYS:
+                        if key in original_payload:
+                            payload[key] = original_payload[key]
+                    reply_to = original_payload.get("agent_message_reply_to")
                     if reply_to:
                         payload.setdefault("agent_message_reply_to", reply_to)
                     payload["continued_turn"] = True

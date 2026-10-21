@@ -225,8 +225,12 @@ def turn_origin(turn: Optional[Dict[str, Any]]) -> Optional[str]:
         if not turn:
             return None
         source = turn.get("source")
-        if source == WORKER_SOURCE:
-            return (turn.get("payload") or {}).get(ORIGIN_KEY) or None
+        payload = turn.get("payload") or {}
+        if (source == WORKER_SOURCE
+                or (source in RELAY_SOURCES and payload.get("continued_turn") and ORIGIN_KEY in payload)):
+            # A parked worker's wake runs in the same row with source=unpark;
+            # there is no earlier parent_turn_id to follow for its birth origin.
+            return payload.get(ORIGIN_KEY) or None
         if source not in RELAY_SOURCES:
             return source or None
         parent_id = turn.get("parent_turn_id")
