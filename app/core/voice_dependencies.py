@@ -61,6 +61,8 @@ def install(root):
             from fluid.tools.child_env import scrub_child_env
             env = scrub_child_env()
         except ImportError:
+            # Before Fluid is installed, this is the standalone build/installer
+            # environment, not an agent tool's environment with injected secrets.
             env = dict(os.environ)
         result = subprocess.run([
             sys.executable, "-m", "pip", "install", "--only-binary=:all:",

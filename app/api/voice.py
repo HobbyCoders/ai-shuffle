@@ -421,18 +421,25 @@ def _resolve_provider_row(
 
     Precedence: explicit request value > the pinned ``voice_provider_id``
     setting > the single eligible row when exactly one exists. ``api_user`` is
-    the caller (``None`` for the owner); it only affects the fal.ai row.
+    the caller (``None`` for the owner and paired devices); it controls fal.ai
+    credentials and excludes personal ChatGPT subscriptions for API users.
     """
+    chatgpt_login_required = (
+        "A connected ChatGPT subscription login is required for this voice engine. "
+        "Connect one in Settings > Providers. There is no API-key fallback."
+    )
     requested = (requested_id or "").strip()
     if requested:
         row = _eligible_provider_row(requested, api_user)
         if row is None or not provider_matches_model(row, model):
+            if model == CODEX_MODEL:
+                raise HTTPException(400, chatgpt_login_required)
             raise HTTPException(400, "Choose an enabled API-key provider for this voice engine. Subscription voice access is not verified; an API key is required.")
         return row
 
     pinned = (settings_provider_id or "").strip()
     if pinned:
-        row = _eligible_provider_row(pinned)
+        row = _eligible_provider_row(pinned, api_user)
         if row is not None and provider_matches_model(row, model):
             return row
         # A stale/retired preference must not require a hidden selector to repair.
@@ -440,6 +447,8 @@ def _resolve_provider_row(
 
     eligible = [p for p in list_eligible_voice_providers(api_user) if provider_matches_model(p, model)]
     if not eligible:
+        if model == CODEX_MODEL:
+            raise HTTPException(400, chatgpt_login_required)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -448,7 +457,7 @@ def _resolve_provider_row(
             ),
         )
     eligible.sort(key=lambda p: (p["name"].casefold(), p["id"]))
-    row = _eligible_provider_row(eligible[0]["id"])
+    row = _eligible_provider_row(eligible[0]["id"], api_user)
     if row is None:  # pragma: no cover — the row was eligible one statement ago
         raise HTTPException(
             status_code=400,
