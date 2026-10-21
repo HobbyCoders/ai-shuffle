@@ -106,21 +106,29 @@ def _account(provider_id):
     return row, provider_kind(row)
 
 
-def load(provider_id):
+def _load_with_status(provider_id):
     _, kind = _account(provider_id)
+    defaults = NativeGenerationSettings(image=_IMAGE_DEFAULTS.get(kind), video=_VIDEO_DEFAULT if kind == "grok" else None)
     raw = database.get_system_setting(f"native_generation:{provider_id}")
-    if raw is not None:
-        return validate_generation(kind, NativeGenerationSettings.model_validate_json(raw))
-    image = _IMAGE_DEFAULTS.get(kind)
-    # Read compatibility with the unshipped family-level native_images keys.
-    # Reading never copies credentials, writes settings or changes another account.
-    legacy = database.get_system_setting(f"native_images_{kind}") if image else None
-    if legacy:
-        old = NativeImageSettings.model_validate_json(legacy)
-        if kind == "grok" and old.quality == "default":
-            old.quality = None
-        image = validate(kind, old).model_dump()
-    return NativeGenerationSettings(image=image, video=_VIDEO_DEFAULT if kind == "grok" else None)
+    try:
+        if raw is not None:
+            return validate_generation(kind, NativeGenerationSettings.model_validate_json(raw)), False
+        # Read compatibility only; never rewrite an account or echo stored values.
+        legacy = database.get_system_setting(f"native_images_{kind}") if defaults.image else None
+        if legacy is not None:
+            old = NativeImageSettings.model_validate_json(legacy)
+            if kind == "grok" and old.quality == "default":
+                old.quality = None
+            defaults.image = validate(kind, old)
+        return defaults, False
+    except (ValueError, TypeError):
+        # One stale account must not break listing or tools on other accounts.
+        # Never turn an unverified provider/model into an available capability.
+        return defaults, True
+
+
+def load(provider_id):
+    return _load_with_status(provider_id)[0]
 
 
 def save(provider_id, value):
@@ -132,8 +140,12 @@ def save(provider_id, value):
 def account_view(provider_id):
     row, kind = _account(provider_id)
     # Return an allowlisted projection, never the provider row or token metadata.
-    return {"provider_id": provider_id, "name": row.get("name", ""), "provider_kind": kind,
-            "settings": load(provider_id).model_dump(), "capabilities": capabilities(kind)}
+    value, stale = _load_with_status(provider_id)
+    result = {"provider_id": provider_id, "name": row.get("name", ""), "provider_kind": kind,
+              "settings": value.model_dump(), "capabilities": capabilities(kind), "stale": stale}
+    if stale:
+        result["reason"] = "Stored Native generation settings are invalid or no longer verified; using verified defaults."
+    return result
 
 
 def list_accounts():

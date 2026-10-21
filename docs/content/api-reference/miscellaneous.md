@@ -625,6 +625,10 @@ No settings UI is implemented by these endpoints.
 - Authenticated `GET /api/v1/settings/native-generation` returns
   `{"accounts": [{"provider_id": "...", "name": "...", "provider_kind": "grok", "settings": {"image": {...}, "video": {...}}, "capabilities": {...}}]}`.
 - `GET /api/v1/settings/native-generation/{provider_id}` returns one account.
+- Each account includes `stale: false`. Invalid or no-longer-verified stored
+  settings instead return verified defaults (or `null` for unavailable groups),
+  `stale: true`, and a sanitized `reason`. Reads/tools never rewrite the stored
+  row, and one stale account does not fail the list.
 - Owner-only `PUT` to that account path replaces both groups. Each group may be
   `null` (disabled); unsupported options, extra fields or unknown accounts return
   `422`. Image fields are `model`, `size`, `quality` (nullable) and `format`.
@@ -645,14 +649,23 @@ with unavailable groups and locked options, not inferred subscription support.
 | SuperGrok image | `grok-imagine-image`, square `1k`, `jpeg`; quality hidden |
 | SuperGrok video | `grok-imagine-video-1.5-lite`, 1 s, `480p`, `16:9`, `generate_audio: false` |
 
-`GenerateNativeImage` reads its session account's Image group. ChatGPT's default
-request is unchanged. SuperGrok sends one images-endpoint request (`n=1`), without
+`GenerateNativeImage` is registered only when the bound account's Image
+capability is available. OpenAI/xAI API-key and no-account/environment-fallback
+sessions do not receive it until verified; direct calls without an account are
+refused without a request. It reads the account's Image group, falling back to
+verified defaults for stale stored settings. ChatGPT's default request is unchanged. SuperGrok sends one images-endpoint request (`n=1`), without
 OpenAI-only fields, and detects JPEG/PNG from returned bytes. Its `2.0` model,
 `2k`, and PNG request format are locked, not claimed as supported.
 
 `GenerateNativeVideo` is exposed only to SuperGrok subscription sessions. It
 submits once, polls asynchronously for at most 180 seconds, and saves a
-session-owned MP4. Timeout/cancellation never resubmits a possibly billed job.
+session-owned MP4. Its `/api/v1/artifacts/{hash}/video.mp4?session_id=...` URL
+is recognizable as video, uses inline Content-Disposition, and supports browser
+byte-range requests with the existing artifact/session authorization. Reported
+cost remains in the structured tool result. Timeout/cancellation never resubmits
+a possibly billed job; do not call again without the user's go-ahead. Images and
+video share one auth-refresh budget per operation: a definite 401 may refresh
+once and retry only the rejected request (including a poll), never an accepted job.
 Only text-to-video is offered; image-to-video and editing are unprobed.
 Documented 2–15 s durations, 720p/1080p, other aspect ratios and audio are locked
 **not yet verified**. The tool surfaces `cost_in_usd_ticks` and

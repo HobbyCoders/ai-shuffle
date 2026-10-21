@@ -223,10 +223,12 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False, provider
         from app.core.provider import supergrok_images
         from app.core.native_generation_settings import NativeImageSettings, validate
         provider_id = provider_id_supplier()
+        if not provider_id:
+            return ToolOutcome(text="Native images without a bound account are not yet verified; no request was made. No other provider was used.", is_error=True)
         try:
             kind = await supergrok_images.subscription_kind(provider_id)
-            options = await load_native_settings(provider_id) if provider_id else None
-            if provider_id and options is None:
+            options = await load_native_settings(provider_id)
+            if options is None:
                 return ToolOutcome(text="Native generation images are disabled or not yet verified for this account. No other provider was used.", is_error=True)
             if options:
                 overrides = {"model" if k == "image_model" else k: v for k, v in args.items()
@@ -234,7 +236,7 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False, provider
                 options = validate(kind, NativeImageSettings(**(options.model_dump() | overrides)))
         except ValueError:
             return ToolOutcome(text="Invalid Native generation image settings or unavailable account. No other provider was used.", is_error=True)
-        tool = {"type": "image_generation", "output_format": options.format if options else "png", "partial_images": 0}
+        tool = {"type": "image_generation", "output_format": options.format, "partial_images": 0}
         # auto/default are provider defaults: omit to preserve the proven ChatGPT request.
         if options and kind == "chatgpt":
             if options.model != "default":
@@ -243,16 +245,6 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False, provider
                 tool["size"] = options.size
             if options.quality != "auto":
                 tool["quality"] = options.quality
-        for key in (() if options else ("image_model", "size", "quality", "format")):
-            if key not in args:
-                continue
-            value = args[key]
-            definition = SPEC.input_schema["properties"][key]
-            if (not isinstance(value, str) or not value.strip() or len(value) > 128
-                    or ("enum" in definition and value not in definition["enum"])
-                    or ("pattern" in definition and re.fullmatch(definition["pattern"], value) is None)):
-                return ToolOutcome(text=f"Invalid native image {key}.", is_error=True)
-            tool[{"image_model": "model", "format": "output_format"}.get(key, key)] = value
         model = engine.model
         turn_id = getattr(engine, "_active_turn_id", None)
         request = ProviderRequest(model=model, messages=[Message("user", [Text(prompt)])],

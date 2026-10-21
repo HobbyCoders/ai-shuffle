@@ -13,6 +13,8 @@ from app.core.provider import native_video, supergrok_images
 
 
 def accounts(monkeypatch):
+    from app.core import xai_token_refresh
+    monkeypatch.setattr(xai_token_refresh, "refresh_on_401_once", AsyncMock(return_value=False))
     from app.db import database
     rows = {"grok-a": {"id": "grok-a", "name": "Plan A", "provider_type": "grok"},
             "grok-b": {"id": "grok-b", "provider_type": "grok"},
@@ -82,7 +84,8 @@ async def test_video_handler_exact_submission_poll_download_cost_and_artifact(mo
     assert not result.is_error, result.text
     output = json.loads(result.text)
     assert output["reported_cost_usd"] == "0.02" and output["cost_in_usd_ticks"] == 200000000
-    assert output["video_url"] == "/api/v1/artifacts/digest?session_id=session"
+    assert result.result_fields["reported_cost_usd"] == "0.02"
+    assert output["video_url"] == "/api/v1/artifacts/digest/video.mp4?session_id=session"
     assert saved == [(mp4, dict(mime="video/mp4", filename="native-video.mp4", created_by_session="session"))]
     assert json.loads(requests[0].content) == {"model": "grok-imagine-video-1.5-lite", "prompt": "circle", "duration": 1, "resolution": "480p", "aspect_ratio": "16:9", "generate_audio": False}
     assert str(requests[0].url) == "https://api.x.ai/v1/videos/generations"
@@ -107,6 +110,7 @@ async def test_video_bounded_timeout_does_not_resubmit(monkeypatch):
     monkeypatch.setattr(native_video, "MAX_POLLS", 2)
     result = await native_video.generate("grok-a", "circle", load("grok-a").video)
     assert "timed out" in result["error"] and "not resubmitted" in result["error"]
+    assert "Do not call again without the user's go-ahead." in result["error"]
     assert [r.method for r in requests] == ["POST", "GET", "GET"]
 
 

@@ -39,7 +39,7 @@ def media_transport():
 
 
 def _failure(message, observed):
-    return {"success": False, "error": message + " No other provider was used; the job was not resubmitted.", **observed}
+    return {"success": False, "error": message + " No other provider was used; the job was not resubmitted. Do not call again without the user's go-ahead.", **observed}
 
 
 def _observe(payload, observed):
@@ -82,20 +82,19 @@ async def generate(provider_id, prompt, options, *, usage=None):
     validate_generation("grok", NativeGenerationSettings(image=None, video=options))
     try:
         async with asyncio.timeout(MAX_WAIT):
-            token = await supergrok_images.resolve_credential(provider_id)
-            headers = {"Authorization": "Bearer " + token, "X-XAI-Token-Auth": "xai-grok-cli"}
+            auth = supergrok_images.SubscriptionRequests(provider_id)
             async with http_client() as client:
-                response = await client.post(ENDPOINT, headers=headers, json={"prompt": prompt, **options.model_dump()})
+                response = await auth.request(client, "POST", ENDPOINT, json={"prompt": prompt, **options.model_dump()})
                 if response.status_code != 200:
                     return _failure(_provider_error(response.status_code), observed)
                 payload = response.json()
                 _observe(payload, observed)
                 job = payload.get("request_id")
-                if not isinstance(job, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", job) or token in job:
+                if not isinstance(job, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", job) or auth.token in job:
                     return _failure("SuperGrok returned no valid video job identifier.", observed)
                 for _ in range(MAX_POLLS):
                     await asyncio.sleep(POLL_INTERVAL)
-                    response = await client.get("https://api.x.ai/v1/videos/" + job, headers=headers)
+                    response = await auth.request(client, "GET", "https://api.x.ai/v1/videos/" + job)
                     if response.status_code not in (200, 202):
                         return _failure(_provider_error(response.status_code), observed)
                     payload = response.json()
@@ -150,7 +149,7 @@ def make_handler(engine_supplier, session_supplier, *, provider_id_supplier):
                     {"video_cost_in_usd_ticks": observed["cost_in_usd_ticks"], "reported_video_cost_usd": observed["reported_cost_usd"]},
                     model=options.model, turn_id=getattr(engine, "_active_turn_id", None), source="native_video_generation")
         if not result["success"]:
-            return ToolOutcome(text=json.dumps(result), is_error=True)
+            return ToolOutcome(text=json.dumps(result), result_fields=result, is_error=True)
         data = result.pop("data")
         task = asyncio.create_task(asyncio.to_thread(store_bytes, data, mime="video/mp4", filename="native-video.mp4", created_by_session=session_id))
         try:
@@ -160,8 +159,8 @@ def make_handler(engine_supplier, session_supplier, *, provider_id_supplier):
             raise
         except Exception:
             return ToolOutcome(text=json.dumps(_failure("The generated video could not be safely saved.", observed)), is_error=True)
-        result.update(video_url=f"/api/v1/artifacts/{artifact['hash']}?" + urlencode({"session_id": session_id}),
+        result.update(video_url=f"/api/v1/artifacts/{artifact['hash']}/video.mp4?" + urlencode({"session_id": session_id}),
                       mime_type="video/mp4", model=options.model, source="supergrok_subscription",
                       billing_note="Provider-reported USD cost; not a verified invoice or subscription quota debit. Not free or unlimited.")
-        return ToolOutcome(text=json.dumps(result))
+        return ToolOutcome(text=json.dumps(result), result_fields=result)
     return handler

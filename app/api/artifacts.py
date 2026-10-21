@@ -196,3 +196,44 @@ async def download_artifact(hash: str, request: Request, session_id: Optional[st
             )
 
     raise _not_found()
+
+
+@router.get("/{hash}/video.mp4")
+async def play_video_artifact(hash: str, request: Request, session_id: Optional[str] = None,
+                              token: str = Depends(_require_auth_or_signed)):
+    """Inline MP4 alias: retain artifact/session authorization and byte-range serving.
+
+    The .mp4 suffix lets existing media classifiers recognize this URL. Local
+    and network-fetched files use FileResponse's Range implementation. Legacy
+    holder redirects keep their scoped signature and this playable route.
+    """
+    response = await download_artifact(hash, request, session_id, token)
+    if isinstance(response, RedirectResponse):
+        row = await asyncio.to_thread(get_artifact, hash)
+        if not row or row.get("mime") != "video/mp4":
+            raise _not_found()
+        target = urlsplit(response.headers["location"])
+        response.headers["location"] = target._replace(path=target.path + "/video.mp4").geturl()
+        return response
+    if response.media_type != "video/mp4":
+        raise _not_found()
+    response.headers["Content-Disposition"] = 'inline; filename="native-video.mp4"'
+    if not isinstance(response, FileResponse):
+        # The legacy holder proxy returns verified in-memory bytes rather than a
+        # file. Support the single byte ranges used by browser video players;
+        # unsupported/multipart ranges may be ignored with a full 200 response.
+        response.headers["Accept-Ranges"] = "bytes"
+        match = re.fullmatch(r"bytes=([0-9]{0,20})-([0-9]{0,20})", request.headers.get("range", ""))
+        if match and any(match.groups()) and not request.headers.get("if-range"):
+            size = len(response.body)
+            first, last = match.groups()
+            start = int(first) if first else max(0, size - int(last))
+            end = min(int(last), size - 1) if first and last else size - 1
+            headers = dict(response.headers)
+            headers.pop("content-length", None)
+            if start > end or start >= size:
+                headers["Content-Range"] = f"bytes */{size}"
+                return Response(b"", status_code=416, media_type="video/mp4", headers=headers)
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+            return Response(response.body[start:end + 1], status_code=206, media_type="video/mp4", headers=headers)
+    return response

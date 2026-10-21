@@ -1,4 +1,4 @@
-"""SuperGrok images endpoint. Server-side subscription credentials only; one attempt."""
+"""SuperGrok images endpoint. Bound subscription credentials; one auth-refresh retry."""
 import asyncio
 
 import httpx
@@ -33,6 +33,34 @@ async def resolve_credential(provider_id):
     return await _load_grok_access_token(provider_id)
 
 
+class SubscriptionRequests:
+    """One auth refresh budget across a media submission and all of its polls.
+
+    Only a definite HTTP 401 may repeat the rejected request. Transport errors,
+    accepted jobs and other status codes are never resubmitted.
+    """
+    def __init__(self, provider_id):
+        self.provider_id = provider_id
+        self.token = None
+        self.refresh_attempted = False
+
+    async def request(self, client, method, url, **kwargs):
+        from app.core import xai_token_refresh
+
+        if self.token is None:
+            self.token = await resolve_credential(self.provider_id)
+        for attempt in range(2):
+            headers = {"Authorization": "Bearer " + self.token, "X-XAI-Token-Auth": "xai-grok-cli"}
+            response = await client.request(method, url, headers=headers, **kwargs)
+            if response.status_code != 401 or self.refresh_attempted:
+                return response
+            self.refresh_attempted = True
+            if not await xai_token_refresh.refresh_on_401_once(self.provider_id, stale_access_token=self.token):
+                return response
+            self.token = await resolve_credential(self.provider_id)
+        return response
+
+
 def http_client():
     return httpx.AsyncClient(timeout=120, follow_redirects=False)
 
@@ -55,11 +83,10 @@ async def generate(provider_id, prompt, options):
     try:
         # The established resolver reads/decrypts the stored subscription login.
         # Never consult auth_token, API-key environment variables, or fal.ai.
-        token = await resolve_credential(provider_id)
+        auth = SubscriptionRequests(provider_id)
         client = http_client()
         try:
-            response = await client.post(ENDPOINT,
-                headers={"Authorization": "Bearer " + token, "X-XAI-Token-Auth": "xai-grok-cli"},
+            response = await auth.request(client, "POST", ENDPOINT,
                 json={"model": options.model, "prompt": prompt, "n": 1,
                       "resolution": options.size, "aspect_ratio": "1:1", "response_format": "b64_json"})
         finally:

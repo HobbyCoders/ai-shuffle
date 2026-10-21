@@ -76,6 +76,8 @@ async def test_sanitized_errors_no_retries(monkeypatch, caplog, status, label):
     from app.core.provider import fluid_credentials
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
     monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
+    from app.core import xai_token_refresh
+    monkeypatch.setattr(xai_token_refresh, "refresh_on_401_once", AsyncMock(return_value=False))
     calls = []
     def boundary(request):
         calls.append(request)

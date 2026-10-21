@@ -1,8 +1,10 @@
 # Native generation: images and video
 
-`GenerateNativeImage` is exposed in sessions using the Responses transport. It
-uses the session's bound provider row and credential, not chat-model name
-sniffing. ChatGPT and other Responses clients use a separate request containing
+`GenerateNativeImage` is exposed only on the Responses transport with a bound
+account whose Image capability is available. OpenAI/xAI API-key and no-account
+(including environment-key fallback) sessions lose the tool until verified.
+Unbound direct calls are refused without sending a request. It uses the bound
+provider row and credential, not chat-model name sniffing. ChatGPT uses a separate request containing
 the native `image_generation` tool and matching `tool_choice`. SuperGrok
 subscription sessions instead use the tested xAI `/v1/images/generations`
 endpoint with `grok-imagine-image`, `n=1`, square `1k` and base64 output. No
@@ -25,7 +27,11 @@ provider-selected model/auto size/auto quality/PNG and SuperGrok's
 OpenAI/xAI API-key accounts appear with locked, not-yet-verified options rather
 than inheriting a subscription's support. Native generation is account-scoped
 and does not change the AI Shuffle direct tools or their existing ChatGPT choice.
-See the mirrored settings API reference for the GET/PUT schema. OpenAI's
+Invalid/stale account or legacy settings fall back to verified defaults (or
+null for an unavailable group), with `stale: true` and a sanitized reason on
+GET. Tools use the same fallback without rewriting the stored row; one stale
+account cannot break the list. The unscoped direct `supergrok-subscription`
+model lane is not included. See the mirrored settings API reference for the GET/PUT schema. OpenAI's
 [image-tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
 documents the native tool, forced tool choice, final base64 output, and examples
 using GPT-6 Astra with GPT Image 2.5 Sunburst. These examples do not establish
@@ -46,7 +52,10 @@ and its newly created files removed; shared content-addressed artifacts are
 never deleted as cancellation cleanup. Incomplete preview images are not saved
 as final output. Ambiguous transport/server failures do not automatically replay
 a native image request, since it may already have produced a billed image. The
-existing explicit 401 credential-refresh retry remains available.
+explicit 401 credential-refresh path shares one refresh budget across a media
+operation. Only a definite 401 retries its rejected request once with the new
+credential, including polls; accepted jobs and ambiguous failures are never
+resubmitted.
 
 Provider-observed usage is recorded once for the auxiliary request, including
 observations received before cancellation. Image charges are not estimated from
@@ -62,7 +71,13 @@ uses the same server-side credential resolver. It sends one
 5-second intervals with a 180-second total deadline. Timeout/cancellation never
 resubmits a job that may still finish and incur charges. Successful MP4 output
 is downloaded from an allowlisted HTTPS media host without subscription headers
-or URL logging and saved as a session-owned artifact.
+or URL logging and saved as a session-owned artifact. The playable
+`/api/v1/artifacts/{hash}/video.mp4?session_id=...` alias delegates the existing
+artifact/session authorization, serves inline MP4 with byte-range support, and
+keeps signed holder redirects on the playable route. Timeout text explicitly
+requires the user's go-ahead before calling again. Provider-reported cost stays
+in the JSON result and structured result fields; inline ToolUseMessage playback
+and visible cost presentation remain pending in the separate frontend build.
 
 Only `grok-imagine-video-1.5-lite`, 1 s, 480p, 16:9, silent text-to-video is
 selectable. Documented but untested durations/resolutions/aspects/audio are
