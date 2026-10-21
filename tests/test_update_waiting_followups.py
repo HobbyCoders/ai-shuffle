@@ -58,6 +58,42 @@ def test_retained_idle_download_has_actionable_role_without_installing(setup):
     assert updates._desktop_request is None
 
 
+@pytest.mark.parametrize("mode", [None, "stop", "when_idle"])
+async def test_mixed_staged_and_retained_idle_fleet_checks_before_restart(setup, monkeypatch, mode):
+    from unittest.mock import AsyncMock
+    values, _ = setup
+    values[updates.ALL_KEY] = "true"
+    rows = [
+        {"device_id": "self", "device_name": "Local", "is_self": True,
+         "phase": "ready", "supported": True, "allow_updates": True, "staged_version": B},
+        {"device_id": "peer", "device_name": "Peer", "is_self": False,
+         "phase": "idle", "supported": True, "allow_updates": True,
+         "staged_version": B, "wait_reason": "updater_idle"},
+    ]
+    for row in rows:
+        row.update(fleet.classify(row, True))
+    plan = fleet.plan(rows)
+    assert plan["action"] == "check"
+    assert plan["ready"] is False
+    assert plan["available"] is False
+    assert "Check for updates" in plan["held"] and "Peer" in plan["held"]
+    monkeypatch.setattr(fleet, "snapshot", AsyncMock(return_value={"workers": rows, "plan": plan}))
+    act = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(fleet, "_act", act)
+    if mode:
+        with pytest.raises(fleet.UpdateNotSent, match="Check for updates.*Peer"):
+            await fleet._send("install", mode)
+        act.assert_not_awaited()
+    else:
+        result = await fleet._send("install")
+        assert result["sent"] == "check"
+        assert "Peer" in result["held"]
+        assert act.await_count == 1
+        assert act.await_args.args[:2] == (rows[1], "check")
+    assert updates._desktop_request is None
+    assert fleet.progress.load() is None
+
+
 @pytest.mark.parametrize("age,session,since_delta,expected", [
     (0, "chat", -10, "still_busy_after_stop"),
     (600, "chat", -1000, "running_work"),

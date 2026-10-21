@@ -500,6 +500,11 @@ def _not_checked(row, offers):
     return False
 
 
+def _check_first(row):
+    """A retained idle download is not an offer to download or install yet."""
+    return row.get("phase") == "idle" and bool(row.get("staged_version"))
+
+
 def classify(row, all_workers, offers=(), refusals=None):
     """A worker's part in the next update: ``{"role", "label"}``.
 
@@ -525,7 +530,7 @@ def classify(row, all_workers, offers=(), refusals=None):
     # with the RUNNING revision on this phase, so it would read as current (#1901).
     if phase == "image-required":
         return {"role": "excluded", "label": row.get("message") or "Needs a new Docker image; not included"}
-    if phase == "idle" and row.get("staged_version"):
+    if _check_first(row):
         if row.get("request_pending"):
             return {"role": "preparing", "label": "Request queued; waiting for the updater"}
         return {"role": "available", "label": "Check for updates before restarting"}
@@ -602,14 +607,17 @@ def plan(rows, operation=None):
     """What one click does next, from rows already carrying ``role`` and ``label``."""
     targets = [row for row in rows if row["role"] != "excluded"]
     preparing = any(row["role"] == "preparing" for row in targets)
-    available = any(row["role"] == "available" for row in targets)
+    check_first = [row for row in targets if row["role"] == "available" and _check_first(row)]
+    available = any(row["role"] == "available" and not _check_first(row) for row in targets)
     staged = sum(row["role"] == "staged" for row in targets)
     unknown = [row for row in targets if row["role"] == "unknown"]
     # Restart is offered only once EVERY included worker is staged, never on the first one.
-    ready = staged > 0 and not preparing and not available and not unknown
+    ready = staged > 0 and not preparing and not available and not unknown and not check_first
     waits = ", ".join(f"{row['device_name']} ({row['label']})" for row in unknown)
     held = f"Restart waits for {waits}." if staged and not preparing and not available and unknown else ""
-    return {"action": "install" if ready else "download" if available else "check",
+    if check_first:
+        held = f"Check for updates needed on {', '.join(row['device_name'] for row in check_first)}; nothing was installed"
+    return {"action": "check" if check_first else "install" if ready else "download" if available else "check",
             "ready": ready, "preparing": preparing, "available": available, "staged": staged,
             "included": len(targets), "held": held,
             "waiting": bool(operation and operation.get("phase") == "waiting")}
@@ -794,11 +802,14 @@ async def _send(action, mode=None, scope=None):
         if not current["plan"]["ready"]:
             if mode in ("stop", "when_idle"):
                 raise UpdateNotSent(current["plan"]["held"] or "Not every worker is staged yet; nothing was installed")
-            behind = [row for row in current["workers"] if row["role"] == "available"]
+            check_first = [row for row in current["workers"] if row["role"] == "available" and _check_first(row)]
+            behind = check_first or [row for row in current["workers"] if row["role"] == "available"]
             if not behind:
                 raise UpdateNotSent(current["plan"]["held"] or "Not every worker is staged yet; nothing was installed")
-            results = await asyncio.gather(*(_act(row, "download", request_id) for row in behind))
-            return {"scope": "all", "sent": "download", "held": "Not every worker is staged yet; nothing was installed",
+            action = "check" if check_first else "download"
+            results = await asyncio.gather(*(_act(row, action, request_id) for row in behind))
+            return {"scope": "all", "sent": action,
+                    "held": current["plan"]["held"] or "Not every worker is staged yet; nothing was installed",
                     "results": list(results)}
     if action == "install":
         targets = [row for row in listing["runners"] if all_workers and not row["is_self"] and row["online"]]
