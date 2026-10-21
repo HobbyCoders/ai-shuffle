@@ -167,10 +167,11 @@ jobs:
           pg_isready -h 127.0.0.1 -p 5432
 
       - name: Measure managed PostgreSQL checkpoints and crash recovery
-        # The only run of test_container_runtime.py and
-        # test_container_image_contract.py: the fast subset ignores them. Here
-        # the PostgreSQL-binary and disk-pressure tests that skip without the
-        # opt-ins below run as well.
+        # local_ci backend-linux also runs these files serially: plain cases
+        # in check and full, outside the parallel fast subset. While #350 is
+        # unresolved, local full PG cases require LOCAL_CI_CONTAINER_PG=1;
+        # LOCAL_CI_CONTAINER_PRESSURE=1 adds measurements and implies PG.
+        # This manual hosted measurement step opts into both below.
         env:
           ALLOW_REAL_PG: '1'
           TEST_POSTGRES_DSN: postgresql://shuffle_safety_test:safety-test-only@127.0.0.1:5432/shuffle_safety_test

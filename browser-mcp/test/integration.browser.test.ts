@@ -34,6 +34,7 @@ import { runBatch } from "../src/tools/batch.js";
 import { TOOL_MAP } from "../src/tools/index.js";
 import type { McpToolResult } from "../src/tools/result.js";
 import { WATCH_KEY } from "../src/dommutation.js";
+import { observationRootStatus } from "../src/tools/observation_scope.js";
 import { BrowserWorkspace } from "../src/workspace.js";
 import { runWait } from "../src/tools/wait.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -52,7 +53,21 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
   const server = createHttpServer((req, res) => {
     if (req.url?.startsWith("/review/")) {
       const url = new URL(req.url, "http://fixture.test");
+      if (url.pathname === "/review/history-stream") {
+        res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+        res.write('<!doctype html><title>Streamed history</title><p>Early prose</p><script>addEventListener("unload",()=>{});window.persisted=false;addEventListener("pageshow",e=>window.persisted=e.persisted)</script>' + " ".repeat(2048));
+        setTimeout(() => res.end('<button>Late streamed button</button><p>Stream finished</p>'), 1500);
+        return;
+      }
+      if (url.pathname === "/review/nested-parent") {
+        const child = new URL("/observation-text?text=DeepReachableMarker", `http://${req.headers.host}`).href;
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(`<p>Parent prose</p>${url.searchParams.has("tall") ? '<div style="height:2000px"></div>' : ""}<iframe src="${child}"></iframe>`);
+        return;
+      }
       const pages: Record<string, string> = {
+        "/review/history-a": '<title>History A</title><button>History A</button><p id="clock">Clock</p><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++});setInterval(()=>clock.textContent=String(Date.now()),100)</script>',
+        "/review/history-b": '<title>History B</title><button>History B</button><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++})</script>',
         "/review/single": '<title>Single</title><label>Size<select><option value="s">Small</option><option value="m">Medium</option></select></label>',
         "/review/repeated": '<title>Repeated</title><main aria-label="Repeated">' + '<button>Same</button>'.repeat(20) + '</main>',
         "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
@@ -342,6 +357,205 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    it.each([
+      ["open", false], ["open", true], ["closed", false], ["closed", true],
+    ] as const)("FOLLOWUP %s shadow slotted clipped frames (absolute: %s) stay hidden from read_text", async (mode, absolute) => {
+      const page = await load('<p>Visible prose</p><div id="host"><iframe srcdoc="<p>HiddenSlottedMarker</p>"></iframe></div>');
+      await page.evaluate(({ mode, absolute }) => {
+        if (absolute) document.querySelector("iframe")!.style.cssText = "position:absolute;top:0;left:0";
+        document.getElementById("host")!.attachShadow({ mode }).innerHTML =
+          '<div style="position:relative;overflow:hidden;height:var(--clip-height,0px)"><slot></slot></div>';
+      }, { mode, absolute });
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.getByText("HiddenSlottedMarker").waitFor({ state: "attached" });
+      expect(await observationRootStatus({ frame, primary: false })).toBe("hidden");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: 1 });
+      expect((result.content[1] as { text: string }).text).not.toContain("HiddenSlottedMarker");
+      await page.evaluate(() => {
+        document.getElementById("host")!.style.setProperty("--clip-height", "200px");
+      });
+      expect(await observationRootStatus({ frame, primary: false })).toBe("included");
+      expect((await runReadText(session)).content[1]).toMatchObject({ text: expect.stringContaining("HiddenSlottedMarker") });
+    });
+    it.each(["visible", "inside", "outside"])("FOLLOWUP closed-shadow clipping %s a scrollport preserves only reachable text", async where => {
+      const page = await load('<p>Main prose</p><div id="outer"><div style="height:100px;overflow:auto"><div style="height:800px"></div><div id="host"><iframe srcdoc="<p>ScrollSlotMarker</p>"></iframe></div></div></div>');
+      await page.evaluate(where => {
+        document.getElementById("host")!.attachShadow({ mode: "closed" }).innerHTML =
+          `<div style="overflow:hidden;height:${where === "inside" ? 0 : 200}px"><slot></slot></div>`;
+        if (where === "outside") document.getElementById("outer")!.attachShadow({ mode: "closed" }).innerHTML =
+          '<div style="overflow:hidden;height:0"><slot></slot></div>';
+      }, where);
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.getByText("ScrollSlotMarker").waitFor({ state: "attached" });
+      expect(await observationRootStatus({ frame, primary: false })).toBe(where === "visible" ? "included" : "hidden");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: where === "visible" ? 0 : 1 });
+      const text = (result.content[1] as { text: string }).text;
+      if (where === "visible") expect(text).toContain("ScrollSlotMarker");
+      else expect(text).not.toContain("ScrollSlotMarker");
+    });
+    it("FOLLOWUP back and forward restore bfcache within the readiness budget and invalidate refs", async () => {
+      const page = await session.ensurePage();
+      page.setDefaultNavigationTimeout(3000);
+      try {
+        await runNavigate(session, { url: httpUrl + "review/history-a" });
+        const beforeA = session.currentSnapshotId;
+        await runNavigate(session, { url: httpUrl + "review/history-b" });
+        const beforeB = session.currentSnapshotId;
+        expect(beforeB).toBeGreaterThan(beforeA);
+        const snapshot = session.snapshot.bind(session);
+        const registryBeforeSnapshot: number[] = [];
+        const snapshotSpy = vi.spyOn(session, "snapshot").mockImplementation(async (...args) => {
+          registryBeforeSnapshot.push(session.refs.knownCount());
+          return snapshot(...args);
+        });
+        const started = performance.now();
+        const back = body(await runNavigate(session, { url: "back" }));
+        snapshotSpy.mockRestore();
+        expect(registryBeforeSnapshot).toEqual([0]);
+        expect(back.url).toBe(httpUrl + "review/history-a");
+        const backMs = Math.round(performance.now() - started);
+        console.info("HISTORY_RESTORE", JSON.stringify({ direction: "back", ms: backMs, timings: back.timings }));
+        expect(backMs).toBeLessThan(2500);
+        expect(await page.evaluate(() => (window as unknown as { restores: number }).restores)).toBe(1);
+        expect(back.snapshot_stale).toBe(true);
+        // Playwright may reuse token strings after a new snapshot (including
+        // the same cached elements). The old registry must be cleared BEFORE
+        // publishing the restored snapshot, whose refs are now usable.
+        expect(back.snapshot_id).toBeGreaterThan(beforeB);
+        // Restoring a frozen ticker does not by itself prove a recent baseline.
+        await page.waitForTimeout(300);
+        const restoredA = await ref("History A");
+        const restoredAction = body(await runAct(session, { kind: "click", ref: restoredA }));
+        console.info("HISTORY_RESTORED_ACTION", JSON.stringify(restoredAction));
+        expect(restoredAction).toMatchObject({ ok: true, snapshot_stale: false });
+        const beforeForward = session.currentSnapshotId;
+        const forwardSpy = vi.spyOn(session, "snapshot").mockImplementation(async (...args) => {
+          expect(session.refs.knownCount()).toBe(0);
+          return snapshot(...args);
+        });
+        const forwardStarted = performance.now();
+        const forward = body(await runNavigate(session, { url: "forward" }));
+        forwardSpy.mockRestore();
+        const forwardMs = Math.round(performance.now() - forwardStarted);
+        console.info("HISTORY_RESTORE", JSON.stringify({ direction: "forward", ms: forwardMs, timings: forward.timings }));
+        expect(forwardMs).toBeLessThan(2500);
+        expect(await page.evaluate(() => (window as unknown as { restores: number }).restores)).toBe(1);
+        expect(forward).toMatchObject({ url: httpUrl + "review/history-b", snapshot_stale: true });
+        expect(forward.snapshot_id).toBeGreaterThan(beforeForward);
+        expect(body(await runAct(session, { kind: "click", ref: await ref("History B") })).snapshot_stale).toBe(false);
+      } finally {
+        vi.restoreAllMocks();
+        page.setDefaultNavigationTimeout(30000);
+      }
+    });
+    it("FOLLOWUP non-cached history waits for a streamed document before taking refs", async () => {
+      await runNavigate(session, { url: httpUrl + "review/history-stream" });
+      await runNavigate(session, { url: httpUrl + "review/history-b" });
+      const started = performance.now();
+      const result = await runNavigate(session, { url: "back" });
+      const page = await session.ensurePage();
+      console.info("HISTORY_STREAM", JSON.stringify({ ms: Math.round(performance.now() - started), ready: await page.evaluate(() => document.readyState) }));
+      expect(await page.evaluate(() => (window as unknown as { persisted: boolean }).persisted)).toBe(false);
+      expect(await page.evaluate(() => document.readyState)).not.toBe("loading");
+      expect((result.content[1] as { text: string }).text).toContain("Late streamed button");
+      expect(body(result).ref_count).toBeGreaterThan(0);
+    });
+    it.each([false, true])("FOLLOWUP history readiness honors the configured navigation timeout (context: %s)", async contextDefault => {
+      const originalTab = session.currentTabId()!;
+      const tab = await session.createTab(); // no page-level override to mask the context default
+      const page = await session.ensurePage();
+      await runNavigate(session, { url: httpUrl + "review/history-stream" });
+      await runNavigate(session, { url: httpUrl + "review/history-b" });
+      const settings = contextDefault ? page.context() : page;
+      settings.setDefaultNavigationTimeout(150);
+      const started = performance.now();
+      try {
+        await expect(runNavigate(session, { url: "back" })).rejects.toThrow(/Timeout/);
+        expect(performance.now() - started).toBeLessThan(1000);
+      } finally {
+        settings.setDefaultNavigationTimeout(30000);
+        await session.closeTab(tab);
+        await session.selectTab(originalTab);
+      }
+    });
+    it.each([
+      [false, false], [true, false], [false, true], [true, true],
+    ])("FOLLOWUP nested offscreen frames remain readable (cross-origin: %s, long top: %s)", async (cross, longTop) => {
+      const src = new URL("review/nested-parent" + (longTop ? "" : "?tall=1"), httpUrl);
+      if (cross) src.hostname = "localhost";
+      const page = await load('<p>Top prose</p>' + (longTop ? '<div style="height:6000px"></div>' : "") + `<iframe style="height:150px" src="${src}"></iframe>`);
+      const parent = page.mainFrame().childFrames()[0];
+      await parent.frameLocator("iframe").getByText("DeepReachableMarker").waitFor({ state: "attached" });
+      const child = parent.childFrames()[0];
+      expect(await observationRootStatus({ frame: child, primary: false })).toBe("included");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: 0, frames_skipped: 0 });
+      expect((result.content[1] as { text: string }).text).toContain("DeepReachableMarker");
+    });
+    it("FOLLOWUP frame sampling ignores a once-sampled slow top clock", async () => {
+      const rows: { kind: string; dispatch: number; settle: number }[] = [];
+      for (const slowTop of [false, true]) {
+        const page = await load('<button>Sample action</button><p id="slow">Slow clock</p><iframe srcdoc="<p id=c>Frame clock</p>"></iframe>');
+        const target = await ref("Sample action");
+        const frame = page.mainFrame().childFrames()[0];
+        for (let i = 0; i < 3; i++) {
+          await frame.evaluate(() => {
+            const w = window as unknown as { ticker: number };
+            clearInterval(w.ticker);
+            // A fast frame proves its baseline within the initial 100ms sample,
+            // separating it from the old 300ms slow-top-clock regression.
+            w.ticker = setInterval(() => { document.getElementById("c")!.textContent = String(Date.now()); }, 20);
+          });
+          if (slowTop) await page.evaluate(() => {
+            const w = window as unknown as { slowTimer: number };
+            clearInterval(w.slowTimer);
+            setTimeout(() => {
+              document.getElementById("slow")!.textContent = String(Date.now());
+              w.slowTimer = setInterval(() => { document.getElementById("slow")!.textContent = String(Date.now()); }, 1000);
+            }, 20);
+          });
+          const result = body(await runAct(session, { kind: "click", ref: target }));
+          rows.push({ kind: slowTop ? "frame+slow-top" : "frame", dispatch: result.timings.dispatch_ms, settle: result.timings.settle_ms });
+          expect(result).toMatchObject({ settle_capped: false, snapshot_stale: false });
+        }
+        await page.goto("about:blank");
+      }
+      console.info("FOLLOWUP_TIMINGS", JSON.stringify(rows));
+      const median = (values: number[]) => values.sort((a, b) => a - b)[1];
+      const metric = (kind: string, key: "dispatch" | "settle") => median(rows.filter(row => row.kind === kind).map(row => row[key]));
+      expect(metric("frame+slow-top", "dispatch")).toBeLessThan(metric("frame", "dispatch") + 100);
+      expect(metric("frame+slow-top", "settle")).toBeLessThan(metric("frame", "settle") + 100);
+    });
+    it("FOLLOWUP empty frame text scans are cached and invalidated by idle light/shadow mutations", async () => {
+      const page = await load('<button>Cache action</button><iframe srcdoc="<div id=host></div>"></iframe>');
+      const target = await ref("Cache action");
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", '<div> </div>'.repeat(5000));
+        document.getElementById("host")!.attachShadow({ mode: "open" }).innerHTML = '<span> </span>';
+        const original = document.createTreeWalker.bind(document);
+        const w = window as unknown as { scans: number };
+        w.scans = 0;
+        document.createTreeWalker = (...args) => { w.scans++; return original(...args); };
+      });
+      await runAct(session, { kind: "click", ref: target });
+      const scans = () => frame.evaluate(() => (window as unknown as { scans: number }).scans);
+      const first = await scans();
+      expect(first).toBeGreaterThan(0);
+      await runAct(session, { kind: "click", ref: target });
+      expect(await scans()).toBe(first);
+      for (const shadow of [false, true]) {
+        const before = await scans();
+        await frame.evaluate(shadow => {
+          const root = shadow ? document.getElementById("host")!.shadowRoot! : document.body;
+          const p = document.createElement("p"); p.textContent = "New frame prose"; root.append(p);
+        }, shadow);
+        await runAct(session, { kind: "click", ref: target });
+        expect(await scans()).toBeGreaterThan(before);
+      }
+    });
     it("counts only emitted navigate refs after repeated children collapse", async () => {
       const result = await runNavigate(session, { url: httpUrl + "review/repeated" });
       const tree = (result.content[1] as { text: string }).text;
@@ -565,7 +779,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.waitForTimeout(250);
       const rows = [];
       for (let i = 0; i < 3; i++) {
-        await page.waitForTimeout(1000); // frame documents have no idle observer
+        await page.waitForTimeout(1000); // no frame ticker history is collected while idle
         const target = await ref("Spaced action");
         const start = Date.now();
         const result = body(await runAct(session, { kind: "click", ref: target }));

@@ -48,6 +48,78 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
 
 `auth_mode` cannot be set through the API. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again. `account_email` and `account_plan` are the email and plan id (such as `plus` or `pro`) read from a stored ChatGPT sign-in, for display; each is `null` when the sign-in does not carry it, and the token itself is never returned.
 
+### Per-model local sampling and reasoning (backend/API)
+
+For a `custom` provider with `api_dialect: "openai"`, model entries may include
+`local_settings`. Set these only for a server and chat template whose documented
+API supports them; server capabilities are not guessed from the URL or model name.
+The settings apply to new connections and model hot-swaps; reconnect an already
+connected session after editing its provider configuration.
+
+```json
+{
+  "id": "my-local-model",
+  "label": "Local model",
+  "local_settings": {
+    "server": "llama_cpp",
+    "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "repeat_penalty": 1.1},
+    "reasoning": true
+  }
+}
+```
+
+Use these entries in `models` on POST or PATCH. PATCH replaces the whole model
+list: preserve other entries and their metadata. GET returns the stored settings.
+Omit `local_settings`, set it to `null`, or replace the entry without it to clear
+all overrides. New or changed local settings with unknown keys or invalid values
+return `400`, as do local settings on another provider type/dialect. PATCH preserves
+unchanged settings for the same model ID, even if a newer worker synced values this
+worker does not recognize; renaming, toggling, and editing other models remain
+possible. New IDs and changed settings are always validated. Changing the provider
+type or dialect revalidates all remaining settings; clear incompatible settings first.
+
+- `server` (required): `llama_cpp` or `vllm` (explicit protocol declaration, not detection).
+- `sampling` (optional object): `temperature` in [0, 2], `top_p` and `min_p` in
+  [0, 1], integer `top_k` >= 0 (0 disables top-k), `repeat_penalty` > 0. Only finite
+  numbers are accepted; booleans are not numbers. All fields are optional.
+- `reasoning` (optional boolean): sends `chat_template_kwargs.enable_thinking`.
+  Use only with a compatible reasoning template (for example Qwen3). It is
+  independent of effort: `reasoning.effort` is still sent only when the model's
+  `reasoning_capabilities` allows it. Most local templates support a switch,
+  not effort levels; declare `effort_levels: []` for those models.
+- `preset` (optional): explicit vendor recommendations, `qwen3-thinking`
+  (temperature 0.6, top_p 0.95) or `qwen3-non-thinking` (0.7, 0.8). Both set top_k
+  20 and min_p 0 and select the corresponding reasoning switch. Explicit
+  `sampling` fields and `reasoning` override preset values. Source:
+  [Qwen3-8B best practices](https://huggingface.co/Qwen/Qwen3-8B#best-practices).
+  Presets are opt-in, not inferred for quantizations, derivatives or future models.
+
+Without an explicit preset, omitted settings keep server defaults. Existing
+providers/sessions receive no new tuning defaults. llama.cpp receives sampling
+fields as named above; vLLM receives `repetition_penalty` instead of
+`repeat_penalty`, and `top_k: -1` instead of 0. Other local-server protocols are
+not declared supported by this contract. No new UI controls are included.
+
+#### Offline request comparison
+
+With test dependencies installed, run from the repository root:
+
+```bash
+PYTHONPATH=fluid python -m scripts.effort_wire_snapshot --output /tmp/effort-before.json
+# Repeat after a change with --output /tmp/effort-after.json
+# Then compare:
+diff -u /tmp/effort-before.json /tmp/effort-after.json
+```
+
+This deterministic harness drives stored session settings and turn overrides
+through the real adapter/request builders, captures HTTP at a fake transport,
+and records CLI effort flags without starting Claude. It makes no paid calls.
+It records request parameters, **not** task quality, tokens or latency. A matching
+snapshot is not evidence that a tuning change improves outcomes. Do not change
+production defaults without an approved outcome benchmark; the separate
+`scripts/effort_benchmark.py` is a live, opt-in outcome experiment, never run by
+this snapshot harness or CI.
+
 ### GET /api/v1/model-providers
 
 List all providers, enabled or not.
@@ -355,7 +427,12 @@ budget reachable, readings refresh about every five minutes, not once per worker
 per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
 remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
 `fresh_until` is supplied by the server. Status includes the source and last
-successful fetched time. Failed/expired readings never expose old credit as
+successful fetched time. A newly synchronized billing key schedules a refresh
+only after commit. Workers share successful normalized readings without adding
+upstream calls; `observed_at` and `source_worker` retain the original time and
+source. Configured access with no reading or error is `pending`; a shared-budget
+wait is `deferred`, with a fixed `last_deferred_reason` (no retry deadline is
+advertised). A failed first reading remains `unavailable`. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference or billing key invalidate old

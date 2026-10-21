@@ -509,7 +509,7 @@ class FactStore:
 
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
-             per_worker=False):
+             per_worker=False, correction_project=None):
         """Save one fact in a tier.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
@@ -532,6 +532,28 @@ class FactStore:
             old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
             if memory_id and (old is None or not visible_on(old, local)):
                 raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
+            if not memory_id and key and expected_revision is not None:
+                # Restrict corrections to the authenticated project's/global
+                # slots. A revision of 1 is also sent on genuinely new saves;
+                # preserve that contract only if no slot or deletion evidence
+                # exists, rather than guessing a correction's target scope.
+                scopes = {scope} if scope is not None else {"global", correction_project}
+                scopes.discard(None)
+                candidates = [e for e in all_entries if e.get("key") == key
+                              and e.get("scope", "global") in scopes and visible_on(e, local)]
+                fresh = (expected_revision == 1
+                         and not any(e.get("key") == key
+                                     and (correction_project is None or e.get("scope", "global") in scopes)
+                                     for e in all_entries)
+                         and not any(t.get("key") == key and t.get("scope") in scopes
+                                     for t in doc["tombstones"])
+                         and not any(barrier_contains(doc.get("forgotten", ""), "key:" + s + ":" + key)
+                                     for s in scopes))
+                if len(candidates) > 1 or (not candidates and not fresh):
+                    raise ValueError("Key correction is ambiguous or unknown in this scope; Recall and supply memory_id or explicit scope")
+                if candidates:
+                    old = candidates[0]
+                    memory_id = old["id"]
             if old is not None and scope is None:
                 scope = old.get("scope", "global")
             # Scope-sensitive canonical keys and deletion barriers must use the
@@ -563,9 +585,8 @@ class FactStore:
                     raise ValueError("This fact was saved at the user's request; an agent cannot "
                                      "rewrite it unless the user asked for the change")
                 raise ValueError("Background learning cannot rewrite an explicitly saved fact")
-            # A revision guards a rewrite. With nothing to rewrite (a new fact,
-            # no memory ID) it has nothing to compare against: models fill the
-            # optional field in anyway, and refusing made every such save fail.
+            # A revision guards a rewrite. A key-addressed correction must have
+            # resolved above; an unkeyed new save has no slot to compare.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
             # An owner correction of either endpoint resolves the displayed pair.

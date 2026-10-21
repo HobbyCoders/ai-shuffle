@@ -318,7 +318,7 @@ def _desktop_return(installed):
 def status():
     root = control_root()
     result = {"allow_updates": mirror_policy(), "update_all_workers": all_workers(), "supported": root is not None,
-              "phase": "idle", "version": None, "error": None, "request_pending": False, "checked_at": None,
+              "phase": "idle", "version": None, "error": None, "request_pending": False, "install_pending": False, "checked_at": None,
               "running_version": os.environ.get("GIT_SHA") if root else None}
     if root:
         try:
@@ -327,7 +327,7 @@ def status():
                 saved = json.loads(path.read_text())
             # notice: a coming update needs a newer Docker image (#1821).
             result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
-                                                           "release", "notes", "channel", "notice")})
+                                                           "release", "notes", "channel", "notice", "staged_version")})
             # When the supervisor last asked the feed. Older supervisors do not
             # say, but they write an available status when a check ends and an
             # idle one mostly then too (also at startup and after an install),
@@ -345,6 +345,12 @@ def status():
         # The supervisor deletes request.json when it takes the request.
         with service_files():
             result["request_pending"] = (root / "request.json").exists()
+        try:
+            with service_files():
+                request = json.loads((root / "request.json").read_text())
+            result["install_pending"] = request.get("action") == "install" and request.get("expires_at", 0) >= time.time()
+        except (ValueError, TypeError, AttributeError, OSError):
+            pass  # Taken, expired, or unreadable is not proof of a queued restart.
     else:
         with _bridge_lock:
             if _desktop_present():
@@ -353,6 +359,8 @@ def status():
                 result["kind"] = "desktop"
                 result["request_pending"] = any(queued and queued["expires_at"] >= time.time()
                                                 for queued in (_desktop_request, _desktop_followup))
+                result["install_pending"] = bool(_desktop_request and _desktop_request["action"] == "install"
+                                                 and _desktop_request["expires_at"] >= time.time())
     if result.get("phase") in ("idle", "ready") and IN_PROGRESS.search(str(result.get("message") or "")):
         result["message"] = None
     return result

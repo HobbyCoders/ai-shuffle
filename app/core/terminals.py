@@ -242,9 +242,10 @@ def supported() -> bool:
 
 
 def capability_version() -> int:
-    """Advertise local terminals only until independent peer owner proof exists."""
+    """Relay support requires an explicit recipient policy and per-use owner approval."""
     try:
-        return 1 if supported() else 0
+        from app.network.terminal_relay import peer_targets_enabled
+        return (2 if peer_targets_enabled() else 1) if supported() else 0
     except Exception:  # noqa: BLE001 — capability detection never raises
         return 0
 

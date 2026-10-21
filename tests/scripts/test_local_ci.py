@@ -70,6 +70,108 @@ def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
     assert verdicts == [ctx]
 
 
+@pytest.mark.parametrize("files", [
+    ["docker/container_runtime.py"],
+    ["docker/nested/helper.py"],
+    ["Dockerfile"],
+    ["entrypoint.sh"],
+    ["docker-compose.yml"],
+    ["app/main.py"],
+    ["tests/core/test_container_runtime.py"],
+    ["tests/core/test_container_image_contract.py"],
+    None,  # full mode must run the dedicated files despite fast-subset exclusions
+])
+@pytest.mark.parametrize("pg_source", ["path", "smoke", None])
+@pytest.mark.parametrize("pressure_optin", [False, True])
+@pytest.mark.parametrize("pg_optin", [False, True])
+def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, pressure_optin, pg_optin):
+    ctx = local_ci.Context(mode="full" if files is None else "changed", base="base",
+                           files=files, python=sys.executable)
+    suite = next(suite for suite in local_ci.SUITES if suite.name == "backend-linux")
+    assert ctx.changed(suite.paths)
+    commands = []
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append((argv, kwargs)))
+    monkeypatch.setattr(local_ci.shutil, "which",
+                        lambda name: "/test/pg/bin/pg_ctl" if name == "pg_ctl" and pg_source == "path" else None)
+    monkeypatch.setattr(local_ci, "has_module", lambda *args: True)
+    monkeypatch.setattr(local_ci, "WORKERS", "2")
+    monkeypatch.setenv("PATH", "/test/original-path")
+    monkeypatch.delenv("SMOKE_PG_BIN", raising=False)
+    if pg_source == "smoke":
+        monkeypatch.setenv("SMOKE_PG_BIN", "/test/pg/bin")
+    # A launching shell must not opt these tests into a live database or enable
+    # PG/pressure cases on a machine without the required binaries.
+    monkeypatch.setenv("ALLOW_REAL_PG", "1")
+    monkeypatch.setenv("TEST_POSTGRES_DSN", "postgresql://never@external.invalid/live")
+    monkeypatch.setenv("CONTAINER_RUNTIME_TEST_PG", "1")
+    monkeypatch.setenv("CONTAINER_RUNTIME_TEST_PRESSURE", "1")
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PG", raising=False)
+    if pg_optin:
+        monkeypatch.setenv("LOCAL_CI_CONTAINER_PG", "1")
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PRESSURE", raising=False)
+    if pressure_optin:
+        monkeypatch.setenv("LOCAL_CI_CONTAINER_PRESSURE", "1")
+
+    if ctx.mode == "full" and (pg_optin or pressure_optin) and not pg_source:
+        with pytest.raises(local_ci.Failure, match="opt-in.*no PostgreSQL binaries"):
+            suite.run(ctx)
+        assert commands == []
+        return
+
+    suite.run(ctx)
+
+    container_files = {
+        "tests/core/test_container_runtime.py",
+        "tests/core/test_container_image_contract.py",
+    }
+    selected = [(argv, kw) for argv, kw in commands if container_files.intersection(argv)]
+    assert len(selected) == 1
+    argv, kwargs = selected[0]
+    assert argv[:3] == [ctx.python, "-m", "pytest"]
+    assert container_files <= set(argv)
+    assert container_files <= set(local_ci.FAST_SUBSET_EXCLUDED)
+    assert "-n" not in argv  # process-global supervisor state and idle/disk timing
+    assert "--timeout=120" in argv
+    env = local_ci.child_env(kwargs["env"])
+    assert env["ALLOW_REAL_PG"] == "0"
+    assert env["TEST_POSTGRES_DSN"] == ""
+    assert env["AI_SHUFFLE_ENV_FILE"] == "/dev/null"
+    expected = "1" if pg_source and ctx.mode == "full" and (pg_optin or pressure_optin) else "0"
+    assert env["CONTAINER_RUNTIME_TEST_PG"] == expected
+    expected_pressure = "1" if expected == "1" and pressure_optin else "0"
+    assert env["CONTAINER_RUNTIME_TEST_PRESSURE"] == expected_pressure
+    coverage_notes = [note for note in ctx.notes if "#350" in note]
+    if expected_pressure == "1":
+        assert coverage_notes == []  # both opt-in groups actually ran
+    elif expected == "1":
+        assert len(coverage_notes) == 1
+        assert "checkpoint" in coverage_notes[0].lower()
+        assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
+        assert "LOCAL_CI_CONTAINER_PG=1" not in coverage_notes[0]
+    else:
+        assert len(coverage_notes) == 1
+        assert "LOCAL_CI_CONTAINER_PG=1" in coverage_notes[0]
+        assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
+    assert env["PATH"] == ("/test/pg/bin:" if pg_source else "") + "/test/original-path"
+    if ctx.mode != "full":
+        assert any("Container" in note and "full" in note for note in ctx.notes)
+    elif not pg_source:
+        assert any("Container" in note and "PostgreSQL" in note for note in ctx.notes)
+
+
+def test_container_collection_drops_host_handover(tmp_path):
+    # The source supervisor reads these directly (not through Settings). A test
+    # launched by an updated worker must not read its installed image metadata.
+    names = ("SHUFFLE_HANDED_OVER", "SHUFFLE_IMAGE_DIR", "SHUFFLE_HANDOVER")
+    env = {**os.environ, "SHUFFLE_HANDED_OVER": "a" * 40,
+           "SHUFFLE_IMAGE_DIR": str(tmp_path), "SHUFFLE_HANDOVER": "1"}
+    code = ("import os; import tests.conftest; "
+            f"assert not set({names!r}).intersection(os.environ)")
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
 def test_android_safety_suite_includes_emulator_contracts(monkeypatch):
     commands = []
     monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append(argv))

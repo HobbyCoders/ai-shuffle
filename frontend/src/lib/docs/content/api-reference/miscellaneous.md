@@ -139,6 +139,8 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 - Each server worker starts at most one refresh every 30 seconds. Inside that window the endpoint returns the cached rows.
 - A refresh skips a provider whose row was refreshed or attempted in the last 30 seconds, including by another worker that shares the database.
 - Each credential still makes at most one request per provider interval (300 seconds, or 900 seconds for OpenAI Admin).
+- Synchronized billing keys schedule a first refresh after commit. Successful normalized readings are shared across workers using the same credential; `observed_at` and `source_worker` identify the original observation, not the time it was received.
+- For a configured API balance with no reading, `status` is `pending` until a first attempt, `deferred` when the shared budget delays it, or `unavailable` on failure. `last_deferred_reason` is a fixed category; no retry deadline is advertised. Existing readings remain `fresh`/`stale` at their original age.
 - On the Claude side nothing is requested: the stored windows are saved and sent to connected clients again, at most once every 30 seconds.
 
 **Response fields** (among others):
@@ -408,6 +410,16 @@ The pull request for the current branch.
 ### Worktrees
 
 Worktrees give a session its own branch and folder. Create one with [`POST /api/v1/sessions/with-worktree`](/docs/api-reference/sessions#worktree-sessions).
+
+Safe local checkout reclaim keeps uncommitted or unpushed work, protected or busy
+branches, processes inside the checkout, and recently active checkouts. Apply must
+match the previewed `{path, head_sha}` pairs and rechecks safety before removal.
+Ignored files also keep a checkout, except for the already-handled dependency
+folders (`node_modules`, `venv`, `.venv`) and known disposable caches:
+`.pytest_cache`, `__pycache__` and `.svelte-kit` directories, plus `*.pyc` files.
+Those caches alone do not block reclaim. Ignored `dist`, `.env*`, other outputs
+and unknown content still keep the checkout; unignored files still count as
+uncommitted work.
 
 **Auth:** Required for every worktree endpoint.
 

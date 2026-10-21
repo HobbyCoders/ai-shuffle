@@ -70,6 +70,8 @@ FAST_SUBSET = [
 ]
 FAST_SUBSET_EXCLUDED = [
     "tests/core/test_chat_shell.py",
+    # Dedicated serial backend-linux step: supervisor globals and idle/disk
+    # timing measurements must not share the parallel fast-subset workload.
     "tests/core/test_container_runtime.py",
     "tests/core/test_container_image_contract.py",
 ]
@@ -478,24 +480,58 @@ def backend_linux(ctx: Context) -> None:
     """Steps CI Backend ran on Linux with real PostgreSQL and bubblewrap."""
     env = python_env()
     args = pytest_args(ctx.python, timeout=240)
-    ran = False
+    pg_ctl = shutil.which("pg_ctl")
+    pg_bin = os.environ.get("SMOKE_PG_BIN") or (str(Path(pg_ctl).parent) if pg_ctl else "")
+    pressure_optin = os.environ.get("LOCAL_CI_CONTAINER_PRESSURE") == "1"
+    pg_optin = os.environ.get("LOCAL_CI_CONTAINER_PG") == "1" or pressure_optin
+    if ctx.mode == "full" and pg_optin and not pg_bin:
+        raise Failure("Container PostgreSQL opt-in requested but no PostgreSQL binaries were found; "
+                      "install PostgreSQL or set SMOKE_PG_BIN.")
     if shutil.which("bwrap"):
         run([ctx.python, "-m", "pytest", "tests/core/test_chat_shell.py", "-rs", *args],
             env={**env, "CHAT_SHELL_REQUIRE_SANDBOX": "1"})
-        ran = True
     else:
         ctx.notes.append("Isolated folder shell tests not run: bubblewrap (bwrap) is not installed here.")
-    pg_ctl = shutil.which("pg_ctl")
-    pg_bin = os.environ.get("SMOKE_PG_BIN") or (str(Path(pg_ctl).parent) if pg_ctl else "")
     if pg_bin:
         run([ctx.python, "-m", "pytest", "tests/smoke", "tests/db/test_schema_lifecycle.py", "-m", "boot_smoke",
              "-rs", *pytest_args(ctx.python, timeout=240, parallel=False)],
             env={**env, "BOOT_SMOKE_REQUIRED": "1", "SMOKE_PG_BIN": pg_bin})
-        ran = True
     else:
         ctx.notes.append("Boot smoke test not run: no PostgreSQL binaries (set SMOKE_PG_BIN).")
-    if not ran:
-        ctx.notes.append("Linux-only backend steps were not run on this machine.")
+    # These files stay outside the parallel fast subset: they mutate supervisor
+    # globals and measure idle/checkpoint timing under bounded disk pressure.
+    # Each real-PG case creates its own cluster under tmp_path; no shared server
+    # or TEST_POSTGRES_DSN is needed. Override inherited opt-ins/DSNs explicitly.
+    # Keep check/full deterministic on busy developer machines. Until #350 is
+    # fixed, even the functional crash-recovery case hits a host-sensitive
+    # checkpoint budget. Both real-PG groups therefore require explicit opt-in.
+    container_pg = ctx.mode == "full" and bool(pg_bin) and pg_optin
+    container_pressure = container_pg and pressure_optin
+    container_env = {
+        **env, "ALLOW_REAL_PG": "0", "TEST_POSTGRES_DSN": "",
+        "AI_SHUFFLE_ENV_FILE": "/dev/null",
+        "CONTAINER_RUNTIME_TEST_PG": "1" if container_pg else "0",
+        "CONTAINER_RUNTIME_TEST_PRESSURE": "1" if container_pressure else "0",
+    }
+    if pg_bin:
+        container_env["PATH"] = pg_bin + os.pathsep + os.environ.get("PATH", "")
+    if ctx.mode != "full":
+        ctx.notes.append("Container PostgreSQL functional cases are full-mode only; "
+                         "check runs the plain serial container contracts.")
+    elif not pg_bin:
+        ctx.notes.append("Container PostgreSQL and disk-pressure cases skipped: "
+                         "no PostgreSQL binaries (set SMOKE_PG_BIN).")
+    run([ctx.python, "-m", "pytest", "tests/core/test_container_runtime.py",
+         "tests/core/test_container_image_contract.py", "-rs",
+         *pytest_args(ctx.python, timeout=120, parallel=False)], env=container_env)
+    if not container_pg:
+        ctx.notes.append("Container real-PG coverage is opt-in pending #350: run full with "
+                         "LOCAL_CI_CONTAINER_PG=1 for functional cases or "
+                         "LOCAL_CI_CONTAINER_PRESSURE=1 for measurements (implies PG); "
+                         "both require PostgreSQL binaries.")
+    elif not container_pressure:
+        ctx.notes.append("Container checkpoint measurements disabled pending #350; run full with "
+                         "LOCAL_CI_CONTAINER_PRESSURE=1 to opt in (implies PG).")
 
 
 FLUID_TESTS = "fluid/tests/unit"
@@ -639,14 +675,16 @@ def android_unavailable() -> str | None:
 
 
 def linux_only() -> str | None:
-    return None if sys.platform.startswith("linux") else "Linux only (bubblewrap, PostgreSQL boot smoke)"
+    return None if sys.platform.startswith("linux") else "Linux only (bubblewrap, PostgreSQL boot smoke, container contracts)"
 
 
 SUITES = [
     Suite("backend", BACKEND_PATHS, backend, "Backend pytest: the files a change reaches (full: the whole fast subset)"),
     Suite("backend-linux", ["app/core/chat_shell.py", "app/core/confined_files.py", "app/db/*", "app/main.py",
-                            "docker/*", "tests/smoke/*", "tests/core/test_chat_shell.py"],
-          backend_linux, "Sandbox shell and real-PostgreSQL boot smoke", linux_only),
+                            "docker/*", "Dockerfile", "entrypoint.sh", "docker-compose.yml",
+                            "tests/smoke/*", "tests/core/test_chat_shell.py",
+                            "tests/core/test_container_runtime.py", "tests/core/test_container_image_contract.py"],
+          backend_linux, "Sandbox shell, PostgreSQL boot smoke and serial container contracts", linux_only),
     Suite("fluid", ["fluid/*"], fluid, "fluid unit suite"),
     Suite("frontend", ["frontend/*", "app/contract/schema/*"], frontend,
           "svelte-check, Vitest for the files a change reaches, contract check (full: build and every test)"),

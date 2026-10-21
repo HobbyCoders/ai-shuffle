@@ -194,8 +194,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
-    # Default-off rollout gate: existing aliases and old peers must keep working.
-    network_token_binding_enabled: bool = False
+    # Endpoint binding is on by default; false is the network-wide rollback switch.
+    # Legacy peers remain accepted until their authenticated binding support is pinned.
+    network_token_binding_enabled: bool = True
     # With binding enabled, require it even for peers without a durable pin.
     network_require_token_binding: bool = False
 
@@ -376,6 +377,10 @@ class Settings(BaseSettings):
     # Nothing in this loop is latency-critical (the UI's own GET reconcile covers
     # the note you are looking at), so 60s is the default.
     notes_sync_interval_seconds: int = 60
+
+    # Reclaim integrated, idle app-managed branch checkouts after a 24h grace.
+    # Set WORKTREE_AUTO_RECLAIM_ENABLED=false to disable the periodic pass.
+    worktree_auto_reclaim_enabled: bool = True
 
     # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
     # enabled Codex provider on this cadence and refreshes any whose access token

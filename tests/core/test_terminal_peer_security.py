@@ -41,15 +41,23 @@ async def test_malicious_member_cannot_self_authorize(monkeypatch, enabled, http
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_unfinished_peer_feature_is_not_advertised_or_offered(monkeypatch, enabled):
+async def test_peer_policy_controls_capability_but_never_implies_authorization(monkeypatch, enabled):
     assert Settings.model_fields["network_peer_terminals"].default is False
     monkeypatch.setattr(settings, "network_peer_terminals", enabled)
     monkeypatch.setattr(terminals, "supported", lambda: True)
     monkeypatch.setattr(terminal_targets.runners, "directory", lambda: {"runners": [{
         "id": "peer", "device_name": "Peer", "is_self": False, "online": True, "capabilities": {"terminal": 2},
+        "endpoints": ["https://peer.example"],
     }]})
-    assert terminals.capability_version() == 1
-    assert await terminal_targets.targets(None) == []
+    assert terminals.capability_version() == (2 if enabled else 1)
+    monkeypatch.setattr(control, "call", AsyncMock(return_value={
+        "available": False, "reason_code": "recipient_approval_required"}))
+    rows = await terminal_targets.targets(None)
+    if enabled:
+        assert rows[0]["available"] is False
+        assert rows[0]["reason_code"] == "recipient_approval_required"
+    else:
+        assert rows == []
 
 
 @pytest.mark.asyncio

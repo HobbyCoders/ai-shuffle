@@ -634,7 +634,7 @@ async def test_failed_load_is_retryable(mock_db, monkeypatch):
     resumed = PgFluidStore()
     from app.core.provider import fluid_pg_store as _mod
     original = _mod._load_session_sync
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("read rejected")
     monkeypatch.setattr(_mod, "_load_session_sync", fail)
     with pytest.raises(RuntimeError):

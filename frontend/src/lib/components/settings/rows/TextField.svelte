@@ -22,6 +22,10 @@
 		maxlength?: number;
 		/** Keyboard hint, e.g. 'numeric' for token counts typed as text. */
 		inputmode?: 'text' | 'numeric' | 'decimal' | 'email' | 'url' | 'tel' | 'search' | 'none';
+		/** The value was refused: sets aria-invalid. */
+		invalid?: boolean;
+		/** DOM id of the message that says why, added to the row's description. */
+		errorId?: string;
 	}
 
 	let {
@@ -36,11 +40,19 @@
 		label,
 		autocomplete = 'off',
 		maxlength,
-		inputmode
+		inputmode,
+		invalid = false,
+		errorId
 	}: Props = $props();
 
 	const access = getSettingsAccess();
 	const row = getRowContext();
+	const aria = $derived.by(() => {
+		const base = controlAria(row, label);
+		if (!invalid) return base;
+		const describedBy = [base['aria-describedby'], errorId].filter(Boolean).join(' ') || undefined;
+		return { ...base, 'aria-invalid': 'true', 'aria-describedby': describedBy };
+	});
 	/** Value when the field took focus; a blur or Enter commits only real changes. */
 	let committed: string | null = null;
 
@@ -62,7 +74,7 @@
 	{inputmode}
 	bind:value
 	disabled={disabled || access.readOnly}
-	{...controlAria(row, label)}
+	{...aria}
 	onfocus={() => (committed = value)}
 	oninput={() => oninput?.(value)}
 	onblur={commit}

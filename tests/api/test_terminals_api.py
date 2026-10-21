@@ -793,7 +793,7 @@ def test_every_terminal_route_in_the_app_requires_the_owner():
         else:
             assert endpoint in (api.terminal_socket, api.monitor_socket), path
             sockets.append(path)
-    assert len(http) == 10, http
+    assert len(http) == 16, http
     expected_sockets = {"/api/v1/ws/terminals/{terminal_id}",
                         "/api/v1/ws/terminals/monitor/{task_id}"}
     assert not sockets or set(sockets) == expected_sockets, sockets

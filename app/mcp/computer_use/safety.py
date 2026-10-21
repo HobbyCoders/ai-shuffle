@@ -161,23 +161,27 @@ class SafeInput:
 
     def press(self, device, key):
         with abort.input_guard(self.session_id, self.token):
-            if (device, key) not in self.held:
-                self.held.append((device, key))
-            announced = None
-            if self.escape_key is not None and key == self.escape_key:
-                if _x11():
-                    # One excuse per press, withdrawn if the press fails.
-                    from app.mcp.computer_use import linux
-                    announced = linux.expect_agent_escape()
-                else:
-                    note_agent_escape()
-            self.sent += 1
-            try:
-                device.press(key)
-            except BaseException:
-                if announced is not None:
-                    linux.withdraw_agent_escape(announced)
-                raise
+            self._press(device, key)
+
+    def _press(self, device, key):
+        # Caller holds the input lock. Emergency Escape is allowed after Stop.
+        if (device, key) not in self.held:
+            self.held.append((device, key))
+        announced = None
+        if self.escape_key is not None and key == self.escape_key:
+            if _x11():
+                # One excuse per press, withdrawn if the press fails.
+                from app.mcp.computer_use import linux
+                announced = linux.expect_agent_escape()
+            else:
+                note_agent_escape()
+        self.sent += 1
+        try:
+            device.press(key)
+        except BaseException:
+            if announced is not None:
+                linux.withdraw_agent_escape(announced)
+            raise
 
     def release(self, device, key):
         # Releases are allowed after abort and serialize with emergency cleanup.
@@ -205,8 +209,32 @@ class SafeInput:
                 self._hold_timer = timer
                 timer.start()
 
-    def release_all(self):
+    def release_all(self, *, cancel_drag=False):
         with abort._LOCK:
+            # A held mouse button is a single-call or cross-call drag. Cancel it
+            # in the target app before mouse-up, rather than dropping at Stop.
+            if cancel_drag and self.escape_key is not None and any(
+                    device is self.mouse for device, _ in self.held):
+                # Escape with Ctrl/Alt/Shift held can invoke a system shortcut.
+                # Release every agent-held key before injecting plain Escape.
+                for device, key in list(reversed(self.held)):
+                    if device is self.keyboard:
+                        try:
+                            self.release(device, key)
+                        except Exception:
+                            logger.exception("Could not release keyboard input before cancelling drag")
+                if any(device is self.keyboard for device, _ in self.held):
+                    logger.warning("Skipping Escape drag cancellation: keyboard input is still held")
+                else:
+                    try:
+                        self._press(self.keyboard, self.escape_key)
+                    except Exception:
+                        logger.exception("Could not press Escape to cancel computer-use drag")
+                    finally:
+                        try:
+                            self.release(self.keyboard, self.escape_key)
+                        except Exception:
+                            logger.exception("Could not release Escape while cancelling computer-use drag")
             if self._hold_timer is not None:
                 self._hold_timer.cancel()
                 self._hold_timer = None

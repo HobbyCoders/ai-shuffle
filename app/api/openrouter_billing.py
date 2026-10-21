@@ -48,6 +48,8 @@ def _save(provider_id, encrypted):
                         datetime.now(timezone.utc).isoformat(), str(uuid4())))
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
                        (SNAPSHOT_PREFIX + provider_id,))
+        from app.db.provider_usage_snapshots import delete_shared_observations
+        delete_shared_observations(conn, provider_id, source_id="openrouter_credits")
     return True
 
 

@@ -32,7 +32,7 @@ SPEC = ToolSpec(
         "key": {"type": "string", "description": "Stable fact slot; do not equate a preferred name, nickname and legal name."},
         "memory_id": {"type": "string", "description": "Existing ID for a correction; obtain it with Recall."},
         "expected_revision": {"type": "integer", "minimum": 1,
-                              "description": "Revision returned by Recall, with memory_id or key for a correction. Omit for a new fact."},
+                              "description": "Revision returned by Recall, with memory_id or key for a correction. Key corrections resolve only global/current-project slots; supply scope or memory_id if ambiguous. Use memory_id plus scope to move a fact. Omit for a new fact."},
         "user_requested": {"type": "boolean",
                            "description": "True only when the user asked to remember this or corrected it."},
         "restore": {"type": "boolean"},
@@ -45,10 +45,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     store = ctx.extra.get("memory_store")
     if store is None:
         return ToolOutcome(text="Memory storage is unavailable; nothing was saved.", is_error=True)
-    # An ID-addressed correction inherits its existing scope unless the caller
-    # explicitly moves it. Passing the new-fact default here would silently
-    # promote a project fact into every project's snapshot.
-    scope = input.get("scope", None if input.get("memory_id") else "global")
+    # Corrections resolve their existing slot under the storage lock. Only a
+    # genuinely new save receives the global default.
+    correction = input.get("memory_id") or (input.get("key") and input.get("expected_revision") is not None)
+    scope = input.get("scope", None if correction else "global")
     if ("scope" in input or scope is not None) and scope not in ("global", "project"):
         return ToolOutcome(text="scope must be global or project", is_error=True)
     if scope == "project":
@@ -62,6 +62,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             store.save_memory, input.get("text"), memory_id=input.get("memory_id"),
             scope=scope, provenance="session", key=input.get("key"),
             expected_revision=input.get("expected_revision"),
+            correction_project=ctx.extra.get("memory_project"),
             source_session=ctx.session_id, restore=input.get("restore") is True, **tier,
         )
     except (ValueError, OSError, TimeoutError) as exc:

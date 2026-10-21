@@ -489,6 +489,9 @@ def update_model_provider(
         saved = _parse_json_columns(row_to_dict(cursor.fetchone()))
         if saved and (changed or kwargs.get("enabled") is False):
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        if saved and (changed or any(k in kwargs for k in ("balance_key", "openai_admin_key", "codex_access_token", "codex_account_id"))):
+            from app.db.provider_usage_snapshots import delete_shared_observations
+            delete_shared_observations(conn, provider_id)
         return saved
 
 
@@ -524,6 +527,8 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
             (organization_id, instance_id, admin_key, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        from app.db.provider_usage_snapshots import delete_shared_observations
+        delete_shared_observations(conn, provider_id)
     return get_model_provider(provider_id)
 
 
@@ -554,6 +559,8 @@ def clear_openai_billing_binding(
                 raw = None
         if isinstance(raw, dict) and raw.get("source") in {"browser_platform", "openai_admin"}:
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        from app.db.provider_usage_snapshots import delete_shared_observations
+        delete_shared_observations(conn, provider_id)
     return get_model_provider(provider_id)
 
 
@@ -566,6 +573,8 @@ def delete_model_provider(provider_id: str) -> bool:
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
         cursor.execute("DELETE FROM system_settings WHERE key = %s", ("openrouter_billing_key:" + provider_id,))
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("openrouter-account:" + provider_id,))
+        from app.db.provider_usage_snapshots import delete_shared_observations
+        delete_shared_observations(conn, provider_id)
         return deleted
 
 
@@ -674,6 +683,9 @@ def set_codex_token_bundle(
         )
         if cursor.rowcount == 0:
             return None
+        if not preserve_refresh_stamp:
+            from app.db.provider_usage_snapshots import delete_shared_observations
+            delete_shared_observations(conn, provider_id)
     return get_model_provider(provider_id)
 
 

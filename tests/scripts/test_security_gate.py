@@ -49,6 +49,19 @@ def test_allowlist_requires_both_exact_fixture_and_path():
         assert not list(secret_scan.findings(rules, "docs/example.md", placeholder))
 
 
+@pytest.mark.parametrize("path,fixture,other", [
+    ("tests/core/test_export_redaction.py", "AKIA" + "IOSFODNN7EXAMPLE", "AKIA" + "Q7W8E9R0T1Y2U3I4"),
+    ("tests/test_update_waiting_safety.py", "ASIA" + "IOSFODNN7EXAMPLE", "ASIA" + "Q7W8E9R0T1Y2U3I4"),
+    ("tests/test_update_waiting_safety.py", "postgresql://admin:" + "fixture-db-secret@db.example.com:5432/app",
+     "postgresql://admin:" + "different-secret@db.example.com:5432/app"),
+])
+def test_update_redaction_fixtures_are_narrowly_allowlisted(path, fixture, other):
+    rules = secret_scan.load_rules(ROOT)
+    assert not list(secret_scan.findings(rules, path, fixture))
+    assert list(secret_scan.findings(rules, "tests/unrelated.py", fixture))
+    assert list(secret_scan.findings(rules, path, other))
+
+
 def git(root, *args):
     return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.PIPE).decode().strip()
 

@@ -70,6 +70,38 @@ available for explicit checks. `full --attest` ignores these overrides and
 requires a clean checkout at the public repository's current main revision.
 Attestation format and publication authorization are unchanged.
 
+The suites are: backend (the same function-level selection the backend test
+map gives), fluid, frontend, mobile, tools, browser-mcp, docs, desktop, the
+Android app and download bridge, the workflow policy tests and the in-app update
+reach check. It runs at low CPU priority with at most two test workers
+(`LOCAL_CI_WORKERS`), because every worker host is shared with other sessions
+and with other workloads on the same machine.
+
+Local parallel pytest controllers also reserve a machine-wide slot before
+starting xdist workers. Capacity defaults to
+`max(1, min(4, cpu_count // 8, total_RAM_bytes // (12 * 1024**3)))`.
+CPU count is bounded by process affinity where supported. One slot per eight
+usable logical CPUs and 12 GiB RAM leaves conservative headroom;
+**total** RAM makes the capacity stable while other tests allocate/free memory.
+If CPU or RAM detection is unavailable, capacity falls back to one. Set
+`AI_SHUFFLE_PYTEST_SLOTS` to an integer >= 1 to override it consistently across
+checkouts; invalid values use the machine default. For example, 22 logical CPUs
+and 62 GiB RAM permit two simultaneous runs.
+
+Each gated run is capped at **two xdist workers**, including `-n auto` and
+`-n logical`: at most `2 * slots` workers (eight with the default maximum),
+plus controllers and any subprocesses tests launch. The existing `-n 0`/`-n 1`
+exemption is unchanged. Files `ai-shuffle-pytest-xdist.lock.0` through
+`.N-1` in the system temp directory use OS locks, released automatically even
+on a crash; do not delete held lock files. Waiters scan all slots, rotate their
+starting slot and jitter bounded polling to avoid lockstep races. Admission is
+best-effort fair, not strict FIFO. Existing progress notices, the 20-minute
+fail-open timeout, and fail-open lock errors remain: the bound is not a hard
+resource quota. `GITHUB_ACTIONS` and `AI_SHUFFLE_PYTEST_GATE=0` still bypass the
+gate. All checkouts must use this gate version and the same slot override/temp
+directory to share the budget; older unsuffixed-lock gates do not coordinate
+with these slots.
+
 A pass on a clean checkout is recorded against the commit's tree in
 `.git/local-ci/passes.json`. A fast receipt also pins the comparison merge-base;
 pushing against a different base reruns affected checks. The offline secret scan
@@ -461,9 +493,22 @@ also independently supports safe ancestors and rechecks its own pointer.
   revision that already passed, or test the tip.
 - Mac-only checks, when the release changes them: `ios.yml` and
   `ci-folder-confinement.yml`.
-- The real-PostgreSQL and container contracts that only run in the hosted
-  backend job: `gh workflow run ci-backend.yml --ref main`, when the release
-  touches the container runtime, the network database or agent isolation.
+- The Linux `backend-linux` local suite runs both container runtime and image
+  contracts serially. `check` runs their plain cases for container/startup changes;
+  `full` also runs the plain cases by default. While
+  [#350](https://github.com/HobbyCoders/ai-shuffle/issues/350) is unresolved, the
+  real-PostgreSQL functional cases require
+  `LOCAL_CI_CONTAINER_PG=1 python scripts/local_ci.py full`; checkpoint timing
+  measurements require `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`
+  (which also enables PG). Both opt-ins require local PostgreSQL binaries and
+  create disposable clusters, not connections to a configured database. A full
+  run with a requested opt-in but no binaries fails clearly. Disabled opt-in
+  groups get a coverage note naming #350 and their opt-in; enabled groups do not.
+  Staged full receipts include both opt-ins in their identity, so changing them
+  reruns the gate. Restore PG functional cases to default full after #350 is fixed.
+  The manual hosted backend job still covers other network-database and agent
+  isolation contracts when a local run cannot answer the release question;
+  do not dispatch it to discover failures.
 - The release workflow itself builds and verifies the container image, the
   buyer install and the Windows installer on a clean Windows runner (see
   [release-channels.md](release-channels.md)).

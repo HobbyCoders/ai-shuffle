@@ -16,7 +16,8 @@ def hold(previous, plan):
         else:
             items = apply_changes(items, body)
             chars += len(wrap(body))
-    return HeldMemory(frozenset(items), chars, "host-pinned-node")
+    return HeldMemory(frozenset(items), chars, "host-pinned-node",
+                      tuple(x.split()[1][1:] for x in items if "; task-match] " in x))
 
 
 def setup_store(root):
@@ -30,7 +31,7 @@ def setup_store(root):
     return SkillStore(root)
 
 
-def test_varied_topics_do_not_resend_base_or_remove_prior_topic(tmp_path):
+def test_varied_topics_do_not_resend_base(tmp_path):
     store = setup_store(tmp_path)
     base = store.render_memory_section()
     eligible = store.memory_snapshot_plan()["eligible_lines"]
@@ -47,12 +48,38 @@ def test_varied_topics_do_not_resend_base_or_remove_prior_topic(tmp_path):
         plan = plan_memory_note(section, held)
         if i:
             assert plan.kind != "full"
-            assert "No longer in the snapshot" not in (plan.note or "")
+            assert all(line not in (plan.note or "") for line in section_items(base) if line.startswith("- ["))
         delivered += len(plan.note or "")
         held = hold(held, plan)
         assert store.render_memory_section() == base
-    assert delivered <= len(wrap(base)) + 4000
+    assert delivered <= len(wrap(base)) + TASK_TURN_CHARS + 8000
     assert any("task-match" in x for x in held.items)
+
+
+def test_rotation_delivers_later_topic_with_bounded_100_turn_history(tmp_path):
+    store = setup_store(tmp_path)
+    base = store.render_memory_section()
+    eligible = store.memory_snapshot_plan()["eligible_lines"]
+    held = None
+    history = []
+    later_delivered = False
+    for i in range(100):
+        section = task_memory_section(base, held, eligible, f"topic{i % 10} habit{i % 10}")
+        extras = {x for x in section_items(section) if "; task-match] " in x}
+        assert sum(len(x) + 1 for x in extras) <= TASK_TOTAL_CHARS
+        new = extras - (held.items if held else set())
+        assert sum(len(x) + 1 for x in new) <= TASK_TURN_CHARS
+        plan = plan_memory_note(section, held)
+        if i:
+            assert plan.kind != "full"
+        if i == 3:
+            later_delivered = any("topic3 habit3" in x for x in new)
+        history.append(plan.note or "")
+        held = hold(held, plan)
+    assert later_delivered, "a full task slice starved the later relevant topic"
+    assert sum(map(len, history)) <= len(history[0]) + 8000
+    assert any("No longer in the snapshot" in note for note in history)
+    print(f"100 turns: {sum(map(len, history))} memory characters; {sum(bool(n) for n in history)} notes")
 
 
 def test_caps_with_many_matches_and_explicit_base_unchanged(tmp_path):

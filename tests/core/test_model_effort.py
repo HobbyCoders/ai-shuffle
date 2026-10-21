@@ -110,6 +110,26 @@ def test_cloud_cli_haiku_alias_remains_effortless(monkeypatch):
     assert effort_capabilities("haiku", route="anthropic")["default_effort"] == "medium"
 
 
+def test_native_sol_matches_documented_efforts_without_overriding_catalogs():
+    levels = ["low", "medium", "high", "xhigh", "max"]
+    native = {"provider_type": "openai", "auth_mode": "api_key"}
+    cap = effort_capabilities("gpt-6.1-sol", native)
+    assert cap["effort_levels"] == levels
+    assert cap["default_effort"] == "medium"
+    for level in EFFORT_LEVELS:
+        assert normalize_effort(level, "gpt-6.1-sol", native) == (level if level in levels else None)
+    for kind, model in (("chatgpt", "gpt-6.1-sol"), ("openrouter", "openai/gpt-6.1-sol")):
+        # An API model doc is not evidence about this account or gateway.
+        assert effort_capabilities(model, {"provider_type": kind})["effort_levels"] is None
+        row = {"provider_type": kind, "models_json": [{"id": model,
+            "reasoning_capabilities": {"version": 1, "effort_levels": ["high", "max"],
+                                       "default_effort": "high"}}]}
+        assert effort_capabilities(model, row)["effort_levels"] == ["high", "max"]
+        assert effort_capabilities(model, row)["default_effort"] == "high"
+    subscribed = {**native, "auth_mode": "chatgpt"}
+    assert effort_capabilities("gpt-6.1-sol", subscribed)["effort_levels"] is None
+
+
 def test_official_defaults_and_cli_difference():
     # https://developers.openai.com/api/docs/models/gpt-5.6-sol.md
     assert effort_capabilities("gpt-5.6-sol", {"provider_type": "openai"})["default_effort"] == "medium"
