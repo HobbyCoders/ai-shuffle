@@ -22,6 +22,8 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(updates, "_desktop_request", None)
     monkeypatch.setattr(updates, "_desktop_followup", None)
     monkeypatch.setattr(fleet, "_stop_result", None)
+    # asyncio.run creates a new loop per scenario; contended locks retain theirs.
+    monkeypatch.setattr(fleet, "_dispatch_lock", asyncio.Lock())
     monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: [])
     fleet._receipts.clear()
     fleet._peer_status.clear()
@@ -1073,6 +1075,38 @@ def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypat
     assert snapshot["operation"]["phase"] == "error"
     worker = snapshot["operation"]["workers"][0]
     assert worker["status"] == "skipped" and worker["message"] == "Busy with running work: Fix login"
+    assert snapshot["operation"]["outcome"] == "refused"
+    assert snapshot["operation"]["refused_workers"] == [{"device_id": "self", "device_name": "Current worker",
+                                                         "reason": "Busy with running work: Fix login"}]
+
+
+def test_all_worker_stop_reports_partial_completion_when_requester_stays_behind(busy, setup, monkeypatch):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": "a" * 12})
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    peer_running = "a" * 12
+
+    async def sent(device_id, kind, body, **kwargs):
+        if body["operation"] == "status":
+            return {"supported": True, "allow_updates": True, "phase": "ready", "version": B[:12],
+                    "running_version": peer_running}
+        return {"accepted": True, "reason": "Request queued"}
+    remote.side_effect = sent
+
+    async def scenario():
+        nonlocal peer_running
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+        peer_running = B[:12]
+        result = await fleet.snapshot(fresh=True)
+        assert result["operation"]["phase"] == "complete"  # compatible legacy transport phase
+        assert result["operation"]["outcome"] == "partial"
+        assert result["operation"]["refused_workers"] == [{"device_id": "self", "device_name": "Current worker",
+                                                          "reason": "Busy with running work: Fix login"}]
+        assert updates._desktop_request is None
+    asyncio.run(scenario())
 
 
 def test_late_stop_refusal_cannot_change_a_newer_install(busy, monkeypatch):
