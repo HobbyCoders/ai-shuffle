@@ -880,6 +880,52 @@ def test_home_root_repair_fixed_mounts_and_storage_aliases(tmp_path, monkeypatch
     assert len(changed) == 2
 
 
+def test_home_root_repair_prioritizes_fluid_before_large_decoy(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    decoy = home / ".cache"
+    decoy.mkdir(parents=True)
+    for index in range(30):
+        (decoy / str(index)).write_text("decoy")
+    target = home / ".fluid" / "exec-file"
+    target.parent.mkdir()
+    target.write_text("repair me")
+    data.mkdir()
+    workspace.mkdir()
+    changed = home_ownership({target: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=4)
+    assert changed == [(target, 41002, 41002)]
+    assert result["limited"]
+
+
+def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeypatch, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    for index in range(30):
+        (home / str(index)).write_text("fixture")
+    home_ownership()
+    original_scandir = os.scandir
+    clock, reads = [0], []
+    class SlowListing:
+        def __init__(self, fd):
+            self.iterator = original_scandir(fd)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.iterator.close()
+        def __iter__(self):
+            return self
+        def __next__(self):
+            reads.append(1)
+            clock[0] += 2
+            return next(self.iterator)
+    monkeypatch.setattr(runtime.os, "scandir", SlowListing)
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert result["limited"]
+    assert len(reads) <= 3
+
+
 def test_home_root_repair_is_bounded_and_logs_capped_relative_sample(tmp_path, monkeypatch, home_ownership):
     home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
     for directory in (home, data, workspace):
@@ -910,7 +956,8 @@ def test_home_root_repair_refuses_symlinked_fixed_volume_parent(tmp_path, monkey
     monkeypatch.setattr(runtime, "mount_points", lambda: {home / ".config" / "gh"})
     result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
     assert changed == []
-    assert result["reasons"]["unavailable"] == 1
+    # Both the fixed .config root and its fixed gh child refuse that parent.
+    assert result["reasons"]["unavailable"] == 2
 
 
 @pytest.mark.parametrize("change", ["device", "hardlink-after-open"])
@@ -950,7 +997,34 @@ def test_home_root_repair_never_repairs_home_used_as_storage(tmp_path, home_owne
     result = runtime.repair_home_root_files(home, home if storage == "data" else outside,
                                            home if storage == "workspace" else outside, 41002, 41002)
     assert changed == []
-    assert result["reasons"]["storage"] == 1
+    assert result["reasons"]["storage"] == len(runtime.HOME_VOLUMES) + 1
+
+
+def test_home_root_repair_priority_child_cannot_bypass_storage_ancestor(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    config = home / ".config"
+    gh = config / "gh"
+    for directory in (gh, data, workspace):
+        directory.mkdir(parents=True)
+    victim = gh / "untouched"
+    victim.write_text("retained data")
+    changed = home_ownership({victim: (0, 0)}, aliases={config: data.stat()})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["storage"] == 3  # .config, .config/gh, and the general walk
+
+
+def test_home_root_repair_bounds_directory_depth(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    deep = home.joinpath(*(["nested"] * 66))
+    for directory in (deep, data, workspace):
+        directory.mkdir(parents=True)
+    victim = deep / "untouched"
+    victim.write_text("beyond depth budget")
+    changed = home_ownership({victim: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+    assert result["reasons"]["depth"] == 1
 
 
 def test_home_root_repair_time_budget_does_not_block_startup(tmp_path, monkeypatch, home_ownership):

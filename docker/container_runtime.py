@@ -873,69 +873,93 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
         result["limited"] = result["visited"] >= max_entries or time.monotonic() - started >= max_seconds
         return result["limited"]
 
-    def walk(root, mounts):
-        root_fd = open_directory(root)
+    def walk(root, mounts, priority):
+        def visit(fd, name, child, device, depth):
+            if limited():
+                return
+            result["visited"] += 1
+            try:
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if storage(child, entry):
+                    skip("storage")
+                    return
+                if entry.st_dev != device:
+                    skip("device")
+                    return
+                if name != "." and (child in mounts or os.path.ismount(child)):
+                    skip("mount")
+                    return
+                if name != "." and child in priority:
+                    skip("priority")  # already scanned separately, including unmounted paths
+                    return
+                directory = stat.S_ISDIR(entry.st_mode)
+                if not directory and not stat.S_ISREG(entry.st_mode):
+                    skip("type")
+                    return
+                if not directory and entry.st_nlink != 1:
+                    skip("hardlink")
+                    return
+                if entry.st_uid != 0:
+                    skip("not-root")
+                    if not directory:
+                        return
+                child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    pinned = os.fstat(child_fd)
+                    if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
+                            or pinned.st_uid != entry.st_uid
+                            or not (stat.S_ISDIR(pinned.st_mode)
+                                    or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                        skip("changed")
+                        return
+                    if pinned.st_uid == 0:
+                        os.fchown(child_fd, uid, gid)
+                        result["repaired"] += 1
+                        if len(sample) < 5:
+                            sample.append(str(child.relative_to(home))[:120])
+                    if directory:
+                        if depth >= 64:
+                            skip("depth")
+                            return
+                        # fwalk eagerly lists a whole directory before yielding. Stream
+                        # from the pinned fd instead, checking the clock during listing.
+                        with os.scandir(child_fd) as entries:
+                            while not limited():
+                                try:
+                                    item = next(entries)
+                                except StopIteration:
+                                    break
+                                if limited():
+                                    break
+                                visit(child_fd, item.name, child / item.name, device, depth + 1)
+                finally:
+                    os.close(child_fd)
+            except OSError:
+                skip("unavailable")
+
+        root_fd = open_directory(home)
         try:
-            root_info = os.fstat(root_fd)
-            if storage(root, root_info):
+            path = home
+            info = os.fstat(root_fd)
+            if storage(path, info):
                 skip("storage")
                 return
-            for directory, dirs, files, fd in os.fwalk(
-                    ".", dir_fd=root_fd, follow_symlinks=False, onerror=lambda _: skip("unavailable")):
-                path = root / directory
-                current = os.fstat(fd)
-                if current.st_dev != root_info.st_dev or storage(path, current):
-                    dirs[:] = []
-                    skip("storage" if storage(path, current) else "device")
-                    continue
-                kept = []
-                for name in (["."] if path == root else []) + dirs + files:
-                    if limited():
-                        dirs[:] = []
-                        return
-                    result["visited"] += 1
-                    child = path if name == "." else path / name
-                    try:
-                        entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                        if storage(child, entry):
-                            skip("storage")
-                            continue
-                        if entry.st_dev != root_info.st_dev:
-                            skip("device")
-                            continue
-                        if name != "." and (child in mounts or os.path.ismount(child)):
-                            skip("mount")
-                            continue
-                        if stat.S_ISDIR(entry.st_mode):
-                            if name != ".":
-                                kept.append(name)
-                        elif not stat.S_ISREG(entry.st_mode):
-                            skip("type")
-                            continue
-                        elif entry.st_nlink != 1:
-                            skip("hardlink")
-                            continue
-                        if entry.st_uid != 0:
-                            skip("not-root")
-                            continue
-                        child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-                        try:
-                            pinned = os.fstat(child_fd)
-                            if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
-                                    or pinned.st_uid != 0
-                                    or not (stat.S_ISDIR(pinned.st_mode)
-                                            or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
-                                skip("changed")
-                                continue
-                            os.fchown(child_fd, uid, gid)
-                            result["repaired"] += 1
-                            if len(sample) < 5:
-                                sample.append(str(child.relative_to(home))[:120])
-                        finally:
-                            os.close(child_fd)
-                    except OSError:
-                        skip("unavailable")
-                dirs[:] = kept
+            # Reopen fixed paths component-by-component from the pinned home;
+            # even an ancestor alias of retained storage must stay excluded.
+            for component in root.relative_to(home).parts:
+                child_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                os.close(root_fd)
+                root_fd = child_fd
+                path = path / component
+                current = os.fstat(root_fd)
+                if storage(path, current):
+                    skip("storage")
+                    return
+                if current.st_dev != info.st_dev and not (path in mounts or os.path.ismount(path)):
+                    skip("device")
+                    return
+                info = current
+            visit(root_fd, ".", root, info.st_dev, 0)
         finally:
             os.close(root_fd)
 
@@ -949,12 +973,17 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
                 continue
             protected_inodes.add((info.st_dev, info.st_ino))
         mounts = mount_points()
-        roots = [home, *(home / name for name in HOME_VOLUMES if home / name in mounts)]
-        for root in roots:
+        priority = {home / name for name in HOME_VOLUMES}
+        # Common exec-as-root destinations precede caches and package installs,
+        # whether or not these fixed paths are separately mounted.
+        names = (".fluid", ".claude", *(name for name in HOME_VOLUMES if name not in {".fluid", ".claude"}))
+        for root in [*(home / name for name in names), home]:
             if limited():
                 break
             try:
-                walk(root, mounts)
+                walk(root, mounts, priority)
+            except FileNotFoundError:
+                pass  # absent optional home directories need no repair
             except OSError:
                 skip("unavailable")
     except OSError:
