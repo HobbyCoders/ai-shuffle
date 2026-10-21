@@ -565,6 +565,10 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
+        if self._is_delegated:
+            from app.core.provider.fluid_pg_store import PgFluidStore
+            if isinstance(store, PgFluidStore):
+                store.cache_nodes = False
         # Legacy Auto selections on native routes use Ask. Only the
         # delegated Claude CLI implements the classifier-backed mode.
         options.permission_mode = effective_permission_mode(
