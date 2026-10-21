@@ -217,7 +217,7 @@ def test_ai_tool_names_for_config():
 
 
 def test_ai_tools_config_from_names_skips_catch_all():
-    assert tc.ai_tools_config_from_names(["mcp__ai-tools__runFalModel", "mcp__ai-tools__searchModels"]) == {}
+    assert tc.ai_tools_config_from_names(["mcp__ai-tools__runFalModel", "mcp__ai-tools__searchModels"]) == {"generation_catalog": True}
     cfg = tc.ai_tools_config_from_names(["mcp__ai-tools__generateVideo", "mcp__ai-tools__textTo3D"])
     assert cfg == {"video_generation": True, "video_with_audio": True, "text_to_3d": True}
     assert tc.ai_tools_config_from_names([]) == {}
@@ -235,6 +235,7 @@ def test_ai_tool_definitions_skips_a_failing_builder(monkeypatch):
     monkeypatch.setattr(ai_tools_sdk, "_create_audio_gen_tools", lambda w: [])
     monkeypatch.setattr(ai_tools_sdk, "_create_catalog_tools", lambda: [SimpleNamespace(name="c", description=None)])
     monkeypatch.setattr(ai_tools_sdk, "_create_generic_tools", lambda w: [])
+    monkeypatch.setattr(ai_tools_sdk, "_create_unified_tools", lambda w: [])
     assert tc._ai_tool_definitions() == {"v": "V.", "c": None}
 
 
@@ -247,7 +248,9 @@ def test_ai_tools_key_lookup_failure_is_unavailable(monkeypatch):
     monkeypatch.setattr(ai_tools_sdk, "_get_fal_api_key", boom)
     monkeypatch.setattr(tc, "_ai_tool_definitions", lambda: {})
     rows, available = tc.ai_tools()
-    assert available is False and rows and all(r["available"] is False for r in rows)
+    assert available is False and rows
+    unified = {"generateImage", "generateVideo", "generateAudio", "textTo3D", "searchModels"}
+    assert all(r["available"] is (r["name"].split("__")[-1] in unified) for r in rows)
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
 
 
@@ -262,7 +265,9 @@ def test_ai_tools_are_unavailable_while_fal_is_off(mock_db, _api_unit_credential
     assert available is True
     fal_credential.set_enabled(False)
     rows, available = tc.ai_tools()
-    assert available is False and rows and all(r["available"] is False for r in rows)
+    assert available is False and rows
+    unified = {"generateImage", "generateVideo", "generateAudio", "textTo3D", "searchModels"}
+    assert all(r["available"] is (r["name"].split("__")[-1] in unified) for r in rows)
 
 
 def test_computer_use_tools_availability_error(monkeypatch):

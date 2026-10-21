@@ -612,17 +612,15 @@ TOOL_CONFIG_MAP = {
         "audio_generation", "audio_to_audio",
     ]},
     # Model discovery — enabled whenever the generic executor is (same condition)
-    "searchModels": {"config_keys": [
-        "image_generation", "image_editing", "image_reference",
-        "video_generation", "video_with_audio", "image_to_video", "video_extend",
-        "text_to_3d", "image_to_3d",
-        "audio_generation", "audio_to_audio",
-    ]},
+    "searchModels": {"config_key": "generation_catalog"},
 }
 
 
 def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
     """Check if a specific tool should be enabled based on config."""
+    if tool_name == "searchModels":
+        return bool(ai_tools_config.get("generation_catalog")) or any(
+            ai_tools_config.get(key, False) for key in TOOL_CONFIG_MAP["runFalModel"]["config_keys"])
     mapping = TOOL_CONFIG_MAP.get(tool_name)
     if not mapping:
         return False
@@ -639,6 +637,100 @@ def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
     return False
 
 
+
+# Unified entry points replace only generation, catalog and generic execution.
+# Transform/edit tools retain their existing names and handlers.
+UNIFIED_TOOL_KINDS = {"generateImage": "image", "generateVideo": "video", "generateAudio": "audio", "textTo3D": "3d"}
+UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
+
+
+def _create_unified_tools(worker, context=None):
+    from app.core.generation_resolver import Resolver, RunContext
+    from app.services.generation_sources import Sources
+
+    context = context or RunContext()
+    backend = Sources(worker, context)
+    resolver = Resolver(backend)
+    tools = []
+    properties = {
+        "prompt": {"type": "string", "description": "Describe the requested result."},
+        "source": {"type": "string", "description": "Optional source (fal, openai, xai, chatgpt, supergrok) or exact account ID from searchModels."},
+        "model": {"type": "string", "description": "Optional exact model ID from searchModels. Never guess."},
+        "worker": {"type": "string", "description": "Optional holding-worker ID from a choice, to distinguish duplicate account bindings."},
+        "options": {"type": "object", "description": "Only parameters declared by the selected model's schema."},
+        "confirmed": {"type": "boolean", "description": "Set true only on an explicit user-approved retry of needs-confirmation."},
+        "confirmation_token": {"type": "string", "description": "The receipt from needs-confirmation; valid only for that exact request and price."},
+    }
+
+    def generation_tool(name, kind):
+        legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
+                  "audio": {"duration": {"type": "number"}},
+                  "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
+                         "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
+        @tool(name, f"Generate {kind} with a connected account.\nNaming no source/model returns priced choices; never choose on the user's behalf. Call searchModels for models and declared options. Unattended runs require a stored choice. Unknown prices are refused; expensive requests require an explicit confirmed retry.", {
+            "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
+        }, annotations=_LARGE_RESULT_ANNOTATIONS)
+        async def generate(args):
+            from app.core.generation_resolver import result
+            request = _model_arg(args)
+            options = request.get("options", {})
+            if not isinstance(options, dict):
+                return _tool_result(result("refused", error="options must be an object."))
+            options = dict(options)
+            for key in legacy:
+                if key in request:
+                    if key in options and options[key] != request[key]:
+                        return _tool_result(result("refused", error="Conflicting top-level and declared model options."))
+                    options[key] = request.pop(key)
+            request["options"] = options
+            return _tool_result(await resolver.generate(kind, request, context))
+        return generate
+
+    tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
+
+    @tool("searchModels", "Discover generation accounts, models, options and prices.\nReturns exact IDs, holding workers and verified status. Catalogs are fetched on demand, never added to every prompt. Unknown prices are not free and cannot be submitted.", {
+        "type": "object", "properties": {
+            "query": {"type": "string"}, "source": {"type": "string"}, "model": {"type": "string"},
+            "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        }, "additionalProperties": False,
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def search_models(args):
+        from app.core.generation_resolver import KINDS, result
+        options = []
+        for kind in [args["output_type"]] if args.get("output_type") else KINDS:
+            catalog = await resolver.catalog(kind, args.get("source"), args.get("model"), query=args.get("query"), limit=args.get("limit") or 15)
+            options.extend(catalog.get("options", []))
+        query = (args.get("query") or "").casefold()
+        options = [o for o in options if not query or query in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
+        limit = max(1, min(args.get("limit") or 15, 50))
+        return _tool_result(result("catalog", options=options[:limit], total_matches=len(options)))
+
+    tools.append(search_models)
+
+    @tool("runFalModel", "Run a fal.ai model with generation guardrails.\nText-input media models only; uses the generation tools' price, confirmation and daily cap checks. Prefer the generation tool for its output kind. Discover its schema with searchModels first.", {
+        "type": "object", "properties": {
+            "endpoint_id": {"type": "string"}, "input": {"type": "object"},
+            "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
+            "confirmed": properties["confirmed"], "confirmation_token": properties["confirmation_token"],
+        }, "required": ["endpoint_id", "input", "output_type"], "additionalProperties": False,
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def run_fal(args):
+        from app.core.generation_resolver import result
+        from app.services.fal_schema import schema_service
+        schema = await schema_service.get_schema(args.get("endpoint_id"), await backend.fal_key())
+        if schema is None or not isinstance(args.get("input"), dict):
+            return _tool_result(result("refused", error="A declared input schema is required."))
+        values = dict(args["input"])
+        prompt = values.pop(schema.primary_text_field, None)
+        request = {"prompt": prompt, "source": "fal", "model": args["endpoint_id"], "options": values,
+                   "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
+        return _tool_result(await resolver.generate(args.get("output_type"), request, context))
+
+    tools.append(run_fal)
+    return tools
+
+
 # ============================================================================
 # Server Creation
 # ============================================================================
@@ -648,6 +740,7 @@ def create_ai_tools_server(
     tools_dir: str,
     tool_env: Optional[Dict[str, str]] = None,
     tool_cwd: Optional[str] = None,
+    generation_context=None,
 ) -> Optional[Any]:
     """
     Create an SDK MCP server with AI content generation tools.
@@ -687,7 +780,7 @@ def create_ai_tools_server(
                     ai_tools_config.get("audio_to_audio", False)
 
     # Generic tool is enabled when any other tool is enabled
-    any_generic = any_image or any_video or any_3d or any_audio_gen
+    any_generic = any_image or any_video or any_3d or any_audio_gen or ai_tools_config.get("generation_catalog", False)
 
     if not any_generic:
         return None
@@ -749,6 +842,9 @@ def create_ai_tools_server(
         if _is_tool_enabled(t.name, ai_tools_config):
             enabled_tools.append(t)
 
+    enabled_tools = [t for t in enabled_tools if t.name not in UNIFIED_TOOL_NAMES]
+    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context)
+                         if _is_tool_enabled(t.name, ai_tools_config))
     if not enabled_tools:
         return None
 

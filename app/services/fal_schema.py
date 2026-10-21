@@ -87,6 +87,72 @@ class ModelSchema:
     endpoint_id: str
     fields: list[ParamField] = field(default_factory=list)
     primary_text_field: Optional[str] = None
+    input_schema: Optional[dict] = None
+
+    def validate_options(self, options: dict, prompt: str) -> dict:
+        """Validate tool input against the same declared fields the picker uses.
+
+        Undeclared parameters are refused, not silently dropped. Defaults and
+        the primary text field are resolved once, before pricing and execution.
+        """
+        import math
+
+        fields = {f.name: f for f in self.fields}
+        if set(options) - fields.keys():
+            raise ValueError("Unknown model option; use the model's declared parameters.")
+        values = {f.name: f.default for f in self.fields if f.default is not None}
+        values.update(options)
+        if not self.primary_text_field:
+            raise ValueError("This model has no declared text input.")
+        if self.primary_text_field in options:
+            raise ValueError("Pass the prompt separately, not in options.")
+        values[self.primary_text_field] = prompt
+        if self.input_schema is not None:
+            # Keep nested object/array constraints and local references from
+            # the provider's OpenAPI document. Never resolve external URLs.
+            from jsonschema import Draft7Validator
+            def local_refs(value):
+                if isinstance(value, dict):
+                    if "$ref" in value and not str(value["$ref"]).startswith("#/"):
+                        raise ValueError("External model schema references are not supported.")
+                    for item in value.values():
+                        local_refs(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        local_refs(item)
+            local_refs(self.input_schema)
+            try:
+                Draft7Validator(self.input_schema).validate(values)
+            except Exception:
+                # Validation errors include the user's values and schema. Do
+                # not return those in a provider/tool error or application log.
+                raise ValueError("Model options do not match the declared input schema.") from None
+            return values
+        for name, f in fields.items():
+            if name not in values:
+                if f.required:
+                    raise ValueError(f"Missing required model option: {name}.")
+                continue
+            value = values[name]
+            valid = True
+            if f.enum is not None:
+                valid = any(type(value) is type(item) and value == item for item in f.enum)
+            elif f.type in ("string", "file"):
+                valid = isinstance(value, str)
+            elif f.type == "integer":
+                valid = type(value) is int
+            elif f.type == "number":
+                valid = type(value) in (int, float) and math.isfinite(value)
+            elif f.type == "boolean":
+                valid = type(value) is bool
+            elif f.type == "array":
+                valid = isinstance(value, list)
+            if valid and type(value) in (int, float):
+                valid = (math.isfinite(value) and (f.minimum is None or value >= f.minimum)
+                         and (f.maximum is None or value <= f.maximum))
+            if not valid:
+                raise ValueError(f"Invalid model option: {name}.")
+        return values
 
     def to_dict(self) -> dict:
         return {
@@ -257,7 +323,8 @@ def normalize_openapi(endpoint_id: str, openapi: dict) -> Optional[ModelSchema]:
                 f.is_primary_text = True
                 break
 
-    return ModelSchema(endpoint_id=endpoint_id, fields=fields, primary_text_field=primary)
+    return ModelSchema(endpoint_id=endpoint_id, fields=fields, primary_text_field=primary,
+                       input_schema={**input_schema, "components": openapi.get("components", {})})
 
 
 def _extract_openapi(model_data: dict) -> Optional[dict]:

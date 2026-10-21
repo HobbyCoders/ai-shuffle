@@ -236,4 +236,5 @@ def detect_capabilities() -> Dict[str, Any]:
         "move_questions": 1,
         "handoff_poll": 1,
         "terminal": _detect_terminal(),
+        "generation": 1,
     }

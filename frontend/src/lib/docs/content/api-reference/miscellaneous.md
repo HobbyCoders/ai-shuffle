@@ -627,10 +627,10 @@ The id must be a model this install can run: a Claude alias from `GET /api/v1/mo
 
 ### Native generation (per provider account)
 
-Native generation is separate from the AI Shuffle direct tools and does not
-change the existing ChatGPT subscription text-to-image choice. The proposed
-settings UI is cancelled and superseded by #379 ("say what you want" generation).
-These backend endpoints do not implement a settings UI.
+These account-scoped endpoints remain for compatibility with the native
+backend. The planned Native generation Settings screen is cancelled. Agents
+use the [unified generation tools](/docs/api-reference/generation-tools), which
+select sources and declared options in the call rather than through Settings.
 
 - Authenticated `GET /api/v1/settings/native-generation` returns
   `{"accounts": [{"provider_id": "...", "name": "...", "provider_kind": "grok", "settings": {"image": {...}, "video": {...}}, "capabilities": {...}}]}`.
@@ -664,36 +664,27 @@ with unavailable groups and locked options, not inferred subscription support.
 | SuperGrok image | `grok-imagine-image`, square `1k`, `jpeg`; quality hidden |
 | SuperGrok video | `grok-imagine-video-1.5-lite`, 1 s, `480p`, `16:9`, `generate_audio: false` |
 
-`GenerateNativeImage` is registered only when the bound account's Image
-capability is available. OpenAI/xAI API-key and no-account/environment-fallback
-sessions do not receive it until verified; direct calls without an account are
-refused without a request. It reads the account's Image group, falling back to
-verified defaults for stale stored settings. ChatGPT's default request is unchanged. SuperGrok sends one images-endpoint request (`n=1`), without
-OpenAI-only fields, and detects JPEG/PNG from returned bytes. Its `2.0` model,
-`2k`, and PNG request format are locked, not claimed as supported.
+The provider-bound `GenerateNativeImage` and `GenerateNativeVideo` tool aliases
+are not registered. The native adapters remain behind `ai-tools.generateImage`
+and `generateVideo`; only the verified combinations above are eligible. An
+unknown price prevents submission, even after confirmation. This draft does
+not infer native media prices from the chat model's token price or from a
+subscription's name.
 
-`GenerateNativeVideo` is exposed only to SuperGrok subscription sessions. It
-submits once, polls asynchronously for at most 180 seconds, and saves a
-session-owned MP4. Its `/api/v1/artifacts/{hash}/video.mp4?session_id=...` URL
-is recognizable as video, uses inline Content-Disposition, and supports browser
-byte-range requests with the existing artifact/session authorization. Reported
-cost remains in the structured tool result. Timeout/cancellation never resubmits
-a possibly billed job; do not call again without the user's go-ahead. Images and
-video share one auth-refresh budget per operation: a definite 401 may refresh
-once and retry only the rejected request (including a poll), never an accepted job.
-Only text-to-video is offered; image-to-video and editing are unprobed.
-Documented 2–15 s durations, 720p/1080p, other aspect ratios and audio are locked
-**not yet verified**. The tool surfaces `cost_in_usd_ticks` and
-`reported_cost_usd` when supplied by xAI (ticks divided by 10,000,000,000).
-The verified probe reported **$0.02**, not free or unlimited usage; this does not
-establish an invoice charge or subscription quota debit. Native media charges
-are not inferred from the chat model's token price.
-
-Subscription credentials and signed download URLs remain server-side. Errors
-are sanitized; no route falls back to fal.ai or paid API keys. Direct tools may
-still explicitly select `chatgpt-subscription` or the distinct
-`supergrok-subscription` image choice using the endpoint below. The latter is
-not fal.ai Grok Imagine Image, and refuses unverified editing/defaults.
+The SuperGrok video adapter submits once, polls for at most 180 seconds and
+stores a session-owned MP4. Timeout/cancellation never resubmits a possibly
+billed job. Only text-to-video is verified. Documented 2–15 s durations,
+720p/1080p, other aspect ratios and audio remain locked **not yet verified**.
+Provider-reported `cost_in_usd_ticks` is divided by 10,000,000,000 to obtain
+`reported_cost_usd`; it is not evidence of an invoice or quota debit.
+Subscription credentials and signed download URLs remain server-side. No route
+falls back to fal.ai or API keys without an explicit source selection.
+Direct native adapter calls without an account are refused without a request.
+Images and video share one auth-refresh budget per operation: a definite 401
+may refresh once and retry only the rejected request (including a poll), never
+an accepted job. The MP4 artifact URL supports authorized byte-range requests
+and inline Content-Disposition. The unscoped direct SuperGrok subscription
+image lane remains removed.
 
 Settings persist as JSON under `native_generation:{provider_id}` in the existing
 settings store. Reads accept the earlier family-level `native_images_chatgpt` /

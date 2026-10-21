@@ -457,6 +457,11 @@ def _task_approval_answer_handler():
     return handle_task_approval_answer
 
 
+def _generation_handler():
+    from app.network.generation import handle
+    return handle
+
+
 def _remote_usage_handler():
     from app.core.assistant_limits import handle_remote_usage
     return handle_remote_usage
@@ -559,6 +564,7 @@ _LAZY_HANDLERS = {
     "task-approval": _task_approval_handler,
     "task-approval-answer": _task_approval_answer_handler,
     "remote-usage": _remote_usage_handler,
+    "generation": _generation_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
     "project-git": _project_git_handler,

@@ -274,6 +274,8 @@ def _measure(now=None) -> dict:
         live = _live_turns(cursor, tracked) if tracked else []
         spent = (_booked(cursor, tracked, start) + _in_flight(cursor, tracked, live)
                  + _remote_booked(cursor, start)) if tracked else 0.0
+        from app.core.generation_budget import reserved
+        spent += float(reserved(cursor, day))
     return dict(day=day, start=start, resets_at=resets_at, timezone=tz_name,
                 spent=spent, tracked=tracked, live=live)
 

@@ -138,9 +138,11 @@ async def test_video_media_url_allowlist(url):
 
 
 async def test_video_deadline_and_cancel_preserve_reported_cost(monkeypatch):
-    from app.core.provider import fluid_credentials
     accounts(monkeypatch)
-    monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
+    # This test's 10 ms deadline targets polling after a billed submission,
+    # not executor scheduling during account lookup. Credential resolution is
+    # exercised separately by the image/video account-boundary tests.
+    monkeypatch.setattr(supergrok_images, "resolve_credential", AsyncMock(return_value="test-private-token"))
     calls = []
     def boundary(request):
         calls.append(request)
@@ -181,8 +183,8 @@ def test_legacy_grok_settings_are_read_compatible_and_account_local(monkeypatch)
     assert load("grok-b").image.model == "grok-imagine-image"
 
 
-@pytest.mark.parametrize("kind,exposed", [("grok", True), ("chatgpt", False), ("xai", False), ("openai", False)])
-async def test_video_registry_is_subscription_specific(monkeypatch, kind, exposed):
+@pytest.mark.parametrize("kind", ["grok", "chatgpt", "xai", "openai"])
+async def test_video_native_alias_is_replaced_by_one_unified_tool(monkeypatch, kind):
     from app.core.provider import harness_adapter as ha
     from app.core.provider.types import SessionOptions
     from app.core.session_modes import CHAT_MODE_TOOL_SURFACE, PROACTIVE_DENIED_TOOLS
@@ -192,6 +194,6 @@ async def test_video_registry_is_subscription_specific(monkeypatch, kind, expose
     options = SessionOptions(model="unrelated-model", extra={"provider_id": "account", "session_mode": "chat"})
     adapter._options = options
     registry = await adapter._build_registry(options, native=True)
-    assert ("GenerateNativeVideo" in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
-    assert "GenerateNativeVideo" in CHAT_MODE_TOOL_SURFACE
+    assert "GenerateNativeVideo" not in {s.name for s in registry.list_tools(loaded_only=False)}
+    assert "mcp__ai-tools__generateVideo" in CHAT_MODE_TOOL_SURFACE
     assert "GenerateNativeVideo" in PROACTIVE_DENIED_TOOLS

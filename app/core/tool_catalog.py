@@ -232,6 +232,7 @@ def _ai_tool_definitions() -> Dict[str, Any]:
         (ai_tools_sdk._create_audio_gen_tools, True),
         (ai_tools_sdk._create_catalog_tools, False),
         (ai_tools_sdk._create_generic_tools, True),
+        (ai_tools_sdk._create_unified_tools, True),
     )
     for builder, takes_worker in builders:
         try:
@@ -269,10 +270,10 @@ def ai_tools_config_from_names(names: List[str]) -> Dict[str, bool]:
 
     ``create_ai_tools_server`` still gates on the per-category booleans, so
     "attach the server when at least one AI tool is permitted" is expressed by
-    synthesizing the map the picker's selection implies. The two catch-all tools
-    (``runFalModel`` / ``searchModels``) map to EVERY category, so they are
-    skipped here — otherwise permitting them alone would silently turn every
-    category back on.
+    synthesizing the map the picker's selection implies. ``runFalModel`` maps
+    to every execution category, so it is skipped here rather than silently
+    turning every category on. ``searchModels`` has a catalog-only key and may
+    be attached without any generation tool.
     """
     from app.mcp.ai_tools_sdk import TOOL_CONFIG_MAP
 
@@ -311,7 +312,9 @@ def ai_tools() -> Tuple[List[Dict[str, Any]], bool]:
     rows = []
     for name in TOOL_CONFIG_MAP:
         row = _tool_row(f"mcp__ai-tools__{name}", described.get(name))
-        row["available"] = available
+        # Unified entry points resolve connected accounts and peers on demand;
+        # absence of a local fal key is not evidence that no source exists.
+        row["available"] = available or name in {"generateImage", "generateVideo", "generateAudio", "textTo3D", "searchModels"}
         rows.append(row)
     rows.sort(key=lambda r: r["name"])
     return rows, available
