@@ -6,11 +6,11 @@ PostgreSQL database (tables ``fluid_sessions`` / ``fluid_session_nodes`` /
 durability — resume, fork, and event replay all survive a process restart and
 work from any app instance sharing the database.
 
-Semantics mirror ``fluid.store.jsonl.JsonlStore``: per-session lazy load into a
-memory cache, then write-through on every mutation. The cache makes the hot
-read paths (``load_path`` on every prompt build, ``events_since`` on every
-receive loop) synchronous-fast; Postgres writes ride ``run_sync`` so the event
-loop never blocks on the driver.
+Semantics mirror ``fluid.store.jsonl.JsonlStore`` with write-through mutations.
+Native sessions cache the node tree for per-turn prompt building; delegated
+CLIs own their context, so their stores keep only metadata and read durable
+nodes on demand. Event replay uses a bounded tail cache. PostgreSQL reads and
+writes ride ``run_sync`` so the event loop never blocks on the driver.
 
 Event appends are idempotent per (session_id, seq) — ``ON CONFLICT DO
 NOTHING`` — because fluid's EventBus can replay a tail after reconnect and the
@@ -52,6 +52,7 @@ from app.core.provider import legacy_events as _legacy_events  # noqa: F401
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
+from fluid.messages.content import Text
 from fluid.store.base import (
     RECONSTRUCTIBLE_EVENTS,
     SessionMeta,
@@ -90,8 +91,8 @@ def _create_session_sync(meta: SessionMeta) -> None:
         )
 
 
-def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
-    """Load the node tree without retaining the unbounded event history."""
+def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Optional[Dict[str, Any]]:
+    """Load metadata, optionally decoding the node tree off-loop."""
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -102,6 +103,8 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
         meta = SessionMeta(**dict(row))
+        if not include_nodes:
+            return {"meta": meta, "nodes": {}}
         cur.execute(
             "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
             "WHERE session_id = %s", (session_id,),
@@ -113,6 +116,134 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
         message=Message.from_dict(_as_dict(r["message"])),
     ) for r in rows}
     return {"meta": meta, "nodes": nodes}
+
+
+def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
+            "WHERE session_id = %s AND node_id = %s", (session_id, node_id),
+        )
+        row = cur.fetchone()
+    return None if row is None else SessionNode(
+        node_id=row["node_id"], parent_id=row["parent_id"], ts=row["ts"],
+        message=Message.from_dict(_as_dict(row["message"])),
+    )
+
+
+# A delegated CLI owns the transcript. Keep only the host-pinned memory
+# projection; never the surrounding owner prompt/tool payload. Overflow is
+# conservative: the adapter re-sends a full snapshot on its next turn.
+MEMORY_PATH_BYTES = 64 * 1024
+_ANCESTORS_SQL = """WITH RECURSIVE ancestors AS (
+    SELECT node_id, parent_id, 0 AS depth FROM fluid_session_nodes
+    WHERE session_id = %s AND node_id = %s
+    UNION ALL
+    SELECT n.node_id, n.parent_id, a.depth + 1 FROM fluid_session_nodes n
+    JOIN ancestors a ON n.node_id = a.parent_id WHERE n.session_id = %s
+) """
+
+
+def _memory_projection(nodes: Optional[List[SessionNode]], node: SessionNode) -> Optional[List[SessionNode]]:
+    from app.core.memory_reminder import memory_blocks, newest_full_node
+
+    message = node.message
+    note = message.pinned_text() if message.role == "user" else ""
+    if not note or not memory_blocks(note):
+        return nodes
+    if newest_full_node([node]):
+        nodes = []
+    if nodes is None:
+        return None
+    result = [*nodes, SessionNode(
+        node_id=node.node_id, parent_id=node.parent_id, ts=node.ts,
+        message=Message(role="user", content=[Text(text=note)], context_pin=(0, len(note))),
+    )]
+    return result if sum(4 * len(n.message.text()) for n in result) <= MEMORY_PATH_BYTES else None
+
+
+def _session_head_sync(session_id: str) -> Optional[str]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT head_node_id FROM fluid_sessions WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(session_id)
+    return row["head_node_id"]
+
+
+def _load_memory_path_sync(session_id: str, head: Optional[str]) -> Optional[List[SessionNode]]:
+    """Cold/rewound path only: indexed ancestry IDs, memory candidates only.
+
+    No off-path rows or assistant/tool messages are decoded. Walk candidates
+    newest-first and stop at the newest provenance-marked full snapshot.
+    Linear appends advance the bounded projection without this ancestry read.
+    """
+    from app.core.memory_reminder import newest_full_node
+
+    if head is None:
+        return []
+    newest = []
+    size = 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(_ANCESTORS_SQL + """
+            SELECT n.node_id, n.parent_id, n.ts, n.message FROM ancestors a
+            JOIN fluid_session_nodes n ON n.node_id = a.node_id AND n.session_id = %s
+            WHERE n.message ->> 'role' = 'user' AND n.message -> 'context_pin' IS NOT NULL
+              AND CAST(n.message AS TEXT) LIKE %s ORDER BY a.depth
+        """, (session_id, head, session_id, session_id, '%# Memory%'))
+        while (row := cur.fetchone()) is not None:
+            node = SessionNode(node_id=row["node_id"], parent_id=row["parent_id"], ts=row["ts"],
+                               message=Message.from_dict(_as_dict(row["message"])))
+            projected = _memory_projection([], node)
+            if projected is None:
+                return None
+            if not projected:
+                continue
+            size += 4 * len(projected[0].message.text())
+            if size > MEMORY_PATH_BYTES:
+                return None
+            newest.append(projected[0])
+            if newest_full_node([node]):
+                break
+    return list(reversed(newest))
+
+
+def _initial_task_sync(session_id: str, owner_ids: List[str]) -> str:
+    from app.core.memory_reminder import initial_task_query
+
+    if not owner_ids:
+        return ""
+    head = _session_head_sync(session_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        slots = ','.join(['%s'] * len(owner_ids))
+        cur.execute(_ANCESTORS_SQL + f"SELECT node_id FROM ancestors WHERE node_id IN ({slots}) "
+                    "ORDER BY depth DESC", (session_id, head, session_id, *owner_ids))
+        ids = [row["node_id"] for row in cur.fetchall()]
+    for node_id in ids:
+        node = _get_node_sync(session_id, node_id)
+        if node is not None and (query := initial_task_query([node])):
+            return query
+    return ""
+
+
+def _load_path_sync(session_id: str, leaf_node_id: Optional[str]) -> List[SessionNode]:
+    # Rare delegated history reads (resume/reseed/fork), not the turn hot path.
+    # Decode and walk off-loop; never publish this temporary tree to the cache.
+    data = _load_session_sync(session_id)
+    if data is None:
+        raise KeyError(session_id)
+    cursor = leaf_node_id or data["meta"].head_node_id
+    path = []
+    while cursor is not None:
+        node = data["nodes"][cursor]
+        path.append(node)
+        cursor = node.parent_id
+    path.reverse()
+    return path
 
 
 def _events_since_sync(session_id: str, seq: int) -> List[Event]:
@@ -1254,9 +1385,13 @@ class PgFluidStore:
     STREAM_BATCH_BYTES = 64 * 1024
     STREAM_BATCH_SECONDS = 0.05
 
-    def __init__(self) -> None:
+    def __init__(self, *, cache_nodes: bool = True) -> None:
+        # Native prompt building needs the tree every turn. Delegated CLIs own
+        # their context: retain metadata only, and read history on demand.
+        self.cache_nodes = cache_nodes
         self._sessions: Dict[str, SessionMeta] = {}
         self._nodes: Dict[str, Dict[str, SessionNode]] = {}
+        self._memory_paths: Dict[str, tuple[Optional[str], Optional[List[SessionNode]]]] = {}
         self._events: Dict[str, List[Event]] = {}
         self._event_floor: Dict[str, int] = {}
         self._event_bytes: Dict[str, int] = {}
@@ -1272,7 +1407,7 @@ class PgFluidStore:
         async with self._load_lock:
             if session_id in self._loaded:
                 return session_id in self._sessions
-            data = await run_sync(_load_session_sync, session_id)
+            data = await run_sync(_load_session_sync, session_id, include_nodes=self.cache_nodes)
             # A failed read must be retryable; never publish a half-loaded cache.
             if data is not None:
                 self._sessions[session_id] = data["meta"]
@@ -1386,6 +1521,8 @@ class PgFluidStore:
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
         self._node_json_bytes[meta.session_id] = 0
+        if not self.cache_nodes:
+            self._memory_paths[meta.session_id] = (None, [])
         self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
         return meta
@@ -1399,18 +1536,31 @@ class PgFluidStore:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
         await run_sync(_append_node_sync, session_id, node)
-        self._cache_node(session_id, node)
+        if self.cache_nodes:
+            self._cache_node(session_id, node)
+        elif session_id in self._memory_paths:
+            head, projection = self._memory_paths[session_id]
+            if node.parent_id == head:
+                self._memory_paths[session_id] = (node.node_id, _memory_projection(projection, node))
+            else:
+                self._memory_paths.pop(session_id, None)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node.node_id
 
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
-        await self._ensure_loaded(session_id)
+        if not await self._ensure_loaded(session_id):
+            return None
+        if not self.cache_nodes:
+            return await run_sync(_get_node_sync, session_id, node_id)
         return self._nodes.get(session_id, {}).get(node_id)
 
     async def load_path(
         self, session_id: str, leaf_node_id: Optional[str] = None
     ) -> List[SessionNode]:
         await self._ensure_loaded(session_id)
+        if not self.cache_nodes:
+            await self.flush_events(session_id)
+            return await run_sync(_load_path_sync, session_id, leaf_node_id)
         meta = self._sessions[session_id]
         nodes = self._nodes[session_id]
         cursor = leaf_node_id or meta.head_node_id
@@ -1422,11 +1572,26 @@ class PgFluidStore:
         path.reverse()
         return path
 
+    async def load_memory_path(self, session_id: str) -> Optional[List[SessionNode]]:
+        """Bounded pinned-memory projection, validated against the durable head."""
+        await self._ensure_loaded(session_id)
+        await self.flush_events(session_id)
+        head = await run_sync(_session_head_sync, session_id)
+        cached = self._memory_paths.get(session_id)
+        if cached is None or cached[0] != head:
+            projection = await run_sync(_load_memory_path_sync, session_id, head)
+            cached = self._memory_paths[session_id] = (head, projection)
+        return cached[1]
+
+    async def initial_task_query(self, session_id: str, owner_ids: List[str]) -> str:
+        return await run_sync(_initial_task_sync, session_id, owner_ids)
+
     async def set_head(self, session_id: str, node_id: Optional[str]) -> None:
         await self._ensure_loaded(session_id)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node_id
         await run_sync(_set_head_sync, session_id, node_id)
+        self._memory_paths.pop(session_id, None)
 
     async def set_cli_session_id(
         self, session_id: str, cli_session_id: Optional[str]

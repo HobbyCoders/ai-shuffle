@@ -565,6 +565,10 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
+        if self._is_delegated:
+            from app.core.provider.fluid_pg_store import PgFluidStore
+            if isinstance(store, PgFluidStore):
+                store.cache_nodes = False
         # Legacy Auto selections on native routes use Ask. Only the
         # delegated Claude CLI implements the classifier-backed mode.
         options.permission_mode = effective_permission_mode(
@@ -2026,8 +2030,9 @@ class HarnessAdapter(ProviderAdapter):
         the newest full snapshot on the path is still trustworthy: no
         compaction that can fold user text ran after the turn that carried it.
         Later calls rely on :meth:`_observe_memory_event`, which follows the
-        live turns. Reading the path every time catches a rewind or fork that
-        moved the head off that node. Never raises: None re-sends in full.
+        live turns. A durable-head check catches rewinds/forks; delegated
+        stores use a bounded pinned-memory projection, not a transcript read
+        every turn. Never raises: None re-sends in full.
         """
         engine = self._engine
         sid = self._sdk_session_id
@@ -2037,7 +2042,12 @@ class HarnessAdapter(ProviderAdapter):
         try:
             from app.core.memory_reminder import held_from_path, newest_full_node
 
-            nodes = await store.load_path(sid)
+            if getattr(store, "cache_nodes", True) is False:
+                # An over-budget projection is unknown, not held. Still recover
+                # task provenance below before conservatively sending it in full.
+                nodes = await store.load_memory_path(sid) or []
+            else:
+                nodes = await store.load_path(sid)
             identity = self._memory_engine_identity()
             if self._memory_identity is not None and identity != self._memory_identity:
                 self._memory_trusted_node = None
@@ -2092,12 +2102,15 @@ class HarnessAdapter(ProviderAdapter):
                         "provider": getattr(event, "provider", None),
                         "source": getattr(event, "source", None),
                     })
-        if nodes and not self._memory_initial_task:
+        if nodes is not None and not self._memory_initial_task:
             from app.core.memory_reminder import initial_task_query
             owner_ids = {row.get("node_id") for row in rows
                          if row.get("_cls") == "TurnStarted" and row.get("source") == "user"}
-            self._memory_initial_task = initial_task_query(
-                [node for node in nodes if getattr(node, "node_id", None) in owner_ids])
+            if getattr(store, "cache_nodes", True) is False:
+                self._memory_initial_task = await store.initial_task_query(sid, list(owner_ids))
+            else:
+                self._memory_initial_task = initial_task_query(
+                    [node for node in nodes if getattr(node, "node_id", None) in owner_ids])
         if not node_id:
             return True
         started = False
