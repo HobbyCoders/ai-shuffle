@@ -455,7 +455,7 @@ async def test_type_with_held_system_modifier_requires_grant(gesture, modifier, 
         access.revoke("test")
         access.grant("test")
     result = payload(await t["type"]({"text": text}))
-    assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "rejected"
+    assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "partial"
     assert not any(e[0] == "type" or e == ("key_down", "tab") for e in gesture.events)
     gesture.keyboard.release.assert_called_with(modifier)
 
@@ -529,7 +529,7 @@ async def test_mouse_up_validates_mapping_before_pressing_modifiers(gesture):
     await t["mouse_down"]({})
     gesture.events.clear()
     result = payload(await t["mouse_up"]({"coordinate": [20, 20], "screenshot_id": "old", "text": "shift"}))
-    assert result["code"] == "STALE_OBSERVATION" and result["outcome"] == "rejected"
+    assert result["code"] == "STALE_OBSERVATION" and result["outcome"] == "partial"
     assert ("key_down", "shift") not in gesture.events
     assert gesture.events == [("mouse_up", "left")]
 
@@ -668,3 +668,83 @@ async def test_keypad_arithmetic_sends_native_key_codes(gesture, monkeypatch, pl
     assert [e for e in gesture.events if e[0] != "sleep"] == [
         ("key_down", "ctrl"), ("key_down", ("vk", add)), ("key_up", ("vk", add)),
         ("key_up", "ctrl"), ("key_down", ("vk", subtract)), ("key_up", ("vk", subtract))]
+
+
+@pytest.mark.parametrize("action", ["open_application", "focus_window", "click_element", "set_value"])
+@pytest.mark.parametrize("held", ["alt", "ctrl+shift", "shift", "a", "cmd"])
+@pytest.mark.parametrize("system_grant", [False, True])
+async def test_implicit_input_actions_refuse_held_keys(gesture, monkeypatch, action, held, system_grant):
+    from app.mcp.computer_use import access
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad", "Paint"], "reason": "test", "systemKeyCombos": True})
+    await t["screenshot"]({})
+    tree = payload(await t["ui_tree"]({"window_id": 101}))
+    element = tree["elements"][0]["element_id"]  # Edit: click_element uses its mouse fallback
+    monkeypatch.setattr(windows, "foreground_window", lambda: 101)
+    assert payload(await t["key_down"]({"text": held}))["success"]
+    if not system_grant:
+        access.revoke("test")
+        access.grant("test", apps=["Notepad", "Paint"])
+    gesture.events.clear()
+    gesture.native.nudge = True
+    args = {"open_application": {"app": "Paint\t" if held == "alt" else "Paint"},
+            "focus_window": {"window_id": 101}, "click_element": {"element_id": element},
+            "set_value": {"element_id": element, "value": "no"}}[action]
+    result = payload(await t[action](args))
+    assert result["code"] == "PERMISSION_REQUIRED" and result["outcome"] == "partial"
+    assert "release held keys first" in result["error"].lower()
+    assert gesture.native.focused == [] and gesture.uia.performed == []
+    gesture.mouse.press.assert_not_called()
+    assert gesture.events == [("key_up", key) for key in reversed(held.split("+"))]
+
+
+@pytest.mark.parametrize("control", ["\t", "\n", "\r", "\x00", "\x7f", "\x85"])
+async def test_open_application_rejects_control_characters(gesture, control):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Paint"], "reason": "test"})
+    result = payload(await t["open_application"]({"app": "Paint" + control}))
+    assert result["code"] == "INVALID_ARGUMENT" and result["outcome"] == "rejected"
+    assert "control characters" in result["error"]
+    assert gesture.native.focused == [] and gesture.events == []
+
+
+@pytest.mark.parametrize("down,up,button", [("mouse_down", "mouse_up", "left"),
+    ("mouse_down", "mouse_up", "right"), ("mouse_down", "mouse_up", "middle"),
+    ("left_mouse_down", "left_mouse_up", "left")])
+async def test_paired_window_drag_defers_bounds_check_until_drop(gesture, down, up, button):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    shot = payload(await t["screenshot"]({"window_id": 101}))["screenshot_id"]
+    assert payload(await t[down]({"coordinate": [5, 2], "button": button}))["success"]
+    gesture.windows[0] = replace(gesture.windows[0], bounds=(30, 10, 100, 50))
+    for point in ([20, 2], [25, 3]):
+        assert payload(await t["mouse_move"]({"coordinate": point, "screenshot_id": shot}))["success"]
+        assert ("mouse_up", button) not in gesture.events
+    result = payload(await t[up]({"coordinate": [30, 3], "button": button, "screenshot_id": shot}))
+    assert result["success"] and result["released"]
+    assert gesture.events.count(("mouse_up", button)) == 1
+    assert payload(await t["left_click"]({"coordinate": [20, 2]}))["code"] == "STALE_OBSERVATION"
+    # Deferral ended: the old crop is rejected before any additional press.
+    gesture.mouse.press.assert_called_once_with(button)
+
+
+@pytest.mark.parametrize("action", ["mouse_move", "mouse_up"])
+async def test_paired_drag_keeps_screenshot_id_checks_and_reports_cleanup(gesture, action):
+    t = gesture.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    await t["screenshot"]({"window_id": 101})
+    await t["mouse_down"]({"coordinate": [5, 2]})
+    gesture.windows[0] = replace(gesture.windows[0], bounds=(30, 10, 100, 50))
+    gesture.events.clear()
+    result = payload(await t[action]({"coordinate": [20, 2], "screenshot_id": "obsolete"}))
+    assert result["code"] == "STALE_OBSERVATION" and result["outcome"] == "partial"
+    assert gesture.events == [("mouse_up", "left")]
+
+
+async def test_batch_first_step_failure_counts_release_of_prior_call_hold(gesture):
+    await gesture.tools["mouse_down"]({})
+    gesture.events.clear()
+    result = await gesture.tools["computer_batch"]({"actions": [{"action": "invalid"}]})
+    failure = payload(result)
+    assert failure["outcome"] == "partial" and failure["completed_actions"] == []
+    assert gesture.events == [("mouse_up", "left")]

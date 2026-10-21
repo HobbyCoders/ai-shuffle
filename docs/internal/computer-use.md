@@ -101,8 +101,10 @@ only when the current screenshot is its window crop; a full-display mapping stil
 allows taskbar and other-app clicks. Related targets include the same process or
 an owned popup. Take `screenshot` **without `window_id`** to clear the pin and work
 elsewhere. This narrows, but cannot eliminate, the focus/input race. Window bounds
-are validated once per action (not once per path point); a window-moving drag
-completes before its old crop becomes stale for the next action. Elevated pointer targets are refused before clicking,
+are validated once per action (not once per path point). A window-moving drag,
+including paired down/move/up calls, completes before its old crop becomes stale
+for the next action. During a paired drag, screenshot-id and display-topology
+checks still apply. Elevated pointer targets are refused before clicking,
 scrolling, or dragging.
 
 A coordinate more than 2 pixels outside the screenshot is refused with
@@ -119,7 +121,10 @@ stay held until up; modifiers supplied on up are held through the drop and relea
 `key_up` hold/release a key or chord across calls. System-key grants still apply,
 including pointer modifiers combined with already-held modifiers. `type` while
 Ctrl, Alt or Win/Command is held requires system-key permission too. X11 refuses
-held Escape.
+held Escape. `open_application`, `focus_window`, `click_element` and `set_value`
+refuse while any key is held, even with a system-key grant: release held keys
+first, because these actions can send their own keys or clicks. Application names
+must not contain control characters.
 Cross-call holds auto-release after **15 seconds**, as well as on errors, Stop,
 turn end and `release_control`. Use a short `computer_batch` for a held gesture.
 Timeout/Stop release does not send Escape to cancel a drag. If an up action finds
@@ -146,7 +151,9 @@ is not implemented here. Key chords accept `ctrl++`, `plus`, `minus`, `KP_Add`,
 
 **Outcomes.** Every error carries `error` (short, plain), `code` and `outcome`:
 `rejected` (nothing sent), `partial` (some input sent) or `unknown` (input may
-have taken effect; observe before retrying). Codes are listed in
+have taken effect; observe before retrying). Error cleanup that releases a held
+key/button counts as input, so a refusal that drops a cross-call drag reports
+`partial`, not `rejected`. Codes are listed in
 `app/mcp/computer_use/errors.py`: `STALE_OBSERVATION`, `TARGET_NOT_FOUND`,
 `TARGET_CHANGED`, `FOCUS_BLOCKED`, `POINTER_MISMATCH`, `USER_INTERRUPTED`, `DESKTOP_LOCKED`,
 `PERMISSION_REQUIRED`, `DESKTOP_BUSY`, `UNSUPPORTED_CAPABILITY`,

@@ -184,6 +184,9 @@ class SafeInput:
         with abort._LOCK:
             if (device, key) in self.held:
                 device.release(key)
+                # Cleanup can drop a cross-call drag or end a held shortcut.
+                # That is input too, even if this action failed before pressing.
+                self.sent += 1
                 self.held.remove((device, key))
             if not self.held and self._hold_timer is not None:
                 self._hold_timer.cancel()

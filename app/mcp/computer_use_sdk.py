@@ -627,6 +627,13 @@ def create_computer_use_server(
     def _enforce_grant(action: str, p: dict) -> None:
         # What the access card showed the owner is what the session may do, in
         # every permission mode (#1700). Checked before any input is sent.
+        if action in ("open_application", "focus_window", "click_element", "set_value") and any(
+                device is keyboard for device, key in inputs.held):
+            raise ActionError("PERMISSION_REQUIRED", "Release held keys first; " + action +
+                              " may send its own keys or clicks.")
+        if action == "open_application" and any(
+                ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in str(p.get("app") or "")):
+            raise ActionError("INVALID_ARGUMENT", "Application names cannot contain control characters.")
         held_mods = [name for name in ("ctrl", "alt", "shift", "cmd")
                      if (keyboard, getattr(Key, name)) in inputs.held]
         pointer_actions = {*_CLICKS, "mouse_down", "left_mouse_down", "left_click_drag", "scroll",
@@ -735,7 +742,12 @@ def create_computer_use_server(
         return mgr.to_physical(value[0], value[1], p.get("screenshot_id"))
 
     def _execute(action: str, p: dict) -> list:
-        mgr.begin_action()
+        # A title-bar drag can move the crop's window between paired calls.
+        # Keep shot-id/topology checks, but defer window-bounds validation until
+        # the button is released, just as for a single-call drag.
+        continuing_drag = action in ("mouse_move", "mouse_up", "left_mouse_up") and any(
+            device is mouse for device, key in inputs.held)
+        mgr.begin_action(defer_window_check=continuing_drag)
         try:
             return _execute_action(action, p)
         finally:

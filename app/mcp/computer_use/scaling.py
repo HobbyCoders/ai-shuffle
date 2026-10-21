@@ -390,6 +390,7 @@ class DisplayManager:
         # index -> {"scale","pw","ph","left","top","vw","vh"}
         self._map: dict[int, dict] = {}
         self._checked_windows: Optional[set[str]] = None
+        self._defer_window_check = False
         _ensure_dpi_awareness()
         displays = self.list_displays()
         if target_display is not None and any(d.index == target_display for d in displays):
@@ -506,12 +507,14 @@ class DisplayManager:
         m = self._map.get(self.selected_index)
         return m.get("id") if m else None
 
-    def begin_action(self) -> None:
-        """Cache native window validation only within one serialized action."""
+    def begin_action(self, *, defer_window_check: bool = False) -> None:
+        """Cache native validation; paired drags may intentionally move the window."""
         self._checked_windows = set()
+        self._defer_window_check = defer_window_check
 
     def end_action(self) -> None:
         self._checked_windows = None
+        self._defer_window_check = False
 
     def mapped_geometry(self, screenshot_id: Optional[str] = None) -> dict:
         """The current screenshot's mapping. Refuses input based on an image
@@ -532,7 +535,7 @@ class DisplayManager:
             self._map.pop(self.selected_index, None)
             raise stale("The display layout changed since the screenshot (layout changed). "
                         "Take a fresh screenshot before acting.")
-        if (m.get("window_id") is not None
+        if (m.get("window_id") is not None and not self._defer_window_check
                 and (self._checked_windows is None or m["id"] not in self._checked_windows)):
             from app.mcp.computer_use import windows
             try:
