@@ -237,7 +237,7 @@ def main():
                           pruning=prune_lab(args.ops, get_db, connection, args.work_mem))
             # Drain only this owned cluster before its normal shutdown guard;
             # never relax the production supervisor deadline.
-            db.query("CHECKPOINT", admin=True)
+            db.admin_script("CHECKPOINT", timeout=120)
         finally:
             if connection is not None:
                 connection.close()
