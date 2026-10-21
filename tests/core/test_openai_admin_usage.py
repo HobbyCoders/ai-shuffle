@@ -130,6 +130,12 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
         results = [{"amount": {"value": "12.5", "currency": "usd"}}] if url.endswith("/costs") else [{"input_tokens": 30, "output_tokens": 40, "num_model_requests": 2}]
         return response({"data": [{"results": results}], "has_more": False})
     upstream.side_effect = get
+    # Produce the reading at its scenario timestamp instead of moving an
+    # already-stored successful observation backwards in time.
+    from app.core import provider_usage
+    now = datetime(2026, 10, 1, 0, 0, 30, tzinfo=timezone.utc).timestamp()
+    fetched = int((now - {"fresh": 10, "stale": 3600, "error": 10, "prior_month": 60}[admin_state]) * 1000)
+    monkeypatch.setattr(provider_usage, "time", SimpleNamespace(time=lambda: fetched / 1000))
     monitor = ProviderUsageMonitor()
     assert await monitor._poll_openai_provider(row)
     snapshot = next(s for s in db.get_all_provider_usage_snapshots() if s["provider_id"] == pid)
@@ -146,8 +152,7 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
     from app.api.usage import _load_provider_usage
     from app.api import usage as api_usage
     # A month boundary must not relabel last month's otherwise-recent spend.
-    now = datetime(2026, 10, 1, 0, 0, 30, tzinfo=timezone.utc).timestamp()
-    fetched = int((now - {"fresh": 10, "stale": 3600, "error": 10, "prior_month": 60}[admin_state]) * 1000)
+    assert snapshot["fetched_at"] == fetched
     raw = {**snapshot["raw"], "billing_fetched_at": fetched}
     if admin_state == "error":
         raw["usage_error"] = "billing_access_denied"
@@ -172,7 +177,15 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
         assert "input_tokens" not in entry.credits
     assert entry.source_info.id == "openai_platform_balance"
     current = db.get_model_provider(pid, include_token=True)
-    assert provider_balances.snapshot(current, {"last_error_kind": "billing_access_denied"})
+    # Model a failed first reading after a billing-key save invalidates the
+    # previous balance. A later failure alone now retains its prior success.
+    assert provider_balances.bind(current, settings.effective_instance_id, encryption.encrypt_value("sess-next-balance"))
+    current = db.get_model_provider(pid, include_token=True)
+    assert provider_balances.snapshot(current, {
+        "last_error_kind": "billing_access_denied",
+        "last_error_scope": "billing",
+        "last_attempted_at": int(balances.time.time() * 1000),
+    })
     entry = next(e for e in await _load_provider_usage() if e.provider_id == pid)
     assert "balance_remaining" not in (entry.credits or {})
     if admin_state == "fresh":
