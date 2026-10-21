@@ -33,21 +33,37 @@ All routes below require the existing terminal owner authentication and
 same-origin checks. Agent previews, API keys, passwordless local access,
 non-owner paired devices and peer device tokens are refused.
 
-1. On source A, `GET /api/v1/terminals/targets` includes all known peer workers.
+Peer terminal UI is not shipped; this is a backend integration contract, not
+an available user feature. Keep the peer-terminal setting off until UI and
+real two-worker HTTPS acceptance are complete.
+
+1. On source A, `GET /api/v1/terminals/targets` includes known peer workers only
+   when peer terminals are enabled locally. Default-off discovery returns no
+   peer rows, preserving the existing terminal picker.
    Each has `kind: "worker"`, `worker_id`, `name`, `available`, `reason_code`
    and `reason`. Codes: `peer_offline`, `peer_terminals_disabled`,
    `peer_unsupported_or_disabled`, `not_supported`, `https_required`,
    `peer_unavailable`, `recipient_approval_required`. Pending approval is **not**
    available. Live HTTPS probes detect unavailable recipients even when cached
-   capability advertisements are stale.
+   capability advertisements are stale. Discovery probes and authorization
+   status checks each have a three-second total deadline and a one-second
+   connect cap; checks run concurrently. Opening probes only the selected peer,
+   and SSH opens never probe peers.
 2. On A, `POST /api/v1/terminals/peer-authorizations` with
    `{"worker_id":"<B>"}` returns 201 with `authorization_id`, `worker_id`,
-   `request_id`, `status: "pending"`, `used: false`, `expires_in` (seconds).
+   `request_id`, `status: "pending"`, `used: false`, `expires_in` (seconds),
+   `confirmation_code` (six random base32 characters), `source_name` (the
+   requesting member's name) and `age_seconds` (since the request was created).
+   B checks A's existing owner callback before creating the request; that
+   callback is still not a substitute for B's independent owner approval.
    A disabled/unsupported recipient can instead return `status: "unavailable"`
    plus `available: false`, `reason_code`, `reason`; never open in that state.
 3. Directly on B, `GET /api/v1/terminals/peer-requests` returns
    `{"requests":[{"request_id", "worker_id":"<A>", "status", "used", "expires_in"}]}`.
-   Show the requesting worker and explain that this grants one interactive shell.
+   Each request also includes `confirmation_code`, `source_name`, `age_seconds`.
+   **Show the same code on A and B** and require the owner to compare it before
+   approval. Show the requesting worker name and request age and explain that
+   this grants one interactive shell. The code is a comparison aid, not authority.
    `POST /api/v1/terminals/peer-requests/{request_id}/approve` returns the
    approved request object. It requires B's own owner credential; A cannot
    forward an approval. `DELETE /api/v1/terminals/peer-requests/{request_id}`
@@ -60,7 +76,8 @@ non-owner paired devices and peer device tokens are refused.
 5. Open on A with `POST /api/v1/terminals` and
    `{"target":{"kind":"worker","worker_id":"<B>","authorization_id":"<id>"},"cols":80,"rows":24}`.
    Optional `session_id` is only A's UI association; optional `cwd`/`shell`
-   are resolved on B, never from a mirrored session. Returns existing
+   are resolved on B, never from a mirrored session. B applies the same workspace
+   cwd validation and pinned-root spawn rules as local opens. Returns existing
    `201 {"terminal":...}`. Each approval opens at most one shell.
 6. Attach/reconnect, input/output and resize use the existing A socket
    `/api/v1/ws/terminals/{terminal_id}` (protocol below); its bounded replay

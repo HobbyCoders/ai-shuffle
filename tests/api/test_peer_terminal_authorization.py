@@ -62,7 +62,13 @@ def test_source_http_contract_opens_real_peer_pty_and_existing_websocket(peer, m
     data = authorization.json()
     assert data["status"] == "pending" and data["worker_id"] == "destination"
     request_id, authorization_id = data["request_id"], data["authorization_id"]
-    assert tc.post(f"/api/v1/terminals/peer-requests/{request_id}/approve").status_code == 200
+    recipient = tc.get("/api/v1/terminals/peer-requests").json()["requests"][0]
+    assert recipient["confirmation_code"] == data["confirmation_code"]
+    assert len(data["confirmation_code"]) == 6 and data["source_name"] == "source"
+    assert recipient["age_seconds"] >= data["age_seconds"] >= 0
+    approved = tc.post(f"/api/v1/terminals/peer-requests/{request_id}/approve")
+    assert approved.status_code == 200
+    assert approved.json()["confirmation_code"] == data["confirmation_code"]
     assert tc.get(f"/api/v1/terminals/peer-authorizations/{authorization_id}").json()["status"] == "approved"
     target = next(t for t in tc.get("/api/v1/terminals/targets").json()["targets"]
                   if t.get("worker_id") == "destination")

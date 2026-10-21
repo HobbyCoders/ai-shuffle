@@ -8,7 +8,19 @@ import asyncssh
 from app.core import terminals as service
 from app.core.terminals import TerminalError
 from app.db.async_database import run_sync
-from app.network import control, runners, terminal_relay
+from app.network import control, runners, terminal_relay, transport
+
+PROBE_TIMEOUT_SECONDS = 3
+PROBE_CONNECT_SECONDS = 1
+
+
+async def _peer_probe(worker_id, operation, lease=None):
+    capped = transport.connect_timeout.set(PROBE_CONNECT_SECONDS)
+    try:
+        return await asyncio.wait_for(control.call(worker_id, "terminal", {"op": operation, "lease": lease},
+                                                  timeout=PROBE_TIMEOUT_SECONDS, secure=True), PROBE_TIMEOUT_SECONDS)
+    finally:
+        transport.connect_timeout.reset(capped)
 
 
 def peer_reason(row):
@@ -30,7 +42,7 @@ async def peer_availability(row):
     if state["reason_code"] != "recipient_approval_required":
         return state
     try:
-        probe = await control.call(row["id"], "terminal", {"op": "probe"}, timeout=3, secure=True)
+        probe = await _peer_probe(row["id"], "probe")
     except control.InsecureRoute:
         code, reason = "https_required", "The peer needs an authenticated HTTPS route."
     except Exception:
@@ -47,28 +59,35 @@ async def peer_availability(row):
     return {"available": False, "reason_code": code, "reason": reason}
 
 
-async def targets(session_id, who=None):
-    rows = await run_sync(runners.directory)
-    workers = [row for row in rows["runners"] if not row["is_self"]]
-    states = await asyncio.gather(*(peer_availability(row) for row in workers))
+async def _worker_target(row, who):
+    state = await peer_availability(row)
+    target = {"kind": "worker", "worker_id": row["id"], "name": row["device_name"], **state}
+    if who and state["reason_code"] == "recipient_approval_required":
+        leases = []
+        for lease in list(terminal_relay._owners):
+            try:
+                terminal_relay.source_authorization(lease, who, row["id"])
+            except PermissionError:
+                continue
+            leases.append(lease)
+        statuses = await asyncio.gather(*(_peer_probe(row["id"], "status", lease) for lease in leases),
+                                        return_exceptions=True)
+        for lease, status in zip(leases, statuses):
+            if isinstance(status, dict) and status.get("status") == "approved" and not status.get("used"):
+                target.update(available=True, reason_code=None, reason=None, authorization_id=lease)
+                break
+        else:
+            if any(not isinstance(status, dict) for status in statuses):
+                target.update(reason_code="peer_unavailable", reason="The peer did not answer the authorization check.")
+    return target
+
+
+async def targets(session_id, who=None, *, include_peers=True):
     result = []
-    for row, state in zip(workers, states):
-        target = {"kind": "worker", "worker_id": row["id"], "name": row["device_name"], **state}
-        if who and state["reason_code"] == "recipient_approval_required":
-            for lease in list(terminal_relay._owners):
-                try:
-                    terminal_relay.source_authorization(lease, who, row["id"])
-                except PermissionError:
-                    continue
-                try:
-                    status = await control.call(row["id"], "terminal", {"op": "status", "lease": lease}, timeout=10, secure=True)
-                except Exception:
-                    target.update(reason_code="peer_unavailable", reason="The peer did not answer the authorization check.")
-                    break
-                if status.get("status") == "approved" and not status.get("used"):
-                    target.update(available=True, reason_code=None, reason=None, authorization_id=lease)
-                    break
-        result.append(target)
+    if include_peers and terminal_relay.peer_targets_enabled():
+        rows = await run_sync(runners.directory)
+        workers = [row for row in rows["runners"] if not row["is_self"]]
+        result.extend(await asyncio.gather(*(_worker_target(row, who) for row in workers)))
     if session_id:
         from app.core.chat_access import broker, AccessDenied
         for grant in list(broker.grants.values()):
@@ -275,10 +294,17 @@ async def create(registry, body, who, request):
     target = body.target
     if registry.count >= registry.limit:
         raise TerminalError("limit_reached", "Close a terminal before opening another.", 409)
-    choices = await targets(body.session_id)
-    match = any(row["kind"] == target.kind and
-                ((row.get("worker_id") == target.worker_id and row.get("reason_code") == "recipient_approval_required")
-                 if target.kind == "worker" else row.get("grant_id") == target.grant_id) for row in choices)
+    if target.kind == "worker":
+        match = False
+        if terminal_relay.peer_targets_enabled():
+            directory = await run_sync(runners.directory)
+            row = next((row for row in directory["runners"]
+                        if row["id"] == target.worker_id and not row["is_self"]), None)
+            if row:
+                match = (await peer_availability(row))["reason_code"] == "recipient_approval_required"
+    else:
+        choices = await targets(body.session_id, include_peers=False)
+        match = any(row["kind"] == target.kind and row.get("grant_id") == target.grant_id for row in choices)
     if not match:
         raise TerminalError("target_unavailable", "Choose an online terminal worker or an approved SSH grant.", 400)
     cls = PeerTerminal if target.kind == "worker" else SSHTerminal

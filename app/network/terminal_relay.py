@@ -112,6 +112,8 @@ async def handle_owner(body, from_device):
 
 def _public_approval(key, approval):
     return {"request_id": approval["id"], "worker_id": key[0],
+            "confirmation_code": approval["confirmation_code"], "source_name": approval["source_name"],
+            "age_seconds": max(0, int(time.monotonic() - approval["created"])),
             "status": "approved" if approval["request"] is not None else "pending", "used": approval["used"],
             "expires_in": max(0, int(approval["expires"] - time.monotonic()))}
 
@@ -205,6 +207,11 @@ async def handle(body, from_device):
         state = availability()
         if state["reason_code"] != "recipient_approval_required":
             return {"status": "unavailable", **state}
+        proof = await control.call(from_device, "terminal-owner", {"lease": lease}, timeout=10, secure=True)
+        if proof.get("authorized") is not True:
+            logger.info("peer terminal request refused source=%s", from_device)
+            raise PermissionError("Source terminal owner authorization required")
+        require_peer(from_device)
         # Expired requests cannot accumulate or preserve a revoked credential.
         for stale, value in list(_approvals.items()):
             if value["expires"] <= time.monotonic():
@@ -212,8 +219,12 @@ async def handle(body, from_device):
         if key not in _approvals:
             if len(_approvals) >= MAX_APPROVALS or sum(k[0] == from_device for k in _approvals) >= 4:
                 raise PermissionError("Too many pending recipient terminal requests")
+            created = time.monotonic()
+            member = engine.context().member(from_device)
             _approvals[key] = {"id": secrets.token_urlsafe(16), "request": None, "who": None,
-                               "expires": time.monotonic() + PENDING_SECONDS, "used": False}
+                               "created": created, "expires": created + PENDING_SECONDS, "used": False,
+                               "source_name": getattr(member, "name", from_device),
+                               "confirmation_code": "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") for _ in range(6))}
             logger.info("peer terminal requested source=%s request=%s", from_device, _approvals[key]["id"])
         return _public_approval(key, _approvals[key])
     if op == "status":
@@ -251,8 +262,10 @@ async def handle(body, from_device):
         _opening.add(key)
         terminal = None
         try:
+            from app.api.terminals import _validated_terminal_cwd
+            cwd, cwd_root = await run_sync(_validated_terminal_cwd, options.get("cwd"))
             terminal = await registry.create(created_by="peer-owner:" + from_device,
-                cwd=options.get("cwd"), shell=options.get("shell"), cols=options.get("cols"), rows=options.get("rows"))
+                cwd=cwd, cwd_root=cwd_root, shell=options.get("shell"), cols=options.get("cols"), rows=options.get("rows"))
             # A replacement approval for the same source lease is new consent,
             # not permission to finish a spawn authorized by a revoked request.
             if await require_recipient_owner(key) is not approval:

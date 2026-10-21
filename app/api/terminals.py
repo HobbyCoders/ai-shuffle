@@ -205,6 +205,13 @@ class PeerAuthorizationBody(BaseModel):
     worker_id: str = Field(..., min_length=1, max_length=200)
 
 
+def _peer_authorization_response(result, worker_id, lease):
+    public_keys = {"request_id", "status", "used", "expires_in", "confirmation_code", "source_name", "age_seconds",
+                   "available", "reason_code", "reason"}
+    return {**{key: value for key, value in result.items() if key in public_keys},
+            "authorization_id": lease, "worker_id": worker_id}
+
+
 async def _peer_call(worker_id, operation, lease=None):
     from app.network import control
     try:
@@ -235,7 +242,7 @@ async def request_peer_terminal(body: PeerAuthorizationBody, request: Request,
         result = await _peer_call(body.worker_id, "request", lease)
         if result.get("status") == "unavailable":
             terminal_relay.forget(lease)
-        return {**result, "authorization_id": lease, "worker_id": body.worker_id}
+        return _peer_authorization_response(result, body.worker_id, lease)
     except BaseException:
         terminal_relay.forget(lease)
         raise
@@ -249,7 +256,7 @@ async def peer_terminal_authorization(authorization_id: str, who: str = Depends(
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from None
     result = await _peer_call(entry[2], "status", authorization_id)
-    return {**result, "worker_id": entry[2], "authorization_id": authorization_id}
+    return _peer_authorization_response(result, entry[2], authorization_id)
 
 
 @router.delete("/peer-authorizations/{authorization_id}")
