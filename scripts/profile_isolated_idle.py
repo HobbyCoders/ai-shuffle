@@ -19,6 +19,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', required=True, type=Path)
 parser.add_argument('--playwright-module', required=True, type=Path)
 args = parser.parse_args()
+def terminate(signum, frame):
+    raise SystemExit(128 + signum)
+signal.signal(signal.SIGTERM, terminate)
 root = Path(__file__).resolve().parents[1]
 scratch = args.output_dir.resolve()
 scratch.mkdir(parents=True, exist_ok=True)
@@ -30,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix='shuffle-idle-') as temp:
     workspace = directory / 'workspace'; workspace.mkdir()
     empty = directory / 'empty.env'; empty.write_text('')
     db = runtime.Database(SimpleNamespace(effective_data_dir=data), port=helpers._free_port())
-    app = None; proxy = helpers.OutboundRecorder()
+    app = sampler = None; proxy = helpers.OutboundRecorder()
     try:
         db.open(); db.publish_descriptor()
         port = helpers._free_port()
@@ -64,12 +67,25 @@ with tempfile.TemporaryDirectory(prefix='shuffle-idle-') as temp:
                     time.sleep(.5)
                 else: raise RuntimeError('isolated readiness timed out')
                 # Complete only the throwaway fixture's local install, no provider credentials.
+                response = client.post(base + '/api/v1/workspace/config',
+                    json={'workspace_path': str(workspace)}, headers={'Origin': base})
+                response.raise_for_status()
                 for path in ('/api/v1/auth/setup', '/api/v1/auth/onboarding/complete'):
                     response = client.post(base + path, headers={'Origin': base})
                     response.raise_for_status()
-            subprocess.run(['node',str(root/'scripts/profile_idle_client.mjs'),base,
-                str(args.playwright_module.resolve())],check=True,cwd=root)
+            with (scratch / 'backend-resources.jsonl').open('w') as samples:
+                sampler = subprocess.Popen([sys.executable, str(root / 'scripts/perf_resources.py'),
+                    '--pid', str(app.pid), '--seconds', '75', '--interval', '5'],
+                    cwd=root, stdout=samples, stderr=subprocess.STDOUT)
+                subprocess.run(['node',str(root/'scripts/profile_idle_client.mjs'),base,
+                    str(args.playwright_module.resolve())],check=True,cwd=root)
+                sampler.wait(timeout=20)
+                if sampler.returncode:
+                    raise RuntimeError('isolated resource sampler failed')
     finally:
+        if sampler is not None and sampler.poll() is None:
+            sampler.terminate()
+            sampler.wait(timeout=5)
         if app is not None and app.poll() is None:
             os.killpg(app.pid,signal.SIGTERM)
             try: app.wait(timeout=40)

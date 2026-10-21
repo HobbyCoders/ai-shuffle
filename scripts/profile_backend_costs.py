@@ -3,7 +3,7 @@
 
 Uses the production container supervisor to provision an OWNED temporary cluster,
 never DATABASE_URL or a live descriptor. Requires PostgreSQL 16 binaries on PATH.
-Run: PYTHONPATH=.:fluid python scripts/profile_backend_costs.py --nodes 5000 --ops 300000
+Run: PYTHONPATH=.:fluid python scripts/profile_backend_costs.py --nodes 1000 --ops 300000
 No provider calls, transcript content, credentials or connection details emitted.
 """
 import argparse
@@ -14,6 +14,7 @@ import importlib.util
 import json
 from pathlib import Path
 import socket
+import signal
 import tempfile
 import time
 import tracemalloc
@@ -94,9 +95,10 @@ def prune_lab(count, get_db, connection):
                     collection TEXT NOT NULL, record_id TEXT NOT NULL, created_at TEXT NOT NULL)""")
         cur.execute('CREATE INDEX idx_sync_ops_record_ingest ON sync_ops(collection, record_id, ingest_id)')
         cur.execute("""INSERT INTO sync_ops(collection, record_id, created_at)
-                    SELECT 'settings', (n % %s)::text, '2000-01-01T00:00:00+00:00'
+                    SELECT 'settings', MOD(n, %s)::text, '2000-01-01T00:00:00+00:00'
                     FROM generate_series(1, %s) n""", (count // 10, count))
         cur.execute('ANALYZE sync_ops')
+        cur.execute("SET work_mem = '64kB'")  # identical memory budget for both algorithms
     expected = count - count // 10
     legacy = dict(timeout_seconds=10)
     cur = connection.cursor()
@@ -128,9 +130,13 @@ def prune_lab(count, get_db, connection):
 
 
 def main():
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, terminate)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--nodes', type=int, default=5000)
+    parser.add_argument('--nodes', type=int, default=1000)
     parser.add_argument('--ops', type=int, default=300000)
+    parser.add_argument('--skip-nodes', action='store_true', help='pruning-only repeat')
     args = parser.parse_args()
     if args.nodes < 1 or args.ops < 10 or args.ops % 10:
         parser.error('nodes positive; ops a positive multiple of ten')
@@ -153,7 +159,7 @@ def main():
                 cur.execute('CREATE TABLE fluid_session_nodes (session_id TEXT NOT NULL, node_id TEXT NOT NULL, '
                             'parent_id TEXT, ts DOUBLE PRECISION NOT NULL, message JSONB NOT NULL, '
                             'PRIMARY KEY (session_id, node_id))')
-            result = dict(nodes=asyncio.run(nodes_lab(args.nodes, get_db)),
+            result = dict(nodes={} if args.skip_nodes else asyncio.run(nodes_lab(args.nodes, get_db)),
                           pruning=prune_lab(args.ops, get_db, connection))
             print(json.dumps(result, indent=2))
         finally:
