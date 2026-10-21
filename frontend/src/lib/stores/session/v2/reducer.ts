@@ -169,6 +169,12 @@ export interface V2SessionState {
 	speculativelySettledCardIds: string[];
 	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
 	speculativelySettledTaskIds: string[];
+	/** Task id → turn id of the terminal `task.updated` that settled its
+	 *  summary, for frames written inside a turn only (an out-of-turn settle has
+	 *  no turn). A park of that same turn which still names the task proves the
+	 *  frame was a delivered report, not an ending (#320). Optional so a cached
+	 *  state from before the field reads as none. */
+	taskSettleTurnIds?: Record<string, string>;
 	/** Seq of the last event that ended a model attempt's streamed output: a
 	 *  turn start, a user message, a tool result, a provider retry. Messages
 	 *  created after it are the current attempt's output, which a
@@ -792,6 +798,52 @@ export function withLogEpoch(state: V2SessionState, epoch: string | null): V2Ses
 	return { ...state, logEpoch: epoch, messages };
 }
 
+/**
+ * Reconcile the running strip with the task registry's own running list (the
+ * `/live` snapshot's `activeTasks`, read on switch-in, reload and reconnect).
+ *
+ * The event log is the strip's normal source, but it can disagree with the
+ * registry: a log with no start row for a task, or a terminal frame for a run
+ * that went on (#320). The registry wins only where it is NEWER than the log's
+ * last word on that task, so a snapshot read just before a completion can
+ * never bring a finished task back:
+ *
+ *   - a running task the log has no summary for is added;
+ *   - a summary the log settled is running again only when the registry
+ *     updated the task after that settle (`updatedAt` later than the frame).
+ *
+ * Anything the log says later still applies on top, as usual. Not a wire
+ * event: it is re-applied from each new snapshot, never replayed. Returns
+ * `state` unchanged when nothing moves.
+ */
+export function reconcileRunningTasks(state: V2SessionState, tasks: readonly Task[]): V2SessionState {
+	const at = (iso: string | null | undefined): number => {
+		const ms = iso ? Date.parse(iso) : NaN;
+		return Number.isNaN(ms) ? -Infinity : ms;
+	};
+	let summaries = state.activeTaskSummaries;
+	for (const task of tasks) {
+		if (!task?.id || task.status !== 'running') continue;
+		const index = summaries.findIndex((t) => t.id === task.id);
+		if (index === -1) {
+			summaries = [...summaries, { ...task, kind: task.kind === 'shell' ? 'shell' : 'agent' }];
+			continue;
+		}
+		const existing = summaries[index];
+		if (existing.status === 'running' || at(task.updatedAt) <= at(existing.updatedAt)) continue;
+		summaries = summaries.slice();
+		summaries[index] = {
+			...existing,
+			status: 'running',
+			startedAt: task.startedAt || existing.startedAt,
+			updatedAt: task.updatedAt,
+			...(task.model && !existing.model ? { model: task.model } : {}),
+			...(task.worker && !existing.worker ? { worker: task.worker } : {}),
+		};
+	}
+	return summaries === state.activeTaskSummaries ? state : { ...state, activeTaskSummaries: summaries };
+}
+
 /** Prefer an event payload `timestamp` over the envelope `created_at`. */
 function stampTs(event: WireEvent, createdAt: string): string {
 	return str(event.timestamp) || createdAt;
@@ -1189,6 +1241,30 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					mayHaveRunningSubagents: next.mayHaveRunningSubagents || cardIds.length > 0,
 					speculativelySettledCardIds: [],
 					speculativelySettledTaskIds: [],
+				};
+			}
+			// Logs written before #320 was fixed: a parent's wake turn delivered a
+			// worker's report with a terminal task.updated while the worker went
+			// on, then parked on that same worker. The park (`task_ids`, the task
+			// registry's running list) names it, so that settle was a delivered
+			// report, not an ending: keep the agent on the running strip. Only an
+			// agent settled 'completed' by a frame of THIS turn qualifies. Work
+			// that really finished while the park was being written settles out
+			// of turn (no turn id) and stays settled. The card is left alone: it
+			// shows the report that was delivered.
+			const parkTurn = str(event.turn_id);
+			const settledIn = next.taskSettleTurnIds;
+			const parkedOn = parkTurn && settledIn && Array.isArray(event.task_ids)
+				? new Set(event.task_ids.filter((id): id is string =>
+					typeof id === 'string' && !!id && settledIn[id] === parkTurn))
+				: null;
+			const revived = (t: Task) => !!parkedOn?.has(t.id) && t.kind === 'agent' && t.status === 'completed';
+			if (parkedOn?.size && next.activeTaskSummaries.some(revived)) {
+				next = {
+					...next,
+					activeTaskSummaries: next.activeTaskSummaries.map((t) =>
+						revived(t) ? { ...t, status: 'running' as const } : t
+					),
 				};
 			}
 			return next;
@@ -2170,6 +2246,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				? state.activeTaskSummaries.map((t) => (t.id === taskId ? summary : t))
 				: [...state.activeTaskSummaries, summary];
 			const taskOriginSeq = withOrigin(state.taskOriginSeq, taskId, seq);
+			const settleTurn = status === 'running' ? '' : str(event.turn_id);
+			let taskSettleTurnIds = state.taskSettleTurnIds;
+			if ((taskSettleTurnIds?.[taskId] ?? '') !== settleTurn) {
+				taskSettleTurnIds = { ...taskSettleTurnIds };
+				if (settleTurn) taskSettleTurnIds[taskId] = settleTurn;
+				else delete taskSettleTurnIds[taskId];
+			}
 			let messages = state.messages;
 			let speculativelySettledCardIds = state.speculativelySettledCardIds;
 			let speculativelySettledTaskIds = state.speculativelySettledTaskIds;
@@ -2229,6 +2312,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				messages,
 				activeTaskSummaries,
 				taskOriginSeq,
+				taskSettleTurnIds,
 				speculativelySettledCardIds,
 				speculativelySettledTaskIds,
 			};
@@ -2414,6 +2498,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				}
 				return false;
 			});
+			const keptTasks = new Set(activeTaskSummaries.map((t) => t.id));
+			const taskSettleTurnIds = state.taskSettleTurnIds && Object.fromEntries(
+				Object.entries(state.taskSettleTurnIds).filter(([id]) => keptTasks.has(id))
+			);
 			// Clear open pointers if their target message was truncated away.
 			const liveIds = new Set(keptMessages.map((m) => m.id));
 			const openTextId = state.openTextId && liveIds.has(state.openTextId) ? state.openTextId : null;
@@ -2426,6 +2514,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				messages: keptMessages,
 				messageOriginSeq,
 				taskOriginSeq,
+				taskSettleTurnIds,
 				hasRetryCards,
 				mayHaveLiveRetry: state.mayHaveLiveRetry && hasRetryCards,
 				activeTaskSummaries,
