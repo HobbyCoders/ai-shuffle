@@ -534,7 +534,7 @@ for _connector in ("bluebubbles", "discord", "gmail", "homeassistant", "hue", "i
     TOOL_LEVELS[f"{_connector}_invoke"] = HIGH
 
 
-_PREFIXES = ("mcp__fluid_bundled__", "mcp__builtins__")
+_PREFIXES = ("mcp__fluid_bundled__", "mcp__builtins__", "mcp__attachments__")
 
 
 def canonical(name: Any) -> str:

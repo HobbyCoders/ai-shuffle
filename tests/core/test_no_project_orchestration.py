@@ -99,8 +99,11 @@ async def test_registered_project_reads_through_real_registry(owner, tmp_path, m
         checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(project_path))
     options = SessionOptions(model="test", cwd=str(tmp_path), tool_allowlist=list(CHAT_MODE_TOOL_SURFACE),
         extra={"session_mode": "chat", "owner_coordinator": True, "app_session_id": owner["id"]})
+    options.extra["assistant_scope"] = {"session_id": owner["id"], "home_session_id": owner["id"],
+                                        "roots": [str(project_path)], "cwd": str(tmp_path)}
     adapter = HarnessAdapter()
     adapter._options = options
+    monkeypatch.setattr(adapter, "_ask_owner", AsyncMock(return_value="Unexpected permission prompt"))
     registry = await adapter._build_registry(options, native=native)
     ctx = ToolCtx(cwd=str(tmp_path))
     def name(tool):
@@ -194,6 +197,8 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     assert options.effort == "high"
     assert options.aih_profile_id == "agent"
     assert options.aih_owner_coordinator and options.permission_mode == "default"
+    from app.core.session_modes import chat_uploads_dir
+    assert str(chat_uploads_dir()) in options.aih_assistant_scope["roots"]
     assert "app-config" in options.mcp_servers
     assert all(tool_permitted(name, CHAT_MODE_TOOL_SURFACE, []) for name in options.allowed_tools)
     for tool in ("StartSession", "Task", "Glob", "Grep", "GetAppLogs", "ScheduleWakeup"):

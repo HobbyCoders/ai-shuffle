@@ -1184,6 +1184,12 @@ def build_options_from_profile(
     # (``app.core.assistant_permissions``). Research turns keep their ceiling.
     assistant_scope = ({"session_id": session_id, "home_session_id": session_id,
                         "roots": [], "cwd": working_dir} if owner_coordinator else None)
+    if owner_coordinator:
+        from app.core.coordinator_files import roots
+        try:
+            assistant_scope["roots"] = [str(path) for path in roots()]
+        except Exception:  # noqa: BLE001 — failed registry reads cannot grant paths
+            logger.warning("Could not resolve coordinator read roots", exc_info=True)
     if session_id and overrides.get("_assistant_proactive") is None and session_mode != "chat":
         from app.core.assistant_permissions import scope_for_session
         assistant_scope = scope_for_session(session_id, working_dir)
