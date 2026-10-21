@@ -875,6 +875,36 @@ def test_mounted_home_root_preparation_without_image_id_change(tmp_path, monkeyp
         assert len(changed) == count
 
 
+def test_storage_directory_creation_refuses_parent_swap(tmp_path, monkeypatch):
+    parent, outside = tmp_path / "parent", tmp_path / "outside"
+    parent.mkdir()
+    outside.mkdir()
+    original = os.mkdir
+    def swap(component, *args, **kwargs):
+        if component == "parent":
+            parent.rename(tmp_path / "moved")
+            parent.symlink_to(outside, target_is_directory=True)
+        return original(component, *args, **kwargs)
+    monkeypatch.setattr(runtime.os, "mkdir", swap)
+    with pytest.raises(OSError):
+        runtime.open_directory(parent / "runtime", create=True)
+    assert not (outside / "runtime").exists()
+
+
+def test_home_prepare_rejects_symlinked_mount_parent(tmp_path, monkeypatch, home_ownership):
+    home, data, code = tmp_path / "home", tmp_path / "data", tmp_path / "code"
+    home.mkdir()
+    data.mkdir()
+    (code / "gh").mkdir(parents=True)
+    (home / ".config").symlink_to(code, target_is_directory=True)
+    changed = home_ownership({code / "gh": (0, 0), home / ".config" / "gh": (0, 0)})
+    # A cached mount path from before a concurrent parent rename/symlink swap.
+    monkeypatch.setattr(runtime, "mount_points", lambda: {home / ".config" / "gh"})
+    with pytest.raises(runtime.RuntimeFailure, match="home volume.*real directories"):
+        runtime.remap_home(home, data, 41002, 41002, 41002, 41002)
+    assert changed == []
+
+
 @pytest.mark.parametrize("owner", [0, 41001])
 def test_home_remap_rechecks_pinned_inode_after_entry_swap(tmp_path, monkeypatch, home_ownership, owner):
     home, data = tmp_path / "home", tmp_path / "data"
@@ -952,7 +982,7 @@ def test_isolated_drop_keeps_full_agent_path_but_trusts_supervisor(settings_fact
     monkeypatch.delenv("PGID", raising=False)
     monkeypatch.setattr(runtime, "_agent_path", None)
     monkeypatch.setattr(runtime.os, "geteuid", lambda: effective[0])
-    monkeypatch.setattr(runtime.os, "chown", Mock())
+    monkeypatch.setattr(runtime.os, "fchown", Mock())
     monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=41001, pw_gid=41001, pw_dir="/home/appuser"))
     split = object()
     monkeypatch.setattr(runtime, "isolate", lambda *args: split)
@@ -979,8 +1009,9 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     monkeypatch.delenv("PGID", raising=False)
     monkeypatch.setattr(runtime.os, "geteuid", lambda: uid[0])
     monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="appuser", pw_dir="/home/appuser"))
-    chown = Mock()
-    monkeypatch.setattr(runtime.os, "chown", chown)
+    changed = []
+    monkeypatch.setattr(runtime.os, "fchown", lambda fd, uid, gid: changed.append(
+        (Path(os.readlink(f"/proc/self/fd/{fd}")), uid, gid)))
     monkeypatch.setattr(runtime.os, "initgroups", Mock())
     monkeypatch.setattr(runtime.os, "setgid", Mock())
     tool_path = "/home/appuser/.local/bin:/usr/bin"
@@ -994,7 +1025,7 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     runtime.drop_privileges(settings_factory(data_dir=data, workspace_dir=workspace))
     assert os.environ["PATH"] == tool_path
     assert "SHUFFLE_CONTAINER_PATH" not in os.environ
-    chown.assert_called_once_with(data, 1000, 1000, follow_symlinks=False)
+    assert changed == [(data, 1000, 1000)]
     assert (workspace / "sentinel").read_text() == "preserve"
 
 

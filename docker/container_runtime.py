@@ -807,6 +807,27 @@ def chrome_command(env):
             dict(env, START_CHROME_COMMAND=str(private / "start-chrome.sh")), private)
 
 
+def open_directory(path, *, create=False):
+    """Return a pinned directory, refusing symlinks in every component."""
+    path = Path(os.path.abspath(path))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(component, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def mount_points():
     """Include same-filesystem bind mounts, which ismount alone misses."""
     result = set()
@@ -848,26 +869,26 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
     roots = [(home, old_uid, old_gid, False)]
     roots += [(home / name, None, None, True) for name in volumes if home / name in mounts]
     for root, previous_uid, previous_gid, mounted in roots:
-        info = root.lstat()
-        if not stat.S_ISDIR(info.st_mode):
-            raise RuntimeFailure(f"home volume {root} must be a real directory; set its host ownership to PUID:PGID")
-        if (info.st_dev, info.st_ino) == data_inode:
-            raise RuntimeFailure(f"home volume {root} overlaps DATA_DIR; use separate home and data volumes")
-        if mounted:
-            previous_uid, previous_gid = info.st_uid, info.st_gid
-            if previous_uid == service_uid:
-                raise RuntimeFailure(f"home volume {root} belongs to the service account; set its host ownership to PUID:PGID")
-        if (previous_uid, previous_gid) == (new_uid, new_gid):
-            continue
         root_fd = None
         try:
-            for directory, dirs, files, fd in os.fwalk(root, follow_symlinks=False):
-                path = Path(directory)
+            # Pin every component from the fixed image home. A cached mount path
+            # is not proof its appuser-controlled parent still names that mount.
+            try:
+                root_fd = open_directory(root)
+            except OSError:
+                raise RuntimeFailure(f"home volume {root} must use real directories; check its mount and PUID:PGID ownership") from None
+            info = os.fstat(root_fd)
+            if (info.st_dev, info.st_ino) == data_inode:
+                raise RuntimeFailure(f"home volume {root} overlaps DATA_DIR; use separate home and data volumes")
+            if mounted:
+                previous_uid, previous_gid = info.st_uid, info.st_gid
+                if previous_uid == service_uid:
+                    raise RuntimeFailure(f"home volume {root} belongs to the service account; set its host ownership to PUID:PGID")
+            if (previous_uid, previous_gid) == (new_uid, new_gid):
+                continue
+            for directory, dirs, files, fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False):
+                path = root / directory
                 current = os.fstat(fd)
-                if path == root and (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-                    raise RuntimeFailure(f"home volume {root} changed during preparation; retry startup")
-                if path == root:
-                    root_fd = os.dup(fd)
                 if (current.st_dev, current.st_ino) == data_inode:
                     dirs[:] = []
                     continue
@@ -981,11 +1002,15 @@ def drop_privileges(settings, *, maintenance=False):
                 ("DATA_DIR", settings.effective_data_dir),
                 ("WORKSPACE_DIR", settings.effective_workspace_dir))]
             for path in roots:
-                path.mkdir(parents=True, exist_ok=True)
-                # Empty image-created mounts may still have the default UID when
-                # PUID changes. Retained contents (especially PG) are never chowned.
-                if not any(path.iterdir()):
-                    os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+                fd = open_directory(path, create=True)
+                try:
+                    # Empty mounts may retain the image UID after PUID changes.
+                    # Pin both lookup and chown: no parent symlink swap may turn
+                    # an outside storage path into a writable image directory.
+                    if not os.listdir(fd):
+                        os.fchown(fd, account.pw_uid, account.pw_gid)
+                finally:
+                    os.close(fd)
         split = maintenance_isolation(settings, account) if maintenance else isolate(settings, account)
         if split is not None:
             try:
