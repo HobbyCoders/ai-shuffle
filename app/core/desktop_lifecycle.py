@@ -12,46 +12,6 @@ def active_session_ids() -> set[str]:
     return set(active_executions().values()) | set(task_registry.active_session_ids())
 
 
-def prune_stale_tasks() -> list[str]:
-    """Retire provably dead local work, never unknown/delegated/remote work.
-
-    Used while an owner-requested stop winds down. Engine absence alone is not
-    proof: a Task may still be dispatching, or run on another worker.
-    """
-    from app.core.session_runtime import active_executions
-    from app.core.task_registry import task_registry
-    from app.core.session_pool import get_session_pool
-    from app.core.provider_agent_supervisor import live_workers
-    from app.mcp.builtin_tools import is_background_shell_running
-
-    retired = []
-    executing = set(active_executions().values())
-    for sid in task_registry.active_session_ids():
-        if sid in executing:
-            continue
-        state = get_session_pool().peek(sid)
-        adapter = getattr(state, "adapter", None)
-        pending = getattr(getattr(adapter, "_engine", None), "_background_pending", None)
-        workers = {worker.task_id for worker in live_workers(sid)}
-        for task in task_registry.get_active(sid):
-            tid = task["id"]
-            if task.get("worker") or tid in workers:
-                continue
-            if task.get("kind") == "shell":
-                dead = not is_background_shell_running(tid)
-            else:
-                dead = (task_registry.is_user_stopped(sid)
-                        and isinstance(pending, dict) and tid not in pending
-                        and not getattr(adapter, "_is_delegated", False))
-            if dead:
-                task_registry.complete_task(
-                    sid, tid, "killed", reason="user_stop",
-                    summary="Stopped before application restart", notify=False,
-                )
-                retired.append(tid)
-    return retired
-
-
 def remote_workers() -> list[str]:
     """Other workers running subagents for this worker's chats, by name.
 

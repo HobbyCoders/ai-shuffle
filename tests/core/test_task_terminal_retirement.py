@@ -112,6 +112,7 @@ class TestEngineRetirement:
         with _pool_with(adapter):
             await turn_scheduler.retire_task_terminals("ghost", [{
                 "task_id": "cancelled-task", "status": "killed",
+                "task_incarnation": task_registry.task_incarnation("ghost", "cancelled-task"),
                 "reason": "user_stop", "summary": "Stopped by user",
             }])
         assert "ghost" not in active_session_ids()
@@ -140,6 +141,15 @@ class TestEngineRetirement:
                 "task_id": "task", "status": "killed", "task_incarnation": old,
             }])
         assert task_registry.get_active("replaced")
+
+    @pytest.mark.asyncio
+    async def test_unstamped_legacy_retirement_does_not_close_running_registry_row(self):
+        _seed_own_background_task("legacy", "task")
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("legacy", [{
+                "task_id": "task", "status": "killed",
+            }])
+        assert task_registry.get_active("legacy")
 
     @pytest.mark.asyncio
     async def test_retire_submits_the_frames_to_the_pooled_adapter(self):

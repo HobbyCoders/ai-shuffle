@@ -82,7 +82,7 @@ async def _restart_when_idle(request_id):
 
 async def _stop_then_restart(request_id):
     """Stop this worker's running work as its Stop buttons do, then install."""
-    from app.core.desktop_lifecycle import active_session_ids, prune_stale_tasks, stop_session_work
+    from app.core.desktop_lifecycle import active_session_ids, stop_session_work
     sessions = active_session_ids()
     results = await asyncio.gather(*(stop_session_work(sid, source="worker_update") for sid in sessions), return_exceptions=True)
     for sid, result in zip(sessions, results):
@@ -90,11 +90,12 @@ async def _stop_then_restart(request_id):
             logger.warning("Application update: could not stop %s before restarting", sid, exc_info=result)
     deadline = time.monotonic() + STOP_WAIT_SECONDS
     while time.monotonic() < deadline:
-        prune_stale_tasks()
         if not active_session_ids():
             break
         await asyncio.sleep(0.1)
-    result = local_action("install", f"{request_id}:stopped", mode="stopped")
+    # Do not bypass the normal guard: both runtimes check again before exit.
+    # A failed stop must remain a named refusal, never a misleading queue ack.
+    result = local_action("install", f"{request_id}:stopped")
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
 
 
@@ -108,9 +109,7 @@ def local_action(action, request_id, mode=None):
     global _deferred
     if action not in ("check", "download", "install", "cancel"):
         raise ValueError("Unknown update action")
-    # "stopped" is internal: dispatch/peer validation never accepts it. The
-    # owner already chose Stop; do not send them through the busy guard again.
-    if mode not in (None, "when_idle", "stop", "stopped"):
+    if mode not in (None, "when_idle", "stop"):
         raise ValueError("Unknown update mode")
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 100:
         raise ValueError("Invalid update request id")
@@ -141,7 +140,7 @@ def local_action(action, request_id, mode=None):
     elif action == "install" and state["phase"] != "ready":
         reason = "No staged update; current version left running"
     busy = None
-    if action == "install" and not reason and mode != "stopped":
+    if action == "install" and not reason:
         from app.core.desktop_lifecycle import active_session_ids, busy_work
         if active_session_ids():
             busy = busy_work()

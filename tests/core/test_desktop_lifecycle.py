@@ -18,33 +18,6 @@ def clean_state():
     session_runtime._executions.clear()
 
 
-@pytest.mark.parametrize("kind,pending,stopped,remote,expected", [
-    ("shell", {}, False, False, True),
-    ("agent", {}, True, False, True),
-    ("agent", {"task": {}}, True, False, False),
-    ("agent", {}, False, False, False),
-    ("agent", None, True, False, False),
-    ("shell", {}, True, True, False),
-])
-def test_prune_requires_dead_local_work(monkeypatch, kind, pending, stopped, remote, expected):
-    from types import SimpleNamespace
-    from app.core.task_registry import TaskRegistry
-
-    registry = TaskRegistry()
-    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
-    adapter = SimpleNamespace(_engine=SimpleNamespace(_background_pending=pending))
-    pool = SimpleNamespace(peek=lambda sid: SimpleNamespace(adapter=adapter))
-    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: pool)
-    monkeypatch.setattr("app.core.provider_agent_supervisor.live_workers", lambda sid: [])
-    monkeypatch.setattr("app.mcp.builtin_tools.is_background_shell_running", lambda tid: False)
-    registry.start_task("session", "task", kind, "work",
-                        remote_device_id="peer" if remote else None)
-    if stopped:
-        registry.mark_user_stopped("session")
-    assert desktop_lifecycle.prune_stale_tasks() == (["task"] if expected else [])
-    assert bool(registry.get_active("session")) is not expected
-
-
 def start(sid):
     turn = turns.enqueue_turn(sid, "user", prompt="work")
     run = runs.claim_run(sid, "desktop", 60)

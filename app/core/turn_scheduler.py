@@ -1710,7 +1710,12 @@ async def retire_task_terminals(
 
     for frame in frames:
         record = task_registry.get_task(session_id, frame["task_id"])
+        # Legacy unstamped frames still retire in the engine for compatibility,
+        # but cannot prove which running registry start they refer to. All local
+        # on_task_terminal frames carry the per-start stamp before reaching here;
+        # direct Stop callers already settle their own registry records.
         if (record and record.get("status") == "running"
+                and frame.get("task_incarnation") == task_registry.task_incarnation(session_id, frame["task_id"])
                 and not frame.get("agent_message_turn_id")
                 and frame.get("status") in ("completed", "error", "killed")):
             task_registry.complete_task(
