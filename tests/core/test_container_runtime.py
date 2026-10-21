@@ -729,6 +729,55 @@ def test_dump_refuses_existing_backup_and_symlink(settings_factory, tmp_path):
     assert backup.read_bytes() == b"preserve"
 
 
+
+
+@pytest.mark.parametrize("name", ["DATA_DIR", "WORKSPACE_DIR"])
+@pytest.mark.parametrize("path", ["/app/docker/__pycache__", "/usr/local/lib/python3.12/site-packages/sitecustomize", "/opt/fluid/cache", "/etc/cache"])
+def test_root_mount_preparation_refuses_unmounted_image_paths(monkeypatch, name, path):
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
+    with pytest.raises(runtime.RuntimeFailure, match=name + ".*mount a volume.*outside the image trees"):
+        runtime.validate_mount_root(name, Path(path))
+
+
+
+
+@pytest.mark.parametrize("field,name", [("data_dir", "DATA_DIR"), ("workspace_dir", "WORKSPACE_DIR")])
+def test_root_rejects_image_storage_before_any_preparation(settings_factory, tmp_path, monkeypatch, field, name):
+    from types import SimpleNamespace
+    cfg = settings_factory(**{field: Path("/app/docker/__pycache__")})
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=1000, pw_gid=1000))
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
+    mkdir, chown = Mock(), Mock()
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(runtime.os, "chown", chown)
+    with pytest.raises(runtime.RuntimeFailure, match=name + ".*mount a volume"):
+        runtime.drop_privileges(cfg)
+    mkdir.assert_not_called()
+    chown.assert_not_called()
+
+
+def test_root_mount_preparation_preserves_volume_inside_app(monkeypatch):
+    monkeypatch.setattr(runtime, "mounted_directory", lambda path: path == Path("/app/data"))
+    assert runtime.validate_mount_root("DATA_DIR", Path("/app/data")) == Path("/app/data")
+
+
+@pytest.mark.parametrize("name,path", [("DATA_DIR", "/data"), ("WORKSPACE_DIR", "/workspace")])
+def test_root_mount_preparation_preserves_defaults(monkeypatch, name, path):
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: pytest.fail("defaults need no mount exception"))
+    assert runtime.validate_mount_root(name, Path(path)) == Path(path)
+
+
+@pytest.mark.parametrize("path,escaped", [("/app/data", "/app/data"), ("/app/my data", r"/app/my\040data")])
+def test_root_mount_detection_includes_same_device_bind_mounts(monkeypatch, path, escaped):
+    original = Path.read_text
+    monkeypatch.setattr(runtime.os.path, "ismount", lambda _: False)
+    mountinfo = "44 31 8:1 /retained " + escaped + " rw - ext4 /dev/test rw\n"
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **kw: mountinfo if str(self) == "/proc/self/mountinfo" else original(self, *a, **kw))
+    assert runtime.mounted_directory(Path(path))
+    assert not runtime.mounted_directory(Path(path + "-other"))
+
+
 def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monkeypatch):
     from types import SimpleNamespace
     data = tmp_path / "empty"
@@ -756,7 +805,7 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     runtime.drop_privileges(settings_factory(data_dir=data, workspace_dir=workspace))
     assert os.environ["PATH"] == tool_path
     assert "SHUFFLE_CONTAINER_PATH" not in os.environ
-    chown.assert_called_once_with(data, 1000, 1000)
+    chown.assert_called_once_with(data, 1000, 1000, follow_symlinks=False)
     assert (workspace / "sentinel").read_text() == "preserve"
 
 

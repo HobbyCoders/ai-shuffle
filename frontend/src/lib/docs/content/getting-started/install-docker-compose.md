@@ -383,6 +383,14 @@ The image ships the AI tools and browser-automation server with their production
 
 If startup reports `Bundled tool assets are missing`, replace or rebuild the image and remove any mount hiding `/opt/ai-tools` or `/opt/browser-mcp`. Startup does not install packages or continue with incomplete bundled tools. Database dump and restore remain available without these assets.
 
+### Startup path troubleshooting
+
+If startup says `DATA_DIR` or `WORKSPACE_DIR` is inside an image tree, mount a
+volume at that exact path or choose a path outside the image’s application,
+tool, Python and system directories. For example, a volume mounted at
+`/app/data` still works; an unmounted directory there is not prepared by root.
+The default `/data` and `/workspace` paths are unchanged.
+
 ## Optional settings
 
 These are only needed in special cases. Uncomment the matching line under `environment:` in `compose.yaml` (or add `-e NAME=value` to `docker run`), then run `docker compose up -d`. A line in `.env` alone does not reach the container.

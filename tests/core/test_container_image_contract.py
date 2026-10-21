@@ -35,6 +35,8 @@ def test_startup_code_and_parent_directories_are_read_only_image_assets():
     assert "COPY --chown=root:root scripts/ ./scripts/" in image
     assert "RUN chown root:root /app" in image
     assert "chmod -R go-w /app" in image
+    assert "COPY --chown=root:root entrypoint.sh /entrypoint.sh" in image
+    assert "RUN chmod 755 /entrypoint.sh" in image
     assert "--chown=appuser:appuser /src/frontend/build/ /app/app/static/" not in image
     entrypoint = (ROOT / "entrypoint.sh").read_text()
     assert not re.search(r"chown[^\n]*appuser[^\n]*/app(?:[ /]|$)", entrypoint)

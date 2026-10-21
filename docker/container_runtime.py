@@ -802,6 +802,35 @@ def chrome_command(env):
             dict(env, START_CHROME_COMMAND=str(private / "start-chrome.sh")), private)
 
 
+def mounted_directory(path):
+    """Include same-filesystem bind mounts, which ismount alone misses."""
+    if os.path.ismount(path):
+        return True
+    try:
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split()
+            if len(fields) >= 5:
+                mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])
+                if Path(mount) == path:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def validate_mount_root(name, path):
+    """Do not turn an unmounted image/import directory into runtime storage."""
+    path = safe_path(path)
+    trees = {Path(p) for p in ("/app", "/opt", "/usr", "/bin", "/sbin", "/etc",
+                               "/lib", "/lib32", "/lib64", "/libx32",
+                               sys.prefix, sys.base_prefix)}
+    trees.add(Path(__file__).resolve().parents[1])
+    if any(path == tree or tree in path.parents for tree in trees) and not mounted_directory(path):
+        raise RuntimeFailure(f"{name} is inside an image tree; mount a volume at that path "
+                             "or choose a path outside the image trees")
+    return path
+
+
 def drop_privileges(settings):
     """Root may prepare mount roots, never recursively repair database files."""
     global _agent_path
@@ -809,13 +838,15 @@ def drop_privileges(settings):
         account = pwd.getpwnam("appuser")
         if not account.pw_uid or not account.pw_gid:
             raise RuntimeFailure("PUID/PGID must identify a non-root account")
-        for path in (Path(settings.effective_data_dir), Path(settings.effective_workspace_dir)):
-            safe_path(path)
+        roots = [validate_mount_root(name, Path(path)) for name, path in (
+            ("DATA_DIR", settings.effective_data_dir),
+            ("WORKSPACE_DIR", settings.effective_workspace_dir))]
+        for path in roots:
             path.mkdir(parents=True, exist_ok=True)
             # Empty image-created mounts may still have the default UID when
             # PUID changes. Retained contents (especially PG) are never chowned.
             if not any(path.iterdir()):
-                os.chown(path, account.pw_uid, account.pw_gid)
+                os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
         split = isolate(settings, account)
         if split is not None:
             isolation().drop(split)

@@ -203,7 +203,7 @@ COPY --chown=root:root .env.example .
 COPY --chown=root:root THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
-COPY entrypoint.sh /entrypoint.sh
+COPY --chown=root:root entrypoint.sh /entrypoint.sh
 COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
 COPY docker/agent_isolation.py ./docker/
 COPY Dockerfile entrypoint.sh ./
@@ -212,7 +212,7 @@ COPY desktop/build/application-update-key.pem ./docker/application-update-key.pe
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
 COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
-RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
+RUN chmod 755 /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
 
 # Image code and its parent stay read-only regardless of agent isolation or PUID.
 # Runtime state, generated assets and update builds live on /data or in the home.
