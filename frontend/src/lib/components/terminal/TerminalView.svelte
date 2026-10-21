@@ -18,6 +18,7 @@
 	import { escClearKeys, type PasteHint } from '$lib/terminal/paste';
 	import { terminalTheme } from './theme';
 	import { exitDetail } from '$lib/terminal/gating';
+	import { localWorkerId } from '$lib/terminal/peer';
 
 	let {
 		id,
@@ -59,6 +60,16 @@
 	const info = $derived(terminals.terminal(id));
 	const link = $derived(terminals.connection(id));
 	const exited = $derived(info?.state === 'exited');
+	// A shell on a peer worker or an SSH grant never restarts in place: it
+	// needs the target chosen again (and, for a peer, a new approval).
+	const remote = $derived.by(() => {
+		const target = info?.target;
+		if (!target) return false;
+		if (target.kind !== 'worker') return true;
+		const probe = terminals.probeFor(sessionId);
+		const local = probe.status === 'ready' ? localWorkerId(probe.targets) : undefined;
+		return !!target.worker_id && !!local && target.worker_id !== local;
+	});
 
 	function send(data: string) {
 		if (!connection || !data) return;
@@ -208,9 +219,9 @@
 	{#if exited}
 		<div class="ended" role="group" aria-label="Shell exited">
 			<p><strong>The shell exited</strong>{exitDetail(info?.exit_code)}</p>
-			<p class="sub">Its output stays here until you close or restart it.</p>
+			<p class="sub">{remote ? 'Its output stays here until you close it. To continue, open a new terminal with + (another worker asks for approval again).' : 'Its output stays here until you close or restart it.'}</p>
 			<div class="ended-actions">
-				<button class="primary" onclick={() => terminals.restart(sessionId, id)}><RotateCcw size={14} />Restart</button>
+				{#if !remote}<button class="primary" onclick={() => terminals.restart(sessionId, id)}><RotateCcw size={14} />Restart</button>{/if}
 				<button onclick={() => terminals.close(sessionId, id)}><X size={14} />Close</button>
 			</div>
 		</div>

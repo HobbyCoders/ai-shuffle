@@ -14,11 +14,14 @@
 	import TerminalView from './TerminalView.svelte';
 	import MonitorWatch from './MonitorWatch.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
+	import PeerRequestList from './PeerRequestList.svelte';
 	import TerminalKeyBar from './TerminalKeyBar.svelte';
 	import { terminals, WORKER_TERMINALS, type TerminalRequest } from '$lib/stores/terminals.svelte';
 	import { terminalAccess, blockAccess, folderName } from '$lib/terminal/gating';
 	import { pasteNeedsConfirm, pasteConfirmLabel, pasteHint, normalizePaste, pasteLines, pasteRefusal } from '$lib/terminal/paste';
 	import { mayTakeFocus } from '$lib/terminal/focus';
+	import { isPeerTarget, localWorkerId, type OpenResult } from '$lib/terminal/peer';
+	import type { CreateTerminal, TerminalInfo } from '$lib/api/terminals';
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 
 	let { sessionId, panelActions, mobile = false }: { sessionId: string; panelActions?: Snippet; mobile?: boolean } = $props();
@@ -77,6 +80,20 @@
 	const limit = $derived(counts.limit);
 	const capReason = $derived(ready && openCount >= limit
 		? `${limit} terminals are open on ${ready.worker}. Close one to open another.` : null);
+
+	// Peer terminals (#196): only when this worker lists another worker as a
+	// target, which it does only with peer terminals turned on here.
+	const localId = $derived(probe.status === 'ready' ? localWorkerId(probe.targets) : undefined);
+	const peerTerminalsOn = $derived(probe.status === 'ready' && (probe.targets ?? []).some((t) => isPeerTarget(t, localId)));
+	/** Where a tab's shell runs: this worker, a peer worker, or an SSH grant. */
+	function hostName(info: TerminalInfo | null): string {
+		const fallback = ready?.worker ?? '';
+		const target = info?.target as { kind: string; worker_id?: string; grant_id?: string } | undefined;
+		if (!target || probe.status !== 'ready') return fallback;
+		if (target.kind === 'worker' && (!target.worker_id || target.worker_id === localId)) return fallback;
+		const row = (probe.targets ?? []).find((t) => t.kind === target.kind && (t.worker_id ?? t.grant_id) === (target.worker_id ?? target.grant_id));
+		return row?.name ?? (target.kind === 'ssh' ? 'SSH machine' : 'Peer worker');
+	}
 
 	onMount(() => {
 		void terminals.ensureProbe(sessionId, true);
@@ -197,16 +214,23 @@
 	}
 
 	// ── Tabs ───────────────────────────────────────────────────────────────
-	async function openTerminal(choice: { cwd: string | null; shell: string | null }) {
+	async function openTerminal(choice: CreateTerminal): Promise<OpenResult> {
 		creating = true;
-		const info = await terminals.create(sessionId, choice);
+		// A peer open reports its failure to the picker (the approval is spent),
+		// and the targets are probed again so the row shows what is left.
+		const peer = !!choice.target?.authorization_id;
+		const result = peer ? await terminals.open(sessionId, choice) : null;
+		const info = result ? ('info' in result ? result.info : null) : await terminals.create(sessionId, choice);
 		creating = false;
+		if (peer) void terminals.ensureProbe(sessionId, true);
 		if (info) {
 			pickerOpen = false;
 			await tick();
 			views[info.id]?.markFresh();
 			focusView(info.id);
+			return { ok: true };
 		}
+		return result && !('info' in result) ? { ok: false, code: result.code, message: result.message } : { ok: false, code: 'unknown', message: '' };
 	}
 
 	function closeTab(id: string) {
@@ -281,7 +305,7 @@
 					{@const link = terminals.connection(id)}
 					<div class="tab" class:current={id === activeId}>
 						<button id={`terminal-tab-${id}`} class="tab-select" role="tab" aria-selected={id === activeId}
-							tabindex={id === activeId ? 0 : -1} title={info?.cwd}
+							tabindex={id === activeId ? 0 : -1} title={hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : info?.cwd}
 							onclick={() => terminals.select(sessionId, id)} onkeydown={(e) => tabKeydown(e, index)}>
 							<span class="dot" data-tone={info?.state === 'exited' ? 'bad' : link.status === 'live' ? (info?.busy ? 'run' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'wait'} aria-hidden="true"></span>
 							<span class="tab-shell">{info?.shell ?? 'shell'}</span>
@@ -346,6 +370,8 @@
 		</div>
 	{/if}
 
+	{#if peerTerminalsOn && ready && !watching}<PeerRequestList workerName={ready.worker} />{/if}
+
 	{#if watching}<MonitorWatch {sessionId} />{/if}
 	<div class="stage" class:watch-hidden={watching}>
 		{#if probe.status === 'idle' || probe.status === 'loading' || (ready && !tabState.loaded)}
@@ -400,7 +426,7 @@
 	{#if ready && activeInfo && statusLabel && !watching}
 		<footer class="status" aria-live="polite">
 			<span class="state-pill" data-tone={statusLabel.tone}><span class="dot" data-tone={statusLabel.tone} aria-hidden="true"></span>{statusLabel.text}</span>
-			<span class="meta" title={activeInfo.cwd}>{activeInfo.shell} · {folderName(activeInfo.cwd)} · {ready.worker}</span>
+			<span class="meta" title={activeInfo.cwd}>{activeInfo.shell} · {folderName(activeInfo.cwd)} · {hostName(activeInfo)}</span>
 		</footer>
 	{/if}
 
