@@ -45,6 +45,31 @@ export interface ProviderModelEntry {
 	supported_parameters?: string[];
 	supported_reasoning_levels?: string[];
 	default_reasoning_level?: string | null;
+	/**
+	 * Opt-in tuning for a model on a custom OpenAI-dialect provider that
+	 * declares a llama.cpp or vLLM server (see `LocalModelSettings`). Absent or
+	 * null means server defaults. PATCH replaces the whole `models` array, so
+	 * every rebuild of an entry MUST carry it (`copyLocalSettings`).
+	 */
+	local_settings?: LocalModelSettings | null;
+}
+
+export type LocalServer = 'llama_cpp' | 'vllm';
+export type LocalPreset = 'qwen3-thinking' | 'qwen3-non-thinking';
+export type LocalSamplingKey = 'temperature' | 'top_p' | 'top_k' | 'min_p' | 'repeat_penalty';
+
+/** `models[].local_settings`, mirrored from `app/core/local_model_settings.py`. */
+export interface LocalModelSettings {
+	server: LocalServer;
+	preset?: LocalPreset;
+	sampling?: Partial<Record<LocalSamplingKey, number>>;
+	/** `chat_template_kwargs.enable_thinking`; absent keeps the template default. */
+	reasoning?: boolean;
+}
+
+/** Saved local tuning, kept through a rebuild; null and absent are both left out. */
+export function copyLocalSettings(model?: Partial<ProviderModelEntry>) {
+	return model?.local_settings ? { local_settings: model.local_settings } : {};
 }
 
 /** Copy canonical evidence and legacy raw metadata. Computed registry fields are never saved.

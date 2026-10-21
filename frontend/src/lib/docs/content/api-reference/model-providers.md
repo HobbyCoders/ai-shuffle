@@ -71,8 +71,12 @@ connected session after editing its provider configuration.
 Use these entries in `models` on POST or PATCH. PATCH replaces the whole model
 list: preserve other entries and their metadata. GET returns the stored settings.
 Omit `local_settings`, set it to `null`, or replace the entry without it to clear
-all overrides. Unknown keys and invalid values return `400`, as do local settings
-on another provider type/dialect. Changing the dialect requires clearing them.
+all overrides. New or changed local settings with unknown keys or invalid values
+return `400`, as do local settings on another provider type/dialect. PATCH preserves
+unchanged settings for the same model ID, even if a newer worker synced values this
+worker does not recognize; renaming, toggling, and editing other models remain
+possible. New IDs and changed settings are always validated. Changing the provider
+type or dialect revalidates all remaining settings; clear incompatible settings first.
 
 - `server` (required): `llama_cpp` or `vllm` (explicit protocol declaration, not detection).
 - `sampling` (optional object): `temperature` in [0, 2], `top_p` and `min_p` in
