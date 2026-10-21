@@ -381,9 +381,20 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect((read.content[1] as { text: string }).text).toContain("PortalProse");
   });
 
-  it.each(["transform:translateZ(0)", "filter:blur(0px)", "contain:layout"])("follow-up: %s makes fixed descendants subject to its overflow", async containingBlock => {
+  it.each([
+    "transform:translateZ(0)", "filter:blur(0px)", "perspective:100px",
+    "contain:layout", "contain:paint", "contain:strict", "contain:content",
+    "will-change:transform", "will-change:filter", "will-change:perspective",
+    "backdrop-filter:blur(1px)", "translate:0 0", "scale:1", "rotate:0deg",
+    "transform-style:preserve-3d", "content-visibility:auto",
+  ])("follow-up: %s makes fixed descendants subject to its overflow", async containingBlock => {
     const page = await session.ensurePage(); await page.goto(httpUrl);
     await page.setContent(`<p>Main</p><div style="${containingBlock};overflow:hidden;height:0"><iframe style="position:fixed;top:10px;left:10px" srcdoc="<p>ClippedFixedProse</p>"></iframe></div>`);
+    // Confirm Chromium actually clips it before asserting the reader's result.
+    expect(await page.locator("iframe").evaluate(el => {
+      const box = el.getBoundingClientRect();
+      return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === el;
+    })).toBe(false);
     const read = await runReadText(session);
     expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_hidden: 1, frames_skipped: 0 });
     expect((read.content[1] as { text: string }).text).not.toContain("ClippedFixedProse");

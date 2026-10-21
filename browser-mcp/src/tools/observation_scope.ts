@@ -89,7 +89,16 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
         const fixedContainer = (node: Element): Element | null => {
           for (let ancestor = parent(node); ancestor; ancestor = parent(ancestor)) {
             const style = getComputedStyle(ancestor);
-            if (style.transform !== "none" || style.filter !== "none" || style.perspective !== "none" ||
+            const effect = ["transform", "filter", "perspective", "backdrop-filter", "-webkit-backdrop-filter", "translate", "scale", "rotate"]
+              .some(property => {
+                const value = style.getPropertyValue(property);
+                return value !== "" && value !== "none";
+              });
+            // Non-default will-change may establish a containing block even
+            // before its effect is applied. Keep clipping for unfamiliar hints
+            // too: uncertain ancestors must retain the base fail-closed behavior.
+            if (effect || (style.willChange && style.willChange !== "auto") ||
+                style.transformStyle === "preserve-3d" || style.contentVisibility === "auto" ||
                 /(?:layout|paint|strict|content)/.test(style.contain)) return ancestor;
           }
           return null; // viewport-fixed descendants escape ordinary overflow
