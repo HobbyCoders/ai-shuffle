@@ -828,6 +828,13 @@ def start_turn(
                         "orchestration_reply_eligible",
                         not original_payload.get("continued_turn") and not original_payload.get("orchestration_reply_to"),
                     )
+                    # Bind eligibility to this actual delivery. Copies into a
+                    # new question/retry row must keep the old id, not rebind.
+                    payload["orchestration_reply_credit"] = original_payload.get(
+                        "orchestration_reply_credit",
+                        previous["id"] if previous["source"] == "agent_message"
+                        and not original_payload.get("continued_turn") else None,
+                    )
                     credit_receipt = (original_payload.get("orchestration_reply_receipt")
                                       or original_payload.get("orchestration_reply_to"))
                     if credit_receipt:
