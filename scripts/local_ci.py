@@ -68,6 +68,8 @@ FAST_SUBSET = [
 ]
 FAST_SUBSET_EXCLUDED = [
     "tests/core/test_chat_shell.py",
+    # Dedicated serial backend-linux step: supervisor globals and idle/disk
+    # timing measurements must not share the parallel fast-subset workload.
     "tests/core/test_container_runtime.py",
     "tests/core/test_container_image_contract.py",
 ]
@@ -453,11 +455,9 @@ def backend_linux(ctx: Context) -> None:
     """Steps CI Backend ran on Linux with real PostgreSQL and bubblewrap."""
     env = python_env()
     args = pytest_args(ctx.python, timeout=240)
-    ran = False
     if shutil.which("bwrap"):
         run([ctx.python, "-m", "pytest", "tests/core/test_chat_shell.py", "-rs", *args],
             env={**env, "CHAT_SHELL_REQUIRE_SANDBOX": "1"})
-        ran = True
     else:
         ctx.notes.append("Isolated folder shell tests not run: bubblewrap (bwrap) is not installed here.")
     pg_ctl = shutil.which("pg_ctl")
@@ -466,11 +466,26 @@ def backend_linux(ctx: Context) -> None:
         run([ctx.python, "-m", "pytest", "tests/smoke", "tests/db/test_schema_lifecycle.py", "-m", "boot_smoke",
              "-rs", *pytest_args(ctx.python, timeout=240, parallel=False)],
             env={**env, "BOOT_SMOKE_REQUIRED": "1", "SMOKE_PG_BIN": pg_bin})
-        ran = True
     else:
         ctx.notes.append("Boot smoke test not run: no PostgreSQL binaries (set SMOKE_PG_BIN).")
-    if not ran:
-        ctx.notes.append("Linux-only backend steps were not run on this machine.")
+    # These files stay outside the parallel fast subset: they mutate supervisor
+    # globals and measure idle/checkpoint timing under bounded disk pressure.
+    # Each real-PG case creates its own cluster under tmp_path; no shared server
+    # or TEST_POSTGRES_DSN is needed. Override inherited opt-ins/DSNs explicitly.
+    container_env = {
+        **env, "ALLOW_REAL_PG": "0", "TEST_POSTGRES_DSN": "",
+        "AI_SHUFFLE_ENV_FILE": "/dev/null",
+        "CONTAINER_RUNTIME_TEST_PG": "1" if pg_bin else "0",
+        "CONTAINER_RUNTIME_TEST_PRESSURE": "1" if pg_bin else "0",
+    }
+    if pg_bin:
+        container_env["PATH"] = pg_bin + os.pathsep + os.environ.get("PATH", "")
+    else:
+        ctx.notes.append("Container PostgreSQL and disk-pressure cases skipped: "
+                         "no PostgreSQL binaries (set SMOKE_PG_BIN).")
+    run([ctx.python, "-m", "pytest", "tests/core/test_container_runtime.py",
+         "tests/core/test_container_image_contract.py", "-rs",
+         *pytest_args(ctx.python, timeout=120, parallel=False)], env=container_env)
 
 
 FLUID_TESTS = "fluid/tests/unit"
@@ -620,8 +635,9 @@ def linux_only() -> str | None:
 SUITES = [
     Suite("backend", BACKEND_PATHS, backend, "Backend pytest: the files a change reaches (full: the whole fast subset)"),
     Suite("backend-linux", ["app/core/chat_shell.py", "app/core/confined_files.py", "app/db/*", "app/main.py",
-                            "docker/*", "tests/smoke/*", "tests/core/test_chat_shell.py"],
-          backend_linux, "Sandbox shell and real-PostgreSQL boot smoke", linux_only),
+                            "docker/*", "Dockerfile", "tests/smoke/*", "tests/core/test_chat_shell.py",
+                            "tests/core/test_container_runtime.py", "tests/core/test_container_image_contract.py"],
+          backend_linux, "Sandbox shell, PostgreSQL boot smoke and serial container contracts", linux_only),
     Suite("fluid", ["fluid/*"], fluid, "fluid unit suite"),
     Suite("frontend", ["frontend/*", "app/contract/schema/*"], frontend,
           "svelte-check, Vitest for the files a change reaches, contract check (full: build and every test)"),
