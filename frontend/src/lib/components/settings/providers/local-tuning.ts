@@ -132,7 +132,8 @@ export function parseSampling(field: SamplingField, raw: string): ParsedSampling
 	}
 	const n = Number(text);
 	if (!Number.isFinite(n)) return { ok: false, error: `${field.label} must be a finite number.` };
-	if (field.integer && !Number.isInteger(n)) return { ok: false, error: `${field.label} must be a whole number.` };
+	// 1e21 is an integer here but reaches the API as the float 1e+21.
+	if (field.integer && !Number.isSafeInteger(n)) return { ok: false, error: `${field.label} must be a whole number.` };
 	const tooLow = field.exclusiveMin ? n <= field.min : n < field.min;
 	if (tooLow || (field.max !== null && n > field.max)) {
 		return { ok: false, error: `${field.label} must be ${field.range.toLowerCase()}.` };
@@ -190,6 +191,12 @@ export function withReasoning(settings: LocalModelSettings, reasoning: boolean |
 	if (reasoning === null) delete next.reasoning;
 	else next.reasoning = reasoning;
 	return tidy(next);
+}
+
+/** The Sampling group's count: a preset and explicit values (the switch is under Reasoning). */
+export function samplingCount(settings: LocalModelSettings | null | undefined): number {
+	if (!settings) return 0;
+	return (settings.preset ? 1 : 0) + Object.keys(settings.sampling ?? {}).length;
 }
 
 /** Overrides beyond the server declaration (a preset, a value or the switch). */

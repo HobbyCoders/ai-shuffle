@@ -228,6 +228,45 @@ describe('the Tuning tab', () => {
 			expect(screen.getByRole('alert').textContent).toContain('Not saved: invalid local_settings.sampling.temperature')
 		);
 		expect(worker.state.rows[0].models[0].local_settings).toEqual({ server: 'llama_cpp' });
+		// The field goes back to what is stored (blank: server default), not the refused value.
+		await flush();
+		expect(field('Temperature').value).toBe('');
+	});
+
+	it('stays on the model it just cleared instead of jumping to another tuned one', async () => {
+		const b: ProviderModelEntry = { id: 'b-model', label: 'B', local_settings: { server: 'llama_cpp', sampling: { top_k: 5 } } };
+		start([gatewayRow({ models: [{ ...qwen, local_settings: tuned }, b, other] })]);
+		await open('mp:gw-1', 'Tuning');
+		const model = () => (screen.getByRole('combobox', { name: 'Model' }) as HTMLSelectElement).value;
+		expect(model()).toBe('qwen3-8b');
+		await fireEvent.click(within(screen.getByRole('group', { name: 'Server' })).getByRole('button', { name: 'Not set' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+		await waitFor(() => expect(patches()).toHaveLength(1));
+		await flush();
+		expect(model()).toBe('qwen3-8b');
+		expect(
+			within(screen.getByRole('group', { name: 'Server' })).getByRole('button', { name: 'Not set' }).getAttribute('aria-pressed')
+		).toBe('true');
+	});
+
+	it('marks a refused field invalid and links it to its message', async () => {
+		start([gatewayRow({ models: [{ ...qwen, local_settings: { server: 'llama_cpp' } }] })]);
+		await open('mp:gw-1', 'Tuning');
+		expect(field('Top K').getAttribute('aria-invalid')).toBeNull();
+		await type('Top K', '1e21');
+		const input = field('Top K');
+		expect(input.getAttribute('aria-invalid')).toBe('true');
+		const ids = (input.getAttribute('aria-describedby') ?? '').split(' ');
+		const message = ids.map((id) => document.getElementById(id)).find((el) => el?.textContent?.includes('Top K'));
+		expect(message?.textContent).toMatch(/Top K must be a whole number/);
+		expect(patches()).toHaveLength(0);
+	});
+
+	it('counts the Sampling group without the Thinking switch', async () => {
+		start([gatewayRow({ models: [{ ...qwen, local_settings: tuned }] })]);
+		await open('mp:gw-1', 'Tuning');
+		// tuned: a preset and two values; its reasoning switch belongs to the Reasoning group.
+		expect(screen.getByRole('heading', { name: /Sampling/ }).textContent).toMatch(/Sampling\s*3 set/);
 	});
 });
 
@@ -277,6 +316,7 @@ describe('parseSampling mirrors the API ranges', () => {
 		['min_p', '-0.5'],
 		['top_k', '-1'],
 		['top_k', '2.5'],
+		['top_k', '1e21'],
 		['repeat_penalty', '0'],
 		['repeat_penalty', '-1'],
 		['temperature', 'Infinity'],

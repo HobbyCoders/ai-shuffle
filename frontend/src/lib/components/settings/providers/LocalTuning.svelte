@@ -38,6 +38,7 @@
 		overrideCount,
 		parseSampling,
 		presetOf,
+		samplingCount,
 		withPreset,
 		withReasoning,
 		withSampling,
@@ -70,6 +71,10 @@
 	/** Field-level refusals, keyed by sampling key; cleared by a valid entry. */
 	let invalid = $state<Partial<Record<LocalSamplingKey, string>>>({});
 	let clearArmed = $state(false);
+	/** Bumped when a field's save fails, so it re-renders with the stored value. */
+	let revision = $state<Partial<Record<LocalSamplingKey, number>>>({});
+	const uid = $props.id();
+	const errorId = (key: LocalSamplingKey) => `${uid}-err-${key}`;
 
 	const models = $derived(row.models ?? []);
 	const tunedCount = $derived(models.filter((m) => !!m.local_settings).length);
@@ -88,11 +93,15 @@
 		if (fromPreset !== null) return `Preset turns it ${fromPreset ? 'on' : 'off'}`;
 		return 'Template default';
 	});
-	const errorList = $derived([...Object.values(invalid), ...(error ? [error] : [])]);
+	const fieldErrors = $derived(
+		SAMPLING_FIELDS.filter((f) => invalid[f.key]).map((f) => ({ id: errorId(f.key), message: invalid[f.key]! }))
+	);
 
 	/** Save this model's settings (null clears them). False tells a control to revert. */
 	async function save(next: LocalModelSettings | null): Promise<boolean> {
 		if (!model || saving) return false;
+		// Stay on this model: after a clear, "first tuned" would otherwise move the view.
+		picked = model.id;
 		saving = true;
 		error = '';
 		try {
@@ -137,14 +146,19 @@
 		const { [field.key]: _cleared, ...rest } = invalid;
 		invalid = rest;
 		if (parsed.value === (settings.sampling?.[field.key] ?? null)) return;
-		void save(withSampling(settings, field.key, parsed.value));
+		void saveField(field, withSampling(settings, field.key, parsed.value));
 	}
 
 	function resetSampling(field: SamplingField) {
 		if (!settings) return;
 		const { [field.key]: _cleared, ...rest } = invalid;
 		invalid = rest;
-		void save(withSampling(settings, field.key, null));
+		void saveField(field, withSampling(settings, field.key, null));
+	}
+
+	/** A field whose save did not land shows the stored value again, not the refused one. */
+	async function saveField(field: SamplingField, next: LocalModelSettings) {
+		if (!(await save(next))) revision = { ...revision, [field.key]: (revision[field.key] ?? 0) + 1 };
 	}
 
 	/** The typed value, or blank: a blank field shows what the server will use instead. */
@@ -211,7 +225,7 @@
 
 	{#if settings}
 		{#key model.id}
-			<RowGroup title="Sampling" count={overrideCount(settings) ? `${overrideCount(settings)} set` : undefined}>
+			<RowGroup title="Sampling" count={samplingCount(settings) ? `${samplingCount(settings)} set` : undefined}>
 				<SettingRow
 					label="Preset"
 					hint={preset ? 'Fields below override it' : 'Qwen3 model card values'}
@@ -238,15 +252,17 @@
 						onReset={() => resetSampling(field)}
 					>
 						<span class="lt-num" class:bad={!!invalid[field.key]}>
-							<TextField
+							{#key revision[field.key] ?? 0}<TextField
 								value={shown(field.key)}
+								invalid={!!invalid[field.key]}
+								errorId={errorId(field.key)}
 								placeholder={placeholder(field.key)}
 								inputmode={field.integer ? 'numeric' : 'decimal'}
 								mono
 								width={112}
 								disabled={saving}
 								onchange={(v) => commitSampling(field, v)}
-							/>
+							/>{/key}
 						</span>
 					</SettingRow>
 				{/each}
@@ -272,9 +288,10 @@
 		{/key}
 	{/if}
 
-	{#if errorList.length}
+	{#if fieldErrors.length || error}
 		<div class="lt-errs" role="alert">
-			{#each errorList as message (message)}<p class="pv-msg err">{message}</p>{/each}
+			{#each fieldErrors as e (e.id)}<p class="pv-msg err" id={e.id}>{e.message}</p>{/each}
+			{#if error}<p class="pv-msg err">{error}</p>{/if}
 		</div>
 	{/if}
 
