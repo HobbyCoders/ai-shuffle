@@ -756,9 +756,11 @@ async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,use_saved", [("machine", True), ("machine", False), ("folder", False)])
+@pytest.mark.parametrize("kind,use_saved,port", [
+    ("machine", True, 22), ("machine", True, 0), ("machine", False, 22), ("folder", False, 22),
+])
 async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
-    broker, saved_vault, ssh_target, monkeypatch, tmp_path, kind, use_saved,
+    broker, saved_vault, ssh_target, monkeypatch, tmp_path, kind, use_saved, port,
 ):
     from unittest.mock import patch
     from uuid import UUID
@@ -784,7 +786,7 @@ async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
             assert chat_vault.save((None, "worker", None), spec) == args["saved_id"]
     else:
         args["saved_id"] = ""
-    args.update(kind=kind, purpose="Inspect resource")
+    args.update(kind=kind, purpose="Inspect resource", suggested_port=port)
     if kind == "folder":
         spec = GrantInput(kind="folder", label="Test folder", path=str(tmp_path))
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
@@ -812,6 +814,27 @@ async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
     finally:
         requested.cancel()
         await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sdk_null_optional_identifiers_are_blank(broker, monkeypatch):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    response = await tools["RequestChatAccess"].handler({
+        "kind": "service", "purpose": "Inspect inventory", "saved_id": None, "plugin": None, "service": None,
+    })
+    assert not response.get("isError")
+    pending = json.loads(response["content"][0]["text"])
+    try:
+        card = (await broker.snapshot("chat"))["requests"][0]
+        assert card["id"] == pending["request_id"]
+        assert not card.get("saved_id") and not card.get("plugin") and not card.get("service")
+        assert not broker.grants
+    finally:
+        await broker.decline("chat", pending["request_id"])
 
 
 @pytest.mark.asyncio

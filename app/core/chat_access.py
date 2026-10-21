@@ -691,7 +691,11 @@ class Broker:
             if kind != "service" or not (plugin and service):
                 raise AccessDenied("A plugin sign-in request needs kind service, the plugin id and the service name (fields: plugin, service).")
             if service_provider or suggested_url:
-                raise AccessDenied("A plugin service's address comes from the plugin; omit service_provider and suggested_url.")
+                conflicts = [name for name, value in (
+                    ("service_provider", service_provider), ("suggested_url", suggested_url),
+                ) if value]
+                raise AccessDenied("A plugin service's address comes from the plugin. Omit: "
+                                   + ", ".join(conflicts) + ".")
             config = await _plugin_config(plugin, service)
             # The declared address, shown on the card; the plugin chose it, not the model.
             service_provider = "custom"

@@ -114,6 +114,50 @@ def _clean(*values) -> None:
         assert secret not in text
 
 
+@pytest.mark.parametrize("url", ["", None, " \t", "custom"])
+async def test_sdk_plugin_placeholders_open_declared_service_card(broker, declared, oauth, monkeypatch, url):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    response = await tools["RequestChatAccess"].handler({
+        "kind": "service", "purpose": "Read inventory", "plugin": PLUGIN, "service": SERVICE,
+        "saved_id": None, "service_provider": "custom", "suggested_url": url,
+        "suggested_host": "", "suggested_port": 22, "suggested_username": "", "suggested_path": "",
+    })
+    assert not response.get("isError")
+    pending = json.loads(response["content"][0]["text"])
+    try:
+        card = (await broker.snapshot("chat"))["requests"][0]
+        assert card["plugin"] == PLUGIN and card["service"] == SERVICE
+        assert card["suggested_url"] == declared.config.service_url
+        assert not broker.grants
+    finally:
+        await broker.decline("chat", pending["request_id"])
+
+
+@pytest.mark.parametrize("hints", [
+    {"suggested_url": "https://other.example/api"}, {"service_provider": "cloudflare"},
+    {"suggested_url": "https://other.example/api", "service_provider": "cloudflare"},
+])
+async def test_sdk_plugin_real_hints_are_refused(broker, declared, oauth, monkeypatch, hints):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    response = await tools["RequestChatAccess"].handler({
+        "kind": "service", "purpose": "Read inventory", "plugin": PLUGIN, "service": SERVICE, **hints,
+    })
+    assert response.get("isError")
+    message = response["content"][0]["text"]
+    assert "Omit:" in message
+    for field in hints:
+        assert field in message
+    assert not (await broker.snapshot("chat"))["requests"] and not broker.grants
+
+
 async def test_the_card_names_the_plugin_service_and_only_a_sign_in_answers_it(
         broker, service, trust, declared, oauth):
     pending = await broker.request("chat", "service", "Read the inventory", plugin=PLUGIN, service=SERVICE)
@@ -147,7 +191,7 @@ async def test_the_card_names_the_plugin_service_and_only_a_sign_in_answers_it(
 
 @pytest.mark.parametrize("args, message", [
     ({"plugin": PLUGIN}, "plugin id and the service name"),
-    ({"plugin": PLUGIN, "service": SERVICE, "suggested_url": "https://api.example.com"}, "omit service_provider"),
+    ({"plugin": PLUGIN, "service": SERVICE, "suggested_url": "https://api.example.com"}, "Omit: suggested_url"),
     ({"plugin": "other@mp", "service": SERVICE}, "not installed"),
     ({"plugin": PLUGIN, "service": "other"}, "does not declare"),
 ])
