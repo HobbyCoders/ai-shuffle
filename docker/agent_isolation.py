@@ -470,7 +470,7 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
             release_code(app_dir, ident, ops)
         except Exception as undo:  # noqa: BLE001 - report both, keep the first
             log(f"agent isolation: rollback after the failure also failed ({type(undo).__name__})")
-            raise IsolationError("agent isolation partially applied; restart with required to retry or off to roll back") from None
+            raise IsolationError("agent isolation partially applied; restart to retry, or with off to roll back") from None
         return None
     log("required agent isolation established" if required else
         "agent isolation is on: agent processes run as PUID without the install's keys or database")

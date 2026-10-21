@@ -121,7 +121,12 @@ mode, failure undoes the partial change and runs unisolated. In `required`
 mode, failure retains protected ownership and refuses startup; restart with
 `required` to resume, or explicitly choose `off` to roll back. Dump/restore
 never repeat migration: they reuse only a completed, root-owned isolation
-record, so online maintenance cannot release the running worker's keys.
+record, so online maintenance cannot release the running worker's keys. A
+fresh maintenance container prepares the passwd entry for custom service IDs
+without changing retained-file ownership. Optional `on` maintenance without a
+record uses the single-account fallback; `required` refuses without a record.
+Unknown values (for example `requried`) warn and run unisolated, preserving
+compatibility; refusing unknown non-empty values remains an owner decision.
 
 **Deviations from the recommendation and remaining exposure**
 

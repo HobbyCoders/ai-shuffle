@@ -227,11 +227,43 @@ def test_maintenance_never_migrates_or_releases_ownership(runtime, monkeypatch, 
     monkeypatch.setattr(module, "disable", lambda *a, **k: pytest.fail("maintenance must not release ownership"))
     settings = SimpleNamespace(effective_data_dir=tmp_path)
     account = SimpleNamespace(pw_uid=PUID, pw_gid=PGID)
+    prepared = []
+    monkeypatch.setattr(module, "ensure_account", prepared.append)
     if state == "enabled":
         assert vars(runtime.maintenance_isolation(settings, account)) == vars(IDENT)
+        assert [vars(ident) for ident in prepared] == [vars(IDENT)]
     else:
         with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused"):
             runtime.maintenance_isolation(settings, account)
+
+
+@pytest.mark.parametrize("mode", ["on", "off"])
+def test_optional_maintenance_after_fallback_uses_single_account(runtime, monkeypatch, tmp_path, mode):
+    monkeypatch.setenv("AGENT_ISOLATION", mode)
+    module = runtime.isolation()
+    monkeypatch.setattr(module, "read_record", lambda *a: None)
+    monkeypatch.setattr(module, "identity", lambda *a: pytest.fail("fallback must not validate isolation identity"))
+    monkeypatch.setattr(module, "bootstrap", lambda *a, **kw: pytest.fail("maintenance must not migrate"))
+    monkeypatch.setattr(module, "ensure_account", lambda *a: pytest.fail("fallback needs no service account"))
+    assert runtime.maintenance_isolation(SimpleNamespace(effective_data_dir=tmp_path),
+                                         SimpleNamespace(pw_uid=PUID, pw_gid=PGID)) is None
+
+
+def test_maintenance_prepares_custom_service_account_without_migration(runtime, monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "64001")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_GID", "64002")
+    module = runtime.isolation()
+    record = {"state": "enabled", "puid": PUID, "pgid": PGID, "service_uid": 64001, "service_gid": 64002}
+    monkeypatch.setattr(module, "read_record", lambda *a: record)
+    monkeypatch.setattr(module, "bootstrap", lambda *a, **kw: pytest.fail("maintenance must not migrate"))
+    monkeypatch.setattr(module, "disable", lambda *a, **kw: pytest.fail("maintenance must not release ownership"))
+    prepared = []
+    monkeypatch.setattr(module, "ensure_account", prepared.append)
+    ident = runtime.maintenance_isolation(SimpleNamespace(effective_data_dir=tmp_path),
+                                          SimpleNamespace(pw_uid=PUID, pw_gid=PGID))
+    assert prepared == [ident]
+    assert (ident.suid, ident.sgid) == (64001, 64002)
 
 
 @pytest.mark.parametrize("action", ["dump", "restore"])

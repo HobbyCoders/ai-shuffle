@@ -787,8 +787,10 @@ def maintenance_isolation(settings, account):
         return None
     record = module.read_record(Path(settings.effective_data_dir))
     if record is None:
-        if module.setting() in {"on", "required"}:
+        if required:
             raise RuntimeFailure(prefix + "maintenance requires an established isolation record; start the container normally first")
+        # Optional isolation may have fallen back and rolled back at startup.
+        # In that case maintenance must use the same single-account identity.
         return None
     try:
         ident = module.identity(account.pw_uid, account.pw_gid)
@@ -797,7 +799,14 @@ def maintenance_isolation(settings, account):
     expected = {"puid": ident.puid, "pgid": ident.pgid,
                 "service_uid": ident.suid, "service_gid": ident.sgid}
     if record.get("state") != "enabled" or any(record.get(k) != v for k, v in expected.items()):
-        raise RuntimeFailure(prefix + "isolation record incomplete or identity changed; restart normally with required to retry")
+        raise RuntimeFailure(prefix + "isolation record incomplete or identity changed; restart normally to retry")
+    # A fresh offline maintenance container has the image's default passwd IDs.
+    # Prepare its service account for custom IDs without touching retained data.
+    try:
+        module.ensure_account(ident)
+    except (module.IsolationError, OSError) as error:
+        reason = str(error) if isinstance(error, module.IsolationError) else type(error).__name__
+        raise RuntimeFailure(prefix + reason) from None
     return ident
 
 

@@ -414,6 +414,8 @@ Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=r
 
 **Image compatibility:** required mode first appears in the image built from merged PR #335 (not yet released; no older published version supports it). Pin an image containing that change and verify the success log. Older images interpret `required` as invalid, log `ignoring`, and run **unisolated**; rolling back the image tag can silently remove this protection. Check the release notes for the first published tag before deployment.
 
+**Check the spelling:** an unrecognized value such as `requried` or `enforce` only logs a warning and runs **unisolated**, just like `off`. This compatibility behavior is unchanged; verify the success log rather than assuming the setting took effect.
+
 The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
 
 **Turn it off**
