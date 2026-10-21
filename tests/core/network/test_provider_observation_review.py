@@ -83,7 +83,7 @@ def test_delayed_peer_success_does_not_clear_newer_local_authentication_failure(
     url = balances.OPENAI_CREDIT_URL if source == "openai_platform_balance" else "https://openrouter.ai/api/v1/key"
     bodies = {url: {"total_available": 42, "total_granted": 50, "total_used": 8} if source == "openai_platform_balance"
               else {"data": {"limit": 50, "usage": 8, "limit_remaining": 42}}}
-    clock = [time.time() - 20000]
+    clock = [time.time()]
     monkeypatch.setattr(observations.time, "time", lambda: clock[0])
     from datetime import datetime
     from app.db import provider_usage_snapshots
@@ -94,6 +94,9 @@ def test_delayed_peer_success_does_not_clear_newer_local_authentication_failure(
     monkeypatch.setattr(provider_usage_snapshots, "datetime", Clock)
     fake_http(monkeypatch, bodies)
     poll(b, source)  # t1
+    # Establish causal order before the partition. Wall-clock freshness alone
+    # does not order concurrent writes in the sync protocol's Lamport clock.
+    exchange(b, a)
     clock[0] += 8000
     poll(a, source)  # t2
     with a.active():
