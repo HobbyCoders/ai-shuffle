@@ -116,14 +116,24 @@ owns. It never creates, initializes, regenerates or deletes anything, and it
 does not follow symlinks. Once the record says "enabled", files PUID has since
 placed in a protected tree are logged, not adopted. With the setting off, the
 next start restores the recorded uid/gid/mode and removes the record. Both
-directions are idempotent and resume after an interruption. If enabling fails,
-the start undoes the partial data change, logs it loudly and runs unisolated, as
-with the setting off. Image code under `/app` stays root-owned in every mode;
-disabling isolation does not release it. The root startup phase reads only
-mount-path settings through image-installed dependencies and the image's
-`docker/` helpers, with an image-only executable PATH and isolated Python
-imports. Full application settings and any source-update handover load only
-after dropping privileges. Runtime writes stay in the data volume or home.
+directions are idempotent and resume after an interruption. In optional `on`
+mode, failure undoes the partial change and runs unisolated. In `required`
+mode, failure retains protected ownership and refuses startup; restart with
+`required` to resume, or explicitly choose `off` to roll back. Dump/restore
+never repeat migration: they reuse only a completed, root-owned isolation
+record, so online maintenance cannot release the running worker's keys. A
+fresh maintenance container prepares the passwd entry for custom service IDs
+without changing retained-file ownership. Optional `on` maintenance without a
+record uses the single-account fallback; `required` refuses without a record.
+Unknown values (for example `requried`) warn and run unisolated, preserving
+compatibility; refusing unknown non-empty values remains an owner decision.
+
+Image code under `/app` stays root-owned in every mode; disabling isolation
+does not release it. The root startup phase reads only mount-path settings
+through image-installed dependencies and the image's `docker/` helpers, with
+an image-only executable PATH and isolated Python imports. Full application
+settings and any source-update handover load only after dropping privileges.
+Runtime writes stay in the data volume or home.
 
 **Deviations from the recommendation and remaining exposure**
 
@@ -164,9 +174,14 @@ and streams the dump (`container_runtime.py dump --file -`), as
 ## Validation before changing the default
 
 Do not enable the split on a live worker merely to test it. Use disposable
-volumes and synthetic credentials. The opt-in still fails open on migration or
-identity errors and is ignored with `--user`; a default environment variable is
-not a substitute for a required/fail-closed mode or visible actual-state reporting.
+volumes and synthetic credentials. Optional `on` still fails open on migration
+or identity errors and is ignored with `--user`. Explicit `required` refuses
+these paths and reports `required agent isolation established` on success.
+Its first supporting image is the image built from merged PR #335 (not yet
+released). Older images ignore the unknown value and run unisolated; pin a
+supporting image and check the log after tag changes. This startup policy is
+not evidence of OS-level enforcement; run the disposable-image checks below
+before relying on it or considering a default-on change.
 
 Run these checks from the repository root:
 

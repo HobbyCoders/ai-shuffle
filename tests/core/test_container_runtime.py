@@ -44,7 +44,7 @@ spec = importlib.util.spec_from_file_location("rt", sys.argv[1])
 rt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rt)
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[1]))
-def boundary(*args):
+def boundary(*args, **kwargs):
     rt.isolation()
     origins = {name: str(pathlib.Path(mod.__file__).resolve())
                for name, mod in sys.modules.copy().items() if getattr(mod, "__file__", None)}
@@ -177,7 +177,7 @@ def test_main_diagnostics_keep_type_and_call_site_but_not_secret_values(monkeypa
     def fail_settings():
         raise PermissionError("postgresql://user:private-test-password@host/database")
     monkeypatch.setattr(runtime, "load_settings", fail_settings)
-    monkeypatch.setattr(runtime, "drop_privileges", lambda settings: None)
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: None)
     monkeypatch.setattr(runtime.signal, "signal", lambda *args: None)
     assert runtime.main(["run"]) == 1
     output = capsys.readouterr().err
@@ -672,7 +672,7 @@ def test_main_marks_the_supervisor_non_dumpable_after_dropping_privileges(monkey
     order = []
     cfg = settings_factory()
     monkeypatch.setattr(runtime, "load_settings", lambda: order.append("settings") or cfg)
-    monkeypatch.setattr(runtime, "drop_privileges", lambda settings: order.append("drop"))
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: order.append("drop"))
     monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: order.append("harden"))
     monkeypatch.setattr(runtime, "run", lambda settings, action, filename=None: order.append(action) or 0)
     assert runtime.main(["run"]) == 0

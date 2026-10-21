@@ -93,9 +93,223 @@ def _protected(root):
 
 @pytest.mark.parametrize("raw,expected", [("", "off"), ("0", "off"), ("off", "off"), ("FALSE", "off"),
                                           ("on", "on"), (" On ", "on"), ("1", "on"), ("yes", "on"),
+                                          ("required", "required"), (" REQUIRED ", "required"),
                                           ("maybe", "invalid")])
 def test_setting(raw, expected):
     assert iso.setting({iso.SETTING: raw}) == expected
+
+
+
+
+@pytest.mark.parametrize("stage", ["ensure_account", "protect_code", "enable"])
+def test_required_failure_refuses_and_restart_recovers(data, app_dir, monkeypatch, stage):
+    root, ops = data
+    monkeypatch.setenv(iso.SETTING, "required")
+    monkeypatch.setattr(iso, "ensure_account", lambda *a: None)
+    original = getattr(iso, stage)
+    def fail(*a, **k):
+        raise iso.IsolationError("unsupported ownership")
+    monkeypatch.setattr(iso, stage, fail)
+    messages = []
+    with pytest.raises(iso.IsolationError, match="required agent isolation.*startup refused"):
+        iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=messages.append)
+    assert not any("agents run unisolated" in m for m in messages)
+    monkeypatch.setattr(iso, stage, original)
+    assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=messages.append) == IDENT
+    assert any("required agent isolation established" in m for m in messages)
+
+
+def test_required_partial_migration_failure_can_restart(data, app_dir, monkeypatch):
+    root, ops = data
+    monkeypatch.setenv(iso.SETTING, "required")
+    monkeypatch.setattr(iso, "ensure_account", lambda *a: None)
+    original = ops.lchown
+    failed = False
+    def fail_once(path, uid, gid):
+        nonlocal failed
+        if Path(path).name == "preview-access.key" and uid == SUID and not failed:
+            failed = True
+            raise OSError("synthetic filesystem failure")
+        return original(path, uid, gid)
+    monkeypatch.setattr(ops, "lchown", fail_once)
+    with pytest.raises(iso.IsolationError, match="required agent isolation.*startup refused"):
+        iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops)
+    assert failed
+    # Required failures must never release already-protected entries.
+    assert any(ops.lstat(p).st_uid == SUID for p in _protected(root))
+    assert not any(change[0] == "chown" and change[2] == PUID for change in ops.changes)
+    assert ops.lstat(app_dir[0] / "app").st_uid == 0
+    assert iso.read_record(root, ops)["state"] == "enabling"
+    assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops) == IDENT
+    assert all(ops.lstat(p).st_uid == SUID for p in _protected(root))
+
+
+def test_required_without_identity_refuses(data, monkeypatch):
+    monkeypatch.setenv(iso.SETTING, "required")
+    with pytest.raises(iso.IsolationError, match="required agent isolation.*startup refused"):
+        iso.bootstrap(data[0], None, ops=data[1])
+
+
+@pytest.mark.parametrize("problem", ["identity", "missing_module", "nonroot"])
+def test_required_runtime_refuses(runtime, monkeypatch, tmp_path, problem):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    account = SimpleNamespace(pw_uid=1000, pw_gid=1000)
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "1000")
+    if problem == "missing_module":
+        monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    if problem == "nonroot":
+        monkeypatch.setattr(runtime.os, "geteuid", lambda: 1000)
+    with pytest.raises(runtime.RuntimeFailure, match="required agent isolation.*startup refused"):
+        if problem == "nonroot":
+            runtime.drop_privileges(SimpleNamespace())
+        else:
+            runtime.isolate(SimpleNamespace(effective_data_dir=tmp_path), account)
+
+
+
+
+def test_required_failure_never_attempts_rollback(data, app_dir, monkeypatch):
+    monkeypatch.setenv(iso.SETTING, "required")
+    monkeypatch.setattr(iso, "ensure_account", lambda *a: (_ for _ in ()).throw(iso.IsolationError("blocked")))
+    monkeypatch.setattr(iso, "disable", lambda *a: pytest.fail("required must retain protected ownership"))
+    monkeypatch.setattr(iso, "release_code", lambda *a: pytest.fail("required must retain protected code"))
+    with pytest.raises(iso.IsolationError, match="restart with required to retry"):
+        iso.bootstrap(data[0], IDENT, app_dir=app_dir[0], ops=data[1])
+
+
+def test_optional_failed_rollback_also_refuses(data, app_dir, monkeypatch):
+    monkeypatch.setenv(iso.SETTING, "on")
+    def fail(*a, **k):
+        raise OSError("synthetic failure")
+    monkeypatch.setattr(iso, "ensure_account", fail)
+    monkeypatch.setattr(iso, "disable", fail)
+    with pytest.raises(iso.IsolationError, match="partially applied"):
+        iso.bootstrap(data[0], IDENT, app_dir=app_dir[0], ops=data[1])
+
+
+def test_required_success_through_isolate_and_main(runtime, data, app_dir, monkeypatch):
+    monkeypatch.setenv(iso.SETTING, "required")
+    monkeypatch.setattr(runtime, "_isolation", iso)
+    monkeypatch.setattr(iso, "ensure_account", lambda *a: None)
+    original = iso.bootstrap
+    monkeypatch.setattr(iso, "bootstrap", lambda path, ident, **kw:
+        original(path, ident, app_dir=app_dir[0], ops=data[1], log=kw["log"]))
+    conf = SimpleNamespace(effective_data_dir=data[0])
+    account = SimpleNamespace(pw_uid=PUID, pw_gid=PGID)
+    assert runtime.isolate(conf, account) == IDENT
+    monkeypatch.setattr(runtime, "load_settings", lambda: conf)
+    calls = []
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: calls.append(runtime.isolate(settings, account)))
+    monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: None)
+    monkeypatch.setattr(runtime, "handover", lambda settings: None)
+    monkeypatch.setattr(runtime, "run", lambda settings, action, filename: 0)
+    assert runtime.main(["run"]) == 0
+    assert calls == [IDENT]
+
+
+def test_required_main_reports_refusal(runtime, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "1000")
+    monkeypatch.setattr(runtime, "load_settings", lambda: SimpleNamespace(effective_data_dir=tmp_path))
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw:
+        runtime.isolate(settings, SimpleNamespace(pw_uid=1000, pw_gid=1000)))
+    assert runtime.main(["run"]) == 1
+    assert "required agent isolation: startup refused" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["enabled", "enabling", None])
+def test_maintenance_never_migrates_or_releases_ownership(runtime, monkeypatch, tmp_path, state):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    module = runtime.isolation()
+    record = {"state": state, "puid": PUID, "pgid": PGID, "service_uid": SUID, "service_gid": SGID}
+    monkeypatch.setattr(module, "read_record", lambda *a: record if state else None)
+    monkeypatch.setattr(module, "bootstrap", lambda *a, **k: pytest.fail("maintenance must not migrate"))
+    monkeypatch.setattr(module, "disable", lambda *a, **k: pytest.fail("maintenance must not release ownership"))
+    settings = SimpleNamespace(effective_data_dir=tmp_path)
+    account = SimpleNamespace(pw_uid=PUID, pw_gid=PGID)
+    prepared = []
+    monkeypatch.setattr(module, "ensure_account", prepared.append)
+    if state == "enabled":
+        assert vars(runtime.maintenance_isolation(settings, account)) == vars(IDENT)
+        assert [vars(ident) for ident in prepared] == [vars(IDENT)]
+    else:
+        with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused"):
+            runtime.maintenance_isolation(settings, account)
+
+
+@pytest.mark.parametrize("mode", ["on", "off"])
+def test_optional_maintenance_after_fallback_uses_single_account(runtime, monkeypatch, tmp_path, mode):
+    monkeypatch.setenv("AGENT_ISOLATION", mode)
+    module = runtime.isolation()
+    monkeypatch.setattr(module, "read_record", lambda *a: None)
+    monkeypatch.setattr(module, "identity", lambda *a: pytest.fail("fallback must not validate isolation identity"))
+    monkeypatch.setattr(module, "bootstrap", lambda *a, **kw: pytest.fail("maintenance must not migrate"))
+    monkeypatch.setattr(module, "ensure_account", lambda *a: pytest.fail("fallback needs no service account"))
+    assert runtime.maintenance_isolation(SimpleNamespace(effective_data_dir=tmp_path),
+                                         SimpleNamespace(pw_uid=PUID, pw_gid=PGID)) is None
+
+
+def test_maintenance_prepares_custom_service_account_without_migration(runtime, monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "64001")
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_GID", "64002")
+    module = runtime.isolation()
+    record = {"state": "enabled", "puid": PUID, "pgid": PGID, "service_uid": 64001, "service_gid": 64002}
+    monkeypatch.setattr(module, "read_record", lambda *a: record)
+    monkeypatch.setattr(module, "bootstrap", lambda *a, **kw: pytest.fail("maintenance must not migrate"))
+    monkeypatch.setattr(module, "disable", lambda *a, **kw: pytest.fail("maintenance must not release ownership"))
+    prepared = []
+    monkeypatch.setattr(module, "ensure_account", prepared.append)
+    ident = runtime.maintenance_isolation(SimpleNamespace(effective_data_dir=tmp_path),
+                                          SimpleNamespace(pw_uid=PUID, pw_gid=PGID))
+    assert prepared == [ident]
+    assert (ident.suid, ident.sgid) == (64001, 64002)
+
+
+def test_required_maintenance_account_command_failure_reports_refusal(runtime, monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    module = runtime.isolation()
+    record = {"state": "enabled", "puid": PUID, "pgid": PGID, "service_uid": SUID, "service_gid": SGID}
+    monkeypatch.setattr(module, "read_record", lambda *a: record)
+
+    def fail_account(ident):
+        raise runtime.subprocess.CalledProcessError(1, ["usermod"])
+
+    monkeypatch.setattr(module, "ensure_account", fail_account)
+    with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused; CalledProcessError"):
+        runtime.maintenance_isolation(SimpleNamespace(effective_data_dir=tmp_path),
+                                      SimpleNamespace(pw_uid=PUID, pw_gid=PGID))
+
+
+@pytest.mark.parametrize("action", ["dump", "restore"])
+def test_main_marks_maintenance_actions(runtime, monkeypatch, action):
+    monkeypatch.setattr(runtime, "load_settings", lambda: object())
+    calls = []
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings, **kw: calls.append(kw))
+    monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: None)
+    monkeypatch.setattr(runtime, "run", lambda *a: 0)
+    assert runtime.main([action, "--file", "-"]) == 0
+    assert calls == [{"maintenance": True}]
+
+
+def test_app_refuses_direct_entrypoint_override(monkeypatch):
+    from app.main import require_agent_isolation
+    monkeypatch.setenv("AGENT_ISOLATION", "required")
+    monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION", raising=False)
+    with pytest.raises(RuntimeError, match="required agent isolation: startup refused"):
+        require_agent_isolation()
+    monkeypatch.setenv("SHUFFLE_AGENT_ISOLATION", "on")
+    require_agent_isolation()
+
+
+def test_invalid_setting_nonroot_logs_choices(runtime, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AGENT_ISOLATION", "requried")
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 1000)
+    monkeypatch.delenv("PUID", raising=False)
+    monkeypatch.delenv("PGID", raising=False)
+    monkeypatch.setattr(runtime, "check_owned", lambda *a, **k: None)
+    runtime.drop_privileges(SimpleNamespace(effective_data_dir=tmp_path))
+    assert "use required, on or off" in capsys.readouterr().err
 
 
 def test_setting_defaults_off():

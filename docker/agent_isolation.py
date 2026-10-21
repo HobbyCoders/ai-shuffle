@@ -86,10 +86,10 @@ ACTIVE = None
 
 
 def setting(environ=None):
-    """"on", "off" or "invalid". Read from the container environment only:
+    """"required", "on", "off" or "invalid". Read from the container environment only:
     the agent can edit files the app reads settings from, never this."""
     raw = (os.environ if environ is None else environ).get(SETTING, "").strip().lower()
-    return "on" if raw in _TRUE else "off" if raw in _FALSE else "invalid"
+    return "required" if raw == "required" else "on" if raw in _TRUE else "off" if raw in _FALSE else "invalid"
 
 
 def _id(environ, name):
@@ -417,7 +417,10 @@ def ensure_account(ident, run=subprocess.run):
         run(["groupmod", "-o", "-g", str(ident.sgid), SERVICE_NAME], check=True)
     if account.pw_uid != ident.suid or account.pw_gid != ident.sgid:
         run(["usermod", "-o", "-u", str(ident.suid), "-g", str(ident.sgid), SERVICE_NAME], check=True)
-    agent = pwd.getpwuid(ident.puid).pw_name
+    try:
+        agent = pwd.getpwuid(ident.puid).pw_name
+    except KeyError:
+        raise IsolationError("the agent isolation PUID has no account") from None
     for gid in {ident.sgid, ident.pgid}:
         try:
             members = set(grp.getgrgid(gid).gr_mem)
@@ -431,15 +434,19 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
     """Root, before the drop. Returns the identity to split with, or None.
 
     Off: roll back a previous enable if there is one, else change nothing.
-    On: account, code, data. Any failure leaves the worker running as it does
-    with the mode off (after undoing a partial change), with a loud log.
+    On: account, code, data. Failure rolls back, then continues unisolated.
+    Required: any failure refuses startup without releasing protected ownership.
+    Migration is resumable; only an explicit off start rolls it back.
     """
     ops = ops or Ops()
+    required = setting() == "required"
     if ident is None:
+        if required:
+            raise IsolationError("required agent isolation: startup refused (no isolation identity)")
         return None
-    if setting() != "on":
+    if setting() not in {"on", "required"}:
         if setting() == "invalid":
-            log(f"agent isolation: ignoring {SETTING}={os.environ.get(SETTING)!r}; use on or off")
+            log(f"agent isolation: ignoring {SETTING}={os.environ.get(SETTING)!r}; use required, on or off")
         if needs_rollback(data_dir, ident, ops):
             disable(data_dir, ident, ops, log)
             release_code(app_dir, ident, ops)
@@ -450,16 +457,23 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
         enable(data_dir, ident, ops, log)
     except (IsolationError, OSError, subprocess.CalledProcessError) as error:
         reason = str(error) if isinstance(error, IsolationError) else type(error).__name__
-        log(f"agent isolation could NOT be enabled ({reason}); agents run unisolated, as with "
-            f"{SETTING}=off. Fix the cause and restart.")
+        if required:
+            log(f"required agent isolation: startup refused ({reason}). Protected ownership retained; "
+                "fix the cause and restart with required to retry.")
+            raise IsolationError(f"required agent isolation: startup refused ({reason}); "
+                                 "restart with required to retry") from None
+        else:
+            log(f"agent isolation could NOT be enabled ({reason}); agents run unisolated, as with "
+                f"{SETTING}=off. Fix the cause and restart.")
         try:
             disable(data_dir, ident, ops, log)
             release_code(app_dir, ident, ops)
         except Exception as undo:  # noqa: BLE001 - report both, keep the first
             log(f"agent isolation: rollback after the failure also failed ({type(undo).__name__})")
-            raise IsolationError("agent isolation partially applied; restart with it on or off") from None
+            raise IsolationError("agent isolation partially applied; restart to retry, or with off to roll back") from None
         return None
-    log("agent isolation is on: agent processes run as PUID without the install's keys or database")
+    log("required agent isolation established" if required else
+        "agent isolation is on: agent processes run as PUID without the install's keys or database")
     return ident
 
 
@@ -475,7 +489,8 @@ def drop(ident):
     os.setresuid(ident.puid, ident.suid, ident.suid)
     if (os.getresuid() != (ident.puid, ident.suid, ident.suid)
             or os.getresgid() != (ident.pgid, ident.sgid, ident.sgid) or os.getgroups()):
-        raise IsolationError("agent isolation could not set the supervisor's ids")
+        prefix = "required agent isolation: startup refused; " if setting() == "required" else ""
+        raise IsolationError(prefix + "agent isolation could not set the supervisor's ids")
     ACTIVE = ident
 
 

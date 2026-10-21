@@ -21,7 +21,11 @@ def bind(row, instance_id, encrypted_key):
         """, (encrypted_key, instance_id,
               json.dumps({"credential": credential_fingerprint({**row, "balance_key": encrypted_key})}) if encrypted_key else None, str(uuid4()),
               row["id"], row.get("revision")))
-        return cur.fetchone() is not None
+        changed = cur.fetchone() is not None
+        if changed:
+            from app.db.provider_usage_snapshots import delete_shared_observations
+            delete_shared_observations(conn, row["id"])
+        return changed
 
 
 def snapshot(row, value):
