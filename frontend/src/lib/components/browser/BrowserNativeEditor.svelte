@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { untrack, onDestroy } from 'svelte';
 	import type { BrowserEditor } from '$lib/browser-panel/workspace';
-	let { field, scale, left, top, viewWidth, viewHeight, onEdit, onActive, onEnter, onText, onKey, onNavKey }: {
+	type FieldSurface = { background: string; color: string };
+	let { field, scale, left, top, viewWidth, viewHeight, onEdit, onActive, onEnter, onText, onKey, onNavKey, surface }: {
 		field: BrowserEditor; scale: number; left: number; top: number; viewWidth: number; viewHeight: number;
 		onEdit: (args: Record<string, unknown>) => void;
 		onActive: (active: boolean) => void;
@@ -15,6 +16,8 @@
 		 * `modifiers` is the CDP bitmask (Shift+Tab walks backwards).
 		 */
 		onNavKey?: (key: string, code: string, keyCode: number, modifiers: number) => void;
+		/** The page field's own fill as drawn in the frame, so the focused editor blends in. */
+		surface?: () => FieldSurface | null;
 	} = $props();
 	// Split code boxes move focus to the next box on every digit. Replacing one
 	// box's value fights that, so these fields send real keystrokes instead and
@@ -25,8 +28,9 @@
 	let composing = false;
 	let lastSent: string | undefined;
 	let el = $state<HTMLInputElement | HTMLTextAreaElement>();
-	// Mouse/trackpad: the overlay sits exactly on the page's own field and stays
-	// see-through, so the page draws its text and nothing nearby is covered.
+	// Mouse/trackpad: the focused editor sits exactly in the page field's own
+	// box, so nothing nearby is covered. It shows its own text and caret (sized
+	// from the field) so a click lands where the text it edits really is.
 	// Touch: a desktop page can be thumbnail-sized, so focus enlarges a readable
 	// native editor instead.
 	const finePointerQuery = typeof matchMedia === 'function' ? matchMedia('(pointer: fine)') : null;
@@ -38,6 +42,8 @@
 		return () => finePointerQuery.removeEventListener?.('change', update);
 	});
 	const enlarged = $derived(focused && !keys && !finePointer);
+	const inPlace = $derived(focused && !keys && finePointer);
+	let fill = $state<FieldSurface | null>(null);
 	const NAV_KEYS = new Map([['ArrowLeft', 37], ['ArrowUp', 38], ['ArrowRight', 39], ['ArrowDown', 40], ['PageUp', 33], ['PageDown', 34], ['Tab', 9], ['Escape', 27]]);
 	$effect(() => {
 		const remote = field.value;
@@ -51,6 +57,7 @@
 		onEdit({ field: field.id, action: 'replace', value, start: el?.selectionStart ?? value.length, end: el?.selectionEnd ?? value.length });
 	}
 	function focus() {
+		if (!keys) fill = surface?.() ?? null;
 		focused = true;
 		lastSent = undefined;
 		onActive(true);
@@ -63,14 +70,28 @@
 	}
 	onDestroy(() => { if (focused) onActive(false); });
 	const style = $derived.by(() => {
-		if (!enlarged) return `left:${left + field.x * scale}px;top:${top + field.y * scale}px;width:${field.width * scale}px;height:${field.height * scale}px`;
+		const box = `left:${left + field.x * scale}px;top:${top + field.y * scale}px;width:${field.width * scale}px;height:${field.height * scale}px`;
+		if (finePointer && !keys) {
+			// Roughly the page's own type size: a single-line field's text is about
+			// 0.62 of its height (13.33px in a 21px default input), capped at 16px;
+			// a textarea's rows are unknown, so use the default 13.5px. Applied while
+			// idle too: the click that focuses the field places the caret with
+			// these metrics, so they must already be the ones shown after focus.
+			const pageFont = field.type === 'textarea' ? 13.5 : Math.min(field.height * 0.62, 16);
+			const font = Math.max(6, Math.round(pageFont * scale * 10) / 10);
+			const pad = Math.max(1, Math.round(3 * scale * 10) / 10);
+			const colors = inPlace && fill ? `;--field-bg:${fill.background};--field-fg:${fill.color}` : '';
+			return `${box};font-size:${font}px;line-height:1.2;padding:${field.type === 'textarea' ? pad : 0}px ${pad}px${colors}`;
+		}
+		if (!enlarged) return box;
 		// A desktop page can be thumbnail-sized on a phone. Keep the hit target
 		// aligned when idle, but make the focused native text readable/selectable.
 		const width = Math.min(Math.max(field.width * scale, 240), viewWidth - 16);
 		const height = Math.min(Math.max(field.height * scale, field.type === 'textarea' ? 80 : 36), viewHeight - 16);
 		const x = Math.max(8, Math.min(left + field.x * scale, viewWidth - width - 8));
 		const y = Math.max(8, Math.min(top + field.y * scale, viewHeight - height - 8));
-		return `left:${x}px;top:${y}px;width:${width}px;height:${height}px`;
+		const colors = fill ? `;--field-bg:${fill.background};--field-fg:${fill.color}` : '';
+		return `left:${x}px;top:${y}px;width:${width}px;height:${height}px${colors}`;
 	});
 	function beforeInput(e: InputEvent) {
 		if (!keys || composing || e.isComposing || !e.inputType.startsWith('delete')) return;
@@ -97,12 +118,12 @@
 <!-- Real native controls, present BEFORE the first tap, preserve the trusted
      focus gesture on iOS and leave selection/copy/paste/IME to the browser. -->
 {#if field.type === 'textarea'}
-	<textarea bind:this={el} bind:value {style} class:focused={focused && !keys} class:enlarged class:keys aria-label={field.label}
+	<textarea bind:this={el} bind:value {style} class:focused={focused && !keys} class:enlarged class:in-place={inPlace} class:keys aria-label={field.label}
 		onfocus={focus} onblur={blur} onbeforeinput={beforeInput} oninput={(e) => { value = e.currentTarget.value; edit(); }} onkeydown={key} onkeyup={(e) => e.stopPropagation()}
 		oncompositionstart={() => composing = true} oncompositionend={() => { composing = false; edit(); }}
 		oncontextmenu={(e) => e.stopPropagation()} maxlength="16384" spellcheck="false"></textarea>
 {:else}
-	<input bind:this={el} bind:value type={field.type} {style} class:focused={focused && !keys} class:enlarged class:keys aria-label={field.label}
+	<input bind:this={el} bind:value type={field.type} {style} class:focused={focused && !keys} class:enlarged class:in-place={inPlace} class:keys aria-label={field.label}
 		onfocus={focus} onblur={blur} onbeforeinput={beforeInput} oninput={(e) => { value = e.currentTarget.value; edit(); }} onkeydown={key} onkeyup={(e) => e.stopPropagation()}
 		oncompositionstart={() => composing = true} oncompositionend={() => { composing = false; edit(); }}
 		oncontextmenu={(e) => e.stopPropagation()} maxlength="16384" autocomplete="off" spellcheck="false" />
@@ -120,16 +141,23 @@
 	/* Keystroke boxes stay see-through: the page draws the digits and its own focus. */
 	.keys { outline: 1px dashed var(--primary, #6750a4); outline-offset: 1px; }
 	.keys:not(:focus) { outline: none; }
-	/* Mouse/trackpad focus: same box as the page field, see-through, ring only.
-	   The page draws the text and its own caret; the ring marks where keys go.
-	   The page under it can be any colour (and a theme's ring can be white), so
-	   the ring is two bands: app background, then the theme's focus colour. */
+	/* Mouse/trackpad focus: the page field's own box, its own fill (sampled
+	   from the frame; theme card colours if that fails) and real, visible text
+	   and caret, so what you see is where the edit lands. The page under it can
+	   be any colour (and a theme's ring can be white), so the ring is two
+	   bands: app background, then the theme's focus colour. */
 	.focused {
 		z-index: 2; outline: none;
 		box-shadow: 0 0 0 2px var(--background, #fff), 0 0 0 4px var(--ring, #6750a4), 0 0 10px 4px color-mix(in oklch, var(--ring, #6750a4) 30%, transparent);
 	}
-	.focused::selection { background: color-mix(in oklch, var(--ring, #6750a4) 25%, transparent); }
-	/* Touch focus: an enlarged, opaque native editor that is readable over a thumbnail page. */
-	.enlarged { background: var(--background, white); color: var(--foreground, #111); caret-color: auto; border-color: var(--primary, #6750a4); outline: 2px solid var(--primary, #6750a4); box-shadow: none; }
+	.in-place {
+		border-radius: 2px;
+		background: var(--field-bg, var(--card, #fff)); color: var(--field-fg, var(--card-foreground, #111));
+		caret-color: currentColor;
+	}
+	.in-place::selection { background: Highlight; color: HighlightText; }
+	/* Touch focus: an enlarged, opaque native editor that is readable over a
+	   thumbnail page, in the page field's colours when the frame can be read. */
+	.enlarged { background: var(--field-bg, var(--background, white)); color: var(--field-fg, var(--foreground, #111)); caret-color: auto; border-color: var(--primary, #6750a4); outline: 2px solid var(--primary, #6750a4); box-shadow: none; }
 	.enlarged::selection { background: color-mix(in oklch, var(--primary, #6750a4) 35%, transparent); }
 </style>

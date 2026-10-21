@@ -73,7 +73,7 @@ describe('focused overlay geometry', () => {
  });
  it('still enlarges a readable editor for touch thumbnails', async () => {
   pointer(false);
-  render(BrowserNativeEditor, { ...base, scale: 0.3, field: { id: 'f', type: 'textarea', label: 'Notes', value: '', x: 10, y: 20, width: 120, height: 22 } });
+  render(BrowserNativeEditor, { ...base, scale: 0.3, surface: () => ({ background: 'rgb(255 255 255)', color: '#141414' }), field: { id: 'f', type: 'textarea', label: 'Notes', value: '', x: 10, y: 20, width: 120, height: 22 } });
   await tick();
   const input = screen.getByRole('textbox') as HTMLTextAreaElement;
   expect(box(input)).toEqual([3, 6, 36, 6.6]);
@@ -81,9 +81,56 @@ describe('focused overlay geometry', () => {
   await tick();
   expect(box(input)).toEqual([8, 8, 240, 80]);
   expect(input.classList.contains('enlarged')).toBe(true);
+  expect(input.style.getPropertyValue('--field-bg')).toBe('rgb(255 255 255)');
   input.blur();
   await tick();
   expect(input.classList.contains('enlarged')).toBe(false);
+ });
+});
+describe('in-place editing on a fine pointer', () => {
+ it('shows its own text in the page field colours, sized from the field', async () => {
+  pointer(true);
+  const surface = vi.fn(() => ({ background: 'rgb(255 255 255)', color: '#141414' }));
+  render(BrowserNativeEditor, { ...base, scale: 0.7, surface, field: { id: 'f', type: 'text', label: 'Name', value: 'hello world', x: 10, y: 20, width: 200, height: 21 } });
+  await tick();
+  const input = screen.getByRole('textbox') as HTMLInputElement;
+  expect(input.classList.contains('in-place')).toBe(false);
+  // Idle uses the same type size, so the focusing click places the caret right.
+  expect(parseFloat(input.style.fontSize)).toBeCloseTo(9.1, 1);
+  expect(input.style.getPropertyValue('--field-bg')).toBe('');
+  input.focus();
+  await tick();
+  expect(surface).toHaveBeenCalledOnce();
+  expect(input.classList.contains('in-place')).toBe(true);
+  expect(input.style.getPropertyValue('--field-bg')).toBe('rgb(255 255 255)');
+  expect(input.style.getPropertyValue('--field-fg')).toBe('#141414');
+  // 21px field → ~13px page text, at 0.7 scale.
+  expect(parseFloat(input.style.fontSize)).toBeCloseTo(9.1, 1);
+  expect(box(input)).toEqual([7, 14, 140, 14.7]);
+ });
+ it('falls back to theme colours when the frame cannot be read', async () => {
+  pointer(true);
+  render(BrowserNativeEditor, { ...base, surface: () => null, field: { id: 'f', type: 'textarea', label: 'Notes', value: '', x: 0, y: 0, width: 200, height: 80 } });
+  await tick();
+  const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+  input.focus();
+  await tick();
+  expect(input.classList.contains('in-place')).toBe(true);
+  expect(input.style.getPropertyValue('--field-bg')).toBe('');
+ });
+ it('lands a mid-text edit at the clicked offset', async () => {
+  pointer(true);
+  const onEdit = vi.fn();
+  render(BrowserNativeEditor, { ...base, onEdit, field: { id: 'f', type: 'text', label: 'Name', value: 'hello world', x: 0, y: 0, width: 200, height: 21 } });
+  await tick();
+  const input = screen.getByRole('textbox') as HTMLInputElement;
+  input.focus();
+  // The click put the visible caret after "hello"; typing inserts there.
+  input.setSelectionRange(5, 5);
+  input.setRangeText('X', 5, 5, 'end');
+  await fireEvent.input(input);
+  expect(input.value).toBe('helloX world');
+  expect(onEdit).toHaveBeenLastCalledWith({ field: 'f', action: 'replace', value: 'helloX world', start: 6, end: 6 });
  });
 });
 describe('navigation keys', () => {

@@ -176,6 +176,58 @@
 		else runDraw();
 	}
 
+	/**
+	 * The page field's fill as drawn in the current frame, so the focused editor
+	 * can wear the same colour instead of a theme box. It is the most common
+	 * colour inside the field (text, carets and resize grips are a minority).
+	 * Text gets black or white for contrast.
+	 */
+	function fieldSurface(f: BrowserEditor): { background: string; color: string } | null {
+		const meta = currentMeta;
+		if (!canvasEl || !currentBitmap || !metaIsDrawable(meta)) return null;
+		try {
+			const ctx = canvasEl.getContext('2d');
+			const rect = canvasEl.getBoundingClientRect();
+			if (!ctx || rect.width <= 0) return null;
+			const box = { left: 0, top: 0, width: rect.width, height: rect.height };
+			const scale = fitScale(box, meta);
+			const off = letterbox(box, meta, scale);
+			const dpr = canvasEl.width / rect.width;
+			// Stay clear of the border (and its blur in the scaled JPEG).
+			const ix = Math.min(4, f.width / 4);
+			const iy = Math.min(4, f.height / 4);
+			const x0 = Math.round((off.x + (f.x + ix) * scale) * dpr);
+			const y0 = Math.round((off.y + (f.y + iy) * scale) * dpr);
+			const w = Math.round((f.width - 2 * ix) * scale * dpr);
+			const h = Math.round((f.height - 2 * iy) * scale * dpr);
+			if (w < 1 || h < 1) return null;
+			const data = ctx.getImageData(x0, y0, w, h).data;
+			const step = Math.max(1, Math.floor((w * h) / 600));
+			const groups = new Map<number, { n: number; r: number; g: number; b: number }>();
+			for (let i = 0; i < w * h; i += step) {
+				const o = i * 4;
+				if (data[o + 3] < 200) continue; // letterbox / outside the frame
+				// JPEG noise: group near-identical colours.
+				const key = ((data[o] >> 4) << 8) | ((data[o + 1] >> 4) << 4) | (data[o + 2] >> 4);
+				const grp = groups.get(key) ?? { n: 0, r: 0, g: 0, b: 0 };
+				grp.n++;
+				grp.r += data[o];
+				grp.g += data[o + 1];
+				grp.b += data[o + 2];
+				groups.set(key, grp);
+			}
+			let best: { n: number; r: number; g: number; b: number } | undefined;
+			for (const grp of groups.values()) if (!best || grp.n > best.n) best = grp;
+			if (!best) return null;
+			const [r, g, b] = [best.r, best.g, best.b].map((c) => Math.round(c / best!.n));
+			const lin = (c: number) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+			const luminance = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+			return { background: `rgb(${r} ${g} ${b})`, color: luminance > 0.18 ? '#141414' : '#f2f2f2' };
+		} catch {
+			return null; // no readable frame: the editor falls back to theme colours
+		}
+	}
+
 	/** Frame metadata is only usable if both device dimensions are finite and positive. */
 	function metaIsDrawable(meta: FrameMetadata | null): meta is FrameMetadata {
 		return (
@@ -357,7 +409,22 @@
 	});
 	onDestroy(dismissKeyboard);
 
+	// The page's command queue holds 128 entries; a giant paste would overflow it
+	// and be cut off silently. Cap it, and say so.
+	const PASTE_LIMIT = 65536;
+	let notice = $state<string | null>(null);
+	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+	onDestroy(() => clearTimeout(noticeTimer));
+
 	function sendText(text: string) {
+		if (text.length > PASTE_LIMIT) {
+			// Never end on half of a surrogate pair.
+			const end = /[\uD800-\uDBFF]/.test(text[PASTE_LIMIT - 1]) ? PASTE_LIMIT - 1 : PASTE_LIMIT;
+			text = text.slice(0, end);
+			notice = `Pasted the first ${PASTE_LIMIT.toLocaleString('en-US')} characters; the rest was too long to send.`;
+			clearTimeout(noticeTimer);
+			noticeTimer = setTimeout(() => (notice = null), 5000);
+		}
 		for (const chunk of browserTextChunks(text))
 			onInput({ type: 'input', kind: 'text', text: chunk });
 	}
@@ -511,7 +578,8 @@
 		if (!interactive || disposed) return;
 		const p = pagePoint(e);
 		if (!p) return;
-		const buttons = e.buttons ?? 0;
+		// Left/right/middle/back/forward only: a pen eraser's 32 is not a mouse button.
+		const buttons = (e.buttons ?? 0) & 31;
 		onInput({
 			type: 'input',
 			kind: 'mouse',
@@ -567,7 +635,9 @@
 	}
 
 	function release(e: MouseSample) {
-		if (e.button < 0 || e.button > 2) return;
+		// Never release a button the page did not see pressed (a press that began
+		// on a field overlay, outside the panel, or before control).
+		if (!pressed.has(e.button)) return;
 		flushMove();
 		const count = pressed.get(e.button);
 		pressed.delete(e.button);
@@ -641,6 +711,8 @@
 	// ── Touch drag→scroll / tap→click synthesis ───────────────────────────
 	/** Movement under this (px) still counts as a tap. */
 	const TAP_SLOP_PX = 8;
+	/** A finger lands less precisely than a mouse: double-tap tolerance. */
+	const TAP_MULTI_SLOP_PX = 14;
 	let touch: {
 		id: number;
 		lastX: number;
@@ -688,7 +760,7 @@
 			return;
 		}
 		// Full click sequence at the tap point; quick repeat taps double-click.
-		const clickCount = clicks.press(Date.now(), e.clientX, e.clientY, 0);
+		const clickCount = clicks.press(Date.now(), e.clientX, e.clientY, 0, TAP_MULTI_SLOP_PX);
 		const at = { ...sample(e), button: 0, buttons: 0 };
 		sendMouse('move', at);
 		sendMouse('down', at, { buttons: 1, clickCount });
@@ -806,8 +878,33 @@
 		return (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v';
 	}
 
+	// Safari raises no paste event on non-editable content, so if none follows
+	// the shortcut promptly, the remote pastes from its own clipboard instead.
+	let pasteFallback: ReturnType<typeof setTimeout> | undefined;
+	onDestroy(() => clearTimeout(pasteFallback));
+	function expectPaste() {
+		clearTimeout(pasteFallback);
+		pasteFallback = setTimeout(() => {
+			pasteFallback = undefined;
+			if (interactive && !inspecting && !disposed) keyPair('v', 'KeyV', 86, MOD_CTRL);
+		}, 100);
+	}
+
+	// WebKit only fires paste on non-editable content after a cancelled beforepaste.
+	$effect(() => {
+		const el = wrapperEl;
+		if (!el) return;
+		const allow = (e: Event) => {
+			if (e.target === el) e.preventDefault();
+		};
+		el.addEventListener('beforepaste', allow);
+		return () => el.removeEventListener('beforepaste', allow);
+	});
+
 	function onPaste(e: ClipboardEvent) {
 		if (e.target !== wrapperEl || !interactive || !focused || inspecting) return;
+		clearTimeout(pasteFallback);
+		pasteFallback = undefined;
 		e.preventDefault();
 		e.stopPropagation();
 		const text = e.clipboardData?.getData('text/plain') ?? '';
@@ -822,6 +919,7 @@
 		if (!inspecting && isPasteShortcut(e)) {
 			// No preventDefault: that would cancel the paste event itself.
 			e.stopPropagation();
+			if (!e.repeat) expectPaste();
 			return;
 		}
 		// Keep the keystroke inside the live view — don't let it trigger app hotkeys.
@@ -890,7 +988,7 @@
 					<BrowserFileInput {field} scale={editorScale} left={editorLeft} top={editorTop} onPick={onPickFiles} onActive={(active) => keyboardOpen = active} />
 				{/if}
 			{:else}
-				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} onText={commitText} onKey={(k) => bridgeKeyPair(k, k, k === 'Delete' ? 46 : 8)} onNavKey={overlayNavKey} />
+				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} onText={commitText} onKey={(k) => bridgeKeyPair(k, k, k === 'Delete' ? 46 : 8)} onNavKey={overlayNavKey} surface={() => fieldSurface(field)} />
 			{/if}
 		{/each}
 	{/if}
@@ -921,7 +1019,9 @@
 		onkeyup={(e) => bridgeKey(e, 'up')}></textarea>
 
 
-	{#if waitingForFrame}
+	{#if notice}
+		<div class="focus-hint" role="status">{notice}</div>
+	{:else if waitingForFrame}
 		<div class="focus-hint" role="status">Waiting for an updated frame · view only</div>
 	{:else if interactive && inspecting}
 		<div class="focus-hint inspect-hint">Click an element to select it</div>

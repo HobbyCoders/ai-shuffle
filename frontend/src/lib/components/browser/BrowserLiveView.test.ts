@@ -487,10 +487,10 @@ describe('frame lifetime', () => {
 	});
 });
 
-function mouse(target: HTMLElement, type: string, init: { x?: number; y?: number; button?: number; buttons?: number; metaKey?: boolean } = {}) {
+function mouse(target: HTMLElement, type: string, init: { x?: number; y?: number; button?: number; buttons?: number; metaKey?: boolean; pointerType?: string } = {}) {
 	const event = new Event(type, { bubbles: true, cancelable: true });
 	Object.assign(event, {
-		pointerType: 'mouse',
+		pointerType: init.pointerType ?? 'mouse',
 		pointerId: 7,
 		clientX: init.x ?? 50,
 		clientY: init.y ?? 60,
@@ -586,6 +586,32 @@ describe('desktop mouse input', () => {
 		]);
 	});
 
+	it('never releases a button the page did not see pressed', async () => {
+		const { surface, onInput } = await setup();
+		mouse(surface, 'pointerup', { button: 0 });
+		mouse(surface, 'pointerdown', { button: 2, buttons: 2 });
+		mouse(surface, 'pointerup', { button: 0 });
+		mouse(surface, 'pointerup', { button: 2 });
+		expect(mouseCalls(onInput).map((p) => [p.event, p.button])).toEqual([
+			['down', 'right'],
+			['up', 'right'],
+		]);
+	});
+
+	it('drops a pen eraser bit the remote does not know', async () => {
+		const { surface, onInput } = await setup();
+		mouse(surface, 'pointerdown', { button: 0, buttons: 33, pointerType: 'pen' });
+		mouse(surface, 'pointermove', { buttons: 33, pointerType: 'pen' });
+		expect(mouseCalls(onInput).map((p) => p.buttons)).toEqual([1, 1]);
+	});
+
+	it('gives double taps a finger-sized tolerance', async () => {
+		const { surface, onInput } = await setup();
+		pointer(surface, 'pointerdown', 50, 60); pointer(surface, 'pointerup', 50, 60);
+		pointer(surface, 'pointerdown', 60, 66); pointer(surface, 'pointerup', 60, 66);
+		expect(mouseCalls(onInput).filter((p) => p.event === 'down').map((p) => p.clickCount)).toEqual([1, 2]);
+	});
+
 	it('sends Cmd+click as Ctrl+click and ignores Back/Forward buttons', async () => {
 		const { surface, onInput } = await setup();
 		mouse(surface, 'pointerdown', { button: 0, buttons: 1, metaKey: true });
@@ -596,6 +622,31 @@ describe('desktop mouse input', () => {
 			['down', 2],
 			['up', 2],
 		]);
+	});
+});
+
+describe('field overlay fill', () => {
+	it('wears the page field colour read from the frame, not its text colour', async () => {
+		vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(pointer: fine)', addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+		const getImageData = vi.fn((_x: number, _y: number, w: number, h: number) => {
+			const data = new Uint8ClampedArray(w * h * 4);
+			for (let i = 0; i < w * h; i++) {
+				const text = i % 5 === 0; // a fifth of the pixels are dark text
+				data.set(text ? [20, 20, 20, 255] : [250, 248, 240, 255], i * 4);
+			}
+			return { data };
+		});
+		vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue({
+			getImageData, setTransform: vi.fn(), clearRect: vi.fn(), drawImage: vi.fn(), save: vi.fn(), restore: vi.fn(),
+		} as unknown as CanvasRenderingContext2D);
+		await setup({ editors: [field], onEdit: vi.fn() });
+		await waitFor(() => expect(screen.getByRole('application').querySelector('canvas')!.width).toBeGreaterThan(0));
+		const overlay = screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement;
+		overlay.focus();
+		await tick();
+		expect(getImageData).toHaveBeenCalled();
+		expect(overlay.style.getPropertyValue('--field-bg')).toBe('rgb(250 248 240)');
+		expect(overlay.style.getPropertyValue('--field-fg')).toBe('#141414');
 	});
 });
 
@@ -641,6 +692,44 @@ describe('desktop keyboard input', () => {
 			['key', 'down', 'v', 2],
 			['key', 'up', 'v', 2],
 		]);
+	});
+
+	it('pastes through Safari: beforepaste is allowed, and a missing paste event falls back to Ctrl+V', async () => {
+		const { surface, onInput } = await setup();
+		surface.focus();
+		const before = new Event('beforepaste', { bubbles: true, cancelable: true });
+		surface.dispatchEvent(before);
+		expect(before.defaultPrevented).toBe(true);
+		vi.useFakeTimers();
+		try {
+			await fireEvent.keyDown(surface, { key: 'v', code: 'KeyV', keyCode: 86, metaKey: true });
+			vi.advanceTimersByTime(99);
+			expect(onInput).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1);
+			expect(sent(onInput).map((p) => [p.event, p.key, p.modifiers])).toEqual([['down', 'v', 2], ['up', 'v', 2]]);
+			onInput.mockClear();
+			// A paste event in time cancels the fallback.
+			await fireEvent.keyDown(surface, { key: 'v', code: 'KeyV', keyCode: 86, ctrlKey: true });
+			const e = new Event('paste', { bubbles: true, cancelable: true });
+			Object.assign(e, { clipboardData: { getData: () => 'hi' } });
+			surface.dispatchEvent(e);
+			vi.advanceTimersByTime(500);
+			expect(sent(onInput)).toEqual([{ type: 'input', kind: 'text', text: 'hi' }]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('caps a giant paste and says so', async () => {
+		const { surface, onInput } = await setup();
+		surface.focus();
+		const e = new Event('paste', { bubbles: true, cancelable: true });
+		Object.assign(e, { clipboardData: { getData: () => 'a'.repeat(65535) + '😀' + 'b'.repeat(10) } });
+		surface.dispatchEvent(e);
+		const text = sent(onInput).map((p) => p.text).join('');
+		expect(text).toBe('a'.repeat(65535)); // never half an emoji
+		await tick();
+		expect(screen.getByRole('status').textContent).toContain('first 65,536 characters');
 	});
 
 	it('forwards navigation keys typed in a field overlay and hands Tab back to the live view', async () => {

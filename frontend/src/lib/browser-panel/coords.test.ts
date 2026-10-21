@@ -224,4 +224,11 @@ describe('ClickCounter', () => {
 		c.reset();
 		expect(c.press(710, 15, 10, 2)).toBe(1);
 	});
+
+	it('takes a wider tolerance for fingers', () => {
+		const c = new ClickCounter();
+		c.press(0, 10, 10, 0, 14);
+		expect(c.press(200, 22, 20, 0, 14)).toBe(2);
+		expect(c.press(400, 40, 20, 0, 14)).toBe(1);
+	});
 });

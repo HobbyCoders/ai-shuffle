@@ -220,14 +220,14 @@ export const MULTI_CLICK_SLOP_PX = 4;
 export class ClickCounter {
 	private last: { time: number; x: number; y: number; button: number; count: number } | null = null;
 
-	press(time: number, x: number, y: number, button: number): number {
+	press(time: number, x: number, y: number, button: number, slop = MULTI_CLICK_SLOP_PX): number {
 		const prev = this.last;
 		const repeat =
 			!!prev &&
 			prev.button === button &&
 			time - prev.time <= MULTI_CLICK_MS &&
-			Math.abs(x - prev.x) <= MULTI_CLICK_SLOP_PX &&
-			Math.abs(y - prev.y) <= MULTI_CLICK_SLOP_PX;
+			Math.abs(x - prev.x) <= slop &&
+			Math.abs(y - prev.y) <= slop;
 		const count = repeat ? Math.min(prev!.count + 1, 3) : 1;
 		this.last = { time, x, y, button, count };
 		return count;
