@@ -121,6 +121,7 @@ export async function runNavigate(
   // A committed navigation invalidates all refs.
   session.notifyNavigation();
 
+  const dispatchStart = performance.now();
   let rewroteTo: string | undefined;
   if (target === "back" || target === "forward") {
     await (target === "back"
@@ -179,27 +180,40 @@ export async function runNavigate(
     }
   }
 
-  // DOMContentLoaded can precede hydration. A landmark can have a ref before
-  // controls exist, so ref_count alone is not a readiness check. Bound this
-  // wait, never wait for network idle, and keep human takeover interruptible.
-  await runWait(session, {
+  const dispatchMs = performance.now() - dispatchStart;
+  const settleStart = performance.now();
+  // A rendered prose/canvas page need not acquire controls. Only blank/loading
+  // shells get the bounded hydration wait (never an unbounded network-idle wait).
+  const needsHydration = await page.evaluate(() => {
+    const body = document.body;
+    const content = body?.innerText.trim() ?? "";
+    const controls = body?.querySelector('button, a[href], input, select, textarea, [role="button"], [role="textbox"], canvas, svg, img');
+    return !controls && (!content || /^(loading|please wait)[.\s…!]*$/i.test(content));
+  });
+  if (needsHydration) await runWait(session, {
     condition: "element",
     selector: 'button:visible, a[href]:visible, input:visible, select:visible, textarea:visible, [role="button"]:visible, [role="link"]:visible, [role="textbox"]:visible, [tabindex]:visible, [contenteditable="true"]:visible',
     timeout_ms: 1500,
   });
+  const settleMs = performance.now() - settleStart;
   session.agentAdmission?.();
+  const snapshotStart = performance.now();
   const snap = await session.snapshot({ filter: "interactive" });
+  const snapshotMs = performance.now() - snapshotStart;
+  // The registry can include refs hidden by collapse/truncation. Count only
+  // refs the caller actually received (compatible with pre-registration snapshots).
+  const emittedRefCount = (snap.text.match(/\[ref=/g) ?? []).length;
   // Emptiness is judged from the page, never from this interactive-filtered
   // snapshot: a login form, a canvas fixture and a prose page all have few or
   // no refs while being perfectly rendered.
   // Only zero-ref snapshots need the extra content diagnostic. Refs are not
   // proof that hydration finished or that the requested app view succeeded.
-  const content = snap.refs.length === 0 ? await session.pageContent() : undefined;
+  const content = emittedRefCount === 0 ? await session.pageContent() : undefined;
   // The title comes from Playwright, which does not depend on a page eval
   // succeeding; only the body measurement does.
   const title = await page.title().catch(() => content?.title ?? "");
   const warning = content
-    ? contentWarning({ ...content, title }, snap.refs.length)
+    ? contentWarning({ ...content, title }, emittedRefCount)
     : undefined;
   const landed = page.url();
   const requestedOrigin =
@@ -226,8 +240,9 @@ export async function runNavigate(
       url: landed,
       title,
       snapshot_id: snap.snapshot_id,
-      ref_count: snap.refs.length,
+      ref_count: emittedRefCount,
       truncated: snap.truncated,
+      timings: { dispatch_ms: Math.round(dispatchMs), settle_ms: Math.round(settleMs), snapshot_ms: Math.round(snapshotMs) },
       ...(rewroteTo ? { rewrote_loopback_to: rewroteTo, note: rewriteNote } : {}),
       ...(redirected ? { redirected_to_origin: landedOrigin } : {}),
       ...(warning ? { warning } : {}),

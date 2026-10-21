@@ -50,6 +50,10 @@ console.log("http-fixture-log hi");
 fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").textContent=JSON.stringify(d);});
 </script></body></html>`;
   const server = createHttpServer((req, res) => {
+    if (req.url === "/action-late" || req.url === "/action-pending") {
+      setTimeout(() => { res.writeHead(200, { "content-type": "text/html" }); res.end('<button>Network result</button>'.repeat(15)); }, req.url === "/action-late" ? 700 : 2200);
+      return;
+    }
     if (req.url === "/delayed-hydration") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end('<title>Loading app</title><main id="app">Loading...</main><script>fetch("/hydrate").then(r=>r.text()).then(html=>document.getElementById("app").innerHTML=html)</script>');
@@ -279,6 +283,149 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     }
   });
 
+  describe("action and settle regressions", () => {
+    async function load(html: string) {
+      await runNavigate(session, { url: httpUrl + "prose-app" });
+      const page = await session.ensurePage();
+      await page.setContent(html);
+      session.notifyNavigation();
+      return page;
+    }
+    async function ref(name: string) {
+      const snap = await session.snapshot({ filter: "all" });
+      const line = snap.text.split("\n").find(line => line.includes(`"${name}"`));
+      const match = line?.match(/ref=([^\]\s]+)/);
+      if (!match) throw new Error(`missing ${name}: ${snap.text}`);
+      return match[1];
+    }
+    const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    it("caps a 100ms ticker without navigation or expiring refs", async () => {
+      const page = await load('<button>Tick action</button><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>');
+      const target = await ref("Tick action");
+      const start = Date.now();
+      const result = body(await runAct(session, { kind: "click", ref: target }));
+      expect(result).toMatchObject({ ok: true, url_changed: false, settle_capped: true, snapshot_stale: false, dom_mutated: "minor" });
+      expect(Date.now() - start).toBeLessThan(3000);
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(1500);
+      expect(await (await session.resolveRef(target)).count()).toBe(1);
+      await page.goto("about:blank"); // stop the ticker before the next test
+    });
+    it("waits for a timer-rendered result 700ms after the click", async () => {
+      const page = await load('<button onclick="setTimeout(()=>out.innerHTML=\'<button>Result</button>\'.repeat(20),700)">Late</button><div id="out"></div>');
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Late") }));
+      expect(result).toMatchObject({ dom_mutated: "major", snapshot_stale: true, pending_timers: 0 });
+      expect(await page.locator("#out button").count()).toBe(20);
+    });
+    it("starts the quiet window after dispatch, not watcher installation", async () => {
+      await load('<button>Ready</button>');
+      await session.beginWatch();
+      await delay(400); // slow dispatch/actionability
+      const start = Date.now();
+      expect(await session.settle()).toMatchObject({ domMutated: "none" });
+      expect(Date.now() - start).toBeGreaterThanOrEqual(290);
+    });
+    it("waits for action-started network work and reports pending work at the cap", async () => {
+      await load(`<button onclick="fetch('/action-late').then(r=>r.text()).then(h=>out.innerHTML=h)">Fetch</button><div id="out"></div>`);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Fetch") }));
+      expect(result).toMatchObject({ dom_mutated: "major", snapshot_stale: true, pending_requests: 0 });
+      await load(`<button onclick="fetch('/action-pending').then(r=>r.text()).then(h=>out.innerHTML=h)">Fetch</button><div id="out"></div>`);
+      const pending = body(await runAct(session, { kind: "click", ref: await ref("Fetch") }));
+      expect(pending.settle_capped).toBe(true);
+      expect(pending.pending_requests).toBeGreaterThan(0);
+    });
+    it.each(["frame", "shadow"])("observes structural changes inside an open %s", async kind => {
+      const page = await load('<div id="host"></div><iframe srcdoc="<button>Frame action</button><div id=out></div>"></iframe>');
+      await page.evaluate(kind => {
+        if (kind === "shadow") {
+          const root = document.querySelector("#host")!.attachShadow({ mode: "open" });
+          root.innerHTML = '<button>Shadow action</button><div id="out"></div>';
+          root.querySelector("button")!.onclick = () => { root.querySelector("#out")!.innerHTML = '<button>New</button>'.repeat(20); };
+        } else {
+          const doc = document.querySelector("iframe")!.contentDocument!;
+          doc.querySelector("button")!.onclick = () => { doc.querySelector("#out")!.innerHTML = '<button>New</button>'.repeat(20); };
+        }
+      }, kind);
+      const result = body(await runAct(session, { kind: "click", ref: await ref(kind === "shadow" ? "Shadow action" : "Frame action") }));
+      expect(result).toMatchObject({ dom_mutated: "major", snapshot_stale: true });
+    });
+    it("observes an open shadow root attached during the action", async () => {
+      await load(`<button onclick="host.attachShadow({mode:'open'}).innerHTML='<button>New shadow control</button>'.repeat(20)">Attach shadow</button><div id="host"></div>`);
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Attach shadow") }))).toMatchObject({ dom_mutated: "major", snapshot_stale: true });
+    });
+    it("uses aliases, rejects unknown keys and malformed dates as input errors", async () => {
+      const page = await load('<label>Entry<input id="entry" onkeydown="this.dataset.key=event.key"></label><label>Date<input type="date"></label><button>Not select</button>');
+      const entry = await ref("Entry");
+      expect(body(await runAct(session, { kind: "key", ref: entry, key: "Return" })).ok).toBe(true);
+      expect(await page.locator("#entry").getAttribute("data-key")).toBe("Enter");
+      expect(body(await runAct(session, { kind: "key", ref: entry, key: "Esc" })).ok).toBe(true);
+      for (const input of [
+        { kind: "key", ref: entry, key: "NoSuchKey" },
+        { kind: "fill", ref: await ref("Date"), value: "10/20/2026" },
+        { kind: "select", ref: await ref("Not select"), value: "x" },
+      ] as const) expect(body(await runAct(session, input)).code).toBe("invalid_input");
+    });
+    it.each(["click", "dblclick", "hover"] as const)("holds Ctrl for %s and releases it afterwards", async kind => {
+      const page = await load('<button onmousedown="this.dataset.ctrl=event.ctrlKey" onmousemove="this.dataset.ctrl=event.ctrlKey">Modified</button>');
+      expect(body(await runAct(session, { kind, ref: await ref("Modified"), modifiers: ["Ctrl"] })).ok).toBe(true);
+      expect(await page.locator("button").getAttribute("data-ctrl")).toBe("true");
+      const nextKey = page.evaluate(() => new Promise(resolve => {
+        document.addEventListener("keydown", event => resolve(event.ctrlKey), { once: true });
+      }));
+      await page.keyboard.press("x");
+      expect(await nextKey).toBe(false);
+    });
+    it("selects multiple native options by value or label and validates bad values", async () => {
+      const page = await load('<label>Toppings<select multiple><option value="h">Ham</option><option value="o">Olives</option></select></label>');
+      const target = await ref("Toppings");
+      expect(body(await runAct(session, { kind: "select", ref: target, values: ["Ham", "o"] })).ok).toBe(true);
+      expect(await page.locator("select").evaluate(el => Array.from((el as HTMLSelectElement).selectedOptions).map(o => o.value))).toEqual(["h", "o"]);
+      const bad = body(await runAct(session, { kind: "select", ref: target, value: "Ham,Olives" }));
+      expect(bad).toMatchObject({ code: "invalid_input", outcome: "not_executed" });
+      expect(bad.error).toContain("values:");
+    });
+    it("adds to a native selection with Ctrl-click rather than replacing it", async () => {
+      const page = await load('<select multiple aria-label="Toppings"><option>Ham</option><option>Olives</option></select>');
+      await runAct(session, { kind: "click", ref: await ref("Ham") });
+      expect(body(await runAct(session, { kind: "click", ref: await ref("Olives"), modifiers: ["Ctrl"] })).ok).toBe(true);
+      expect(await page.locator("select").evaluate(el => Array.from((el as HTMLSelectElement).selectedOptions).map(o => o.value))).toEqual(["Ham", "Olives"]);
+    });
+    it("selects an exact label from ARIA comboboxes and listboxes", async () => {
+      const page = await load('<button role="combobox" aria-label="Country" aria-controls="list" onclick="list.hidden=false">Country</button><div role="listbox" aria-label="Choices" id="list" hidden><div role="option" onclick="document.body.dataset.selected=this.textContent">China</div></div>');
+      expect(body(await runAct(session, { kind: "select", ref: await ref("Country"), value: "China" })).ok).toBe(true);
+      expect(await page.locator("body").getAttribute("data-selected")).toBe("China");
+      expect(body(await runAct(session, { kind: "select", ref: await ref("Choices"), value: "China" })).ok).toBe(true);
+    });
+    it("drags between refs without a screenshot, including hold/drop delay", async () => {
+      const page = await load('<button style="position:absolute;left:10px;top:10px">Source</button><button style="position:absolute;left:250px;top:10px" onmouseup="this.dataset.drop=1">Destination</button>');
+      const result = body(await runAct(session, { kind: "drag", ref: await ref("Source"), to_ref: await ref("Destination"), hold_ms: 20, drop_delay_ms: 20 }));
+      expect(result.ok).toBe(true);
+      expect(await page.getByRole("button", { name: "Destination" }).getAttribute("data-drop")).toBe("1");
+    });
+    it("drags through multiple screenshot waypoints and rejects odd paths", async () => {
+      const page = await load('<button style="position:absolute;left:10px;top:10px" onmousedown="window.moves=[]">Source</button><script>document.onmousemove=e=>{if(e.buttons===1)moves.push([e.clientX,e.clientY])}</script>');
+      const source = await ref("Source");
+      const shot = JSON.parse(firstText(await runScreenshot(session, {})));
+      const result = body(await runAct(session, { kind: "drag", ref: source, screenshot_id: shot.screenshot_id, path: [100, 100, 150, 60, 200, 120] }));
+      expect(result.ok).toBe(true);
+      const moves = await page.evaluate(() => (window as unknown as { moves: number[][] }).moves);
+      expect(moves).toContainEqual([100, 100]);
+      expect(moves).toContainEqual([150, 60]);
+      expect(moves.at(-1)).toEqual([200, 120]);
+      // Invalid input is rejected before any mouse down (source is a ref).
+      expect(body(await runAct(session, { kind: "drag", ref: source, path: [1] })).code).toBe("invalid_input");
+    });
+    it("reports scroll position/at-end and masked fill differences", async () => {
+      await load('<div role="region" aria-label="Scroller" style="height:100px;width:150px;overflow:auto"><div style="height:900px">content</div></div><label>Mask<input oninput="this.value=this.value.replace(/[^0-9]/g,\'\')"></label>');
+      const scroller = await ref("Scroller");
+      const scroll = body(await runAct(session, { kind: "scroll", ref: scroller, direction: "down", amount: 2000 }));
+      expect(scroll.scroll.y).toBeGreaterThan(0);
+      expect(scroll.scroll.at_end).toBe(true);
+      const fill = body(await runAct(session, { kind: "fill", ref: await ref("Mask"), value: "12a3" }));
+      expect(fill).toMatchObject({ actual_value: "123", value_matches: false });
+      expect(fill.note).toContain("kind=type");
+    });
+  });
+
   it("applies the workspace viewport before first navigation, new tabs and CDP recovery", async () => {
     const viewportManager = new BrowserManager({ endpoint: cdpEndpoint });
     const viewportSession = new Session(viewportManager);
@@ -329,6 +476,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const body = JSON.parse(firstText(await runNavigate(session, { url: httpUrl + kind + "-app" })));
     expect(Date.now() - started).toBeLessThan(4500);
     expect(body.ref_count).toBe(0);
+    if (kind !== "blank") {
+      expect(body.timings.settle_ms).toBeLessThan(500);
+      expect(body.timings.snapshot_ms).toBeGreaterThanOrEqual(0);
+    }
     expect(body.warning).toContain("no actionable refs yet");
     expect(body.warning).not.toContain("likely a blank/errored app");
     if (kind === "blank") expect(body.warning).toContain("No body text or visible media was observed");

@@ -10,7 +10,7 @@ export const SERVER_INSTRUCTIONS = `You drive one shared web browser. Everything
 LOOP
 1. Observe. browser_snapshot gives the page as an accessibility tree with refs (default). browser_find locates one control on a big page. browser_read_text reads prose. browser_screenshot is for layout, images and canvas. After the first full snapshot of a page, re-read with filter=interactive or scope_ref=eN.
 2. Act with browser_act on a ref, or on a coordinate from the latest screenshot. Prefer refs.
-3. Read the act result before observing again: url_changed, dom_mutated (none, minor, major), snapshot_stale, and events (new_tab, download, dialog). snapshot_stale false means your refs still work; true attaches a fresh interactive snapshot.
+3. Read the act result before observing again: url_changed, dom_mutated (none, minor, major), snapshot_stale, and events (new_tab, download, dialog). snapshot_stale false means no major change was observed, not a guarantee that every ref still resolves (a removed/relabelled element can go stale); true attaches a fresh interactive snapshot. settle_capped means observation hit its 1.5s cap; pending_requests/pending_timers warn that action-triggered work may still change the page. Observe before relying on completion in that case. Quiet time starts after dispatch, with a 300ms quiet window (100ms for fill/type, extended while action-started requests/timers run); timings reports dispatch_ms, settle_ms and snapshot_ms.
 4. Verify the goal on the page (browser_wait, a snapshot, the text) before saying it is done.
 
 STALENESS

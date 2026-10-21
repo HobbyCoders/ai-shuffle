@@ -93,6 +93,7 @@ describe("browser_navigate loopback retry", () => {
         return { headers: () => headers };
       },
       title: async () => "Dev server",
+      evaluate: async () => false,
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
     };
     return {

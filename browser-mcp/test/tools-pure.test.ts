@@ -180,6 +180,7 @@ describe("content warning via browser_navigate", () => {
       goForward: async () => {},
       url: () => landing,
       title: async () => page.title,
+      evaluate: async () => false,
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
     };
     return {
@@ -202,6 +203,11 @@ describe("content warning via browser_navigate", () => {
     expect(body.ok).toBe(true);
     expect(body.ref_count).toBe(0);
     expect(String(body.warning)).toMatch(/no actionable refs yet/);
+  });
+
+  it("counts only refs emitted in the navigate tree, not hidden registry entries", async () => {
+    const res = await runNavigate(navSession('button "Visible" [ref=e1]', 20, RENDERED), { url: "https://app.test/" });
+    expect(bodyOf(res).ref_count).toBe(1);
   });
 
   it("stays silent when the landing page has content", async () => {

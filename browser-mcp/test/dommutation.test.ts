@@ -51,9 +51,9 @@ describe("classifyMutations", () => {
 });
 
 describe("settle timing constants", () => {
-  it("uses ~300ms quiet capped at 5s", () => {
+  it("uses ~300ms quiet capped at 1.5s", () => {
     expect(QUIET_MS).toBe(300);
-    expect(QUIET_CAP_MS).toBe(5000);
+    expect(QUIET_CAP_MS).toBe(1500);
     expect(QUIET_CAP_MS).toBeGreaterThan(QUIET_MS);
   });
 });
