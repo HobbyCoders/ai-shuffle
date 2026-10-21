@@ -1701,6 +1701,23 @@ async def retire_task_terminals(
     ])
     if not session_id or not frames:
         return False
+    # Retirement is terminal in BOTH stores. A cancelled task can reach this
+    # seam without its producer completing the registry row; retiring only the
+    # engine then leaves a permanent busy entry. Keep the terminal record for
+    # TaskGet/UI history, but remove it from the running view even without an
+    # adapter. Continuation reports are not task completions.
+    from app.core.task_registry import task_registry
+
+    for frame in frames:
+        record = task_registry.get_task(session_id, frame["task_id"])
+        if (record and record.get("status") == "running"
+                and not frame.get("agent_message_turn_id")
+                and frame.get("status") in ("completed", "error", "killed")):
+            task_registry.complete_task(
+                session_id, frame["task_id"], frame["status"],
+                summary=frame.get("summary"), reason=frame.get("reason"),
+                notify=False,
+            )
     try:
         from app.core.session_pool import get_session_pool
 

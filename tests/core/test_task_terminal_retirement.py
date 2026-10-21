@@ -102,6 +102,46 @@ def _user_turn(session_id: str) -> dict:
 
 class TestEngineRetirement:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("adapter_available", [True, False])
+    async def test_terminal_retirement_removes_busy_ghost(self, adapter_available):
+        from app.core.desktop_lifecycle import active_session_ids
+
+        _seed_own_background_task("ghost", "cancelled-task")
+        assert "ghost" in active_session_ids()
+        adapter = _RecordingAdapter() if adapter_available else None
+        with _pool_with(adapter):
+            await turn_scheduler.retire_task_terminals("ghost", [{
+                "task_id": "cancelled-task", "status": "killed",
+                "reason": "user_stop", "summary": "Stopped by user",
+            }])
+        assert "ghost" not in active_session_ids()
+        record = task_registry.get_task("ghost", "cancelled-task")
+        assert record["status"] == "killed"
+        assert record["reason"] == "user_stop"
+
+    @pytest.mark.asyncio
+    async def test_retirement_keeps_a_continuation_running(self):
+        _seed_own_background_task("continuing", "task")
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("continuing", [{
+                "task_id": "task", "status": "completed",
+                "agent_message_turn_id": "report-turn",
+            }])
+        assert task_registry.get_active("continuing")
+
+    @pytest.mark.asyncio
+    async def test_retirement_ignores_a_replaced_task_incarnation(self):
+        _seed_own_background_task("replaced", "task")
+        old = task_registry.task_incarnation("replaced", "task")
+        task_registry.complete_task("replaced", "task", "completed")
+        _seed_own_background_task("replaced", "task")
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("replaced", [{
+                "task_id": "task", "status": "killed", "task_incarnation": old,
+            }])
+        assert task_registry.get_active("replaced")
+
+    @pytest.mark.asyncio
     async def test_retire_submits_the_frames_to_the_pooled_adapter(self):
         adapter = _RecordingAdapter()
         with _pool_with(adapter):

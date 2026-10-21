@@ -897,6 +897,18 @@ def test_stop_them_and_restart_stops_each_session_then_installs(busy, monkeypatc
     assert updates._desktop_request["action"] == "install"
 
 
+def test_stop_then_restart_does_not_refuse_the_same_ghost_again(busy, monkeypatch):
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock())
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+
+    asyncio.run(scenario())
+    assert updates._desktop_request["action"] == "install"
+
+
 def test_a_mode_only_applies_to_install(setup):
     with pytest.raises(ValueError, match="Unknown update mode"):
         asyncio.run(fleet.dispatch("download", "stop"))
