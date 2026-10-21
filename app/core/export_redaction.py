@@ -31,18 +31,20 @@ _SENSITIVE = {
 }
 _ASSIGNMENT = re.compile(
     r"\b(?:password|passwd|pwd|client[_-]?secret|api[_-]?(?:key|token)|"
+    r"(?:secret|access|private)[_-]?key|auth[_-]?token|db[_-]?pass(?:word|wd)|"
     r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|ais_preview(?:_[0-9a-f]{24})?)"
-    r"[\"']?\s*[:=]\s*(?:\"((?:\\.|[^\"\r\n])+)\"|"
-    r"'((?:\\.|[^'\r\n])+)'|([^\s,;&\"'<>}]+))",
+    r"[\"']?\s*[:=]\s*(?:\"((?:\\.|[^\"\\\r\n])+)\"|"
+    r"'((?:\\.|[^'\\\r\n])+)'|([^\s,;&\"'<>()[\]{}]+))",
     re.IGNORECASE,
 )
-# Credential-name components, not arbitrary substrings: KEYBOARD, token_count
-# and --keep-alive are not secrets. Keep quotes and surrounding command text.
+# Broad names are env-var shaped and case-sensitive; ordinary key= expressions
+# are code, not credentials. Flags use explicit credential names and stay on
+# the same line. Disjoint quoted alternatives prevent backslash backtracking.
 _COMMAND_ASSIGNMENT = re.compile(
-    r"(?:(?<![A-Za-z0-9_])(?:(?:[A-Za-z0-9]+_)*(?:key|token|secret|pass(?:word|wd)?|pwd|credentials?)|PGPASSWORD)\s*=\s*"
-    r"|--(?:[\w]+-)*(?:token|key|secret|password|passwd|pass|pwd|credentials?)(?:\s+|=))"
-    r"(?:\"((?:\\.|[^\"\r\n])+)\"|'((?:\\.|[^'\r\n])+)'|([^\s,;&\"'<>}]+))",
-    re.IGNORECASE,
+    r"(?:(?<![A-Za-z0-9_])[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASS(?:WORD|WD)?|PWD|CREDENTIALS?)="
+    r"|(?i:--(?:api-key|access-key|private-key|secret-key|auth-token|access-token|"
+    r"api-token|client-secret|token|password|passwd|secret|credentials?)(?:[ \t]+|=)))"
+    r"(?:\"((?:\\.|[^\"\\\r\n])+)\"|'((?:\\.|[^'\\\r\n])+)'|([^\s,;&\"'<>()[\]{}]+))",
 )
 # As in scrub.py, a scheme-run boundary avoids quadratic scans of large blobs.
 _URL = re.compile(
