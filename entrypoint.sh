@@ -7,10 +7,17 @@ require_bundled_tools() {
     case "${1:-run}" in
         dump|restore) return 0 ;;
     esac
-    local tool
+    local tool entry
     for tool in /opt/ai-tools /opt/browser-mcp; do
-        if [ ! -f "$tool/package.json" ] || [ ! -f "$tool/dist/index.js" ] || [ ! -d "$tool/node_modules" ]; then
+        if [ ! -f "$tool/package.json" ] || [ ! -f "$tool/dist/index.js" ] || [ ! -d "$tool/node_modules" ] ||
+                [ -z "$(find "$tool/node_modules" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
             echo "Bundled tool assets are missing in $tool; replace or rebuild the image. Startup will not install packages." >&2
+            return 1
+        fi
+    done
+    for entry in /opt/ai-tools/dist/worker.js /opt/browser-mcp/dist/egress-launch.js; do
+        if [ ! -f "$entry" ]; then
+            echo "Bundled tool assets are missing: $entry; replace or rebuild the image. Startup will not install packages." >&2
             return 1
         fi
     done

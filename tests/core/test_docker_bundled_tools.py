@@ -10,9 +10,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = [f"{tool}/{asset}" for tool in ("ai-tools", "browser-mcp")
           for asset in ("package.json", "dist/index.js", "node_modules")]
+ASSETS += ["ai-tools/dist/worker.js", "browser-mcp/dist/egress-launch.js"]
 
 
-def run_check(tmp_path, missing=(), args=()):
+def run_check(tmp_path, missing=(), args=(), empty=()):
     source = (ROOT / "entrypoint.sh").read_text()
     match = re.search(r"^require_bundled_tools\(\) \{\n.*?^\}", source, re.M | re.S)
     assert match, "entrypoint must validate bundled tools before setup"
@@ -23,6 +24,8 @@ def run_check(tmp_path, missing=(), args=()):
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.name == "node_modules":
             path.mkdir()
+            if asset not in empty:
+                (path / "fixture-package").mkdir()
         else:
             path.write_text("{}")
     function = match.group().replace("/opt/ai-tools", str(tmp_path / "ai-tools"))
@@ -46,6 +49,13 @@ def test_missing_tool_asset_refuses_with_repair_diagnostic(tmp_path, missing):
     assert result.returncode != 0
     assert "Bundled tool assets are missing" in result.stderr
     assert "replace or rebuild the image" in result.stderr
+
+
+@pytest.mark.parametrize("asset", ["ai-tools/node_modules", "browser-mcp/node_modules"])
+def test_empty_dependency_directory_refuses_startup(tmp_path, asset):
+    result = run_check(tmp_path, empty=(asset,))
+    assert result.returncode != 0
+    assert "Bundled tool assets are missing" in result.stderr
 
 
 @pytest.mark.parametrize("action", ["dump", "restore"])
