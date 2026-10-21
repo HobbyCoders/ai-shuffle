@@ -1,6 +1,7 @@
 """Pending catch-up must yield the state lock between bounded transactions."""
 from contextlib import contextmanager
-from time import perf_counter
+from time import perf_counter, sleep
+from types import SimpleNamespace
 import json
 import os
 
@@ -9,6 +10,31 @@ import pytest
 from app.db import database, network as store, session_events
 from app.network import catalog, engine
 from tests.core.network.harness import converge, join
+
+
+@pytest.fixture(autouse=True)
+def pending_semantics_clock(monkeypatch):
+    # These tests assert committed prefixes, chunk sizes, and SQL shape, not
+    # host speed. Freeze only this module's clock (not the shared time module)
+    # so a slow database cannot exhaust the real 250 ms request deadline.
+    # test_pending_drain_deadline.py separately advances a fake clock to check
+    # that deadline and background handoff with the unchanged product budget.
+    monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: 0.0))
+
+
+@pytest.fixture
+def pending_chunk_delay(request, monkeypatch):
+    """Regress slow chunks without changing the engine's real 250 ms budget."""
+    delay = request.param
+    real_chunk = engine._apply_pending_chunk
+
+    def chunk(*args, **kwargs):
+        committed = real_chunk(*args, **kwargs)
+        if committed:
+            sleep(delay)
+        return committed
+
+    monkeypatch.setattr(engine, "_apply_pending_chunk", chunk)
 
 
 def backlog(workers, count, *, withhold=()):
@@ -185,7 +211,8 @@ def test_real_postgres_pending_budget(pg_workers, monkeypatch):
 
 
 @pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
-def test_unexpected_buffered_error_commits_good_predecessors(request, use_postgres, monkeypatch):
+@pytest.mark.parametrize("pending_chunk_delay", [0.0, 0.3], ids=["fast", "slow"], indirect=True)
+def test_unexpected_buffered_error_commits_good_predecessors(request, use_postgres, monkeypatch, pending_chunk_delay):
     factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
     a, b, ops = backlog(factory, 145)
     bad = ops[79]["origin_seq"]  # 80th envelope: commit the 79 good predecessors.
