@@ -862,7 +862,7 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
     except AttributeError:
         service_uid = 64000  # standalone bootstrap copy without isolation helpers
     except module.IsolationError as error:
-        if module.setting() != "off":
+        if module.setting() == "required":
             raise RuntimeFailure(str(error)) from None
         service_uid = module.DEFAULT_SERVICE_ID
     volumes = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
@@ -882,7 +882,7 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
                 raise RuntimeFailure(f"home volume {root} overlaps DATA_DIR; use separate home and data volumes")
             if mounted:
                 previous_uid, previous_gid = info.st_uid, info.st_gid
-                if previous_uid == service_uid:
+                if previous_uid == service_uid and previous_uid != new_uid:
                     raise RuntimeFailure(f"home volume {root} belongs to the service account; set its host ownership to PUID:PGID")
             if (previous_uid, previous_gid) == (new_uid, new_gid):
                 continue

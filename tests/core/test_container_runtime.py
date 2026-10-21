@@ -853,6 +853,35 @@ def test_home_remap_prunes_nested_mounts_and_data_bind_aliases(tmp_path, monkeyp
     assert {entry[0] for entry in changed} == {home, volume, volume / "migrate"}
 
 
+@pytest.mark.parametrize("mode", ["on", "required", "off"])
+def test_home_remap_invalid_service_uid_obeys_isolation_mode(tmp_path, monkeypatch, home_ownership, mode):
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    changed = home_ownership()
+    monkeypatch.setenv("AGENT_ISOLATION", mode)
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", "abc")
+    if mode == "required":
+        with pytest.raises(runtime.RuntimeFailure, match="AGENT_ISOLATION_SERVICE_UID"):
+            runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+        assert changed == []
+    else:
+        runtime.remap_home(home, data, 41001, 41001, 41002, 41002)
+        assert changed == [(home, 41002, 41002)]
+
+
+def test_mounted_home_already_owned_by_puid_64000_with_isolation_off(tmp_path, monkeypatch, home_ownership):
+    home, data = tmp_path / "home", tmp_path / "data"
+    data.mkdir()
+    volume = home / ".local"
+    volume.mkdir(parents=True)
+    changed = home_ownership({home: (64000, 64000), volume: (64000, 64000)})
+    monkeypatch.setenv("AGENT_ISOLATION", "off")
+    monkeypatch.setattr(runtime, "mount_points", lambda: {volume})
+    runtime.remap_home(home, data, 64000, 64000, 64000, 64000)
+    assert changed == []
+
+
 @pytest.mark.parametrize("owner", [0, 41003, 64000])
 def test_mounted_home_root_preparation_without_image_id_change(tmp_path, monkeypatch, home_ownership, owner):
     home, data = tmp_path / "home", tmp_path / "data"

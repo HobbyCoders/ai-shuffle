@@ -387,7 +387,7 @@ If startup reports `Bundled tool assets are missing`, replace or rebuild the ima
 
 If startup says `DATA_DIR` or `WORKSPACE_DIR` is inside an image tree, mount a volume at that exact path or choose a path outside the image’s application, tool, Python and system directories. For example, a volume mounted at `/app/data` still works; an unmounted directory there is not prepared by root. The default `/data` and `/workspace` paths are unchanged.
 
-For a home-volume ownership error, stop the container and set the host directory’s ownership to the configured PUID:PGID. Keep home and retained data on separate volumes. Startup adjusts only the directory inode of a fresh root-owned home bind; a retained home volume migrates only the previous agent’s own single-link files, leaving service-owned contents and nested mounts alone.
+For a home-volume ownership error, stop the container and set the host directory’s ownership to the configured PUID:PGID. Keep home and retained data on separate volumes. Startup adjusts only the directory inode of a fresh root-owned home bind; a retained home volume migrates only the previous account’s own single-link files, leaving service-owned contents and nested mounts alone. Use `docker exec -u appuser` for home-file writes; startup does not repair root-owned home files, multi-link files or mounts outside the fixed home-volume list, so stop the container and manually set only the affected files’ host ownership to PUID:PGID when needed.
 
 ## Optional settings
 
