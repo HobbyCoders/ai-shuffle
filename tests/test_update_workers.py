@@ -1041,6 +1041,7 @@ def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypat
     assert updates._desktop_request is None
     assert "could not stop s1 before restarting" in caplog.text
     assert "Busy with running work: Fix login" in caplog.text
+    assert asyncio.run(fleet.snapshot())["refusals"]["self"] == "Busy with running work: Fix login"
 
 
 def test_a_mode_only_applies_to_install(setup):

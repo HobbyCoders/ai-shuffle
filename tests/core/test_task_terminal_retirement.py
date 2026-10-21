@@ -152,6 +152,14 @@ class TestEngineRetirement:
         assert task_registry.get_active("legacy")
 
     @pytest.mark.asyncio
+    async def test_registry_retirement_failure_still_reaches_engine(self, monkeypatch):
+        adapter = _RecordingAdapter()
+        monkeypatch.setattr(task_registry, "get_task", lambda *args: (_ for _ in ()).throw(RuntimeError("registry unavailable")))
+        with _pool_with(adapter):
+            assert await turn_scheduler.retire_task_terminals("s", [{"task_id": "task", "status": "killed"}])
+        assert adapter.submitted == [[{"task_id": "task", "status": "killed"}]]
+
+    @pytest.mark.asyncio
     async def test_retire_submits_the_frames_to_the_pooled_adapter(self):
         adapter = _RecordingAdapter()
         with _pool_with(adapter):

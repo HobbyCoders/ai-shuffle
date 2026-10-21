@@ -161,10 +161,18 @@ async def _stop_then_restart(request_id):
     while time.monotonic() < deadline:
         if not active_session_ids():
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
     # Do not bypass the normal guard: both runtimes check again before exit.
     # A failed stop must remain a named refusal, never a misleading queue ack.
     result = local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
+    if not result.get("accepted"):
+        # Dispatch accepts the stop attempt before it finishes. Publish a later
+        # refusal after that dispatch releases its lock, so it cannot erase it.
+        global _refusals_at
+        async with _dispatch_lock:
+            listing = await run_sync(runners.directory)
+            _refusals[listing.get("self_device_id") or "local"] = result["reason"]
+            _refusals_at = time.time()
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
 
 
@@ -279,8 +287,6 @@ async def peer_action(body, from_device):
     expiry = body.get("expires_at")
     if type(expiry) not in (int, float) or not time.time() <= expiry <= time.time() + 15:
         raise ValueError("Update request expired; offline commands are not replayed")
-    if body.get("mode") not in (None, "when_idle", "stop"):
-        raise ValueError("Unknown update mode")
     result = local_action(body.get("action"), from_device + ":" + body["request_id"], body.get("mode"))
     logger.info("Application update %s requested by worker %s: %s", body.get("action"), from_device,
                 result["reason"])
