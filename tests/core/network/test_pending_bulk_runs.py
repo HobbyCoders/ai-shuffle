@@ -10,7 +10,9 @@ from app.db import network as store
 from app.network import engine
 from tests.core.network.harness import converge, join
 from tests.core.network.test_bulk_differential import grow, produce, state
-from tests.core.network.test_pending_apply_budget import measured_apply, pg_workers, private_cluster  # noqa: F401
+from tests.core.network.test_pending_apply_budget import (  # noqa: F401
+    measured_apply, pending_chunk_delay, pg_workers, private_cluster,
+)
 
 
 def alternating(factory):
@@ -89,7 +91,9 @@ def test_alternating_runs_share_one_bounded_window(request, monkeypatch, use_pos
 
 @pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
 @pytest.mark.parametrize("failure", ["transient_metadata", "bulk_after_metadata"])
-def test_mixed_window_failure_preserves_predecessors(request, monkeypatch, use_postgres, failure):
+@pytest.mark.parametrize("pending_chunk_delay", [0.0, 0.3], ids=["fast", "slow"], indirect=True)
+def test_mixed_window_failure_preserves_predecessors(
+        request, monkeypatch, use_postgres, failure, pending_chunk_delay):
     factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
     a, receiver, _perop, ops = alternating(factory)
     real_apply, real_insert = engine._apply_next, store.insert_event_batch

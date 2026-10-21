@@ -8,7 +8,9 @@ import pytest
 from app.db import database, network as store
 from app.network import catalog, engine, session_active, transport
 from tests.core.network.harness import converge, join
-from tests.core.network.test_pending_apply_budget import backlog, pg_workers, private_cluster  # noqa: F401
+from tests.core.network.test_pending_apply_budget import (  # noqa: F401
+    backlog, pending_chunk_delay, pg_workers, private_cluster,
+)
 from tests.core.network.test_pending_retry_backoff import stalled_heads, warnings
 
 
@@ -60,7 +62,9 @@ async def test_ready_unattempted_work_does_not_take_idle_sleep(monkeypatch):
 
 
 @pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
-def test_inbound_continuation_is_capped_and_background_finishes(request, use_postgres, monkeypatch):
+@pytest.mark.parametrize("pending_chunk_delay", [0.0, 0.3], ids=["fast", "slow"], indirect=True)
+def test_inbound_continuation_is_capped_and_background_finishes(
+        request, use_postgres, monkeypatch, pending_chunk_delay):
     factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
     a, b, ops = backlog(factory, 450)
     wakes = []
