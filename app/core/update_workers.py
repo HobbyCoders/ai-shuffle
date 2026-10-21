@@ -192,7 +192,7 @@ async def _stop_then_restart(request_id):
     # A failed stop must remain a named refusal, never a misleading queue ack.
     result = local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
     global _stop_result
-    _stop_result = {"accepted": result.get("accepted", False), "reason": result["reason"],
+    _stop_result = {"request_id": request_id, "accepted": result.get("accepted", False), "reason": result["reason"],
                     "completed_at": time.time(), "busy": result.get("busy", [])}
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
     if not result.get("accepted"):
@@ -567,6 +567,18 @@ async def snapshot(*, fresh=False):
             return {**row, **await _peer_status_for(row["device_id"], fresh=fresh)}
         rows.extend(await asyncio.gather(*(read(row) for row in listing["runners"]
                                           if not row["is_self"] and (local["update_all_workers"] or row["device_id"] in tracked))))
+    # A peer's stop finishes after its action reply. Correlate the later status
+    # receipt with this operation, never a historical failure or another sender.
+    # record() fences the persisted write if a new dispatch races this snapshot.
+    if operation:
+        by_device = {row["device_id"]: row for row in rows}
+        for target in operation["workers"]:
+            row = by_device.get(target["device_id"], {})
+            outcome = row.get("stop_result") or {}
+            expected = operation["id"] if row.get("is_self") else f"{listing.get('self_device_id') or 'local'}:{operation['id']}"
+            if outcome.get("request_id") == expected and outcome.get("accepted") is False and target.get("accepted") is not False:
+                await run_sync(progress.record, operation["id"], target["device_id"], result=outcome)
+                target.update(accepted=False, reason=outcome.get("reason") or "Restart refused after stopping work")
     observed = await run_sync(progress.observe, operation, rows)
     global _refusals_at
     if (_refusals and observed and observed.get("phase") == "complete"

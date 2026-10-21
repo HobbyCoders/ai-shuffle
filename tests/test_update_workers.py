@@ -1054,6 +1054,7 @@ def test_stop_then_restart_reaps_real_adapterless_registry_ghost(setup, monkeypa
 
 
 def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypatch, caplog):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12]})
     monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
     monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
     async def scenario():
@@ -1086,6 +1087,39 @@ def test_late_stop_refusal_cannot_change_a_newer_install(busy, monkeypatch):
     operation = fleet.progress.load()
     assert operation["id"] == "newer-operation" and operation["workers"][0]["accepted"] is None
     assert "self" not in fleet._refusals
+
+
+@pytest.mark.parametrize("current_request", [True, False])
+def test_peer_stop_outcome_settles_requester_progress(busy, setup, monkeypatch, current_request):
+    # Drive the peer producer, then consume its authenticated status as the
+    # requester. No manually seeded stop_result can hide a broken producer.
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(fleet.engine, "context", lambda: SimpleNamespace(member=lambda _: member))
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    _, remote = setup
+
+    async def scenario():
+        response = await fleet.peer_action({"operation": "action", "action": "install", "mode": "stop",
+                                           "request_id": "wire-id", "expires_at": time.time() + 10}, "self")
+        assert response["accepted"]
+        await asyncio.gather(*fleet._stop_tasks)
+        peer_status = await fleet.peer_action({"operation": "status"}, "self")
+        request_id = "wire-id" if current_request else "newer-id"
+        fleet.progress.begin(request_id, [{"device_id": "peer", "device_name": "Peer"}])
+        fleet.progress.record(request_id, "peer", target_version="b" * 12, result={"accepted": True})
+        remote.return_value = peer_status
+        result = await fleet.snapshot(fresh=True)
+        worker = result["operation"]["workers"][0]
+        if current_request:
+            assert result["operation"]["phase"] == "error"
+            assert worker["status"] == "skipped"
+            assert worker["message"] == "Busy with running work: Fix login"
+            assert fleet.progress.load()["workers"][0]["accepted"] is False
+        else:
+            assert result["operation"]["phase"] == "waiting"
+            assert worker["accepted"] is True
+    asyncio.run(scenario())
 
 
 def test_stop_refusal_reporting_failure_is_logged(busy, monkeypatch, caplog):
