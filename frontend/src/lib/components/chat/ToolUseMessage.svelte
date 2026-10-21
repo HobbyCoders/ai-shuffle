@@ -240,15 +240,20 @@
 		min-width: 0;
 	}
 
+	/* The row and its one action. "Show phone" sits beside the row while the
+	   row keeps ~320px; a narrower column (a phone, or a chat squeezed by a
+	   side panel) drops it to its own line, right-aligned under the status. */
 	.wl-head {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
-		gap: 6px;
+		column-gap: 6px;
+		row-gap: 2px;
 		min-width: 0;
 	}
 
 	.wlrow {
-		flex: 1 1 auto;
+		flex: 1 1 320px;
 		min-width: 0;
 		display: flex;
 		align-items: center;
@@ -449,6 +454,7 @@
 	.wl-phone {
 		position: relative;
 		flex: none;
+		margin-left: auto;
 		display: inline-flex;
 		align-items: center;
 		gap: 5px;
