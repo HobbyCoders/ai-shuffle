@@ -1175,6 +1175,21 @@ class ContainerUpdates:
         # Said ahead of the release that needs it, while this one still installs.
         lacking = set(manifest["container"].get("recommends") or []) - set(self.image.get("provides") or [])
         self.notice = IMAGE_NOTICE if lacking else None
+        active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
+        if (staged and revision != staged
+                and (revision in (self.state.get("active"), self.image["revision"])
+                     or manifest["container"]["sequence"] <= active["sequence"])
+                and not self.install_requested.is_set() and not self.state.get("booting")
+                and not self.state.get("blocked") and not self.state.get("snapshot")
+                and staged not in (self.state.get("active"), self.state.get("previous"))
+                and staged not in self.state.get("failed", [])):
+            # A verified feed no longer offers an update. Unselect only a build
+            # that never started; retain its files and every recovery reference.
+            self.state.pop("pending")
+            self.save()
+            self.remember(manifest)
+            self.publish("idle", "You are up to date.")
+            return
         if staged:
             staged_manifest = self.manifest(staged)
             if (revision == staged or manifest["container"]["sequence"] <= staged_manifest["container"]["sequence"]
@@ -1184,7 +1199,6 @@ class ContainerUpdates:
                 self.remember(staged_manifest)
                 self.publish("ready", "Update ready. Choose Update and restart.")
                 return
-        active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
             self.publish("idle", "You are up to date.")
             return

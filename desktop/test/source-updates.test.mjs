@@ -1553,6 +1553,18 @@ test('#98: a waiting build takes precedence over a failed-start retry offer', as
  assert.equal(await u.discardStaged(C),true);
  await assert.rejects(u.check(),/This revision failed to start/);
 });
+test('a verified current feed unselects a withdrawn unchosen download without deleting its files',async t=>{
+ for(const legacy of [false,true])await t.test(legacy?'legacy pending':'explicit staged',async t=>{
+  const {f,u}=await stagedOver(t);
+  if(legacy){const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));state.pending=state.staged;delete state.staged;await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(state));}
+  const manager=legacy?f.create():u;if(legacy)await manager.load();
+  await f.release(A);f.requests.length=0;const builds=f.builds;
+  assert.equal((await manager.check()).kind,'current');assert.equal(manager.pendingVersion,null);
+  assert.equal(f.builds,builds);assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+  assert((await fs.stat(path.join(f.root,'versions',B))).isDirectory());
+  const reloaded=f.create();await reloaded.load();assert.equal(reloaded.pendingVersion,null);
+ });
+});
 test('#98: a staged build does not hide a newer release; a download replaces it and removes its files',async t=>{
  const {f,u}=await stagedOver(t);
  await f.release(C,undefined,{version:'1.0.1'});f.requests.length=0;const builds=f.builds;
@@ -1598,5 +1610,8 @@ test('#98: a build selected to install or fenced is never replaced and the feed 
   assert.deepEqual(f.requests,[],step);
   await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});
   assert((await fs.stat(path.join(f.root,'versions',B))).isDirectory(),step);
+  await f.release(A);f.requests.length=0;
+  assert.equal((await manager.check()).kind,'ready',step);
+  assert.equal(manager.pendingVersion,B);assert.deepEqual(f.requests,[],step);
  }
 });

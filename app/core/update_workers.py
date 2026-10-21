@@ -122,7 +122,7 @@ def waiting_status(state, *, busy_rows=None):
                   "updater_idle" if state.get("phase") == "idle" else "updater_error")
     elif staged:
         install, reason = ("blocked", "running_work") if blocked else ("ready", None)
-        if blocked and _stop_result and not _stop_result.get("accepted"):
+        if blocked and _recent_stop_refusal(blocked):
             reason = "still_busy_after_stop"
     else:
         install, reason = "idle", None
@@ -130,6 +130,33 @@ def waiting_status(state, *, busy_rows=None):
             "blocked_by": blocked, "wait_reason": reason,
             "restart_expires_at": (_deferred or {}).get("expires_at"),
             "monitor_serving_idle_seconds": serving_idle_budget_seconds(), "stop_result": _stop_result}
+
+
+def _recent_stop_refusal(blocked):
+    """Do not attribute new work to an old Stop, even in the same chat."""
+    from datetime import datetime, timezone
+
+    result = _stop_result or {}
+    completed = result.get("completed_at")
+    if result.get("accepted") is not False or not isinstance(completed, (int, float)):
+        return False
+    if not 0 <= time.time() - completed <= 60:
+        return False
+    sessions = {row["session_id"] for row in result.get("busy", [])}
+    for blocker in blocked:
+        if blocker["session_id"] not in sessions:
+            return False
+        since = blocker.get("started_at") or blocker.get("since")
+        if since:
+            try:
+                started = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                if started.timestamp() > completed:
+                    return False
+            except (ValueError, TypeError, AttributeError):
+                return False  # Unknown incarnation: plain running work is safer.
+    return True
 
 
 def _waiting_unavailable():
@@ -304,6 +331,8 @@ def local_action(action, request_id, mode=None, *, busy_rows=None):
         reason = "Already staged; ready to restart"
     elif action == "download" and state["phase"] not in ("idle", "available", "error"):
         reason = f"Cannot download while the updater is {state['phase']}"
+    elif action == "install" and mode in ("stop", "when_idle") and _stop_tasks:
+        reason = "A stop and restart request is already in progress"
     elif action == "install" and state["phase"] != "ready":
         reason = ("A previous download is retained; finish checking or downloading the offered update before restarting"
                   if state.get("staged_version") else "No staged update; current version left running")
@@ -496,6 +525,10 @@ def classify(row, all_workers, offers=(), refusals=None):
     # with the RUNNING revision on this phase, so it would read as current (#1901).
     if phase == "image-required":
         return {"role": "excluded", "label": row.get("message") or "Needs a new Docker image; not included"}
+    if phase == "idle" and row.get("staged_version"):
+        if row.get("request_pending"):
+            return {"role": "preparing", "label": "Request queued; waiting for the updater"}
+        return {"role": "available", "label": "Check for updates before restarting"}
     if _same(row.get("version"), row.get("running_version")):
         return {"role": "excluded", "label": "Already up to date"}
     # Queued but not yet taken (a desktop takes requests on its 30 s report).
