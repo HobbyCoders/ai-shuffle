@@ -282,6 +282,66 @@ def retaining_pool(monkeypatch):
         pool.closeall()
 
 
+
+
+def test_return_after_pool_close_discards_without_warning(retaining_pool, caplog):
+    pool, _ = retaining_pool
+    conn = pool.getconn()
+    pool.closeall()
+    base._close_connection(conn)
+    assert conn.closed
+    assert not pool._used and not pool._rused
+    assert not caplog.records
+
+
+def test_shutdown_races_with_connection_return(retaining_pool, monkeypatch, caplog):
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool, _ = retaining_pool
+    conn = pool.getconn()
+    returning, resume = threading.Event(), threading.Event()
+    putconn = pool.putconn
+
+    def paused_return(*args, **kwargs):
+        returning.set()
+        assert resume.wait(3)
+        return putconn(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "putconn", paused_return)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(base._close_connection, conn)
+        try:
+            assert returning.wait(3)
+            pool.closeall()
+            monkeypatch.setattr(base, "_pg_pool", None)
+        finally:
+            resume.set()
+        future.result(timeout=3)
+    assert conn.closed
+    assert not pool._used and not pool._rused
+    assert not caplog.records
+
+
+def test_return_reclaims_original_pool_if_global_changes(monkeypatch):
+    conn = _FakeConn()
+    pool = _AlwaysFailsPool(conn)
+    replacement = _AlwaysFailsPool(_FakeConn())
+    failing_putconn = pool.putconn
+
+    def replace_pool(*args, **kwargs):
+        monkeypatch.setattr(base, "_pg_pool", replacement)
+        return failing_putconn(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "putconn", replace_pool)
+    monkeypatch.setattr(base, "_pg_pool", pool)
+    base._close_connection(conn)
+    assert pool.calls == [False, True]
+    assert not pool._used and not pool._rused
+    assert not replacement.calls
+    assert len(replacement._used) == len(replacement._rused) == 1
+    assert conn.closed
+
+
 def test_retaining_pool_opens_only_startup_minimum(retaining_pool):
     pool, created = retaining_pool
     assert len(created) == 2
@@ -392,8 +452,14 @@ def test_retaining_pool_shutdown_closes_idle_and_checked_out(retaining_pool):
     assert all(conn.closed for conn in created)
     with pytest.raises(psycopg2.pool.PoolError, match="closed"):
         pool.getconn()
-    with pytest.raises(psycopg2.pool.PoolError, match="closed"):
-        pool.putconn(burst[-1])
+    # Shutdown still rejects new work, but an existing borrower's late return
+    # is a discard, not an error or a chance to resurrect a closed socket.
+    idle_before = list(pool._pool)
+    pool.putconn(burst[-1])
+    assert pool.closed and burst[-1].closed
+    assert pool._pool == idle_before
+    assert burst[-1] not in pool._pool
+    assert not pool._used and not pool._rused
 
 @pytest.mark.parametrize("state", ["closed", "unknown", "explicit", "rollback"])
 def test_pressure_disposal_and_shutdown(retaining_pool, state):

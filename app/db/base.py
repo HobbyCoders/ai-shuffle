@@ -269,6 +269,19 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
 
     def _putconn(self, conn, key=None, close=False):
         try:
+            if self.closed:
+                # closeall() also closes checked-out sockets, but psycopg2
+                # retains their bookkeeping and rejects their later returns.
+                # A borrower finishing during shutdown must discard, not try
+                # to roll back/reuse the socket or report a broken-pool error.
+                # Both paths run under the driver's same lock, so closeall
+                # cannot race this check or put the socket back in service.
+                if not conn.closed:
+                    conn.close()
+                held_key = self._rused.pop(id(conn), None)
+                if held_key is not None:
+                    self._used.pop(held_key, None)
+                return
             super()._putconn(conn, key, close)
         finally:
             try:
@@ -488,11 +501,14 @@ def _close_connection(conn) -> None:
     ``except: pass``, which both leaked the slot and hid the leak entirely.
     Here we log it and force the slot free.
     """
-    if _pg_pool is None:
+    # Keep one pool throughout return/reclaim: shutdown can clear the global
+    # while putconn waits for the driver lock, or reinitialization can swap it.
+    pool = _pg_pool
+    if pool is None:
         return
     raw_conn = conn._conn if isinstance(conn, _PgDictConnection) else conn
     try:
-        _pg_pool.putconn(raw_conn)
+        pool.putconn(raw_conn)
         return
     except Exception:
         logger.warning(
@@ -503,7 +519,7 @@ def _close_connection(conn) -> None:
     # Retry with close=True — this skips the rollback path that just failed
     # and goes straight to conn.close(), so the _used slot is reclaimed.
     try:
-        _pg_pool.putconn(raw_conn, close=True)
+        pool.putconn(raw_conn, close=True)
         return
     except Exception:
         pass
@@ -512,9 +528,9 @@ def _close_connection(conn) -> None:
     # internals (no public API to force-reclaim a slot), so access them
     # defensively in case a future version renames them.
     try:
-        lock = getattr(_pg_pool, "_lock", None)
-        rused = getattr(_pg_pool, "_rused", None)
-        used = getattr(_pg_pool, "_used", None)
+        lock = getattr(pool, "_lock", None)
+        rused = getattr(pool, "_rused", None)
+        used = getattr(pool, "_used", None)
         if lock is not None and rused is not None and used is not None:
             with lock:
                 key = rused.pop(id(raw_conn), None)
@@ -527,12 +543,12 @@ def _close_connection(conn) -> None:
     except Exception:
         pass
     finally:
-        if isinstance(_pg_pool, _RetainingThreadedConnectionPool):
-            with _pg_pool._lock:
+        if isinstance(pool, _RetainingThreadedConnectionPool):
+            with pool._lock:
                 try:
-                    _pg_pool._returned(raw_conn, True)
+                    pool._returned(raw_conn, True)
                 finally:
-                    _pg_pool._notify_available()
+                    pool._notify_available()
 
 
 def pressure_stats() -> Optional[Dict[str, Any]]:
