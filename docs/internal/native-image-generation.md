@@ -1,10 +1,12 @@
 # Native Responses image generation
 
 `GenerateNativeImage` is exposed in sessions using the Responses transport. It
-uses the session's current provider client, credential and orchestrator model.
-The separate request contains the native `image_generation` tool and a matching
-`tool_choice`; it never translates that tool into a function or falls back to
-another provider. The assistant-facing function participates in the ordinary
+uses the session's bound provider row and credential, not chat-model name
+sniffing. ChatGPT and other Responses clients use a separate request containing
+the native `image_generation` tool and matching `tool_choice`. SuperGrok
+subscription sessions instead use the tested xAI `/v1/images/generations`
+endpoint with `grok-imagine-image`, `n=1`, square `1k` and base64 output. No
+OpenAI-specific fields reach xAI and neither route falls back to another provider. The assistant-facing function participates in the ordinary
 tool permissions and allow/deny lists.
 
 This route does not require fal.ai. A failure in either route says nothing about
@@ -16,8 +18,13 @@ could contain credentials. Unknown account capabilities are not advertised as
 verified support.
 
 The optional `image_model` selects the exact provider-native image model; omitting
-it uses that endpoint's default. `size` and `quality` are passed through after
-shape validation, so the provider decides whether they are supported. OpenAI's
+it reads the subscription's Native images defaults. Subscription overrides
+are validated against the verified capability table, currently only ChatGPT's
+provider-selected model/auto size/auto quality/PNG and SuperGrok's
+`grok-imagine-image`/square 1k/default quality/JPEG. Other Responses endpoints
+retain shape-validated options, so their provider decides support. These native
+defaults do not change Default models or the direct AI Shuffle generation tools.
+See the mirrored settings API reference for the GET/PUT schema. OpenAI's
 [image-tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
 documents the native tool, forced tool choice, final base64 output, and examples
 using GPT-6 Astra with GPT Image 2.5 Sunburst. These examples do not establish
@@ -25,8 +32,9 @@ support for another account, subscription endpoint or compatible provider.
 
 The stream normalizer separates progress/partial previews from final image
 results and deduplicates images repeated in the terminal response. The tool
-requests final PNG output without partial previews. Final images have bounded
-size and PNG container validation. Workspace sessions save them under
+requests final PNG output without partial previews on ChatGPT. SuperGrok's
+tested output is JPEG. Final images have bounded size and PNG/JPEG container
+validation, and MIME type/extension follow the returned bytes. Workspace sessions save them under
 `generated-images` and return a session-scoped download URL. Chat sessions store
 session-owned artifacts and never accept a filesystem destination. Both routes
 return inline image blocks through the existing durable tool-result pipeline,
@@ -46,6 +54,17 @@ the tool/settings explain that session cost estimates exclude native image
 charges.
 
 ## Acceptance
+
+On 2026-10-21, one isolated Linux handler probe used the connected SuperGrok
+subscription through the production credential resolver (read-only credential
+snapshot), native settings loader, xAI request path and workspace image saver.
+It made one image request, no retries and no native Responses-tool check:
+HTTP 200, `grok-imagine-image`, square `1k`, one 1024×1024 JPEG, 130,034 bytes,
+5.874 seconds. The saved image decoded successfully and auxiliary image usage
+was recorded. This was a real-provider handler check, not a running-app/UI or
+permission-card check. No request for `grok-imagine-image-2.0` or `2k` was made;
+neither is advertised. ChatGPT's default request shape is unchanged and was not
+re-run live in this change.
 
 Regression coverage exercises the real Responses client, native loop, tool
 dispatch, saved bytes, inline event serialization/replay, credential/endpoint

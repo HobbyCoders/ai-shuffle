@@ -615,6 +615,41 @@ curl -X PUT http://localhost:8000/api/v1/settings/subagent-default   -H "Authori
 
 The id must be a model this install can run: a Claude alias from `GET /api/v1/models` (a full Claude id such as `claude-opus-4-6` is saved as its alias), or a model in the curated list of an enabled provider. Any other value returns `400` and nothing is saved. An `allowed` list, which older pages send, is accepted and ignored. The response has the same shape as the `GET`. The setting is shared with the owner's other workers.
 
+### Native images (subscription chats)
+
+`GET /api/v1/settings/native-images` returns entries keyed by `chatgpt` and
+`grok`. `GET /api/v1/settings/native-images/{provider}` returns one entry:
+`{"provider": "grok", "settings": {"model": "grok-imagine-image", "size": "1k", "quality": "default", "format": "jpeg"}, "capabilities": {...}}`.
+Reads require authentication. Owner-only `PUT` to the provider path replaces all
+four required string fields; unknown fields/providers and unsupported options
+return `422`. Capability lists are `models`, `sizes`, `qualities`, `formats` and
+`aspect_ratios`, with `verified`, `route`, `direct_tool_choice` and
+`unverified_options_exposed` metadata. These are verified combinations, not a
+claim that every connected account is entitled.
+
+| Subscription | Model | Size | Quality | Format | Route |
+|---|---|---|---|---|---|
+| ChatGPT | `default` (provider-selected) | `auto` | `auto` | `png` | Responses native image tool |
+| SuperGrok | `grok-imagine-image` | `1k` (square) | `default` (provider-selected) | `jpeg` | xAI images endpoint |
+
+`GenerateNativeImage` reads these defaults using the session's subscription
+provider, not its chat model's name. ChatGPT's default request is unchanged.
+SuperGrok sends one `n=1` request without OpenAI image-tool fields and accepts
+JPEG or PNG by actual image bytes. Its login stays server-side; expired login,
+entitlement, rate-limit and refused-request errors are sanitized. There is no
+fallback to fal.ai or a paid API key. `grok-imagine-image-2.0`, `2k`, other aspect
+ratios and SuperGrok native Responses image tools remain unverified and are not
+offered. Native image charges are not included in session cost estimates.
+
+These settings do **not** change Default models or the direct generation tools.
+The latter may explicitly select `chatgpt-subscription` (existing behavior) or
+`supergrok-subscription` using the image-model endpoint below. The SuperGrok
+choice is separate from fal.ai's Grok Imagine Image: only square 1k generation
+is verified; editing/reference images and unsupported direct-tool defaults are
+refused before sending a request. Native settings are stored separately as
+`native_images_chatgpt` / `native_images_grok` JSON system settings, so existing
+installations need no schema migration.
+
 ### Media tool models
 
 Choose the fal.ai model each media tool uses. Any model id is accepted; it is not checked against a catalog. Surrounding whitespace is trimmed, and an empty `model` returns `400`.

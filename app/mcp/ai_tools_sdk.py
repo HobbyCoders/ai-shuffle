@@ -190,7 +190,7 @@ def _subscription_image_tools(
             args = _model_arg(args)
             refused = sub.refusal(args.get("model"), image_model)
             if refused:
-                return sub._failure(refused)
+                return sub._failure(refused, image_model)
             return await sub.run(args.get("prompt"), image_model, cwd=tool_cwd, tool_env=tool_env)
 
         tools.append(generate_image)
@@ -209,7 +209,7 @@ def _subscription_image_tools(
             args = _model_arg(args)
             refused = sub.refusal(args.get("model"), edit_model)
             if refused:
-                return sub._failure(refused)
+                return sub._failure(refused, edit_model)
             return await sub.run(args.get("prompt"), edit_model, image_paths=[args.get("image_path")],
                                  cwd=tool_cwd, tool_env=tool_env)
 
@@ -233,10 +233,10 @@ def _subscription_image_tools(
             args = _model_arg(args)
             refused = sub.refusal(args.get("model"), edit_model)
             if refused:
-                return sub._failure(refused)
+                return sub._failure(refused, edit_model)
             refs = args.get("reference_images")
             if not isinstance(refs, list) or not refs:
-                return sub._failure("At least one reference image path is required.")
+                return sub._failure("At least one reference image path is required.", edit_model)
             return await sub.run(args.get("prompt"), edit_model, image_paths=refs,
                                  cwd=tool_cwd, tool_env=tool_env)
 
@@ -499,7 +499,7 @@ def _catalog_output_type(endpoint_id: str) -> Optional[str]:
         return None
 
 
-def _fal_image_refusal(args: dict) -> Optional[str]:
+def _fal_image_refusal(args: dict, provider_name: Optional[str] = None) -> Optional[str]:
     """Why a runFalModel call is refused while images are set to the ChatGPT
     subscription (#1796), or ``None`` when it may run.
 
@@ -514,6 +514,7 @@ def _fal_image_refusal(args: dict) -> Optional[str]:
     """
     from app.core.provider import subscription_images as sub
 
+    provider_name = provider_name or sub.PROVIDER_NAME
     endpoint_id = args.get("endpoint_id")
     endpoint_id = endpoint_id.strip() if isinstance(endpoint_id, str) else ""
     requested = args.get("output_type")
@@ -524,13 +525,13 @@ def _fal_image_refusal(args: dict) -> Optional[str]:
         known = "image"
     if known is None and requested in (None, ""):
         return (f"'{endpoint_id}' is not a known video, 3D or audio model, and fal.ai would run it as an "
-                f"image. Image generation here is set to {sub.PROVIDER_NAME}, so nothing was run. Use "
+                f"image. Image generation here is set to {provider_name}, so nothing was run. Use "
                 "generateImage or editImage for images; for another kind of model, call again with "
                 "its output_type (video, 3d or audio).")
     if requested != "image" and known != "image":
         return None
     return ("Images are not generated with fal.ai here: image generation is set to "
-            f"{sub.PROVIDER_NAME}. Use generateImage or editImage; nothing was run.")
+            f"{provider_name}. Use generateImage or editImage; nothing was run.")
 
 
 def _create_generic_tools(worker: NodeWorker, tool_env: Optional[Dict[str, str]] = None) -> list:
@@ -542,11 +543,13 @@ def _create_generic_tools(worker: NodeWorker, tool_env: Optional[Dict[str, str]]
     from app.core.provider import subscription_images as sub
 
     tools = []
-    subscription_images = any(sub.is_subscription_model(m) for m in _configured_image_models(tool_env))
+    subscription_models = [m for m in _configured_image_models(tool_env) if sub.is_subscription_model(m)]
+    subscription_images = bool(subscription_models)
+    provider_name = " / ".join(dict.fromkeys(sub._provider_name(m) for m in subscription_models))
     description = _RUN_FAL_MODEL_DESCRIPTION
     if subscription_images:
         description = description.replace("Imagen 4, ", "") + (
-            " Not for images: image generation and editing are set to the ChatGPT subscription "
+            f" Not for images: image generation and editing use {provider_name} "
             "here; use generateImage or editImage. For a video, 3D or audio model, pass its output_type.")
 
     @tool("runFalModel", description, {
@@ -572,7 +575,7 @@ def _create_generic_tools(worker: NodeWorker, tool_env: Optional[Dict[str, str]]
         "required": ["endpoint_id", "input"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def run_fal_model(args: dict) -> dict:
-        refused = _fal_image_refusal(args) if subscription_images else None
+        refused = _fal_image_refusal(args, provider_name) if subscription_images else None
         if refused:
             return _tool_result({"success": False, "error": refused})
         result = await worker.call("runFalModel", args)

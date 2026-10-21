@@ -4896,6 +4896,7 @@ class HarnessAdapter(ProviderAdapter):
                 registry.register_builtin(SPEC, make_handler(
                     lambda: self._engine, self._resolve_app_session_id,
                     chat_mode=_session_mode(options) == "chat",
+                    provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
                 ))
             builtins_registered = True
             logger.info(

@@ -22,19 +22,20 @@ SPEC = ToolSpec(
     name="GenerateNativeImage",
     description=(
         "Generate an image with the current session's Responses provider and credential. "
-        "Uses the provider-native image_generation tool; no fal.ai credential is needed. "
+        "Uses native subscription settings (SuperGrok uses its images endpoint); no fal.ai credential is needed. "
         "Model/account support is verified by the provider when called, not assumed from the model name. "
         "Use only for a requested image; the configured provider may charge for generation. "
         "Session cost estimates do not include native image charges. "
         "Never treat a rejection here as evidence that fal.ai is unavailable, or vice versa. "
         "Returns a saved image and image_url: embed it inline in your reply. "
-        "Omit image_model to use the provider's default, or pass the exact image model requested by the user."
+        "Omit options to use Native images settings. Subscription options must match verified capabilities."
     ),
     input_schema={"type": "object", "properties": {
         "prompt": {"type": "string", "minLength": 1, "maxLength": 32000},
         "image_model": {"type": "string", "minLength": 1, "maxLength": 128},
-        "size": {"type": "string", "pattern": r"^(auto|[1-9][0-9]{1,4}x[1-9][0-9]{1,4})$"},
-        "quality": {"type": "string", "enum": ["auto", "low", "medium", "high", "xhigh", "max"]},
+        "size": {"type": "string", "pattern": r"^(auto|1k|[1-9][0-9]{1,4}x[1-9][0-9]{1,4})$"},
+        "format": {"type": "string", "enum": ["png", "jpeg"]},
+        "quality": {"type": "string", "enum": ["auto", "default", "low", "medium", "high", "xhigh", "max"]},
     }, "required": ["prompt"], "additionalProperties": False},
     risk="write",
 )
@@ -46,7 +47,7 @@ def _error(status=None, payload=None):
         body = json.loads((payload or {}).get("message", ""))
         error = body.get("error") or {}
         code = error.get("code")
-        if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", code):
+        if code in {"content_policy_violation", "rate_limit_exceeded", "invalid_api_key", "insufficient_quota", "model_not_found", "unsupported_model", "image_generation_unsupported"}:
             detail = f", code {code}"
     except (ValueError, TypeError, AttributeError):
         pass
@@ -87,6 +88,42 @@ def _validate_png(data):
     raise ValueError("Incomplete or invalid PNG image")
 
 
+def _image_mime(data):
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        _validate_png(data)
+        return "image/png"
+    # Bounded JPEG marker walk: require dimensions, a scan and the final EOI.
+    if data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"):
+        offset, dimensions = 2, False
+        while offset + 4 <= len(data):
+            if data[offset] != 255:
+                break
+            while offset < len(data) and data[offset] == 255:
+                offset += 1
+            if offset >= len(data):
+                break
+            marker = data[offset]
+            offset += 1
+            length = int.from_bytes(data[offset:offset + 2], "big")
+            if length < 2 or offset + length > len(data):
+                break
+            if marker in {0xC0, 0xC1, 0xC2} and length >= 8:
+                height = int.from_bytes(data[offset + 3:offset + 5], "big")
+                width = int.from_bytes(data[offset + 5:offset + 7], "big")
+                dimensions = bool(width and height and width * height <= 64_000_000)
+            if marker == 0xDA:
+                if dimensions and offset + length < len(data) - 2:
+                    return "image/jpeg"
+                break
+            offset += length
+    raise ValueError("Incomplete or invalid PNG/JPEG image")
+
+
+def _encoded_mime(encoded):
+    # Only called after _decode_image has validated the bounded container.
+    return "image/jpeg" if encoded.startswith("/9j/") else "image/png"
+
+
 def _decode_image(item):
     encoded = item.get("result")
     if not isinstance(encoded, str) or len(encoded) > MAX_IMAGE_BYTES * 4 // 3:
@@ -94,7 +131,7 @@ def _decode_image(item):
     data = base64.b64decode(encoded, validate=True)
     if not data or len(data) > MAX_IMAGE_BYTES:
         raise ValueError("Native image exceeds the supported size")
-    _validate_png(data)
+    _image_mime(data)
     return data, encoded
 
 
@@ -103,7 +140,9 @@ def _save_artifacts(session_id, items):
 
     # Validate all results first. Chat mode never writes a caller-selected path.
     decoded = [_decode_image(item) for item in items]
-    return [(store_bytes(data, mime="image/png", filename="native-image.png", created_by_session=session_id)["hash"], encoded)
+    return [(store_bytes(data, mime=_encoded_mime(encoded),
+                         filename="native-image.jpg" if _encoded_mime(encoded) == "image/jpeg" else "native-image.png",
+                         created_by_session=session_id)["hash"], encoded)
             for data, encoded in decoded]
 
 
@@ -117,7 +156,8 @@ def _save_images(cwd, items):
     try:
         for item in items:
             data, encoded = _decode_image(item)
-            path = directory / f"native-{uuid4().hex}.png"
+            extension = "jpg" if _encoded_mime(encoded) == "image/jpeg" else "png"
+            path = directory / f"native-{uuid4().hex}.{extension}"
             with path.open("xb") as stream:
                 saved.append((path, encoded))
                 stream.write(data)
@@ -162,7 +202,13 @@ async def stream_images(provider, request, items, usage):
     return warning
 
 
-def make_handler(engine_supplier, session_supplier, *, chat_mode=False):
+async def load_native_settings(kind):
+    from app.core.native_image_settings import load
+    from app.db.async_database import run_sync
+    return await run_sync(load, kind)
+
+
+def make_handler(engine_supplier, session_supplier, *, chat_mode=False, provider_id_supplier=lambda: None):
     async def generate(args, ctx):
         prompt = args.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
@@ -174,8 +220,28 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False):
         session_id = session_supplier()
         if not session_id:
             return ToolOutcome(text="The session must be saved before generating an image.", is_error=True)
-        tool = {"type": "image_generation", "output_format": "png", "partial_images": 0}
-        for key in ("image_model", "size", "quality"):
+        from app.core.provider import supergrok_images
+        from app.core.native_image_settings import NativeImageSettings, validate
+        provider_id = provider_id_supplier()
+        try:
+            kind = await supergrok_images.subscription_kind(provider_id)
+            options = await load_native_settings(kind) if kind else None
+            if options:
+                overrides = {"model" if k == "image_model" else k: v for k, v in args.items()
+                             if k in {"image_model", "size", "quality", "format"}}
+                options = validate(kind, NativeImageSettings(**(options.model_dump() | overrides)))
+        except ValueError:
+            return ToolOutcome(text="Invalid native image settings or unavailable subscription login. No other provider was used.", is_error=True)
+        tool = {"type": "image_generation", "output_format": options.format if options else "png", "partial_images": 0}
+        # auto/default are provider defaults: omit to preserve the proven ChatGPT request.
+        if options and kind == "chatgpt":
+            if options.model != "default":
+                tool["model"] = options.model
+            if options.size != "auto":
+                tool["size"] = options.size
+            if options.quality != "auto":
+                tool["quality"] = options.quality
+        for key in (() if options else ("image_model", "size", "quality", "format")):
             if key not in args:
                 continue
             value = args[key]
@@ -184,14 +250,17 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False):
                     or ("enum" in definition and value not in definition["enum"])
                     or ("pattern" in definition and re.fullmatch(definition["pattern"], value) is None)):
                 return ToolOutcome(text=f"Invalid native image {key}.", is_error=True)
-            tool["model" if key == "image_model" else key] = value
+            tool[{"image_model": "model", "format": "output_format"}.get(key, key)] = value
         model = engine.model
         turn_id = getattr(engine, "_active_turn_id", None)
         request = ProviderRequest(model=model, messages=[Message("user", [Text(prompt)])],
                                   tools=[tool], extra={"tool_choice": {"type": "image_generation"}})
         items, usage, warning = [], {}, None
         try:
-            warning = await stream_images(provider, request, items, usage)
+            if kind == "grok":
+                items, warning = await supergrok_images.generate(provider_id, prompt, options)
+            else:
+                warning = await stream_images(provider, request, items, usage)
         finally:
             if items:
                 usage["generated_images"] = len(items)
@@ -223,8 +292,8 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False):
                    [{"image_url": "/api/generated-images/by-path?" + urlencode({"path": str(path), "session_id": session_id}),
                      "path": str(path)} for path, _ in saved])
         return ToolOutcome(
-            text=json.dumps({"success": True, "source": "native_responses", "model": model,
+            text=json.dumps({"success": True, "source": "supergrok_subscription" if kind == "grok" else "native_responses", "model": options.model if kind == "grok" else model,
                              "images": results, "image_url": results[0]["image_url"], "warning": warning}),
-            images=tuple(ToolImage(media_type="image/png", data=data) for _, data in saved),
+            images=tuple(ToolImage(media_type=_encoded_mime(data), data=data) for _, data in saved),
         )
     return generate

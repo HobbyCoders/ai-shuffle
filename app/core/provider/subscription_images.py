@@ -1,4 +1,4 @@
-"""Image tools on the owner's ChatGPT subscription, for chats on any provider.
+"""Direct image tools on a selected ChatGPT or SuperGrok subscription.
 
 ``GenerateNativeImage`` (``native_images``) uses the session's own Responses
 provider, so only chats on an OpenAI Responses model have it. When Settings
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # The Settings value that selects this path. ``chatgpt-subscription`` uses
 # OpenAI's default image model; ``chatgpt-subscription/<id>`` asks for <id>.
 SUBSCRIPTION_IMAGE_MODEL = "chatgpt-subscription"
+SUPERGROK_IMAGE_MODEL = "supergrok-subscription"
 PROVIDER_NAME = "OpenAI image generation on the ChatGPT subscription signed in on this worker"
 SOURCE = "chatgpt_subscription"
 
@@ -57,7 +58,8 @@ NOT_SIGNED_IN = (
 def is_subscription_model(model_id: Optional[str]) -> bool:
     """Whether a configured image model id selects this path."""
     return isinstance(model_id, str) and (
-        model_id == SUBSCRIPTION_IMAGE_MODEL or model_id.startswith(SUBSCRIPTION_IMAGE_MODEL + "/")
+        model_id == SUPERGROK_IMAGE_MODEL or model_id == SUBSCRIPTION_IMAGE_MODEL
+        or model_id.startswith(SUBSCRIPTION_IMAGE_MODEL + "/")
     )
 
 
@@ -67,14 +69,20 @@ def image_model_of(configured: str) -> Optional[str]:
     return tail.strip() or None
 
 
+def _provider_name(configured: str) -> str:
+    return "xAI image generation on the connected SuperGrok subscription" if configured == SUPERGROK_IMAGE_MODEL else PROVIDER_NAME
+
+
 def model_label(configured: str) -> str:
+    if configured == SUPERGROK_IMAGE_MODEL:
+        return "grok-imagine-image (verified: 1k, square, JPEG)"
     model = image_model_of(configured)
     return f"OpenAI image model {model}" if model else "OpenAI's default image model"
 
 
 def describe(action: str, configured: str) -> str:
     """Tool description naming the configured provider and model only."""
-    return (f"{action} with {PROVIDER_NAME}, using {model_label(configured)} "
+    return (f"{action} with {_provider_name(configured)}, using {model_label(configured)} "
             f"(configured image model '{configured}'). This is the only image provider "
             "configured here: do not name or suggest another provider's models.")
 
@@ -90,7 +98,7 @@ def refusal(requested: Any, configured: str) -> Optional[str]:
         return None
     if requested in (configured, image_model_of(configured)):
         return None
-    return (f"Image generation here is set to {PROVIDER_NAME} ({model_label(configured)}, "
+    return (f"Image generation here is set to {_provider_name(configured)} ({model_label(configured)}, "
             f"configured as '{configured}'). '{requested}' is not one of its models, so nothing "
             "was generated and no other provider was used. Call again without a model to use "
             "the configured one; only the owner can change the image model, in Settings > Models.")
@@ -100,8 +108,9 @@ def _result(payload: Dict[str, Any]) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}]}
 
 
-def _failure(message: str) -> dict:
-    return _result({"success": False, "error": message, "provider_used": SOURCE})
+def _failure(message: str, configured: str = SUBSCRIPTION_IMAGE_MODEL) -> dict:
+    source = "supergrok_subscription" if configured == SUPERGROK_IMAGE_MODEL else SOURCE
+    return _result({"success": False, "error": message, "provider_used": source})
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +173,9 @@ async def run(prompt: Any, configured: str, *, image_paths=(), cwd: Optional[str
               tool_env: Optional[Dict[str, str]] = None) -> dict:
     """Generate (no images) or edit/compose (with images) on the subscription."""
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
-        return _failure("A nonempty image prompt of at most 32000 characters is required.")
+        return _failure("A nonempty image prompt of at most 32000 characters is required.", configured)
+    if configured == SUPERGROK_IMAGE_MODEL:
+        return await _run_supergrok(prompt, image_paths=image_paths, cwd=cwd, tool_env=tool_env)
     if len(image_paths) > MAX_INPUT_IMAGES:
         return _failure(f"At most {MAX_INPUT_IMAGES} images can be passed.")
     try:
@@ -218,8 +229,8 @@ async def run(prompt: Any, configured: str, *, image_paths=(), cwd: Optional[str
         return _failure("The provider returned an image that could not be safely saved. "
                         "No other provider was used.")
     results = [{"image_url": f"/api/generated-images/by-path?path={quote(str(path), safe='')}",
-                "file_path": str(path), "filename": path.name, "mime_type": "image/png"}
-               for path, _ in saved]
+                "file_path": str(path), "filename": path.name, "mime_type": native_images._encoded_mime(encoded)}
+               for path, encoded in saved]
     payload: Dict[str, Any] = {"success": True, **results[0], "provider_used": SOURCE,
                                "model_used": model or "openai-default"}
     if len(results) > 1:
@@ -227,3 +238,43 @@ async def run(prompt: Any, configured: str, *, image_paths=(), cwd: Optional[str
     if warning:
         payload["warning"] = warning
     return _result(payload)
+
+
+async def _run_supergrok(prompt, *, image_paths, cwd, tool_env):
+    """Direct tools' separate model choice; native defaults never change this lane."""
+    from app.core.native_image_settings import NativeImageSettings
+    from app.core.provider import supergrok_images
+    from app.core.provider.fluid_credentials import _is_grok_subscription
+    from app.db import model_providers
+    from app.db.async_database import run_sync
+
+    source = "supergrok_subscription"
+    def failure(message):
+        return _result({"success": False, "error": message, "provider_used": source})
+
+    if image_paths:
+        return failure("Image editing on the SuperGrok subscription is not verified; no request was made. No other provider was used.")
+    env = tool_env or {}
+    if env.get("IMAGE_ASPECT_RATIO") not in (None, "", "1:1") or env.get("IMAGE_RESOLUTION") not in (None, "", "1k"):
+        return failure("Only square 1k image generation is verified on the SuperGrok subscription. No other provider was used.")
+    rows = await run_sync(model_providers.list_usable_model_providers)
+    row = next((r for r in rows if _is_grok_subscription(r)), None)
+    if not row:
+        return failure("No usable SuperGrok login is connected. Reconnect it under Providers. No other provider was used.")
+    options = NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg")
+    items, warning = await supergrok_images.generate(str(row["id"]), prompt, options)
+    if not items:
+        return failure(warning)
+    task = asyncio.create_task(asyncio.to_thread(native_images._save_images, cwd or ".", items))
+    try:
+        saved = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        for path, _ in await task:
+            path.unlink(missing_ok=True)
+        raise
+    except (OSError, ValueError, binascii.Error):
+        return failure("The provider returned an image that could not be safely saved. No other provider was used.")
+    path, encoded = saved[0]
+    return _result({"success": True, "image_url": f"/api/generated-images/by-path?path={quote(str(path), safe='')}",
+                    "file_path": str(path), "filename": path.name, "mime_type": native_images._encoded_mime(encoded),
+                    "provider_used": source, "model_used": options.model})
