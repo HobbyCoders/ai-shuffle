@@ -158,6 +158,17 @@ describe('reported field metrics', () => {
   expect([input.style.fontSize, input.style.paddingLeft]).toEqual(['7px', '5.5px']);
  });
 });
+describe('unusable metrics', () => {
+ it('falls back to the estimate for a 0px font (a visually hidden input)', async () => {
+  pointer(true);
+  render(BrowserNativeEditor, { ...base, field: { id: 'h', type: 'text', label: 'Hidden', value: '', x: 0, y: 0, width: 100, height: 21,
+   style: { fontSize: 0, lineHeight: null, paddingLeft: 0, paddingTop: 0, fontFamily: 'Arial' } } });
+  await tick();
+  const input = screen.getByRole('textbox', { name: 'Hidden' }) as HTMLInputElement;
+  expect(parseFloat(input.style.fontSize)).toBeCloseTo(13, 0);
+  expect(input.style.fontFamily).toBe('');
+ });
+});
 describe('reported border widths', () => {
  it('starts the text after the page border when the runtime reports it', async () => {
   pointer(true);

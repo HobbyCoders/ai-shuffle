@@ -18,13 +18,22 @@ export interface BrowserEditor {
   style?: BrowserEditorStyle;
 }
 
-const metric = (v: unknown, max: number) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max;
+// Same limits as the runtime and server: any CSS px value 0..1000, families
+// up to 200 characters. Pages really report 0 (hidden inputs) and big values.
+const metric = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000;
 function editorStyle(v: unknown): boolean {
-	if (v === undefined) return true;
-	if (!object(v)) return false;
-	return metric(v.fontSize, 400) && (v.fontSize as number) > 0 && (v.lineHeight === null || metric(v.lineHeight, 800)) &&
-		metric(v.paddingLeft, 400) && metric(v.paddingTop, 400) && typeof v.fontFamily === 'string' && v.fontFamily.length <= 256 &&
-		(v.borderLeft === undefined || metric(v.borderLeft, 100)) && (v.borderTop === undefined || metric(v.borderTop, 100));
+	return object(v) && metric(v.fontSize) && (v.lineHeight === null || metric(v.lineHeight)) &&
+		metric(v.paddingLeft) && metric(v.paddingTop) && typeof v.fontFamily === 'string' && v.fontFamily.length <= 200 &&
+		(v.borderLeft === undefined || metric(v.borderLeft)) && (v.borderTop === undefined || metric(v.borderTop));
+}
+
+/**
+ * `style` is only a hint for lining up text. One that cannot be used is
+ * removed from that field (it falls back to estimated metrics) and never
+ * fails the whole workspace update. Mutates the freshly parsed field.
+ */
+function dropUnusableStyle(field: unknown) {
+	if (object(field) && field.style !== undefined && !editorStyle(field.style)) delete field.style;
 }
 
 export interface BrowserWorkspaceState {
@@ -107,13 +116,14 @@ export function isBrowserWorkspaceState(
 		return false;
 	}
 
+	if (Array.isArray(value.editors) && value.editors.length <= 32) value.editors.forEach(dropUnusableStyle);
 	if (value.editors !== undefined && (!Array.isArray(value.editors) || value.editors.length > 32 || !value.editors.every((field) =>
 		object(field) && id(field.id) && ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'].includes(String(field.type)) &&
 		typeof field.label === 'string' && field.label.length <= 256 && typeof field.value === 'string' && field.value.length <= 16384 &&
 		(field.accept === undefined || (typeof field.accept === 'string' && field.accept.length <= 1024)) &&
 		(field.multiple === undefined || typeof field.multiple === 'boolean') &&
 		(field.chooser === undefined || typeof field.chooser === 'boolean') &&
-		(field.keys === undefined || typeof field.keys === 'boolean') && editorStyle(field.style) &&
+		(field.keys === undefined || typeof field.keys === 'boolean') &&
 		(field.type !== 'password' || field.value === '') && ['x', 'y', 'width', 'height'].every(k => typeof field[k] === 'number' && Number.isFinite(field[k])) &&
 		(field.width as number) > 0 && (field.height as number) > 0))) return false;
 	const ids = new Set<string>();

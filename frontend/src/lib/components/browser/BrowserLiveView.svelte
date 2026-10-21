@@ -893,16 +893,22 @@
 	// Safari raises no paste event on non-editable content, so if none follows
 	// the shortcut promptly, the remote pastes from its own clipboard instead.
 	let pasteFallback: ReturnType<typeof setTimeout> | undefined;
-	/** When the fallback Ctrl+V went out: a paste event arriving after it is late. */
-	let pasteFallbackAt = -Infinity;
-	const LATE_PASTE_MS = 1000;
+	/**
+	 * Set when a shortcut's fallback Ctrl+V went out: the one paste event that
+	 * shortcut may still raise (Safari's Paste prompt answered late) must be
+	 * ignored, or the text lands twice. Belongs to that key press only: the
+	 * next paste shortcut, or the ceiling, ends it.
+	 */
+	let latePasteUntil = 0;
+	const LATE_PASTE_CEILING_MS = 10_000;
 	onDestroy(() => clearTimeout(pasteFallback));
 	function expectPaste() {
 		clearTimeout(pasteFallback);
+		latePasteUntil = 0; // a new key press: its own paste is not late
 		pasteFallback = setTimeout(() => {
 			pasteFallback = undefined;
 			if (!interactive || inspecting || disposed) return;
-			pasteFallbackAt = Date.now();
+			latePasteUntil = Date.now() + LATE_PASTE_CEILING_MS;
 			keyPair('v', 'KeyV', 86, MOD_CTRL);
 		}, 100);
 	}
@@ -926,7 +932,11 @@
 		e.stopPropagation();
 		// The remote already pasted its own clipboard for this shortcut: a late
 		// local paste would put the text in twice.
-		if (Date.now() - pasteFallbackAt < LATE_PASTE_MS) return;
+		if (latePasteUntil) {
+			const late = Date.now() < latePasteUntil;
+			latePasteUntil = 0; // only ever the one event
+			if (late) return;
+		}
 		const text = e.clipboardData?.getData('text/plain') ?? '';
 		// Nothing textual (an image, an empty clipboard): let the remote browser
 		// paste from its own clipboard, as Ctrl+V did before.

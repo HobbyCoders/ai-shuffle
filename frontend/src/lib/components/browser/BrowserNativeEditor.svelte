@@ -78,7 +78,8 @@
 			// text never moves on focus). Text starts at (page border + padding) ×
 			// scale; the overlay's own 1px border comes off that. Runtimes that do
 			// not report border widths get the common 1px.
-			const m = field.style;
+			// A 0px font (a visually hidden input) says nothing about the text.
+			const m = field.style && field.style.fontSize > 0 ? field.style : undefined;
 			const textarea = field.type === 'textarea';
 			let font: number, padX: number, padY: number, lineHeight: string, family = '';
 			if (m) {

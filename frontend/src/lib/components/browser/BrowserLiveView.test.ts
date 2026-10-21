@@ -708,20 +708,41 @@ describe('desktop keyboard input', () => {
 			vi.advanceTimersByTime(1);
 			expect(sent(onInput).map((p) => [p.event, p.key, p.modifiers])).toEqual([['down', 'v', 2], ['up', 'v', 2]]);
 			onInput.mockClear();
-			// A paste that turns up after the fallback (150 ms) is dropped: the
-			// remote already pasted, and the text must not land twice.
-			vi.advanceTimersByTime(50);
-			const late = new Event('paste', { bubbles: true, cancelable: true });
-			Object.assign(late, { clipboardData: { getData: () => 'late' } });
-			surface.dispatchEvent(late);
-			expect(late.defaultPrevented).toBe(true);
+			const paste = (text: string) => {
+				const e = new Event('paste', { bubbles: true, cancelable: true });
+				Object.assign(e, { clipboardData: { getData: () => text } });
+				surface.dispatchEvent(e);
+				return e;
+			};
+			const shortcut = () => fireEvent.keyDown(surface, { key: 'v', code: 'KeyV', keyCode: 86, ctrlKey: true });
+			// The one paste that shortcut still raises (at 150 ms, or a Paste prompt
+			// answered seconds later) is dropped: the remote already pasted.
+			vi.advanceTimersByTime(3000);
+			expect(paste('late').defaultPrevented).toBe(true);
 			expect(onInput).not.toHaveBeenCalled();
-			vi.advanceTimersByTime(1000);
+			// Only that one: the next paste goes through.
+			paste('menu paste');
+			expect(sent(onInput)).toEqual([{ type: 'input', kind: 'text', text: 'menu paste' }]);
+			onInput.mockClear();
+			// A real second shortcut right after a fallback keeps its own paste.
+			await shortcut();
+			vi.advanceTimersByTime(100); // fallback fires for this one
+			onInput.mockClear();
+			await shortcut();
+			paste('second');
+			expect(sent(onInput)).toEqual([{ type: 'input', kind: 'text', text: 'second' }]);
+			onInput.mockClear();
+			// Past the ceiling, a stray paste is treated as new.
+			await shortcut();
+			vi.advanceTimersByTime(100);
+			onInput.mockClear();
+			vi.advanceTimersByTime(10_000);
+			paste('much later');
+			expect(sent(onInput)).toEqual([{ type: 'input', kind: 'text', text: 'much later' }]);
+			onInput.mockClear();
 			// A paste event in time cancels the fallback.
-			await fireEvent.keyDown(surface, { key: 'v', code: 'KeyV', keyCode: 86, ctrlKey: true });
-			const e = new Event('paste', { bubbles: true, cancelable: true });
-			Object.assign(e, { clipboardData: { getData: () => 'hi' } });
-			surface.dispatchEvent(e);
+			await shortcut();
+			paste('hi');
 			vi.advanceTimersByTime(500);
 			expect(sent(onInput)).toEqual([{ type: 'input', kind: 'text', text: 'hi' }]);
 		} finally {
