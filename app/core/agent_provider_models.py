@@ -814,7 +814,7 @@ def build_task_contract(
         "Sync JSON: report_head (bounded prefix), report_chars (full length), "
         "report_path (full file). There is NO 'report' key unless writing failed; "
         "then it holds the full text and the note explains. Only if report_head "
-        "is insufficient, Read report_path with offset/limit in ONE cell; never "
+        "is insufficient, read report_path via Read(offset=..., limit=...) in ONE cell; never "
         "print the whole file. Background returns worker_session_id/task_id, "
         "no report; completion is announced later."
     )
