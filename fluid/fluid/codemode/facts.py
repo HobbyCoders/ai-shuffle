@@ -533,16 +533,25 @@ class FactStore:
             if memory_id and (old is None or not visible_on(old, local)):
                 raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
             if not memory_id and key and expected_revision is not None:
-                # Never turn an unresolved correction into an insertion. Restrict
-                # lookup to the authenticated session's project and global slot;
-                # revisions are guards, not a way to guess among matching slots.
+                # Restrict corrections to the authenticated project's/global
+                # slots. A revision of 1 is also sent on genuinely new saves;
+                # preserve that contract only if no slot or deletion evidence
+                # exists, rather than guessing a correction's target scope.
                 scopes = {scope} if scope is not None else {"global", correction_project}
+                scopes.discard(None)
                 candidates = [e for e in all_entries if e.get("key") == key
                               and e.get("scope", "global") in scopes and visible_on(e, local)]
-                if len(candidates) != 1:
+                fresh = (expected_revision == 1
+                         and not any(e.get("key") == key for e in all_entries)
+                         and not any(t.get("key") == key and t.get("scope") in scopes
+                                     for t in doc["tombstones"])
+                         and not any(barrier_contains(doc.get("forgotten", ""), "key:" + s + ":" + key)
+                                     for s in scopes))
+                if len(candidates) > 1 or (not candidates and not fresh):
                     raise ValueError("Key correction is ambiguous or unknown in this scope; Recall and supply memory_id or explicit scope")
-                old = candidates[0]
-                memory_id = old["id"]
+                if candidates:
+                    old = candidates[0]
+                    memory_id = old["id"]
             if old is not None and scope is None:
                 scope = old.get("scope", "global")
             # Scope-sensitive canonical keys and deletion barriers must use the

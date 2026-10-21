@@ -127,6 +127,19 @@ async def test_key_correction_resolves_only_visible_unambiguous_slot(tmp_path, s
     assert len(store.memories()) == len(scopes)
 
 
+@pytest.mark.parametrize("scope,expected_scope", [(None, "global"), ("global", "global"), ("project", "project:one")])
+@pytest.mark.parametrize("revision", [1, 2])
+async def test_fresh_key_with_initial_revision_preserves_new_save_contract(tmp_path, scope, expected_scope, revision):
+    store = SkillStore(tmp_path)
+    ctx = ToolCtx(extra={"memory_store": store, "memory_project": "project:one"})
+    data = {"text": "Fixture genuinely new convention.", "key": "fixture.fresh", "expected_revision": revision}
+    if scope is not None:
+        data["scope"] = scope
+    result = await handler(data, ctx)
+    assert result.is_error == (revision != 1)
+    assert [m.scope for m in store.memories()] == ([expected_scope] if revision == 1 else [])
+
+
 async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path):
     store = SkillStore(tmp_path)
     first = store.save_memory("Fixture runner alpha.", key="fixture.runner", scope="project:one", protected=True)
