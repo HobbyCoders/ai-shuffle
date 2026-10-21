@@ -4898,6 +4898,14 @@ class HarnessAdapter(ProviderAdapter):
                     chat_mode=_session_mode(options) == "chat",
                     provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
                 ))
+                from app.core.provider.fluid_credentials import _is_grok_subscription
+                native_account = (options.extra or {}).get("provider_id")
+                if native_account and _is_grok_subscription(_lookup_provider_row(native_account) or {}):
+                    from app.core.provider.native_video import SPEC as VIDEO_SPEC, make_handler as video_handler
+                    registry.register_builtin(VIDEO_SPEC, video_handler(
+                        lambda: self._engine, self._resolve_app_session_id,
+                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
+                    ))
             builtins_registered = True
             logger.info(
                 "[HarnessAdapter] registered fluid builtin tools for native leg",

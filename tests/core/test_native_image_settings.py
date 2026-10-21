@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 from fluid.tools.registry import ToolCtx
 
-from app.core.native_image_settings import NativeImageSettings, capabilities, load, save, validate
+from app.core.native_generation_settings import NativeImageSettings, capabilities, load, save, validate
 from app.core.provider import native_images, supergrok_images
 
 
@@ -25,18 +25,19 @@ def test_settings_round_trip_and_separation(monkeypatch):
     stored = {}
     monkeypatch.setattr(database, "get_system_setting", stored.get)
     monkeypatch.setattr(database, "set_system_setting", stored.__setitem__)
-    assert load("chatgpt").model_dump() == dict(model="default", size="auto", quality="auto", format="png")
+    monkeypatch.setattr(database, "get_model_provider", lambda key, **kw: {"provider_type": key})
+    assert load("chatgpt").image.model_dump() == dict(model="default", size="auto", quality="auto", format="png")
     settings = load("grok")
-    assert settings.model_dump() == dict(model="grok-imagine-image", size="1k", quality="default", format="jpeg")
+    assert settings.image.model_dump() == dict(model="grok-imagine-image", size="1k", quality=None, format="jpeg")
     save("grok", settings)
     assert load("grok") == settings
-    assert set(stored) == {"native_images_grok"}
-    assert capabilities("grok")["models"] == ["grok-imagine-image"]
+    assert set(stored) == {"native_generation:grok"}
+    assert capabilities("grok")["image"]["verified_combination"]["model"] == "grok-imagine-image"
 
 
 @pytest.mark.parametrize("field,value", [("model", "grok-imagine-image-2.0"), ("size", "2k"), ("quality", "high"), ("format", "png")])
 def test_reject_unproven_options(field, value):
-    options = dict(model="grok-imagine-image", size="1k", quality="default", format="jpeg")
+    options = dict(model="grok-imagine-image", size="1k", quality=None, format="jpeg")
     options[field] = value
     with pytest.raises(ValueError):
         validate("grok", NativeImageSettings(**options))
@@ -47,7 +48,7 @@ async def test_grok_handler_exact_http_body_image_bytes_and_no_fallback(monkeypa
     from app.core.provider import fluid_credentials
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
     monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
-    monkeypatch.setattr(native_images, "load_native_settings", AsyncMock(return_value=NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg")))
+    monkeypatch.setattr(native_images, "load_native_settings", AsyncMock(return_value=NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg")))
     from tests.core.test_native_image_tool import png
     data, requests = (jpeg() if output == "jpeg" else png()), []
     def boundary(request):
@@ -81,7 +82,7 @@ async def test_sanitized_errors_no_retries(monkeypatch, caplog, status, label):
         return httpx.Response(status, json={"error": {"message": "test-private-token", "code": "test-private-token"}})
     async with httpx.AsyncClient(transport=httpx.MockTransport(boundary)) as http:
         monkeypatch.setattr(supergrok_images, "http_client", lambda: http)
-        items, warning = await supergrok_images.generate("row", "tree", NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg"))
+        items, warning = await supergrok_images.generate("row", "tree", NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg"))
     assert not items and label in warning
     assert len(calls) == 1
     assert "test-private-token" not in warning + caplog.text
@@ -111,29 +112,31 @@ async def test_chatgpt_settings_preserve_exact_http_tool(monkeypatch, tmp_path):
 async def test_api_validation_persistence_and_owner_boundary(monkeypatch):
     from fastapi import FastAPI
     from app.api.auth import require_auth, require_admin
-    from app.api.settings_native_images import router
+    from app.api.settings_native_generation import router
     from app.db import database
     stored = {}
     monkeypatch.setattr(database, "get_system_setting", stored.get)
     monkeypatch.setattr(database, "set_system_setting", stored.__setitem__)
+    monkeypatch.setattr(database, "get_model_provider", lambda key, **kw: {"id": key, "provider_type": "grok"} if key == "grok-row" else None)
+    monkeypatch.setattr(database, "get_all_model_providers", lambda **kw: [{"id": "grok-row", "provider_type": "grok"}])
     app = FastAPI()
     app.include_router(router, prefix="/api/v1/settings")
     app.dependency_overrides[require_auth] = lambda: "reader"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/settings/native-images")
+        response = await client.get("/api/v1/settings/native-generation")
         assert response.status_code == 200
-        settings = response.json()["grok"]["settings"]
-        denied = await client.put("/api/v1/settings/native-images/grok", json=settings)
+        settings = response.json()["accounts"][0]["settings"]
+        denied = await client.put("/api/v1/settings/native-generation/grok-row", json=settings)
         assert denied.status_code in (401, 403)
         app.dependency_overrides[require_admin] = lambda: "owner"
-        updated = await client.put("/api/v1/settings/native-images/grok", json=settings)
+        updated = await client.put("/api/v1/settings/native-generation/grok-row", json=settings)
         assert updated.status_code == 200
         assert updated.json()["settings"] == settings
-        assert (await client.get("/api/v1/settings/native-images/grok")).json()["settings"] == settings
-        for body in (settings | {"size": "2k"}, settings | {"format": "png"}, settings | {"extra": True}, settings | {"model": None}):
-            assert (await client.put("/api/v1/settings/native-images/grok", json=body)).status_code == 422
-        assert (await client.get("/api/v1/settings/native-images/fal")).status_code == 422
-    assert set(stored) == {"native_images_grok"}
+        assert (await client.get("/api/v1/settings/native-generation/grok-row")).json()["settings"] == settings
+        for body in (settings | {"image": settings["image"] | {"size": "2k"}}, settings | {"image": settings["image"] | {"format": "png"}}, settings | {"extra": True}, settings | {"image": settings["image"] | {"model": None}}):
+            assert (await client.put("/api/v1/settings/native-generation/grok-row", json=body)).status_code == 422
+        assert (await client.get("/api/v1/settings/native-generation/fal")).status_code == 422
+    assert set(stored) == {"native_generation:grok-row"}
 
 
 @pytest.mark.parametrize("kind", ["grok", "chatgpt"])
@@ -162,7 +165,7 @@ async def test_grok_resolver_rejects_paid_api_key_row(monkeypatch):
     monkeypatch.setattr(database, "get_model_provider", lambda *a, **kw: {"provider_type": "xai", "auth_mode": "api_key"})
     credential = AsyncMock()
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", credential)
-    items, warning = await supergrok_images.generate("row", "tree", NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg"))
+    items, warning = await supergrok_images.generate("row", "tree", NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg"))
     assert not items and "expired" in warning
     credential.assert_not_called()
 
@@ -184,7 +187,7 @@ async def test_expired_resolver_and_transport_errors_are_redacted(monkeypatch, c
     from app.core.provider import fluid_credentials
     from app.core.provider.fluid_credentials import ProviderCredentialError
     monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
-    options = NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg")
+    options = NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg")
     for error in (ProviderCredentialError("test-private-token"), RuntimeError("test-private-token")):
         monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(side_effect=error))
         items, warning = await supergrok_images.generate("row", "tree", options)
@@ -220,7 +223,7 @@ async def test_content_refusal_and_cancellation_never_retry(monkeypatch):
     from app.core.provider import fluid_credentials
     monkeypatch.setattr(supergrok_images, "subscription_kind", AsyncMock(return_value="grok"))
     monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
-    options = NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg")
+    options = NativeImageSettings(model="grok-imagine-image", size="1k", quality=None, format="jpeg")
     requests = []
     def boundary(request):
         requests.append(request)

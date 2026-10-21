@@ -615,40 +615,62 @@ curl -X PUT http://localhost:8000/api/v1/settings/subagent-default   -H "Authori
 
 The id must be a model this install can run: a Claude alias from `GET /api/v1/models` (a full Claude id such as `claude-opus-4-6` is saved as its alias), or a model in the curated list of an enabled provider. Any other value returns `400` and nothing is saved. An `allowed` list, which older pages send, is accepted and ignored. The response has the same shape as the `GET`. The setting is shared with the owner's other workers.
 
-### Native images (subscription chats)
+### Native generation (per provider account)
 
-`GET /api/v1/settings/native-images` returns entries keyed by `chatgpt` and
-`grok`. `GET /api/v1/settings/native-images/{provider}` returns one entry:
-`{"provider": "grok", "settings": {"model": "grok-imagine-image", "size": "1k", "quality": "default", "format": "jpeg"}, "capabilities": {...}}`.
-Reads require authentication. Owner-only `PUT` to the provider path replaces all
-four required string fields; unknown fields/providers and unsupported options
-return `422`. Capability lists are `models`, `sizes`, `qualities`, `formats` and
-`aspect_ratios`, with `verified`, `route`, `direct_tool_choice` and
-`unverified_options_exposed` metadata. These are verified combinations, not a
-claim that every connected account is entitled.
+Native generation is separate from the AI Shuffle direct tools. The API is
+intended for the **AI Shuffle tools / Native generation** switch under Default
+models; it does not change the existing ChatGPT subscription text-to-image choice.
+No settings UI is implemented by these endpoints.
 
-| Subscription | Model | Size | Quality | Format | Route |
-|---|---|---|---|---|---|
-| ChatGPT | `default` (provider-selected) | `auto` | `auto` | `png` | Responses native image tool |
-| SuperGrok | `grok-imagine-image` | `1k` (square) | `default` (provider-selected) | `jpeg` | xAI images endpoint |
+- Authenticated `GET /api/v1/settings/native-generation` returns
+  `{"accounts": [{"provider_id": "...", "name": "...", "provider_kind": "grok", "settings": {"image": {...}, "video": {...}}, "capabilities": {...}}]}`.
+- `GET /api/v1/settings/native-generation/{provider_id}` returns one account.
+- Owner-only `PUT` to that account path replaces both groups. Each group may be
+  `null` (disabled); unsupported options, extra fields or unknown accounts return
+  `422`. Image fields are `model`, `size`, `quality` (nullable) and `format`.
+  Video fields are `model`, `duration` (integer seconds), `resolution`,
+  `aspect_ratio` and `generate_audio` (boolean).
 
-`GenerateNativeImage` reads these defaults using the session's subscription
-provider, not its chat model's name. ChatGPT's default request is unchanged.
-SuperGrok sends one `n=1` request without OpenAI image-tool fields and accepts
-JPEG or PNG by actual image bytes. Its login stays server-side; expired login,
-entitlement, rate-limit and refused-request errors are sanitized. There is no
-fallback to fal.ai or a paid API key. `grok-imagine-image-2.0`, `2k`, other aspect
-ratios and SuperGrok native Responses image tools remain unverified and are not
-offered. Native image charges are not included in session cost estimates.
+Each capability group (`image`, `video`) contains `available`,
+`verified_combination` and `fields`. Field options are objects such as
+`{"value": "2k", "verified": false, "selectable": false, "reason": "not yet verified"}`.
+Only verified options may be selected. SuperGrok image quality has
+`quality_visible: false`, an empty options list and a `null` setting until tested.
+ChatGPT has no video controls. Unprobed OpenAI/xAI API-key accounts are listed
+with unavailable groups and locked options, not inferred subscription support.
 
-These settings do **not** change Default models or the direct generation tools.
-The latter may explicitly select `chatgpt-subscription` (existing behavior) or
-`supergrok-subscription` using the image-model endpoint below. The SuperGrok
-choice is separate from fal.ai's Grok Imagine Image: only square 1k generation
-is verified; editing/reference images and unsupported direct-tool defaults are
-refused before sending a request. Native settings are stored separately as
-`native_images_chatgpt` / `native_images_grok` JSON system settings, so existing
-installations need no schema migration.
+| Account / media | Verified selectable combination |
+|---|---|
+| ChatGPT image | `default` model, `auto` size, `auto` quality, `png` |
+| SuperGrok image | `grok-imagine-image`, square `1k`, `jpeg`; quality hidden |
+| SuperGrok video | `grok-imagine-video-1.5-lite`, 1 s, `480p`, `16:9`, `generate_audio: false` |
+
+`GenerateNativeImage` reads its session account's Image group. ChatGPT's default
+request is unchanged. SuperGrok sends one images-endpoint request (`n=1`), without
+OpenAI-only fields, and detects JPEG/PNG from returned bytes. Its `2.0` model,
+`2k`, and PNG request format are locked, not claimed as supported.
+
+`GenerateNativeVideo` is exposed only to SuperGrok subscription sessions. It
+submits once, polls asynchronously for at most 180 seconds, and saves a
+session-owned MP4. Timeout/cancellation never resubmits a possibly billed job.
+Only text-to-video is offered; image-to-video and editing are unprobed.
+Documented 2–15 s durations, 720p/1080p, other aspect ratios and audio are locked
+**not yet verified**. The tool surfaces `cost_in_usd_ticks` and
+`reported_cost_usd` when supplied by xAI (ticks divided by 10,000,000,000).
+The verified probe reported **$0.02**, not free or unlimited usage; this does not
+establish an invoice charge or subscription quota debit. Native media charges
+are not inferred from the chat model's token price.
+
+Subscription credentials and signed download URLs remain server-side. Errors
+are sanitized; no route falls back to fal.ai or paid API keys. Direct tools may
+still explicitly select `chatgpt-subscription` or the distinct
+`supergrok-subscription` image choice using the endpoint below. The latter is
+not fal.ai Grok Imagine Image, and refuses unverified editing/defaults.
+
+Settings persist as JSON under `native_generation:{provider_id}` in the existing
+settings store. Reads accept the earlier family-level `native_images_chatgpt` /
+`native_images_grok` defaults without writing; account-specific writes do not
+affect another account. No database schema migration is required.
 
 ### Media tool models
 

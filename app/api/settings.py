@@ -16,7 +16,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
-from app.api.settings_native_images import router as native_images_router
+from app.api.settings_native_generation import router as native_generation_router
 from app.core import encryption
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
@@ -47,7 +47,7 @@ router.include_router(stt_stream_router)
 router.include_router(media_router)
 router.include_router(credentials_router)
 router.include_router(updates_router)
-router.include_router(native_images_router)
+router.include_router(native_generation_router)
 
 
 # ============================================================================

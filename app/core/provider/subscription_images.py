@@ -242,7 +242,7 @@ async def run(prompt: Any, configured: str, *, image_paths=(), cwd: Optional[str
 
 async def _run_supergrok(prompt, *, image_paths, cwd, tool_env):
     """Direct tools' separate model choice; native defaults never change this lane."""
-    from app.core.native_image_settings import NativeImageSettings
+    from app.core.native_generation_settings import NativeImageSettings
     from app.core.provider import supergrok_images
     from app.core.provider.fluid_credentials import _is_grok_subscription
     from app.db import model_providers
@@ -261,7 +261,7 @@ async def _run_supergrok(prompt, *, image_paths, cwd, tool_env):
     row = next((r for r in rows if _is_grok_subscription(r)), None)
     if not row:
         return failure("No usable SuperGrok login is connected. Reconnect it under Providers. No other provider was used.")
-    options = NativeImageSettings(model="grok-imagine-image", size="1k", quality="default", format="jpeg")
+    options = NativeImageSettings(model="grok-imagine-image", size="1k", format="jpeg")
     items, warning = await supergrok_images.generate(str(row["id"]), prompt, options)
     if not items:
         return failure(warning)

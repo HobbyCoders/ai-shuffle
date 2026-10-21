@@ -28,7 +28,7 @@ SPEC = ToolSpec(
         "Session cost estimates do not include native image charges. "
         "Never treat a rejection here as evidence that fal.ai is unavailable, or vice versa. "
         "Returns a saved image and image_url: embed it inline in your reply. "
-        "Omit options to use Native images settings. Subscription options must match verified capabilities."
+        "Omit options to use Native generation account settings. Only verified account options are selectable."
     ),
     input_schema={"type": "object", "properties": {
         "prompt": {"type": "string", "minLength": 1, "maxLength": 32000},
@@ -202,10 +202,10 @@ async def stream_images(provider, request, items, usage):
     return warning
 
 
-async def load_native_settings(kind):
-    from app.core.native_image_settings import load
+async def load_native_settings(provider_id):
+    from app.core.native_generation_settings import load
     from app.db.async_database import run_sync
-    return await run_sync(load, kind)
+    return (await run_sync(load, provider_id)).image
 
 
 def make_handler(engine_supplier, session_supplier, *, chat_mode=False, provider_id_supplier=lambda: None):
@@ -221,17 +221,19 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False, provider
         if not session_id:
             return ToolOutcome(text="The session must be saved before generating an image.", is_error=True)
         from app.core.provider import supergrok_images
-        from app.core.native_image_settings import NativeImageSettings, validate
+        from app.core.native_generation_settings import NativeImageSettings, validate
         provider_id = provider_id_supplier()
         try:
             kind = await supergrok_images.subscription_kind(provider_id)
-            options = await load_native_settings(kind) if kind else None
+            options = await load_native_settings(provider_id) if provider_id else None
+            if provider_id and options is None:
+                return ToolOutcome(text="Native generation images are disabled or not yet verified for this account. No other provider was used.", is_error=True)
             if options:
                 overrides = {"model" if k == "image_model" else k: v for k, v in args.items()
                              if k in {"image_model", "size", "quality", "format"}}
                 options = validate(kind, NativeImageSettings(**(options.model_dump() | overrides)))
         except ValueError:
-            return ToolOutcome(text="Invalid native image settings or unavailable subscription login. No other provider was used.", is_error=True)
+            return ToolOutcome(text="Invalid Native generation image settings or unavailable account. No other provider was used.", is_error=True)
         tool = {"type": "image_generation", "output_format": options.format if options else "png", "partial_images": 0}
         # auto/default are provider defaults: omit to preserve the proven ChatGPT request.
         if options and kind == "chatgpt":

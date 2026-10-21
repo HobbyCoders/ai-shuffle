@@ -3,7 +3,7 @@ import asyncio
 
 import httpx
 
-from app.core.native_image_settings import validate
+from app.core.native_generation_settings import validate
 from app.core.provider.fluid_credentials import ProviderCredentialError, _is_grok_subscription
 from app.db import database
 from app.db.async_database import run_sync
@@ -25,6 +25,14 @@ async def subscription_kind(provider_id):
     return None
 
 
+async def resolve_credential(provider_id):
+    """Shared image/video resolver: no paid API keys or environment fallback."""
+    from app.core.provider.fluid_credentials import _load_grok_access_token
+    if await subscription_kind(provider_id) != "grok":
+        raise ProviderCredentialError("A connected SuperGrok subscription is required.")
+    return await _load_grok_access_token(provider_id)
+
+
 def http_client():
     return httpx.AsyncClient(timeout=120, follow_redirects=False)
 
@@ -44,13 +52,10 @@ async def generate(provider_id, prompt, options):
     validate("grok", options)
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
         return [], "A nonempty image prompt of at most 32000 characters is required."
-    from app.core.provider.fluid_credentials import _load_grok_access_token
     try:
         # The established resolver reads/decrypts the stored subscription login.
         # Never consult auth_token, API-key environment variables, or fal.ai.
-        if await subscription_kind(provider_id) != "grok":
-            return [], _error(401)
-        token = await _load_grok_access_token(provider_id)
+        token = await resolve_credential(provider_id)
         client = http_client()
         try:
             response = await client.post(ENDPOINT,
