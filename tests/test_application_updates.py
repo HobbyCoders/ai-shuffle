@@ -741,9 +741,9 @@ def _no_inherited_update_settings(monkeypatch):
 
 @pytest.fixture
 def feed(tmp_path, monkeypatch):
-    # Model the image interpreter with a real local binary on non-container hosts.
-    if os.name == "nt":
-        monkeypatch.setattr("docker.application_updates.IMAGE_PYTHON", sys._base_executable)
+    # Model the image interpreter with a real local binary on every host.
+    # GitHub's Python is under /opt/hostedtoolcache, not /usr/local/bin.
+    monkeypatch.setattr("docker.application_updates.IMAGE_PYTHON", str(Path(sys._base_executable).resolve()))
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
     responses, requests = {}, []

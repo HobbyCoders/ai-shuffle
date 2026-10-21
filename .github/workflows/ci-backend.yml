@@ -39,17 +39,12 @@ jobs:
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
-      # The checkout below has full history: a missing old-schema commit is a
-      # failure here, not a silent skip (tests/db/test_schema_lifecycle.py).
-      SCHEMA_LIFECYCLE_REQUIRED: "1"
       PYTEST_WORKERS: ${{ inputs.runner_cpus == '4' && '4' || '2' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # The schema lifecycle tests build old-schema databases from git
-          # history; a shallow clone would skip them. The full clone takes
-          # about 5 s; a blobless clone was not adopted because those tests
-          # would then fetch old blobs one by one during the test run.
+          # Keep history for tests that inspect public revisions. Schema lifecycle
+          # tests use checked-in SQL fixtures and need no private-era commits.
           fetch-depth: 0
 
       # Official setup actions use the GitHub Actions dependency cache.
