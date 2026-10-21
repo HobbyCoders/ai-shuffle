@@ -166,6 +166,7 @@ def test_main_diagnostics_keep_type_and_call_site_but_not_secret_values(monkeypa
     def fail_settings():
         raise PermissionError("postgresql://user:private-test-password@host/database")
     monkeypatch.setattr(runtime, "load_settings", fail_settings)
+    monkeypatch.setattr(runtime, "drop_privileges", lambda settings: None)
     monkeypatch.setattr(runtime.signal, "signal", lambda *args: None)
     assert runtime.main(["run"]) == 1
     output = capsys.readouterr().err
@@ -628,6 +629,8 @@ def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, m
     monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
     monkeypatch.setattr(runtime, "watch", lambda *args, **kwargs: 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
+    # A running source worker may export its production image directory.
+    monkeypatch.setattr(runtime, "image_dir", lambda: tmp_path / "image")
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
     chrome, app = spawned["chrome-supervisor"], spawned["app"]
@@ -657,12 +660,12 @@ def test_main_marks_the_supervisor_non_dumpable_after_dropping_privileges(monkey
     """R13-1: the supervisor holds every secret in its own environ."""
     order = []
     cfg = settings_factory()
-    monkeypatch.setattr(runtime, "load_settings", lambda: cfg)
+    monkeypatch.setattr(runtime, "load_settings", lambda: order.append("settings") or cfg)
     monkeypatch.setattr(runtime, "drop_privileges", lambda settings: order.append("drop"))
     monkeypatch.setattr(runtime, "harden_process_introspection", lambda settings: order.append("harden"))
     monkeypatch.setattr(runtime, "run", lambda settings, action, filename=None: order.append(action) or 0)
     assert runtime.main(["run"]) == 0
-    assert order == ["drop", "harden", "run"]
+    assert order == ["drop", "settings", "harden", "run"]
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="prctl is Linux-only")
@@ -742,8 +745,17 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     monkeypatch.setattr(runtime.os, "chown", chown)
     monkeypatch.setattr(runtime.os, "initgroups", Mock())
     monkeypatch.setattr(runtime.os, "setgid", Mock())
-    monkeypatch.setattr(runtime.os, "setuid", lambda value: uid.__setitem__(0, value))
+    tool_path = "/home/appuser/.local/bin:/usr/bin"
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("SHUFFLE_CONTAINER_PATH", tool_path)
+    monkeypatch.setattr(runtime, "isolate", lambda *args: None)
+    def setuid(value):
+        assert os.environ["PATH"] == "/usr/bin"  # root still uses image tools
+        uid[0] = value
+    monkeypatch.setattr(runtime.os, "setuid", setuid)
     runtime.drop_privileges(settings_factory(data_dir=data, workspace_dir=workspace))
+    assert os.environ["PATH"] == tool_path
+    assert "SHUFFLE_CONTAINER_PATH" not in os.environ
     chown.assert_called_once_with(data, 1000, 1000)
     assert (workspace / "sentinel").read_text() == "preserve"
 

@@ -379,7 +379,7 @@ Earlier versions let `docker exec <container> curl http://localhost:8000/...` (a
 
 ## Bundled tool assets
 
-The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`.
+The image ships the AI tools and browser-automation server with their production dependencies. These bundled trees are root-owned and read-only to the app user; generated files go in your workspace or data volume, not under `/opt`. The application and startup files under `/app` are also root-owned in every isolation mode. Runtime state and application-update builds remain in the data volume or the app user’s home; `PUID`/`PGID` still control your project files.
 
 If startup reports `Bundled tool assets are missing`, replace or rebuild the image and remove any mount hiding `/opt/ai-tools` or `/opt/browser-mcp`. Startup does not install packages or continue with incomplete bundled tools. Database dump and restore remain available without these assets.
 
@@ -416,7 +416,7 @@ AI Shuffle notes who owned each file before changing anything. Your database, ke
 
 **Turn it off**
 
-Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives every file back to `PUID` exactly as it was.
+Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives the protected data files back to `PUID` exactly as they were. Image application and startup files stay root-owned.
 
 **Good to know**
 

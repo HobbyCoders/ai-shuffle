@@ -40,8 +40,14 @@ def test_startup_code_and_parent_directories_are_read_only_image_assets():
     assert not re.search(r"chown[^\n]*appuser[^\n]*/app(?:[ /]|$)", entrypoint)
     assert "SHUFFLE_CONTAINER_PATH=$PATH" in entrypoint
     assert 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' in entrypoint
-    assert 'exec /usr/local/bin/python3 -I /app/docker/container_runtime.py' in entrypoint
+    assert 'exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py' in entrypoint
     assert "npm install" not in entrypoint
+    assert entrypoint.index('export PATH=') < entrypoint.index('require_bundled_tools "$@"')
+    assert "chown -hR -P appuser:appuser" in entrypoint
+    assert not re.search(r"(?m)^\s*chown (?!-hR -P )", entrypoint)
+    assert not re.search(r"(?m)^\s*chown.*(?:/home/appuser/\.[^ /]+/)", entrypoint)
+    assert "cp /root/.config/gh" not in entrypoint
+    assert "/usr/bin/tar --no-same-owner -C /home/appuser/.config/gh -xf -" in entrypoint
 
 
 def test_docker_bundles_one_supported_postgres_major():

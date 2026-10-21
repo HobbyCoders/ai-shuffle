@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Root uses only image executables, including during bundled-asset validation.
+# Restore the configured tool PATH only after dropping privileges.
+if [ "$(/usr/bin/id -u)" = "0" ]; then
+    export SHUFFLE_CONTAINER_PATH=$PATH
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
+
 # Tool code and production dependencies are supplied by the image. Startup
 # validates them, but never repairs or installs packages with root privileges.
 require_bundled_tools() {
@@ -31,7 +38,7 @@ claude_cli_keep_installed() {
     if [ -f "$marker" ]; then
         [ "$(cat "$marker")" = "1" ]
     else
-        command -v claude >/dev/null 2>&1 ||
+        PATH="${SHUFFLE_CONTAINER_PATH:-$PATH}" command -v claude >/dev/null 2>&1 ||
             [ -n "$(find "${HOME}/.claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] ||
             [ -n "$(find "${HOME}/.config/claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
     fi
@@ -44,13 +51,8 @@ if [ "$(/usr/bin/id -u)" != "0" ]; then
         dump|restore) ;;
         *) if claude_cli_keep_installed; then bash /app/docker/install-claude-cli.sh || true; fi ;;
     esac
-    exec /usr/local/bin/python3 -I /app/docker/container_runtime.py "$@"
+    exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@"
 fi
-
-# Root uses only image executables. Restore the configured tool PATH only after
-# the privilege drop (and for commands explicitly launched as appuser).
-export SHUFFLE_CONTAINER_PATH=$PATH
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Get PUID and PGID from environment, default to 99:100 (Unraid)
 PUID=${PUID:-99}
@@ -77,7 +79,7 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
 
     # Fix ownership of critical directories (skip node_modules to avoid slow recursive chown)
     echo "Updating ownership of /home/appuser" >&2
-    chown -R appuser:appuser /home/appuser
+    chown -hR -P appuser:appuser /home/appuser
     # Image code stays root-owned. Retained DATA_DIR/postgres is validated by
     # the runtime, never recursively chowned.
 else
@@ -103,12 +105,18 @@ fi
 
 # Maintenance never starts provider setup, Chromium or application services.
 case "${1:-run}" in
-    dump|restore) exec /usr/local/bin/python3 -I /app/docker/container_runtime.py "$@" ;;
+    dump|restore) exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@" ;;
 esac
 
-# Ensure config directories exist with correct permissions
-mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
-chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude
+# Repair only direct home entries, physically: never follow a home symlink or
+# traverse an appuser-controlled parent as root. Creation runs as appuser.
+for directory in /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude /home/appuser/.local; do
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        chown -hR -P appuser:appuser "$directory"
+    fi
+done
+setpriv --reuid=appuser --regid=appuser --init-groups \
+    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh /home/appuser/.local/bin
 
 # =============================================================================
 # Claude Code CLI
@@ -116,8 +124,6 @@ chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuse
 # The delegated Claude leg runs the stock `claude` from PATH and nothing else.
 # Download only while Keep Claude Code installed is on. The CLI then updates
 # itself in ~/.local. Never pinned, patched or wrapped here.
-mkdir -p /home/appuser/.local/bin
-chown appuser:appuser /home/appuser/.local /home/appuser/.local/bin
 if HOME=/home/appuser claude_cli_keep_installed; then
     setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         bash /app/docker/install-claude-cli.sh || true
@@ -133,8 +139,8 @@ fi
 CLAUDE_JSON_REAL="/home/appuser/.claude/.claude.json"
 CLAUDE_JSON_LINK="/home/appuser/.claude.json"
 if [ ! -e "$CLAUDE_JSON_LINK" ] && [ ! -L "$CLAUDE_JSON_LINK" ]; then
-    ln -s "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
-    chown -h appuser:appuser "$CLAUDE_JSON_LINK"
+    setpriv --reuid=appuser --regid=appuser --init-groups \
+        ln -s "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
     echo "Routed .claude.json into the retained provider volume without creating or rewriting provider data"
 fi
 
@@ -171,9 +177,10 @@ fi
 # Legacy: Copy GitHub CLI auth from root if it exists (for backwards compatibility)
 if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.yml ]; then
     echo "Copying GitHub CLI auth from root to appuser (legacy migration)..."
-    cp /root/.config/gh/hosts.yml /home/appuser/.config/gh/ 2>/dev/null || true
-    cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
-    chown -R appuser:appuser /home/appuser/.config/gh
+    # Root reads its legacy files, but only appuser writes into the home.
+    /usr/bin/tar -C /root/.config/gh -cf - . 2>/dev/null |
+        setpriv --reuid=appuser --regid=appuser --init-groups \
+            /usr/bin/tar --no-same-owner -C /home/appuser/.config/gh -xf - 2>/dev/null || true
     # Configure git credential helper as appuser
     setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
         git config --global credential.helper '!gh auth git-credential'
@@ -204,10 +211,7 @@ fi
 # Mount roots and retained database permissions are handled non-recursively
 # by the Python runtime after resolving DATA_DIR through Settings.
 
-# Final ownership fix for active Fluid settings and provider compatibility data.
-chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
-
 # Python owns PostgreSQL, the existing Chromium supervisor, and the app. It
 # drops root itself after safely preparing empty mount roots. tini must forward
 # only to this supervisor (not -g), so application cleanup precedes PG shutdown.
-exec /usr/local/bin/python3 -I /app/docker/container_runtime.py "$@"
+exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@"

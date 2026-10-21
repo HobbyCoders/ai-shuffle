@@ -117,8 +117,13 @@ does not follow symlinks. Once the record says "enabled", files PUID has since
 placed in a protected tree are logged, not adopted. With the setting off, the
 next start restores the recorded uid/gid/mode and removes the record. Both
 directions are idempotent and resume after an interruption. If enabling fails,
-the start undoes the partial change, logs it loudly and runs unisolated, as
-with the setting off.
+the start undoes the partial data change, logs it loudly and runs unisolated, as
+with the setting off. Image code under `/app` stays root-owned in every mode;
+disabling isolation does not release it. The root startup phase reads only
+mount-path settings through image-installed dependencies and the image's
+`docker/` helpers, with an image-only executable PATH and isolated Python
+imports. Full application settings and any source-update handover load only
+after dropping privileges. Runtime writes stay in the data volume or home.
 
 **Deviations from the recommendation and remaining exposure**
 

@@ -597,6 +597,10 @@ def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, mo
     assert artifacts[2][0]["sha256"] in build_env["CHROME_EXECUTABLE"]
     assert tool["sha256"] in build_env["LD_LIBRARY_PATH"]
     assert "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN" not in build_env
+    # The runtime producer writes generated frontend assets beside the staged
+    # source on the data volume, never into the read-only image application.
+    built = updater.root / "versions" / B / "source" / "app/static/index.html"
+    assert built.read_text() == "built"
     assert all("x-shuffle-lease" not in request.headers for request in feed[3]
                if request.url.host == "runtimes.example")
 

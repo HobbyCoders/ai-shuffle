@@ -91,6 +91,41 @@ def log(message):
     print(f"container runtime: {message}", file=sys.stderr, flush=True)
 
 
+def load_startup_settings():
+    """Only mount paths, from image-installed dependencies; no app imports.
+
+    Keep the same environment/.env precedence as Settings. Values are data,
+    never Python or shell code. The full application settings load after drop.
+    """
+    from pathlib import Path  # local namespace also supports standalone spec loaders
+    from pydantic_settings import BaseSettings
+    from types import SimpleNamespace
+
+    class Paths(BaseSettings):
+        data_dir: Path | None = None
+        workspace_dir: Path | None = None
+        model_config = {"extra": "ignore", "env_file_encoding": "utf-8"}
+
+    ref = os.environ.get("AI_SHUFFLE_ENV_FILE", "").strip()
+    paths = Paths(_env_file=ref if ref and os.path.isfile(ref) else ".env")
+    # Match platform.py's container detection and Linux/macOS local overrides.
+    local = os.environ.get("LOCAL_MODE", "").lower()
+    docker = local in {"false", "0", "no"} or (
+        local not in {"true", "1", "yes"} and (
+            Path("/.dockerenv").exists() or os.environ.get("USER") == "appuser"
+            or os.environ.get("HOME") == "/home/appuser"
+            or all(Path(p).exists() for p in ("/data", "/workspace", "/app"))))
+    home = Path.home()
+    if docker:
+        data, workspace = Path("/data"), Path("/workspace")
+    else:
+        data = (home / "Library/Application Support/ai-shuffle" if sys.platform == "darwin"
+                else Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "ai-shuffle")
+        workspace = home / "ai-shuffle-workspace"
+    return SimpleNamespace(effective_data_dir=paths.data_dir or data,
+                           effective_workspace_dir=paths.workspace_dir or workspace)
+
+
 def load_settings():
     # This uses Pydantic's sources and the app's normalization, including the
     # explicit-fields set (which includes env-file values even equal to defaults).
@@ -784,12 +819,14 @@ def drop_privileges(settings):
         split = isolate(settings, account)
         if split is not None:
             isolation().drop(split)
-            _agent_path = os.environ.get("PATH", "")
+            _agent_path = os.environ.pop("SHUFFLE_CONTAINER_PATH", os.environ.get("PATH", ""))
             os.environ["PATH"] = isolation().trusted_path(_agent_path)
         else:
             os.initgroups(account.pw_name, account.pw_gid)
             os.setgid(account.pw_gid)
             os.setuid(account.pw_uid)
+            if "SHUFFLE_CONTAINER_PATH" in os.environ:
+                os.environ["PATH"] = os.environ.pop("SHUFFLE_CONTAINER_PATH")
         os.environ["HOME"] = account.pw_dir
     elif getattr(isolation(), "setting", lambda: "off")() == "on":
         log("agent isolation could NOT be enabled: the container did not start as root "
@@ -1130,8 +1167,11 @@ def main(argv=None):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: STOP.set())
     try:
+        drop_privileges(load_startup_settings())
+        # Only unprivileged code may import the application (or hand over to a
+        # retained update's supervisor/interpreter on the data volume).
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         settings = load_settings()
-        drop_privileges(settings)
         # After the drop: setuid() resets the flag to suid_dumpable.
         harden_process_introspection(settings)
         if (args.action or "run") == "run":
@@ -1154,8 +1194,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    # Entrypoint and maintenance commands execute this absolute script. Python
-    # otherwise searches only /app/docker, not the sibling application package.
-    # Anchor imports to the installed script, never to a caller's working folder.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    # Entrypoint runs the image interpreter with -I: no user site, PYTHONPATH,
+    # or caller working directory participates in the root phase's imports.
     sys.exit(main())

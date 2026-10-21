@@ -75,7 +75,7 @@ OVERLAYS = ()
 # The trust key is checked on its own (scripts/ci/update_reach.py).
 IMAGE_INPUTS = ("Dockerfile", "entrypoint.sh", "docker/install-claude-cli.sh")
 # sha256 of IMAGE_INPUTS with comment lines removed. Update with --pin.
-IMAGE_INPUTS_PIN = "fa183115e2a5f32ea3497d3a1404c5f0e95fe5de9e53eb5fbd68b553793380e3"
+IMAGE_INPUTS_PIN = "409cd95f600e35c95e75dc6064fbc877c46e5f033e11968462767ff56484d92b"
 
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,39}")
 
