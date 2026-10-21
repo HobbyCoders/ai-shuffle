@@ -6,8 +6,9 @@ Covers the three framework-free responsibilities:
 * ``validate_provider_model`` — every rejection reason plus the happy path;
 * ``dispatch_worker`` — the worker lifecycle and its failure modes.
 
-NOTHING here spawns a session, a CLI or a network call: ``turn_manager`` and the
-DB layer are stubbed. The task registry is the REAL one — the ``kind="agent"``
+NOTHING here runs provider inference, a CLI or a network call. ``turn_manager``
+is stubbed; the composer fast-mode regression uses real preference, identity
+and provider rows in the isolated test database. The task registry is the REAL one — the ``kind="agent"``
 registration is load-bearing (it is what pins the parent in the session pool),
 so it is asserted against the real predicate rather than a mock.
 """
@@ -720,6 +721,63 @@ class TestDispatchWorker:
         _dispatch()
         assert dispatch_env.create_kwargs["fast"] is False
         assert dispatch_env.tm.submitted[0]["overrides"]["fast"] is False
+
+    @pytest.mark.parametrize("caller_kind", ["owner", "admin", "paired", "paired-local", "api_user"])
+    @pytest.mark.parametrize("saved", [True, False])
+    @pytest.mark.parametrize("model", ["gpt-6.1-sol", "prov:chatgpt-plan:gpt-6.1-sol", "unsupported"])
+    def test_composer_fast_pick_reaches_dispatch_through_real_chain(
+            self, mock_db, dispatch_env, monkeypatch, caller_kind, saved, model):
+        from types import SimpleNamespace
+        from app.core import preference_identity
+        from app.core.model_effort import fast_preference_key
+        from app.core.model_override import fast_mode_supported
+        from app.core.provider.harness_adapter import _decide_provider_kind
+        from app.core.provider.types import SessionOptions
+        from app.db import database, mobile_tool_identity, sessions
+
+        # Only the external account lookup is replaced, not identity mapping,
+        # preference storage/lookup or the provider capability decision.
+        monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "test-owner")
+        account = None if caller_kind == "paired-local" else "test-owner"
+        monkeypatch.setattr(preference_identity.mobile_hub, "ownership",
+                            lambda **kw: {"account_id": account} if account else None)
+        state = SimpleNamespace(is_admin=True)
+        api_user_id = None
+        if caller_kind == "api_user":
+            api_user_id = "test-key-user"
+            database.create_api_user(api_user_id, "Test key user", "test-hash", profile_ids=["default"])
+            state.api_user = {"id": api_user_id}
+        elif caller_kind.startswith("paired"):
+            state.paired_client = {"id": "test-controller"}
+        sessions.create_session("parent-1", "default", api_user_id=api_user_id, fast=not saved)
+        if caller_kind in ("admin", "paired", "paired-local"):
+            kind = "admin" if caller_kind == "admin" else "paired"
+            mobile_tool_identity.bind("parent-1", dict(
+                kind=kind, principal_id="test-controller", credential_hash="test-hash",
+                account_id=account if kind == "paired" else None,
+                owner="install-admin" if kind == "admin" else
+                      "account:" + account if account else "paired:test-controller"), new=True)
+        original = database.get_session
+        monkeypatch.setattr(database, "get_session", lambda sid: {
+            **original(sid), "model": "opus", "fast": not saved, "api_user_id": api_user_id})
+        identity = preference_identity.request_preference_identity(SimpleNamespace(state=state))
+        key = fast_preference_key(model)
+        database.set_user_preference(*identity, key, saved)
+        if caller_kind in ("api_user", "paired-local"):
+            # Neither principal may accidentally read the install owner's pick.
+            database.set_user_preference(*preference_identity.account_identity("test-owner"), key, not saved)
+        database.create_model_provider("chatgpt-plan", "ChatGPT plan", "chatgpt",
+                                       "https://example.invalid", models=[{"id": "gpt-6.1-sol"}])
+        assert _decide_provider_kind(SessionOptions(
+            model="gpt-6.1-sol", extra={"provider_id": "chatgpt-plan"})) == "openai_responses"
+        assert fast_mode_supported("gpt-6.1-sol", "chatgpt-plan") is True
+        if model != "unsupported":
+            assert key == "composer.modelFast.gpt-6.1-sol"
+        result = _dispatch(provider_id="chatgpt-plan", model_id=model)
+        assert result.ok, result
+        expected = None if saved and model == "unsupported" else saved
+        assert dispatch_env.create_kwargs.get("fast") is expected
+        assert dispatch_env.tm.submitted[0]["overrides"].get("fast") is expected
 
     @pytest.mark.parametrize("entrypoint", ["Task", "Swarm"])
     @pytest.mark.parametrize("caller,saved,expected", [(False, True, True), (True, False, False)])

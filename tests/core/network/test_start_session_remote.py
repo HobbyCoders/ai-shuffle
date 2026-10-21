@@ -105,6 +105,37 @@ async def test_remote_start_receiver_preference_beats_sender_fallback_not_explic
         assert row["effort"] == turn["overrides"]["effort"] == expected
 
 
+@pytest.mark.parametrize("saved", [True, False])
+async def test_remote_sol_start_uses_real_synced_composer_preference(workers, monkeypatch, kicks, saved):
+    from types import SimpleNamespace
+    from app.core import preference_identity
+
+    a, b, _ = network(workers, monkeypatch)
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "test-owner")
+    with b.active():
+        identity = preference_identity.request_preference_identity(
+            SimpleNamespace(state=SimpleNamespace(is_admin=True)))
+        database.set_user_preference(*identity, "composer.modelFast.gpt-6.1-sol", saved)
+        database.create_model_provider("chatgpt-plan", "ChatGPT plan", "chatgpt",
+                                       "https://example.invalid", models=[{"id": "gpt-6.1-sol"}])
+        database.set_session_run_binding("caller", model="prov:chatgpt-plan:gpt-6.1-sol", fast=not saved)
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        assert database.get_user_preference(*identity, "composer.modelFast.gpt-6.1-sol")["value"] is saved
+    with b.active():
+        result = await start(ARGS)
+        assert not result.is_error, result.text
+        child = json.loads(result.text)["session_id"]
+    with a.active():
+        row = database.get_session(child)
+        [turn] = agent_turns(child)
+        assert row["provider_id"] == "chatgpt-plan"
+        assert row["model"] == "prov:chatgpt-plan:gpt-6.1-sol"
+        assert bool(row["fast"]) is saved
+        assert turn["overrides"]["fast"] is saved
+
+
 @pytest.mark.parametrize("old_receiver", [True, False])
 @pytest.mark.parametrize("saved,parent,supported,expected", [
     (False, True, True, False),

@@ -653,6 +653,28 @@ def test_list_active_visible_local_same_owner(peers):
     assert "prompt" not in result["sessions"][0]
 
 
+@pytest.mark.parametrize("saved", [True, False])
+def test_start_session_reads_real_sol_composer_fast_pick(peers, monkeypatch, saved):
+    from types import SimpleNamespace
+    from app.core import preference_identity
+
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "test-owner")
+    identity = preference_identity.request_preference_identity(
+        SimpleNamespace(state=SimpleNamespace(is_admin=True)))
+    database.set_user_preference(*identity, "composer.modelFast.gpt-6.1-sol", saved)
+    database.create_model_provider("chatgpt-plan", "ChatGPT plan", "chatgpt",
+                                   "https://example.invalid", models=[{"id": "gpt-6.1-sol"}])
+    database.set_session_run_binding("caller", model="prov:chatgpt-plan:gpt-6.1-sol", fast=not saved)
+    result = orch._queue("caller", {"title": "Review", "prompt": "Review this work",
+                                    "request_id": "sol-fast"}, "start")
+    child = sessions.get_session(result["session_id"])
+    turn = turns.get_turn(result["turn_id"])
+    assert child["provider_id"] == "chatgpt-plan"
+    assert child["model"] == "prov:chatgpt-plan:gpt-6.1-sol"
+    assert bool(child["fast"]) is saved
+    assert turn["overrides"]["fast"] is saved
+
+
 def test_start_is_top_level_and_atomic_peer_authored(peers):
     result = orch._queue("caller", {"title": "Independent review", "prompt": "Review this work", "request_id": "review"}, "start")
     child = sessions.get_session(result["session_id"])
