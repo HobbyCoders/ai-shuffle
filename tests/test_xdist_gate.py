@@ -261,12 +261,14 @@ def test_all_slots_wait_and_resume_after_crash(tmp_path):
 def test_configure_caps_workers_per_slot(tmp_path, requested):
     from types import SimpleNamespace
     config = FakeConfig(numprocesses=requested)
-    config.option = SimpleNamespace(numprocesses=requested)
+    # xdist materializes these specs in pytest_cmdline_main, before configure.
+    config.option = SimpleNamespace(numprocesses=requested, tx=["popen"] * 8)
     gate = _xdist_gate.configure(config, environ={"AI_SHUFFLE_PYTEST_SLOTS": "2"},
                                  path=str(tmp_path / "gate.lock"), max_wait=0.2)
     try:
         assert gate is not None
         assert config.option.numprocesses == 2
+        assert config.option.tx == ["popen"] * 2
     finally:
         _xdist_gate.unconfigure(config)
 

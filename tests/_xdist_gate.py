@@ -286,6 +286,9 @@ def configure(config, environ: Optional[Mapping[str, str]] = None, **gate_kwargs
         requested = config.getoption("numprocesses", default=None)
         if isinstance(requested, str) or requested > WORKERS_PER_SLOT:
             config.option.numprocesses = WORKERS_PER_SLOT
+            # xdist builds tx in pytest_cmdline_main, before pytest_configure.
+            # Updating only numprocesses here would leave the actual workers uncapped.
+            config.option.tx = config.option.tx[:WORKERS_PER_SLOT]
             _warn(gate_kwargs.get("stream"),
                   f"pytest gate: limiting {requested!r} workers to {WORKERS_PER_SLOT} per slot.")
         gate_kwargs.setdefault("slots", slot_count(environ))
