@@ -85,7 +85,9 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
           right = Math.min(right, x2); bottom = Math.min(bottom, y2);
         };
         const length = (value: string, size: number) => value.endsWith("%") ? px(value) * size / 100 : px(value);
-        const parent = (node: Element): Element | null => node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
+        // Slotted light-DOM children inherit clipping from the slot's shadow
+        // ancestors before reaching the host, not from their light-DOM parent.
+        const parent = (node: Element): Element | null => node.assignedSlot ?? node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
         const fixedContainer = (node: Element): Element | null => {
           for (let ancestor = parent(node); ancestor; ancestor = parent(ancestor)) {
             const style = getComputedStyle(ancestor);

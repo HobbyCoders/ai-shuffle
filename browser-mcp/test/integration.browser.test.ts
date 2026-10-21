@@ -34,6 +34,7 @@ import { runBatch } from "../src/tools/batch.js";
 import { TOOL_MAP } from "../src/tools/index.js";
 import type { McpToolResult } from "../src/tools/result.js";
 import { WATCH_KEY } from "../src/dommutation.js";
+import { observationRootStatus } from "../src/tools/observation_scope.js";
 import { BrowserWorkspace } from "../src/workspace.js";
 import { runWait } from "../src/tools/wait.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -53,6 +54,8 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
     if (req.url?.startsWith("/review/")) {
       const url = new URL(req.url, "http://fixture.test");
       const pages: Record<string, string> = {
+        "/review/history-a": '<title>History A</title><button>History A</button><p id="clock">Clock</p><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++});setInterval(()=>clock.textContent=String(Date.now()),100)</script>',
+        "/review/history-b": '<title>History B</title><button>History B</button><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++})</script>',
         "/review/single": '<title>Single</title><label>Size<select><option value="s">Small</option><option value="m">Medium</option></select></label>',
         "/review/repeated": '<title>Repeated</title><main aria-label="Repeated">' + '<button>Same</button>'.repeat(20) + '</main>',
         "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
@@ -342,6 +345,139 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    it("FOLLOWUP slotted clipped frames stay hidden from read_text", async () => {
+      const page = await load('<p>Visible prose</p><div id="host"><iframe srcdoc="<p>HiddenSlottedMarker</p>"></iframe></div>');
+      await page.evaluate(() => {
+        document.getElementById("host")!.attachShadow({ mode: "open" }).innerHTML =
+          '<div style="overflow:hidden;height:0"><slot></slot></div>';
+      });
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.getByText("HiddenSlottedMarker").waitFor({ state: "attached" });
+      expect(await observationRootStatus({ frame, primary: false })).toBe("hidden");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: 1 });
+      expect((result.content[1] as { text: string }).text).not.toContain("HiddenSlottedMarker");
+      await page.evaluate(() => {
+        (document.getElementById("host")!.shadowRoot!.firstElementChild as HTMLElement).style.height = "200px";
+      });
+      expect(await observationRootStatus({ frame, primary: false })).toBe("included");
+      expect((await runReadText(session)).content[1]).toMatchObject({ text: expect.stringContaining("HiddenSlottedMarker") });
+    });
+    it("FOLLOWUP back and forward restore bfcache within the readiness budget and invalidate refs", async () => {
+      const page = await session.ensurePage();
+      page.setDefaultNavigationTimeout(3000);
+      try {
+        await runNavigate(session, { url: httpUrl + "review/history-a" });
+        const beforeA = session.currentSnapshotId;
+        await runNavigate(session, { url: httpUrl + "review/history-b" });
+        const beforeB = session.currentSnapshotId;
+        expect(beforeB).toBeGreaterThan(beforeA);
+        const snapshot = session.snapshot.bind(session);
+        const registryBeforeSnapshot: number[] = [];
+        const snapshotSpy = vi.spyOn(session, "snapshot").mockImplementation(async (...args) => {
+          registryBeforeSnapshot.push(session.refs.knownCount());
+          return snapshot(...args);
+        });
+        const started = performance.now();
+        const back = body(await runNavigate(session, { url: "back" }));
+        snapshotSpy.mockRestore();
+        expect(registryBeforeSnapshot).toEqual([0]);
+        expect(back.url).toBe(httpUrl + "review/history-a");
+        const backMs = Math.round(performance.now() - started);
+        console.info("HISTORY_RESTORE", JSON.stringify({ direction: "back", ms: backMs, timings: back.timings }));
+        expect(backMs).toBeLessThan(2500);
+        expect(await page.evaluate(() => (window as unknown as { restores: number }).restores)).toBe(1);
+        expect(back.snapshot_stale).toBe(true);
+        // Playwright may reuse token strings after a new snapshot (including
+        // the same cached elements). The old registry must be cleared BEFORE
+        // publishing the restored snapshot, whose refs are now usable.
+        expect(back.snapshot_id).toBeGreaterThan(beforeB);
+        // Restoring a frozen ticker does not by itself prove a recent baseline.
+        await page.waitForTimeout(300);
+        const restoredA = await ref("History A");
+        const restoredAction = body(await runAct(session, { kind: "click", ref: restoredA }));
+        console.info("HISTORY_RESTORED_ACTION", JSON.stringify(restoredAction));
+        expect(restoredAction).toMatchObject({ ok: true, snapshot_stale: false });
+        const beforeForward = session.currentSnapshotId;
+        const forwardSpy = vi.spyOn(session, "snapshot").mockImplementation(async (...args) => {
+          expect(session.refs.knownCount()).toBe(0);
+          return snapshot(...args);
+        });
+        const forwardStarted = performance.now();
+        const forward = body(await runNavigate(session, { url: "forward" }));
+        forwardSpy.mockRestore();
+        const forwardMs = Math.round(performance.now() - forwardStarted);
+        console.info("HISTORY_RESTORE", JSON.stringify({ direction: "forward", ms: forwardMs, timings: forward.timings }));
+        expect(forwardMs).toBeLessThan(2500);
+        expect(await page.evaluate(() => (window as unknown as { restores: number }).restores)).toBe(1);
+        expect(forward).toMatchObject({ url: httpUrl + "review/history-b", snapshot_stale: true });
+        expect(forward.snapshot_id).toBeGreaterThan(beforeForward);
+        expect(body(await runAct(session, { kind: "click", ref: await ref("History B") })).snapshot_stale).toBe(false);
+      } finally {
+        vi.restoreAllMocks();
+        page.setDefaultNavigationTimeout(30000);
+      }
+    });
+    it("FOLLOWUP frame sampling ignores a once-sampled slow top clock", async () => {
+      const rows: { kind: string; dispatch: number; settle: number }[] = [];
+      for (const slowTop of [false, true]) {
+        const page = await load('<button>Sample action</button><p id="slow">Slow clock</p><iframe srcdoc="<p id=c>Frame clock</p>"></iframe>');
+        const target = await ref("Sample action");
+        const frame = page.mainFrame().childFrames()[0];
+        for (let i = 0; i < 3; i++) {
+          await frame.evaluate(() => {
+            const w = window as unknown as { ticker: number };
+            clearInterval(w.ticker);
+            w.ticker = setInterval(() => { document.getElementById("c")!.textContent = String(Date.now()); }, 80);
+          });
+          if (slowTop) await page.evaluate(() => {
+            const w = window as unknown as { slowTimer: number };
+            clearInterval(w.slowTimer);
+            setTimeout(() => {
+              document.getElementById("slow")!.textContent = String(Date.now());
+              w.slowTimer = setInterval(() => { document.getElementById("slow")!.textContent = String(Date.now()); }, 1000);
+            }, 20);
+          });
+          const result = body(await runAct(session, { kind: "click", ref: target }));
+          rows.push({ kind: slowTop ? "frame+slow-top" : "frame", dispatch: result.timings.dispatch_ms, settle: result.timings.settle_ms });
+          expect(result).toMatchObject({ settle_capped: false, snapshot_stale: false });
+        }
+        await page.goto("about:blank");
+      }
+      console.info("FOLLOWUP_TIMINGS", JSON.stringify(rows));
+      const median = (values: number[]) => values.sort((a, b) => a - b)[1];
+      const metric = (kind: string, key: "dispatch" | "settle") => median(rows.filter(row => row.kind === kind).map(row => row[key]));
+      expect(metric("frame+slow-top", "dispatch")).toBeLessThan(metric("frame", "dispatch") + 70);
+      expect(metric("frame+slow-top", "settle")).toBeLessThan(metric("frame", "settle") + 70);
+    });
+    it("FOLLOWUP empty frame text scans are cached and invalidated by idle light/shadow mutations", async () => {
+      const page = await load('<button>Cache action</button><iframe srcdoc="<div id=host></div>"></iframe>');
+      const target = await ref("Cache action");
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", '<div> </div>'.repeat(5000));
+        document.getElementById("host")!.attachShadow({ mode: "open" }).innerHTML = '<span> </span>';
+        const original = document.createTreeWalker.bind(document);
+        const w = window as unknown as { scans: number };
+        w.scans = 0;
+        document.createTreeWalker = (...args) => { w.scans++; return original(...args); };
+      });
+      await runAct(session, { kind: "click", ref: target });
+      const scans = () => frame.evaluate(() => (window as unknown as { scans: number }).scans);
+      const first = await scans();
+      expect(first).toBeGreaterThan(0);
+      await runAct(session, { kind: "click", ref: target });
+      expect(await scans()).toBe(first);
+      for (const shadow of [false, true]) {
+        const before = await scans();
+        await frame.evaluate(shadow => {
+          const root = shadow ? document.getElementById("host")!.shadowRoot! : document.body;
+          const p = document.createElement("p"); p.textContent = "New frame prose"; root.append(p);
+        }, shadow);
+        await runAct(session, { kind: "click", ref: target });
+        expect(await scans()).toBeGreaterThan(before);
+      }
+    });
     it("counts only emitted navigate refs after repeated children collapse", async () => {
       const result = await runNavigate(session, { url: httpUrl + "review/repeated" });
       const tree = (result.content[1] as { text: string }).text;
@@ -565,7 +701,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.waitForTimeout(250);
       const rows = [];
       for (let i = 0; i < 3; i++) {
-        await page.waitForTimeout(1000); // frame documents have no idle observer
+        await page.waitForTimeout(1000); // no frame ticker history is collected while idle
         const target = await ref("Spaced action");
         const start = Date.now();
         const result = body(await runAct(session, { kind: "click", ref: target }));

@@ -63,7 +63,9 @@ export async function installMutationWatcher(input: string | { key: string; pass
   const passive = typeof input !== "string" && input.passive;
   const w = window as unknown as Record<string, unknown>;
   type TextHistory = WeakMap<Node, { samples: number; first: number; last: number }>;
-  const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory;
+  type TextPresence = { value?: boolean; observer: MutationObserver; roots: WeakSet<Node> };
+  const prev = w[key] as { observer?: { disconnect(preserveTextCache?: boolean): void }; textHistory?: TextHistory;
+    textPresence?: WeakMap<Document, TextPresence>; textInvalidators?: Set<WeakRef<MutationObserver>>;
     sampledDocuments?: WeakSet<Document>; tickerDocuments?: WeakSet<Document>; emptyDocuments?: WeakSet<Document>;
     observedShadows?: WeakMap<ShadowRoot, number>;
     passive: boolean; observedSince: number } | undefined;
@@ -73,25 +75,50 @@ export async function installMutationWatcher(input: string | { key: string; pass
   let sampleSince = observedSince;
   let hasUncoveredFrames = false;
   const canSample = typeof input === "string" || input.sample !== false;
-  prev?.observer?.disconnect();
+  prev?.observer?.disconnect(true);
   const textHistory: TextHistory = prev?.textHistory ?? new WeakMap();
+  let textPresence = prev?.textPresence ?? new WeakMap<Document, TextPresence>();
+  // Weak refs permit explicit teardown without retaining detached frame documents.
+  const textInvalidators = prev?.textInvalidators ?? new Set<WeakRef<MutationObserver>>();
+  for (const ref of textInvalidators) if (!ref.deref()) textInvalidators.delete(ref);
+  const cacheRoot = (root: Node, cached: TextPresence) => {
+    if (cached.roots.has(root)) return;
+    cached.roots.add(root); cached.value = undefined;
+    cached.observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
+  };
   const sampledDocuments = prev?.sampledDocuments ?? new WeakSet<Document>();
-  // Frame observers are disconnected while idle: ticker evidence is valid for
-  // this action only. A previously proven ticker document must sample again.
+  // Frame action observers are disconnected while idle (only the text-presence
+  // invalidator remains). Ticker evidence must be proven afresh each action.
   const frameTextTargets = new WeakMap<Node, { samples: number; last: number }>();
   const tickerDocuments = prev?.tickerDocuments ?? new WeakSet<Document>();
   const emptyDocuments = prev?.emptyDocuments ?? new WeakSet<Document>();
   const observedShadows = prev?.observedShadows ?? new WeakMap<ShadowRoot, number>();
   const newDocuments = new WeakSet<Document>();
+  const samplingShadows = new WeakSet<Node>();
   const samplingDocuments = new Map<Document, number>();
   const samplingTargets = new Set<Node>();
-  const hasText = (root: Node): boolean => {
+  const scanText = (root: Node, cached: TextPresence): boolean => {
+    cacheRoot(root, cached);
     const walker = (root.nodeType === 9 ? root as Document : root.ownerDocument!).createTreeWalker(root, 4 /* SHOW_TEXT */);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) if (node.textContent?.trim()) return true;
     if ("querySelectorAll" in root) for (const el of Array.from((root as Document).querySelectorAll("*"))) {
-      if (el.shadowRoot && hasText(el.shadowRoot)) return true;
+      if (el.shadowRoot && scanText(el.shadowRoot, cached)) return true;
     }
     return false;
+  };
+  const hasText = (doc: Document): boolean => {
+    let cached = textPresence.get(doc);
+    if (!cached) {
+      const Observer = (doc.defaultView as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver;
+      const entry: TextPresence = { observer: new Observer(() => {
+        // One invalidation is enough until the next scan. Release observed
+        // shadow roots too, including hosts removed while the frame is idle.
+        entry.value = undefined; entry.observer.disconnect(); entry.roots = new WeakSet();
+      }), roots: new WeakSet() };
+      textPresence.set(doc, cached = entry);
+      textInvalidators.add(new WeakRef(entry.observer));
+    }
+    return cached.value ?? (cached.value = scanText(doc, cached));
   };
   const cleanups: (() => void)[] = [];
   const activeCleanups: (() => void)[] = [];
@@ -116,7 +143,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
     addedNodes: 0, removedNodes: 0, attributeChanges: 0, characterDataChanges: 0,
     startUrl: location.href, lastMutation: Date.now(), pendingRequests: 0, pendingTimers: 0,
     deadline: 0, textSamples: 0, textTargets: new Set<Node>(), lastNonTextMutation: Date.now(), lastPendingWork: 0,
-    textHistory, sampledDocuments, tickerDocuments, emptyDocuments, observedShadows,
+    textHistory, textPresence, textInvalidators, sampledDocuments, tickerDocuments, emptyDocuments, observedShadows,
     knownTextTargets: new WeakSet<Node>(), hasKnownText: false,
     observedSince, lastNonBaselineTextMutation: Date.now(),
     nonBaselineTextChanges: 0, sampling: true, passive,
@@ -128,7 +155,14 @@ export async function installMutationWatcher(input: string | { key: string; pass
         state.textTargets.clear(); samplingTargets.clear(); samplingDocuments.clear(); // no idle frame retention
         pruneShadows();
       },
-      disconnect: () => { state.observer.pause(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); },
+      disconnect: (preserveTextCache = false) => {
+        state.observer.pause();
+        for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+        if (!preserveTextCache) {
+          for (const ref of textInvalidators) ref.deref()?.disconnect();
+          textInvalidators.clear(); state.textPresence = textPresence = new WeakMap();
+        }
+      },
     },
   };
   const changed = () => { state.lastMutation = Date.now(); };
@@ -160,6 +194,10 @@ export async function installMutationWatcher(input: string | { key: string; pass
     if (roots.has(root)) return;
     roots.add(root);
     const doc = root.nodeType === 9 ? root as Document : root.ownerDocument!;
+    // Keep only a cache invalidator while frames are idle, not action counters,
+    // timer hooks or strong document references. Newly discovered roots invalidate.
+    const cached = textPresence.get(doc);
+    if (cached) cacheRoot(root, cached);
     if (root !== doc) {
       const shadow = root as ShadowRoot;
       const since = observedShadows.get(shadow) ?? Date.now();
@@ -167,9 +205,10 @@ export async function installMutationWatcher(input: string | { key: string; pass
       if (!state.passive && state.sampling && canSample && Date.now() - since < 100) {
         hasUncoveredFrames = true;
         sampleSince = Math.max(sampleSince, since);
+        if (topRoot) samplingShadows.add(root);
       }
     }
-    if (!topRoot && newDocuments.has(doc) && hasText(root)) {
+    if (!topRoot && newDocuments.has(doc) && hasText(doc)) {
       hasUncoveredFrames = true;
       sampleSince = Math.max(sampleSince, Date.now());
     }
@@ -186,12 +225,18 @@ export async function installMutationWatcher(input: string | { key: string; pass
             ? { samples: old.samples + 1, first: old.first, last: now }
             : { samples: 1, first: now, last: now });
           if (state.sampling && !state.passive) {
-            samplingTargets.add(target);
             if (target.ownerDocument !== document) {
+              samplingTargets.add(target);
               const previous = frameTextTargets.get(target);
               frameTextTargets.set(target, { samples: previous && now - previous.last <= 250 ? previous.samples + 1 : 1, last: now });
             }
             baseline(target);
+            // A shadow root first discovered on this action has no passive
+            // baseline yet. Give its first write a quiet window of its own;
+            // mature top-document clocks must not extend the frame sample.
+            if (samplingShadows.has(target.getRootNode()) && !state.knownTextTargets.has(target)) {
+              sampleSince = Math.max(sampleSince, now);
+            }
           }
           if (!state.passive && !state.sampling) {
             if (state.knownTextTargets.has(target)) {

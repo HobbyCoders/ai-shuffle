@@ -1,7 +1,8 @@
 /**
  * browser_navigate — url or "back"/"forward". Doubles as session bootstrap: the
  * first call acquires the page. Returns {url, title} plus an interactive-filtered
- * snapshot so the model has an immediate map of the landing page.
+ * snapshot so the model has an immediate map of the landing page. snapshot_stale
+ * refers to the pre-navigation refs, not the fresh refs returned alongside it.
  */
 
 import { raceWithTimeout, type Session } from "../session.js";
@@ -125,9 +126,11 @@ export async function runNavigate(
   const dispatchStart = performance.now();
   let rewroteTo: string | undefined;
   if (target === "back" || target === "forward") {
+    // A bfcache restore commits without a fresh DOMContentLoaded. The bounded
+    // readiness check below works for both restored and newly loaded documents.
     await (target === "back"
-      ? page.goBack({ waitUntil: "domcontentloaded" })
-      : page.goForward({ waitUntil: "domcontentloaded" }));
+      ? page.goBack({ waitUntil: "commit" })
+      : page.goForward({ waitUntil: "commit" }));
   } else {
     const requested = normalizeUrl(input.url);
     const refusal = (url: string) => {
@@ -262,6 +265,7 @@ export async function runNavigate(
       url: landed,
       title,
       snapshot_id: snap.snapshot_id,
+      snapshot_stale: true, // refs from the previous document are never reusable
       ref_count: emittedRefCount,
       truncated: snap.truncated,
       text_churn_ignored: textChurnIgnored,
