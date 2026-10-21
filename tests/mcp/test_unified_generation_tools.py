@@ -58,8 +58,8 @@ async def test_sdk_legacy_option_alias_is_validated_and_not_silently_lost(monkey
     assert output["status"] == "refused"
 
 
-async def test_unified_metadata_does_not_expand_first_request(monkeypatch, tmp_path):
-    from tests.core.test_native_first_request_budget import _first_request, _priced_before_the_turn
+async def test_unified_metadata_does_not_expand_first_request(monkeypatch, tmp_path, record_property):
+    from tests.core.test_native_first_request_budget import _first_request, _priced_before_the_turn, FIRST_REQUEST_BUDGET
     modern, legacy = tmp_path / "modern", tmp_path / "legacy"
     modern.mkdir()
     legacy.mkdir()
@@ -71,4 +71,7 @@ async def test_unified_metadata_does_not_expand_first_request(monkeypatch, tmp_p
         scoped.setattr(sdk, "UNIFIED_TOOL_NAMES", set())
         scoped.setattr(sdk, "_create_unified_tools", lambda *args, **kw: [])
         _, previous, _ = await _first_request(scoped, legacy, code_mode=False)
-    assert _priced_before_the_turn(current, "hello") <= _priced_before_the_turn(previous, "hello")
+    tokens = _priced_before_the_turn(current, "hello")
+    record_property("unified_json_first_request_tokens", tokens)
+    assert tokens <= FIRST_REQUEST_BUDGET
+    assert tokens <= _priced_before_the_turn(previous, "hello")

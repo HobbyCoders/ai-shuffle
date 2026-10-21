@@ -82,8 +82,8 @@ Networked generation reserves on the network founder so two account-holding
 workers cannot independently spend the same generation budget. Ordinary
 assistant spending is included using the existing accounting rules.
 
-Worker presence advertises `generation: 1`. Versioned catalog, prepare,
-reservation and execution operations use authenticated worker controls. An old
+Worker presence advertises `generation: 2`. Versioned catalog, prepare,
+reservation, overrun accounting and execution use authenticated worker controls. An old
 worker refuses with an update message; there is no fallback provider or replay
 of an uncertain paid submission. Native media and fal outputs are returned as
 session-owned artifacts, not peer-local paths. Chat generation cannot read
@@ -92,12 +92,30 @@ local media outside chat uploads.
 ## Current limits of this backend draft
 
 Only verified subscription combinations from the native capability table are
-eligible. API-key accounts without a declared media schema remain unavailable.
-Subscription prices and non-flat fal pricing formulas have not been established
-here, so those routes refuse submission rather than fabricate a price. Flat fal
-item/request quotes come from the account's pricing API and use the validated
-count. These limitations must be resolved before step 1 can be called complete.
-No live provider generation was exercised for this draft.
+eligible. The exact SuperGrok video combination has a USD 0.02 estimate from
+the verified native probe: 1 second, 480p, 16:9, silent. It is not a quote for
+other settings or proof of a subscription quota debit. The result carries the
+backend's actual reported cost when present, with price status `reported`.
+Reported overruns increase the founder's accounting, even beyond the daily cap;
+they never authorize another submission. Lower costs do not release the
+conservative reservation. A provider-reported cost is not a verified invoice.
+
+fal rates come from the account's pricing API. The shared model-schema service
+resolves item/request/generation counts, seconds or minutes with declared
+duration units, characters or 1K-character blocks with known input length, and
+megapixels with explicit declared dimensions. Fractional billing units round
+up. A catalog-only character price has unknown total until text is supplied.
+Unsupported units, missing dimensions or ambiguous duration/count parameters
+refuse submission rather than guess. Conditional pricing formulas are not
+inferred from resolution names.
+
+OpenAI/xAI API media routes remain unavailable: this base's Default models
+schema endpoint is fal-only, and its native API capability table declares no
+available media combinations or pricing. ChatGPT/SuperGrok image costs are not
+reported by their native adapters, so those routes still refuse; they are not
+labelled free or included in a plan. ChatGPT video and native audio/3D have no
+verified combinations. These gaps must be resolved before step 1 is complete.
+No new live provider generation was exercised for this draft.
 
 The choice-card UI, remembered-choice storage and Settings changes are separate
 steps. Editing and media-transform tools retain their existing handlers; this

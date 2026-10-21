@@ -35,7 +35,7 @@ def test_shape_has_all_keys_and_types():
     assert caps["handoff_target_resume"] == 1
     assert caps["handoff_receipt"] == 1
     from app.network.generation import WIRE_VERSION
-    assert type(caps["generation"]) is int and caps["generation"] == WIRE_VERSION == 1
+    assert type(caps["generation"]) is int and caps["generation"] == WIRE_VERSION == 2
     assert caps["terminal"] in (0, 1)
 
 

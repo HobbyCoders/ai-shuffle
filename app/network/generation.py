@@ -1,7 +1,7 @@
 """Versioned unified-generation actions over authenticated worker controls.
 
-Version 1 adds catalog, prepare, reserve and execute. Peers advertising version
-0 (or no capability) must be updated; requests never fall back to an old lane.
+Version 2 adds reported-cost overrun accounting to catalog/prepare/reserve/execute.
+Older peers must be updated; requests never fall back to an old lane.
 Credentials remain on the holding worker. Paid submissions are never replayed.
 """
 from __future__ import annotations
@@ -13,7 +13,9 @@ from app.core.generation_resolver import Candidate, RunContext, price_total
 from app.db.async_database import run_sync
 from app.network import control, engine, runners
 
-WIRE_VERSION = 1
+from app.core.runner_capabilities import GENERATION_VERSION
+
+WIRE_VERSION = GENERATION_VERSION
 ACTION = "generation"
 
 
@@ -34,18 +36,18 @@ async def request(worker, operation, **body):
         raise ValueError("The account-holding worker did not confirm the outcome. Do not automatically retry a generation submission.") from None
     except control.ControlRefused:
         raise ValueError("The account-holding worker refused unified generation. Check its account or update that worker; no fallback was used.") from None
-    if response.get("version") != WIRE_VERSION:
+    if type(response.get("version")) is not int or response["version"] != WIRE_VERSION:
         raise ValueError("Update that worker before using unified generation; its reply uses an older generation protocol.")
     return response
 
 
-async def catalog(kind, *, source=None, model=None, query=None, limit=15):
+async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None):
     entries = []
     for peer in await run_sync(runners.other_workers):
         if not peer.get("online"):
             continue
         try:
-            response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query, limit=limit)
+            response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
         except ValueError as exc:
             # Surface old/unreachable workers rather than silently treating their
             # accounts as absent. No account identities are advertised in presence.
@@ -78,6 +80,17 @@ async def reserve(amount):
     return await run_sync(generation_budget.reserve, amount)
 
 
+async def record_overrun(amount):
+    ctx = await run_sync(engine.load_context)
+    if ctx is not None and ctx.founder_device_id != ctx.device_id:
+        response = await request(ctx.founder_device_id, "record-overrun", amount=str(amount))
+        if response.get("recorded") is not True:
+            raise ValueError("The network founder did not confirm reported generation cost accounting.")
+        return
+    from app.core import generation_budget
+    await run_sync(generation_budget.record_overrun, amount)
+
+
 async def execute(candidate, prompt, context):
     response = await request(candidate.worker, "execute", kind=candidate.kind, source=candidate.account,
                              model=candidate.model, options=candidate.options, prompt=prompt,
@@ -108,12 +121,15 @@ async def handle(body, from_device):
     from app.core.generation_resolver import KINDS
 
     if type(body.get("version")) is not int or body["version"] != WIRE_VERSION:
-        raise ValueError("Update that worker before using unified generation; generation protocol version 1 is required.")
+        raise ValueError("Update that worker before using unified generation; generation protocol version 2 is required.")
     operation = body.get("operation")
-    if operation == "reserve":
+    if operation in ("reserve", "record-overrun"):
         ctx = await run_sync(engine.load_context)
         if ctx and ctx.founder_device_id != ctx.device_id:
             raise ValueError("Generation budget requests must go to the network founder.")
+        if operation == "record-overrun":
+            await record_overrun(body.get("amount"))
+            return {"version": WIRE_VERSION, "recorded": True}
         return {"version": WIRE_VERSION, "reserved": await reserve(body.get("amount"))}
     kind = body.get("kind")
     if kind not in KINDS:
@@ -125,7 +141,7 @@ async def handle(body, from_device):
     limit = body.get("limit", 15)
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Generation catalog limit must be between 1 and 50.")
-    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"), limit=limit)
+    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"), limit=limit, prompt=body.get("prompt"))
     if operation == "catalog":
         return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in candidates]}
     if operation not in ("prepare", "execute") or len(candidates) != 1:

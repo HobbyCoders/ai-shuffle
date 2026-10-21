@@ -17,6 +17,23 @@ POLL_INTERVAL = 5
 MAX_POLLS = 36
 MAX_WAIT = 180
 MAX_VIDEO_BYTES = 25 * 1024 * 1024
+# Approximate provider-reported cost of the exact #377 verified probe, not a
+# price for other durations/resolutions or proof of subscription quota debit.
+VERIFIED_ESTIMATE_USD = "0.02"
+
+
+def estimate_price(options):
+    validate_generation("grok", NativeGenerationSettings(image=None, video=options))
+    # Expanding the capability table must not silently extend this observation
+    # to another model, duration, resolution, aspect ratio or audio setting.
+    if (options.model, options.duration, options.resolution, options.aspect_ratio, options.generate_audio) != (
+            "grok-imagine-video-1.5-lite", 1, "480p", "16:9", False):
+        from app.core.generation_resolver import UNKNOWN_PRICE
+        return dict(UNKNOWN_PRICE)
+    return {"currency": "USD", "unit": "item", "amount": VERIFIED_ESTIMATE_USD,
+            "total": VERIFIED_ESTIMATE_USD, "status": "estimated",
+            "basis": "verified_native_probe",
+            "billing_note": "Approximate verified-probe cost; not an invoice or subscription quota debit."}
 
 SPEC = ToolSpec(name="GenerateNativeVideo", description=(
     "Generate a video using this session's SuperGrok subscription and Native generation account settings. "

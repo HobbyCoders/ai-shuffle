@@ -18,7 +18,7 @@ CONTEXT = RunContext(session_id="session", owner=True, unattended=False)
 @pytest.fixture
 def network(monkeypatch):
     from app.network import runners, control
-    row = {"device_id": "peer-worker", "online": True, "capabilities": {"generation": 1}}
+    row = {"device_id": "peer-worker", "online": True, "capabilities": {"generation": peer.WIRE_VERSION}}
     monkeypatch.setattr(runners, "self_device_id", lambda: "local-worker")
     monkeypatch.setattr(runners, "find", lambda worker: row if worker == row["device_id"] else None)
     monkeypatch.setattr(runners, "other_workers", lambda: [row])
@@ -26,11 +26,11 @@ def network(monkeypatch):
     async def call(worker, action, body, **kw):
         calls.append((worker, action, body, kw))
         if body["operation"] == "catalog":
-            return {"version": 1, "candidates": [asdict(ENTRY)]}
+            return {"version": peer.WIRE_VERSION, "candidates": [asdict(ENTRY)]}
         if body["operation"] == "prepare":
-            return {"version": 1, "candidate": asdict(ENTRY)}
+            return {"version": peer.WIRE_VERSION, "candidate": asdict(ENTRY)}
         if body["operation"] == "execute":
-            return {"version": 1, "result": {"success": True, "image_url": "/api/v1/artifacts/fake"}}
+            return {"version": peer.WIRE_VERSION, "result": {"success": True, "image_url": "/api/v1/artifacts/fake"}}
         raise AssertionError(body)
     monkeypatch.setattr(control, "call", call)
     return row, calls
@@ -52,7 +52,7 @@ async def test_explicit_remote_account_resolves_and_runs_only_on_holding_worker(
     assert calls[-1][2]["price"] == PRICE
 
 
-@pytest.mark.parametrize("version", [None, 0, False, "1"])
+@pytest.mark.parametrize("version", [None, 0, 1, False, "2"])
 async def test_older_peer_is_refused_before_any_dispatch(network, version):
     row, calls = network
     row["capabilities"] = {} if version is None else {"generation": version}
@@ -98,7 +98,7 @@ async def test_peer_receiver_rechecks_options_price_budget_and_claim(monkeypatch
     reserve = AsyncMock(return_value=False)
     monkeypatch.setattr(peer, "reserve", reserve)
     monkeypatch.setattr(peer, "claim", lambda command: True)
-    body = {"version": 1, "operation": "execute", "source": ENTRY.account, "kind": "image", "model": ENTRY.model,
+    body = {"version": peer.WIRE_VERSION, "operation": "execute", "source": ENTRY.account, "kind": "image", "model": ENTRY.model,
             "options": ENTRY.options, "prompt": "tree", "price": PRICE, "session_id": "session", "command_id": "request"}
     output = await peer.handle(body, "origin-worker")
     assert not output["result"]["success"]
@@ -110,3 +110,24 @@ async def test_peer_receiver_rechecks_options_price_budget_and_claim(monkeypatch
     with pytest.raises(ValueError, match="price changed"):
         await peer.handle({**body, "price": {**PRICE, "total": "0"}}, "origin-worker")
     execute.assert_awaited_once()
+
+
+async def test_reported_overrun_goes_to_founder_not_each_account_worker(network, monkeypatch):
+    from app.network import engine, control
+    monkeypatch.setattr(engine, "load_context", lambda: SimpleNamespace(founder_device_id="peer-worker", device_id="local-worker"))
+    call = AsyncMock(return_value={"version": peer.WIRE_VERSION, "recorded": True})
+    monkeypatch.setattr(control, "call", call)
+    await peer.record_overrun("0.01")
+    assert call.call_args.args[:2] == ("peer-worker", "generation")
+    assert call.call_args.args[2] == {"version": peer.WIRE_VERSION, "operation": "record-overrun", "amount": "0.01"}
+
+
+async def test_founder_receiver_records_actual_cost_without_authorizing_submission(monkeypatch):
+    from app.network import engine
+    from app.core import generation_budget
+    monkeypatch.setattr(engine, "load_context", lambda: None)
+    record = []
+    monkeypatch.setattr(generation_budget, "record_overrun", lambda amount: record.append(amount))
+    result = await peer.handle({"version": peer.WIRE_VERSION, "operation": "record-overrun", "amount": "0.01"}, "account-worker")
+    assert result == {"version": peer.WIRE_VERSION, "recorded": True}
+    assert record == ["0.01"]

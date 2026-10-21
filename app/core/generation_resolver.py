@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 KINDS = ("image", "video", "audio", "3d")
+# Owner-tunable ceiling for an unconfirmed item OR batch; never round floats here.
 CONFIRM_ABOVE_USD = Decimal("0.10")
 UNKNOWN_PRICE = {"currency": "USD", "unit": "item", "amount": None, "total": None, "status": "unknown"}
 
@@ -70,7 +71,7 @@ class Candidate:
 
 
 class Backend(Protocol):
-    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15) -> list[Candidate]: ...
+    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None) -> list[Candidate]: ...
     async def prepare(self, candidate: Candidate, options: dict, prompt: str) -> Candidate: ...
     async def reserve(self, candidate: Candidate, context: RunContext) -> bool: ...
     async def execute(self, candidate: Candidate, prompt: str, context: RunContext) -> dict: ...
@@ -131,7 +132,7 @@ class Resolver:
         aliases = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgpt-plan": "chatgpt", "supergrok-plan": "supergrok"}
         source = aliases.get(source, source)
         try:
-            candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4)
+            candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt)
             candidates = [c for c in candidates if matches(c, {k: v for k, v in choice.items() if k != "source"})
                           and (not source or source in (c.source, c.account))]
             if not candidates:
@@ -143,7 +144,7 @@ class Resolver:
                 if context.last_choice:
                     last = context.last_choice
                     if not explicit and not any(matches(c, last) for c in candidates):
-                        prior = await self.backend.catalog(kind, source=last.get("account") or last.get("source"), model=last.get("model"), limit=1)
+                        prior = await self.backend.catalog(kind, source=last.get("account") or last.get("source"), model=last.get("model"), limit=1, prompt=prompt)
                         candidates.extend(c for c in prior if matches(c, last))
                     for index, candidate in enumerate(candidates):
                         if matches(candidate, last) and candidate.available and last.get("options") != candidate.options:
@@ -204,7 +205,13 @@ class Resolver:
             if not await self.backend.reserve(candidate, context):
                 return result("refused", price=candidate.price, reason="daily_cap", error="The daily spending cap would be exceeded.")
             output = await self.backend.execute(candidate, prompt, context)
-            return result("completed" if output.get("success") else "failed", price=candidate.price,
+            reported = output.get("price")
+            price = candidate.price
+            if (candidate.source == "supergrok" and kind == "video" and isinstance(reported, dict)
+                    and reported.get("status") == "reported"
+                    and price_total({**reported, "status": "estimated"}) is not None):
+                price = reported
+            return result("completed" if output.get("success") else "failed", price=price,
                           choice=candidate.choice(), result=output)
         except ValueError as exc:
             # Backends raise only safe validation messages, not upstream bodies.

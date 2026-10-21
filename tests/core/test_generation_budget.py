@@ -54,3 +54,13 @@ def test_budget_does_not_round_off_small_reservations():
     assert generation_budget.reserve("19.99996")
     assert generation_budget.reserve("0.00004")
     assert not generation_budget.reserve("0.00001")
+
+
+def test_reported_overrun_is_counted_even_if_it_crosses_the_cap():
+    assert generation_budget.reserve("19.99")
+    generation_budget.record_overrun("0.04")
+    assert assistant_limits.status()["spent_today_usd"] == 20.03
+    assert assistant_limits.status()["limit_reached"]
+    assert not generation_budget.reserve("0.01")
+    with pytest.raises(ValueError):
+        generation_budget.record_overrun("-1")

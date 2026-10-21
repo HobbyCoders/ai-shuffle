@@ -154,6 +154,80 @@ class ModelSchema:
                 raise ValueError(f"Invalid model option: {name}.")
         return values
 
+    def pricing_quantity(self, unit: str, options: dict, prompt: str | None = None):
+        """Conservative billable units from this model's declared parameters.
+
+        No resolution-name tables or token estimates: missing dimensions,
+        duration units or text lengths leave the price unknown. Whole billing
+        units round up so a fractional block cannot under-reserve the cap.
+        """
+        from decimal import Decimal, ROUND_CEILING
+        import re
+
+        fields = {f.name: f for f in self.fields}
+        def number(value):
+            if type(value) not in (int, float, str):
+                raise ValueError("Unknown billable quantity.")
+            value = Decimal(str(value))
+            if not value.is_finite() or value <= 0:
+                raise ValueError("Unknown billable quantity.")
+            return value
+
+        count_fields = [name for name in ("num_images", "number_of_images", "num_outputs", "num_videos", "num_samples", "batch_size")
+                        if name in fields and name in options]
+        if len(count_fields) > 1:
+            raise ValueError("Ambiguous output count.")
+        count = number(options[count_fields[0]]) if count_fields else Decimal(1)
+        if count != count.to_integral_value() or count > 100:
+            raise ValueError("Invalid output count.")
+        unit = unit.strip().lower()
+        if unit in ("request", "inference"):
+            return Decimal(1), Decimal(1)
+        if unit in ("image", "video", "audio", "mesh", "3d", "generation"):
+            return Decimal(1), count
+        if unit in ("character", "characters", "1k chars", "1000 characters"):
+            if prompt is None or not prompt:
+                raise ValueError("Text length is needed for pricing.")
+            divisor = 1000 if unit in ("1k chars", "1000 characters") else 1
+            quantity = (Decimal(len(prompt)) / divisor).to_integral_value(rounding=ROUND_CEILING)
+            return quantity, count
+        if unit in ("second", "seconds", "minute", "minutes"):
+            durations = []
+            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds"):
+                if name not in fields or name not in options:
+                    continue
+                field = fields[name]
+                value = str(options[name])
+                match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", value)
+                if not match:
+                    continue
+                declaration = " ".join((name, field.title, field.description)).lower()
+                suffix = match[2]
+                if suffix:
+                    in_minutes = suffix.startswith("m")
+                elif "millisecond" in declaration:
+                    continue
+                elif "minute" in declaration:
+                    in_minutes = True
+                elif "second" in declaration or name in ("duration_sec", "seconds"):
+                    in_minutes = False
+                else:
+                    continue
+                durations.append(number(match[1]) * (60 if in_minutes else 1))
+            if len(durations) != 1:
+                raise ValueError("No unambiguous declared duration in seconds.")
+            quantity = durations[0] / (60 if unit.startswith("minute") else 1)
+            return quantity.to_integral_value(rounding=ROUND_CEILING), count
+        if unit in ("megapixel", "megapixels"):
+            dimensions = options.get("image_size") if "image_size" in fields else None
+            if dimensions is None and {"width", "height"} <= fields.keys():
+                dimensions = options
+            if not isinstance(dimensions, dict) or any(type(dimensions.get(k)) is not int for k in ("width", "height")):
+                raise ValueError("Explicit declared pixel dimensions are required.")
+            quantity = number(dimensions["width"]) * number(dimensions["height"]) / 1_000_000
+            return quantity.to_integral_value(rounding=ROUND_CEILING), count
+        raise ValueError("Unsupported declared pricing unit.")
+
     def to_dict(self) -> dict:
         return {
             "endpoint_id": self.endpoint_id,

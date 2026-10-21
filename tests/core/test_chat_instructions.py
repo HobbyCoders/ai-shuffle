@@ -99,9 +99,9 @@ def test_default_encoding_examples_are_correct_on_windows_and_posix():
 
 def test_default_keeps_the_media_embed_rules():
     text = DEFAULT_SECURITY_INSTRUCTIONS
-    for tool in ("generateImage", "editImage", "generateWithReference", "generateVideo",
-                 "imageToVideo", "extendVideo", "generateAudio", "audioToAudio"):
-        assert tool in text
+    # This rule covers all sources and tools, not a hard-coded provider/tool
+    # list that becomes stale when another generation tool is registered.
+    assert "Embed all media" in text
     assert "`![short description](IMAGE_URL)` from `image_url`" in text
     assert "`[short description](VIDEO_URL)` from `video_url`" in text
     assert "`[short description](AUDIO_URL)` from `audio_url`" in text

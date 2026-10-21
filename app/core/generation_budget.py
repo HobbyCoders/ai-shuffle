@@ -19,6 +19,18 @@ def reserved(cursor, day):
 
 
 def reserve(amount):
+    return _record(amount, enforce_limit=True)
+
+
+def record_overrun(amount):
+    """Record already-incurred cost above a reservation, even beyond the cap.
+
+    Admission must still use reserve(); this never authorizes a submission.
+    """
+    return _record(amount, enforce_limit=False)
+
+
+def _record(amount, *, enforce_limit):
     from app.core import assistant_limits
 
     from decimal import InvalidOperation
@@ -40,7 +52,7 @@ def reserve(amount):
         # reservations through its own connection and includes ordinary AI usage.
         state = assistant_limits.status()
         spent = Decimal(str(assistant_limits._measure()["spent"]))
-        if state["spend_limit_enabled"] and spent + amount > Decimal(str(state["daily_spend_limit_usd"])):
+        if enforce_limit and state["spend_limit_enabled"] and spent + amount > Decimal(str(state["daily_spend_limit_usd"])):
             return False
         cursor.execute("UPDATE system_settings SET value=%s WHERE key=%s",
                        (json.dumps({"reserved": str(current + amount)}), key))

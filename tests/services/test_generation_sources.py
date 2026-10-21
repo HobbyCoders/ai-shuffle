@@ -42,7 +42,7 @@ def backend(monkeypatch):
 
 async def test_catalog_does_not_serialize_credentials_and_uses_verified_table(backend):
     entries = await backend.local_catalog("image")
-    assert {e.source for e in entries} == {"fal", "chatgpt", "supergrok"}
+    assert {e.source for e in entries} == {"fal", "chatgpt", "supergrok", "openai", "xai"}
     assert "never-return-this" not in repr([e.view() for e in entries])
     chatgpt = next(e for e in entries if e.source == "chatgpt")
     assert chatgpt.options == {"size": "auto", "quality": "auto", "format": "png"}
@@ -64,7 +64,7 @@ async def test_fal_declared_options_reach_price_and_execution_identically(backen
     output = await Resolver(backend).generate("image", {"prompt": "tree", "source": "fal", "model": entry.model,
         "options": {"num_images": 2, "size": "wide"}}, CONTEXT)
     assert output["status"] == "completed"
-    backend.fal_price.assert_awaited_with("fake/model", {"num_images": 2, "size": "wide"})
+    backend.fal_price.assert_awaited_with("fake/model", {"num_images": 2, "size": "wide"}, prompt="tree")
     backend.node.call.assert_awaited_once_with("runFalModel", {"endpoint_id": "fake/model", "output_type": "image",
         "input": {"prompt": "tree", "num_images": 2, "size": "wide"}})
 

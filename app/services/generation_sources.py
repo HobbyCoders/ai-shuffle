@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from urllib.parse import urlencode
 
 import httpx
@@ -34,18 +34,18 @@ class Sources:
             from app.core import fal_credential
             return await run_sync(fal_credential.api_key, self.context.api_user_id)
         if self.context.owner:
-            from app.mcp.ai_tools_sdk import _get_fal_api_key
-            return await run_sync(_get_fal_api_key)
+            from app.core import fal_credential
+            return await run_sync(fal_credential.api_key)
         return None
 
-    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15):
-        entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit)
+    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
+        entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
         if self.context.owner and not self.local_only:
             from app.network.generation import catalog
-            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit))
+            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt))
         return entries
 
-    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15):
+    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
         from app.core import native_generation_settings as native
         from app.db import model_providers
         from app.services.fal_catalog import catalog_service
@@ -63,7 +63,7 @@ class Sources:
             for m in models[:max(1, min(limit, 50))]:
                 schema = await schema_service.get_schema(m.endpoint_id, await self.fal_key())
                 options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
-                price = await self.fal_price(m.endpoint_id, options)
+                price = await self.fal_price(m.endpoint_id, options, prompt=prompt)
                 entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False,
                                          options=options, price=price, schema=schema.to_dict() if schema else None,
                                          available=schema is not None, reason=None if schema else "Model schema is unavailable."))
@@ -84,20 +84,22 @@ class Sources:
             if combination and capability.get("available"):
                 if model and combination["model"] != model:
                     continue
+                price = dict(UNKNOWN_PRICE)
+                if name == "supergrok" and kind == "video":
+                    from app.core.provider.native_video import estimate_price
+                    price = estimate_price(native.NativeVideoSettings(**combination))
                 entries.append(Candidate(name, account, worker, combination["model"], kind, True,
                                          options={k: v for k, v in combination.items() if k != "model"},
-                                         schema=capability))
-            elif source or model:
+                                         schema=capability, price=price))
+            elif not model or source:
+                # Unsupported accounts are visible in discovery, but must not
+                # invent a match for a model explicitly named on another source.
                 entries.append(Candidate(name, account, worker, model or "unavailable", kind, False,
                                          available=False, reason=capability.get("reason") or "No verified media schema is available for this account."))
         return entries
 
-    async def fal_price(self, model, options):
-        """Read provider pricing; only flat item/request prices are bounded here.
-
-        Per-second, megapixel, token and provider-specific formulas need a real
-        estimate adapter. Do not assume a different resolution costs the same.
-        """
+    async def fal_price(self, model, options, *, prompt=None):
+        """Read declared provider rates and resolve quantities with its schema."""
         try:
             async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
                 response = await client.get("https://api.fal.ai/v1/models/pricing", params={"endpoint_id": model},
@@ -105,15 +107,18 @@ class Sources:
                 if response.status_code != 200:
                     return dict(UNKNOWN_PRICE)
                 rows = response.json().get("prices", [])
-            row = next((r for r in rows if r.get("endpoint_id") == model), {})
-            if row.get("currency") != "USD" or row.get("unit") not in ("image", "request", "inference"):
+            row = next((r for r in rows if isinstance(r, dict) and r.get("endpoint_id") == model), {})
+            if row.get("currency") != "USD" or not isinstance(row.get("unit"), str):
                 return dict(UNKNOWN_PRICE)
-            amount = Decimal(str(row["unit_price"]))
-            count = options.get("num_images", 1)
-            if type(count) is not int or not 1 <= count <= 100 or not amount.is_finite() or amount < 0:
+            rate = Decimal(str(row["unit_price"]))
+            from app.services.fal_schema import schema_service
+            schema = await schema_service.get_schema(model, await self.fal_key())
+            if schema is None or not rate.is_finite() or rate < 0:
                 return dict(UNKNOWN_PRICE)
+            quantity, count = schema.pricing_quantity(row["unit"], options, prompt)
+            amount = rate * quantity
             return {"currency": "USD", "unit": "item", "amount": str(amount), "total": str(amount * count), "status": "estimated"}
-        except (httpx.HTTPError, ValueError, TypeError, KeyError, InvalidOperation):
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, ArithmeticError, AttributeError):
             return dict(UNKNOWN_PRICE)
 
     async def prepare(self, candidate, options, prompt):
@@ -134,7 +139,7 @@ class Sources:
                             and not chat_mode_read_permitted("Read", {"file_path": value})):
                         raise ValueError("Chat generation may read local media only from chat uploads.")
             values.pop(schema.primary_text_field)
-            return replace(candidate, options=values, price=await self.fal_price(candidate.model, values))
+            return replace(candidate, options=values, price=await self.fal_price(candidate.model, values, prompt=prompt))
         from app.core import native_generation_settings as native
         if "model" in options:
             raise ValueError("Pass the model separately, not in options.")
@@ -210,11 +215,25 @@ class Sources:
         options = {"model": candidate.model, **candidate.options}
         warning = None
         if candidate.kind == "video":
-            output = await native_video.generate(candidate.account, prompt, NativeVideoSettings(**options))
+            observed = {}
+            try:
+                output = await native_video.generate(candidate.account, prompt, NativeVideoSettings(**options), usage=observed)
+            finally:
+                # Preserve a provider-reported overrun even on cancellation or
+                # failed downloads; do not authorize another generation call.
+                if "reported_cost_usd" in observed:
+                    cost = Decimal(observed["reported_cost_usd"])
+                    estimate = price_total(candidate.price)
+                    if cost.is_finite() and estimate is not None and cost > estimate:
+                        from app.network.generation import record_overrun
+                        await record_overrun(cost - estimate)
+            if "reported_cost_usd" in observed:
+                output["price"] = {"currency": "USD", "unit": "item", "amount": observed["reported_cost_usd"],
+                                   "total": observed["reported_cost_usd"], "status": "reported"}
             if not output.get("success"):
                 return output
             artifact = await run_sync(store_bytes, output.pop("data"), mime="video/mp4", filename="generated-video.mp4", created_by_session=context.session_id)
-            return {"success": True, "video_url": f"/api/v1/artifacts/{artifact['hash']}/video.mp4?" + urlencode({"session_id": context.session_id})}
+            return {**output, "video_url": f"/api/v1/artifacts/{artifact['hash']}/video.mp4?" + urlencode({"session_id": context.session_id})}
         if candidate.source == "supergrok":
             items, warning = await supergrok_images.generate(candidate.account, prompt, NativeImageSettings(**options))
         else:
