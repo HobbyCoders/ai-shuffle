@@ -417,7 +417,10 @@ def ensure_account(ident, run=subprocess.run):
         run(["groupmod", "-o", "-g", str(ident.sgid), SERVICE_NAME], check=True)
     if account.pw_uid != ident.suid or account.pw_gid != ident.sgid:
         run(["usermod", "-o", "-u", str(ident.suid), "-g", str(ident.sgid), SERVICE_NAME], check=True)
-    agent = pwd.getpwuid(ident.puid).pw_name
+    try:
+        agent = pwd.getpwuid(ident.puid).pw_name
+    except KeyError:
+        raise IsolationError("the agent isolation PUID has no account") from None
     for gid in {ident.sgid, ident.pgid}:
         try:
             members = set(grp.getgrgid(gid).gr_mem)
@@ -432,7 +435,8 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
 
     Off: roll back a previous enable if there is one, else change nothing.
     On: account, code, data. Failure rolls back, then continues unisolated.
-    Required: the same migration, but any failure refuses startup after rollback.
+    Required: any failure refuses startup without releasing protected ownership.
+    Migration is resumable; only an explicit off start rolls it back.
     """
     ops = ops or Ops()
     required = setting() == "required"
@@ -442,7 +446,7 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
         return None
     if setting() not in {"on", "required"}:
         if setting() == "invalid":
-            log(f"agent isolation: ignoring {SETTING}={os.environ.get(SETTING)!r}; use on or off")
+            log(f"agent isolation: ignoring {SETTING}={os.environ.get(SETTING)!r}; use required, on or off")
         if needs_rollback(data_dir, ident, ops):
             disable(data_dir, ident, ops, log)
             release_code(app_dir, ident, ops)
@@ -454,7 +458,10 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
     except (IsolationError, OSError, subprocess.CalledProcessError) as error:
         reason = str(error) if isinstance(error, IsolationError) else type(error).__name__
         if required:
-            log(f"required agent isolation: startup refused ({reason}). Fix the cause and restart.")
+            log(f"required agent isolation: startup refused ({reason}). Protected ownership retained; "
+                "fix the cause and restart with required to retry.")
+            raise IsolationError(f"required agent isolation: startup refused ({reason}); "
+                                 "restart with required to retry") from None
         else:
             log(f"agent isolation could NOT be enabled ({reason}); agents run unisolated, as with "
                 f"{SETTING}=off. Fix the cause and restart.")
@@ -463,10 +470,7 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
             release_code(app_dir, ident, ops)
         except Exception as undo:  # noqa: BLE001 - report both, keep the first
             log(f"agent isolation: rollback after the failure also failed ({type(undo).__name__})")
-            prefix = "required agent isolation: startup refused; " if required else ""
-            raise IsolationError(prefix + "agent isolation partially applied; restart with it on or off") from None
-        if required:
-            raise IsolationError(f"required agent isolation: startup refused ({reason})") from None
+            raise IsolationError("agent isolation partially applied; restart with required to retry or off to roll back") from None
         return None
     log("required agent isolation established" if required else
         "agent isolation is on: agent processes run as PUID without the install's keys or database")
@@ -485,7 +489,8 @@ def drop(ident):
     os.setresuid(ident.puid, ident.suid, ident.suid)
     if (os.getresuid() != (ident.puid, ident.suid, ident.suid)
             or os.getresgid() != (ident.pgid, ident.sgid, ident.sgid) or os.getgroups()):
-        raise IsolationError("agent isolation could not set the supervisor's ids")
+        prefix = "required agent isolation: startup refused; " if setting() == "required" else ""
+        raise IsolationError(prefix + "agent isolation could not set the supervisor's ids")
     ACTIVE = ident
 
 

@@ -772,23 +772,58 @@ def chrome_command(env):
             dict(env, START_CHROME_COMMAND=str(private / "start-chrome.sh")), private)
 
 
-def drop_privileges(settings):
+def maintenance_isolation(settings, account):
+    """Dump/restore never migrate or release ownership, even against a live app.
+
+    Reuse only a completed root-owned record. Database.open independently owns
+    the cluster lock (online dumps may share; restores still require offline).
+    """
+    module = isolation()
+    required = os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
+    prefix = "required agent isolation: startup refused; " if required else ""
+    if not hasattr(module, "read_record"):
+        if required:
+            raise RuntimeFailure(prefix + "image lacks isolation helpers")
+        return None
+    record = module.read_record(Path(settings.effective_data_dir))
+    if record is None:
+        if module.setting() in {"on", "required"}:
+            raise RuntimeFailure(prefix + "maintenance requires an established isolation record; start the container normally first")
+        return None
+    try:
+        ident = module.identity(account.pw_uid, account.pw_gid)
+    except module.IsolationError as error:
+        raise RuntimeFailure(prefix + str(error)) from None
+    expected = {"puid": ident.puid, "pgid": ident.pgid,
+                "service_uid": ident.suid, "service_gid": ident.sgid}
+    if record.get("state") != "enabled" or any(record.get(k) != v for k, v in expected.items()):
+        raise RuntimeFailure(prefix + "isolation record incomplete or identity changed; restart normally with required to retry")
+    return ident
+
+
+def drop_privileges(settings, *, maintenance=False):
     """Root may prepare mount roots, never recursively repair database files."""
     global _agent_path
     if os.geteuid() == 0:
         account = pwd.getpwnam("appuser")
         if not account.pw_uid or not account.pw_gid:
             raise RuntimeFailure("PUID/PGID must identify a non-root account")
-        for path in (Path(settings.effective_data_dir), Path(settings.effective_workspace_dir)):
-            safe_path(path)
-            path.mkdir(parents=True, exist_ok=True)
-            # Empty image-created mounts may still have the default UID when
-            # PUID changes. Retained contents (especially PG) are never chowned.
-            if not any(path.iterdir()):
-                os.chown(path, account.pw_uid, account.pw_gid)
-        split = isolate(settings, account)
+        if not maintenance:
+            for path in (Path(settings.effective_data_dir), Path(settings.effective_workspace_dir)):
+                safe_path(path)
+                path.mkdir(parents=True, exist_ok=True)
+                # Empty image-created mounts may still have the default UID when
+                # PUID changes. Retained contents (especially PG) are never chowned.
+                if not any(path.iterdir()):
+                    os.chown(path, account.pw_uid, account.pw_gid)
+        split = maintenance_isolation(settings, account) if maintenance else isolate(settings, account)
         if split is not None:
-            isolation().drop(split)
+            try:
+                isolation().drop(split)
+            except (isolation().IsolationError, OSError) as error:
+                prefix = "required agent isolation: startup refused; " if isolation().setting() == "required" else ""
+                reason = str(error) if isinstance(error, isolation().IsolationError) else type(error).__name__
+                raise RuntimeFailure(prefix + reason) from None
             _agent_path = os.environ.get("PATH", "")
             os.environ["PATH"] = isolation().trusted_path(_agent_path)
         else:
@@ -801,6 +836,8 @@ def drop_privileges(settings):
     elif getattr(isolation(), "setting", lambda: "off")() == "on":
         log("agent isolation could NOT be enabled: the container did not start as root "
             "(--user or a hand-over); agents run unisolated")
+    elif getattr(isolation(), "setting", lambda: "off")() == "invalid":
+        log("agent isolation: ignoring invalid AGENT_ISOLATION; use required, on or off")
     # Real ids: with agent isolation the effective ids are the service account's.
     for name, actual in (("PUID", os.getuid()), ("PGID", os.getgid())):
         if name in os.environ and int(os.environ[name]) != actual:
@@ -1138,7 +1175,7 @@ def main(argv=None):
         signal.signal(sig, lambda *_: STOP.set())
     try:
         settings = load_settings()
-        drop_privileges(settings)
+        drop_privileges(settings, maintenance=args.action in {"dump", "restore"})
         # After the drop: setuid() resets the flag to suid_dumpable.
         harden_process_introspection(settings)
         if (args.action or "run") == "run":
