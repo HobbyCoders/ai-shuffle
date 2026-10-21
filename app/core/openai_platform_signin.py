@@ -92,6 +92,11 @@ class Cdp:
 
 
 async def capture(viewer, *, authorize):
+    async with native_chrome.browser_in_use():
+        return await _capture(viewer, authorize=authorize)
+
+
+async def _capture(viewer, *, authorize):
     version = await native_chrome.sign_in_browser_version()
     # Do not trust a remote debugging address returned by an external listener.
     path = urlsplit(version["webSocketDebuggerUrl"]).path

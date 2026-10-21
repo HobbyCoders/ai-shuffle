@@ -107,10 +107,10 @@
  {#if reading?.spend_month !== undefined}<SettingRow label="Cycle usage"><ValueText value={`$${reading.spend_month.toFixed(2)}`} /></SettingRow>{/if}
  {#if reading?.spending_limit !== undefined}<SettingRow label="Postpaid spending limit"><ValueText value={`$${reading.spending_limit.toFixed(2)}`} /></SettingRow>{/if}
  {#if openAI}
-  <p class="balance-note">Unofficial integration. Sign in to your own OpenAI Platform account in the isolated app browser. The dashboard session is encrypted on this worker; it is separate from ChatGPT/Codex and may expire or stop working.</p>
+  <p class="balance-note">Unofficial integration. Sign in to your own OpenAI Platform account in the isolated app browser. The dashboard session key is encrypted and synced across your network workers; it is separate from ChatGPT/Codex and may expire or stop working.</p>
   <button bind:this={signInButton} type="button" class="st-btn primary sm" disabled={busy || signingIn || access.readOnly} onclick={signIn}>Sign in to OpenAI Platform</button>
  {:else}<p class="balance-note">Create a management key in console.x.ai → Settings → Management Keys with billing read access. The normal API key resolves its team; the management key reads prepaid balance and invoice preview.</p>{/if}
- <SettingRow label={openAI ? 'Paste session key (fallback)' : 'Management key'} hint="Write-only · encrypted on this worker">
+ <SettingRow label={openAI ? 'Paste session key (fallback)' : 'Management key'} hint="Write-only · synced encrypted">
   <div class="access-controls">
    <TextField bind:value={key} type="password" label={openAI ? 'Platform session key' : 'xAI management key'} autocomplete="off" disabled={busy || signingIn} />
    <button type="button" class="st-btn primary sm" disabled={!key.trim() || busy || signingIn || access.readOnly} onclick={() => save()}>Save access</button>

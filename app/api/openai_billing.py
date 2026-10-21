@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, SecretStr
 from app.api.auth import require_admin
 from app.core import encryption
 from app.core.config import settings
-from app.core.provider_usage import _is_openai_platform_row
 from app.db import database as db
 from app.db.async_database import run_sync
 from app.db.analytics import get_manual_balance_credits
@@ -56,23 +55,24 @@ async def _status(row):
     snapshots = await run_sync(db.get_all_provider_usage_snapshots)
     snapshot = next((s for s in snapshots if s["provider_id"] == row["id"]), {})
     raw = snapshot.get("raw") or {}
-    configured = bool(row.get("openai_admin_key"))
+    configured = bool(row.get("openai_admin_key") and
+                      row.get("openai_billing_instance_id") == settings.effective_instance_id)
     return {
         "configured": configured,
         "manual_balance": await run_sync(get_manual_balance_credits, row),
         "organization_id": row.get("openai_billing_org_id") if configured else None,
         "source": "OpenAI organization Admin API",
         "scope": "Organization spend; completions token/request usage; current month (UTC)",
-        "spend": snapshot.get("credits") if raw.get("source") == "openai_admin" else None,
+        "spend": snapshot.get("credits") if configured and raw.get("source") == "openai_admin" else None,
         "last_error_kind": raw.get("usage_error") if configured else None,
         "fetched_at": raw.get("billing_fetched_at") if configured else None,
     }
 
 
-async def close_provider_billing(provider_id, *, local_only=False):
+async def close_provider_billing(provider_id, *, required=False):
     row = await run_sync(db.clear_openai_billing_binding, provider_id,
-                         expected_instance_id=settings.effective_instance_id if local_only else None)
-    if local_only and row is None:
+                         instance_id=settings.effective_instance_id)
+    if required and row is None:
         raise HTTPException(409, "Usage configuration changed")
 
 
@@ -141,7 +141,7 @@ async def configure_usage(provider_id: str, body: AdminUsageConfig, _: None = De
 async def disconnect_usage(provider_id: str, _: None = Depends(require_admin)):
     async with operation_lock(provider_id):
         await _provider(provider_id)
-        await close_provider_billing(provider_id, local_only=True)
+        await close_provider_billing(provider_id, required=True)
         return await _status(await _provider(provider_id))
 
 

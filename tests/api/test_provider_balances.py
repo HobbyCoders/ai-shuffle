@@ -123,12 +123,14 @@ def test_xai_resolves_team_with_model_key_and_polls_management(authenticated_cli
 
 
 @pytest.mark.parametrize("change", [{"auth_token": "other"}, {"auth_mode": "codex"}, {"enabled": False}, {"base_url": "https://example.com"}, {"provider_type": "custom"}])
-def test_binding_invalidated_and_inflight_snapshot_rejected(authenticated_client, provider, change):
+def test_reading_invalidated_but_billing_key_retained(authenticated_client, provider, change):
     configure(authenticated_client, provider)
     old = db.get_model_provider(provider, include_token=True)
     db.update_model_provider(provider, **change)
     assert not provider_balances.snapshot(old, {"credits": {"balance_remaining": 999}})
-    assert db.get_model_provider(provider, include_token=True)["balance_key"] is None
+    current = db.get_model_provider(provider, include_token=True)
+    assert current["balance_key"] == old["balance_key"]
+    assert current["balance_snapshot"] is None
 
 
 def test_stale_balance_not_current(authenticated_client, provider):
@@ -148,7 +150,7 @@ def test_status_detects_sync_replacing_inference_secret(authenticated_client, pr
     assert balances.status(row)["credits"]["balance_remaining"] == 99
     # Network sync can replace the credential without calling the update helper.
     row["auth_token"] = encryption.encrypt_value("synced-other-account")
-    assert balances.status(row)["configured"] is False
+    assert balances.status(row)["configured"] is True
     assert balances.status(row)["credits"] is None
 
 
@@ -166,14 +168,16 @@ def test_refresh_requests_poll_and_survives_interval_jitter(authenticated_client
     assert result["fresh_until"] == fetched + balances.FRESHNESS_SECONDS * 1000
 
 
-def test_toggle_disable_clears_binding(authenticated_client, provider):
+def test_toggle_disable_keeps_binding_and_invalidates_reading(authenticated_client, provider):
     configure(authenticated_client, provider)
     db.set_model_provider_enabled(provider, True)
     assert db.get_model_provider(provider, include_token=True)["balance_key"]
     old = db.get_model_provider(provider, include_token=True)
     db.set_model_provider_enabled(provider, False)
     row = db.get_model_provider(provider, include_token=True)
-    assert all(row[k] is None for k in ("balance_key", "balance_instance_id", "balance_snapshot"))
+    assert row["balance_key"] == old["balance_key"]
+    assert row["balance_snapshot"] is None
+    assert row["balance_instance_id"] == settings.effective_instance_id
     assert not provider_balances.snapshot(old, {"credits": {"balance_remaining": 999}})
 
 

@@ -333,7 +333,7 @@ export class BrowserManager {
       // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
-          const browser = await chromium.connectOverCDP(this.endpoint);
+          const browser = await chromium.connectOverCDP(this.endpoint, { timeout: 4000 });
           browser.on("disconnected", () => {
             this.browser = undefined;
             this.context = undefined;
@@ -355,7 +355,7 @@ export class BrowserManager {
           return browser;
         } catch (err) {
           attempt += 1;
-          if (attempt >= this.maxRetries) throw err;
+          if (attempt >= this.maxRetries) throw new Error(`Browser CDP connection failed after ${attempt} attempt(s); Chrome or a page may be unresponsive: ${err instanceof Error ? err.message : String(err)}`);
           await sleep(delay);
           delay = Math.min(delay * 2, this.maxBackoffMs);
         }

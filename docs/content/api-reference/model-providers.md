@@ -109,7 +109,7 @@ Update a provider. Takes the same fields as create, all optional, with the same 
 - Omitting `auth_token` or sending it blank keeps the stored key.
 - Sending `context_window` or `max_output_tokens` as `null` clears it; omitting it leaves it unchanged.
 - `models` replaces the whole list.
-- Disabling the provider, or changing it so it is no longer an official OpenAI API provider, removes its [OpenAI usage key](#openai-usage-key).
+- Disabling the provider or rotating its inference key invalidates readings but keeps its [OpenAI usage key](#openai-usage-key). Admin requests require an enabled, official OpenAI API provider; only explicit disconnect removes the shared Admin key.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11 \
@@ -135,7 +135,7 @@ curl -X DELETE http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9
 
 ### POST /api/v1/model-providers/{provider_id}/toggle
 
-Flip `enabled`. No body. Returns the updated provider object. Disabling removes the provider's OpenAI usage key.
+Flip `enabled`. No body. Returns the updated provider object. Disabling invalidates readings but keeps billing access, including the OpenAI Admin key, for re-enabling.
 
 **Auth:** Owner only
 
@@ -303,8 +303,20 @@ Optional admin keys that let the app read account spend for a provider. Each key
 ### Provider-reported API balances
 
 In **Settings > Providers > the OpenAI or xAI API key > Usage**, configure balance
-access separately from the inference key. Keys are write-only, encrypted on this
-worker, excluded from network sync, and included in secret re-encryption.
+access separately from the inference key. Keys are write-only, encrypted at rest
+and under the network key during sync, and included in secret re-encryption.
+Balance keys (including Platform session keys), OpenAI Admin keys and organization
+IDs sync across network workers. This gives every trusted worker the same billing
+access, including higher-privilege Admin access. Each worker keeps its own readings
+and errors and can fetch credit while the network's shared usage budget is
+reachable. Keys become usable after the next sync; readings arrive on the next
+poll. The network founder coordinates that budget: other workers defer new
+requests while it is offline, even if they already have the synced key.
+Disconnecting access syncs the removal. Older versions keep their local billing
+configuration until upgraded. An upgraded worker that lacks the key gets it once
+the worker holding the key is online and running this build.
+Restoring another installation's database alone
+does not authorize using or publishing its billing keys; authenticated sync does.
 
 - **xAI (official):** create a management key in console.x.ai → Settings →
   Management Keys, with billing read permission. The normal API key resolves
@@ -336,8 +348,9 @@ worker, excluded from network sync, and included in secret re-encryption.
   This undocumented endpoint can change and sessions expire. An inference key
   or ChatGPT/Codex OAuth token cannot replace a Platform session key.
 
-Polling is demand-driven, at most once per five minutes per credential/endpoint,
-under the existing shared usage budget. Opening balance status or choosing
+Polling is demand-driven, with roughly one request per credential/endpoint every
+300–330 seconds network-wide under the shared usage budget. With demand and the
+budget reachable, readings refresh about every five minutes, not once per worker. Opening balance status or choosing
 **Refresh balance status** requests a poll (30-second forced-refresh cooldown;
 per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
 remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
@@ -345,9 +358,11 @@ remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
 successful fetched time. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
-inference/Admin credentials. Changes of inference key, origin, auth type, or
-disabling the provider (including the enable toggle) invalidate its binding and
-reject in-flight snapshots. Fresh, error-free Admin organization-spend fields
+inference/Admin credentials. Changes of inference or billing key invalidate old
+readings and reject in-flight snapshots. Inference-key rotation, provider changes,
+and disabling the provider (including the enable toggle) invalidate readings but
+retain billing access, including the OpenAI Admin key. Only explicitly
+disconnecting the relevant billing access removes that key across the network. Fresh, error-free Admin organization-spend fields
 from the current UTC month remain alongside real remaining credit in the usage
 popover. Stale, failed or prior-month Admin totals are withheld when a balance
 is bound, rather than borrowing its newer timestamp. Balance freshness/error
@@ -405,7 +420,11 @@ curl -X PUT http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61
 
 `spend` holds the latest reading (`spend_month` in USD with `input_tokens`, `output_tokens` and `num_model_requests`), or `null` until one arrives.
 
-**Errors:** `404` provider not found. `409` on PUT when the provider is disabled, and on DELETE when the key was saved by a different server instance. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
+A restored installation's Admin key is not configured until saved here or received
+through authenticated sync. Explicit save or disconnect replaces a restored
+installation marker; it does not require that installation to come back online.
+
+**Errors:** `404` provider not found. `409` on PUT when the provider is disabled or changes during the operation. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
 
 ### Entered OpenAI prepaid balance
 

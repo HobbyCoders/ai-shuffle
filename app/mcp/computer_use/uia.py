@@ -551,6 +551,19 @@ class ComProvider:
     def read(self, handle):
         return self._element(handle, cached=False)
 
+    def focused_value(self):
+        """Best-effort readable field evidence for paste verification; never passwords."""
+        el = self.auto.GetFocusedElement()
+        if not el:
+            return None
+        get = el.GetCurrentPropertyValue
+        if get(_P_PASSWORD) or not get(_P_HAS_VALUE):
+            return None
+        # Do not use _element: its display-oriented clipping would reject a
+        # successful long paste merely because the inserted text was truncated.
+        runtime = tuple(int(v) for v in (get(_P_RUNTIME_ID) or ()))
+        return runtime, str(get(_P_VALUE) or "")
+
     def window_at(self, x, y):
         hwnd = self._user32.WindowFromPoint(self._point(int(x), int(y)))
         if not hwnd:

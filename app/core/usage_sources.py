@@ -200,7 +200,7 @@ _SOURCES: tuple[UsageSource, ...] = (
     UsageSource(
         id="openai_platform_balance", snapshot_type="openai_balance",
         label="OpenAI Platform balance (unofficial)",
-        credential="OpenAI Platform dashboard sign-in (worker-local session key)",
+        credential="OpenAI Platform dashboard sign-in (session key encrypted across network workers)",
         scope="account", scope_label="Platform account API credit, not ChatGPT credits",
         measure=MONETARY_CREDIT, collection=POLLED, support=UNDOCUMENTED,
         dashboard_url="https://platform.openai.com/settings/organization/billing/overview",
@@ -209,7 +209,7 @@ _SOURCES: tuple[UsageSource, ...] = (
     ),
     UsageSource(
         id="xai_management", snapshot_type="xai_balance", label="xAI Management API",
-        credential="Separate worker-local xAI management key; inference key resolves team ID",
+        credential="Separate xAI management key encrypted across network workers; inference key resolves team ID",
         scope="organization", scope_label="Team prepaid credit and current billing cycle",
         measure=MONETARY_CREDIT, collection=POLLED, support=DOCUMENTED,
         dashboard_url="https://console.x.ai/",
@@ -316,7 +316,7 @@ _SOURCES: tuple[UsageSource, ...] = (
         id="openai_admin",
         snapshot_type="openai",
         label="OpenAI organization Admin API",
-        credential="Separate OpenAI Admin key and organization ID (local only)",
+        credential="Separate OpenAI Admin key and organization ID (encrypted across network workers)",
         scope="organization",
         scope_label="Organization spend and completions usage this month (UTC)",
         measure=REPORTED_SPEND,
