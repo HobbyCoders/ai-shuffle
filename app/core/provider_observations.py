@@ -184,7 +184,7 @@ def _publish(source, row, before):
     fetched = local.get("fetched_at")
     if not _number(fetched) or fetched <= (before[1].get("fetched_at") or 0):
         return
-    if local.get("last_error_kind") or (local.get("raw") or {}).get("last_error_kind"):
+    if local.get("last_error_kind") or (local.get("raw") or {}).get("usage_error"):
         return
     credits, windows = _credits(local.get("credits")), _windows(local.get("windows"))
     if not credits and not windows:
@@ -211,7 +211,7 @@ async def poll_shared(source, row, poll):
     except Exception:
         pass  # Sharing must not prevent the existing local poll path.
     if (before and before[2] and not before[1].get("last_error_kind")
-            and not (before[1].get("raw") or {}).get("last_error_kind")
+            and not (before[1].get("raw") or {}).get("usage_error")
             and (before[1].get("fetched_at") or 0) > (time.time() - source.min_interval) * 1000):
         return
     result = await poll(row) if row is not None else await poll()

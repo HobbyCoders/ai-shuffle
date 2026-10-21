@@ -171,6 +171,22 @@ def test_other_polled_snapshots_share_without_additional_requests(workers, monke
     assert second[0]["plan_type"] == first[0]["plan_type"]
     assert second[0]["raw"]["source_worker"] == a.device_id
     assert len(calls) == count
+    if source == "openrouter_key":
+        # A local failure must not be hidden by an equal-age peer reading or
+        # bypass a deliberate retry. The authority still enforces the cooldown.
+        with b.active():
+            db.record_provider_usage_failure(PROVIDER, "openrouter", "unavailable")
+        acquired = []
+        original = usage_budget.acquire
+
+        async def acquire(*args):
+            acquired.append(True)
+            return await original(*args)
+
+        monkeypatch.setattr(usage_budget, "acquire", acquire)
+        run(b)
+        assert acquired
+        assert len(calls) == count
 
 
 @pytest.mark.parametrize("secret", ["balance_key", "openai_admin_key"])
