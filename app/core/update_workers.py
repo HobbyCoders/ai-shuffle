@@ -194,15 +194,23 @@ async def _stop_then_restart(request_id):
     global _stop_result
     _stop_result = {"accepted": result.get("accepted", False), "reason": result["reason"],
                     "completed_at": time.time(), "busy": result.get("busy", [])}
-    if not result.get("accepted"):
-        # Dispatch accepts the stop attempt before it finishes. Publish a later
-        # refusal after that dispatch releases its lock, so it cannot erase it.
-        global _refusals_at
-        async with _dispatch_lock:
-            listing = await run_sync(runners.directory)
-            _refusals[listing.get("self_device_id") or "local"] = result["reason"]
-            _refusals_at = time.time()
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
+    if not result.get("accepted"):
+        # Publish after dispatch releases its lock, and only to the same install
+        # operation. A newer dispatch must not inherit this old stop's refusal.
+        global _refusals_at
+        try:
+            listing = await run_sync(runners.directory)
+            async with _dispatch_lock:
+                operation = await run_sync(progress.load)
+                if not operation or operation["id"] != request_id:
+                    return
+                self_id = listing.get("self_device_id") or "local"
+                await run_sync(progress.record, request_id, self_id, result=result)
+                _refusals[self_id] = result["reason"]
+                _refusals_at = time.time()
+        except Exception:  # noqa: BLE001 — a reporting failure must still leave the refusal logged.
+            logger.warning("Application update: could not publish stop refusal for %s", request_id, exc_info=True)
 
 
 def local_action(action, request_id, mode=None):

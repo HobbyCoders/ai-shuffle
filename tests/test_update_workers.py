@@ -1069,6 +1069,39 @@ def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypat
     row = snapshot["workers"][0]
     assert row["wait_reason"] == "still_busy_after_stop"
     assert row["stop_result"]["accepted"] is False
+    assert snapshot["operation"]["phase"] == "error"
+    worker = snapshot["operation"]["workers"][0]
+    assert worker["status"] == "skipped" and worker["message"] == "Busy with running work: Fix login"
+
+
+def test_late_stop_refusal_cannot_change_a_newer_install(busy, monkeypatch):
+    async def stop(*args, **kwargs):
+        fleet.progress.begin("newer-operation", [{"device_id": "self", "device_name": "Current worker"}])
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", stop)
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+    asyncio.run(scenario())
+    operation = fleet.progress.load()
+    assert operation["id"] == "newer-operation" and operation["workers"][0]["accepted"] is None
+    assert "self" not in fleet._refusals
+
+
+def test_stop_refusal_reporting_failure_is_logged(busy, monkeypatch, caplog):
+    async def stop(*args, **kwargs):
+        def broken():
+            raise RuntimeError("directory unavailable")
+        monkeypatch.setattr(fleet.runners, "directory", broken)
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", stop)
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0)
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        await asyncio.gather(*fleet._stop_tasks)
+    with caplog.at_level("INFO"):
+        asyncio.run(scenario())
+    assert "Busy with running work: Fix login" in caplog.text
+    assert "could not publish stop refusal" in caplog.text
 
 
 def test_a_mode_only_applies_to_install(setup):

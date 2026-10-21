@@ -1426,7 +1426,40 @@ async def history_recovery_loop():
             logger.warning("Could not sweep hand-off history staging", exc_info=True)
 
 
+class _HistoryCursor:
+    """Measure real execute calls, including driver binding/JSON serialization.
+
+    Python row/placeholder construction outside execute is excluded. The
+    shared metrics span all cursors used by one table's import chunks.
+    """
+
+    def __init__(self, cursor, metrics):
+        self.cursor, self.metrics = cursor, metrics
+
+    def execute(self, *args, **kwargs):
+        started = monotonic()
+        try:
+            return self.cursor.execute(*args, **kwargs)
+        finally:
+            seconds = monotonic() - started
+            self.metrics["statements"] += 1
+            self.metrics["execute_seconds"] += seconds
+            self.metrics["max_statement_seconds"] = max(self.metrics["max_statement_seconds"], seconds)
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+
 def install_history(sid, data, cwd):
+    """Stage history with per-table timings (rounded seconds).
+
+    connection_seconds includes get_db entry: pool wait, health checks and
+    transaction setup. execute_seconds times driver execute calls only (with
+    binding/serialization), not Python row adaptation. commit_seconds covers
+    get_db exit: commit, pool return, slow-hold reporting and post-commit
+    callbacks. seconds also includes the table's Python preparation; the
+    staging header and final publication are outside these table timings.
+    """
     from psycopg2.extras import Json
     from app.core.cli_sessions import project_key_for_directory
     from app.db.network import _insert_rows
@@ -1483,12 +1516,16 @@ def install_history(sid, data, cwd):
                                 value["cwd"] = cwd
                     values.append(value)
                 rows.append((destination_id, *values))
+            metrics = {"rows": len(rows), "statements": 0, "execute_seconds": 0.0,
+                       "max_statement_seconds": 0.0, "commit_seconds": 0.0, "connection_seconds": 0.0}
             for start in range(0, len(rows), 200):
                 part = rows[start:start + 200]
                 # get_db commits each bounded chunk. Staging never changes the
                 # visible app mirror or its SDK pointer, including on failure.
+                connection_started = monotonic()
                 with get_db() as conn:
-                    cur = conn.cursor()
+                    metrics["connection_seconds"] += monotonic() - connection_started
+                    cur = _HistoryCursor(conn.cursor(), metrics)
                     if table in APP_TABLES:
                         cur.execute("INSERT INTO handoff_history_chunks "
                                     "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
@@ -1500,7 +1537,19 @@ def install_history(sid, data, cwd):
                                              for c, v in zip(columns, r[1:])]) for r in part]
                         _insert_rows(cur, table, ("session_id", *columns), adapted,
                                      _history_conflict(table, ("session_id", *columns)), batch=200)
-            facts[table] = {"rows": len(rows), "seconds": round(monotonic() - started, 3)}
+                    written = monotonic()
+                metrics["commit_seconds"] += monotonic() - written
+            metrics["seconds"] = monotonic() - started
+            facts[table] = {key: round(value, 3) if key.endswith("seconds") else value
+                            for key, value in metrics.items()}
+            # Log each nonempty completed table immediately, not only when
+            # ownership finally commits. Never log parameters/transcript text.
+            if rows:
+                logger.info("Hand-off import for session %s install_history.%s: rows=%d statements=%d "
+                            "total=%.3fs connection=%.3fs execute=%.3fs max_statement=%.3fs commit_release=%.3fs",
+                            sid, table, len(rows), metrics["statements"], metrics["seconds"],
+                            metrics["connection_seconds"], metrics["execute_seconds"],
+                            metrics["max_statement_seconds"], metrics["commit_seconds"])
         if not data.get("_prepare_history"):
             with get_db() as conn:
                 _publish_history(conn.cursor(), sid, token)
