@@ -54,6 +54,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       const url = new URL(req.url, "http://fixture.test");
       const pages: Record<string, string> = {
         "/review/single": '<title>Single</title><label>Size<select><option value="s">Small</option><option value="m">Medium</option></select></label>',
+        "/review/repeated": '<title>Repeated</title><main aria-label="Repeated">' + '<button>Same</button>'.repeat(20) + '</main>',
         "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
         "/review/reload": '<title>Reload</title><form method="post" action="/review/reload"><button>Save</button></form>',
         "/review/slowreload": '<title>Reload</title><form method="post" action="/review/slowreload"><button>Save</button></form>',
@@ -341,6 +342,17 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       return match[1];
     }
     const body = (result: McpToolResult) => JSON.parse(firstText(result));
+    it("counts only emitted navigate refs after repeated children collapse", async () => {
+      const result = await runNavigate(session, { url: httpUrl + "review/repeated" });
+      const tree = (result.content[1] as { text: string }).text;
+      const emitted = new Set([...tree.matchAll(/\[ref=((?:f\d+)?e\d+)\]/g)].map(match => match[1]));
+      expect(tree).toContain("more similar items");
+      expect(body(result).ref_count).toBe(emitted.size);
+      const raw = await (await session.ensurePage()).locator("body").ariaSnapshot({ mode: "ai" });
+      const all = [...raw.matchAll(/\[ref=((?:f\d+)?e\d+)\]/g)].map(match => match[1]);
+      expect(emitted.size).toBeLessThan(all.length);
+      expect(session.refs.isKnown(all.at(-1)!)).toBe(true);
+    });
     it("does not resample a mature plain page across repeated actions", async () => {
       await load('<button>Plain</button><label>Name<input></label>');
       const target = await ref("Plain"), field = await ref("Name");
