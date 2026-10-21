@@ -128,14 +128,21 @@ export async function runNavigate(
   if (target === "back" || target === "forward") {
     // Restores commit without a fresh DOMContentLoaded, but uncached history
     // must still finish parsing (a streaming response can pause longer than our
-    // DOM-quiet window). Share a bounded navigation budget across both waits.
-    const timeout = 30_000;
-    await (target === "back"
-      ? page.goBack({ waitUntil: "commit", timeout })
-      : page.goForward({ waitUntil: "commit", timeout }));
-    const ready = await page.waitForFunction(() => document.readyState !== "loading", undefined,
-      { timeout: Math.max(1, timeout - (performance.now() - dispatchStart)) });
-    await ready.dispose();
+    // DOM-quiet window). Share the page's navigation budget across both waits.
+    try {
+      // Playwright has no public timeout getter. Use the same resolver as its
+      // navigation methods, including context defaults and 0 (no timeout).
+      const timeout = (page as unknown as { _timeoutSettings: { navigationTimeout(options: object): number } })
+        ._timeoutSettings.navigationTimeout({});
+      await (target === "back"
+        ? page.goBack({ waitUntil: "commit", timeout })
+        : page.goForward({ waitUntil: "commit", timeout }));
+      const ready = await page.waitForFunction(() => document.readyState !== "loading", undefined,
+        { polling: 100, timeout: timeout === 0 ? 0 : Math.max(1, timeout - (performance.now() - dispatchStart)) });
+      await ready.dispose();
+    } catch (err) {
+      throw navigationFailure(session, page.url(), err);
+    }
   } else {
     const requested = normalizeUrl(input.url);
     const refusal = (url: string) => {

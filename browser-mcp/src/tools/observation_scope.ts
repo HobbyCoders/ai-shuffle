@@ -109,8 +109,10 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
         // Layout sees clipping inside closed shadow roots even when assignedSlot
         // is null. Check each scroll-reachable segment separately: expanding a
         // scrollport root admits its reachable content without ignoring closed
-        // shadow clips inside it or around the scrollport itself.
-        const segments: { target: Element; root: Element | null }[] = [];
+        // shadow clips inside it or around the scrollport itself. Known
+        // fail-closed limitation: a scrollport inside a closed shadow root
+        // cannot be traversed, so its off-scrollport content remains hidden.
+        const segments: { target: Element; root: Element | Document }[] = [];
         let layoutTarget = el;
         let overflowRoot: Element | null = null;
         let clipOverflow = true;
@@ -178,11 +180,17 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
         clip(-scrollX, -scrollY, Math.max(doc.scrollWidth, innerWidth) - scrollX,
           Math.max(doc.scrollHeight, innerHeight) - scrollY);
         if (!intersects()) return false;
-        segments.push({ target: layoutTarget, root: null });
+        // Stop at this frame's document, not the top-level viewport. The outer
+        // frame walk checks ancestor visibility separately, preserving readable
+        // grandchildren below this frame's fold (including cross-origin ones).
+        segments.push({ target: layoutTarget, root: document });
         const results = await Promise.all(segments.map(({ target, root }) => new Promise<boolean>((resolve, reject) => {
           const box = target.getBoundingClientRect();
+          const bounds = root instanceof Element ? root : doc;
           const margin = Math.max(Math.abs(box.left), Math.abs(box.top), Math.abs(box.right), Math.abs(box.bottom),
-            root?.scrollWidth ?? doc.scrollWidth, root?.scrollHeight ?? doc.scrollHeight, innerWidth, innerHeight) + 1;
+            bounds.scrollWidth, bounds.scrollHeight, innerWidth, innerHeight) + 1;
+          // A never-delivered callback fails closed: the bounded task rejects
+          // and read_text reports the frame in frames_skipped, not as readable.
           const timer = setTimeout(() => { observer.disconnect(); reject(new Error("layout visibility timed out")); }, 250);
           const observer = new IntersectionObserver(entries => {
             clearTimeout(timer); observer.disconnect();

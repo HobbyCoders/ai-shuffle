@@ -59,6 +59,12 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
         setTimeout(() => res.end('<button>Late streamed button</button><p>Stream finished</p>'), 1500);
         return;
       }
+      if (url.pathname === "/review/nested-parent") {
+        const child = new URL("/observation-text?text=DeepReachableMarker", `http://${req.headers.host}`).href;
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(`<p>Parent prose</p>${url.searchParams.has("tall") ? '<div style="height:2000px"></div>' : ""}<iframe src="${child}"></iframe>`);
+        return;
+      }
       const pages: Record<string, string> = {
         "/review/history-a": '<title>History A</title><button>History A</button><p id="clock">Clock</p><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++});setInterval(()=>clock.textContent=String(Date.now()),100)</script>',
         "/review/history-b": '<title>History B</title><button>History B</button><script>window.restores=0;addEventListener("pageshow",e=>{if(e.persisted)window.restores++})</script>',
@@ -455,6 +461,38 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(await page.evaluate(() => document.readyState)).not.toBe("loading");
       expect((result.content[1] as { text: string }).text).toContain("Late streamed button");
       expect(body(result).ref_count).toBeGreaterThan(0);
+    });
+    it.each([false, true])("FOLLOWUP history readiness honors the configured navigation timeout (context: %s)", async contextDefault => {
+      const originalTab = session.currentTabId()!;
+      const tab = await session.createTab(); // no page-level override to mask the context default
+      const page = await session.ensurePage();
+      await runNavigate(session, { url: httpUrl + "review/history-stream" });
+      await runNavigate(session, { url: httpUrl + "review/history-b" });
+      const settings = contextDefault ? page.context() : page;
+      settings.setDefaultNavigationTimeout(150);
+      const started = performance.now();
+      try {
+        await expect(runNavigate(session, { url: "back" })).rejects.toThrow(/Timeout/);
+        expect(performance.now() - started).toBeLessThan(1000);
+      } finally {
+        settings.setDefaultNavigationTimeout(30000);
+        await session.closeTab(tab);
+        await session.selectTab(originalTab);
+      }
+    });
+    it.each([
+      [false, false], [true, false], [false, true], [true, true],
+    ])("FOLLOWUP nested offscreen frames remain readable (cross-origin: %s, long top: %s)", async (cross, longTop) => {
+      const src = new URL("review/nested-parent" + (longTop ? "" : "?tall=1"), httpUrl);
+      if (cross) src.hostname = "localhost";
+      const page = await load('<p>Top prose</p>' + (longTop ? '<div style="height:6000px"></div>' : "") + `<iframe style="height:150px" src="${src}"></iframe>`);
+      const parent = page.mainFrame().childFrames()[0];
+      await parent.frameLocator("iframe").getByText("DeepReachableMarker").waitFor({ state: "attached" });
+      const child = parent.childFrames()[0];
+      expect(await observationRootStatus({ frame: child, primary: false })).toBe("included");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: 0, frames_skipped: 0 });
+      expect((result.content[1] as { text: string }).text).toContain("DeepReachableMarker");
     });
     it("FOLLOWUP frame sampling ignores a once-sampled slow top clock", async () => {
       const rows: { kind: string; dispatch: number; settle: number }[] = [];

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { validateTarget, scrollDelta, type ActInput } from "../src/tools/act.js";
 import { normalizeUrl, runNavigate } from "../src/tools/navigate.js";
 import { runSnapshot } from "../src/tools/snapshot.js";
@@ -184,6 +184,7 @@ describe("content warning via browser_navigate", () => {
       title: async () => page.title,
       evaluate: async () => ({ controls: true, loading: false }),
       waitForFunction: async () => ({ dispose: async () => {} }),
+      _timeoutSettings: { navigationTimeout: () => 30000 },
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
       mainFrame: () => frame,
       frames: () => [frame],
@@ -250,6 +251,19 @@ describe("content warning via browser_navigate", () => {
     expect(body.warning).toBeUndefined();
   });
 
+  it.each([0, 250])("history readiness polls without rAF and preserves navigation timeout %i", async timeout => {
+    const session = navSession(RICH_SNAPSHOT, 2, RENDERED);
+    const page = await session.ensurePage();
+    Object.assign(page, { _timeoutSettings: { navigationTimeout: () => timeout } });
+    const wait = vi.spyOn(page, "waitForFunction");
+    try {
+      await runNavigate(session, { url: "back" });
+      const options = wait.mock.calls[0][2]!;
+      expect(options.polling).toBe(100);
+      if (timeout === 0) expect(options.timeout).toBe(0);
+      else { expect(options.timeout).toBeGreaterThan(0); expect(options.timeout).toBeLessThanOrEqual(timeout); }
+    } finally { wait.mockRestore(); }
+  });
   it("does not flag a same-origin redirect or a history move", async () => {
     const same = bodyOf(
       await runNavigate(
