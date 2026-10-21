@@ -56,6 +56,14 @@
 	let celebration = $state<'none' | 'complete' | 'leaving'>('none');
 	// A finished update that left some workers behind, until the owner closes it.
 	let partialShown = $state('');
+	// An accepted stop / when-idle request, held until a snapshot read AFTER it
+	// lands: the snapshot polled before still says "blocked" and must not
+	// re-enable Stop (a second stop request). lockSeq is the action it belongs to.
+	let optimistic = $state<'stopping' | 'waiting_for_idle' | 'queued' | null>(null);
+	let actionSeq = 0;
+	let lockSeq = 0;
+	// Server clock minus this client's, from the snapshot's server_time.
+	let skew = $state(0);
 	// Reasons workers gave for refusing the last request, by device id.
 	let refusals = $state<Record<string, string>>({});
 	let tipOpen = $state(false);
@@ -88,7 +96,13 @@
 		? { role: worker.role, label: worker.label } : classify(worker, snapshot!.update_all_workers, offers))) ?? []);
 	// A Docker worker told ahead that a coming update needs a newer image (#1821).
 	function withNotice(worker: Worker, row: { role: Role; label: string }) {
-		const wait = waitingView(worker);
+		// A just-accepted stop or schedule shows at once on the workers it held.
+		const own = optimistic && worker.install_state === 'blocked' && row.role === 'staged'
+			? { ...worker, install_state: optimistic, stop_result: null,
+				wait_reason: optimistic === 'stopping' ? 'stopping_work' : optimistic === 'queued' ? 'updater_acknowledgement' : 'running_work' }
+			: worker;
+		// server_time is this worker's clock; a peer's epochs come from its own.
+		const wait = waitingView(own, worker.is_self ? { skewSeconds: skew } : {});
 		// The launcher's reason is technical; the installer panel shows it as detail.
 		if (worker.remedy === 'installer') return { worker, role: row.role, label: 'Needs the latest installer', wait };
 		// What a staged restart waits for says more than "Staged"; plain ready keeps the worker's label.
@@ -97,17 +111,19 @@
 	}
 	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
 	// Restarts held by running work, scheduled for when it ends, being stopped, or requested.
-	const restartWaits = $derived(targets.flatMap(row => row.wait && RESTART_WAITS.has(row.wait.state) ? [{ worker: row.worker, view: row.wait }] : []));
+	// Staged workers only: a newer offer elsewhere is never hidden behind the waiting panel.
+	const restartWaits = $derived(targets.flatMap(row => row.role === 'staged' && row.wait && RESTART_WAITS.has(row.wait.state) ? [{ worker: row.worker, view: row.wait }] : []));
 	const stopping = $derived(restartWaits.some(w => w.view.state === 'stopping'));
 	const restartQueued = $derived(restartWaits.some(w => w.view.state === 'queued'));
 	const blocked = $derived(restartWaits.some(w => w.view.state === 'blocked'));
 	// A worker waiting to restart until its running work ends ("Restart when work finishes").
 	const deferred = $derived(restartWaits.some(w => w.view.state === 'waiting_for_idle') || !!snapshot?.workers.some(w => w.deferred));
 	// A stop or restart request is in flight: never send a second one.
-	const restartLocked = $derived(stopping || restartQueued);
+	const restartLocked = $derived(stopping || restartQueued || !!optimistic);
 	const named = $derived(restartWaits.length > 1 || !!snapshot?.update_all_workers);
 	// A retained download on an idle updater: not installable until a check reads the feed again.
-	const retainedIdle = $derived(rows.some(row => row.wait?.reason === 'updater_idle' && row.worker.online && row.worker.supported
+	// Only while the worker's role leaves it out; a server that includes it is trusted as is.
+	const retainedIdle = $derived(rows.some(row => row.role === 'excluded' && row.wait?.reason === 'updater_idle' && row.worker.online && row.worker.supported
 		&& row.worker.allow_updates && (!!snapshot?.update_all_workers || row.worker.is_self !== false)));
 	const downloading = $derived(targets.some(row => row.role === 'preparing'));
 	const available = $derived(targets.some(row => row.role === 'available'));
@@ -148,7 +164,7 @@
 	const progressNote = $derived(targets.length > 1 ? ` ${staged} of ${targets.length} staged.` : '');
 	const waitText = $derived(restartWaits.map(w => `${named ? `${w.worker.device_name}: ` : ''}${waitingSummary(w.view)}`).join(' '));
 	const summary = $derived(error || waitText || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : partialNote
-		|| (retainedIdle ? 'Previous download retained; the updater is idle. Check for updates before restarting.' : 'Update available. Click to download.')));
+		|| (retainedIdle ? 'Click to check for updates.' : 'Update available. Click to download.')));
 	// Workers a still-running install will not restart, named while the rest finish.
 	const refusedNote = $derived(waiting && outcomeInfo?.outcome === 'waiting' ? outcomeInfo.detail : '');
 	const status = $derived(waiting ? `${headline}. ${FIRST_START_NOTE} ${reports}${refusedNote ? ` ${refusedNote}` : ''}` : celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
@@ -159,6 +175,8 @@
 	const offerCancel = $derived(restartWaits.some(w => w.view.controls.cancel));
 	// Only the partial outcome keeps the button up: clicking shows who was left behind.
 	const outcomeOnly = $derived(!!partialNote && !busy && !ready && !available && !error && !restartWaits.length);
+	// The click shows what the restart waits for, so the button stays operable while it is busy.
+	const opensPanel = $derived(restartWaits.length > 0 && !waiting && !celebrating);
 	const leftBehind = $derived(operation && partialNote ? refusedWorkers(operation) : []);
 	// A panel showing live restart state closes once nothing waits any more.
 	$effect(() => { if (panel?.kind === 'waiting' && !restartWaits.length) panel = null; });
@@ -266,6 +284,12 @@
 			if (!active) return;
 			const refused = result.results.filter(w => !w.accepted);
 			keepReceipt(result);
+			const accepted = result.results.filter(w => w.accepted);
+			if (accepted.length) {
+				const said = accepted.map(w => w.install_state).find(state => state === 'stopping' || state === 'waiting_for_idle' || state === 'queued');
+				optimistic = (said as typeof optimistic) ?? (mode === 'stop' ? 'stopping' : 'waiting_for_idle');
+				lockSeq = ++actionSeq;
+			}
 			if (refused.length) notify.warning(receipt, { title: refused.every(notSent) ? 'Restart was not sent' : 'Update needs attention', persist: false });
 			else notify.info(mode === 'stop' ? 'Stop requested. Stopping running work, then requesting restart…' : 'Restarts when running work finishes.',
 				{ title: mode === 'stop' ? 'Stopping running work' : 'Restart scheduled', persist: false });
@@ -282,19 +306,22 @@
 			if (active) notify.info('The update stays downloaded.', { title: 'Schedule cancelled', persist: false });
 		} catch (cause) {
 			if (active) notify.error(getErrorMessage(cause, 'Could not cancel the restart'));
-		} finally { if (active) { pending = false; void refresh(); } }
+		} finally { if (active) { pending = false; optimistic = null; void refresh(); } }
 	}
 	function closeOutcome() { partialShown = ''; closePanel(); }
 	function clicked() {
 		if (panel) { closePanel(); return; }
 		// What the restart waits for, and the controls that fit, rather than a request that would be refused.
-		if (restartWaits.length && !waiting && !celebrating) { openPanel({ kind: 'waiting' }); void refresh(); return; }
+		if (opensPanel) { openPanel({ kind: 'waiting' }); void refresh(); return; }
 		if (outcomeOnly) { openPanel({ kind: 'outcome' }); return; }
+		// A retained download the updater cannot install yet: check, and always say what was found.
+		if (retainedIdle && !busy && !ready && !available && !error) { void checkForUpdates(); return; }
 		if (installer.length && !busy) { openPanel({ kind: 'installer' }); return; }
 		void activate();
 	}
 	function applySnapshot(next: Snapshot) {
 		snapshot = next;
+		skew = typeof next.server_time === 'number' ? next.server_time - Date.now() / 1000 : 0;
 		if (!pending) installRequested = false;
 		const done = next.operation;
 		if (done && operationOutcome(done) === 'waiting') watched = done.id;
@@ -334,9 +361,13 @@
 		if (reading) return;
 		if (auth.current.status?.preview_access) { snapshot = null; schedule(); return; }
 		reading = true;
+		const seq = actionSeq;
 		try {
 			const next = await api.get<Snapshot>('/settings/application-updates/workers');
-			if (active) applySnapshot(next);
+			if (!active) return;
+			// Read after the accepted action: the worker's own state now speaks for it.
+			if (optimistic && seq >= lockSeq) optimistic = null;
+			applySnapshot(next);
 		} catch { /* Keep waiting through the worker's restart; never offer a stale install. */ }
 		finally { reading = false; schedule(); }
 	}
@@ -484,7 +515,7 @@
 	<div class="update-slot" class:complete={celebrating} class:leaving={celebration === 'leaving'}>
 		<button class="update-button" class:ready class:failed={!!error && !waiting && !celebrating && !deferred}
 			class:held={(blocked || deferred) && !error && !waiting && !celebrating} class:attention={outcomeOnly}
-			type="button" onclick={clicked} aria-disabled={busy} aria-busy={busy && !celebrating} bind:this={buttonEl}
+			type="button" onclick={clicked} aria-disabled={busy && !opensPanel} aria-busy={busy && !celebrating} bind:this={buttonEl}
 			aria-label={waiting || celebrating || deferred || restartLocked || outcomeOnly || (blocked && !error) ? headline : busy ? 'Downloading update' : installer.length ? 'Update needs the latest installer' : action}
 			aria-haspopup="dialog" aria-expanded={!!panel} aria-controls={panel ? panelId : undefined}
 			title={panel ? undefined : status} aria-describedby={tipOpen ? tooltipId : undefined}
@@ -579,7 +610,7 @@
 				{:else}
 					{#if error || !restartWaits.length}<span>{scope}: {summary}</span>{/if}
 					{#each rows as row (row.worker.device_id)}
-						<div class="worker-row"><span>{row.worker.device_name}</span><span class:verified={row.role === 'staged' && !row.wait?.blockers?.length && row.wait?.state !== 'stopping'}>{row.label}</span></div>
+						<div class="worker-row"><span>{row.worker.device_name}</span><span class:verified={row.role === 'staged' && (!row.wait || row.wait.state === 'ready')}>{row.label}</span></div>
 						{#if row.wait && row.wait.state !== 'ready' && (row.role !== 'excluded' || row.wait.reason === 'updater_idle')}
 							<div class="wait-tip">
 								<span>{row.wait.text}</span>
@@ -626,7 +657,7 @@
 	.complete .halo { animation: update-halo .6s .12s ease-out both; }
 	.leaving { animation: close-gap .3s ease-in forwards; }
 	.leaving .update-button { animation: update-leave .3s ease-in forwards; }
-	.update-tooltip { position: fixed; z-index: 250; width: 280px; max-width: calc(100vw - 16px); padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 8px 24px #0004; font-size: 11px; line-height: 1.5; pointer-events: none; overflow-wrap: anywhere; }
+	.update-tooltip { position: fixed; z-index: 250; width: 280px; max-width: calc(100vw - 16px); padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 8px 24px #0004; font-size: 11px; line-height: 1.5; pointer-events: none; overflow-wrap: break-word; }
 	.update-tooltip strong { display: block; font-size: 12px; margin-bottom: 8px; }
 	.worker-row { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; }
 	.worker-row span:last-child { text-align: right; color: var(--muted-foreground); }
@@ -635,7 +666,7 @@
 	.release-notes strong { margin-bottom: 4px; }
 	.notes-text { white-space: pre-line; color: var(--muted-foreground); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 12; line-clamp: 12; overflow: hidden; }
 	.update-tooltip p { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted-foreground); }
-	.update-panel { width: 100%; max-width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--card-foreground, var(--foreground)); box-shadow: var(--shadow-l); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+	.update-panel { width: 100%; max-width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--card-foreground, var(--foreground)); box-shadow: var(--shadow-l); font-size: 13px; line-height: 1.45; overflow-wrap: break-word; }
 	.update-panel strong { display: block; font-size: 14px; }
 	.panel-hint { margin: 2px 0 8px; color: var(--muted-foreground); }
 	.panel-worker { display: block; margin-top: 6px; font-size: 11px; color: var(--muted-foreground); }

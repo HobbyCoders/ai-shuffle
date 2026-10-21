@@ -75,6 +75,12 @@ export interface TimeOptions {
 	locale?: string;
 	/** Defaults to the client's timezone. */
 	timeZone?: string;
+	/**
+	 * Server clock minus client clock, in seconds (the snapshot's server_time
+	 * against when it arrived). Applied to epoch times only, and only for the
+	 * worker that produced server_time: a peer's epochs come from its own clock.
+	 */
+	skewSeconds?: number;
 }
 
 /**
@@ -82,7 +88,7 @@ export interface TimeOptions {
  * otherwise. Accepts ISO strings and epoch seconds; null when unknown.
  */
 export function formatWhen(value: string | number | null | undefined, options: TimeOptions = {}): string | null {
-	const ms = typeof value === 'number' ? value * 1000 : typeof value === 'string' && value ? Date.parse(value) : NaN;
+	const ms = typeof value === 'number' ? (value - (options.skewSeconds ?? 0)) * 1000 : typeof value === 'string' && value ? Date.parse(value) : NaN;
 	if (!Number.isFinite(ms)) return null;
 	const { timeZone, locale } = options;
 	const day = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -143,13 +149,12 @@ export function blockerView(blocker: Blocker, index: number, bound?: number | nu
 	const chat = chatName(blocker);
 	if (kind === 'service') {
 		const label = blocker.label?.trim();
-		const noun = label && /preview/i.test(label) ? 'Preview server' : 'Service';
 		const started = formatWhen(blocker.started_at ?? blocker.since, time);
 		const ended = formatWhen(blocker.turn_ended_at, time);
 		let turn = '';
 		if (blocker.running_turn === false) turn = ended ? `; the chat's turn ended ${ended}` : '; chat has no running turn';
 		const text =
-			`${noun}${label ? ` ${label}` : ''} ${blocker.live ? 'still running' : 'still registered (process not confirmed)'} for ${chat}` +
+			`Service${label ? ` ${label}` : ''} ${blocker.live ? 'still running' : 'still registered (process not confirmed)'} for ${chat}` +
 			`${blocker.port ? ` on port ${blocker.port}` : ''}${started ? `, started ${started}` : ''}${turn}.`;
 		const meta = [idleStop(blocker, bound, time)];
 		if (blocker.stop_will_stop) meta.push('Stopping running work stops it.');
@@ -207,15 +212,16 @@ export function waitingView(worker: WaitingFields, time: TimeOptions = {}): Wait
 		case 'blocked': {
 			const controls = { stop: true, whenIdle: true, cancel: false };
 			if (reason === 'still_busy_after_stop') {
-				const names = (worker.blocked_by ?? []).map(blockerName);
-				const named = names.length ? names.join(', ') : 'running work';
-				const why = worker.stop_result?.accepted === false && worker.stop_result.reason ? worker.stop_result.reason : 'work is still running';
+				// The refusal usually restates the busy work the list below already names; keep only a different reason.
+				const reason = worker.stop_result?.accepted === false ? worker.stop_result.reason?.trim().replace(/\.$/, '') : '';
+				const why = reason && !/^Busy with running work\b/i.test(reason) ? `: ${reason}` : '';
 				const when = formatWhen(worker.stop_result?.completed_at, time);
 				return {
 					...base,
 					tone: 'err',
 					title: 'Still running after the stop attempt',
-					text: `The stop attempt finished, but ${named} ${names.length > 1 ? 'are' : 'is'} still running. Restart was not queued: ${why.replace(/\.$/, '')}.`,
+					// The blocker list names what still runs, once.
+					text: `The stop attempt finished, but work is still running. Restart was not queued${why}.`,
 					blockers,
 					notes: when ? [`Last stop attempt ${when}.`] : [],
 					controls

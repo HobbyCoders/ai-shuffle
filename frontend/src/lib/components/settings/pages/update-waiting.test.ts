@@ -57,7 +57,7 @@ describe('blocker copy', () => {
 	it('names a preview service by label, port, start and the turn end, never a raw command field', () => {
 		const view = blockerView(service, 0, 1800, T);
 		expect(view.text).toBe(
-			"Preview server npm run preview -- --port 5173 still running for Fix login on port 5173, started 9:02 AM; the chat's turn ended 9:10 AM."
+			"Service npm run preview -- --port 5173 still running for Fix login on port 5173, started 9:02 AM; the chat's turn ended 9:10 AM."
 		);
 		expect(view.meta).toEqual(['Stops on its own around 11:40 AM, if the chat stays idle.', 'Stopping running work stops it.']);
 	});
@@ -105,7 +105,7 @@ describe('waitingView', () => {
 	it('blocked by a service offers both restart choices and no force', () => {
 		const view = waitingView({ ...staged, install_state: 'blocked', wait_reason: 'running_work', blocked_by: [service] }, T)!;
 		expect(view.text).toBe('Downloaded and ready.');
-		expect(view.blockers?.[0].text).toMatch(/^Preview server npm run preview/);
+		expect(view.blockers?.[0].text).toMatch(/^Service npm run preview/);
 		expect(view.controls).toEqual({ stop: true, whenIdle: true, cancel: false });
 		expect(view.locked).toBe(false);
 		expect(waitingSummary(view)).not.toMatch(/fail/i);
@@ -127,10 +127,22 @@ describe('waitingView', () => {
 			T
 		)!;
 		expect(view.text).toBe(
-			'The stop attempt finished, but npm run preview -- --port 5173 is still running. Restart was not queued: Busy with running work: Preview server still running.'
+			'The stop attempt finished, but work is still running. Restart was not queued.'
 		);
 		expect(view.notes).toEqual(['Last stop attempt 10:58 AM.']);
 		expect(view.controls.stop && view.controls.whenIdle).toBe(true);
+	});
+	it('keeps a stop refusal that says something other than busy work', () => {
+		const view = waitingView(
+			{ ...staged, install_state: 'blocked', wait_reason: 'still_busy_after_stop', blocked_by: [service], stop_result: { accepted: false, reason: 'Updater did not answer.' } },
+			T
+		)!;
+		expect(view.text).toBe('The stop attempt finished, but work is still running. Restart was not queued: Updater did not answer.');
+	});
+	it('applies the server clock offset to epoch times only', () => {
+		const skewed = { ...T, skewSeconds: 3600 };
+		expect(formatWhen(at('2026-10-21T15:40:00Z'), skewed)).toBe('10:40 AM');
+		expect(formatWhen('2026-10-21T13:02:00Z', skewed)).toBe('9:02 AM');
 	});
 	it('does not render an old stop failure once the worker is ready', () => {
 		const view = waitingView({ ...staged, install_state: 'ready', blocked_by: [], stop_result: { accepted: false, reason: 'Old failure' } }, T)!;

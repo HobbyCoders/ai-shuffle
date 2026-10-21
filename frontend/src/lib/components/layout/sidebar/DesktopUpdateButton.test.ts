@@ -636,7 +636,7 @@ describe('restart waiting state', () => {
   api.get.mockResolvedValue({...state,workers:[{...ready,install_state:'blocked',wait_reason:'running_work',blocked_by:[svc]}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Ready; waiting for running work'});
-  expect(button.title).toContain('Preview server npm run preview -- --port 5173 still running for Fix login on port 5173');
+  expect(button.title).toContain('Service npm run preview -- --port 5173 still running for Fix login on port 5173');
   await fireEvent.click(button);
   const panel = await screen.findByRole('dialog',{name:'Work is still running'});
   expect(panel.textContent).toContain('Downloaded and ready.');
@@ -651,7 +651,9 @@ describe('restart waiting state', () => {
   api.get.mockResolvedValue({...state,workers:[{...ready,install_state:'stopping',wait_reason:'stopping_work',blocked_by:[svc]}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Stopping running work…'});
-  expect(button.getAttribute('aria-disabled')).toBe('true');
+  // Still operable (it opens the state); busy, not disabled.
+  expect(button.getAttribute('aria-disabled')).toBe('false');
+  expect(button.getAttribute('aria-busy')).toBe('true');
   await fireEvent.click(button);
   const panel = await screen.findByRole('dialog',{name:'Stopping running work'});
   expect(panel.textContent).toContain('Stop requested. Stopping running work, then requesting restart…');
@@ -683,7 +685,9 @@ describe('restart waiting state', () => {
    stop_result:{request_id:'r',accepted:false,reason:'Busy with running work: Fix login',completed_at:1_790_000_000}}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Ready; waiting for running work'});
-  expect(button.title).toContain('The stop attempt finished, but npm run preview -- --port 5173 is still running. Restart was not queued: Busy with running work: Fix login.');
+  expect(button.title).toContain('The stop attempt finished, but work is still running. Restart was not queued. Service npm run preview -- --port 5173 still running');
+  // Named once, by the blocker line; the busy refusal does not repeat it.
+  expect(button.title.match(/npm run preview/g)).toHaveLength(1);
  });
  it('reports a not-sent request with the worker named once', async () => {
   api.get.mockResolvedValue({...state,workers:[{...ready,install_state:'blocked',wait_reason:'running_work',blocked_by:[svc]}]});
@@ -711,6 +715,98 @@ describe('restart waiting state', () => {
   render(DesktopUpdateButton);
   await fireEvent.focus(await screen.findByRole('button',{name:'Update and restart'}));
   expect(screen.getByRole('tooltip').querySelector('.release-notes')).toBeNull();
+ });
+});
+
+describe('review fixes (#355)', () => {
+ const svc = {session_id:'s1',title:'Fix login',kind:'service',task_id:'t1',label:'npm run preview -- --port 5173',port:5173,live:true,running_turn:false};
+ const blockedSnap = {...state,workers:[{...worker,phase:'ready',staged_version:'abc123',install_state:'blocked',wait_reason:'running_work',blocked_by:[svc]}]};
+ const stopped = {results:[{device_id:'local',device_name:'Current worker',accepted:true,reason:'Stopping running work, then restarting',install_state:'stopping'}]};
+ it('sends one stop while the snapshot read after it has not landed', async () => {
+  api.get.mockResolvedValue(blockedSnap);
+  render(DesktopUpdateButton);
+  const button = await screen.findByRole('button',{name:'Ready; waiting for running work'});
+  // Every read from here on is held: the last snapshot still says "blocked".
+  let release!: (value: unknown) => void;
+  api.get.mockReturnValue(new Promise(resolve => { release = resolve; }));
+  api.post.mockResolvedValue(stopped);
+  await fireEvent.click(button);
+  await fireEvent.click(screen.getByRole('button',{name:'Stop running work and restart'}));
+  await waitFor(()=>expect(api.post).toHaveBeenCalledOnce());
+  const locked = await screen.findByRole('button',{name:'Stopping running work…'});
+  await fireEvent.click(locked);
+  const stop = screen.getByRole('button',{name:'Stop running work and restart'}) as HTMLButtonElement;
+  expect(stop.disabled).toBe(true);
+  await fireEvent.click(stop);
+  expect(api.post).toHaveBeenCalledOnce();
+  // The held read was sent before the stop: it does not settle the lock.
+  release(blockedSnap);
+  await new Promise(r => setTimeout(r, 0));
+  expect(screen.getByRole('button',{name:'Stopping running work…'})).toBeTruthy();
+  // A read sent after it does: here the stop finished and the work still runs, so a retry is allowed.
+  api.get.mockResolvedValue({...blockedSnap,workers:[{...blockedSnap.workers[0],wait_reason:'still_busy_after_stop',stop_result:{accepted:false,reason:'Busy with running work'}}]});
+  window.dispatchEvent(new Event('application-update-policy'));
+  const again = await screen.findByRole('button',{name:'Ready; waiting for running work'});
+  expect(again.title).toContain('The stop attempt finished, but work is still running.');
+ });
+ it('the bell action cannot send a second stop before the next snapshot', async () => {
+  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}]});
+  api.post.mockResolvedValue(busyReceipt);
+  render(DesktopUpdateButton);
+  await fireEvent.click(await screen.findByRole('button',{name:'Update and restart'}));
+  await waitFor(()=>expect(notice.warning).toHaveBeenCalled());
+  await new Promise(r => setTimeout(r, 0));
+  api.get.mockReturnValue(new Promise(() => {}));
+  api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Stopping running work, then restarting'}]});
+  const stop = notice.warning.mock.calls.at(-1)![1].secondaryAction.onClick;
+  stop();
+  await waitFor(()=>expect(api.post).toHaveBeenCalledTimes(2));
+  await new Promise(r => setTimeout(r, 0));
+  stop();
+  await new Promise(r => setTimeout(r, 0));
+  expect(api.post).toHaveBeenCalledTimes(2);
+ });
+ it('checks for updates from a retained download on an idle updater, and says what it found', async () => {
+  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'idle',version:null,staged_version:'abc123',install_state:'unavailable',wait_reason:'updater_idle',role:'excluded',label:'No update offered'}]});
+  render(DesktopUpdateButton);
+  const button = await screen.findByRole('button',{name:'Check for updates'});
+  expect(button.title).toContain('Click to check for updates.');
+  expect(button.title.match(/the updater is idle/g) ?? []).toHaveLength(0);
+  await fireEvent.click(button);
+  await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'check'}));
+  expect(notice.info).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({title:'Checking for updates'}));
+ });
+ it('trusts a server role that includes the retained download', async () => {
+  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'idle',version:null,staged_version:'abc123',install_state:'unavailable',wait_reason:'updater_idle',
+   checked_at:null,role:'available',label:'Not checked yet; will check and download'}]});
+  render(DesktopUpdateButton);
+  const button = await screen.findByRole('button',{name:'Download update'});
+  await fireEvent.click(button);
+  expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'download'});
+ });
+ it('does not hide a newer offer behind the waiting panel', async () => {
+  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'available',version:'b'.repeat(40),install_state:'waiting_for_idle',wait_reason:'running_work',blocked_by:[svc],role:'available',label:'Update available; not downloaded'}]});
+  render(DesktopUpdateButton);
+  await fireEvent.click(await screen.findByRole('button',{name:'Download update'}));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'download'});
+ });
+ it('never marks a worker with unknown blockers as verified', async () => {
+  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready',install_state:'blocked',wait_reason:'running_work',blocked_by:null}]});
+  render(DesktopUpdateButton);
+  await fireEvent.focus(await screen.findByRole('button',{name:'Ready; waiting for running work'}));
+  expect(screen.getByRole('tooltip').querySelector('.verified')).toBeNull();
+  expect(screen.getByRole('tooltip').textContent).toContain('Running work details are unavailable.');
+ });
+ it('formats this worker’s server epochs against its own clock', async () => {
+  // The server is 1 h ahead of this browser: its 1 h-from-its-now expiry is "now" here.
+  const serverNow = Date.now() / 1000 + 3600;
+  api.get.mockResolvedValue({...state,server_time:serverNow,workers:[{...worker,is_self:true,phase:'ready',install_state:'waiting_for_idle',wait_reason:'running_work',
+   blocked_by:[svc],restart_expires_at:serverNow + 60}]});
+  render(DesktopUpdateButton);
+  const button = await screen.findByRole('button',{name:'Restarts when work finishes'});
+  const local = new Date(Date.now() + 60_000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  expect(button.title).toContain(`Waits until ${local} at most`);
  });
 });
 

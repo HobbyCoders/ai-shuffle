@@ -7,6 +7,13 @@
 // Run from frontend/ while the fixture is serving:
 //   npx vite dev --config tests/vite.update-button.config.js --host 127.0.0.1 --port 5248 --strictPort
 //   SCREENSHOT_DIR=/tmp/update-waiting node tests/verify-update-waiting.mjs
+//
+// Or inside the real app shell (sidebar, phone drawer, anchored dock), with
+// every API call answered here and the dev proxy pointed at a dead port so no
+// request can reach a running worker:
+//   AI_SHUFFLE_DEV_API=http://127.0.0.1:9 npx vite dev --host 127.0.0.1 --port 5249 --strictPort
+//   UPDATE_WAITING_SHELL_URL=http://127.0.0.1:5249/ SCREENSHOT_DIR=/tmp/update-waiting node tests/verify-update-waiting.mjs
+//
 // Needs playwright-core (browser-mcp's, or PLAYWRIGHT_MODULE) and Chromium
 // (CHROMIUM_PATH). UPDATE_WAITING_FIXTURE_URL overrides the URL.
 import assert from 'node:assert/strict';
@@ -19,7 +26,11 @@ const browser = await chromium.launch({
 	headless: true,
 	args: ['--no-sandbox', '--disable-gpu'],
 });
-const url = process.env.UPDATE_WAITING_FIXTURE_URL || 'http://127.0.0.1:5248/tests/update-waiting.html';
+const shell = process.env.UPDATE_WAITING_SHELL_URL;
+const url = shell || process.env.UPDATE_WAITING_FIXTURE_URL || 'http://127.0.0.1:5248/tests/update-waiting.html';
+// The app shell's own boot reads: a signed-in local owner; everything else is empty.
+const AUTH = { authenticated: true, is_admin: true, setup_required: false, auth_mode: 'local', local_access: true, claude_authenticated: true,
+	has_any_credential: true, github_authenticated: false, onboarding_complete: true, username: 'owner', agent_gate: { ready: true } };
 const shots = process.env.SCREENSHOT_DIR;
 
 const now = Date.now() / 1000;
@@ -65,10 +76,10 @@ const SCENARIOS = [
 			[{ device_id: 'local', device_name: 'Current worker', reason: 'Busy with running work: Fix login page' }]) }),
 	'hover', 'Not restarted: Current worker: Busy with running work: Fix login page.'],
 	['blocked-service', one([{ ...self, phase: 'ready', install_state: 'blocked', wait_reason: 'running_work', blocked_by: [service, turn] }]),
-		'click', 'Preview server npm run preview -- --port 5173 still running for Fix login page on port 5173'],
+		'click', 'Service npm run preview -- --port 5173 still running for Fix login page on port 5173'],
 	['still-busy-after-stop', one([{ ...self, phase: 'ready', install_state: 'blocked', wait_reason: 'still_busy_after_stop', blocked_by: [service],
 		stop_result: { request_id: 'r1', accepted: false, reason: 'Busy with running work: Preview server still running for Fix login page', completed_at: now - 30 } }]),
-		'click', 'The stop attempt finished, but npm run preview -- --port 5173 is still running. Restart was not queued'],
+		'click', 'The stop attempt finished, but work is still running. Restart was not queued.'],
 	['waiting-for-idle', one([{ ...self, phase: 'ready', install_state: 'waiting_for_idle', wait_reason: 'running_work', deferred: true, blocked_by: [service],
 		restart_expires_at: now + 11.5 * 3600 }]), 'click', 'Will restart when running work finishes.'],
 	['waiting-for-idle-no-estimate', one([{ ...self, phase: 'ready', install_state: 'waiting_for_idle', wait_reason: 'running_work', deferred: true, monitor_serving_idle_seconds: 0,
@@ -100,19 +111,25 @@ async function run(viewport, touch, theme) {
 		const context = await browser.newContext({ viewport, isMobile: touch, hasTouch: touch, deviceScaleFactor: 2, serviceWorkers: 'block',
 			timezoneId: 'America/New_York', locale: 'en-US', colorScheme: theme });
 		const posts = [];
-		await context.route((u) => u.pathname.startsWith('/api/'), async (route) => {
+		await context.route((u) => u.pathname.startsWith('/api/') || u.pathname === '/health', async (route) => {
 			const request = route.request();
-			if (request.url().endsWith('/settings/application-updates/workers')) return route.fulfill({ json: snapshot });
-			if (request.method() === 'POST' && request.url().endsWith('/settings/application-updates')) {
+			const path = new URL(request.url()).pathname;
+			if (path.endsWith('/settings/application-updates/workers')) return route.fulfill({ json: snapshot });
+			if (request.method() === 'POST' && path.endsWith('/settings/application-updates')) {
 				posts.push(request.postDataJSON());
 				return route.fulfill({ json: reply ?? { results: [{ device_name: 'Current worker', accepted: true, reason: 'Request queued' }] } });
 			}
-			return route.abort();
+			if (!shell) return route.abort();
+			if (path.endsWith('/auth/status')) return route.fulfill({ json: AUTH });
+			if (path.startsWith('/api/v1/assistant')) return; // never answered: the home page stays in its neutral loading state
+			return route.fulfill({ status: 404, json: { detail: 'Not Found' } });
 		});
 		const page = await context.newPage();
 		const errors = [];
 		page.on('pageerror', (e) => errors.push(e.message));
-		await page.goto(`${url}?theme=${theme}`);
+		await page.goto(shell ? url : `${url}?theme=${theme}`);
+		// On a phone the update button rides in the sidebar drawer.
+		if (shell && touch) await page.getByRole('button', { name: 'Show sidebar' }).click();
 		const button = page.locator('.update-button');
 		await button.waitFor();
 		const shot = async (suffix = '') => {
@@ -138,6 +155,7 @@ async function run(viewport, touch, theme) {
 			const text = await tip.innerText();
 			check(text.replace(/\s+/g, ' ').includes(expected), `${name}: tooltip copy`, text);
 			check(!/could not be confirmed/.test(text), `${name}: no startup-failure copy`, text);
+			check((text.match(/the updater is idle/g) ?? []).length <= 1, `${name}: no repeated sentence`, text);
 			const box = await tip.boundingBox();
 			check(box && box.x >= 0 && box.x + box.width <= viewport.width, `${name}: tooltip in viewport`, box);
 			await shot('-tooltip');
@@ -168,14 +186,16 @@ async function run(viewport, touch, theme) {
 				await shot('-panel');
 			}
 		}
-		check(errors.length === 0, `${name}: no page errors`, errors);
+		// The shell's own unrelated reads are answered 404; only fail on errors from this surface.
+		const own = shell ? errors.filter((e) => !/Not Found/.test(e)) : errors;
+		check(own.length === 0, `${name}: no page errors`, own);
 		await context.close();
 	}
 }
 
 try {
 	for (const theme of ['dark', 'light']) {
-		await run({ width: 1440, height: 900 }, false, theme);
+		await run({ width: 1280, height: 800 }, false, theme);
 		await run({ width: 390, height: 844 }, true, theme);
 	}
 	console.log(`update waiting: ${passed} checks passed`);
