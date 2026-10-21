@@ -32,6 +32,7 @@ import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
+import { phonePanel, isEmulatorTool } from '../../phone-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
 import { swarms } from '../../swarms';
 
@@ -1032,6 +1033,15 @@ export const feedController: FeedController = {
 					// replaying a session's history never pops the panel open;
 					// `autoOpenFor` no-ops if the user closed it for this session.
 					browserPanel.autoOpenFor(currentSessionId);
+				}
+				if (ev.type === 'tool.use' && isEmulatorTool(ev.name)) {
+					// Same rule for the phone: the composer has no Phone toggle, so the
+					// panel appears when the agent drives the emulator. LIVE events
+					// only; `autoOpenFor` no-ops once the user closed it for this
+					// session, and for a chat running on another worker.
+					const app = deps?.getState();
+					const remote = app?.sessionId === currentSessionId && app?.isRemote === true;
+					void phonePanel.autoOpenFor(currentSessionId, { remote });
 				}
 				scheduleFlush(
 					THROTTLED_EVENT_TYPES.has(String(ev.type)) ? 'throttled' : 'immediate'
