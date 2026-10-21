@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Download, RefreshCw, LoaderCircle, CircleAlert } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
@@ -8,7 +8,7 @@
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 	import { DATA_KEPT, INSTALLER_ACTION, INSTALLER_URL } from '$lib/components/settings/pages/update-remedy';
 	import {
-		blockerView, notSent, offerDescribesStaged, operationOutcome, outcomeView, receiptRows, receiptText, refusedWorkers, waitingSummary, waitingView,
+		STOP_STOPS_IT, blockerView, notSent, offerDescribesStaged, operationOutcome, outcomeView, receiptRows, receiptText, refusedWorkers, waitingSummary, waitingView,
 		type ActionResult, type Blocker, type BlockerView, type UpdateOperation, type WaitingFields
 	} from '$lib/components/settings/pages/update-waiting';
 
@@ -56,6 +56,9 @@
 	let installRequested = $state(false);
 	let requestError = $state('');
 	let receipt = $state('');
+	// The receipt only repeats the server's held text: it is history once the restart is ready.
+	let receiptHeld = $state(false);
+	let wasReady = false;
 	let celebration = $state<'none' | 'complete' | 'leaving'>('none');
 	// A finished update that left some workers behind, until the owner closes it.
 	let partialShown = $state('');
@@ -147,7 +150,10 @@
 	// anywhere in scope always holds the restart until a check reads the feed again (#361).
 	const ready = $derived((typeof plan?.ready === 'boolean' ? plan.ready : staged > 0 && !downloading && !available && !unknown.length) && !retainedIdle);
 	// The next click is a check, not an install: a staged worker waits for one that must check first.
-	const checkFirst = $derived(!ready && !available && !downloading && (retainedIdle || (staged > 0 && plan?.action === 'check')));
+	// The server holds the restart for a check (#361), even when the worker that must check is too
+	// old to say so; unknown workers hold it for their own reason ("Restart waits for …").
+	const checkHeld = $derived(retainedIdle || (staged > 0 && !unknown.length && plan?.action === 'check' && plan.ready === false));
+	const checkFirst = $derived(!ready && !available && !downloading && checkHeld);
 	const held = $derived(staged > 0 && !downloading && !available && unknown.length
 		? `Restart waits for ${unknown.map(row => `${row.worker.device_name} (${row.label})`).join(', ')}.` : '');
 	// Release notes travel in the signed manifest and describe the offered version.
@@ -187,8 +193,8 @@
 	const panelLabel = $derived(blocked ? 'Work is still running' : stopping ? 'Stopping running work' : restartQueued ? 'Restart requested' : 'Restart scheduled');
 	// The controls that fit any waiting worker; stop and restart stay visible but disabled while one is in flight.
 	// A worker that must check first holds the restart: stop and restart would not be sent (#361).
-	const offerStop = $derived(!retainedIdle && (restartWaits.some(w => w.view.controls.stop) || restartLocked));
-	const offerWhenIdle = $derived(!retainedIdle && (restartWaits.some(w => w.view.controls.whenIdle) || (restartLocked && !deferred)));
+	const offerStop = $derived(!checkHeld && (restartWaits.some(w => w.view.controls.stop) || restartLocked));
+	const offerWhenIdle = $derived(!checkHeld && (restartWaits.some(w => w.view.controls.whenIdle) || (restartLocked && !deferred)));
 	const offerCancel = $derived(restartWaits.some(w => w.view.controls.cancel));
 	// Only the partial outcome keeps the button up: clicking shows who was left behind.
 	const outcomeOnly = $derived(!!partialNote && !busy && !ready && !available && !error && !restartWaits.length);
@@ -199,6 +205,12 @@
 	$effect(() => { if (panel?.kind === 'waiting' && !restartWaits.length) panel = null; });
 	$effect(() => { if (panel?.kind === 'outcome' && !partialNote) panel = null; });
 	$effect(() => { canCheck = !!snapshot?.allow_updates; });
+	// Clears on the turn to ready, not on a stale snapshot that already read ready when the server held it.
+	$effect(() => {
+		const now = ready;
+		if (now && !wasReady && untrack(() => receiptHeld)) { receipt = ''; receiptHeld = false; }
+		wasReady = now;
+	});
 
 	const same = (a?: string | null, b?: string | null) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 	type Offer = { version: string; channel?: string | null; checked_at?: number | null };
@@ -289,6 +301,7 @@
 	/** Remember a request's refusals: not-sent rows are not the worker's refusal, so they only show as the receipt. */
 	function keepReceipt(result: Receipt) {
 		receipt = receiptText(receiptRows(result.results));
+		receiptHeld = false;
 		refusals = Object.fromEntries(result.results.filter(w => !w.accepted && !notSent(w) && w.device_id).map(w => [w.device_id!, w.reason]));
 	}
 	/** "Restart when work finishes" or "Stop running work and restart". */
@@ -332,7 +345,8 @@
 		if (opensPanel) { openPanel({ kind: 'waiting' }); void refresh(); return; }
 		if (outcomeOnly) { openPanel({ kind: 'outcome' }); return; }
 		// A retained download the updater cannot install yet: check, and always say what was found.
-		if (checkFirst && !busy && !error) { void checkForUpdates(); return; }
+		// Even beside a worker error: the check always reports what it found.
+		if (checkFirst && !busy && !installer.length) { void checkForUpdates(); return; }
 		if (installer.length && !busy) { openPanel({ kind: 'installer' }); return; }
 		void activate();
 	}
@@ -501,6 +515,7 @@
 				installRequested = false;
 				const why = result.held?.replace(/\.+$/, '') || 'Nothing was installed';
 				receipt = [why, receipt].filter(Boolean).join('; ');
+				receiptHeld = true;
 				if (sentAction === 'check' && result.results.some(w => w.accepted)) manualCheckAt = Date.now();
 				notify.warning(`${why}.${sentAction === 'check' ? ' Checking for updates first.' : sentAction === 'download' ? ' Downloading first.' : ''}`,
 					{ title: 'Restart held', persist: false });
@@ -528,13 +543,13 @@
 
 <svelte:window onkeydown={panelKey} />
 
-{#snippet blockerList(blockers: BlockerView[])}
+{#snippet blockerList(blockers: BlockerView[], stopOffered = true)}
 	<ul class="busy-list blockers">
 		{#each blockers as blocker (blocker.key)}
 			<li data-kind={blocker.kind}>
 				<span class="kind-tag">{blocker.kind}</span>
 				<span class="busy-title">{blocker.text}</span>
-				{#each blocker.meta as line (line)}<span class="busy-tasks">{line}</span>{/each}
+				{#each blocker.meta.filter(line => stopOffered || line !== STOP_STOPS_IT) as line (line)}<span class="busy-tasks">{line}</span>{/each}
 			</li>
 		{/each}
 	</ul>
@@ -612,14 +627,14 @@
 						<section class="wait-group" data-state={wait.view.state}>
 							{#if named}<span class="panel-worker">{wait.worker.device_name}</span>{/if}
 							<p class="wait-text"><i class="tone-dot {wait.view.tone}" aria-hidden="true"></i><span>{wait.view.text}</span></p>
-							{#if wait.view.blockers?.length}{@render blockerList(wait.view.blockers)}{/if}
+							{#if wait.view.blockers?.length}{@render blockerList(wait.view.blockers, offerStop)}{/if}
 							{#each wait.view.notes as note (note)}<p class="wait-note">{note}</p>{/each}
 						</section>
 					{/each}
 					{#if restartLocked}<p class="wait-note">Another stop or restart can be requested once this one finishes.</p>{/if}
-					{#if retainedIdle && !restartLocked}<p class="wait-text check-first"><i class="tone-dot warn" aria-hidden="true"></i><span>{checkWhy} Restart controls return once every worker is staged.</span></p>{/if}
+					{#if checkHeld && !restartLocked}<p class="wait-text check-first"><i class="tone-dot warn" aria-hidden="true"></i><span>{checkWhy} Restart controls return once every worker is staged.</span></p>{/if}
 					<div class="panel-actions">
-						{#if retainedIdle && !restartLocked}<button type="button" class="panel-primary" disabled={pending} onclick={() => { closePanel(); void checkForUpdates(); }}>Check for updates</button>{/if}
+						{#if checkHeld && !restartLocked}<button type="button" class="panel-primary" disabled={pending} onclick={() => { closePanel(); void checkForUpdates(); }}>Check for updates</button>{/if}
 						{#if offerWhenIdle}<button type="button" class="panel-primary" disabled={pending || restartLocked} onclick={() => restartLater('when_idle')}>Restart when work finishes</button>{/if}
 						{#if offerStop}<button type="button" class="panel-danger" disabled={pending || restartLocked} onclick={() => restartLater('stop')}>Stop running work and restart</button>{/if}
 						{#if offerCancel}<button type="button" class="panel-outline" disabled={pending} onclick={cancelRestart}>Cancel schedule</button>{/if}
