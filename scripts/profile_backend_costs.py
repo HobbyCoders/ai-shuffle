@@ -44,6 +44,13 @@ async def nodes_lab(count, get_db):
     from fluid.messages.content import Message, Text
     from fluid.store.base import SessionNode
     module.get_db = get_db
+    # Warm executor, SQL/JSON codecs and scrubber before tracing either mode.
+    warm = module.PgFluidStore()
+    await warm.create_session("warmup")
+    await warm.append("warmup", SessionNode(node_id="warmup", parent_id=None,
+        message=Message(role="user", content=[Text(text="warmup:" + "x" * 8192)])))
+    del warm
+    gc.collect()
     results = {}
     for cached in (True, False):
         gc.collect()
