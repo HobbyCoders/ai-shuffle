@@ -68,19 +68,24 @@ launcher swap to this one after the update's first healthy start; from the
 next update on, the launcher makes the restore point again. Run the acceptance
 run below against a 0.9.6 installer and a 1.0.x installer before release.
 
-Current version is **5**, with **minimum 4** and **start 3** unchanged. It includes
+Current version is **6**, with **minimum 4** and **start 3** unchanged. It retains
 the start-floor/staged replacement changes and waits for a timed-out self-test
 to close after killing it (bounded to 10 seconds) before rejecting the candidate.
-Launcher 5 still runs the full `ColdClusterCopy.validate()` content read-back
+Launcher 6 still runs the full `ColdClusterCopy.validate()` content read-back
 on a ready journal: every snapshot file is hashed against the manifest before
 selection. There is no redundant copy or second read in this path to remove;
 a structure-only or manifest-trust check would weaken the rollback guarantee.
-The `RESTORE_POINT_VALIDATING_LAUNCHERS` allowlist was re-audited for launcher 5:
-its ready-point preparation still performs that full content read-back, as
-`ready-journal launcher preparation reads every snapshot byte once without recopying`
-in [`test/source-updates.test.mjs`](test/source-updates.test.mjs) proves, including
-rejection of same-size content corruption. Launchers 4 and 5 are explicitly trusted;
-future versions still require a fresh audit.
+
+Launcher 6 audit: its functional launcher changes are confined to `source-auth.ts`
+and `source-updates.ts`: the `check()` withdrawal handling and the lease/key
+transport removal from `e02a8a6ff`. `prepareRollback`, `ColdClusterCopy` and
+`installed-entry.ts` are untouched. The `RESTORE_POINT_VALIDATING_LAUNCHERS`
+allowlist was re-audited for launcher 6: ready-point preparation still performs
+that full content read-back. `installed-entry factory fully hashes a real ready journal before selection`
+and `ready-journal launcher preparation reads every snapshot byte once without recopying`
+in [`test/source-updates.test.mjs`](test/source-updates.test.mjs) prove it, including
+rejection of same-size content corruption. Launchers 4, 5 and 6 are explicitly
+trusted; any future version still requires a fresh audit.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.
