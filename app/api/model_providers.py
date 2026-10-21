@@ -908,8 +908,6 @@ async def update_provider(
             if row is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                     detail="Model provider not found")
-            if not row.get("enabled") or not openai_billing._is_openai_platform_row(row):
-                await openai_billing.close_provider_billing(provider_id)
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
@@ -969,8 +967,6 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
-        if not row.get("enabled"):
-            await openai_billing.close_provider_billing(provider_id)
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)

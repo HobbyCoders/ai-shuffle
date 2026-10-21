@@ -464,7 +464,9 @@ def update_model_provider(
     if not updates:
         return get_model_provider(provider_id)
     if changed or kwargs.get("enabled") is False:
-        updates.extend(["balance_key = NULL", "balance_instance_id = NULL", "balance_snapshot = NULL"])
+        # Billing access is independent of the inference credential. Invalidate
+        # the reading, not the shared management/session key or its trust.
+        updates.append("balance_snapshot = NULL")
     if changed:
         updates.append("credential_status = NULL")
     updates.append("updated_at = %s")
@@ -484,11 +486,18 @@ def update_model_provider(
         )
         # Return this write's revision, not an unrelated edit committed between
         # our UPDATE and a second SELECT (used by capability cooldown keys).
-        return _parse_json_columns(row_to_dict(cursor.fetchone()))
+        saved = _parse_json_columns(row_to_dict(cursor.fetchone()))
+        if saved and (changed or kwargs.get("enabled") is False):
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        return saved
 
 
 def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str, admin_key: Optional[str] = None) -> Optional[ModelProviderRow]:
-    """Bind credit tracking without changing model credentials."""
+    """Explicitly save shared Admin access without changing inference credentials.
+
+    The row lock protects validation and replacement, including takeover of a
+    restored installation's trust marker.
+    """
     from urllib.parse import urlsplit
 
     with get_db() as conn:
@@ -499,8 +508,6 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
         )
         row = cursor.fetchone()
         if not row or row["provider_type"] != "openai" or not row["enabled"]:
-            return None
-        if row.get("openai_billing_instance_id") not in (None, instance_id):
             return None
         try:
             url = urlsplit(row["base_url"])
@@ -521,20 +528,21 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
 
 
 def clear_openai_billing_binding(
-    provider_id: str, expected_instance_id: Optional[str] = None,
+    provider_id: str, instance_id: Optional[str] = None,
 ) -> Optional[ModelProviderRow]:
-    """Remove local Admin API access and its usage snapshot, not the model key."""
+    """Remove shared Admin API access and its local snapshot, not the model key."""
+    from app.core.config import settings
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,)
         )
         row = cursor.fetchone()
-        if not row or (expected_instance_id and row.get("openai_billing_instance_id") not in (None, expected_instance_id)):
+        if not row:
             return None
         cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
-            (datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
+            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = %s, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
+            (instance_id or settings.effective_instance_id, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
         snapshot = cursor.fetchone()
@@ -566,13 +574,16 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
-        clear_balance = ", balance_key = NULL, balance_instance_id = NULL, balance_snapshot = NULL" if not enabled else ""
+        clear_balance = ", balance_snapshot = NULL" if not enabled else ""
+        values = [enabled, now, str(uuid4())]
         cursor.execute(
             f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
-            (enabled, now, str(uuid4()), provider_id),
+            (*values, provider_id),
         )
         if cursor.rowcount == 0:
             return None
+        if not enabled:
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
     return get_model_provider(provider_id)
 
 
