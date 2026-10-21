@@ -26,7 +26,7 @@ Errors are JSON with ok:false, a code, a message and, for actions, an outcome.
 - browser_wait that times out returns ok:false with timed_out; that is not success.
 
 BATCHING
-browser_batch runs up to 20 calls in order; each item is a JSON string such as {"tool":"browser_act","input":{"kind":"click","ref":"e5"}}. Batch only steps whose inputs you already know. It stops at the first failed step. After a step that navigates, switches tabs or opens a dialog or tab, only observation steps still run. The result lists each step that ran, not_run, and why it stopped.
+browser_batch runs up to 20 calls in order; each item is a JSON string such as {"tool":"browser_act","input":{"kind":"click","ref":"e5"}}. Batch only steps whose inputs you already know. It stops at the first failed step. After a step that navigates, switches tabs or opens a dialog or tab, only observation steps still run. The result lists each step that ran, not_run, and why it stopped. It preserves the final observation and fresh trees under a shared text budget, with earlier steps summarized; screenshot images stay beside their metadata.
 
 DIALOGS, TABS, DOWNLOADS
 - alert() is accepted automatically and reported in events. confirm, prompt and beforeunload wait for you: the call that triggered one returns paused_by_dialog, and every other call returns dialog_open until you answer with browser_act kind=accept_dialog (value = prompt text) or kind=dismiss_dialog. The answer returns the paused call's result.

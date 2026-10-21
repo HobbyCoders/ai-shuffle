@@ -84,6 +84,8 @@ describe("browser_navigate loopback retry", () => {
     failure: string | ((url: string) => string) = REFUSED,
     responseHeaders: Record<string, string> | ((url: string) => Record<string, string>) = {},
   ): Session {
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => page,
+      locator: () => ({ filter() { return this; }, count: async () => 1 }) };
     const page = {
       url: () => visited[visited.length - 1] ?? "about:blank",
       goto: async (url: string) => {
@@ -95,6 +97,8 @@ describe("browser_navigate loopback retry", () => {
       title: async () => "Dev server",
       evaluate: async () => ({ controls: true, loading: false }),
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
+      mainFrame: () => frame,
+      frames: () => [frame],
     };
     return {
       ensurePage: async () => page,

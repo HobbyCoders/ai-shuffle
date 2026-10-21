@@ -124,7 +124,7 @@ function snapshotSession(
   } as unknown as Session;
 }
 
-const RICH_SNAPSHOT = 'button "Save" [ref=e1]\nlink "Docs" [ref=e2]\nheading "Dashboard"';
+const RICH_SNAPSHOT = '- button "Save" [ref=e1]\n- link "Docs" [ref=e2]\n- heading "Dashboard"';
 const RENDERED = { title: "Dashboard", textChars: 400 };
 
 describe("content warning via browser_snapshot", () => {
@@ -174,6 +174,8 @@ describe("content warning via browser_navigate", () => {
     page: { title: string; textChars: number } = { title: "", textChars: 0 },
     landing = "http://127.0.0.1:5173/",
   ): Session {
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => handle,
+      locator: () => ({ filter() { return this; }, count: async () => 1 }) };
     const handle = {
       goto: async () => {},
       goBack: async () => {},
@@ -182,6 +184,8 @@ describe("content warning via browser_navigate", () => {
       title: async () => page.title,
       evaluate: async () => ({ controls: true, loading: false }),
       locator: () => ({ first: () => ({ isVisible: async () => true }) }),
+      mainFrame: () => frame,
+      frames: () => [frame],
     };
     return {
       ensurePage: async () => handle,
@@ -265,9 +269,11 @@ describe("content warning via browser_navigate", () => {
 
 describe("emptyContentWarning via browser_read_text", () => {
   function readSession(text: string): Session {
+    const frame = { isDetached: () => false, parentFrame: () => null, page: (): object => page,
+      locator: () => ({ evaluate: async () => text }) };
+    const page = { title: async () => "App", url: () => "http://127.0.0.1:5173/", mainFrame: () => frame, frames: () => [frame] };
     return {
-      ensurePage: async () => ({}),
-      evaluate: async () => ({ title: "App", url: "http://127.0.0.1:5173/", text }),
+      ensurePage: async () => page,
       checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }

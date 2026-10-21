@@ -46,6 +46,72 @@ def test_save_status_and_disconnect_do_not_change_inference_key(authenticated_cl
     assert encryption.decrypt_value(row["auth_token"]) == "model-key"
 
 
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_restored_admin_binding_status_and_explicit_takeover(authenticated_client, provider, method):
+    from app.core.config import settings
+    path = f"{ROOT}/{provider}/openai-usage"
+    assert authenticated_client.put(path, json={"admin_key": "old-admin", "organization_id": "org-old"}).status_code == 200
+    original = db.get_model_provider(provider, include_token=True)
+    assert db.upsert_provider_usage_snapshot(
+        provider, "openai", None, [], {"spend_month": 7}, {"source": "openai_admin"}, 123,
+        expected_binding=("org-old", settings.effective_instance_id), expected_admin_key=original["openai_admin_key"])
+    with db.get_db() as conn:
+        conn.cursor().execute("UPDATE model_providers SET openai_billing_instance_id = %s WHERE id = %s",
+                              ("another-installation", provider))
+    status = authenticated_client.get(path).json()
+    assert status["configured"] is False
+    assert status["organization_id"] is None and status["spend"] is None
+    kwargs = {"json": {"admin_key": "new-admin", "organization_id": "org-new"}} if method == "put" else {}
+    result = getattr(authenticated_client, method)(path, **kwargs)
+    assert result.status_code == 200, result.text
+    assert result.json()["configured"] is (method == "put")
+    saved = db.get_model_provider(provider, include_token=True)
+    assert saved["openai_billing_instance_id"] == settings.effective_instance_id
+    assert encryption.decrypt_value(saved["auth_token"]) == "model-key"
+    assert not any(s["provider_id"] == provider for s in db.get_all_provider_usage_snapshots())
+    if method == "put":
+        assert encryption.decrypt_value(saved["openai_admin_key"]) == "new-admin"
+    else:
+        assert saved["openai_admin_key"] is None
+
+
+@pytest.mark.parametrize("change", ["disable_patch", "disable_toggle", "rotate"])
+def test_disable_and_rotation_keep_admin_access_but_invalidate_readings(authenticated_client, provider, change):
+    path = f"{ROOT}/{provider}"
+    usage = path + "/openai-usage"
+    assert authenticated_client.put(usage, json={"admin_key": "admin", "organization_id": "org-test"}).status_code == 200
+    original = db.get_model_provider(provider, include_token=True)
+    guard = {"expected_binding": ("org-test", original["openai_billing_instance_id"]),
+             "expected_admin_key": original["openai_admin_key"]}
+    assert db.upsert_provider_usage_snapshot(provider, "openai", None, [], {"spend_month": 7},
+                                             {"source": "openai_admin"}, 123, **guard)
+    if change == "disable_toggle":
+        result = authenticated_client.post(path + "/toggle")
+    else:
+        result = authenticated_client.patch(path, json={"enabled": False} if change == "disable_patch"
+                                             else {"auth_token": "rotated-inference"})
+    assert result.status_code == 200, result.text
+    saved = db.get_model_provider(provider, include_token=True)
+    assert saved["openai_admin_key"] == original["openai_admin_key"]
+    assert saved["openai_billing_org_id"] == "org-test"
+    assert saved["openai_billing_instance_id"] == original["openai_billing_instance_id"]
+    assert not any(s["provider_id"] == provider for s in db.get_all_provider_usage_snapshots())
+    status = authenticated_client.get(usage).json()
+    assert status["configured"] is True and status["spend"] is None
+    if change != "rotate":
+        # Preserving the key must not let an already-running poll resurrect the
+        # reading or its error state while the provider is disabled.
+        assert not db.upsert_provider_usage_snapshot(provider, "openai", None, [], {"spend_month": 8},
+                                                     {"source": "openai_admin"}, 124, **guard)
+        db.record_provider_usage_failure(provider, "openai", "timeout", **guard)
+        assert not any(s["provider_id"] == provider for s in db.get_all_provider_usage_snapshots())
+        result = authenticated_client.patch(path, json={"enabled": True})
+        assert result.status_code == 200
+    assert db.upsert_provider_usage_snapshot(provider, "openai", None, [], {"spend_month": 9},
+                                             {"source": "openai_admin"}, 125, **guard)
+    assert authenticated_client.get(usage).json()["spend"]["spend_month"] == 9
+
+
 def test_custom_host_and_bad_org_rejected(authenticated_client, provider):
     path = f"{ROOT}/{provider}/openai-usage"
     assert authenticated_client.put(path, json={"admin_key": "secret", "organization_id": "bad"}).status_code == 422
@@ -178,11 +244,13 @@ def test_manual_balance_sync_policy_and_provider_validation(authenticated_client
     assert authenticated_client.put(f"{ROOT}/{provider}/openai-usage/balance", json={"balance_usd": 20}).status_code == 400
 
 
-def test_admin_key_is_local_only():
+def test_admin_key_syncs_encrypted_but_instance_trust_stays_local():
     from app.network.policy import COLLECTIONS
     policy = COLLECTIONS["model_providers"]
-    assert "openai_admin_key" in policy.local_fields
-    assert "openai_admin_key" not in policy.fields
+    assert "openai_admin_key" not in policy.local_fields
+    assert {"openai_admin_key", "openai_billing_org_id"} <= set(policy.fields)
+    assert "openai_admin_key" in policy.encrypted
+    assert "openai_billing_instance_id" in policy.local_fields
 
 
 def test_resaving_admin_key_resumes_both_official_auth_pauses(authenticated_client, provider):

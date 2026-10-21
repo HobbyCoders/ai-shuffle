@@ -4,10 +4,36 @@ export interface BrowserViewport {
 	height: number;
 }
 
+/** A page field's computed text metrics in unscaled CSS px (newer runtimes). */
+export interface BrowserEditorStyle {
+  fontSize: number; lineHeight: number | null; paddingLeft: number; paddingTop: number; fontFamily: string;
+  /** Computed border widths; absent from runtimes that predate them. */
+  borderLeft?: number; borderTop?: number;
+}
+
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
   accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
   x: number; y: number; width: number; height: number;
+  style?: BrowserEditorStyle;
+}
+
+// Same limits as the runtime and server: any CSS px value 0..1000, families
+// up to 200 characters. Pages really report 0 (hidden inputs) and big values.
+const metric = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000;
+function editorStyle(v: unknown): boolean {
+	return object(v) && metric(v.fontSize) && (v.lineHeight === null || metric(v.lineHeight)) &&
+		metric(v.paddingLeft) && metric(v.paddingTop) && typeof v.fontFamily === 'string' && v.fontFamily.length <= 200 &&
+		(v.borderLeft === undefined || metric(v.borderLeft)) && (v.borderTop === undefined || metric(v.borderTop));
+}
+
+/**
+ * `style` is only a hint for lining up text. One that cannot be used is
+ * removed from that field (it falls back to estimated metrics) and never
+ * fails the whole workspace update. Mutates the freshly parsed field.
+ */
+function dropUnusableStyle(field: unknown) {
+	if (object(field) && field.style !== undefined && !editorStyle(field.style)) delete field.style;
 }
 
 export interface BrowserWorkspaceState {
@@ -90,6 +116,7 @@ export function isBrowserWorkspaceState(
 		return false;
 	}
 
+	if (Array.isArray(value.editors) && value.editors.length <= 32) value.editors.forEach(dropUnusableStyle);
 	if (value.editors !== undefined && (!Array.isArray(value.editors) || value.editors.length > 32 || !value.editors.every((field) =>
 		object(field) && id(field.id) && ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'].includes(String(field.type)) &&
 		typeof field.label === 'string' && field.label.length <= 256 && typeof field.value === 'string' && field.value.length <= 16384 &&

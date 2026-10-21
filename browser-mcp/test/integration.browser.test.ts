@@ -6,7 +6,7 @@
  * so `npm test` stays green in browser-less CI.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -78,6 +78,22 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
     }
     if (req.url === "/action-late" || req.url === "/action-pending") {
       setTimeout(() => { res.writeHead(200, { "content-type": "text/html" }); res.end('<button>Network result</button>'.repeat(15)); }, req.url === "/action-late" ? 700 : 2200);
+      return;
+    }
+    if (req.url === "/never-observation") return; // deliberately no headers/body
+    if (req.url === "/bodyless.svg") {
+      res.writeHead(200, { "content-type": "image/svg+xml" });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg"><text>SVG text</text></svg>');
+      return;
+    }
+    if (req.url?.startsWith("/observation-text?")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<p>${new URL(req.url, "http://fixture").searchParams.get("text")}</p>`);
+      return;
+    }
+    if (req.url === "/inner-observation") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<p id="cross">Cross frame text</p>');
       return;
     }
     if (req.url === "/delayed-hydration") {
@@ -666,6 +682,364 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     });
   });
 
+  it("expands every scoped child and keeps collapsed refs registered", async () => {
+    const page = await session.ensurePage();
+    await page.goto("about:blank");
+    await page.setContent('<main aria-label="Repeated">' + '<button>Same</button>'.repeat(12) + '</main>');
+    const initial = await runSnapshot(session, {});
+    const tree = initial.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(tree).toContain("more similar items");
+    const parent = /scope_ref=(e\d+)/.exec(tree)![1];
+    // Hidden refs are already known, without needing another snapshot first.
+    const raw = await page.locator("body").ariaSnapshot({ mode: "ai" });
+    const hidden = [...raw.matchAll(/button "Same" \[ref=(e\d+)\]/g)].at(-1)![1];
+    const locator = await session.resolveRef(hidden);
+    expect(await locator.count()).toBe(1);
+    const expanded = await runSnapshot(session, { scope_ref: parent });
+    const expandedTree = expanded.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(expandedTree.match(/button "Same"/g)).toHaveLength(12);
+    expect(expandedTree).not.toContain("more similar items");
+    const capped = await runSnapshot(session, { filter: "interactive", max_chars: 300 });
+    const cappedTree = capped.content.slice(1).filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(JSON.parse(firstText(capped)).ref_count).toBe((cappedTree.match(/\[ref=/g) ?? []).length);
+    expect(cappedTree).not.toContain("filter=interactive");
+  });
+
+  it("find locates past-budget controls by query and structured live locators, with explicit ambiguity", async () => {
+    const page = await session.ensurePage();
+    await page.goto("about:blank");
+    await page.setContent(Array.from({ length: 1500 }, (_, i) => `<div><button>Product ${i}</button></div>`).join("") +
+      '<button>Duplicate</button><button>Duplicate</button><label>Email label<input placeholder="Email placeholder" data-testid="email-id"></label>');
+    const capped = await runSnapshot(session, { filter: "interactive" });
+    expect(JSON.parse(firstText(capped)).truncated).toBe(true);
+    expect(capped.content.map(c => c.type === "text" ? c.text : "").join("\n")).not.toContain('"Product 1499"');
+    for (const input of [{ query: "Product 1499" }, { role: "button", name: "Product 1499" },
+      { label: "Email label" }, { placeholder: "Email placeholder" }, { test_id: "email-id" }, { text: "Product 1499" }]) {
+      const result = await runFind(session, input);
+      expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, match_count: 1, method: "locator", degraded: false });
+      const listing = result.content[1] as { text: string };
+      const ref = /^(e\d+) /m.exec(listing.text)![1];
+      expect(await (await session.resolveRef(ref)).count()).toBe(1);
+    }
+    expect(JSON.parse(firstText(await runFind(session, { role: "button", name: "Duplicate" })))).toMatchObject({ ok: true, ambiguous: true, match_count: 2 });
+    expect(JSON.parse(firstText(await runFind(session, { query: "Bottom button" })))).toMatchObject({ ok: true, match_count: 0 });
+  });
+
+  it("read_text and waits include frame and shadow text, with subtree scopes", async () => {
+    const page = await session.ensurePage();
+    await page.goto(new URL("prose-app", httpUrl).href);
+    // A real cross-origin document, not merely a mocked consumer of frame text.
+    await page.setContent(`<main aria-label="Inside"><p>Scoped prose</p><div id="host"></div>
+      <iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe></main><p>Outside prose</p>
+      <iframe srcdoc="<p id='same'>Same frame text</p>"></iframe>`);
+    await page.locator("#host").evaluate(host => { host.attachShadow({ mode: "open" }).innerHTML = '<p id="shadow">Open shadow prose</p><button>Shadow action</button>'; });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text" })))).toMatchObject({ ok: true, matched: true });
+    for (const target of [{ condition: "text", text: "Same frame text" }, { condition: "element", selector: "#cross" },
+      { condition: "text", text: "Open shadow prose" }, { condition: "element", selector: "#shadow" }] as const) {
+      expect(JSON.parse(firstText(await runWait(session, target)))).toMatchObject({ ok: true, matched: true });
+    }
+    const all = await runReadText(session);
+    const allText = all.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    for (const part of ["Cross frame text", "Same frame text", "Open shadow prose", "Outside prose"]) expect(allText).toContain(part);
+    const snap = await runSnapshot(session, {});
+    const scope = /main "Inside"[^\n]*\[ref=(e\d+)\]/.exec((snap.content[1] as { text: string }).text)![1];
+    const scoped = await runReadText(session, { scope_ref: scope });
+    const scopedText = scoped.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    expect(scopedText).toContain("Cross frame text");
+    expect(scopedText).toContain("Open shadow prose");
+    expect(scopedText).not.toContain("Outside prose");
+    expect(scopedText).not.toContain("Same frame text");
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Same frame text", scope_ref: scope, timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", state: "hidden", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "#cross", state: "detached", timeout_ms: 20 })))).toMatchObject({ ok: false, timed_out: true });
+  });
+
+  it.each([
+    ["below fold", '<div style="height:3000px"></div>FRAME'],
+    ["transparent overlay", '<div style="position:relative;width:320px">FRAME<div style="position:absolute;inset:0;background:transparent"></div></div>'],
+    ["click shield", '<div style="position:relative;width:320px">FRAME<div style="position:absolute;inset:0;opacity:0;pointer-events:auto"></div></div>'],
+    ["pointer events none", '<div style="pointer-events:none">FRAME</div>'],
+    ["inner scrollport", '<div style="overflow:auto;width:340px;height:100px"><div style="height:800px"></div>FRAME</div>'],
+    ["sticky header", '<header style="position:sticky;top:0;height:200px;background:white;z-index:5">Header</header><div style="margin-top:-160px">FRAME</div>'],
+  ])("geometry: %s frames remain readable and hidden waits cannot falsely pass", async (_name, layout) => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=ReachableFrame", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent('<p>Main content</p>' + layout.replace("FRAME", `<iframe style="display:block;width:300px;height:150px" src="${src}"></iframe>`));
+    const child = page.frames().find(frame => frame !== page.mainFrame())!;
+    expect(await child.getByText("ReachableFrame").filter({ visible: true }).count()).toBe(1);
+    const read = await runReadText(session);
+    expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_hidden: 0, frames_skipped: 0 });
+    expect((read.content[1] as { text: string }).text).toContain("ReachableFrame");
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "ReachableFrame", timeout_ms: 1000 })))).toMatchObject({ matched: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "ReachableFrame", state: "hidden", timeout_ms: 200 })))).toMatchObject({ matched: false, timed_out: true });
+    await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+    expect((await runReadText(session)).content.map(c => c.type === "text" ? c.text : "").join("\n")).toContain("ReachableFrame");
+  });
+
+  it("geometry: busy counts in one tab cannot starve reads or waits in another", async () => {
+    const pageA = await session.ensurePage(); await pageA.goto(httpUrl);
+    const tabA = session.currentTabId()!;
+    const src = new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost");
+    await pageA.setContent('<p>Tab A</p>' + `<iframe src="${src}"></iframe>`.repeat(8));
+    const children = pageA.frames().filter(frame => frame !== pageA.mainFrame());
+    await Promise.all(children.map(frame => frame.evaluate(() => {
+      addEventListener("message", () => { const until = Date.now() + 20000; while (Date.now() < until) { /* busy renderer */ } });
+    })));
+    let tabB: string | undefined;
+    try {
+      await pageA.evaluate(() => { document.querySelectorAll("iframe").forEach(frame => frame.contentWindow!.postMessage("busy", "*")); });
+      await pageA.waitForTimeout(100);
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing", state: "hidden", timeout_ms: 1100 })))).toMatchObject({ matched: false, timed_out: true });
+      tabB = await session.createTab(); await session.selectTab(tabB);
+      const pageB = await session.ensurePage(); await pageB.goto(httpUrl);
+      await pageB.setContent(`<p>Tab B</p><iframe src="${new URL("observation-text?text=HealthyTabBFrame", httpUrl)}"></iframe>`);
+      const read = await runReadText(session);
+      expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, frames_skipped: 0 });
+      expect((read.content[1] as { text: string }).text).toContain("HealthyTabBFrame");
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HealthyTabBFrame", timeout_ms: 1000 })))).toMatchObject({ matched: true });
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing", state: "hidden", timeout_ms: 1000 })))).toMatchObject({ matched: true });
+    } finally {
+      if (tabB) await session.closeTab(tabA);
+      else await pageA.goto("about:blank");
+    }
+  });
+
+  it("geometry: a read waits within its own budget for a preceding main-frame count", async () => {
+    const page = await session.ensurePage(); await page.goto(httpUrl); await page.setContent("<p>MainBusy</p>");
+    await page.evaluate(() => { setTimeout(() => { const until = Date.now() + 2500; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    try {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "MainBusy", state: "hidden", timeout_ms: 400 })))).toMatchObject({ timed_out: true });
+      const read = await runReadText(session);
+      expect(JSON.parse(firstText(read))).toMatchObject({ ok: true });
+      expect((read.content[1] as { text: string }).text).toContain("MainBusy");
+    } finally { await page.evaluate(() => true); }
+  });
+
+  it("geometry: a new wait cannot reuse a preceding wait's late absence result", async () => {
+    const page = await session.ensurePage(); await page.goto(httpUrl); await page.setContent("<p>Main</p>");
+    await page.evaluate(() => { setTimeout(() => { const until = Date.now() + 1500; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Spinner", state: "hidden", timeout_ms: 200 })))).toMatchObject({ timed_out: true });
+    const add = page.evaluate(() => { const p = document.createElement("p"); p.textContent = "Spinner"; document.body.append(p); });
+    const result = await runWait(session, { condition: "text", text: "Spinner", state: "hidden", timeout_ms: 2200 });
+    await add;
+    expect(await page.getByText("Spinner").count()).toBe(1);
+    expect(JSON.parse(firstText(result))).toMatchObject({ matched: false, timed_out: true });
+  });
+
+  it.each([10000, 60000])("delta: large %i-node pages preserve main prose and never satisfy false negative waits", async count => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.evaluate(count => {
+      document.body.innerHTML = '<p>Loading spinner</p>' + Array.from({ length: count }, (_, i) => `<div><span>Item ${i} lorem ipsum</span></div>`).join("");
+    }, count);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Loading spinner", state: "hidden", timeout_ms: 1200 })))).toMatchObject({ matched: false, timed_out: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Loading spinner", timeout_ms: 4000 })))).toMatchObject({ ok: true, matched: true });
+    const read = await runReadText(session);
+    expect(JSON.parse(firstText(read))).toMatchObject({ ok: true, chars: 30000, truncated: true });
+    expect((read.content[1] as { text: string }).text).toContain("Loading spinner");
+  });
+
+  it.each(["hidden", "detached", "visible"] as const)("delta: malformed selectors are invalid_input for %s waits", async state => {
+    const page = await session.ensurePage(); await page.goto("about:blank"); await page.setContent("<p>Ready</p>");
+    for (const selector of ["div[[[", "xpath=//["]) {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector, state, timeout_ms: 1000 })))).toMatchObject({ ok: false, code: "invalid_input" });
+    }
+  });
+
+  it.each(["hidden", "detached"] as const)("delta: busy cross-origin frames are unknown for %s waits without queued evaluations", async state => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    await page.setContent(`<p>Main</p><iframe src="${new URL("inner-observation", httpUrl).href.replace("127.0.0.1", "localhost")}"></iframe>`);
+    const frame = page.frames().find(frame => frame !== page.mainFrame())!;
+    await frame.getByText("Cross frame text").waitFor();
+    const spy = vi.spyOn(frame, "getByText");
+    await frame.evaluate(() => { setTimeout(() => { const until = Date.now() + 2500; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    try {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", state, timeout_ms: 1100 })))).toMatchObject({ matched: false, timed_out: true });
+      expect(spy.mock.calls.length).toBeLessThanOrEqual(1);
+    } finally { spy.mockRestore(); await frame.evaluate(() => true); }
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Cross frame text", timeout_ms: 2000 })))).toMatchObject({ matched: true });
+  });
+
+  it("delta: main read failure is an explicit error, not an empty or blank-app result", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank"); await page.setContent("<p>Main is present</p>");
+    await page.evaluate(() => { setTimeout(() => { const until = Date.now() + 6000; while (Date.now() < until) { /* busy renderer */ } }, 0); });
+    try {
+      const body = JSON.parse(firstText(await runReadText(session)));
+      expect(body).toMatchObject({ ok: false, code: "observation_failed" });
+      expect(body.chars).toBeUndefined(); expect(body.warning).toBeUndefined();
+    } finally { await page.evaluate(() => true); }
+  });
+
+  it.each([15, 30, 300])("delta: %i frames cannot starve main text and skipped children are reported", async count => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    await page.setContent('<p>Main survives frame fanout</p>' + Array.from({ length: count }, (_, i) =>
+      `<iframe style="width:50px;height:50px;border:0" src="${new URL("observation-text?text=F" + i, httpUrl).href.replace("127.0.0.1", i % 2 ? "localhost" : "127.0.0.1")}"></iframe>`).join(""));
+    const read = await runReadText(session);
+    const body = JSON.parse(firstText(read));
+    expect(body).toMatchObject({ ok: true });
+    expect(body.chars).toBeGreaterThan(20);
+    expect((read.content[1] as { text: string }).text).toContain("Main survives frame fanout");
+    expect(body.frames_skipped).toBeGreaterThanOrEqual(Math.max(0, count - 48));
+    expect(body.frames_skipped).toBeLessThanOrEqual(count);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Main survives frame fanout", timeout_ms: 2000 })))).toMatchObject({ matched: true });
+    const last = page.frames().find(frame => frame.url().endsWith("text=F" + (count - 1)))!;
+    await page.locator("iframe").last().scrollIntoViewIfNeeded();
+    expect(await last.getByText("F" + (count - 1), { exact: true }).filter({ visible: true }).count()).toBe(1);
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "F" + (count - 1), match: "exact", timeout_ms: 4000 })))).toMatchObject({ matched: true });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing frame text", timeout_ms: 100 })))).toMatchObject({ timed_out: true });
+  }, 30000);
+
+  it.each([
+    ['offscreen', 'style="position:absolute;left:-10000px;width:400px;height:300px"', ""],
+    ['overflow wrapper', '', 'width:0;height:0;overflow:hidden'],
+    ['clip path', 'style="clip-path:inset(100%)"', ""],
+    ['legacy clip', 'style="position:absolute;clip:rect(0,0,0,0)"', ""],
+    ['behind page', 'style="position:absolute;top:0;left:0;z-index:-1"', ""],
+    ['content visibility', '', 'content-visibility:hidden'],
+    ['padding consumes viewport', 'style="width:300px;height:150px;border:20px solid;box-sizing:border-box;padding:55px"', ""],
+  ])("delta: %s injection is excluded from reads while waits use Playwright visibility", async (_name, attributes, wrapper) => {
+    const page = await session.ensurePage(); await page.goto(httpUrl);
+    const src = new URL("observation-text?text=HiddenInjection", httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(`<p>Main content</p><div style="${wrapper}"><iframe ${attributes} src="${src}"></iframe></div><iframe srcdoc="<p>Visible control frame</p>"></iframe>`);
+    const read = await runReadText(session);
+    const text = (read.content[1] as { text: string }).text;
+    expect(text).toContain("Main content"); expect(text).toContain("Visible control frame");
+    expect(text).not.toContain("HiddenInjection");
+    expect(JSON.parse(firstText(read))).toMatchObject({ frames_hidden: 1, frames_skipped: 0 });
+    const child = page.frames().find(frame => frame.url() === src)!;
+    const visible = await child.getByText("HiddenInjection").filter({ visible: true }).count() > 0;
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", timeout_ms: 400 })))).toMatchObject({ matched: visible });
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "HiddenInjection", state: "hidden", timeout_ms: 150 })))).toMatchObject({ matched: !visible });
+  });
+
+  it("review: churn, SVG and never-answering frames cannot break main-frame observations", async () => {
+    const page = await session.ensurePage();
+    await page.goto(new URL("prose-app", httpUrl).href);
+    await page.setContent(`<p>Main frame remains readable</p><iframe src="${new URL("bodyless.svg", httpUrl)}"></iframe>
+      <iframe src="${new URL("never-observation", httpUrl)}"></iframe>`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(() => {
+      (window as unknown as { churn: number }).churn = window.setInterval(() => {
+        const f = document.createElement("iframe"); f.srcdoc = "<p>Transient text</p>";
+        document.body.appendChild(f); setTimeout(() => f.remove(), 10);
+      }, 20);
+    });
+    try {
+      const start = Date.now();
+      for (let i = 0; i < 5; i++) {
+        const read = await runReadText(session);
+        expect((read.content[1] as { text: string }).text).toContain("Main frame remains readable");
+        expect(JSON.parse(firstText(read)).ok).toBe(true);
+      }
+      expect(Date.now() - start).toBeLessThan(2500);
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "never appears", timeout_ms: 250 })))).toMatchObject({ ok: false, timed_out: true });
+      expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Main frame remains readable", timeout_ms: 250 })))).toMatchObject({ ok: true });
+    } finally { await page.goto("about:blank"); }
+  });
+
+  it("review: hidden, transparent, tiny and nested-hidden frame text is omitted and visible origins are labelled", async () => {
+    const page = await session.ensurePage();
+    await page.goto(new URL("prose-app", httpUrl).href);
+    const frameUrl = (text: string) => new URL("observation-text?text=" + text, httpUrl).href.replace("127.0.0.1", "localhost");
+    await page.setContent(`<p>Main content</p><iframe style="display:none" src="${frameUrl("HiddenPayload")}"></iframe>
+      <iframe style="width:1px;height:1px;opacity:0" src="${frameUrl("TinyPayload")}"></iframe>
+      <iframe style="width:1px;height:1px" src="${frameUrl("SizedPayload")}"></iframe>
+      <div style="opacity:0"><iframe src="${frameUrl("TransparentPayload")}"></iframe></div>
+      <iframe src="${frameUrl("VisiblePayload")}"></iframe>`);
+    const result = await runReadText(session);
+    const text = (result.content[1] as { text: string }).text;
+    expect(text).toContain("Main content");
+    expect(text).toContain(`[frame ${new URL(frameUrl("VisiblePayload")).origin}]\nVisiblePayload`);
+    for (const hidden of ["HiddenPayload", "TinyPayload", "SizedPayload", "TransparentPayload"]) expect(text).not.toContain(hidden);
+  });
+
+  it("review: ambiguous find lists usable candidate refs, continues batches and supports index narrowing", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<main><p>First row</p><button>Delete</button><p>Second row</p><button>Delete</button></main>');
+    const found = await runFind(session, { role: "button", name: "Delete" });
+    expect(JSON.parse(firstText(found))).toMatchObject({ ok: true, ambiguous: true, match_count: 2 });
+    expect((found.content[1] as { text: string }).text).toContain("Ambiguous");
+    expect((found.content[1] as { text: string }).text).toContain("Do not act until one is chosen");
+    expect(JSON.parse(firstText(found)).hint).toContain("parent row or container (not the button itself)");
+    const refs = [...(found.content[1] as { text: string }).text.matchAll(/^(e\d+) button/gm)].map(m => m[1]);
+    expect(refs).toHaveLength(2);
+    for (const ref of refs) expect(await (await session.resolveRef(ref)).count()).toBe(1);
+    const narrowed = await runFind(session, { role: "button", name: "Delete", index: 1 });
+    expect(JSON.parse(firstText(narrowed))).toMatchObject({ ok: true, match_count: 1 });
+    expect((narrowed.content[1] as { text: string }).text).toContain(refs[1]);
+    const batch = await runBatch(session, { actions: [JSON.stringify({ tool: "browser_find", input: { role: "button", name: "Delete" } }), JSON.stringify({ tool: "browser_read_text", input: {} })] }, name => TOOL_MAP.get(name));
+    expect(JSON.parse(firstText(batch))).toMatchObject({ ok: true, count: 2, not_run: 0 });
+  });
+
+  it("review: selector waits include body/html/root and cheaply handle thousands of hidden matches", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<body class="loaded">' + '<span hidden class="many">hidden</span>'.repeat(3000) + '<span class="many">visible</span>');
+    await page.evaluate(() => { document.documentElement.classList.add("dark"); document.documentElement.dataset.ready = "yes"; });
+    for (const selector of ["body.loaded", "html[data-ready]", ":root.dark"]) {
+      expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector, timeout_ms: 250 })))).toMatchObject({ ok: true });
+    }
+    for (const state of ["visible", "attached"] as const) {
+      const started = Date.now();
+      expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: ".many", state, timeout_ms: 400 })))).toMatchObject({ ok: true });
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+    expect(JSON.parse(firstText(await runWait(session, { condition: "element", selector: "[hidden]", state: "attached", timeout_ms: 100 })))).toMatchObject({ ok: true });
+  });
+
+  it("review: semantic find gets capped interactive context and handles icon-only descriptive queries", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<button>☰</button><button>🛒</button><p>PrivateProseMarker</p>' + Array.from({ length: 1800 }, (_, i) => `<button>Long control description number ${i}</button>`).join(""));
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    const mock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url) !== "https://api.anthropic.com/v1/messages") return originalFetch(url, init);
+      const body = JSON.parse(String(init?.body));
+      const context: string = body.messages[0].content;
+      requests.push(context);
+      const icon = context.startsWith("Query: cart icon") ? "🛒" : "☰";
+      const ref = new RegExp(`button "${icon}"[^\\n]*\\[ref=(e\\d+)\\]`).exec(context)![1];
+      return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify([{ ref }]) }] }), { status: 200 });
+    });
+    vi.stubEnv("ANTHROPIC_API_KEY", "fixture-not-a-real-key");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+    try {
+      for (const query of ["hamburger menu", "cart icon", "the special button"]) {
+        const result = await runFind(session, { query });
+        expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, degraded: false, match_count: 1 });
+        const ref = /^(e\d+) /m.exec((result.content[1] as { text: string }).text)![1];
+        expect(await (await session.resolveRef(ref)).count()).toBe(1);
+      }
+      expect(requests).toHaveLength(3);
+      for (const message of requests) {
+        const tree = message.split("Accessibility tree:\n")[1];
+        expect(tree.length).toBeLessThanOrEqual(40000);
+        expect(tree).not.toContain("PrivateProseMarker");
+        expect(tree).toContain("truncated");
+      }
+    } finally { mock.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it("review: find containers return just themselves, unknown roles are invalid, and ref-like names do not inflate counts", async () => {
+    const page = await session.ensurePage(); await page.goto("about:blank");
+    await page.setContent('<div data-testid="container"><button>Child one</button><button>Child two</button></div><div>Container label<input aria-label="Nested input"></div><button aria-label="Fake [ref=e99999]">Real</button><iframe srcdoc="<button>Only frame control</button>"></iframe>');
+    const found = await runFind(session, { test_id: "container" });
+    expect(JSON.parse(firstText(found))).toMatchObject({ ok: true, match_count: 1 });
+    expect((found.content[1] as { text: string }).text).not.toContain('button "Child');
+    const textContainer = await runFind(session, { text: "Container label" });
+    expect(JSON.parse(firstText(textContainer))).toMatchObject({ ok: true, match_count: 1 });
+    expect((textContainer.content[1] as { text: string }).text).not.toContain("Nested input");
+    // Documented exact lookup boundary; frame refs remain available to local search.
+    expect(JSON.parse(firstText(await runFind(session, { role: "button", name: "Only frame control" })))).toMatchObject({ ok: true, match_count: 0 });
+    expect(JSON.parse(firstText(await runFind(session, { query: "Only frame control" })))).toMatchObject({ ok: true, match_count: 1 });
+    const invalid = await runFind(session, { role: "not-a-role" });
+    expect(invalid.isError).toBe(true); expect(firstText(invalid)).toContain("invalid_input");
+    const snap = await runSnapshot(session, {});
+    const raw = await page.locator("body").ariaSnapshot({ mode: "ai" });
+    const actual = [...raw.matchAll(/\[ref=(?:f\d+)?e\d+\](?: |:|$)/gm)];
+    // The name's closing quote distinguishes its fake token from real attributes.
+    expect(JSON.parse(firstText(snap)).ref_count).toBe(actual.length);
+    expect(session.refs.isKnown("e99999")).toBe(false);
+  });
+
   it("applies the workspace viewport before first navigation, new tabs and CDP recovery", async () => {
     const viewportManager = new BrowserManager({ endpoint: cdpEndpoint });
     const viewportSession = new Session(viewportManager);
@@ -759,10 +1133,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(snapText).toMatch(/\[ref=e\d+\]/);
   });
 
-  it("snapshot collapses the long list of rows", async () => {
+  it("snapshot preserves all distinct list rows", async () => {
     const res = await runSnapshot(session, { filter: "all" });
     const snapText = res.content[1] && res.content[1].type === "text" ? res.content[1].text : "";
-    expect(snapText).toContain("more similar items");
+    expect(snapText).not.toContain("more similar items");
+    for (let i = 1; i <= 20; i++) expect(snapText).toContain(`link "Item ${i}"`);
   });
 
   it("act(fill) then act(click) mutates the DOM and reflects the value", async () => {
@@ -1084,7 +1459,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     delete process.env.ANTHROPIC_BASE_URL;
 
     await runNavigate(session, { url: fixtureUrl });
-    const res = await runFind(session, { query: "submit button" });
+    const res = await runFind(session, { query: "the submit button" });
     const body = JSON.parse(firstText(res));
     expect(body.ok).toBe(true);
     expect(body.degraded).toBe(true);
