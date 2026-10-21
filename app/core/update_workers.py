@@ -60,7 +60,7 @@ def waiting_status(state, *, busy_rows=None):
     to that loop. Do not attach session titles to the ordinary authenticated
     policy endpoint. Old producers only prove staging in the ready phase.
     """
-    from app.core.desktop_lifecycle import busy_work
+    from app.core.desktop_lifecycle import active_session_ids, busy_work
     from app.core.session_runtime import active_executions, get_live_runtime
     from app.core.task_registry import task_registry
     from app.core.session_pool import get_session_pool
@@ -71,7 +71,8 @@ def waiting_status(state, *, busy_rows=None):
     staged = state.get("staged_version") or (state.get("version") if state.get("phase") == "ready" else None)
     blocked = []
     executing = set(active_executions().values())
-    for row in busy_work() if busy_rows is None else busy_rows:
+    rows = busy_work() if busy_rows is None else _fresh_busy_rows(busy_rows, set(active_session_ids()))
+    for row in rows:
         sid = row["session_id"]
         base = {"session_id": sid, "title": row["title"],
                 "running_turn": row.get("running_turn", sid in executing),
@@ -142,6 +143,17 @@ def _safe_waiting_status(state, busy_rows):
     except Exception as exc:  # Display metadata must never undo a queued action.
         logger.warning("Application update: waiting state unavailable (%s)", type(exc).__name__)
         return _waiting_unavailable()
+
+
+def _fresh_busy_rows(rows, active):
+    """Use fresh membership, retaining bounded names from the earlier DB read."""
+    from app.core.desktop_lifecycle import BUSY_LIMIT
+
+    busy = [row for row in rows if row["session_id"] in active][:BUSY_LIMIT]
+    named = {row["session_id"] for row in busy}
+    for sid in sorted(active - named)[:BUSY_LIMIT - len(busy)]:
+        busy.append({"session_id": sid, "title": "Running chat", "tasks": []})
+    return busy
 
 
 async def _async_waiting_status(state):
@@ -298,14 +310,14 @@ def local_action(action, request_id, mode=None, *, busy_rows=None):
     busy = None
     if action == "install" and not reason:
         from app.core.desktop_lifecycle import active_session_ids, busy_work
-        active = active_session_ids()
+        active = set(active_session_ids())
         if active:
-            busy = list(busy_work() if busy_rows is None else busy_rows)
-            named = {row["session_id"] for row in busy}
-            busy.extend({"session_id": sid, "title": "Running chat", "tasks": []}
-                        for sid in active if sid not in named)
+            busy = _fresh_busy_rows(busy_work() if busy_rows is None else busy_rows, active)
             if mode is None:
                 reason = _busy_reason(busy)
+                omitted = len(active) - len(busy)
+                if omitted:
+                    reason += f", and {omitted} more"
             else:
                 # Restart later: when the work ends, or once it is stopped.
                 _cancel_deferred()

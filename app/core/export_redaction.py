@@ -17,7 +17,7 @@ _PREVIEW = re.compile(r"v1\.[A-Za-z0-9_-]+\.[0-9]+\.[a-fA-F0-9]{64}")
 _BEARER = re.compile(r"\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)", re.IGNORECASE)
 _PROVIDER_KEY = re.compile(
     r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
-    r"|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})"
+    r"|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}\b)"
 )
 _PRIVATE_KEY = re.compile(
     r"-----BEGIN ((?:(?:RSA|EC|DSA|OPENSSH) )?PRIVATE KEY)-----"
@@ -34,6 +34,14 @@ _ASSIGNMENT = re.compile(
     r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|ais_preview(?:_[0-9a-f]{24})?)"
     r"[\"']?\s*[:=]\s*(?:\"((?:\\.|[^\"\r\n])+)\"|"
     r"'((?:\\.|[^'\r\n])+)'|([^\s,;&\"'<>}]+))",
+    re.IGNORECASE,
+)
+# Credential-name components, not arbitrary substrings: KEYBOARD, token_count
+# and --keep-alive are not secrets. Keep quotes and surrounding command text.
+_COMMAND_ASSIGNMENT = re.compile(
+    r"(?:(?<![A-Za-z0-9_])(?:(?:[A-Za-z0-9]+_)*(?:key|token|secret|pass(?:word|wd)?|pwd|credentials?)|PGPASSWORD)\s*=\s*"
+    r"|--(?:[\w]+-)*(?:token|key|secret|password|passwd|pass|pwd|credentials?)(?:\s+|=))"
+    r"(?:\"((?:\\.|[^\"\r\n])+)\"|'((?:\\.|[^'\r\n])+)'|([^\s,;&\"'<>}]+))",
     re.IGNORECASE,
 )
 # As in scrub.py, a scheme-run boundary avoids quadratic scans of large blobs.
@@ -76,11 +84,11 @@ def redact_export_text(text: str) -> str:
     """Filter recognized credentials in text without decoding unrelated content."""
     decoded, spans = _decoded_view(text)
     replacements = []
-    for pattern in (_PREVIEW, _PROVIDER_KEY, _PRIVATE_KEY, _BEARER, _ASSIGNMENT):
+    for pattern in (_PREVIEW, _PROVIDER_KEY, _PRIVATE_KEY, _BEARER, _ASSIGNMENT, _COMMAND_ASSIGNMENT):
         for match in pattern.finditer(decoded):
             if pattern is _BEARER:
                 group = 1
-            elif pattern is _ASSIGNMENT:
+            elif pattern in (_ASSIGNMENT, _COMMAND_ASSIGNMENT):
                 group = next(i for i in (1, 2, 3) if match[i] is not None)
             else:
                 group = 0

@@ -55,6 +55,22 @@ def test_preview_cookie_names_redact_opaque_values(name):
     assert redact_external_export({name: "fixture-cookie", "ok": True}) == {name: "***", "ok": True}
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("GITHUB_TOKEN=fixture-token", "GITHUB_TOKEN=***"),
+    ("AWS_SECRET_ACCESS_KEY=fixture-secret", "AWS_SECRET_ACCESS_KEY=***"),
+    ("PGPASSWORD=fixture-password", "PGPASSWORD=***"),
+    ('DB_PASSWORD="fixture secret"', 'DB_PASSWORD="***"'),
+    ("tool --token fixture-token --port 5173", "tool --token *** --port 5173"),
+    ("tool --password=fixture-password", "tool --password=***"),
+    ("tool --api-key 'fixture key'", "tool --api-key '***'"),
+    ("aws AKIAIOSFODNN7EXAMPLE ASIAIOSFODNN7EXAMPLE", "aws *** ***"),
+    ("KEYBOARD=us --keyboard us --keep-alive 30 --monkey banana", "KEYBOARD=us --keyboard us --keep-alive 30 --monkey banana"),
+    ("total_tokens_in=42 token_count=7 tokenizer=example", "total_tokens_in=42 token_count=7 tokenizer=example"),
+])
+def test_command_credential_values_and_false_positives(text, expected):
+    assert redact_export_text(text) == expected
+
+
 def test_structure_and_useful_content_survive_without_mutation():
     data = {
         "content": "notes " + PREVIEW,

@@ -31,10 +31,33 @@ def service(setup, mock_db, monkeypatch):
     return register
 
 
-async def test_command_credentials_never_reach_update_surfaces(service, monkeypatch):
-    key = "sk-" + "synthetic" * 5
-    bearer = "test-only-bearer-value"
-    service(f'OPENAI_API_KEY={key} curl -H "Authorization: Bearer {bearer}" http://localhost:5173')
+COMMAND_CREDENTIALS = [
+    ('OPENAI_API_KEY=sk-' + 'synthetic' * 5, ['sk-' + 'synthetic' * 5]),
+    ('curl -H "Authorization: Bearer test-only-bearer-value"', ['test-only-bearer-value']),
+    ("curl -H 'Authorization: Bearer eyJfixture.payload.signature'", ['eyJfixture.payload.signature']),
+    ('curl -H "Authorization: Bearer ghp_' + 'x' * 30 + '"', ['ghp_' + 'x' * 30]),
+    ('psql postgresql://admin:fixture-db-secret@db.example.com:5432/app', ['fixture-db-secret']),
+    ('git clone https://user:ghp_' + 'x' * 30 + '@github.com/x/y', ['ghp_' + 'x' * 30]),
+    ('tool --token=fixture-token-equal', ['fixture-token-equal']),
+    ('tool --token fixture-token-space', ['fixture-token-space']),
+    ('tool --api-key=fixture-api-key', ['fixture-api-key']),
+    ('tool --password fixture-password', ['fixture-password']),
+    ('export ANTHROPIC_API_KEY=sk-ant-api03-' + 'A' * 90, ['sk-ant-api03-' + 'A' * 90]),
+    ('x' * 100 + ' sk-ant-api03-' + 'B' * 60, ['sk-ant-api03-' + 'B' * 60]),
+    ('aws AKIAIOSFODNN7EXAMPLE secret', ['AKIAIOSFODNN7EXAMPLE']),
+    ('aws ASIAIOSFODNN7EXAMPLE secret', ['ASIAIOSFODNN7EXAMPLE']),
+    ('npm run dev -- --host 0.0.0.0 --port 5173', []),
+    ('ffmpeg -ss 00:01:30 -i a.mp4', []),
+] + [(name + '=fixture-env-value', ['fixture-env-value']) for name in (
+    'GITHUB_TOKEN', 'DB_PASSWORD', 'AWS_SECRET_ACCESS_KEY', 'HF_TOKEN',
+    'CLOUDFLARE_API_TOKEN', 'STRIPE_SECRET', 'PGPASSWORD', 'MY_KEY',
+    'db_passwd', 'APP_PWD', 'SERVICE_CREDENTIALS',
+)]
+
+
+@pytest.mark.parametrize('command,secrets', COMMAND_CREDENTIALS)
+async def test_command_credentials_never_reach_update_surfaces(service, monkeypatch, command, secrets):
+    service(command)
     snapshot = await fleet.snapshot()
     peer = await fleet.peer_action({"operation": "status"}, "peer")
     receipt = await fleet.dispatch("install")
@@ -47,10 +70,10 @@ async def test_command_credentials_never_reach_update_surfaces(service, monkeypa
     assert stopped_peer["stop_result"]["accepted"] is False
     for value in (snapshot, peer, receipt, stopping, stopped_snapshot, stopped_peer):
         serialized = json.dumps(value)
-        assert key not in serialized and bearer not in serialized
+        assert all(secret not in serialized for secret in secrets)
     for blockers in (snapshot["workers"][0]["blocked_by"], peer["blocked_by"], receipt["results"][-1]["blocked_by"]):
         assert "subject" not in blockers[0]
-        assert blockers[0]["port"] == 5173
+        assert "label" in blockers[0]
 
 
 async def test_busy_metadata_reads_stay_off_event_loop(service, monkeypatch):
@@ -141,6 +164,31 @@ async def test_new_work_during_metadata_read_still_blocks_install(setup, monkeyp
     assert receipt["accepted"] is False
     assert receipt["busy"][0]["session_id"] == "late-session"
     assert fleet.updates._desktop_request is None
+
+
+async def test_finished_work_during_metadata_read_is_not_a_blocker(service, monkeypatch):
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: {"still-running"})
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: [
+        {"session_id": "finished", "title": "Finished chat", "tasks": []},
+        {"session_id": "still-running", "title": "Live chat", "tasks": []},
+    ])
+    snapshot = await fleet.snapshot()
+    peer = await fleet.peer_action({"operation": "status"}, "peer")
+    receipt = (await fleet.dispatch("install"))["results"][-1]
+    assert "Finished chat" not in receipt["reason"]
+    assert [row["session_id"] for row in receipt["busy"]] == ["still-running"]
+    for status in (snapshot["workers"][0], peer, receipt):
+        assert {row["session_id"] for row in status["blocked_by"]} == {"still-running"}
+
+
+async def test_new_busy_rows_respect_naming_limit(setup, monkeypatch):
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: {f"chat-{i:02}" for i in range(20)})
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: [])
+    receipt = (await fleet.dispatch("install"))["results"][-1]
+    assert receipt["accepted"] is False
+    assert len(receipt["busy"]) == desktop_lifecycle.BUSY_LIMIT
+    assert len(receipt["blocked_by"]) == desktop_lifecycle.BUSY_LIMIT
+    assert "and 12 more" in receipt["reason"]
 
 
 def test_retained_staged_idle_is_not_an_updater_error(setup):
