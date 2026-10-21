@@ -1716,7 +1716,8 @@ async def retire_task_terminals(
             # on_task_terminal frames carry the per-start stamp before reaching here;
             # direct Stop callers already settle their own registry records.
             if (record and record.get("status") == "running"
-                    and frame.get("task_incarnation") == task_registry.task_incarnation(session_id, frame["task_id"])
+                    and frame.get("task_incarnation")
+                    and frame["task_incarnation"] == task_registry.task_incarnation(session_id, frame["task_id"])
                     and not frame.get("agent_message_turn_id")
                     and frame.get("status") in ("completed", "error", "killed")):
                 task_registry.complete_task(

@@ -152,6 +152,16 @@ class TestEngineRetirement:
         assert task_registry.get_active("legacy")
 
     @pytest.mark.asyncio
+    async def test_unstamped_retirement_preserves_a_legacy_null_start(self):
+        assert task_registry.hydrate_rows("legacy-null", [{
+            "task_id": "task", "kind": "agent", "status": "running",
+            "remote_device_id": "peer", "started_at": None,
+        }]) == 1
+        with _pool_with(_RecordingAdapter()):
+            await turn_scheduler.retire_task_terminals("legacy-null", [{"task_id": "task", "status": "killed"}])
+        assert task_registry.get_active("legacy-null")
+
+    @pytest.mark.asyncio
     async def test_registry_retirement_failure_still_reaches_engine(self, monkeypatch):
         adapter = _RecordingAdapter()
         monkeypatch.setattr(task_registry, "get_task", lambda *args: (_ for _ in ()).throw(RuntimeError("registry unavailable")))
