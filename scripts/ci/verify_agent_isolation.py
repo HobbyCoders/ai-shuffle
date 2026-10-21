@@ -142,6 +142,13 @@ class IsolationCheck(Check):
     def required_mode(self):
         """Required startup, refusal and resumable partial migration on synthetic data."""
         volume = self.volume()
+        # Partial migration resumes an existing install, not a keys-only legacy
+        # directory (which the database's data-loss guard must refuse).
+        seed = self.launch(volume, env={"AGENT_ISOLATION": "off"})
+        self.ready(seed)
+        self.sql(seed, "CREATE TABLE required_migration_check (value text); "
+                       "INSERT INTO required_migration_check VALUES ('kept');")
+        self.stop(seed)
         # Inject a filesystem failure only in a disposable volume, after the
         # first protected key migrated. Required mode must never give it back.
         injection = """
@@ -157,7 +164,7 @@ subprocess.run(['usermod', '-o', '-u', '99', '-d', '/', 'appuser'], check=True)
 subprocess.run(['usermod', '-d', '/home/appuser', 'appuser'], check=True)
 root = Path('/data')
 keys = root / '.credential-keys'
-keys.mkdir()
+keys.mkdir(exist_ok=True)
 for name in ('first', 'second'):
     p = keys / name
     p.write_text('synthetic')
@@ -167,9 +174,10 @@ os.chown(root, 99, 100)
 class FailOnce(iso.Ops):
     moved = 0
     def lchown(self, path, uid, gid):
-        if uid == 64000:
+        # Other retained metadata migrates first; fail only after one key child.
+        if uid == 64000 and Path(path).parent == keys:
             self.moved += 1
-            if self.moved == 3:
+            if self.moved == 2:
                 raise OSError('injected disposable migration failure')
         super().lchown(path, uid, gid)
 ops = FailOnce()
@@ -179,7 +187,7 @@ except iso.IsolationError as error:
     assert 'required agent isolation: startup refused' in str(error)
 else:
     raise AssertionError('required migration did not refuse')
-assert ops.moved == 3, 'startup refused before the injected migration failure'
+assert ops.moved == 2, 'startup refused before the injected key migration failure'
 record = iso.read_record(root)
 assert record is not None, 'partial migration did not retain its root-owned record'
 assert record['state'] == 'enabling'
@@ -190,6 +198,8 @@ print('REQUIRED_PARTIAL_MIGRATION_RETAINED')
         assert b"REQUIRED_PARTIAL_MIGRATION_RETAINED" in self.inspect_volume(volume, injection).stdout
         required = self.launch(volume, env={"AGENT_ISOLATION": "required"})
         self.ready(required)
+        assert self.sql(required, "SELECT value FROM required_migration_check;",
+                        uid=f"{SERVICE_UID}:{SERVICE_UID}") == "kept"
         logs = self.docker("logs", required)
         assert b"required agent isolation established" in logs.stdout + logs.stderr
         self.denied(required, ["cat", FILES[0]])

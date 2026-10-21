@@ -58,12 +58,30 @@ def test_required_probe_prepares_the_bypassed_entrypoint_account(tmp_path, monke
         assert (account.pw_uid, account.pw_gid) == (ident.puid, ident.pgid)
         assert (ident.puid, ident.pgid) == (99, 100)
         assert calls, "inspection must explicitly prepare the image account"
+        # Retained database metadata must not consume the key-failure counter.
+        ops = kwargs["ops"]
+        keys = root / ".credential-keys"
+        for path in (root / "database-mode.json", keys):
+            ops.lchown(path, 64000, 64000)
+        assert ops.moved == 0
+        ops.lchown(keys / "first", 64000, 64000)
+        assert ops.moved == 1
+        with pytest.raises(OSError, match="injected disposable migration failure"):
+            ops.lchown(keys / "second", 64000, 64000)
+        assert ops.moved == 2
         raise ReachedMigration
 
     monkeypatch.setattr(iso, "bootstrap", bootstrap)
     harness = Mock()
 
     def inspect_volume(volume, code):
+        # The interrupted migration must start from a real retained database;
+        # a keys-only volume correctly fails the runtime's legacy-data guard.
+        seed = harness.launch.return_value
+        harness.launch.assert_called_once_with(volume, env={"AGENT_ISOLATION": "off"})
+        harness.ready.assert_called_once_with(seed)
+        harness.stop.assert_called_once_with(seed)
+        assert "CREATE TABLE required_migration_check" in harness.sql.call_args.args[1]
         # Execute the actual producer up to migration, confined to scratch data.
         code = code.replace("Path('/data')", f"Path({str(tmp_path)!r})")
         with pytest.raises(ReachedMigration):

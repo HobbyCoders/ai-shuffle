@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Render the real read-only usage component, never live account data or billing.
+// Render current usage controls with synthetic reads, never live account data or billing.
 export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
   const page = await browser.newPage({ viewport });
   const errors = [], unexpected = [], calls = [];
@@ -14,6 +14,15 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     const request = route.request(), target = new URL(request.url());
     if (target.pathname.startsWith('/api/')) {
       calls.push({ path: target.pathname, method: request.method() });
+      if (request.method() === 'GET' && target.pathname === '/api/v1/model-providers/fixture-openai/balance-access') {
+        return route.fulfill({ json: { configured: false, source: 'fixture', source_id: 'fixture',
+          fetched_at: null, fresh_until: null, refreshing: false, last_error_kind: null,
+          needs_reauth: false, status: 'unconfigured', credits: null } });
+      }
+      if (request.method() === 'GET' && target.pathname === '/api/v1/model-providers/fixture-openai/openai-usage') {
+        return route.fulfill({ json: { configured: false, manual_balance: null, organization_id: null,
+          source: 'fixture', scope: 'fixture', spend: null, fetched_at: null, last_error_kind: null } });
+      }
       return route.abort();
     }
     if (target.origin !== new URL(fixtureUrl).origin || request.method() !== 'GET') {
@@ -27,9 +36,10 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     const url = new URL(fixtureUrl); url.searchParams.set('provider-login', '1');
     await page.goto(url.href);
     // Settings > Providers > OpenAI API key > Usage.
-    const usage = page.getByRole('region', { name: 'Billing', exact: true });
-    await usage.getByRole('heading', { name: 'Billing', exact: true }).waitFor();
-    assert.match(await usage.innerText(), /Not available for this key/);
+    const usage = page.getByRole('region', { name: 'Manual balance (fallback only)', exact: true });
+    await usage.getByRole('heading', { name: 'Manual balance (fallback only)', exact: true }).waitFor();
+    assert.match(await usage.innerText(), /This is not a provider reading/);
+    await page.getByRole('region', { name: 'OpenAI Platform balance (unofficial)', exact: true }).waitFor();
     // The guidance lives in the row's help tip; showing it is local only.
     const help = usage.getByRole('button', { name: 'About Balance', exact: true });
     await help.focus();
@@ -49,9 +59,19 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     assert.ok(rel.includes('noreferrer'));
 
     const assertPassive = async () => {
-      assert.equal(await page.locator('input, textarea, select, form').count(), 0, 'no key/organization form');
-      // The only button is the help tip; no billing sign-in action.
-      assert.deepEqual(await page.getByRole('button').evaluateAll(els => els.map(el => el.getAttribute('aria-label'))), ['About Balance']);
+      // Current main intentionally offers write-only Platform access and a
+      // manual-balance fallback. Mounting may read status, never use those actions.
+      assert.equal(await page.locator('input').count(), 2);
+      assert.equal(await page.locator('textarea, select, form').count(), 0);
+      const key = page.getByLabel('Platform session key', { exact: true });
+      assert.equal(await key.inputValue(), '');
+      assert.equal(await key.getAttribute('type'), 'password');
+      assert.equal(await page.getByLabel('Current balance (USD)', { exact: true }).inputValue(), '');
+      assert.equal(await page.getByRole('button', { name: 'Save access', exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: 'Disconnect balance', exact: true }).isDisabled(), true);
+      assert.equal(await usage.getByRole('button', { name: 'Save', exact: true }).isDisabled(), true);
+      assert.equal(await usage.getByRole('button', { name: 'Clear', exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: 'Sign in to OpenAI Platform', exact: true }).isVisible(), true);
       assert.equal(await page.getByRole('dialog').count(), 0);
       // The fixture records attempts even when a socket is closed or a panel-start
       // fetch is intercepted before it reaches Playwright's network routing.
@@ -65,7 +85,10 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
       })), { sockets: 0, openSockets: 0, loginOpened: false, loginSocketUrl: '', starts: [], messages: [] });
       assert.equal(page.context().pages().length, 1, 'no login/billing browser opened');
       assert.equal(page.url(), url.href, 'no automatic billing navigation');
-      assert.deepEqual(calls, [], 'no usage reads, credential writes or disconnects');
+      assert.deepEqual([...calls].sort((a, b) => a.path.localeCompare(b.path)), [
+        { path: '/api/v1/model-providers/fixture-openai/balance-access', method: 'GET' },
+        { path: '/api/v1/model-providers/fixture-openai/openai-usage', method: 'GET' },
+      ], 'no background reads, credential writes or disconnects');
       assert.deepEqual(unexpected, []);
       assert.deepEqual(errors, []);
     };
@@ -80,7 +103,7 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     await page.screenshot({ path: screenshot });
     console.log(JSON.stringify({ providerUsageGuidance: true, viewport,
       unsupportedPrepaidBalance: true, organizationSpendSeparate: true, chatgptCreditsSeparate: true,
-      additionalKeyInputs: false, apiCalls: calls, automaticPolling: false,
+      writeOnlyAccessInput: true, manualBalanceFallback: true, apiCalls: calls, automaticPolling: false,
       loginBrowser: false, overflow: false, pageErrors: errors, screenshot }));
   } finally { await page.context().close(); }
 }
@@ -112,10 +135,11 @@ export async function verifyProviderPollingCanary(browser, fixtureUrl, viewport)
     },
   };
   await assert.rejects(verifyProviderLogin(pollingBrowser, fixtureUrl, viewport), {
-    code: 'ERR_ASSERTION', message: /no usage reads, credential writes or disconnects/,
+    code: 'ERR_ASSERTION', message: /no background reads, credential writes or disconnects/,
   }, 'the verifier must reject polling scheduled before component mount');
-  assert.ok(requests.length > 0, 'the polling canary must actually attempt a request');
-  for (const request of requests) {
+  const polling = requests.filter(request => request.path === '/api/v1/model-providers/p1/openai-usage');
+  assert.ok(polling.length > 0, 'the polling canary must actually attempt its extra request');
+  for (const request of polling) {
     assert.deepEqual(request, { path: '/api/v1/model-providers/p1/openai-usage', method: 'GET' });
   }
   console.log(JSON.stringify({ providerPollingCanary: true, viewport, detectedRequests: requests }));
