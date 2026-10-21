@@ -52,7 +52,10 @@ sessions with successful execution, a completion reply and an explicit user
 receipt `workflow accepted: <name>`. Tool output cannot provide that receipt.
 `workflow corrected: <name>` or `workflow rejected: <name>` blocks the workflow.
 These receipts support evidence; they are **not** installation approval. Natural
-language corrections must also be considered during owner review.
+language corrections must also be considered during owner review. Ordinary
+fact/helper passes include no workflow-proposal instructions: that prompt cost
+is added only after two distinct user-accepted episodes for the same workflow
+appear in the project slice. Full evidence validation still gates the queue.
 
 Proposals retain owner/project identity, exact content digests and bounded
 source episodes/hashes. Content and evidence pass secret/injection screening;

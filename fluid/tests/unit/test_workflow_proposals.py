@@ -31,16 +31,45 @@ def output():
 
 
 @pytest.mark.asyncio
-async def test_synthesizer_queues_grounded_prose_without_installing(tmp_path):
+async def test_synthesizer_queues_grounded_prose_without_installing(tmp_path, monkeypatch):
     cwd = tmp_path / "project"
     cwd.mkdir()
     store = SkillStore(tmp_path / "store")
     await journal_success(store, cwd, "first")
     await journal_success(store, cwd, "second")
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
-    changed = await synth._apply(output(), store.journal_entries())
+    systems = []
+
+    async def complete(prompt, system):
+        systems.append(system)
+        assert "workflow accepted: fixture-summary" in prompt
+        return output(), {}
+
+    monkeypatch.setattr(synth, "_complete", complete)
+    changed = await synth._run_locked()
+    assert len(systems) == 1 and "<workflow>JSON</workflow>" in systems[0]
     assert len(changed) == 1 and changed[0].startswith("workflow-proposal:"), synth.last_error
     assert not (cwd / ".fluid" / "skills").exists()
+
+
+@pytest.mark.asyncio
+async def test_workflow_prompt_only_after_repeated_user_acceptance(tmp_path):
+    from fluid.codemode.continual import _SYNTH_SYSTEM
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    store = SkillStore(tmp_path / "store")
+    synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
+    await journal_success(store, cwd, "first")
+    entries = store.journal_entries()
+    assert synth._synthesis_system(entries) == _SYNTH_SYSTEM
+    assert synth._synthesis_system(entries + entries) == _SYNTH_SYSTEM
+    await journal_success(store, cwd, "second")
+    entries = store.journal_entries()
+    assert "<workflow>JSON</workflow>" in synth._synthesis_system(entries)
+    for entry in entries:
+        if entry.get("kind") == "user" and "workflow accepted:" in entry.get("text", ""):
+            entry["kind"] = "tool"
+    assert synth._synthesis_system(entries) == _SYNTH_SYSTEM
 
 
 async def propose(tmp_path):
