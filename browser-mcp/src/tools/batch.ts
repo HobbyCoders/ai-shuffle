@@ -15,12 +15,14 @@
  */
 
 import type { Session } from "../session.js";
-import { jsonResult, errorResult, type McpToolResult, type McpContent } from "./result.js";
+import { jsonResult, errorResult, capText, type McpToolResult, type McpContent } from "./result.js";
 import { normalizeOptionalInput, validateInput, type JsonSchema } from "../schemas.js";
 
 export const BATCH_MAX_ACTIONS = 20;
 /** Chars of each item's result text surfaced in the batch summary. */
 const SUMMARY_MAX_CHARS = 400;
+/** Shared text budget, including the summary and step labels (images are separate). */
+export const BATCH_MAX_CHARS = 80000;
 
 export interface BatchInput {
   actions: string[];
@@ -137,9 +139,7 @@ export async function runBatch(
   }
 
   const results: BatchItemResult[] = [];
-  // Image blocks (screenshots) from sub-results, re-emitted on the batch result
-  // so a screenshot taken inside a batch reaches the model.
-  const images: McpContent[] = [];
+  const observations: Array<{ index: number; tool: string; result: McpToolResult; important: boolean }> = [];
   let allOk = true;
   let stopped: string | undefined;
   let changedAt = -1;
@@ -185,20 +185,23 @@ export async function runBatch(
     const first = firstText(res);
     const body = parseBody(first);
     const summary = first.slice(0, SUMMARY_MAX_CHARS);
+    // Keep complete observations until we can allocate the shared output budget.
+    // A navigate/act can carry a fresh tree too; it must not disappear just
+    // because it is not classified as an observation for control flow.
+    if (isObservation(action) || res.content.length > 1 || body?.snapshot_stale === true) {
+      observations.push({ index, tool: action.tool, result: res,
+        important: action.tool === "browser_navigate" || body?.snapshot_stale === true });
+    }
     // A tool can answer without isError and still say it did not get there
     // (browser_wait timing out reports ok:false): that also ends the batch.
     if (res.isError || body?.ok === false) {
       const outcome = typeof body?.outcome === "string" ? body.outcome : undefined;
       const err = typeof body?.error === "string" ? body.error.slice(0, SUMMARY_MAX_CHARS) : summary || "tool error";
       results.push({ tool: action.tool, ok: false, error: err, ...(outcome ? { outcome } : {}) });
-      for (const c of res.content) if (c.type === "image") images.push(c);
       allOk = false;
       break;
     }
     results.push({ tool: action.tool, ok: true, summary });
-    for (const c of res.content) {
-      if (c.type === "image") images.push(c);
-    }
     if (body?.paused_by_dialog === true && index < actions.length - 1) {
       // Every later step would only be refused with dialog_open.
       stopped = `step ${index + 1} opened a dialog that waits for an answer, so later steps were not run. ` +
@@ -216,6 +219,37 @@ export async function runBatch(
     ...(stopped ? { stopped } : {}),
     results,
   });
-  out.content.push(...images);
+  let remaining = BATCH_MAX_CHARS - JSON.stringify(out.content).length;
+  const kept = new Map<number, McpContent[]>();
+  // Reserve labels and screenshot metadata first so even a huge final tree
+  // cannot orphan an image. Then prioritize the last observation and fresh trees.
+  const labels = new Map(observations.map(o => [o.index, `Step ${o.index + 1} (${o.tool}):`]));
+  remaining -= [...labels.values()].reduce((n, label) => n + label.length + 2, 0);
+  const priority = [...observations].reverse();
+  const last = priority[0];
+  const images = priority.filter(o => o.result.content.some(c => c.type === "image"));
+  const rest = priority.filter(o => !images.includes(o) && o !== last);
+  const ordered = [...images, ...(last && !images.includes(last) ? [last] : []),
+    ...rest.filter(o => o.important), ...rest.filter(o => !o.important)];
+  for (const o of ordered) {
+    const label = labels.get(o.index)!;
+    const content: McpContent[] = [{ type: "text", text: label }];
+    const reserved = ordered.slice(ordered.indexOf(o) + 1).filter(next => next.important).length * 1200;
+    const available = Math.max(0, remaining - reserved);
+    const allowance = o === last || o.important || o.result.content.some(c => c.type === "image")
+      ? available : Math.min(1200, available);
+    let budget = Math.max(0, allowance);
+    for (const c of o.result.content) {
+      if (c.type === "image") { content.push(c); continue; }
+      const marker = "\n[batch output truncated; call this tool separately for the rest]";
+      const value = c.text.length <= budget ? c.text
+        : budget >= marker.length ? capText(c.text, budget - marker.length).text + marker : "";
+      if (value) content.push({ ...c, text: value });
+      budget -= value.length;
+      remaining -= value.length;
+    }
+    kept.set(o.index, content);
+  }
+  for (const o of observations) out.content.push(...(kept.get(o.index) ?? []));
   return out;
 }

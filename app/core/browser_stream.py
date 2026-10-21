@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 
 import websockets
 from fastapi import WebSocket
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 from app.api.ws_utils import WSPayloadEncodeError, safe_ws_send
 from app.core import browser_control, native_chrome
@@ -67,7 +67,8 @@ class _MouseInput(BaseModel):
     event: str  # move | down | up | wheel
     x: float
     y: float
-    button: str = "left"  # left | middle | right
+    button: str = "left"  # none | left | middle | right
+    buttons: Optional[StrictInt] = Field(default=None, ge=0, le=31)
     clickCount: int = 0
     deltaX: float = 0.0
     deltaY: float = 0.0
@@ -125,7 +126,7 @@ _MOUSE_CDP_TYPE = {
     "up": "mouseReleased",
     "wheel": "mouseWheel",
 }
-_VALID_MOUSE_BUTTONS = {"left", "middle", "right"}
+_VALID_MOUSE_BUTTONS = {"none", "left", "middle", "right"}
 
 
 def _translate_mouse(m: _MouseInput, bounds: Optional[Tuple[int, int]]) -> dict:
@@ -155,6 +156,8 @@ def _translate_mouse(m: _MouseInput, bounds: Optional[Tuple[int, int]]) -> dict:
         "clickCount": m.clickCount,
         "modifiers": m.modifiers,
     }
+    if m.buttons is not None:
+        params["buttons"] = m.buttons
     if m.event == "wheel":
         params["deltaX"] = m.deltaX
         params["deltaY"] = m.deltaY

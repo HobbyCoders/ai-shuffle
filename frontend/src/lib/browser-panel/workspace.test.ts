@@ -12,6 +12,30 @@ const state = {
 	control: { owner: 'agent', viewer_id: null, pending_viewer_id: null },
 };
 describe('workspace wire validation', () => {
+	it('accepts optional text metrics within the runtime limits', () => {
+		const field = { id: 'f', type: 'text', label: 'Name', value: '', x: 0, y: 0, width: 100, height: 20 };
+		const style = { fontSize: 14, lineHeight: null, paddingLeft: 12, paddingTop: 4, fontFamily: 'Arial, sans-serif' };
+		for (const s of [style, { ...style, lineHeight: 21 }, { ...style, borderLeft: 2, borderTop: 0 },
+			// Real pages: font-size:0 hidden inputs, huge type, wide padding and borders.
+			{ ...style, fontSize: 0 }, { ...style, fontSize: 450 }, { ...style, paddingLeft: 420 }, { ...style, borderLeft: 120 }, { ...style, fontSize: 1000, fontFamily: 'x'.repeat(200) }]) {
+			const editors = [{ ...field, style: s }];
+			expect(isBrowserWorkspaceState({ ...state, editors })).toBe(true);
+			expect(editors[0].style).toEqual(s);
+		}
+	});
+	it('drops an unusable style from that field only and never fails the update', () => {
+		const style = { fontSize: 14, lineHeight: null, paddingLeft: 12, paddingTop: 4, fontFamily: 'Arial, sans-serif' };
+		const field = (id: string, s?: unknown) => ({ id, type: 'text', label: id, value: '', x: 0, y: 0, width: 100, height: 20, ...(s === undefined ? {} : { style: s }) });
+		for (const bad of [null, 'big', { ...style, fontSize: -1 }, { ...style, fontSize: 1001 }, { ...style, paddingLeft: -1 }, { ...style, lineHeight: 'normal' },
+			{ ...style, fontFamily: 'x'.repeat(201) }, { ...style, paddingTop: Infinity }, { ...style, borderLeft: NaN }, { ...style, borderTop: '1px' }, { ...style, borderTop: null }]) {
+			const value = { ...state, editors: [field('good', style), field('bad', bad)] };
+			expect(isBrowserWorkspaceState(value)).toBe(true);
+			expect(value.editors[0].style).toEqual(style);
+			expect('style' in value.editors[1]).toBe(false);
+		}
+		// The rest of a field is still checked as strictly as before.
+		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field('f', style), width: 0 }] })).toBe(false);
+	});
 	it('accepts a short plain notice and rejects anything else', () => {
 		expect(isBrowserWorkspaceState({ ...state, notice: 'This step needs your own browser.' })).toBe(true);
 		for (const notice of [3, null, 'x'.repeat(513)]) {

@@ -36,6 +36,26 @@ class TestTranslateInput:
             },
         }
 
+    @pytest.mark.parametrize("buttons", [0, 1, 2, 4, 8, 16, 31])
+    def test_mouse_buttons_bitmask(self, buttons):
+        cmd = browser_stream.translate_input({
+            "type": "input", "kind": "mouse", "event": "move",
+            "x": 10, "y": 20, "button": "none", "buttons": buttons,
+        })
+        assert cmd["params"]["button"] == "none"
+        assert cmd["params"]["buttons"] == buttons
+
+    @pytest.mark.parametrize("extra", [
+        {"button": "unknown"}, {"buttons": -1}, {"buttons": 32},
+        {"buttons": 1.5}, {"buttons": "1"}, {"buttons": True},
+    ])
+    def test_invalid_mouse_buttons(self, extra):
+        with pytest.raises(ValueError):
+            browser_stream.translate_input({
+                "type": "input", "kind": "mouse", "event": "move",
+                "x": 10, "y": 20, **extra,
+            })
+
     def test_mouse_down_up(self):
         down = browser_stream.translate_input(
             {

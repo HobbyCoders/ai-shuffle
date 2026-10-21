@@ -2,6 +2,7 @@
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
   accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
+  style?: { fontSize: number; lineHeight: number | null; paddingLeft: number; paddingTop: number; borderLeft: number; borderTop: number; fontFamily: string };
   x: number; y: number; width: number; height: number;
 }
 export interface BrowserWorkspaceState {

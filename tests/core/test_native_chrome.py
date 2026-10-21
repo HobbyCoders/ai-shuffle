@@ -4,7 +4,7 @@ Tests for native-install browser support:
   * ``builtin_mcp_servers._browser_mcp_entry`` — the env → docker-path → repo
     fallback resolution order.
   * ``native_chrome.resolve_chrome_executable`` — Chrome/Edge/Chromium discovery.
-  * ``native_chrome.ensure_started`` — the no-op guards (container).
+  * ``native_chrome.ensure_started`` — Docker watchdog/native launch guards.
 
 Pure/logic tests only: nothing here spawns Chrome or binds a port, and no
 POSIX-only APIs are exercised (the module and these tests import on Linux CI).
@@ -139,19 +139,35 @@ class TestBrowserLabel:
 
 
 # =============================================================================
-# ensure_started — no-op guards
+# ensure_started — Docker health supervision without a second process launcher
 # =============================================================================
 class TestEnsureStartedNoOps:
     @pytest.mark.asyncio
-    async def test_noop_in_container(self):
-        nc._supervisor_task = None
+    async def test_container_starts_one_health_watchdog_but_never_launches_chrome(self, monkeypatch):
+        monkeypatch.setattr(nc, "_supervisor_task", None)
+        monkeypatch.setattr(nc, "_proc", None)
+        monkeypatch.setattr(nc, "_stopping", False)
+        monkeypatch.setattr(nc, "_HEALTH_INTERVAL_S", 0.001)
+        checked = asyncio.Event()
+
+        async def health(port, *, docker):
+            assert docker and port == nc._cdp_port()
+            checked.set()
+
+        monkeypatch.setattr(nc, "_check_health", health)
         with patch("app.core.native_chrome._in_container", return_value=True), \
              patch(
                  "app.core.native_chrome.asyncio.create_subprocess_exec",
                  new=AsyncMock(side_effect=AssertionError("must not spawn")),
              ):
             await nc.ensure_started()
-        assert nc._supervisor_task is None
+            task = nc._supervisor_task
+            assert task is not None
+            await nc.ensure_started()
+            assert nc._supervisor_task is task
+            await asyncio.wait_for(checked.wait(), 1)
+            await nc.stop()
+            assert task.cancelled()
 
 
 class TestCreatePage:
@@ -346,3 +362,117 @@ def test_the_browser_is_launched_without_the_server_run_marker(monkeypatch):
     env = nc._egress_env()
     assert process_ledger.RUN_MARKER not in env
     assert env["SOME_SETTING"] == "kept"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "close", "replacement"])
+@pytest.mark.parametrize("docker", [False, True])
+async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(monkeypatch, failure, docker):
+    """Real fake CDP socket: browser commands answer, page commands can hang."""
+    import json
+    import websockets
+
+    calls = []
+    repaired = False
+
+    async def endpoint(ws):
+        nonlocal repaired
+        async for raw in ws:
+            message = json.loads(raw)
+            method = message["method"]
+            calls.append(method)
+            path = ws.request.path
+            if path == "/page/stuck" or (path == "/page/new" and failure == "replacement"):
+                continue  # A live connection whose renderer never replies.
+            result = {}
+            if method == "Target.closeTarget":
+                result = {"success": failure != "close"}
+            elif method == "Target.createTarget":
+                repaired = True
+                result = {"targetId": "new"}
+            await ws.send(json.dumps({"id": message["id"], "result": result}))
+
+    async with websockets.serve(endpoint, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        base = f"ws://127.0.0.1:{port}"
+
+        async def get(path, port):
+            if path == "/json/version":
+                return {"webSocketDebuggerUrl": base + "/browser"}
+            target = "new" if repaired else "stuck"
+            return [{"type": "page", "id": target, "webSocketDebuggerUrl": base + "/page/" + target}]
+
+        monkeypatch.setattr(nc, "cdp_get", get)
+        monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(nc, "_health_states", {})
+        monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
+        monkeypatch.setattr(nc, "_health_now", lambda: clock[0])
+        clock = [0]
+        for second in (0, 15):
+            clock[0] = second
+            assert await nc._probe_pages(port) is None
+        clock[0] = 31
+        candidates = await nc._probe_pages(port)
+        assert candidates is not None
+        assert "Target.createTarget" not in calls
+        profile = Mock(side_effect=AssertionError("health recovery must not alter the profile"))
+        monkeypatch.setattr(nc, "_profile_dir", profile)
+        if docker:
+            process = Mock(pid=123)
+            process.create_time.return_value = 10
+            monkeypatch.setattr(nc, "_docker_chrome_process", lambda port: process)
+            monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
+            monkeypatch.setattr(nc, "_docker_restarts", [])
+            process.wait.return_value = 0
+            monkeypatch.setattr(nc, "_probe_pages", AsyncMock(return_value=candidates))
+            await nc._check_health(port, docker=True)
+            assert process.terminate.call_count == (failure is not None)
+            process.kill.assert_not_called()
+        else:
+            assert await nc._repair_pages(port, *candidates) is (failure is None)
+        assert "Target.closeTarget" in calls
+        assert "Target.createTarget" in calls
+        profile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restarts_when_page_repair_fails(monkeypatch):
+    monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
+    monkeypatch.setattr(nc, "_stopping", False)
+    monkeypatch.setattr(nc, "_HEALTH_INTERVAL_S", 0.01)
+    monkeypatch.setattr(nc, "_RELAUNCH_BACKOFF_S", 0)
+    monkeypatch.setattr(nc, "_open_launcher_log", lambda port: None)
+    monkeypatch.setattr(nc, "_egress_command", lambda exe, args: [exe, *args])
+    monkeypatch.setattr(nc, "_egress_env", lambda: {})
+    process = Mock(returncode=None, pid=123)
+    exited = asyncio.Event()
+
+    async def wait():
+        await exited.wait()
+        return 0
+
+    process.wait = wait
+    health = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(nc, "_probe_pages", health)
+    monkeypatch.setattr(nc, "_docker_restarts", [])
+
+    async def stop(proc):
+        assert proc is process
+        exited.set()
+
+    stopper = AsyncMock(side_effect=stop)
+    monkeypatch.setattr(nc, "_stop_process", stopper)
+    launches = []
+
+    async def spawn(*args, **kwargs):
+        launches.append(args)
+        if len(launches) == 2:
+            monkeypatch.setattr(nc, "_stopping", True)
+        return process
+
+    monkeypatch.setattr(nc.asyncio, "create_subprocess_exec", spawn)
+    await nc._supervise("fake-chrome", 1234)
+    health.assert_awaited_once_with(1234)
+    stopper.assert_awaited_once_with(process)
+    assert len(launches) == 2
+    profiles = [[a for a in args if a.startswith("--user-data-dir=")] for args in launches]
+    assert profiles[0] == profiles[1] and len(profiles[0]) == 1
