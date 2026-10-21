@@ -38,7 +38,6 @@ import stat
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -249,7 +248,9 @@ def _home_entry() -> str:
 
 def _probe(bwrap: str) -> tuple[bool, str]:
     """Run a real sandbox over a temporary folder and check its isolation."""
-    with tempfile.TemporaryDirectory(prefix="chat-shell-probe-") as base:
+    from app.core.temp_scratch import scratch_directory
+
+    with scratch_directory("ai-shuffle-probe-") as base:
         folder = os.path.join(base, "grant")
         os.mkdir(folder)
         outside = os.path.join(base, "outside")

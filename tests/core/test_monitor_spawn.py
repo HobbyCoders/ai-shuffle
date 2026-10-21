@@ -1166,6 +1166,24 @@ async def test_output_split_across_chunks_still_forms_whole_lines(monkeypatch):
     bt._background_tasks.pop(task.task_id, None)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("character", ["x", "😀"])
+async def test_monitor_retained_output_has_a_byte_budget(monkeypatch, character):
+    import sys
+    from app.mcp import builtin_tools as bt
+
+    chunks = [(f"{index}:" + character * 100_000 + "\n").encode() for index in range(64)]
+    chunks.append(b"Tests 64 passed; EXIT:0\n")
+    _fake_proc(monkeypatch, chunks)
+    task = await bt._spawn_background("synthetic-output", None, None)
+    try:
+        await task._reader_task
+        assert task.lines[-1] == "Tests 64 passed; EXIT:0"
+        assert sum(sys.getsizeof(line) for line in task.lines) <= 4 * 1024 * 1024
+    finally:
+        bt._background_tasks.pop(task.task_id, None)
+
+
 # ---------------------------------------------------------------------------
 # R7-5 — a script with no exec bit is run through sh instead of failing
 # ---------------------------------------------------------------------------

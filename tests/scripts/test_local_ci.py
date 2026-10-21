@@ -298,7 +298,8 @@ def asset_repo(tmp_path):
     git("config", "user.email", "local-ci@example.invalid")
     git("config", "commit.gpgsign", "false")
     git("config", "core.hooksPath", ".githooks")
-    for name in ("scripts/local_ci.py", "scripts/secret_scan.py", ".githooks/pre-push", ".gitleaks.toml"):
+    for name in ("scripts/local_ci.py", "app/__init__.py", "app/core/__init__.py",
+                 "app/core/temp_scratch.py", "scripts/secret_scan.py", ".githooks/pre-push", ".gitleaks.toml"):
         destination = repo / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)

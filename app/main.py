@@ -318,6 +318,8 @@ async def lifespan(app: FastAPI):
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
+        from app.core.scratch_reaper import maintain_scratch
+        bg_tasks.append(asyncio.create_task(maintain_scratch(), name="scratch-maintenance"))
         from app.core.fluid_memory import maintain_memories
         bg_tasks.append(asyncio.create_task(maintain_memories(), name="memory-maintenance"))
         monitor_task = await start_resource_monitor(interval_seconds=300)

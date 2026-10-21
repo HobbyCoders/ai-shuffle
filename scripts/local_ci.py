@@ -21,6 +21,7 @@ so instead of claiming them.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 import json
@@ -74,7 +75,7 @@ FAST_SUBSET_EXCLUDED = [
     "tests/core/test_container_image_contract.py",
 ]
 BACKEND_PATHS = ["app/*", "tests/*", "fluid/*", "scripts/*", "docker/*", "Dockerfile",
-                 "requirements*", "pytest.ini", "run_local.*"]
+                 "requirements*", "pytest.ini", "conftest.py", "run_local.*"]
 
 
 class Failure(Exception):
@@ -209,6 +210,22 @@ def kill_tree(process: subprocess.Popen) -> None:
 
 def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         timeout: float | None = None, *, retry: bool = True) -> None:
+    # All child scratch (Python, Node and Chromium) belongs to this command.
+    # Remove it on failures, timeout and Ctrl-C, after _run has reaped children.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from app.core.temp_scratch import scratch_directory
+
+    with scratch_directory("ai-shuffle-ci-") as directory:
+        scratch_env = {
+            "AI_SHUFFLE_PYTEST_GATE_DIR": os.environ.get("AI_SHUFFLE_PYTEST_GATE_DIR") or tempfile.gettempdir(),
+            **(env or {}), **dict.fromkeys(("TMPDIR", "TEMP", "TMP"), directory),
+        }
+        _run(argv, cwd=cwd, env=scratch_env, timeout=timeout, retry=retry)
+
+
+def _run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
+         timeout: float | None = None, *, retry: bool = True) -> None:
     exe = shutil.which(argv[0]) or argv[0]
     shown = " ".join(argv)
     rel = cwd.relative_to(ROOT).as_posix() if cwd != ROOT else "."
@@ -223,7 +240,7 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
     merged = child_env(env)
     failed_file = None
     if retry and os.environ.get(RETRY_FAILED_ENV) == "1" and argv[1:3] == ["-m", "pytest"]:
-        failed_file = Path(tempfile.mkdtemp(prefix="local-ci-failed-")) / "failed.txt"
+        failed_file = Path(merged["TMPDIR"]) / "failed.txt"
         merged["LOCAL_CI_FAILED_FILE"] = str(failed_file)
         argv = [*argv, "-p", "scripts.ci.record_failures"]
     process = subprocess.Popen([exe, *argv[1:]], cwd=cwd, env=merged, **low_priority_kwargs())
@@ -241,7 +258,6 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
     if returncode and failed_file is not None:
         failed = (list(dict.fromkeys(failed_file.read_text(encoding="utf-8").splitlines()))
                   if failed_file.exists() else [])
-        shutil.rmtree(failed_file.parent, ignore_errors=True)
         # Nothing recorded (a collection error, a crash) or many failures: a real break.
         if failed and len(failed) <= MAX_RETRIED:
             print(f"\n{len(failed)} failed test(s); running them once more.", flush=True)
@@ -253,8 +269,6 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
                               f"its {len(failed)} failed test(s) failed again") from None
             FLAKY.extend(failed)
             return
-    elif failed_file is not None:
-        shutil.rmtree(failed_file.parent, ignore_errors=True)
     if returncode:
         raise Failure(f"{shown} (in {rel}) exited {returncode}")
 
@@ -438,17 +452,19 @@ def backend(ctx: Context) -> None:
         print("No backend tests reach this change.")
         return
     print(f"Backend: {'the whole fast subset' if selection == 'all' else f'{len(targets)} test files'}")
-    hits = None
-    if ctx.mode == "full" and sys.version_info >= (3, 12):
-        hits = ctx.map_hits or Path(tempfile.mkdtemp(prefix="local-ci-map-"))
-        env = {**env, "BACKEND_TEST_MAP_DIR": str(hits)}
-        extra = [*extra, "-p", "tests._test_map"]
-    run([ctx.python, "-m", "pytest", *targets, *extra, *args], env=env)
-    if hits is not None and ctx.map_hits is None:
-        MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-        run([ctx.python, "scripts/ci/backend_test_map.py", "merge", "--hits", str(hits),
-             "--out", str(MAP_PATH), "--commit", git("rev-parse", "HEAD")], env=env)
-        shutil.rmtree(hits, ignore_errors=True)
+    with ExitStack() as scratch:
+        hits = None
+        if ctx.mode == "full" and sys.version_info >= (3, 12):
+            # Staged runs own map_hits across invocations; never remove theirs.
+            hits = ctx.map_hits or Path(scratch.enter_context(
+                tempfile.TemporaryDirectory(prefix="local-ci-map-")))
+            env = {**env, "BACKEND_TEST_MAP_DIR": str(hits)}
+            extra = [*extra, "-p", "tests._test_map"]
+        run([ctx.python, "-m", "pytest", *targets, *extra, *args], env=env)
+        if hits is not None and ctx.map_hits is None:
+            MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            run([ctx.python, "scripts/ci/backend_test_map.py", "merge", "--hits", str(hits),
+                 "--out", str(MAP_PATH), "--commit", git("rev-parse", "HEAD")], env=env)
 
 
 def backend_linux(ctx: Context) -> None:
@@ -660,7 +676,8 @@ SUITES = [
                             "tests/smoke/*", "tests/core/test_chat_shell.py",
                             "tests/core/test_container_runtime.py", "tests/core/test_container_image_contract.py"],
           backend_linux, "Sandbox shell, PostgreSQL boot smoke and serial container contracts", linux_only),
-    Suite("fluid", ["fluid/*"], fluid, "fluid unit suite"),
+    Suite("fluid", ["fluid/*", "conftest.py", "scripts/ci/test_scratch.py", "app/core/temp_scratch.py"],
+          fluid, "fluid unit suite"),
     Suite("frontend", ["frontend/*", "app/contract/schema/*"], frontend,
           "svelte-check, Vitest for the files a change reaches, contract check (full: build and every test)"),
     Suite("mobile", ["mobile/*", "frontend/src/*", "frontend/package*.json"], mobile, "Mobile UI type check and tests"),

@@ -74,6 +74,35 @@ gate. All checkouts must use this gate version and the same slot override/temp
 directory to share the budget; older unsuffixed-lock gates do not coordinate
 with these slots.
 
+### Disposable test scratch and previews
+
+Pytest controllers allocate a unique `ai-shuffle-pytest-*` basetemp and remove
+it after fixture and xdist worker teardown, including failed runs. Workers use
+the controller's base rather than competing for a shared numbered directory.
+Retention is explicitly `none` / `0`. An explicit `--basetemp` remains caller-owned.
+`local_ci.py` gives each child command a unique `ai-shuffle-ci-*` TMPDIR/TEMP/TMP
+and removes it after stopping failed, timed-out or interrupted children. It
+preserves the original shared xdist lock directory in
+`AI_SHUFFLE_PYTEST_GATE_DIR`; private scratch must not create private admission
+slots. `npm test` in browser-mcp similarly owns its browser/Node scratch.
+
+Normal exit, pytest's Ctrl-C handling and local-ci command failure run cleanup;
+SIGKILL and host crashes cannot run finalizers. Approved workers periodically
+sweep only allowlisted, ownership-receipted scratch older than six hours,
+skipping live owners, process cwd/open descriptors, symlinks and checkouts.
+Sweeps are bounded and fail closed if process metadata cannot be inspected;
+they do not clean generic `tmp*`, `probe-`, `cdp-`, `ci-` or legacy unmarked trees.
+
+For a disposable Linux preview, build the frontend, run
+`python -m app.preview stamp`, then use
+`python -m app.preview run --port 18080 --ttl-seconds 3600` under a Monitor task.
+It creates its own HOME, data directory and PostgreSQL without inheriting
+credentials. Keep the launcher alive: parent loss, task termination, Ctrl-C or
+TTL expiry closes the app and cluster. The TTL is capped at four hours. Raw
+`AI_SHUFFLE_PREVIEW=1 python -m app.main` remains a caller-managed instance;
+this command cannot adopt or terminate somebody else's existing preview.
+SIGKILL of the launcher still relies on Monitor's process-tree teardown.
+
 A pass on a clean checkout is recorded against the commit's tree in
 `.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`, which
 `install` copies into the directory git runs hooks from, next to AI Shuffle's

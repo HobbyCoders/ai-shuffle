@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { stopBrowser } from "./browser-process.js";
 import { BrowserManager } from "../src/browser.js";
 import { Session } from "../src/session.js";
 import { runNavigate } from "../src/tools/navigate.js";
@@ -95,7 +96,7 @@ describe.skipIf(!browserPath)("withheld captcha detection", () => {
     proc = spawn(
       browserPath!,
       ["--headless=new", "--no-sandbox", "--disable-gpu", `--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`, "about:blank"],
-      { stdio: "ignore" },
+      { stdio: "ignore", detached: process.platform !== "win32" },
     );
     await waitForCdp(port);
     manager = new BrowserManager({ endpoint: `http://127.0.0.1:${port}` });
@@ -104,15 +105,9 @@ describe.skipIf(!browserPath)("withheld captcha detection", () => {
 
   afterAll(async () => {
     await manager?.cleanup().catch(() => {});
-    if (proc && proc.exitCode === null) {
-      const exited = new Promise((r) => proc.once("exit", r));
-      proc.kill();
-      await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
-    }
-    try {
-      rmSync(userDataDir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
+    await stopBrowser(proc);
+    if (userDataDir) {
+      rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 
