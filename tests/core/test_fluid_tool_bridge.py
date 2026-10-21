@@ -66,7 +66,7 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
             "purpose": {"type": "string"},
             "saved_id": {
                 "type": "string",
-                "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Omit connection hints and plugin/service when using this.",
+                "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Pass saved_id alone, without connection hints or plugin/service. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named.",
             },
             "suggested_host": {
                 "type": "string", "maxLength": 64,
@@ -94,7 +94,7 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
             },
             "plugin": {
                 "type": "string",
-                "description": "Service only: id (name@source) of an installed plugin that declares a sign-in for the service. Use with service; omit the hints.",
+                "description": "Service only: id (name@source) of an installed plugin that declares a sign-in for the service. Use with service; omit the hints. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named.",
             },
             "service": {
                 "type": "string",
