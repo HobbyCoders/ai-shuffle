@@ -215,15 +215,26 @@ class SafeInput:
             # in the target app before mouse-up, rather than dropping at Stop.
             if cancel_drag and self.escape_key is not None and any(
                     device is self.mouse for device, _ in self.held):
-                try:
-                    self._press(self.keyboard, self.escape_key)
-                except Exception:
-                    logger.exception("Could not press Escape to cancel computer-use drag")
-                finally:
+                # Escape with Ctrl/Alt/Shift held can invoke a system shortcut.
+                # Release every agent-held key before injecting plain Escape.
+                for device, key in list(reversed(self.held)):
+                    if device is self.keyboard:
+                        try:
+                            self.release(device, key)
+                        except Exception:
+                            logger.exception("Could not release keyboard input before cancelling drag")
+                if any(device is self.keyboard for device, _ in self.held):
+                    logger.warning("Skipping Escape drag cancellation: keyboard input is still held")
+                else:
                     try:
-                        self.release(self.keyboard, self.escape_key)
+                        self._press(self.keyboard, self.escape_key)
                     except Exception:
-                        logger.exception("Could not release Escape while cancelling computer-use drag")
+                        logger.exception("Could not press Escape to cancel computer-use drag")
+                    finally:
+                        try:
+                            self.release(self.keyboard, self.escape_key)
+                        except Exception:
+                            logger.exception("Could not release Escape while cancelling computer-use drag")
             if self._hold_timer is not None:
                 self._hold_timer.cancel()
                 self._hold_timer = None

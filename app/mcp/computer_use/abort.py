@@ -135,10 +135,10 @@ def describe(reason: str | None) -> str:
     return _CAUSES.get(reason, f"it was stopped ({reason})")
 
 
-def _release_controllers(key: str) -> None:
+def _release_controllers(key: str, *, cancel_drag: bool) -> None:
     for controller in list(_controllers):
         if _key(controller.session_id) == key:
-            controller.release_all(cancel_drag=True)
+            controller.release_all(cancel_drag=cancel_drag)
 
 
 def request_stop(session_id: str | None = None, *, reason: str = "stopped",
@@ -155,7 +155,9 @@ def request_stop(session_id: str | None = None, *, reason: str = "stopped",
         if not already:
             _REASONS[key] = {"reason": reason, "detail": detail, "at": time.time()}
         _GENERATIONS[key] = _GENERATIONS.get(key, 0) + 1
-        _release_controllers(key)
+        # Physical Escape already reaches the target app. A normal turn end
+        # retains the old drop behavior rather than cancelling a held drag.
+        _release_controllers(key, cancel_drag=reason not in ("escape", "completed"))
         from app.mcp.computer_use import activity
         activity.finish(session_id, reason=reason)
     if not already and reason != "completed":
@@ -176,7 +178,7 @@ def cancel_inflight(session_id: str | None = None, *, reason: str = "cancelled",
     key = _key(session_id)
     with _LOCK:
         _GENERATIONS[key] = _GENERATIONS.get(key, 0) + 1
-        _release_controllers(key)
+        _release_controllers(key, cancel_drag=True)
     logger.warning("computer-use call cancelled for session %s: reason=%s%s; input invalidated, "
                    "session stays armed", key, reason, f"; evidence: {detail}" if detail else "")
 
