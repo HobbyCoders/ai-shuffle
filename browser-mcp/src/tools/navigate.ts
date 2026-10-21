@@ -6,6 +6,7 @@
 
 import { raceWithTimeout, type Session } from "../session.js";
 import { runWait } from "./wait.js";
+import { collectRefs, parseAriaYaml } from "../snapshot.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
 import {
@@ -223,7 +224,7 @@ export async function runNavigate(
   const snapshotMs = performance.now() - snapshotStart;
   // The registry can include refs hidden by collapse/truncation. Count only
   // refs the caller actually received (compatible with pre-registration snapshots).
-  const emittedRefCount = (snap.text.match(/\[ref=/g) ?? []).length;
+  const emittedRefCount = new Set(collectRefs(parseAriaYaml(snap.text))).size;
   // Emptiness is judged from the page, never from this interactive-filtered
   // snapshot: a login form, a canvas fixture and a prose page all have few or
   // no refs while being perfectly rendered.

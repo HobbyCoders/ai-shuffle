@@ -211,7 +211,7 @@ describe("content warning via browser_navigate", () => {
   });
 
   it("counts only refs emitted in the navigate tree, not hidden registry entries", async () => {
-    const res = await runNavigate(navSession('button "Visible" [ref=e1]', 20, RENDERED), { url: "https://app.test/" });
+    const res = await runNavigate(navSession('- button "Visible [ref=e999]" [ref=e1]', 20, RENDERED), { url: "https://app.test/" });
     expect(bodyOf(res).ref_count).toBe(1);
   });
 
