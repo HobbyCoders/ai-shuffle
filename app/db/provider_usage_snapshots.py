@@ -27,6 +27,30 @@ from app.db.base import get_db, rows_to_list
 logger = logging.getLogger(__name__)
 
 
+def delete_shared_observations(conn, provider_id: str, *, source_id: str | None = None) -> None:
+    """Remove obsolete readings atomically; publish their tombstones after commit."""
+    from app.db.base import after_commit
+
+    cursor = conn.cursor()
+    prefix = "provider_observation:"
+    cursor.execute("SELECT key FROM system_settings WHERE key LIKE %s", (prefix + "%",))
+    keys = []
+    for row in cursor.fetchall():
+        source, _, provider = row["key"][len(prefix):].partition(":")
+        if provider == provider_id and (source_id is None or source == source_id):
+            keys.append(row["key"])
+    for key in keys:
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
+    if keys:
+        def publish():
+            from app.db.settings import invalidate_system_setting_memo
+            from app.network import engine
+            for key in keys:
+                invalidate_system_setting_memo(key)
+                engine.record_after_commit("system_settings", key)
+        after_commit(conn, publish)
+
+
 def _parse_json_list(raw: Any) -> List[Dict[str, Any]]:
     """Parse a JSON list field, handling both str and list (JSONB)."""
     if isinstance(raw, str):

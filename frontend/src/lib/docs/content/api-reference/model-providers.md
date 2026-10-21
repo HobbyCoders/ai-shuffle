@@ -431,8 +431,8 @@ successful fetched time. A newly synchronized billing key schedules a refresh
 only after commit. Workers share successful normalized readings without adding
 upstream calls; `observed_at` and `source_worker` retain the original time and
 source. Configured access with no reading or error is `pending`; a shared-budget
-wait is `deferred`, with `last_deferred_reason` and nullable `deferred_until`
-(epoch milliseconds). A failed first reading remains `unavailable`. Failed/expired readings never expose old credit as
+wait is `deferred`, with a fixed `last_deferred_reason` (no retry deadline is
+advertised). A failed first reading remains `unavailable`. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference or billing key invalidate old

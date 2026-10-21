@@ -17,7 +17,8 @@ def test_configured_balance_waits_for_first_reading(monkeypatch):
                                           "last_deferred_reason": "shared_usage_budget", "deferred_until": 12345})
     status = balances.status(row)
     assert status["status"] == "deferred"
-    assert status["deferred_until"] == 12345
+    assert status["last_deferred_reason"] == "shared_usage_budget"
+    assert "deferred_until" not in status
     assert status["last_error_kind"] is None
     assert balances.status({})["status"] == "unavailable"
 
