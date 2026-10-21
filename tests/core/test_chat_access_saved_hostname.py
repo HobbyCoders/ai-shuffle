@@ -144,6 +144,39 @@ async def test_saved_id_request_and_real_ssh_approval(broker, saved_vault, ssh_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hints", [
+    {"suggested_host": "192.0.2.50"}, {"suggested_port": 2222},
+    {"suggested_username": "admin"}, {"suggested_path": "/new/target"},
+    {"service_provider": "cloudflare"}, {"suggested_url": "https://api.example"},
+    {"suggested_host": "192.0.2.50", "suggested_port": 2222, "suggested_username": "admin"},
+])
+async def test_sdk_saved_connection_refuses_real_hints_without_comparing_targets(
+    broker, saved_vault, monkeypatch, hints,
+):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    saved_id = chat_vault.save(("local", "worker"), GrantInput(
+        kind="machine", label="Saved server", host="192.0.2.50", username="admin"))
+    lookup = AsyncMock(side_effect=AssertionError("Conflicts must be refused before saved target lookup"))
+    monkeypatch.setattr(broker, "_saved_metadata", lookup)
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    response = await tools["RequestChatAccess"].handler({
+        "kind": "machine", "purpose": "Inspect a different server", "saved_id": saved_id, **hints,
+    })
+    assert response.get("isError")
+    message = response["content"][0]["text"]
+    assert "Omit:" in message
+    for field, value in hints.items():
+        assert field in message
+        assert str(value) not in message
+    lookup.assert_not_awaited()
+    assert not (await broker.snapshot("chat"))["requests"]
+    assert not broker.grants
+
+
+@pytest.mark.asyncio
 async def test_sdk_lists_and_requests_saved_service_without_private_details(broker, saved_vault, monkeypatch):
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
     from app.mcp import chat_access_sdk

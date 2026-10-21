@@ -33,23 +33,34 @@ def create_chat_access_server(session_id: str):
         try:
             if operation == "request":
                 kind = args.get("kind", "")
-                # Plain-JSON callers may fill every optional field. Only pass
-                # meaningful hints for this kind; a saved entry defines them all.
+                # Plain-JSON callers may fill every optional field. Ignore
+                # known filler, but let the broker refuse real saved/plugin
+                # conflicts without looking up or comparing private targets.
+                plugin = args.get("plugin") if args.get("plugin") is not None else ""
+                service = args.get("service") if args.get("service") is not None else ""
+                saved_id = args.get("saved_id") if args.get("saved_id") is not None else ""
                 hint_kinds = {
                     "suggested_host": "machine", "suggested_port": "machine",
                     "suggested_username": "machine", "suggested_path": "folder",
                     "service_provider": "service", "suggested_url": "service",
                 }
-                hints = {
-                    name: args[name] for name, hint_kind in hint_kinds.items()
-                    if not args.get("saved_id") and kind == hint_kind
-                    and args.get(name) is not None
-                    and not (isinstance(args[name], str) and not args[name].strip())
-                }
+                hints = {}
+                for name, hint_kind in hint_kinds.items():
+                    value = args.get(name)
+                    if value is None or (isinstance(value, str) and not value.strip()):
+                        continue
+                    if saved_id:
+                        if name == "suggested_port" and type(value) is int and value in (0, 22):
+                            continue
+                        if name == "service_provider" and kind != "service" and value == "custom":
+                            continue
+                    elif kind != hint_kind:
+                        continue
+                    if plugin and name in ("service_provider", "suggested_url") and value == "custom":
+                        continue
+                    hints[name] = value
                 result = await broker.request(session_id, kind, args.get("purpose", ""),
-                                              **hints,
-                                              plugin=args.get("plugin", ""), service=args.get("service", ""),
-                                              saved_id=args.get("saved_id", ""))
+                                              **hints, plugin=plugin, service=service, saved_id=saved_id)
             elif operation == "resources":
                 # Saved labels/IDs only; targets and pending command/write
                 # contents belong exclusively to the owner's approval UI.
@@ -64,19 +75,19 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private card for an SSH machine, Linux/macOS folder or HTTPS service; explain why in purpose. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, NOT access: preparation lasts 24 hours and can be reopened without rushing. Do not poll, re-request or assume consent; after the user confirms readiness, call ChatResources. Identical retries reuse pending preparation without extending it; cancelled/expired cards need a new request with user consent. Hints are editable, grant no access and must be known, never guessed; omit unknowns for private entry. Machine hints use only host/port/username as specified below. Call ChatResources first for saved connection IDs, kinds and labels. Pass saved_id alone (without hints or plugin sign-in) to preselect an owned entry for approval, not to grant access. Without saved_id, machine hints preselect only when host and any supplied port/user match. Approved details stay private, never in results. Folder paths are on this worker (Docker: container path, not an unmounted host path); hints do not create folders. For services, explain the task and required read-only resources so the user can scope a token. Cloudflare prefills its official API endpoint. For a plugin-declared sign-in pass plugin and service instead of hints: ChatHttpRequest attaches its token only to the plugin's declared address. No generic OAuth: plugin-declared sign-ins are the only OAuth. Grants expose only temporary handles, resource kinds, permissions and expiry. ChatResources lists saved IDs, kinds and owner-chosen labels, never addresses or credentials. Reuse via saved_id; unrelated sessions need their own grant. Local Task descendants reuse ancestor handles with unchanged scope, expiry and revocation, under their own confirmation mode; never across workers. Scope, expiry and revocation apply in every permission mode. After a grant, writes, commands and non-GET/HEAD API requests skip confirmation only in bypass mode; otherwise each needs a one-shot card decision. A service grant holds one API key/token, attached privately by ChatHttpRequest with redacted responses; collect no other secret because no tool can consume it privately. Machine access is broad administration as the approved account on the verified SSH target, not a sandbox or local worker shell grant; it can modify code or use that machine's network. For folder sandbox limits/refusals see ChatRunCommand; for service scope, read-only methods and redirects see ChatHttpRequest. Follow the private-resource safety rules in the prompt.", {
+    @tool("RequestChatAccess", "Show a private card for an SSH machine, Linux/macOS folder or HTTPS service; explain why in purpose. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, NOT access: preparation lasts 24 hours and can be reopened without rushing. Do not poll, re-request or assume consent; after the user confirms readiness, call ChatResources. Identical retries reuse pending preparation without extending it; cancelled/expired cards need a new request with user consent. Hints are editable, grant no access and must be known, never guessed; omit unknowns for private entry. Machine hints use only host/port/username as specified below. Call ChatResources first for saved connection IDs, kinds and labels. Pass saved_id alone (without hints or plugin sign-in) to preselect an owned entry for approval, not to grant access. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named. Without saved_id, machine hints preselect only when host and any supplied port/user match. Approved details stay private, never in results. Folder paths are on this worker (Docker: container path, not an unmounted host path); hints do not create folders. For services, explain the task and required read-only resources so the user can scope a token. Cloudflare prefills its official API endpoint. For a plugin-declared sign-in pass plugin and service instead of hints: ChatHttpRequest attaches its token only to the plugin's declared address. No generic OAuth: plugin-declared sign-ins are the only OAuth. Grants expose only temporary handles, resource kinds, permissions and expiry. ChatResources lists saved IDs, kinds and owner-chosen labels, never addresses or credentials. Reuse via saved_id; unrelated sessions need their own grant. Local Task descendants reuse ancestor handles with unchanged scope, expiry and revocation, under their own confirmation mode; never across workers. Scope, expiry and revocation apply in every permission mode. After a grant, writes, commands and non-GET/HEAD API requests skip confirmation only in bypass mode; otherwise each needs a one-shot card decision. A service grant holds one API key/token, attached privately by ChatHttpRequest with redacted responses; collect no other secret because no tool can consume it privately. Machine access is broad administration as the approved account on the verified SSH target, not a sandbox or local worker shell grant; it can modify code or use that machine's network. For folder sandbox limits/refusals see ChatRunCommand; for service scope, read-only methods and redirects see ChatHttpRequest. Follow the private-resource safety rules in the prompt.", {
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
             "purpose": {"type": "string"},
-            "saved_id": {"type": "string", "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Omit connection hints and plugin/service when using this."},
+            "saved_id": {"type": "string", "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Pass saved_id alone, without connection hints or plugin/service. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named."},
             "suggested_host": {"type": "string", "maxLength": 64, "description": "Machine only: known unicast IPv4 or IPv6 literal, editable for review. Hostnames are not supported; pass the machine IP. No URLs, credentials or interface scope; omit when unknown."},
             "suggested_port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Machine only: known SSH port, editable for review. Omit when unknown."},
             "suggested_username": {"type": "string", "maxLength": 128, "description": "Machine only: known POSIX username, editable for review. Never passwords, keys or credentials; omit when unknown."},
             "suggested_path": {"type": "string", "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown."},
             "service_provider": {"type": "string", "enum": ["cloudflare", "custom"], "description": "Service only: known provider preset, or custom. Omit for other kinds."},
             "suggested_url": {"type": "string", "description": "Service only: known public HTTPS API base, without credentials, query or fragment. Never private connection details; omit when unknown."},
-            "plugin": {"type": "string", "description": "Service only: id (name@source) of an installed plugin that declares a sign-in for the service. Use with service; omit the hints."},
+            "plugin": {"type": "string", "description": "Service only: id (name@source) of an installed plugin that declares a sign-in for the service. Use with service; omit the hints. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named."},
             "service": {"type": "string", "description": "Service only: the service name that plugin declares. Use with plugin."},
         },
         "required": ["kind", "purpose"],
