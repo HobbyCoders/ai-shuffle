@@ -195,27 +195,11 @@ async def test_expired_resolver_and_transport_errors_are_redacted(monkeypatch, c
     assert "test-private-token" not in native_images._error(400, {"message": json.dumps({"error": {"code": "test-private-token"}})})
 
 
-async def test_direct_supergrok_choice_never_reaches_fal(monkeypatch, tmp_path):
-    from app.core.provider import subscription_images as sub, fluid_credentials
-    from app.db import model_providers, database
-    from tests.core.test_subscription_image_tools import _tools, _payload, _Worker
-    monkeypatch.setattr(model_providers, "list_usable_model_providers", lambda: [{"id": "grok-row", "provider_type": "grok"}])
-    monkeypatch.setattr(database, "get_model_provider", lambda *a, **kw: {"provider_type": "grok"})
-    monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
-    requests = []
-    def boundary(request):
-        requests.append(json.loads(request.content))
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(jpeg()).decode()}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(boundary)) as http:
-        monkeypatch.setattr(supergrok_images, "http_client", lambda: http)
-        worker = _Worker()
-        tools = _tools({"IMAGE_MODEL": "supergrok-subscription"}, worker=worker, cwd=str(tmp_path))
-        result = _payload(await tools["generateImage"].handler({"prompt": "tree"}))
-    assert result["success"] and result["provider_used"] == "supergrok_subscription"
-    assert result["mime_type"] == "image/jpeg" and result["filename"].endswith(".jpg")
-    assert requests[0]["model"] == "grok-imagine-image" and not worker.calls
-    assert sub.is_subscription_model("supergrok-subscription")
-    assert not sub.is_subscription_model("xai/grok-imagine-image")
+def test_supergrok_is_not_a_direct_image_model():
+    from app.core.provider import subscription_images as sub
+    assert not sub.is_subscription_model("supergrok-subscription")
+    assert sub.is_subscription_model("chatgpt-subscription")
+    assert sub.is_subscription_model("chatgpt-subscription/gpt-image-1")
 
 
 async def test_content_refusal_and_cancellation_never_retry(monkeypatch):
@@ -240,23 +224,3 @@ async def test_content_refusal_and_cancellation_never_retry(monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await supergrok_images.generate("row", "tree", options)
 
-
-async def test_direct_grok_editing_and_unverified_defaults_refused(monkeypatch, tmp_path):
-    from app.core.provider import subscription_images as sub
-    generate = AsyncMock()
-    monkeypatch.setattr(supergrok_images, "generate", generate)
-    for kwargs in ({"image_paths": ["image.jpg"]}, {"tool_env": {"IMAGE_RESOLUTION": "2k"}}, {"tool_env": {"IMAGE_ASPECT_RATIO": "16:9"}}):
-        response = await sub.run("tree", "supergrok-subscription", cwd=str(tmp_path), **kwargs)
-        payload = json.loads(response["content"][0]["text"])
-        assert not payload["success"] and payload["provider_used"] == "supergrok_subscription"
-    generate.assert_not_called()
-
-
-async def test_grok_choice_is_named_in_fal_guardrail():
-    from tests.core.test_subscription_image_tools import _Worker, _payload
-    from app.mcp.ai_tools_sdk import _create_generic_tools
-    worker = _Worker()
-    tools = _create_generic_tools(worker, {"IMAGE_MODEL": "supergrok-subscription"})
-    result = _payload(await tools[0].handler({"endpoint_id": "xai/grok-imagine-image", "output_type": "image", "input": {"prompt": "tree"}}))
-    assert not result["success"] and "SuperGrok" in result["error"]
-    assert "ChatGPT" not in result["error"] and not worker.calls
