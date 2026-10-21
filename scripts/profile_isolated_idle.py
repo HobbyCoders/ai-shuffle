@@ -18,6 +18,7 @@ import httpx
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', required=True, type=Path)
 parser.add_argument('--playwright-module', required=True, type=Path)
+parser.add_argument('--chromium-executable', required=True, type=Path)
 args = parser.parse_args()
 def terminate(signum, frame):
     raise SystemExit(128 + signum)
@@ -78,7 +79,8 @@ with tempfile.TemporaryDirectory(prefix='shuffle-idle-') as temp:
                     '--pid', str(app.pid), '--seconds', '75', '--interval', '5'],
                     cwd=root, env=env, stdout=samples, stderr=subprocess.STDOUT)
                 subprocess.run(['node',str(root/'scripts/profile_idle_client.mjs'),base,
-                    str(args.playwright_module.resolve())],check=True,cwd=root,env=env)
+                    str(args.playwright_module.resolve()), str(args.chromium_executable.resolve())],
+                    check=True,cwd=root,env=env)
                 sampler.wait(timeout=20)
                 if sampler.returncode:
                     raise RuntimeError('isolated resource sampler failed')

@@ -1,13 +1,14 @@
 // Private headless client against an explicitly isolated loopback instance.
-// Usage: node profile_idle_client.mjs URL PLAYWRIGHT_MODULE [seconds=60]
+// Usage: node profile_idle_client.mjs URL PLAYWRIGHT_MODULE CHROMIUM_EXECUTABLE [seconds=60]
 import { pathToFileURL } from 'node:url';
-const [base, modulePath, duration = '60'] = process.argv.slice(2);
+const [base, modulePath, chromiumPath, duration = '60'] = process.argv.slice(2);
 const target = new URL(base);
 if (!['127.0.0.1', 'localhost'].includes(target.hostname) || ['8000', '8002'].includes(target.port)) {
   throw new Error('Refusing non-isolated/live target');
 }
+if (!chromiumPath) throw new Error('Provide an explicit Chromium executable path');
 const { chromium } = await import(pathToFileURL(modulePath));
-const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', headless: true,
+const browser = await chromium.launch({ executablePath: chromiumPath, headless: true,
   args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 try {
   const page = await browser.newPage();

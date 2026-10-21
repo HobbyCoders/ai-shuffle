@@ -49,3 +49,12 @@ def test_sampler_rejects_pid_reuse(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["sampler", "--pid", "42", "--seconds", "10"])
     with pytest.raises(SystemExit, match="PID changed"):
         resources.main()
+
+
+def test_racing_target_network_exit_is_friendly(tmp_path, monkeypatch):
+    import sys
+    base = fixture_proc(tmp_path, monkeypatch)
+    (base / "net/dev").unlink()
+    monkeypatch.setattr(sys, "argv", ["sampler", "--pid", "42", "--seconds", "0"])
+    with pytest.raises(SystemExit, match="Target process exited"):
+        resources.main()
