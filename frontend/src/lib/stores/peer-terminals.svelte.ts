@@ -42,6 +42,8 @@ const polling = new Set<string>();
 const polledAt = new Map<string, number>();
 /** Recipient list answers are applied only if no newer refresh or decision came after them. */
 let recipientSeq = 0;
+/** Refreshes still waiting for an answer: a background tick waits for them instead of overtaking them. */
+let recipientInflight = 0;
 
 let ticker: ReturnType<typeof setInterval> | null = null;
 let sourceTimer: ReturnType<typeof setInterval> | null = null;
@@ -59,6 +61,9 @@ function syncTimers() {
 	if (sourceActive && !sourceTimer) sourceTimer = setInterval(() => void pollSources(), SOURCE_POLL_MS);
 	if (!sourceActive && sourceTimer) { clearInterval(sourceTimer); sourceTimer = null; }
 	if (watchers > 0 && !recipientTimer) recipientTimer = setInterval(() => {
+		// A slow list (over one interval) must not be overtaken by the next tick
+		// every time, or each answer would be dropped as stale and never shown.
+		if (recipientInflight > 0) return;
 		if (typeof document === 'undefined' || document.visibilityState !== 'hidden') void peerTerminals.refreshRequests();
 	}, RECIPIENT_POLL_MS);
 	if (watchers === 0 && recipientTimer) { clearInterval(recipientTimer); recipientTimer = null; }
@@ -221,6 +226,7 @@ export const peerTerminals = {
 
 	async refreshRequests(): Promise<void> {
 		const seq = ++recipientSeq;
+		recipientInflight += 1;
 		try {
 			const result = await terminalsApi.peerRequests();
 			// A newer refresh or a decision landed meanwhile: this answer is stale.
@@ -236,6 +242,7 @@ export const peerTerminals = {
 			if (error instanceof TerminalApiError && (error.status === 401 || error.status === 403)) requests = [];
 			else recipientError = error instanceof Error ? error.message : 'Terminal requests are unavailable right now.';
 		} finally {
+			recipientInflight = Math.max(0, recipientInflight - 1);
 			recipientLoaded = true;
 		}
 	},
@@ -261,7 +268,7 @@ export const peerTerminals = {
 	/** Test hook. */
 	reset() {
 		flows = {}; requests = []; fetchedAt = 0; recipientLoaded = false; recipientError = null; decisions = {}; notices = {}; revoked = [];
-		polling.clear(); polledAt.clear(); recipientSeq = 0;
+		polling.clear(); polledAt.clear(); recipientSeq = 0; recipientInflight = 0;
 		watchers = 0; now = Date.now();
 		syncTimers();
 	},

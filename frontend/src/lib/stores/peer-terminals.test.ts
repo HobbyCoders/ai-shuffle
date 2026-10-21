@@ -97,6 +97,21 @@ describe('source status polling', () => {
 });
 
 describe('recipient list', () => {
+	it('shows a slow list instead of overtaking every answer with the next tick', async () => {
+		const request = { request_id: 'r5', worker_id: 'a', status: 'pending', used: false, expires_in: 100, confirmation_code: 'ABCDEF', source_name: 'A', age_seconds: 1 };
+		// Each answer takes 5 s, longer than the 3 s poll interval.
+		api.peerRequests.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ requests: [request] }), 5_000)));
+		const stop = peerTerminals.watch();
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(api.peerRequests).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1_500);
+		expect(peerTerminals.requests.map((r) => r.request_id)).toEqual(['r5']);
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.peerRequests.mock.calls.length).toBeLessThanOrEqual(5);
+		expect(peerTerminals.requests.map((r) => r.request_id)).toEqual(['r5']);
+		stop();
+	});
+
 	it('ignores a list answer fetched before a decision', async () => {
 		const request = { request_id: 'r9', worker_id: 'a', status: 'pending', used: false, expires_in: 100, confirmation_code: 'ABCDEF', source_name: 'A', age_seconds: 1 };
 		api.peerRequests.mockResolvedValueOnce({ requests: [request] });
