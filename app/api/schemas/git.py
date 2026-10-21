@@ -206,8 +206,8 @@ class PushRequest(BaseModel):
 
 
 class PullRequest(BaseModel):
-    """Request to pull from remote"""
-    remote: str = Field(default="origin", pattern=r'^[a-zA-Z0-9._-]+$')
+    """Request to pull from a tracked upstream or an explicit remote."""
+    remote: Optional[str] = Field(default=None, pattern=r'^[a-zA-Z0-9._][a-zA-Z0-9._-]*$', description="None uses the tracked upstream, falling back to origin/<branch>; an explicit remote must not start with '-'")
     strategy: str = Field(default="merge", pattern=r'^(merge|rebase)$')
     auto_stash: bool = Field(default=False, description="Auto-stash uncommitted changes before pull and restore after")
 
@@ -216,6 +216,8 @@ class PullResponse(BaseModel):
     """Response for pull endpoint"""
     success: bool
     message: str
+    target: Optional[str] = Field(default=None, description="The actual ref selected for integration")
+    warning: bool = Field(default=False, description="Integration succeeded but stashed changes could not be restored")
     conflicts: List[str] = []
     has_conflicts: bool = False
     status: Optional[dict] = None

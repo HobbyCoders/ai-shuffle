@@ -443,76 +443,133 @@ class GitCommitMixin:
     def pull(
         self,
         working_dir: str,
-        remote: str = "origin",
+        remote: Optional[str] = None,
         strategy: str = "merge",
         auto_stash: bool = False,
-    ) -> Tuple[bool, Optional[str], List[str]]:
+    ) -> Tuple[bool, Optional[str], List[str], Optional[str]]:
         """
         Pull from remote (fetch + merge/rebase).
 
         Args:
             working_dir: Repository directory
-            remote: Remote name (default: origin)
+            remote: Explicit remote, or None to use the tracked upstream (else origin)
             strategy: "merge" or "rebase"
             auto_stash: If True, stash uncommitted changes before pull and pop after
 
         Returns:
-            Tuple of (success, error_message, conflicted_files)
+            Tuple of (success, error_message, conflicted_files, target)
         """
         stashed = False
+        target = None
         try:
             # Get current branch
             branch = self.get_current_branch(working_dir)
             if not branch:
-                return False, "Cannot pull: HEAD is detached", []
+                return False, "Cannot pull: HEAD is detached", [], target
 
-            # Auto-stash uncommitted changes if requested
+            if remote is None:
+                upstream = self._run_git(
+                    working_dir,
+                    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                )
+                if upstream.returncode != 0:
+                    # Recover a mapped upstream whose tracking ref is missing.
+                    # An unmapped but configured upstream is refused below.
+                    upstream = self._run_git(
+                        working_dir,
+                        ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"],
+                    )
+                if upstream.returncode == 0 and upstream.stdout.strip():
+                    target = upstream.stdout.strip()
+                    # Read the remote separately: remote names can contain slashes,
+                    # and the tracked branch need not have the local branch's name.
+                    tracked_remote = self._run_git(
+                        working_dir, ["config", "--get", f"branch.{branch}.remote"]
+                    )
+                    if tracked_remote.returncode != 0:
+                        return False, f"Cannot determine the remote for {target}", [], target
+                    remote = tracked_remote.stdout.strip()
+                else:
+                    configured_merge = self._run_git(
+                        working_dir, ["config", "--get", f"branch.{branch}.merge"]
+                    )
+                    if configured_merge.returncode != 1:
+                        return (
+                            False,
+                            f"Pull stopped: the configured upstream for {branch} could not be resolved. Check the remote and fetch refspec configuration. Nothing was changed.",
+                            [], target,
+                        )
+                    remote = "origin"
+            if remote.startswith("-"):
+                return False, f"Invalid remote name: {remote}", [], target
+            target = target or f"{remote}/{branch}"
+
+            if not self.fetch(working_dir, remote):
+                return False, f"Failed to fetch from '{remote}'", [], target
+
+            # Refuse unrelated histories before rebase can replay the whole branch,
+            # and before auto-stash can modify the working tree or stash stack.
+            base = self._run_git(working_dir, ["merge-base", "--", "HEAD", target])
+            if base.returncode == 1:
+                shallow = self._run_git(working_dir, ["rev-parse", "--is-shallow-repository"])
+                if shallow.returncode != 0:
+                    return False, shallow.stderr.strip() or "Cannot check whether this repository is shallow", [], target
+                if shallow.stdout.strip() == "true":
+                    return (
+                        False,
+                        f"Pull stopped: the shared history with {target} isn't in this shallow clone. Run `git fetch --unshallow` (or `--deepen`). Nothing was changed.",
+                        [], target,
+                    )
+                return (
+                    False,
+                    f"Pull stopped: this branch and {target} share no history (the remote may have changed). Nothing was changed.",
+                    [], target,
+                )
+            if base.returncode != 0:
+                return False, base.stderr.strip() or f"Cannot check history with {target}", [], target
+
             if auto_stash:
                 stashed = self.stash_push(working_dir, "auto-stash before pull")
 
-            # Fetch first
-            if not self.fetch(working_dir, remote):
-                if stashed:
-                    self.stash_pop(working_dir)
-                return False, f"Failed to fetch from '{remote}'", []
-
-            # Merge or rebase
-            if strategy == "rebase":
-                args = ["rebase", f"{remote}/{branch}"]
-            else:
-                args = ["merge", f"{remote}/{branch}"]
+            args = ["rebase" if strategy == "rebase" else "merge", "--", target]
 
             result = self._run_git(working_dir, args, timeout=120)
 
             if result.returncode == 0:
-                logger.debug(f"Pulled from {remote}/{branch} using {strategy}")
+                logger.debug(f"Pulled from {target} using {strategy}")
                 self.invalidate_status_cache(working_dir)
                 # Pop stash after successful pull
                 if stashed:
                     pop_ok, pop_err = self.stash_pop(working_dir)
                     if not pop_ok:
-                        return True, f"Pull succeeded but failed to restore stashed changes: {pop_err}", []
-                return True, None, []
+                        return True, f"Pull from {target} succeeded but failed to restore stashed changes: {pop_err}", [], target
+                return True, None, [], target
 
             # Check for merge conflicts
             conflicts = self._get_conflict_files(working_dir)
             if conflicts:
-                # Auto-abort to keep repo clean
-                if strategy == "rebase":
-                    self._run_git(working_dir, ["rebase", "--abort"], timeout=10)
+                # Auto-abort to keep repo clean, but never claim it worked if it failed.
+                abort = self._run_git(working_dir, [args[0], "--abort"], timeout=10)
+                files = ", ".join(conflicts)
+                if abort.returncode != 0:
+                    message = f"Pull from {target} hit conflicts in {files} and could not be aborted: {abort.stderr.strip()}"
+                    if stashed:
+                        message += ". Your changes are saved in the stash."
                 else:
-                    self._run_git(working_dir, ["merge", "--abort"], timeout=10)
-                # Restore stashed changes after abort
-                if stashed:
-                    self.stash_pop(working_dir)
-                return False, "Merge conflicts detected", conflicts
+                    message = f"Pull from {target} was stopped due to conflicts in {files}. Nothing was changed."
+                    if stashed:
+                        pop_ok, pop_err = self.stash_pop(working_dir)
+                        if not pop_ok:
+                            message = f"Pull from {target} was aborted after conflicts in {files}, but stashed changes could not be restored: {pop_err}"
+                logger.warning(message)
+                return False, message, conflicts, target
 
             # Non-conflict error — restore stash
             if stashed:
                 self.stash_pop(working_dir)
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             logger.warning(f"Pull failed: {error_msg}")
-            return False, error_msg, []
+            return False, error_msg, [], target
         except Exception as e:
             # Restore stash on any exception
             if stashed:
@@ -521,7 +578,7 @@ class GitCommitMixin:
                 except Exception:
                     pass
             logger.error(f"Error pulling: {e}")
-            return False, str(e), []
+            return False, str(e), [], target
 
     def _get_conflict_files(self, working_dir: str) -> List[str]:
         """Get list of files with merge conflicts."""

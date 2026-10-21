@@ -924,7 +924,8 @@ export async function pushCommits(projectId: string, request: PushRequest = {}, 
 // ============================================================================
 
 export interface PullRequest {
-    remote?: string;
+    /** Omitted or null uses the tracked upstream, falling back to origin/<branch>. */
+    remote?: string | null;
     strategy?: 'merge' | 'rebase';
     auto_stash?: boolean;
 }
@@ -932,6 +933,8 @@ export interface PullRequest {
 export interface PullResponse {
     success: boolean;
     message: string;
+    target?: string | null;
+    warning?: boolean;
     conflicts: string[];
     has_conflicts: boolean;
     /** Post-pull status + diff stats computed inline by the backend. */
@@ -942,6 +945,8 @@ export interface PullResponse {
 interface RawPullResponse {
     success: boolean;
     message: string;
+    target?: string | null;
+    warning?: boolean;
     conflicts?: string[];
     has_conflicts?: boolean;
     status?: RawGitStatus | null;
@@ -961,6 +966,8 @@ export async function pullFromRemote(
     return {
         success: raw.success,
         message: raw.message,
+        target: raw.target ?? null,
+        warning: raw.warning ?? false,
         conflicts: raw.conflicts ?? [],
         has_conflicts: raw.has_conflicts ?? false,
         status: raw.status ? transformGitStatus(raw.status) : null,

@@ -47,6 +47,7 @@
 	import { isApiError } from '$lib/api/client';
 	import ChatExportActions from './ChatExportActions.svelte';
 	import { notify } from '$lib/stores/notifications';
+	import { pullNotification } from './git-pull-notification';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 	import SessionSidePanel from './SessionSidePanel.svelte';
@@ -811,12 +812,8 @@
 			const res = await git.pull(strategy, autoStash);
 			git.refreshPrState(true).catch(() => {});
 			gitOperations.clear();
-			if (res.has_conflicts) {
-				const files = res.conflicts.length ? res.conflicts.join(', ') : 'some files';
-				notify(`Pull hit conflicts in ${files}. Resolve them, then commit to finish the merge.`, { severity: 'error' });
-			} else {
-				notify(res.message || 'Pulled latest changes', { severity: 'success' });
-			}
+			const notification = pullNotification(res);
+			notify(notification.message, { severity: notification.severity });
 		} catch (e) {
 			gitOperations.clear();
 			// Dirty working tree without auto-stash → 409. Offer a stash retry

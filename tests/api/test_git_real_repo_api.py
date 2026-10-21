@@ -453,7 +453,7 @@ def test_auth_failure_maps_to_502_fetch_400_push_and_failed_pull(api):
     assert pull.status_code == 200
     assert pull.json() == {
         "success": False, "message": "Failed to fetch from 'origin'",
-        "conflicts": [], "has_conflicts": False, "status": None, "diff_stats": None,
+        "conflicts": [], "has_conflicts": False, "target": "origin/main", "warning": False, "status": None, "diff_stats": None,
     }
 
 
@@ -505,7 +505,8 @@ def test_pull_success_and_conflict(api):
     ok = client.post(f"{BASE}/pull", json={"strategy": "rebase"})
     assert ok.status_code == 200
     body = ok.json()
-    assert body["success"] is True and body["message"] == "Pulled from origin using rebase"
+    assert body["success"] is True and body["message"] == "Pulled from origin/main using rebase"
+    assert body["target"] == "origin/main"
     assert body["status"]["behind"] == 0 and body["diff_stats"]["files_changed"] == 0
 
     commit_file(other, "a.txt", "theirs\n", "remote a")
@@ -516,7 +517,86 @@ def test_pull_success_and_conflict(api):
     assert conflict.json()["success"] is False
     assert conflict.json()["has_conflicts"] is True
     assert conflict.json()["conflicts"] == ["a.txt"]
+    assert conflict.json()["target"] == "origin/main"
+    assert conflict.json()["message"] == "Pull from origin/main was stopped due to conflicts in a.txt. Nothing was changed."
     assert git(repo, "status", "--porcelain") == ""   # merge was aborted
+
+
+@pytest.mark.parametrize("remote", [None, "origin"])
+def test_pull_selects_upstream_or_explicit_remote(api, remote):
+    client, repo, tmp_path = api
+    bare = make_origin(tmp_path, repo)
+    origin_writer = clone(tmp_path, bare, "origin-writer")
+    other_bare = tmp_path / "tracked.git"
+    git(tmp_path, "clone", "-q", "--bare", str(repo), str(other_bare))
+    git(repo, "remote", "add", "other", str(other_bare))
+    git(repo, "fetch", "other")
+    git(repo, "branch", "--set-upstream-to=other/main")
+    other_writer = clone(tmp_path, other_bare, "other-writer")
+    other_head = commit_file(other_writer, "tracked.txt", "tracked\n", "tracked change")
+    git(other_writer, "push", "-q", "origin", "main")
+    origin_head = commit_file(origin_writer, "origin.txt", "origin\n", "origin change")
+    git(origin_writer, "push", "-q", "origin", "main")
+
+    response = client.post(f"{BASE}/pull", json={"remote": remote, "strategy": "rebase"})
+
+    target = "origin/main" if remote else "other/main"
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert response.json()["target"] == target
+    assert response.json()["message"] == f"Pulled from {target} using rebase"
+    assert git(repo, "rev-parse", "HEAD") == (origin_head if remote else other_head)
+
+
+@pytest.mark.parametrize("strategy", ["merge", "rebase"])
+def test_pull_unrelated_history_reports_unchanged(api, strategy):
+    client, repo, tmp_path = api
+    unrelated = init_repo(tmp_path / "unrelated", {"unrelated.txt": "different root\n"})
+    bare = make_origin(tmp_path, unrelated)
+    git(repo, "remote", "add", "origin", str(bare))
+    before = git(repo, "rev-parse", "HEAD")
+
+    response = client.post(f"{BASE}/pull", json={"strategy": strategy})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert body["target"] == "origin/main"
+    assert body["message"] == "Pull stopped: this branch and origin/main share no history (the remote may have changed). Nothing was changed."
+    assert body["has_conflicts"] is False and body["conflicts"] == []
+    assert git(repo, "rev-parse", "HEAD") == before
+    assert git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("remote", ["--all", "-v"])
+def test_pull_rejects_option_like_remote(api, remote):
+    client, repo, _ = api
+    before = git(repo, "rev-parse", "HEAD")
+    assert client.post(f"{BASE}/pull", json={"remote": remote}).status_code == 422
+    assert git(repo, "rev-parse", "HEAD") == before
+
+
+@pytest.mark.parametrize("strategy", ["merge", "rebase"])
+def test_pull_warns_when_real_stash_restoration_conflicts(api, strategy):
+    client, repo, tmp_path = api
+    bare = make_origin(tmp_path, repo)
+    other = clone(tmp_path, bare, "other")
+    remote_head = commit_file(other, "a.txt", "remote edits\n", "remote edit")
+    git(other, "push", "-q", "origin", "main")
+    write(repo / "a.txt", "uncommitted local edits\n")
+
+    response = client.post(f"{BASE}/pull", json={"strategy": strategy, "auto_stash": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True  # integration completed, restoration did not
+    assert body["warning"] is True
+    assert body["target"] == "origin/main"
+    assert body["message"].startswith("Pull from origin/main succeeded but failed to restore stashed changes:")
+    assert git(repo, "rev-parse", "HEAD") == remote_head
+    assert git(repo, "diff", "--name-only", "--diff-filter=U") == "a.txt"
+    assert "auto-stash before pull" in git(repo, "stash", "list")
+    assert git(repo, "show", "stash@{0}:a.txt") == "uncommitted local edits"
 
 
 def test_pull_rejects_unknown_strategy(api):
