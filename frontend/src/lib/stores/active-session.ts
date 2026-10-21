@@ -572,6 +572,9 @@ const wsConn: WsConnection = createWsConnection({
 				// from_seq=lastSeq — no reducer reset, no repaint (unlike the
 				// unconditional restart removed in #640), gap- and duplicate-free.
 				feedController.revive(sessionId);
+				// The task registry may have moved on while the socket was down;
+				// the strip follows its running list (#320).
+				void switcher.refreshRunningTasks(sessionId);
 			}
 			// The feed clears isRestoringSession only when its first caught_up
 			// atomically publishes the complete transcript. A connected socket alone
@@ -696,7 +699,12 @@ const draftManager = createDraftManager({
 	wsSend: (data) => wsConn.send(data),
 	wsIsConnected: () => wsConn.isConnected(),
 	feedRestart: (id) => feedController.restart(id),
-	feedRevive: (id) => feedController.revive(id),
+	feedRevive: (id) => {
+		feedController.revive(id);
+		// Resuming at the cursor brings no snapshot; re-read the registry's
+		// running list for the strip, as a reconnect does (#320).
+		void switcher.refreshRunningTasks(id);
+	},
 });
 
 // Message sender needs a reference to activeSession for recursive calls

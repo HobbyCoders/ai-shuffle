@@ -536,6 +536,56 @@ async def test_record_task_terminal_takes_kind_from_the_frame(mock_db):
     await rec.close()
 
 
+async def test_record_task_terminal_keeps_a_still_running_continuation_running(mock_db):
+    # #320: a resumed worker's continuation turn ends while another of its
+    # turns (its own ScheduleWakeup) is already queued. The parent is sent that
+    # round's report, but the task row deliberately stays running for the turn
+    # behind it (agent_messaging.finish_message_resume). The parent's wake turn
+    # must not paint a terminal chip for it: that frame emptied the running
+    # agents panel while TaskList still said running.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    task_registry.start_task(SID, "worker-1", "agent", "Backend fix", tool_use_id="worker-1")
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("worker report")
+    before = len(_rows())
+
+    appended = await rec.record_task_terminal([{
+        "task_id": "worker-1", "tool_use_id": "worker-1", "status": "completed",
+        "summary": "round one done", "agent_message_turn_id": "turn-continuation",
+    }])
+
+    assert appended == 0
+    assert [r for r in _rows()[before:] if r["event_type"] == "task.updated"] == []
+    await rec.close()
+    task_registry.reset_all()
+
+
+async def test_record_task_terminal_settles_a_continuation_whose_row_closed(mock_db):
+    # The ordinary continuation: its row was completed before the report went
+    # out, so the wake turn settles the chip as it always did.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    task_registry.start_task(SID, "worker-1", "agent", "Backend fix", tool_use_id="worker-1")
+    task_registry.complete_task(SID, "worker-1", "completed", summary="all done")
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("worker report")
+
+    appended = await rec.record_task_terminal([{
+        "task_id": "worker-1", "tool_use_id": "worker-1", "status": "completed",
+        "summary": "all done", "agent_message_turn_id": "turn-continuation",
+    }])
+
+    assert appended == 1
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["state"] == "completed"
+    await rec.close()
+    task_registry.reset_all()
+
+
 async def test_record_task_terminal_ignores_junk_frames(mock_db):
     # No frames, non-dict frames and frames without a task_id append nothing —
     # an empty task_id makes the frontend reducer bail anyway.

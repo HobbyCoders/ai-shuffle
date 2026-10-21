@@ -11,12 +11,13 @@ import {
 	reduce,
 	reduceAll,
 	initialState,
+	reconcileRunningTasks,
 	releaseMessages,
 	sealState,
 	withLogEpoch,
 	type WireEvent,
 } from './reducer';
-import type { ChatMessage } from '../../types';
+import type { ChatMessage, Task } from '../../types';
 
 // ─── Event builders ─────────────────────────────────────────────────────────
 
@@ -1999,6 +2000,162 @@ describe('turn.parked reverts a premature turn.completed settle', () => {
 			ev('turn.parked', {}),
 		]);
 		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+});
+
+// ─── #320: a worker's report delivered while it keeps running ────────────────
+// The real sequence from a coordinator chat (ids shortened). The worker was
+// resumed with SendMessage, its continuation turn ended while its own
+// ScheduleWakeup turn was already queued, so the parent got that round's report
+// (subagent.completed) and its unpark wake turn wrote a terminal task.updated —
+// while the task registry kept the worker running and every later park named
+// it. The running agents panel went empty.
+
+const W = 'worker-47e0';
+function parkNoticeSequence(): WireEvent[] {
+	return [
+		ev('turn.started', { turn_id: 'turn-p', source: 'unpark' }),
+		// SendMessage resumed the worker: its start frame (#1758).
+		ev('task.updated', { task_id: W, state: 'running', tool_use_id: W, description: 'Backend fix', created_at: '2026-10-21T00:44:29.874Z' }),
+		ev('subagent.started', { task_id: W, description: 'Backend fix' }),
+		ev('turn.parked', { turn_id: 'turn-p', task_ids: [W, 'other-0756'] }),
+		// The continuation's report reaches the parent; the worker keeps going.
+		ev('subagent.completed', { task_id: W, status: 'completed', result_preview: 'Survey started.' }),
+		ev('turn.started', { turn_id: 'turn-p', source: 'unpark' }),
+		ev('task.updated', { task_id: W, state: 'completed', tool_use_id: W, turn_id: 'turn-p', created_at: '2026-10-21T00:51:34.309Z' }),
+		ev('turn.parked', { turn_id: 'turn-p', task_ids: [W] }),
+	];
+}
+
+describe('turn.parked task_ids keep parked-on work on the running strip (#320)', () => {
+	it('a worker the park names stays running after its report was delivered', () => {
+		const s = fold(parkNoticeSequence());
+		const summary = s.activeTaskSummaries.find((t) => t.id === W);
+		expect(summary?.status).toBe('running');
+		// The stored card keeps the delivered report; it RENDERS "Running" while
+		// the task is on the running list (utils/subagent-status overlay).
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('completed');
+		expect(card?.content).toBe('Survey started.');
+	});
+
+	it('the worker leaves the strip once it really finishes, after the park', () => {
+		const s = fold([
+			...parkNoticeSequence(),
+			ev('task.updated', { task_id: W, state: 'completed', tool_use_id: W, summary: 'Done.' }),
+		]);
+		expect(s.activeTaskSummaries.find((t) => t.id === W)?.status).toBe('completed');
+	});
+
+	it('a park that does not name a settled task leaves it settled', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('task.updated', { task_id: 'done-1', state: 'running' }),
+			ev('task.updated', { task_id: 'done-1', state: 'completed' }),
+			ev('turn.parked', { task_ids: ['someone-else'] }),
+		]);
+		expect(s.activeTaskSummaries.find((t) => t.id === 'done-1')?.status).toBe('completed');
+	});
+
+	it('never revives stopped or failed work, only a completed settle', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't1' }),
+			ev('task.updated', { task_id: 'k', state: 'running', kind: 'agent' }),
+			ev('task.updated', { task_id: 'k', state: 'killed', kind: 'agent', turn_id: 't1' }),
+			ev('task.updated', { task_id: 'e', state: 'running', kind: 'agent' }),
+			ev('task.updated', { task_id: 'e', state: 'failed', kind: 'agent', turn_id: 't1' }),
+			ev('turn.parked', { turn_id: 't1', task_ids: ['k', 'e'] }),
+		]);
+		expect(s.activeTaskSummaries.map((t) => t.status)).toEqual(['killed', 'error']);
+	});
+
+	// The park gate reads the registry, then writes the park off-thread. Work
+	// that really finishes in that gap writes its terminal frame OUT of turn
+	// (record_drained_event: no turn id) before a turn.parked that still names
+	// it. That frame is the truth: it must stay settled.
+	it.each(['agent', 'shell'] as const)(
+		'a %s that finished out of turn just before a park naming it stays settled',
+		(kind) => {
+			const s = fold([
+				ev('turn.started', { turn_id: 't1' }),
+				ev('task.updated', { task_id: 'gap', state: 'running', kind }),
+				ev('task.updated', { task_id: 'gap', state: 'completed', kind }),
+				ev('turn.parked', { turn_id: 't1', task_ids: ['gap'] }),
+			]);
+			expect(s.activeTaskSummaries[0].status).toBe('completed');
+		}
+	);
+
+	it('a shell settled in the parking turn itself stays settled', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't1' }),
+			ev('task.updated', { task_id: 'sh', state: 'running', kind: 'shell' }),
+			ev('task.updated', { task_id: 'sh', state: 'completed', kind: 'shell', turn_id: 't1' }),
+			ev('turn.parked', { turn_id: 't1', task_ids: ['sh'] }),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('a settle written by an earlier turn is not revived by a later park', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 't1' }),
+			ev('task.updated', { task_id: W, state: 'running', kind: 'agent' }),
+			ev('task.updated', { task_id: W, state: 'completed', kind: 'agent', turn_id: 't1' }),
+			ev('turn.completed', { turn_id: 't1' }),
+			ev('turn.started', { turn_id: 't2' }),
+			ev('turn.parked', { turn_id: 't2', task_ids: [W] }),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+});
+
+describe('reconcileRunningTasks (the /live registry list)', () => {
+	const registry = (fields: Partial<Task> = {}): Task => ({
+		id: W, subject: 'Backend fix', status: 'running', kind: 'agent', summary: null,
+		toolUseId: W, startedAt: '2026-10-21T00:44:29.900+00:00', updatedAt: '2026-10-21T00:51:34.000+00:00',
+		...fields,
+	});
+
+	it('adds a running task the log has no row for', () => {
+		const s = reconcileRunningTasks(initialState(), [registry()]);
+		expect(s.activeTaskSummaries).toHaveLength(1);
+		expect(s.activeTaskSummaries[0]).toMatchObject({ id: W, status: 'running', kind: 'agent' });
+	});
+
+	it('brings back a task the registry changed after the log settled it', () => {
+		// e.g. a SendMessage resume whose running start frame never landed.
+		const settled = reduceAll([
+			ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:44:29.874Z' }),
+			ev('task.updated', { task_id: W, state: 'completed', created_at: '2026-10-21T00:51:34.309Z' }),
+		]);
+		const s = reconcileRunningTasks(settled, [registry({ updatedAt: '2026-10-21T00:55:02.000+00:00' })]);
+		expect(s.activeTaskSummaries[0].status).toBe('running');
+	});
+
+	it('leaves the log in charge on the real #320 timestamps (the park heals that log)', () => {
+		// TaskList said updatedAt 00:51:34 while the bad frame is 00:51:34.309:
+		// the registry is not newer, so the snapshot does not override the log.
+		const settled = reduceAll([
+			ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:44:29.874Z' }),
+			ev('task.updated', { task_id: W, state: 'completed', created_at: '2026-10-21T00:51:34.309Z' }),
+		]);
+		expect(reconcileRunningTasks(settled, [registry()])).toBe(settled);
+	});
+
+	it('never brings back a task the log settled after the snapshot was read', () => {
+		const settled = reduceAll([
+			ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:44:29.874Z' }),
+			ev('task.updated', { task_id: W, state: 'completed', created_at: '2026-10-21T00:52:00.000Z' }),
+		]);
+		const s = reconcileRunningTasks(settled, [registry()]);
+		expect(s).toBe(settled);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('ignores rows that are not running and leaves state untouched when nothing moves', () => {
+		const base = reduceAll([ev('task.updated', { task_id: W, state: 'running' })]);
+		expect(reconcileRunningTasks(base, [registry()])).toBe(base);
+		expect(reconcileRunningTasks(base, [registry({ id: 'x', status: 'completed' })])).toBe(base);
 	});
 });
 

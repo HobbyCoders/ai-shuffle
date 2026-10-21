@@ -1057,6 +1057,7 @@ class HarnessAdapter(ProviderAdapter):
                 **{k: v for k, v in self._prompt_inputs.items()
                    if k not in ("system", "append_system")},
             )
+            request_extra = await asyncio.to_thread(_native_request_extra, kind, options)
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=store,
@@ -1089,11 +1090,7 @@ class HarnessAdapter(ProviderAdapter):
                 # priority``, merged into the request body by fluid's
                 # ``request_extra``. The anthropic and openrouter native lanes
                 # have no equivalent knob and ignore ``fast`` entirely.
-                request_extra=(
-                    {"service_tier": "priority"}
-                    if kind == "openai_responses" and getattr(options, "fast", None)
-                    else None
-                ),
+                request_extra=request_extra or None,
                 **native_caps,
                 # Full recoverable context management is explicit host policy:
                 # fluid compacts only the rendered model view, persists mechanical
@@ -3424,6 +3421,11 @@ class HarnessAdapter(ProviderAdapter):
             # Mid-session hot swap lands on NativeLoop's raw model attribute —
             # same verbatim-to-API path as connect, same canonicalization.
             model = _native_api_model(model, self._options) or model
+        request_extra = None
+        if not self._is_delegated and self._options is not None:
+            request_extra = await asyncio.to_thread(
+                _native_request_extra, self._provider_kind, self._options, requested
+            )
         try:
             await self._engine.submit(SetModel(model=model))
         except NotImplementedError:
@@ -3434,6 +3436,8 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_trusted_node = None
         self._memory_put_back = None
         self._memory_rehydrated = True
+        if request_extra is not None:
+            self._engine.request_extra = request_extra
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
@@ -8250,6 +8254,18 @@ def _permit_within(permit: Any, names: Optional[frozenset]) -> Any:
     if permit is None:
         return lambda name: name in names
     return lambda name: name in names and permit(name)
+
+
+def _native_request_extra(kind: Optional[str], options: SessionOptions, model: Optional[str] = None) -> dict:
+    from app.core.local_model_settings import local_request_extra
+
+    if kind == "openai_responses":
+        return {"service_tier": "priority"} if getattr(options, "fast", None) else {}
+    if kind != "openrouter":
+        return {}
+    provider_id = (options.extra or {}).get("provider_id")
+    row = _lookup_provider_row(provider_id) if provider_id else None
+    return local_request_extra(row, model if model is not None else options.model)
 
 
 def _openrouter_pricing(options: SessionOptions) -> Dict[str, Dict[str, float]]:

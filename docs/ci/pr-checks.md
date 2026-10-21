@@ -47,7 +47,32 @@ map gives), fluid, frontend, mobile, tools, browser-mcp, docs, desktop, the
 Android app and download bridge, the workflow policy tests and the in-app update
 reach check. It runs at low CPU priority with at most two test workers
 (`LOCAL_CI_WORKERS`), because every worker host is shared with other sessions
-and, on Unraid, with everything else the server runs.
+and with other workloads on the same machine.
+
+Local parallel pytest controllers also reserve a machine-wide slot before
+starting xdist workers. Capacity defaults to
+`max(1, min(4, cpu_count // 8, total_RAM_bytes // (12 * 1024**3)))`.
+CPU count is bounded by process affinity where supported. One slot per eight
+usable logical CPUs and 12 GiB RAM leaves conservative headroom;
+**total** RAM makes the capacity stable while other tests allocate/free memory.
+If CPU or RAM detection is unavailable, capacity falls back to one. Set
+`AI_SHUFFLE_PYTEST_SLOTS` to an integer >= 1 to override it consistently across
+checkouts; invalid values use the machine default. For example, 22 logical CPUs
+and 62 GiB RAM permit two simultaneous runs.
+
+Each gated run is capped at **two xdist workers**, including `-n auto` and
+`-n logical`: at most `2 * slots` workers (eight with the default maximum),
+plus controllers and any subprocesses tests launch. The existing `-n 0`/`-n 1`
+exemption is unchanged. Files `ai-shuffle-pytest-xdist.lock.0` through
+`.N-1` in the system temp directory use OS locks, released automatically even
+on a crash; do not delete held lock files. Waiters scan all slots, rotate their
+starting slot and jitter bounded polling to avoid lockstep races. Admission is
+best-effort fair, not strict FIFO. Existing progress notices, the 20-minute
+fail-open timeout, and fail-open lock errors remain: the bound is not a hard
+resource quota. `GITHUB_ACTIONS` and `AI_SHUFFLE_PYTEST_GATE=0` still bypass the
+gate. All checkouts must use this gate version and the same slot override/temp
+directory to share the budget; older unsuffixed-lock gates do not coordinate
+with these slots.
 
 A pass on a clean checkout is recorded against the commit's tree in
 `.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`, which
