@@ -76,9 +76,9 @@ with tempfile.TemporaryDirectory(prefix='shuffle-idle-') as temp:
             with (scratch / 'backend-resources.jsonl').open('w') as samples:
                 sampler = subprocess.Popen([sys.executable, str(root / 'scripts/perf_resources.py'),
                     '--pid', str(app.pid), '--seconds', '75', '--interval', '5'],
-                    cwd=root, stdout=samples, stderr=subprocess.STDOUT)
+                    cwd=root, env=env, stdout=samples, stderr=subprocess.STDOUT)
                 subprocess.run(['node',str(root/'scripts/profile_idle_client.mjs'),base,
-                    str(args.playwright_module.resolve())],check=True,cwd=root)
+                    str(args.playwright_module.resolve())],check=True,cwd=root,env=env)
                 sampler.wait(timeout=20)
                 if sampler.returncode:
                     raise RuntimeError('isolated resource sampler failed')
