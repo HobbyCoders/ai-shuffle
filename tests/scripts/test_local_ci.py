@@ -288,6 +288,8 @@ def asset_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     env = {**os.environ, "LOCAL_CI_PYTHON": sys.executable}
+    # This isolated repository supplies its own base; never inherit the caller's.
+    env.pop("LOCAL_CI_BASE", None)
 
     def git(*args, check=True, input=None):
         return subprocess.run(["git", *args], cwd=repo, env=env, input=input,
