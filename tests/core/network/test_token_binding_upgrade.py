@@ -115,8 +115,13 @@ async def test_rolling_back_one_peer_requires_opt_out_on_its_pinned_receiver(upg
     with server.active():
         assert store.get_member(peer.device_id)["token_binding_required"]
     monkeypatch.setattr(settings, "network_token_binding_enabled", False)
-    with pytest.raises(transport.PeerError, match="Endpoint binding is required"):
+    with pytest.raises(transport.PeerError, match="Endpoint binding is required") as refused:
         await issue()
+    detail = str(refused.value)
+    assert "Update the calling worker" in detail
+    assert "NETWORK_TOKEN_BINDING_ENABLED=false on this worker and restart" in detail
+    assert "No re-pairing needed" in detail
+    assert len(detail) <= 300  # v1.0.2 callers truncate the response detail at 300 characters
     receiver_enabled = False
     token, _ = await issue()
     with server.active():
