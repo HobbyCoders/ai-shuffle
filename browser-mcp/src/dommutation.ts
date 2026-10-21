@@ -64,7 +64,8 @@ export async function installMutationWatcher(input: string | { key: string; pass
   const w = window as unknown as Record<string, unknown>;
   type TextHistory = WeakMap<Node, { samples: number; first: number; last: number }>;
   const prev = w[key] as { observer?: { disconnect(): void }; textHistory?: TextHistory;
-    sampledDocuments?: WeakSet<Document>; frameTextTargets?: WeakSet<Node>;
+    sampledDocuments?: WeakSet<Document>; tickerDocuments?: WeakSet<Document>; emptyDocuments?: WeakSet<Document>;
+    observedShadows?: WeakMap<ShadowRoot, number>;
     passive: boolean; observedSince: number } | undefined;
   const installedAt = Date.now();
   // Top-document history includes its attached open shadow roots.
@@ -75,8 +76,23 @@ export async function installMutationWatcher(input: string | { key: string; pass
   prev?.observer?.disconnect();
   const textHistory: TextHistory = prev?.textHistory ?? new WeakMap();
   const sampledDocuments = prev?.sampledDocuments ?? new WeakSet<Document>();
-  const frameTextTargets = prev?.frameTextTargets ?? new WeakSet<Node>();
+  // Frame observers are disconnected while idle: ticker evidence is valid for
+  // this action only. A previously proven ticker document must sample again.
+  const frameTextTargets = new WeakMap<Node, { samples: number; last: number }>();
+  const tickerDocuments = prev?.tickerDocuments ?? new WeakSet<Document>();
+  const emptyDocuments = prev?.emptyDocuments ?? new WeakSet<Document>();
+  const observedShadows = prev?.observedShadows ?? new WeakMap<ShadowRoot, number>();
   const newDocuments = new WeakSet<Document>();
+  const samplingDocuments = new Map<Document, number>();
+  const samplingTargets = new Set<Node>();
+  const hasText = (root: Node): boolean => {
+    const walker = (root.nodeType === 9 ? root as Document : root.ownerDocument!).createTreeWalker(root, 4 /* SHOW_TEXT */);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) if (node.textContent?.trim()) return true;
+    if ("querySelectorAll" in root) for (const el of Array.from((root as Document).querySelectorAll("*"))) {
+      if (el.shadowRoot && hasText(el.shadowRoot)) return true;
+    }
+    return false;
+  };
   const cleanups: (() => void)[] = [];
   const activeCleanups: (() => void)[] = [];
   const roots = new WeakSet<Node>();
@@ -89,12 +105,19 @@ export async function installMutationWatcher(input: string | { key: string; pass
       observer.disconnect(); shadows.delete(root); roots.delete(root);
     }
   };
+  let pruneQueued = false;
+  const queuePrune = () => {
+    if (pruneQueued) return;
+    pruneQueued = true;
+    queueMicrotask(() => { pruneQueued = false; pruneShadows(); });
+  };
   cleanups.push(() => { for (const observer of shadows.values()) observer.disconnect(); shadows.clear(); });
   const state = {
     addedNodes: 0, removedNodes: 0, attributeChanges: 0, characterDataChanges: 0,
     startUrl: location.href, lastMutation: Date.now(), pendingRequests: 0, pendingTimers: 0,
     deadline: 0, textSamples: 0, textTargets: new Set<Node>(), lastNonTextMutation: Date.now(), lastPendingWork: 0,
-    textHistory, sampledDocuments, frameTextTargets, knownTextTargets: new WeakSet<Node>(), hasKnownText: false,
+    textHistory, sampledDocuments, tickerDocuments, emptyDocuments, observedShadows,
+    knownTextTargets: new WeakSet<Node>(), hasKnownText: false,
     observedSince, lastNonBaselineTextMutation: Date.now(),
     nonBaselineTextChanges: 0, sampling: true, passive,
     schedule: window.setTimeout.bind(window),
@@ -102,7 +125,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
       pause: () => {
         state.passive = true;
         for (const cleanup of activeCleanups.splice(0).reverse()) cleanup();
-        state.textTargets.clear(); // do not retain detached frame/root nodes
+        state.textTargets.clear(); samplingTargets.clear(); samplingDocuments.clear(); // no idle frame retention
         pruneShadows();
       },
       disconnect: () => { state.observer.pause(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); },
@@ -114,10 +137,14 @@ export async function installMutationWatcher(input: string | { key: string; pass
     n + (node.nodeType === 1 ? 1 + (node as Element).querySelectorAll("*").length : 0), 0);
   const baseline = (node: Node) => {
     if (!state.sampling) return; // eligibility is frozen before dispatch
-    const history = textHistory.get(node);
-    if ((node.ownerDocument !== document && frameTextTargets.has(node)) ||
-        (history && history.samples >= 2 && history.last - history.first >= 50 && installedAt - history.last <= 250)) {
+    const frame = node.ownerDocument !== document;
+    const history = textHistory.get(node), frameHistory = frameTextTargets.get(node);
+    const proven = frame
+      ? frameHistory && frameHistory.samples >= 2 && Date.now() - frameHistory.last <= 250
+      : history && history.samples >= 2 && history.last - history.first >= 50 && Date.now() - history.last <= 250;
+    if (proven) {
       state.knownTextTargets.add(node); state.hasKnownText = true;
+      if (frame && node.ownerDocument) tickerDocuments.add(node.ownerDocument);
     }
   };
   const scan = (root: Node) => {
@@ -133,13 +160,22 @@ export async function installMutationWatcher(input: string | { key: string; pass
     if (roots.has(root)) return;
     roots.add(root);
     const doc = root.nodeType === 9 ? root as Document : root.ownerDocument!;
-    if (!topRoot && newDocuments.has(doc) && doc.createTreeWalker(root, 4 /* SHOW_TEXT */).nextNode()) {
+    if (root !== doc) {
+      const shadow = root as ShadowRoot;
+      const since = observedShadows.get(shadow) ?? Date.now();
+      observedShadows.set(shadow, since);
+      if (!state.passive && state.sampling && canSample && Date.now() - since < 100) {
+        hasUncoveredFrames = true;
+        sampleSince = Math.max(sampleSince, since);
+      }
+    }
+    if (!topRoot && newDocuments.has(doc) && hasText(root)) {
       hasUncoveredFrames = true;
       sampleSince = Math.max(sampleSince, Date.now());
     }
     const Observer = (realm as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver;
     const observer = new Observer(records => {
-      pruneShadows();
+      queuePrune();
       for (const r of records) {
         const textOnly = r.type === "characterData" || (r.type === "childList" &&
           [...Array.from(r.addedNodes), ...Array.from(r.removedNodes)].every(node => node.nodeType === 3));
@@ -150,8 +186,12 @@ export async function installMutationWatcher(input: string | { key: string; pass
             ? { samples: old.samples + 1, first: old.first, last: now }
             : { samples: 1, first: now, last: now });
           if (state.sampling && !state.passive) {
-            state.knownTextTargets.add(target); state.hasKnownText = true;
-            if (target.ownerDocument !== document) frameTextTargets.add(target);
+            samplingTargets.add(target);
+            if (target.ownerDocument !== document) {
+              const previous = frameTextTargets.get(target);
+              frameTextTargets.set(target, { samples: previous && now - previous.last <= 250 ? previous.samples + 1 : 1, last: now });
+            }
+            baseline(target);
           }
           if (!state.passive && !state.sampling) {
             if (state.knownTextTargets.has(target)) {
@@ -194,7 +234,7 @@ export async function installMutationWatcher(input: string | { key: string; pass
       return root;
     };
     realm.Element.prototype.attachShadow = attachWrapper;
-    (win === window ? cleanups : activeCleanups).push(() => {
+    activeCleanups.push(() => {
       if (realm.Element.prototype.attachShadow === attachWrapper) realm.Element.prototype.attachShadow = attach;
     });
   };
@@ -204,9 +244,14 @@ export async function installMutationWatcher(input: string | { key: string; pass
     const doc = win.document;
     if (documents.has(doc)) return;
     documents.add(doc);
-    if (state.passive) { if (win === window) { watchShadows(win); observe(doc, win); } return; }
-    if (state.sampling && canSample && win !== window && !sampledDocuments.has(doc)) {
-      sampledDocuments.add(doc); newDocuments.add(doc);
+    if (state.passive) { if (win === window) observe(doc, win); return; }
+    if (state.sampling && canSample && win !== window) {
+      if (!hasText(doc)) { sampledDocuments.add(doc); emptyDocuments.add(doc); tickerDocuments.delete(doc); }
+      else {
+        const wasEmpty = emptyDocuments.delete(doc), hadTicker = tickerDocuments.delete(doc);
+        if (wasEmpty || hadTicker) sampledDocuments.delete(doc);
+        if (!sampledDocuments.has(doc)) { newDocuments.add(doc); samplingDocuments.set(doc, Date.now()); }
+      }
     }
     const realm = win as unknown as typeof window;
     // Timers scheduled by the action matter too (e.g. debounce/700ms render).
@@ -261,9 +306,14 @@ export async function installMutationWatcher(input: string | { key: string; pass
   const sampleLimit = Date.now() + 300;
   while (canSample && (!state.hasKnownText || hasUncoveredFrames)) {
     const remaining = Math.min(100 - (Date.now() - sampleSince), sampleLimit - Date.now());
-    if (remaining <= 0) break;
-    await new Promise<void>(resolve => state.schedule(resolve, remaining));
+    // A 100ms clock may mutate only once in the first window. Require a
+    // second sample (bounded), rather than treating that one write as a ticker.
+    const proving = Array.from(samplingTargets).some(node => !state.knownTextTargets.has(node));
+    if (remaining <= 0 && (!proving || Date.now() >= sampleLimit)) break;
+    await new Promise<void>(resolve => state.schedule(resolve, remaining > 0 ? remaining : Math.min(50, sampleLimit - Date.now())));
   }
+  for (const [doc, since] of samplingDocuments) if (Date.now() - since >= 100) sampledDocuments.add(doc);
+  samplingDocuments.clear(); samplingTargets.clear();
   state.sampling = false;
   state.addedNodes = state.removedNodes = state.attributeChanges = state.characterDataChanges = 0;
   state.lastMutation = state.lastNonTextMutation = state.lastNonBaselineTextMutation = Date.now();

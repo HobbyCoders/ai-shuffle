@@ -439,11 +439,35 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.goto("about:blank");
       for (let i = 0; i < rows.length; i++) {
         expect(rows[i]).toMatchObject({ capped: false, stale: false });
-        // Non-empty frame documents may sample once; all other shapes are
-        // already covered by passive history or have nothing to sample.
-        if (i > 0 || !["frame", "staticframe"].includes(kind)) expect(rows[i].dispatch).toBeLessThan(90);
+        // Frame tickers prove their baseline afresh each action; static frames
+        // sample once, and passive/empty roots do not pay repeated samples.
+        if (kind === "frame") expect(rows[i].dispatch).toBeLessThan(450);
+        else if (i > 0 || kind !== "staticframe") expect(rows[i].dispatch).toBeLessThan(90);
       }
     }, 15000);
+    for (const where of ["top", "frame"]) it(`REVIEWSTALE ${where} once-churned node later streams`, async () => {
+      const inner = '<p id=s>Init</p>';
+      const page = await load('<button id=b>Go</button>' + (where === "frame" ? `<iframe srcdoc="${inner}"></iframe>` : inner));
+      await page.waitForTimeout(400);
+      const docOf = where === "frame" ? "document.querySelector('iframe').contentDocument" : "document";
+      // a brief ticker that is running during action 1's sample, then stops
+      await page.evaluate(`(()=>{const d=${docOf};let n=0;window.t=setInterval(()=>{d.getElementById('s').textContent='Connecting'+'.'.repeat(n++%4)},20)})()`);
+      await page.waitForTimeout(150);
+      const r1 = body(await runAct(session, { kind: "click", ref: await ref("Go") }));
+      await page.evaluate(`clearInterval(window.t); ${docOf}.getElementById('s').textContent='Ready'`);
+      await page.waitForTimeout(2000);
+      await page.evaluate(`document.getElementById('b').onclick=()=>{const d=${docOf};let n=0;window.done=false;const t=setInterval(()=>{d.getElementById('s').textContent+=' tok'+n;if(++n>=15){clearInterval(t);d.body.insertAdjacentHTML('beforeend','<button>Answer</button>'.repeat(15));window.done=true}},60)}`);
+      const started = Date.now();
+      const response = await runAct(session, { kind: "click", ref: await ref("Go") });
+      const r2 = body(response);
+      const done = await page.evaluate(() => (window as unknown as { done: boolean }).done);
+      console.log("REVIEWSTALE", where, JSON.stringify({ r1: { d: Math.round(r1.timings.dispatch_ms), s: Math.round(r1.timings.settle_ms), ign: r1.text_churn_ignored }, r2: { ms: Date.now() - started, s: Math.round(r2.timings.settle_ms), dom: r2.dom_mutated, stale: r2.snapshot_stale, capped: r2.settle_capped, ign: r2.text_churn_ignored, doneAtReturn: done } }));
+      expect(r2).toMatchObject({ dom_mutated: "major", snapshot_stale: true, settle_capped: false });
+      expect(done).toBe(true);
+      expect(r2.text_churn_ignored).not.toBe(true);
+      expect(response.content[1]).toMatchObject({ text: expect.stringContaining("Answer") });
+      await page.goto("about:blank");
+    }, 20000);
     it("recovers a late-starting frame clock after at most one capped action", async () => {
       const page = await load('<button>Late frame</button><iframe srcdoc="<p>Static</p><span id=clock></span>"></iframe>');
       await runAct(session, { kind: "click", ref: await ref("Late frame") }); // sample the static document once
@@ -457,7 +481,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.goto("about:blank");
       expect(rows[0]).toMatchObject({ settle_capped: true, text_churn_ignored: false });
       for (const row of rows.slice(1)) expect(row).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
-      expect(rows[2].timings.dispatch_ms).toBeLessThan(90);
+      expect(rows[2].timings.dispatch_ms).toBeLessThan(450); // ticker evidence is per-action
     }, 15000);
     it("prunes detached passive shadow observers and observes roots attached while idle", async () => {
       const page = await load('<button>Shadow lifecycle</button><div id="hosts"></div>');
@@ -485,8 +509,42 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.waitForTimeout(400);
       const result = body(await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") }));
       expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
-      expect(result.timings.dispatch_ms).toBeLessThan(90);
+      expect(result.timings.dispatch_ms).toBeLessThan(450); // idle late attachment gets its first sample
       await cdp.detach();
+      await page.goto("about:blank");
+    });
+    it("restores native attachShadow while idle and samples an idle late-attached clock", async () => {
+      const page = await load('<button>Native shadow</button><div id="late"></div>');
+      const native = () => page.evaluate(() => Element.prototype.attachShadow.toString().includes("[native code]"));
+      expect(await native()).toBe(true);
+      await runAct(session, { kind: "click", ref: await ref("Native shadow") });
+      expect(await native()).toBe(true);
+      await page.evaluate(() => {
+        const root = document.getElementById("late")!.attachShadow({ mode: "open" });
+        root.innerHTML = '<p>Idle clock</p>';
+        setInterval(() => { root.querySelector("p")!.textContent = String(Date.now()); }, 60);
+      });
+      await page.waitForTimeout(400);
+      const result = body(await runAct(session, { kind: "click", ref: await ref("Native shadow") }));
+      expect(result).toMatchObject({ settle_capped: false, snapshot_stale: false, text_churn_ignored: true });
+      expect(result.timings.dispatch_ms).toBeGreaterThanOrEqual(100);
+      expect(await native()).toBe(true);
+      await page.goto("about:blank");
+    });
+    it.each(["light", "shadow"])("skips whitespace-only frames but samples a script-filled %s blank frame when text arrives", async kind => {
+      const page = await load('<button>Blank frame</button><iframe srcdoc="   "></iframe>');
+      await page.waitForTimeout(400);
+      const first = body(await runAct(session, { kind: "click", ref: await ref("Blank frame") }));
+      expect(first.timings.dispatch_ms).toBeLessThan(90);
+      await page.mainFrame().childFrames()[0].evaluate(kind => {
+        const root = kind === "shadow" ? document.body.attachShadow({ mode: "open" }) : document.body;
+        root.innerHTML = '<p id="clock">Clock</p>';
+        setInterval(() => { root.querySelector("p")!.textContent = String(Date.now()); }, 60);
+      }, kind);
+      await page.waitForTimeout(400);
+      const second = body(await runAct(session, { kind: "click", ref: await ref("Blank frame") }));
+      expect(second).toMatchObject({ settle_capped: false, snapshot_stale: false, text_churn_ignored: true });
+      expect(second.timings.dispatch_ms).toBeGreaterThanOrEqual(100);
       await page.goto("about:blank");
     });
     it("finishes a new frame sample discovered during the initial sample wait", async () => {
