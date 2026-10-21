@@ -3,6 +3,7 @@ import {
 	type BrowserWorkspaceState,
 } from './workspace';
 import { wsUrl } from '$lib/api/runtime';
+import { isBrowserChoices, type BrowserChoices } from './pickers';
 /**
  * Browser screencast WebSocket client.
  *
@@ -77,7 +78,8 @@ export interface BrowserStreamConfig {
 	onOpen?: () => void;
 	onHello?: (viewerId: string) => void;
 	onWorkspace?: (state: BrowserWorkspaceState | null) => void;
-	onCommandResult?: (id: string, ok: boolean, error?: string, text?: string) => void;
+	/** `text` answers a copy, `choices` an options lookup (validated). */
+	onCommandResult?: (id: string, ok: boolean, error?: string, text?: string, choices?: BrowserChoices) => void;
 	/** The socket closed (clean or not). */
 	onClose?: (wasClean: boolean) => void;
 }
@@ -125,12 +127,13 @@ export function createBrowserStreamClient(
 	let protocolReady = false;
 	let workspace: BrowserWorkspaceState | null = null;
 	const pending = new Map<string, ReturnType<typeof setTimeout>>();
-	function settle(id: string, ok: boolean, error?: string, text?: string) {
+	function settle(id: string, ok: boolean, error?: string, text?: string, choices?: BrowserChoices) {
 		const timer = pending.get(id);
 		if (!timer) return;
 		clearTimeout(timer);
 		pending.delete(id);
-		if (text === undefined) config.onCommandResult?.(id, ok, error);
+		if (choices !== undefined) config.onCommandResult?.(id, ok, error, text, choices);
+		else if (text === undefined) config.onCommandResult?.(id, ok, error);
 		else config.onCommandResult?.(id, ok, error, text);
 	}
 	function reset() {
@@ -275,6 +278,7 @@ export function createBrowserStreamClient(
 						msg.ok === true,
 						typeof msg.error === 'string' ? msg.error : undefined,
 						typeof msg.text === 'string' ? msg.text : undefined,
+						isBrowserChoices(msg.choices) ? msg.choices : undefined,
 					);
 				break;
 			case 'status':

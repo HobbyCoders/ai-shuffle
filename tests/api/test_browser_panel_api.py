@@ -330,6 +330,24 @@ class TestWorkspaceEndpoints:
         )
         registry.clear("control-api")
 
+    def test_report_accepts_a_long_select_option_list(self, client):
+        """A country list is longer than the generic 128-item cap; options have their own bounds."""
+        from app.core import browser_control as control
+
+        registry.clear("control-options")
+        token = registry.issue_token("control-options")
+        auth = dict(session_id="control-options", token=token, runtime_id="runtime")
+        prefix = "/api/v1/browser/panel/control/"
+        assert client.post(prefix + "register", json=auth).status_code == 200
+        value = control.unavailable("runtime")
+        value["available"] = True
+        choices = {"selected": 0, "groups": [], "options": [{"label": f"Country {i}", "disabled": False} for i in range(250)]}
+        results = [{"id": "unknown", "ok": True, "choices": choices}]
+        assert client.post(prefix + "report", json={**auth, "state": value, "results": results}).status_code == 204
+        choices["options"][0]["value"] = "never sent"
+        assert client.post(prefix + "report", json={**auth, "state": value, "results": results}).status_code == 422
+        registry.clear("control-options")
+
     @pytest.mark.parametrize(
         "body",
         [
