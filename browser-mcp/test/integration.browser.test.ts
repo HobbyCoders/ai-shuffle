@@ -397,13 +397,14 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const frameUrl = (text: string) => new URL("observation-text?text=" + text, httpUrl).href.replace("127.0.0.1", "localhost");
     await page.setContent(`<p>Main content</p><iframe style="display:none" src="${frameUrl("HiddenPayload")}"></iframe>
       <iframe style="width:1px;height:1px;opacity:0" src="${frameUrl("TinyPayload")}"></iframe>
+      <iframe style="width:1px;height:1px" src="${frameUrl("SizedPayload")}"></iframe>
       <div style="opacity:0"><iframe src="${frameUrl("TransparentPayload")}"></iframe></div>
       <iframe src="${frameUrl("VisiblePayload")}"></iframe>`);
     const result = await runReadText(session);
     const text = (result.content[1] as { text: string }).text;
     expect(text).toContain("Main content");
     expect(text).toContain(`[frame ${new URL(frameUrl("VisiblePayload")).origin}]\nVisiblePayload`);
-    for (const hidden of ["HiddenPayload", "TinyPayload", "TransparentPayload"]) expect(text).not.toContain(hidden);
+    for (const hidden of ["HiddenPayload", "TinyPayload", "SizedPayload", "TransparentPayload"]) expect(text).not.toContain(hidden);
   });
 
   it("review: ambiguous find lists usable candidate refs, continues batches and supports index narrowing", async () => {

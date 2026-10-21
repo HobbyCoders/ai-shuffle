@@ -34,7 +34,7 @@ export async function includeObservationRoot(root: ObservationRoot): Promise<boo
       const visible = await element.evaluate(el => {
         if (!(el instanceof Element)) return false;
         const rect = el.getBoundingClientRect();
-        if (rect.width <= 2 || rect.height <= 2) return false;
+        if (rect.width <= 2 || rect.height <= 2 || el.clientWidth <= 2 || el.clientHeight <= 2) return false;
         let node: Element | null = el;
         let opacity = 1;
         while (node) {
