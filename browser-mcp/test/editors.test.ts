@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
-import { readEditors, editField, uploadField, rememberFileChooser, copySelection, COPY_LIMIT } from '../src/editors.js';
+import { readEditors, readChoices, editField, uploadField, rememberFileChooser, copySelection, COPY_LIMIT, MAX_CHOICES } from '../src/editors.js';
 
 // Browser-dependent lane is opt-in; plain npm test must also work without Chrome.
 describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () => {
@@ -196,6 +196,93 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
       expect(await page.getByRole('textbox', { name: 'Email or username' }).evaluate(el => el.matches(':focus'))).toBe(false);
       await page.locator('faceplate-text-input').first().evaluate(el => el.remove());
       await expect(editField(page, { field: email.id, action: 'replace', value: 'stale', start: 0, end: 0 })).rejects.toThrow('Text field changed');
+    } finally { await browser.close(); }
+  });
+
+  it('reports popup controls (select, date and time types) with their limits and focus', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<label>Country <select id="c"><option value="">Choose</option><optgroup label="Europe"><option value="fr">France</option><option value="de" selected>Germany</option></optgroup></select></label>
+        <select aria-label="Many" multiple><option>a</option></select><select aria-label="Box" size="3"><option>a</option></select><select aria-label="Off" disabled><option>a</option></select>
+        <input type="date" aria-label="Day" value="2026-10-21" min="2026-01-01" max="2026-12-31" step="7">
+        <input type="time" aria-label="At" step="900"><input type="datetime-local" aria-label="When"><input type="month" aria-label="Month"><input type="week" aria-label="Week">
+        <input type="date" aria-label="Fixed" readonly><input type="color" aria-label="Colour"><input type="number" aria-label="Count">`);
+      await page.focus('#c');
+      const fields = await readEditors(page);
+      expect(fields.map(f => [f.label, f.type])).toEqual([
+        ['Country', 'select'], ['Day', 'date'], ['At', 'time'], ['When', 'datetime-local'], ['Month', 'month'], ['Week', 'week'],
+      ]);
+      expect(fields[0]).toMatchObject({ value: 'Germany', focused: true });
+      expect(fields[0]).not.toHaveProperty('style');
+      expect(fields[1]).toMatchObject({ value: '2026-10-21', min: '2026-01-01', max: '2026-12-31', step: '7' });
+      expect(fields[1]).not.toHaveProperty('focused');
+      expect(fields[2]).toMatchObject({ step: '900' });
+      expect(fields[2]).not.toHaveProperty('min');
+    } finally { await browser.close(); }
+  });
+
+  it('lists select options with groups and disabled state, bounded, without option values', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<select aria-label="Pick"><option value="secret-a">  Plain
+        label </option><option disabled>Off</option><optgroup label="Group A"><option selected>A1</option></optgroup>
+        <optgroup label="Closed" disabled><option>C1</option></optgroup><option label="By attribute">ignored</option></select>
+        <select aria-label="Huge">${Array.from({ length: 1500 }, (_, i) => `<option>Option ${i}</option>`).join('')}</select>`);
+      const [pick, huge] = await readEditors(page);
+      expect(await readChoices(page, { field: pick.id })).toEqual({
+        selected: 2, groups: ['Group A', 'Closed'],
+        options: [
+          { label: 'Plain label', disabled: false }, { label: 'Off', disabled: true },
+          { label: 'A1', disabled: false, group: 0 }, { label: 'C1', disabled: true, group: 1 }, { label: 'By attribute', disabled: false },
+        ],
+      });
+      const many = await readChoices(page, { field: huge.id });
+      expect(many.options).toHaveLength(MAX_CHOICES);
+      expect(many.truncated).toBe(true);
+      expect(JSON.stringify(many)).not.toContain('secret-a');
+      await page.locator('select').first().evaluate(el => el.remove());
+      await expect(readChoices(page, { field: pick.id })).rejects.toThrow('changed');
+    } finally { await browser.close(); }
+  });
+
+  it('sets a choice in the page and fires input then change like the native popup', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<select aria-label="Pick"><option>One</option><option disabled>Two</option><option>Three</option></select>
+        <input type="date" aria-label="Day" value="2026-10-21"><input type="time" aria-label="At"><input type="datetime-local" aria-label="When">
+        <input type="month" aria-label="Month"><input type="week" aria-label="Week">
+        <script>window.log = []; for (const el of document.querySelectorAll('select, input'))
+          for (const type of ['input', 'change']) el.addEventListener(type, e => log.push([el.getAttribute('aria-label'), type, el.value, e.bubbles, document.activeElement === el]));</script>`);
+      const fields = await readEditors(page);
+      const byLabel = (label: string) => fields.find(f => f.label === label)!.id;
+      await editField(page, { field: byLabel('Pick'), action: 'set', index: 2 });
+      await editField(page, { field: byLabel('Day'), action: 'set', value: '2027-01-05' });
+      await editField(page, { field: byLabel('At'), action: 'set', value: '13:45' });
+      await editField(page, { field: byLabel('When'), action: 'set', value: '2026-10-21T08:30' });
+      await editField(page, { field: byLabel('Month'), action: 'set', value: '2026-11' });
+      await editField(page, { field: byLabel('Week'), action: 'set', value: '2026-W43' });
+      await editField(page, { field: byLabel('Day'), action: 'set', value: '' });
+      expect(await page.evaluate(() => (window as unknown as { log: unknown[] }).log)).toEqual([
+        ['Pick', 'input', 'Three', true, true], ['Pick', 'change', 'Three', true, true],
+        ['Day', 'input', '2027-01-05', true, true], ['Day', 'change', '2027-01-05', true, true],
+        ['At', 'input', '13:45', true, true], ['At', 'change', '13:45', true, true],
+        ['When', 'input', '2026-10-21T08:30', true, true], ['When', 'change', '2026-10-21T08:30', true, true],
+        ['Month', 'input', '2026-11', true, true], ['Month', 'change', '2026-11', true, true],
+        ['Week', 'input', '2026-W43', true, true], ['Week', 'change', '2026-W43', true, true],
+        ['Day', 'input', '', true, true], ['Day', 'change', '', true, true],
+      ]);
+      // The same value again is not a change; a disabled option, a malformed value
+      // and a text field are refused without touching the page.
+      await editField(page, { field: byLabel('Pick'), action: 'set', index: 2 });
+      await expect(editField(page, { field: byLabel('Pick'), action: 'set', index: 1 })).rejects.toThrow('unavailable');
+      await expect(editField(page, { field: byLabel('Pick'), action: 'set', index: 9 })).rejects.toThrow('unavailable');
+      await expect(editField(page, { field: byLabel('At'), action: 'set', value: 'noon' })).rejects.toThrow("didn't accept");
+      expect(await page.locator('input[type=time]').inputValue()).toBe('13:45');
+      await expect(editField(page, { field: byLabel('Pick'), action: 'replace', value: 'x', start: 0, end: 0 })).rejects.toThrow();
+      expect((await page.evaluate(() => (window as unknown as { log: unknown[] }).log)).length).toBe(14);
     } finally { await browser.close(); }
   });
 

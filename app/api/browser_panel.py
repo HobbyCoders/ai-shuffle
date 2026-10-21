@@ -126,7 +126,7 @@ async def workspace_control(operation: str, request: Request):
         token = body.get("token")
         if not isinstance(token, str) or len(token) > 256:
             raise ValueError()
-        browser_control.finite(body)
+        browser_control.finite_report(body)
     except (ValueError, TypeError, RecursionError):
         raise HTTPException(422, "Invalid workspace payload")
     if not registry.verify_token(session_id, token):

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceBridge, bridgeConfig } from "../src/workspace-bridge.js";
+import { WorkspaceBridge, bridgeConfig, reportBatch } from "../src/workspace-bridge.js";
 import { Session } from "../src/session.js";
 import { BrowserManager } from "../src/browser.js";
 const bridges: WorkspaceBridge[] = [];
@@ -126,6 +126,14 @@ describe("runtime bridge", () => {
     await h.bridge.shutdown();
     expect(h.calls.some(c=>c.endpoint==="report" && c.body.state.available===false)).toBe(true);
     expect(h.bridge.workspace.state().control.owner).toBe("agent");
+  });
+  it("reports at most one payload-carrying result (copy text or list options) per batch", () => {
+    const choices = { selected: 0, groups: [], options: [{ label: "A", disabled: false }] };
+    const results = [{ id: "a", ok: true }, { id: "b", ok: true, choices }, { id: "c", ok: true }, { id: "d", ok: true, text: "copied" }, { id: "e", ok: true }];
+    expect(reportBatch(results).map(r => r.id)).toEqual(["a"]);
+    expect(reportBatch(results.slice(1)).map(r => r.id)).toEqual(["b", "c"]);
+    expect(reportBatch(results.slice(3)).map(r => r.id)).toEqual(["d", "e"]);
+    expect(reportBatch(Array.from({ length: 70 }, (_, i) => ({ id: `r${i}`, ok: true })))).toHaveLength(64);
   });
   it("is opt-in and derives control siblings from legacy URL", () => {
     expect(bridgeConfig({})).toBeUndefined();

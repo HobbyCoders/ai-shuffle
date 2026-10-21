@@ -15,6 +15,14 @@ TTL = 60
 COMMAND_TTL = 30
 MAX_PENDING = 128
 COPY_LIMIT = 16384  # longest page selection a viewer can copy at once
+# A select's options for the panel's own list (matches the runtime's bounds).
+MAX_CHOICES = 1000
+CHOICE_LABEL = 200
+CHOICE_TEXT_BUDGET = 24000
+TEXT_FIELDS = ("text", "search", "email", "url", "tel", "password", "textarea", "file")
+# Controls whose popup Chrome draws outside the screencast: the panel shows
+# its own list or calendar for these.
+PICKER_FIELDS = ("select", "date", "time", "datetime-local", "month", "week")
 MAX_BODY = 262144
 
 
@@ -55,6 +63,61 @@ def finite(value):
         raise ControlError("Invalid number")
     elif isinstance(value, str) and len(value) > 16384:
         raise ControlError("String too long")
+
+
+def validate_choices(value):
+    """A select's options, sent only to the viewer that opened the list.
+
+    Labels, groups and disabled state; never option values (the panel picks
+    by index).
+    """
+    if not isinstance(value, dict) or set(value) - {"truncated"} != {"selected", "groups", "options"}:
+        raise ControlError("Invalid options")
+    groups, options = value["groups"], value["options"]
+    if not isinstance(groups, list) or not isinstance(options, list) or len(options) > MAX_CHOICES or len(groups) > len(options) + 1:
+        raise ControlError("Invalid options")
+    if "truncated" in value and type(value["truncated"]) is not bool:
+        raise ControlError("Invalid options")
+    budget = CHOICE_TEXT_BUDGET
+    for label in groups:
+        if not isinstance(label, str) or len(label) > CHOICE_LABEL:
+            raise ControlError("Invalid option group")
+        budget -= len(label)
+    for option in options:
+        if not isinstance(option, dict) or set(option) - {"group"} != {"label", "disabled"}:
+            raise ControlError("Invalid option")
+        if not isinstance(option["label"], str) or len(option["label"]) > CHOICE_LABEL or type(option["disabled"]) is not bool:
+            raise ControlError("Invalid option")
+        if "group" in option and (type(option["group"]) is not int or not 0 <= option["group"] < len(groups)):
+            raise ControlError("Invalid option group")
+        budget -= len(option["label"])
+    if budget < 0:
+        raise ControlError("Options too long")
+    if type(value["selected"]) is not int or not -1 <= value["selected"] < len(options):
+        raise ControlError("Invalid selected option")
+    return value
+
+
+def finite_report(body):
+    """finite() for a runtime payload whose results may carry a long option list.
+
+    Option lists are bounded by validate_choices() instead of the generic
+    128-item list cap; everything else gets the usual checks.
+    """
+    results = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(results, list) or not any(isinstance(r, dict) and "choices" in r for r in results):
+        finite(body)
+        return
+    if len(results) > 64:
+        raise ControlError("Invalid results")
+    for result in results:
+        if isinstance(result, dict) and "choices" in result:
+            validate_choices(result["choices"])
+            for label in (*result["choices"]["groups"], *(o["label"] for o in result["choices"]["options"])):
+                finite(label)
+    finite({**body, "results": [
+        {k: v for k, v in r.items() if k != "choices"} if isinstance(r, dict) else r for r in results
+    ]})
 
 
 def viewport(value):
@@ -110,11 +173,18 @@ def validate_state(state, runtime_id):
     if not isinstance(editors, list) or len(editors) > 32:
         raise ControlError("Invalid text fields")
     for field in editors:
-        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys", "style"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
+        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys", "style", "min", "max", "step", "focused"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
             raise ControlError("Invalid text field")
         identifier(field["id"])
-        if field["type"] not in ("text", "search", "email", "url", "tel", "password", "textarea", "file"):
+        if field["type"] not in TEXT_FIELDS + PICKER_FIELDS:
             raise ControlError("Invalid text field type")
+        if field["type"] not in PICKER_FIELDS and {"min", "max", "step", "focused"} & set(field):
+            raise ControlError("Picker details on a text field")
+        for name in ("min", "max", "step"):
+            if name in field and (not isinstance(field[name], str) or len(field[name]) > 64):
+                raise ControlError("Invalid picker limit")
+        if "focused" in field and type(field["focused"]) is not bool:
+            raise ControlError("Invalid picker focus flag")
         if not isinstance(field["value"], str) or not isinstance(field["label"], str) or len(field["label"]) > 256:
             raise ControlError("Invalid text field content")
         if "style" in field:
@@ -245,7 +315,7 @@ class Broker:
             )
         )
 
-    async def settle(self, command_id, ok, error=None, text=None):
+    async def settle(self, command_id, ok, error=None, text=None, choices=None):
         command = self.pending.pop(command_id, None)
         if command:
             if command["op"] in ("takeover", "release"):
@@ -257,6 +327,9 @@ class Broker:
             # broadcast or kept in workspace state.
             if text is not None and command["op"] == "copy":
                 message["text"] = text
+            # A select's options likewise go only to the viewer that opened it.
+            if choices is not None and command["op"] == "options":
+                message["choices"] = choices
             waiter = self.result_waiters.get(command_id)
             if waiter is not None and not waiter.done():
                 waiter.set_result(message)
@@ -369,6 +442,8 @@ class Broker:
                 not isinstance(copied, str) or len(copied) > COPY_LIMIT
             ):
                 raise ControlError("Invalid copied text")
+            if "choices" in result:
+                validate_choices(result["choices"])
         if state["revision"] > self.report_revision:
             self.report_revision = state["revision"]
             self.state = state
@@ -386,7 +461,7 @@ class Broker:
             await self.broadcast()
         for result in results:
             await self.settle(
-                result["id"], result["ok"], result.get("error"), result.get("text")
+                result["id"], result["ok"], result.get("error"), result.get("text"), result.get("choices")
             )
 
     async def submit(self, viewer_id, data, internal=False):
@@ -411,8 +486,9 @@ class Broker:
             "tabs": {"action", "tab_id", "url"},
             "viewport": {"mode", "width", "height"},
             "input": {"method", "params"},
-            "edit": {"field", "action", "value", "start", "end"},
+            "edit": {"field", "action", "value", "start", "end", "index"},
             "upload": {"field", "paths"},
+            "options": {"field"},
         }
         if op not in allowed or set(args) - allowed[op]:
             raise ControlError("Unsupported operation or arguments")
@@ -455,11 +531,24 @@ class Broker:
         elif op == "copy":
             if args:
                 raise ControlError("Invalid copy")
+        elif op == "options":
+            identifier(args.get("field"))
         elif op == "edit":
             identifier(args.get("field"))
-            if args.get("action") not in ("focus", "blur", "replace"):
+            if args.get("action") not in ("focus", "blur", "replace", "set"):
                 raise ControlError("Invalid text edit")
-            if args["action"] == "replace":
+            if "index" in args and args["action"] != "set":
+                raise ControlError("Invalid text edit")
+            if args["action"] == "set":
+                # A picker choice: a select option by index, or a date/time value.
+                if "start" in args or "end" in args:
+                    raise ControlError("Invalid choice")
+                if "index" in args:
+                    if "value" in args or type(args["index"]) is not int or not 0 <= args["index"] <= 9999:
+                        raise ControlError("Invalid choice")
+                elif not isinstance(args.get("value"), str) or len(args["value"]) > 64:
+                    raise ControlError("Invalid choice")
+            elif args["action"] == "replace":
                 value = args.get("value")
                 if not isinstance(value, str) or any(type(args.get(k)) is not int for k in ("start", "end")) or not 0 <= args["start"] <= args["end"] <= len(value.encode('utf-16-le')) // 2:
                     raise ControlError("Invalid text selection")

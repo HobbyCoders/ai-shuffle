@@ -399,3 +399,115 @@ async def test_oversized_or_non_string_copy_results_are_rejected(broker):
     for bad in ("x" * (control.COPY_LIMIT + 1), 5):
         with pytest.raises(control.ControlError):
             await broker.report("runtime", state(revision=1), [{"id": "c", "ok": True, "text": bad}])
+
+
+def picker_field(**extra):
+    return {"id": "pick-1", "type": "date", "label": "Day", "value": "2026-10-21",
+            "x": 1, "y": 1, "width": 120, "height": 30, **extra}
+
+
+@pytest.mark.parametrize("field", [
+    picker_field(min="2026-01-01", max="2026-12-31", step="7", focused=True),
+    picker_field(type="select", value="Germany"),
+    *(picker_field(type=kind, value="") for kind in ("time", "datetime-local", "month", "week")),
+])
+def test_picker_controls_are_valid_state(field):
+    value = state()
+    value["editors"] = [field]
+    assert control.validate_state(value, "runtime") == value
+
+
+@pytest.mark.parametrize("change", [
+    {"type": "color"}, {"min": 5}, {"max": "x" * 65}, {"step": None}, {"focused": "yes"},
+    {"type": "text", "step": "1"}, {"type": "text", "focused": True},
+])
+def test_invalid_picker_state_is_rejected(change):
+    value = state()
+    value["editors"] = [picker_field(**change)]
+    with pytest.raises(control.ControlError):
+        control.validate_state(value, "runtime")
+
+
+@pytest.mark.asyncio
+async def test_picker_set_accepts_an_index_or_a_short_value_only(broker):
+    await broker.report("runtime", state(revision=1, viewer="viewer"), [])
+    for index, args in enumerate(({"field": "f", "action": "set", "index": 2},
+                                  {"field": "f", "action": "set", "value": "2026-10-21T08:30"},
+                                  {"field": "f", "action": "set", "value": ""})):
+        await broker.submit("viewer", command(f"set{index}", "edit", args))
+    assert [c["args"] for c in await broker.poll("runtime")][0] == {"field": "f", "action": "set", "index": 2}
+    for index, bad in enumerate(({"field": "f", "action": "set"},
+                                 {"field": "f", "action": "set", "index": 1, "value": "x"},
+                                 {"field": "f", "action": "set", "index": -1},
+                                 {"field": "f", "action": "set", "index": True},
+                                 {"field": "f", "action": "set", "value": "x" * 65},
+                                 {"field": "f", "action": "set", "value": "x", "start": 0, "end": 0},
+                                 {"field": "f", "action": "focus", "index": 1})):
+        with pytest.raises(control.ControlError):
+            await broker.submit("viewer", command(f"bad{index}", "edit", bad))
+
+
+def choices(count=3):
+    return {"selected": 1, "groups": ["Europe"],
+            "options": [{"label": f"Option {i}", "disabled": i == 0, **({"group": 0} if i else {})} for i in range(count)]}
+
+
+@pytest.mark.asyncio
+async def test_select_options_reach_only_the_asking_viewer_and_never_workspace_state(broker):
+    received, others = [], []
+
+    async def send(message):
+        received.append(message)
+
+    async def other(message):
+        others.append(message)
+
+    broker.viewers["viewer"] = send
+    broker.viewers["watcher"] = other
+    with pytest.raises(control.ControlError, match="Take control"):
+        await broker.submit("viewer", command("early", "options", {"field": "f"}))
+    await broker.report("runtime", state(revision=1, viewer="viewer"), [])
+    await broker.submit("viewer", command("opts-1", "options", {"field": "f"}))
+    await broker.submit("viewer", command("edit-1", "edit", {"field": "f", "action": "focus"}))
+    for bad in ({}, {"field": "f", "x": 1}, {"field": "bad id!"}):
+        with pytest.raises(control.ControlError):
+            await broker.submit("viewer", command(f"opts-bad-{len(bad)}", "options", bad))
+    await broker.poll("runtime")
+    big = choices(control.MAX_CHOICES)
+    await broker.report("runtime", state(revision=2, viewer="viewer"), [
+        {"id": "opts-1", "ok": True, "choices": big},
+        # Only an options lookup carries options to a viewer.
+        {"id": "edit-1", "ok": True, "choices": choices()},
+    ])
+    results = [m for m in received if m["type"] == "command-result"]
+    assert results == [
+        {"type": "command-result", "id": "opts-1", "ok": True, "choices": big},
+        {"type": "command-result", "id": "edit-1", "ok": True},
+    ]
+    assert "Option 1" not in repr(others) and "Option 1" not in repr(broker.state)
+
+
+@pytest.mark.parametrize("bad", [
+    None, [], {"selected": 0, "groups": [], "options": []} | {"x": 1},
+    choices() | {"selected": 3}, choices() | {"selected": -2}, choices() | {"selected": True},
+    choices() | {"groups": ["x" * 201]}, choices() | {"truncated": "yes"},
+    choices() | {"options": [{"label": "A", "disabled": False, "group": 1}]},
+    choices() | {"options": [{"label": "A", "disabled": 0}]},
+    choices() | {"options": [{"label": "A", "disabled": False, "value": "secret"}]},
+    choices() | {"options": [{"label": "x" * 201, "disabled": False}]},
+    choices(control.MAX_CHOICES + 1),
+    choices() | {"options": [{"label": "x" * 200, "disabled": False}] * 121},
+])
+def test_invalid_select_options_are_rejected(bad):
+    with pytest.raises(control.ControlError):
+        control.validate_choices(bad)
+
+
+def test_report_payload_allows_long_option_lists_but_stays_finite():
+    body = {"state": state(), "results": [{"id": "o", "ok": True, "choices": choices(600)}]}
+    control.finite_report(body)
+    assert len(body["results"][0]["choices"]["options"]) == 600
+    with pytest.raises(control.ControlError):
+        control.finite_report({"state": state(), "results": [{"id": "o", "ok": True, "choices": choices(600)}], "x": [0] * 129})
+    with pytest.raises(control.ControlError):
+        control.finite_report({"results": [{"id": "o", "ok": True, "choices": choices() | {"selected": float("nan")}}]})

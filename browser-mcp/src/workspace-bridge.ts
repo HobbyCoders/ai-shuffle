@@ -157,7 +157,7 @@ export class WorkspaceBridge {
     try {
       while (!this.abort.signal.aborted && (this.dirty || this.results.length)) {
         this.dirty = false;
-        const results = this.results.slice(0, 64);
+        const results = reportBatch(this.results);
         try {
           await this.post("report", { state: this.workspace.state(), results }, 5000);
           this.results.splice(0, results.length);
@@ -170,6 +170,16 @@ export class WorkspaceBridge {
       }
     } finally { this.reporting = false; }
   }
+}
+/**
+ * The next results to report: up to 64, but at most one that carries a
+ * payload (a copy's text or a list's options), so a single report stays well
+ * inside the server's body limit.
+ */
+export function reportBatch(results: readonly CommandResult[]): CommandResult[] {
+  const batch = results.slice(0, 64);
+  const second = batch.findIndex((r, i) => i > 0 && (r.text !== undefined || r.choices !== undefined));
+  return second > 0 ? batch.slice(0, second) : batch;
 }
 export function startWorkspaceBridge(session: Session): WorkspaceBridge | undefined {
   const config = bridgeConfig();
