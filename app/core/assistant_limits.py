@@ -371,7 +371,12 @@ def _job_over_time(session_id, minutes, now):
         return _job_minutes(session, now) >= minutes
 
 
-def turn_refusal(session_id, source=None):
+def _person_input(source, payload=None):
+    # Away answers use the user lane, but do not carry an owner's exemption.
+    return source in PERSON_SOURCES and (_payload(payload) or {}).get("question_answer_human_input") is not False
+
+
+def turn_refusal(session_id, source=None, *, payload=None):
     """Why a new model turn in ``session_id`` may not start, or None.
 
     The home starts no turn at the limit, whoever asked. A job starts no
@@ -380,7 +385,7 @@ def turn_refusal(session_id, source=None):
     """
     try:
         kind = role(session_id)
-        if kind is None or (kind == "job" and source in PERSON_SOURCES):
+        if kind is None or (kind == "job" and _person_input(source, payload)):
             return None
         state = status()
         if state["limit_reached"]:
@@ -468,7 +473,7 @@ def plan(now=None):
             sid = turn["session_id"]
             if limits_db.stopped(turn["id"]):
                 continue
-            person = sid != home and turn.get("source") in PERSON_SOURCES
+            person = sid != home and _person_input(turn.get("source"), turn.get("payload"))
             if state["limit_reached"] and not person:
                 stops.append((sid, turn["id"], "daily_limit", _label(cursor, sid) if sid != home else None))
                 continue
@@ -536,7 +541,8 @@ def _payload(value):
 def _started_by(payload, device_id):
     """Whether a session's first turn records ``device_id`` as the worker that started it."""
     return bool(payload) and device_id in (payload.get("task_report_device"),
-                                           payload.get("orchestration_remote_origin"))
+                                           payload.get("orchestration_remote_origin"),
+                                           payload.get("orchestration_report_device"))
 
 
 def _job_usage(cursor, session_id, from_device, now):
@@ -563,7 +569,8 @@ def _job_usage(cursor, session_id, from_device, now):
         "known": True,
         "cost_usd": round(cost, 6),
         "running": bool(live),
-        "turns": [{"turn_id": turn["id"], "person": turn.get("source") in PERSON_SOURCES} for turn in own],
+        "turns": [{"turn_id": turn["id"], "person": _person_input(turn.get("source"), turn.get("payload"))}
+                  for turn in own],
         "job_minutes": round(_job_minutes(session, now), 3),
     }
 

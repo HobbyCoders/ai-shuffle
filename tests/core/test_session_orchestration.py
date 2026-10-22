@@ -714,7 +714,8 @@ def test_start_budget_survives_fresh_handler_and_retries(peers):
 
 
 @pytest.mark.parametrize("pending", [False, True])
-def test_direct_reply_does_not_spend_budget_or_mint_reply_credit(peers, monkeypatch, pending):
+@pytest.mark.parametrize("wake_reply", [None, "unpark", "user", "away"])
+def test_direct_reply_does_not_spend_budget_or_mint_reply_credit(peers, monkeypatch, pending, wake_reply):
     monkeypatch.setattr(orch, "MAX_ACTIONS", 1)
     request = orch._queue("caller", {"session_id": "peer", "message": "Please check", "request_id": "ask"}, "message")
     if not pending:
@@ -726,12 +727,69 @@ def test_direct_reply_does_not_spend_budget_or_mint_reply_credit(peers, monkeypa
     reply = orch._queue("peer", args, "message")
     assert turns.get_turn(reply["turn_id"])["payload"]["orchestration_reply_to"] == request["turn_id"]
     assert orch._queue("peer", args, "message")["turn_id"] == reply["turn_id"]
+    if wake_reply:
+        from app.core.session_runtime import SessionRuntime
+        first = turns.start_turn(reply["turn_id"])
+        for _ in range(2):
+            assert turns.park_turn(first["id"], ["monitor"])
+            wake = turns.enqueue_turn(
+                "caller", "user" if wake_reply == "away" else wake_reply,
+                profile_id=first["profile_id"], overrides=first["overrides"],
+                payload={"question_answer_human_input": False} if wake_reply == "away" else {},
+            )
+            resumed = turns.start_turn(wake["id"], can_resume=SessionRuntime._can_resume_parked)
+            assert resumed["id"] == first["id"]
+            assert resumed["payload"]["orchestration_reply_receipt"] == request["turn_id"]
+            assert "orchestration_reply_to" not in resumed["payload"]
     with pytest.raises(ValueError, match="budget"):
         orch._queue("peer", {**args, "request_id": "repeat"}, "message")
     with pytest.raises(ValueError, match="budget"):
         orch._queue("caller", {"session_id": "peer", "message": "Thanks", "request_id": "ack"}, "message")
     monkeypatch.setattr(orch, "MAX_ACTIONS", 2)
     orch._queue("peer", {**args, "request_id": "new-work"}, "message")
+
+
+@pytest.mark.parametrize("wake_source", ["unpark", "user", "away"])
+def test_parked_request_keeps_one_reply_credit(peers, monkeypatch, wake_source):
+    from app.core.session_runtime import SessionRuntime
+    request = orch._queue("caller", {"session_id": "peer", "message": "Check", "request_id": "parked"}, "message")
+    first = turns.start_turn(request["turn_id"])
+    assert turns.park_turn(first["id"], ["monitor"])
+    wake = turns.enqueue_turn(
+        "peer", "user" if wake_source == "away" else wake_source,
+        profile_id=first["profile_id"], overrides=first["overrides"],
+        payload={"question_answer_human_input": False} if wake_source == "away" else {},
+    )
+    assert turns.start_turn(wake["id"], can_resume=SessionRuntime._can_resume_parked)["id"] == first["id"]
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
+    args = {"session_id": "caller", "message": "Checked", "request_id": "answer"}
+    if wake_source == "user":
+        with pytest.raises(ValueError, match="budget"):
+            orch._queue("peer", args, "message")
+        return
+    reply = orch._queue("peer", args, "message")
+    assert turns.get_turn(reply["turn_id"])["payload"]["orchestration_reply_to"] == first["id"]
+    assert orch._queue("peer", args, "message")["turn_id"] == reply["turn_id"]
+    with pytest.raises(ValueError, match="budget"):
+        orch._queue("peer", {**args, "request_id": "again"}, "message")
+
+
+def test_legacy_parked_request_without_credit_ancestry_is_charged(peers, monkeypatch):
+    from app.core.session_runtime import SessionRuntime
+    request = orch._queue("caller", {"session_id": "peer", "message": "Check", "request_id": "legacy"}, "message")
+    first = turns.start_turn(request["turn_id"])
+    assert turns.park_turn(first["id"], ["monitor"])
+    # Old code erased reply ancestry. Do not assume this was a new request
+    # rather than a reply and accidentally mint a credit when it wakes again.
+    legacy = {**first["payload"], "continued_turn": True, "birth_source": "agent_message"}
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET source='unpark', payload=%s WHERE id=%s",
+                              (json.dumps(legacy), first["id"]))
+    wake = turns.enqueue_turn("peer", "unpark", profile_id=first["profile_id"], overrides=first["overrides"])
+    assert turns.start_turn(wake["id"], can_resume=SessionRuntime._can_resume_parked)["id"] == first["id"]
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
+    with pytest.raises(ValueError, match="budget"):
+        orch._queue("peer", {"session_id": "caller", "message": "Checked", "request_id": "answer"}, "message")
 
 
 def test_message_budget_and_no_hop_limit(peers, monkeypatch):

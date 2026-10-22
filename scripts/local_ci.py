@@ -388,6 +388,12 @@ def select_backend_tests(ctx: Context) -> list[str] | str:
     return select_by_name(ctx.files or [])
 
 
+def test_file_path(name: str) -> bool:
+    """A changed pytest file owns itself, even outside the usual discovery roots."""
+    return (name.startswith(("tests/", "fluid/tests/"))
+            and Path(name).name.startswith("test_") and name.endswith(".py"))
+
+
 def select_by_name(files: list[str]) -> list[str] | str:
     if any(fnmatch(name, pattern) for name in files
            for pattern in ("requirements*", "pytest.ini", "tests/conftest.py", "tests/*/conftest.py")):
@@ -395,7 +401,7 @@ def select_by_name(files: list[str]) -> list[str] | str:
     roots = [ROOT / d for d in FAST_SUBSET]
     tests = [p.relative_to(ROOT).as_posix() for d in roots for p in d.rglob("test_*.py")]
     tests += [p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").glob("test_*.py")]
-    selected = {name for name in files if name in tests}
+    selected = {name for name in files if test_file_path(name)}
     for name in files:
         if not name.endswith(".py") or name.startswith("tests/"):
             continue
@@ -411,7 +417,8 @@ def select_by_name(files: list[str]) -> list[str] | str:
                     selected.add(test)
             except OSError:
                 continue
-    return sorted(t for t in selected if t not in FAST_SUBSET_EXCLUDED and (ROOT / t).is_file())
+    return sorted(t for t in selected
+                  if (t not in FAST_SUBSET_EXCLUDED or t in files) and (ROOT / t).is_file())
 
 
 # --- suites ----------------------------------------------------------------
@@ -419,6 +426,7 @@ def select_by_name(files: list[str]) -> list[str] | str:
 def affected_backend_tests(ctx: Context, *, use_map: bool = True) -> list[str] | str:
     """Reuse the dependency map, or name matching with a per-path safe fallback."""
     if (use_map and MAP_PATH.is_file()
+            and not any(test_file_path(name) for name in ctx.files or [])
             and set(changed_files(ctx.base)) <= set(ctx.files or [])):
         # The map CLI compares the whole Git diff. When other areas were
         # removed from this context (notably workflow changes), do not let
@@ -426,14 +434,21 @@ def affected_backend_tests(ctx: Context, *, use_map: bool = True) -> list[str] |
         return select_backend_tests(ctx)
     selected: set[str] = set()
     for name in ctx.files or []:
+        if test_file_path(name) and name.startswith("fluid/tests/"):
+            continue  # The fluid suite owns these, never the backend fallback.
         if not any(fnmatch(name, pattern) for pattern in BACKEND_PATHS):
             continue
         matches = select_by_name([name])
+        if test_file_path(name):
+            selected.update(matches)  # A deleted test needs no execution.
+            continue
         if matches == "all" or not matches:
             ctx.notes.append(f"No test mapping for {name}; running the backend suite.")
             return "all"
         selected.update(matches)
-    return sorted(selected) or "all"
+    if selected or (ctx.files and all(test_file_path(name) for name in ctx.files)):
+        return sorted(selected)
+    return "all"
 
 
 def backend(ctx: Context) -> None:
@@ -539,11 +554,17 @@ FLUID_TESTS = "fluid/tests/unit"
 
 def fluid(ctx: Context) -> None:
     env, extra = python_env(), []
+    targets = [FLUID_TESTS]
+    changed = [name for name in ctx.files or [] if name.startswith("fluid/")]
+    if ctx.mode == "fast" and changed and all(test_file_path(name) for name in changed):
+        targets = [name for name in changed if (ROOT / name).is_file()]
+        if not targets:
+            return  # Only deleted tests changed.
     if ctx.backend_selected is not None:
         # One full --step shard: the same directory and hooks, other files ignored.
         env = {**env, "LOCAL_CI_BACKEND_BATCH": json.dumps(ctx.backend_selected)}
         extra = ["-p", "scripts.ci.local_ci_batch"]
-    run([ctx.python, "-m", "pytest", FLUID_TESTS, *extra, *pytest_args(ctx.python)], env=env)
+    run([ctx.python, "-m", "pytest", *targets, *extra, *pytest_args(ctx.python)], env=env)
 
 
 def frontend(ctx: Context) -> None:
@@ -1072,8 +1093,10 @@ def affected_suites(files: list[str]) -> list[Suite]:
     selected = [suite for suite in SUITES if ctx.changed(suite.paths)]
     # The dedicated workflow suite already runs gate and publication regression
     # tests. Do not turn its scripts into an unrelated backend-wide fallback.
-    backend_files = [name for name in code if any(fnmatch(name, pattern) for pattern in BACKEND_PATHS)]
-    if backend_files and all(workflow_path(name) for name in backend_files):
+    backend_files = [name for name in code
+                     if any(fnmatch(name, pattern) for pattern in BACKEND_PATHS)
+                     and not (test_file_path(name) and name.startswith("fluid/tests/"))]
+    if not backend_files or all(workflow_path(name) for name in backend_files):
         selected = [suite for suite in selected if suite.name != "backend"]
     if any(documentation_path(name) for name in files):
         selected += [suite for suite in SUITES if suite.name == "docs" and suite not in selected]
