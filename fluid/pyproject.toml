@@ -41,6 +41,9 @@ packages = ["fluid"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# This is a separate pytest root, so the parent conftest is not discovered.
+pythonpath = [".."]
+addopts = "-p scripts.ci.test_scratch"
 
 [tool.uv]
 package = true

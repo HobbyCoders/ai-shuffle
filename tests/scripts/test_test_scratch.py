@@ -66,7 +66,18 @@ def test_local_ci_pytest_scratch_does_not_nest_socket_paths(tmp_path):
 def test_pytest_owns_and_removes_basetemp(tmp_path, parallel, failure):
     suite = tmp_path / "test_child.py"
     record = tmp_path / "record"
-    suite.write_text("def test_payload(tmp_path):\n"
+    suite.write_text("import json\n"
+                     "from pathlib import Path\n"
+                     "def test_payload(tmp_path, tmp_path_factory, pytestconfig):\n"
+                     "    base = tmp_path_factory.getbasetemp()\n"
+                     "    owner = base.parent\n"
+                     "    if hasattr(pytestconfig, 'workerinput'):\n"
+                     "        owner = owner.parent\n"
+                     "    assert owner.name.startswith('ai-shuffle-pytest-')\n"
+                     "    if Path('/proc/self/stat').exists():\n"
+                     "        receipt = json.loads((owner / '.ai-shuffle-scratch-owner').read_text())\n"
+                     "        assert receipt['version'] == 1\n"
+                     "        assert receipt['pid'] > 0\n"
                      "    (tmp_path/'payload').write_bytes(b'x'*1048576)\n"
                      f"    __import__('pathlib').Path({str(record)!r}).write_text(str(tmp_path))\n"
                      f"    assert {not failure!r}\n")
@@ -78,7 +89,9 @@ def test_pytest_owns_and_removes_basetemp(tmp_path, parallel, failure):
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == int(failure), result.stdout + result.stderr
     directory = Path(record.read_text())
-    assert not directory.exists()
+    owner = directory.parents[2 if parallel else 1]
+    assert owner.name.startswith("ai-shuffle-pytest-")
+    assert not owner.exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGTERM cleanup")
@@ -99,8 +112,13 @@ def test_sigterm_unwinds_owned_scratch(tmp_path, runner):
     else:
         suite = tmp_path / "test_sleep.py"
         suite.write_text("import pathlib, time\n"
-                         "def test_sleep(pytestconfig):\n"
-                         f"    pathlib.Path({str(record)!r}).write_text(str(pathlib.Path(pytestconfig.option.basetemp).parent))\n"
+                         "def test_sleep(pytestconfig, tmp_path_factory):\n"
+                         "    owner = tmp_path_factory.getbasetemp().parent\n"
+                         "    if hasattr(pytestconfig, 'workerinput'):\n"
+                         "        owner = owner.parent\n"
+                         "    if pathlib.Path('/proc/self/stat').exists():\n"
+                         "        assert (owner / '.ai-shuffle-scratch-owner').is_file()\n"
+                         f"    pathlib.Path({str(record)!r}).write_text(str(owner))\n"
                          "    time.sleep(60)\n"
                          "def test_second():\n"
                          f"    pathlib.Path({str(second)!r}).touch()\n")
@@ -143,3 +161,67 @@ def test_sigterm_cleanup_preserves_staged_handler():
         assert signal.getsignal(signal.SIGTERM) is staged
     finally:
         _restore_signals(previous)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("from_fluid", [False, True])
+def test_fluid_pytest_owns_scratch(tmp_path, explicit, from_fluid):
+    """Exercise Fluid's real config boundary, without injecting our scratch plugin."""
+    import json
+
+    record = tmp_path / "record"
+    observer = tmp_path / "scratch_observer.py"
+    observer.write_text(
+        "import json, pathlib\n"
+        "def pytest_sessionstart(session):\n"
+        "    config = session.config\n"
+        "    base = pathlib.Path(config.option.basetemp)\n"
+        "    marker = base.parent / '.ai-shuffle-scratch-owner'\n"
+        "    receipt = json.loads(marker.read_text()) if marker.is_file() else None\n"
+        f"    pathlib.Path({str(record)!r}).write_text(json.dumps([str(base), receipt]))\n"
+    )
+    cwd = ROOT / "fluid" if from_fluid else ROOT
+    test = ROOT / "fluid/tests/unit/test_workflow_proposals.py"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(ROOT / "fluid")])}
+    command = [sys.executable, "-m", "pytest", "-p", "scratch_observer", str(test), "-q"]
+    requested = tmp_path / "caller-owned"
+    if explicit:
+        command += ["--basetemp", str(requested)]
+    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    base, receipt = json.loads(record.read_text())
+    base = Path(base)
+    if explicit:
+        assert base == requested
+        assert receipt is None
+        assert base.is_dir()
+    else:
+        assert base.name == "pytest"
+        assert base.parent.name.startswith("ai-shuffle-pytest-")
+        if Path("/proc/self/stat").exists():
+            assert receipt["version"] == 1
+            assert receipt["pid"] != os.getpid()
+            assert receipt["uid"] == os.getuid()
+        assert not base.parent.exists()
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_explicit_basetemp_is_caller_owned(tmp_path, parallel):
+    suite = tmp_path / "test_explicit.py"
+    record = tmp_path / "record"
+    requested = tmp_path / "caller-owned"
+    suite.write_text("def test_payload(tmp_path):\n"
+                     f"    __import__('pathlib').Path({str(record)!r}).write_text(str(tmp_path))\n")
+    command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
+               str(suite), "--basetemp", str(requested), "-q"]
+    if parallel:
+        command += ["-n", "2"]
+    result = subprocess.run(
+        command,
+        cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(record.read_text()).is_relative_to(requested)
+    assert requested.is_dir()
+    assert not (requested.parent / ".ai-shuffle-scratch-owner").exists()
