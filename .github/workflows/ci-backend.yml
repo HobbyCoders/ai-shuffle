@@ -1,14 +1,10 @@
 name: CI Backend
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} test workers)"
 
-# Manual only. Pull requests run no CI: scripts/local_ci.py runs the backend
-# tests on the developer's machine before a push, and edge publication waits
-# for a local full-suite pass on main (scripts/ci/edge_publication_gate.py).
-# Dispatch this for what a local machine cannot run: the real-PostgreSQL
-# contracts and root-account isolation steps below, before a stable release.
-#
-# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
+# Full backend checks on every PR, including drafts. Edge publication still
+# requires a separate attested local full run on main.
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       runner_cpus:
@@ -23,8 +19,8 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-backend-${{ github.ref }}-${{ inputs.runner_cpus || '2' }}
-  cancel-in-progress: true
+  group: ci-backend-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   backend:
@@ -43,17 +39,12 @@ jobs:
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
-      # The checkout below has full history: a missing old-schema commit is a
-      # failure here, not a silent skip (tests/db/test_schema_lifecycle.py).
-      SCHEMA_LIFECYCLE_REQUIRED: "1"
       PYTEST_WORKERS: ${{ inputs.runner_cpus == '4' && '4' || '2' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # The schema lifecycle tests build old-schema databases from git
-          # history; a shallow clone would skip them. The full clone takes
-          # about 5 s; a blobless clone was not adopted because those tests
-          # would then fetch old blobs one by one during the test run.
+          # Keep history for tests that inspect public revisions. Schema lifecycle
+          # tests use checked-in SQL fixtures and need no private-era commits.
           fetch-depth: 0
 
       # Official setup actions use the GitHub Actions dependency cache.
@@ -75,6 +66,12 @@ jobs:
           python -m pip install --upgrade pip==26.2.1
           pip install -r requirements.txt -r requirements-dev.txt
           pip install -e ./fluid
+
+      # setup-python's hosted tool cache can contain group/world-writable
+      # stdlib files. Match the image's trusted dependency permissions rather
+      # than weakening the root-phase import provenance assertions.
+      - name: Secure hosted Python dependency permissions
+        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
 
       - name: Reject blocking database calls on the event loop
         # The only run of tests/test_scan_blocking_db.py: the fast subset

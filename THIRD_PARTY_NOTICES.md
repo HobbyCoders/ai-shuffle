@@ -547,7 +547,7 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | unist-util-visit-parents | 6.0.2 | MIT | https://www.npmjs.com/package/unist-util-visit-parents/v/6.0.2 |
 | vfile | 6.0.3 | MIT | https://www.npmjs.com/package/vfile/v/6.0.3 |
 | vfile-message | 4.0.3 | MIT | https://www.npmjs.com/package/vfile-message/v/4.0.3 |
-| vite | 7.3.6 | MIT | https://www.npmjs.com/package/vite/v/7.3.6 |
+| vite | 7.3.7 | MIT | https://www.npmjs.com/package/vite/v/7.3.7 |
 | vitefu | 1.1.1 | MIT | https://www.npmjs.com/package/vitefu/v/1.1.1 |
 | vitest | 4.1.11 | MIT | https://www.npmjs.com/package/vitest/v/4.1.11 |
 | w3c-keyname | 2.2.8 | MIT | https://www.npmjs.com/package/w3c-keyname/v/2.2.8 |

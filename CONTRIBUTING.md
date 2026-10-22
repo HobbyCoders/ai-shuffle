@@ -14,7 +14,7 @@ Contributions use the [Developer Certificate of Origin 1.1](https://developercer
 
 ## Run checks locally
 
-CI runs no tests on pull requests or branch pushes. A push should contain work that has already passed the local checks.
+Before every push, run only the affected tests plus the offline secret scan. Every pull request, including drafts and fork contributions, runs the full hosted suites in parallel. Merge requires green CI and review.
 
 Once per clone, run `python scripts/local_ci.py install` to install the pre-push hook. It selects a Python with pytest and PyYAML; pass `--python PATH` if you need to choose one. Worktrees share that hook.
 
@@ -31,10 +31,12 @@ For frontend work, run `npm ci` and `npx svelte-kit sync` in `frontend/` once pe
 Before a push, commit your changes and run:
 
 ```sh
-python scripts/local_ci.py
+python scripts/local_ci.py fast
 ```
 
-It selects the checks your changes reach and records a pass for the committed tree. Read its “Not covered here” lines and repeat them in your pull request. If a check or the pre-push hook fails, fix the failure locally; never push with `--no-verify` or use GitHub Actions to find out whether tests pass. If your machine cannot run a required check, explain the limitation to a maintainer before pushing.
+It maps changes against the remote main merge-base to affected tests, falling back to the whole area suite when a mapping is unknown. Docs-only changes run docs checks. It records a pass for a clean committed tree; the hook always scans outgoing commits, even with a cached pass. Never bypass it with `--no-verify`. Read its “Not covered here” lines and repeat them in your pull request. Fix local failures before pushing, then fix any full-suite failures reported by CI before review and merge.
+
+`check`, `full` and `full --step --attest` remain available for broader local validation. Before edge/nightly publication, maintainers still run the attested full suite locally on main; PR CI does not replace that publication gate. See [where tests run](docs/ci/pr-checks.md).
 
 ## Open a draft pull request
 
