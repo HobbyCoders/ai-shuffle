@@ -451,7 +451,7 @@ async def dispatch_remote(
         remote_tasks.record_dispatch, worker_session_id=worker_id,
         target_device_id=worker["device_id"], owner_session_id=caller_session_id,
         root_session_id=root_session_id, tool_use_id=launch_tool_use_id, mode=mode,
-        label=label, agent=result_agent, target_name=name)
+        label=label, agent=result_agent, target_name=name, published_base=state.base_commit)
     # Its spend counts against the assistant's limits when the assistant started it.
     await asyncio.to_thread(_link_job, caller_session_id, worker_id, worker["device_id"], label)
 

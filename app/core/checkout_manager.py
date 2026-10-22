@@ -32,6 +32,7 @@ Reuses ``git_service`` and ``worktree_manager._sanitize_branch_name`` by import.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import logging
 import ntpath
@@ -288,7 +289,14 @@ def _branch_plan(
         from app.core.git_fork_base import fetch_base
 
         fetched_branch, fetched = fetch_base(base_dir, base_branch)
-        return True, (base_branch or fetched_branch) if fetched else base_branch
+        if base_branch or fetched:
+            return True, base_branch or fetched_branch
+        # Offline, prefer the same default branch if either cached ref exists;
+        # retain HEAD only for repositories with no default ref at all.
+        for ref in (f"refs/remotes/origin/{fetched_branch}", f"refs/heads/{fetched_branch}"):
+            if git_service._run_git(base_dir, ["rev-parse", "--verify", ref], timeout=5).returncode == 0:
+                return True, fetched_branch
+        return True, None
     try:
         return resolve_rebound_branch_plan(
             git_service, base_dir, branch, project_id=project_id, runner_id=runner_id,
@@ -689,29 +697,33 @@ def _ensure_branch_checkout(
     if legacy_path is not None:
         return legacy_path
 
-    plan = _branch_plan(
-        base_path, branch, base_branch=base_branch, create_new_branch=create_new_branch,
-        project_id=project_id, runner_id=runner_id,
-    )
-    if plan is None:
-        # Branch not local, not on origin, and not an intentional new branch —
-        # honestly not materializable here (never fabricate an empty branch).
-        return None
-    new_branch, plan_base = plan
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:  # pragma: no cover - defensive
         logger.warning("checkout_manager: cannot create %s: %s", dest.parent, e)
         return None
 
-    success, err = git_service.add_worktree(
-        main_dir=base_path,
-        path=dest_str,
-        branch=branch,
-        new_branch=new_branch,
-        base_branch=plan_base,
-        fetch_base=not create_new_branch,
-    )
+    from app.core.worker_checkout import _project_lock
+
+    # Only new-chat creation joins dispatch's project lock. Existing checkout
+    # lookup, recovery/clone, and runtime setup never hold this lock.
+    with _project_lock(project_id) if create_new_branch else nullcontext():
+        plan = _branch_plan(
+            base_path, branch, base_branch=base_branch, create_new_branch=create_new_branch,
+            project_id=project_id, runner_id=runner_id,
+        )
+        if plan is None:
+            # Never fabricate a branch that cannot be recovered here.
+            return None
+        new_branch, plan_base = plan
+        success, err = git_service.add_worktree(
+            main_dir=base_path,
+            path=dest_str,
+            branch=branch,
+            new_branch=new_branch,
+            base_branch=plan_base,
+            fetch_base=not create_new_branch,
+        )
     if not success:
         logger.warning(
             "checkout_manager: git worktree add failed for branch %r at %s: %s",
@@ -1612,18 +1624,15 @@ def ensure_checkout(
             register_unregistered_worktrees(project_id, runner_id, base)
         return base
     try:
-        from app.core.worker_checkout import _project_lock
-
-        with _project_lock(project_id):
-            path = _ensure_branch_checkout(
-                project_v2_row,
-                project_id,
-                runner_id,
-                branch,
-                base_branch=base_branch,
-                create_new_branch=create_new_branch,
-                provision_runtime=provision_runtime,
-            )
+        path = _ensure_branch_checkout(
+            project_v2_row,
+            project_id,
+            runner_id,
+            branch,
+            base_branch=base_branch,
+            create_new_branch=create_new_branch,
+            provision_runtime=provision_runtime,
+        )
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
         return None

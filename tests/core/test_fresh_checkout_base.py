@@ -3,6 +3,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -80,18 +81,85 @@ def test_failed_or_timed_out_fetch_falls_back(world, monkeypatch, tmp_path, capl
     w = world
     if timeout:
         slow = tmp_path / "slow.py"
-        slow.write_text("import time; time.sleep(0.5)\n")
+        slow.write_text("import time; time.sleep(10)\n")
         argv = [sys.executable, str(slow)]
         command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
         git(w["base"], "config", "remote.origin.uploadpack", command)
         monkeypatch.setattr(git_fork_base, "FETCH_TIMEOUT", 0.05)
     else:
         git(w["base"], "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    started = time.monotonic()
     checkout = prepare(w)
+    assert time.monotonic() - started < 6, "Dispatch must not wait for the ten-second child"
     assert checkout.base_commit == w["old"] == git(checkout.path, "rev-parse", "HEAD")
     assert "Caller HEAD; fetch-failed fallback." in checkout.instructions()
     if timeout:
-        assert "Git command timed out" in caplog.text
+        assert "Checkout base fetch failed or timed out" in caplog.text
+
+
+def test_fetch_timeout_kills_real_credential_helper_without_pipe_drain(world, monkeypatch, tmp_path):
+    import http.server
+    import json
+    import threading
+    import psutil
+
+    class Unauthorized(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="test"')
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    w = world
+    marker = tmp_path / "helper-started.json"
+    helper = tmp_path / "slow-helper.py"
+    helper.write_text(
+        "import os, json, time\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(json.dumps(dict(pid=os.getpid(), "
+        "terminal=os.environ.get('GIT_TERMINAL_PROMPT'), "
+        "interactive=os.environ.get('GCM_INTERACTIVE'))))\n"
+        "time.sleep(15)\n"
+    )
+    git(w["base"], "config", "credential.helper", "")
+    git(w["base"], "config", "--add", "credential.helper",
+        f'!"{sys.executable.replace(os.sep, "/")}" "{helper.as_posix()}"')
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("GCM_INTERACTIVE", "Always")
+    monkeypatch.setattr(git_fork_base, "FETCH_TIMEOUT", 3)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        git(w["base"], "remote", "set-url", "origin", f"http://127.0.0.1:{server.server_port}/repo.git")
+        started = time.monotonic()
+        checkout = prepare(w)
+        assert time.monotonic() - started < 9, "Do not drain pipes held by the fifteen-second helper"
+        assert checkout.base_commit == w["old"]
+        assert marker.exists(), "The real Git credential helper must have started"
+        recorded = json.loads(marker.read_text())
+        assert recorded["terminal"] == "0"
+        assert recorded["interactive"] == "Never"
+        try:
+            helper_process = psutil.Process(recorded["pid"])
+            deadline = time.monotonic() + 2
+            while helper_process.status() != psutil.STATUS_ZOMBIE and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert helper_process.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        if marker.exists():
+            try:
+                psutil.Process(json.loads(marker.read_text())["pid"]).kill()
+            except psutil.NoSuchProcess:
+                pass
 
 
 @pytest.mark.parametrize("explicit_branch", [False, True])
@@ -122,6 +190,98 @@ def test_remote_default_fetch_failure_falls_back_after_task_branch_fetch(world, 
     received = worker_checkout.receive_worker_branch(state.to_wire(), "remote-offline")
     assert received.checkout.base_commit == w["old"] == git(received.cwd, "rev-parse", "HEAD")
     assert "Caller HEAD; fetch-failed fallback." in received.checkout.instructions()
+
+
+def test_existing_checkout_fast_path_never_takes_project_lock(world, monkeypatch):
+    w = world
+
+    def refuse_lock(*args):
+        pytest.fail("Existing checkout lookup must not acquire the project lock")
+
+    monkeypatch.setattr(worker_checkout, "_project_lock", refuse_lock)
+    path = checkout_manager.ensure_checkout(w["project"], "caller", provision_runtime=False)
+    assert path == str(w["caller"])
+
+
+def test_offline_chat_without_base_uses_cached_default_not_base_head(world, tmp_path):
+    w = world
+    git(w["base"], "switch", "-c", "other-branch")
+    own = commit(w["base"], "other.txt", "not the default branch")
+    git(w["base"], "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    path = checkout_manager.ensure_checkout(w["project"], "chore/chat-offline-default",
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == w["old"] != own
+    assert git(w["base"], "rev-parse", "HEAD") == own
+
+
+def test_fetch_coalesces_worktrees_then_refreshes_after_ten_seconds(world, monkeypatch):
+    from app.core import checkout_transfer
+
+    w = world
+    run = checkout_transfer._run
+    fetches = []
+
+    def observed_run(cwd, *args, **kwargs):
+        if args[0] == "fetch":
+            fetches.append(args)
+        return run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(checkout_transfer, "_run", observed_run)
+    assert git_fork_base.fetch_base(str(w["base"])) == ("main", True)
+    fresh = commit(w["seed"], "later.txt", "newer default")
+    git(w["seed"], "push", "origin", "main")
+    assert git_fork_base.fetch_base(str(w["caller"])) == ("main", True)
+    assert len(fetches) == 1
+    assert git(w["base"], "rev-parse", "origin/main") == w["fresh"]
+    key = (str(w["base"].resolve()), "main")
+    git_fork_base._recent_fetches[key] -= 11
+    assert git_fork_base.fetch_base(str(w["caller"])) == ("main", True)
+    assert len(fetches) == 2
+    assert git(w["base"], "rev-parse", "origin/main") == fresh
+    # A different branch never shares the freshness window.
+    git(w["seed"], "push", "origin", "HEAD:refs/heads/topic")
+    assert git_fork_base.fetch_base(str(w["caller"]), "topic") == ("topic", True)
+    assert len(fetches) == 3
+
+
+def test_failed_fetch_is_not_coalesced(world, tmp_path):
+    w = world
+    git(w["base"], "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    assert git_fork_base.fetch_base(str(w["base"])) == ("main", False)
+    git(w["base"], "remote", "set-url", "origin", str(w["origin"]))
+    assert git_fork_base.fetch_base(str(w["caller"])) == ("main", True)
+    assert git(w["base"], "rev-parse", "origin/main") == w["fresh"]
+
+
+def test_old_git_uses_compatible_flags_and_the_shared_repository_lock(world, monkeypatch, caplog):
+    from app.core import checkout_transfer
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    w = world
+    run = checkout_transfer._run
+    locks = []
+    commands = []
+
+    def observed_lock(root):
+        locks.append(root)
+        return repo_worktree_lock(root)
+
+    def observed_run(cwd, *args, **kwargs):
+        commands.append(args)
+        return run(cwd, *args, **kwargs)
+
+    # Feature gating only: all repository operations still run real Git.
+    monkeypatch.setattr(git_fork_base, "_git_version", lambda _: (2, 25))
+    monkeypatch.setattr(git_fork_base, "FETCH_COALESCE_SECONDS", 0)
+    monkeypatch.setattr(git_fork_base, "repo_worktree_lock", observed_lock)
+    monkeypatch.setattr(checkout_transfer, "_run", observed_run)
+    git_fork_base._log_legacy_fetch.cache_clear()
+    for _ in range(2):
+        assert git_fork_base.fetch_base(str(w["caller"])) == ("main", True)
+    assert locks == [str(w["base"].resolve())] * 2
+    assert all("--no-write-fetch-head" not in command for command in commands)
+    assert caplog.text.count("Git older than 2.29") == 1
+    assert git(w["caller"], "rev-parse", "origin/main") == w["fresh"]
 
 
 @pytest.mark.parametrize("new_peer", [False, True])
