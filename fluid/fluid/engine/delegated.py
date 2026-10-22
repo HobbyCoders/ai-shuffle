@@ -907,11 +907,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if claude_mod_compaction is None else bool(claude_mod_compaction)
         )
         self._compaction_route = False
-        if self.claude_mod_compaction and self.registry is not None:
-            from fluid.tools.builtins import history_expand, history_search
-            for tool in (history_expand, history_search):
-                if self.registry.get(tool.SPEC.name) is None:
-                    self.registry.register_builtin(tool.SPEC, tool.handler)
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -1503,6 +1498,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return []
         self._claude_mod_dir = path
         self._claude_mod_state = "requested"
+        # Only a spawn that can load the compaction hook needs recall tools.
+        if self.claude_mod_compaction and self.registry is not None:
+            from fluid.tools.builtins import history_expand, history_search
+            for tool in (history_expand, history_search):
+                if self.registry.get(tool.SPEC.name) is None:
+                    self.registry.register_builtin(tool.SPEC, tool.handler)
         return ["--plugin-dir", path]
 
     def _check_claude_mod(self, mapper: StreamJsonMapper) -> None:
@@ -1675,7 +1676,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # respawn, so the next turn does not write into a dead pipe.
             await self._stop_process(grace=1.0)
         await self._version_guard()
-        await self._start_bundled_server()
         spawn_kwargs: dict[str, Any] = {}
         if os.name != "nt":
             # Own session, so _stop_process can kill the CLI's whole process
@@ -1686,6 +1686,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._cli_cost_total = None if self._spawn_resume else 0.0
         self._claude_mod_listed = None
         argv = self._build_argv()
+        # Staging the mod registers its recall tools before the bridge decides
+        # which tools to expose. The first spawn has no MCP config until now.
+        await self._start_bundled_server()
+        if self._mcp_config_path and "--mcp-config" not in argv:
+            argv += ["--mcp-config", self._mcp_config_path, "--strict-mcp-config"]
         # After the argv, which decides whether this spawn gets the mod.
         child_env = {**self._child_env(), **self._claude_mod_env()}
         from fluid.tools import agent_runner

@@ -298,3 +298,35 @@ async def test_without_the_mod_the_spawn_is_unchanged(tmp_path, caplog, version,
         assert not any("AI Shuffle's mod" in r.getMessage() for r in caplog.records)
     finally:
         await loop.aclose()
+
+
+@pytest.mark.parametrize(("version", "enabled", "copy_fails", "exposed"), [
+    ("2.1.286", True, False, False),
+    ("2.1.287", False, False, False),
+    ("2.1.287", True, True, False),
+    ("2.1.287", True, False, True),
+])
+async def test_compaction_recall_tools_require_a_staged_mod(
+    tmp_path, monkeypatch, version, enabled, copy_fails, exposed,
+) -> None:
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("FLUID_CLAUDE_MOD", "true" if enabled else "false")
+    if copy_fails:
+        def refuse(_tmpdir):
+            raise PermissionError("read-only scratch")
+        monkeypatch.setattr(delegated_mod, "_stage_claude_mod", refuse)
+    registry = ToolRegistry()
+    loop, record = _loop(tmp_path, version, registry=registry, claude_mod_compaction=True)
+    try:
+        await _turn(loop)
+        names = {spec.name for spec in registry.list_tools(loaded_only=False)}
+        assert ("HistoryExpand" in names) is exposed
+        assert ("HistorySearch" in names) is exposed
+        argv = _spawn_argv(record)
+        assert ("--plugin-dir" in argv) is exposed
+        if exposed:
+            assert "--mcp-config" in argv
+            assert loop._claude_mod_listed is True
+    finally:
+        await loop.aclose()
