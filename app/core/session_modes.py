@@ -170,17 +170,8 @@ def session_mode_of(session_row: Optional[Mapping[str, Any]]) -> str:
 
 
 def runtime_session_mode(row: Optional[Mapping[str, Any]]) -> str:
-    """No-project owner sessions share the read-only coordination ceiling.
-
-    The old mode column remains readable and unchanged until the step-4 UI
-    migration. A legacy code-lane row with no project must not grant a shell.
-    """
-    mode = session_mode_of(row)
-    if row and not row.get("hidden") and mode != "voice" and not (row.get("project_id") or row.get("project_v2_id")):
-        from app.core.session_orchestration import is_owner_session
-        if is_owner_session(row):
-            return "chat"
-    return mode
+    """Step 1 widens stored chat rows only; legacy code rows migrate in step 4."""
+    return session_mode_of(row)
 
 
 def storage_session_mode(mode: Any) -> Optional[str]:

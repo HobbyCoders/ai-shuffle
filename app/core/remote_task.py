@@ -106,7 +106,7 @@ _BODY_KEYS = frozenset({
     "version", "worker_session_id", "agent", "agent_name", "prompt", "label",
     "name", "provider_id", "model", "effort", "permission_mode",
     "tool_allowlist", "mode", "origin", "depth", "checkout", "parent",
-    "context_window", "fast", "effort_explicit",
+    "context_window", "fast", "effort_explicit", "sender_version", "session_mode",
 })
 #: The ``remote_task`` capability that accepts ``context_window`` in the body.
 #: An older target refuses unknown fields, so the parent sends it only to
@@ -237,6 +237,7 @@ def start_body(
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
     effort_explicit: Optional[bool] = None,
+    session_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The ``task-start`` body. Identifiers only; never a path or credential.
 
@@ -275,6 +276,8 @@ def start_body(
         body["fast"] = bool(fast)
     if effort_explicit is not None:
         body["effort_explicit"] = effort_explicit
+    if session_mode == "chat":
+        body.update(sender_version=TARGET_DEFAULT_VERSION, session_mode="chat")
     return body
 
 
@@ -442,6 +445,12 @@ async def dispatch_remote(
         except Exception:  # noqa: BLE001 — the refusal stands either way
             logger.warning("remote_task: could not release %s", state.branch, exc_info=True)
 
+    from app.core.session_modes import session_mode_of
+    chat_child = (session_mode_of(caller_row) == "chat"
+                  and not (caller_row.get("project_id") or caller_row.get("project_v2_id")))
+    if chat_child and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
+        await release()
+        return {"ok": False, "error": f"{name} cannot confine chat Tasks; update that worker before retrying."}
     body = start_body(
         worker_session_id=worker_id, agent=profile_id, agent_name=agent_name, prompt=prompt,
         label=label, roster_name=roster_name, provider_id=provider_id, model_id=model_id,
@@ -451,6 +460,7 @@ async def dispatch_remote(
         owner_session_id=caller_session_id, tool_use_id=launch_tool_use_id,
         context_window=context_window, fast=fast,
         effort_explicit=effort_explicit if _remote_task_version(worker) >= EFFORT_VERSION else None,
+        session_mode="chat" if chat_child else None,
     )
     if stop_generation is not None and task_registry.stop_invalidated(root_session_id, stop_generation):
         await release()
@@ -606,6 +616,7 @@ class _Start:
     context_window: Optional[int] = None
     fast: Optional[bool] = None
     effort_explicit: bool = False
+    session_mode: Optional[str] = None
 
 
 def _text(body: Mapping[str, Any], key: str, limit: int) -> str:
@@ -641,6 +652,10 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         raise ValueError("The subagent request must be an object")
     if body.get("version") != WIRE_VERSION:
         raise ValueError("Unsupported subagent request version; update this worker.")
+    session_mode = body.get("session_mode")
+    if session_mode is not None and (session_mode != "chat"
+            or type(body.get("sender_version")) is not int or body["sender_version"] != TARGET_DEFAULT_VERSION):
+        raise ValueError("The chat ceiling requires an explicit version-6 sender request; update that worker.")
     unknown = set(body) - _BODY_KEYS
     if unknown:
         raise ValueError(f"Unknown subagent request fields: {', '.join(sorted(unknown))}")
@@ -710,6 +725,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         owner_session_id=_text(parent, "owner_session_id", 200),
         tool_use_id=_optional_text(parent, "tool_use_id", 200),
         fingerprint=_fingerprint(body),
+        session_mode=session_mode,
         context_window=context_window,
         fast=fast,
     )
@@ -894,8 +910,8 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         permission_mode=permission_mode, context_window=context_window,
         permission_ceiling=permission_mode, fast=fast,
     )
-    if not project_v2_id:
-        # A remote research child without a project has no worker file/shell grant.
+    if not project_v2_id and start.session_mode == "chat":
+        # Only an explicit v6 request opts in. Old senders/legacy code keep their ceiling.
         fields["mode"] = "chat"
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=effort,

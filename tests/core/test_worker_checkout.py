@@ -274,17 +274,25 @@ def repo(mock_db, tmp_path):
 
 
 def test_no_project_owner_task_uses_named_project_checkout(repo, worker_runtime, monkeypatch):
-    from app.core import session_orchestration as orch
+    from app.core import session_orchestration as orch, task_dispatch
+    from app.core import turn_manager
     row, parent, base, _ = repo
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
-    database.create_session("coordinator", "coder", mode="chat", is_active=True)
-    worker_runtime.work["named-worker"] = lambda cwd: commit_in(cwd)
-    outcome = dispatch(parent="coordinator", worker="named-worker", project_override=row["project_v2_id"])
-    assert outcome.ok, outcome.error
-    child = database.get_session("named-worker")
+    database.create_profile("coordinator-agent", "Coordinator", None, {"model": "sonnet"})
+    database.create_session("coordinator", "coordinator-agent", mode="chat", is_active=True)
+    submit = turn_manager.submit_async
+    async def complete(sid, source, **kwargs):
+        worker_runtime.work[sid] = lambda cwd: commit_in(cwd)
+        return await submit(sid, source, **kwargs)
+    monkeypatch.setattr(turn_manager, "submit_async", complete)
+    outcome = asyncio.run(task_dispatch.dispatch_task_tool(
+        {"agent": "coder", "prompt": "Work", "project": row["project_v2_id"], "mode": "sync"},
+        caller_session_id="coordinator"))
+    assert outcome["ok"], outcome
+    child = database.get_session(worker_runtime[0]["session_id"])
     assert child["project_v2_id"] == row["project_v2_id"]
     assert child["worktree_path"] not in {str(base), str(parent)}
-    assert child["branch"] == child["worktree_branch"] == "chore/task-named-worker"
+    assert child["branch"] == child["worktree_branch"] == "chore/task-" + child["id"]
     assert worker_runtime[0]["head"] == git(base, "rev-parse", "HEAD")
     assert worker_runtime[0]["overrides"]["cwd"] == child["worktree_path"]
 

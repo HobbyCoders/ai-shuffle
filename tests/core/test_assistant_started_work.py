@@ -92,8 +92,9 @@ async def test_ordinary_owner_start_session_reports_automatically(mock_db, monke
     result = json.loads(outcome.text)
     assert "reports back to you automatically" in result["note"] and "project" not in result
     new_id = result["session_id"]
-    assert orch.started_by_home(new_id) == "caller"
-    assert away_mode.answers_questions(new_id)
+    assert orch.started_by_owner(new_id) == "caller"
+    assert orch.started_by_home(new_id) is None
+    assert not away_mode.answers_questions(new_id)
     assert approvals.assistant_route(new_id).parent_session_id == "caller"
     run(new_id, result["turn_id"], "Done.")
     await turn_scheduler.on_turn_settled(new_id, result["turn_id"], "completed")

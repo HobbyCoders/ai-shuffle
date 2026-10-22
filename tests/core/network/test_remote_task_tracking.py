@@ -418,8 +418,7 @@ def swarm_network(workers, monkeypatch):
         with worker.active():
             from app.db import mobile_tool_identity
             mobile_tool_identity.init_schema()
-            database.create_profile("helper", "Helper", None,
-                                    {"model": "sonnet", "allowed_tools": ["Read", "Glob", "Grep"]})
+            database.create_profile("helper", "Helper", None, {"model": "sonnet"})
             from app.network import engine
             engine.publish_presence(capabilities={"remote_task": 1})
     converge([a, b])

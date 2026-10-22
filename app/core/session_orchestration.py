@@ -471,7 +471,8 @@ def _remote_worker(value, listing=None):
                                  refused="nothing was started", listing=listing)
     if row["is_self"]:
         return None
-    return {"device_id": row["device_id"], "device_name": row["device_name"]}
+    return {"device_id": row["device_id"], "device_name": row["device_name"],
+            "capabilities": row.get("capabilities") or {}}
 
 
 def _start_turn(session_id):
@@ -490,13 +491,16 @@ def _home_of_start(session_id, start):
     home = payload.get("orchestration_sender")
     if not home or home == session_id or payload.get("orchestration_remote_origin"):
         return None
-    return home if is_owner_session(home) else None
+    if is_owner_session(home):
+        return home
+    from app.db import sessions
+    # A host-written start marker still owes a report after its starter was
+    # deleted. This is delivery-only: a missing row cannot grant any powers.
+    return home if sessions.get_session(home) is None else None
 
 
-def started_by_home(session_id):
-    """The owner top-level starter of this local chat, else None.
-
-    The historic function name is retained for approval/away-mode consumers.
+def started_by_owner(session_id):
+    """The owner starter to report/route approvals to, not a permission grant.
 
     Durable: read from the chat's StartSession turn, whose sender and command id
     the host wrote. Never raises; any doubt answers None (ordinary behaviour).
@@ -506,8 +510,15 @@ def started_by_home(session_id):
     try:
         return _home_of_start(session_id, _start_turn(session_id))
     except Exception:  # noqa: BLE001 — absent marker means an ordinary chat
-        log.debug("started_by_home failed for %s", session_id, exc_info=True)
+        log.debug("started_by_owner failed for %s", session_id, exc_info=True)
         return None
+
+
+def started_by_home(session_id):
+    """Only legacy-home work receives the assistant scope and Away handling."""
+    from app.core.assistant_service import is_primary_session
+    starter = started_by_owner(session_id)
+    return starter if starter and is_owner_session(starter) and is_primary_session(starter) else None
 
 
 def _resolve_project(value):
@@ -755,7 +766,9 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         body.update(model=model_plan["model"], provider_id=model_plan["provider_id"], **mapped)
         body["model_choice"] = _override_record(model_plan)
     if assistant:
+        from app.core.assistant_service import is_primary_session
         body["report_back"] = True
+        body["assistant_work"] = is_primary_session(sender["id"])
     from app.core.model_effort import resolve_child_effort, resolve_child_fast
     # Older peers only fit the transmitted flag to their model; send the
     # owner's resolved pick so a saved off cannot become a paid fast child.
@@ -827,6 +840,10 @@ def accept_remote_start(body, from_device):
     worker_name = member.name or from_device
 
     report_back = body.get("report_back") is True
+    # Older senders only used report_back for legacy-home work.
+    assistant_work = body.get("assistant_work", report_back)
+    if type(assistant_work) is not bool:
+        raise ValueError("assistant_work must be true or false")
     choice = body.get("model_choice") if isinstance(body.get("model_choice"), dict) else None
 
     def receipt(turn, created):
@@ -835,6 +852,7 @@ def accept_remote_start(body, from_device):
                 "status": "queued" if created else "already_queued",
                 "delivery_status": _delivery_status(turn),
                 "report_back": bool((turn.get("payload") or {}).get("orchestration_report_device")),
+                "assistant_work": bool(row.get("away_mode")),
                 "model": row.get("model"), "provider_id": row.get("provider_id")}
 
     if sessions.get_session(session_id) is not None:
@@ -914,7 +932,7 @@ def accept_remote_start(body, from_device):
             conn.cursor().execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, session_id))
             overrides["system_prompt_append"] = _checkout_note(checkout)
             unused.kept = True
-        if report_back:
+        if report_back and assistant_work:
             # Approvals cannot travel back to the assistant's worker, so Away
             # mode applies as is: questions get the recommended option and
             # approvals are deferred (never granted) and listed in the report.
@@ -1328,6 +1346,13 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         # The owner's own paired phone or browser is the owner (#2218).
         if sender.get("api_user_id") or not owner_principal(_principal(sender_id)):
             raise PermissionError("Only the owner's chats can start chats on another worker.")
+        from app.core.assistant_service import is_primary_session
+        from app.core.runner_capabilities import START_SESSION_PERMISSIONS_VERSION
+        capability = (remote.get("capabilities") or {}).get("start_session_permissions", 0)
+        if assistant and not is_primary_session(sender_id) and (
+                type(capability) is not int or capability < START_SESSION_PERMISSIONS_VERSION):
+            raise ValueError(f"{remote['device_name']} cannot separate report-back from assistant permissions; "
+                             "update that worker before retrying. Nothing was started.")
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
         (sender_id + ":" + request_id).encode()).hexdigest()
     fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
@@ -1629,9 +1654,12 @@ async def _start_remote(plan, sender_id, sender_generation):
     if plan["body"].get("report_back"):
         if answer.get("report_back"):
             result["note"] = (f"Runs on {name}, in the project's checkout there, with no private-access "
-                              "grants. It reports back to you automatically when it finishes or fails. It runs "
-                              "in Away mode there: questions get the recommended option and approvals are "
-                              "held back for the owner and listed in its report.")
+                              "grants. It reports back to you automatically when it finishes or fails.")
+            if answer.get("assistant_work", plan["body"].get("assistant_work", True)):
+                result["note"] += (" It runs in Away mode there: questions get the recommended option and "
+                                   "approvals are held back for the owner and listed in its report.")
+            else:
+                result["note"] += " It keeps its permission binding; report-back does not enable Away mode."
         else:
             result["note"] += (f" {name} runs an older release, so this chat will not report back on "
                                "its own; tell the owner to check it there.")
@@ -1778,12 +1806,20 @@ async def defer_started_report(starter_id, frame):
         from app.db.base import transaction
         with transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (starter_id,))
+            # Keep the durable receipt on the child, including if the starter
+            # disappeared between settlement and delivery. Never recreate it.
+            receipt_session = frame.get("task_id")
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (receipt_session,))
+            if not cursor.fetchone():
+                receipt_session = starter_id
+                cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (receipt_session,))
+                if not cursor.fetchone():
+                    return False
             cursor.execute("SELECT id FROM session_events WHERE id=%s", (event_id,))
             if cursor.fetchone():
                 return False
-            session_events.append_events(starter_id, [{"id": event_id, "type": "orchestration.report_deferred",
-                "payload": {"child_session_id": frame.get("task_id"),
+            session_events.append_events(receipt_session, [{"id": event_id, "type": "orchestration.report_deferred",
+                "payload": {"starter_session_id": starter_id, "child_session_id": frame.get("task_id"),
                             "child_turn_id": frame.get("agent_message_turn_id")}}], _conn=conn)
             return True
     if await asyncio.to_thread(record):

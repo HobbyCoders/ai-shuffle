@@ -350,6 +350,16 @@ def test_a_remote_chat_past_its_job_time_is_stopped_turn_by_turn_and_owner_turns
     with b.active():
         asyncio.run(limits.enforce())
         assert len(interrupts) == 1
+    # An automatic Away answer uses the user lane but has no owner exemption.
+    with a.active():
+        turns.settle_turn(mine["id"], "completed")
+        automatic = turns.enqueue_turn("remote-chat", "user", prompt="automatic answer", profile_id="default",
+                                       payload={"question_answer_human_input": False})
+        assert turns.start_turn(automatic["id"])
+    with b.active():
+        asyncio.run(limits.enforce())
+        assert interrupts[-1]["turn_id"] == automatic["id"]
+        assert len(interrupts) == 2
 
 
 def test_an_unreachable_worker_is_not_stopped_until_it_answers(workers, monkeypatch, kicks, interrupts, notices):
