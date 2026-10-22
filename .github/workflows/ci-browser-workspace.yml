@@ -79,6 +79,14 @@ jobs:
         working-directory: browser-mcp
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # The hosted Azure Ubuntu mirror can drip package downloads past the
+          # deadline. Use Ubuntu's primary HTTPS archive; retain the configured
+          # suite, signed indexes, keyring and normal package hash verification.
+          for source in /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
+            fi
+          done
           timeout --kill-after=10s 180s npx --no-install playwright-core install --with-deps chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
       - name: Verify shadow-root auth editor discovery and edits

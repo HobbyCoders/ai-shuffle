@@ -115,6 +115,9 @@ def test_workspace_cases_keep_real_browser_and_ui_security_checks():
     assert "if" not in install
     assert "install --with-deps chromium" in install["run"]
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in install["run"]
+    assert "https://archive.ubuntu.com/ubuntu" in install["run"]
+    assert "--allow-unauthenticated" not in install["run"]
+    assert "trusted=yes" not in install["run"]
     assert steps["Cache managed Chromium"]["uses"] == "actions/cache@v4"
     assert "nested shadow auth fields" in steps["Verify shadow-root auth editor discovery and edits"]["run"]
     assert "verify-crumb-strip.mjs" in steps["Verify desktop breadcrumb strip layout"]["run"]
