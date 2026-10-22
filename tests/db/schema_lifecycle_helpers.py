@@ -25,14 +25,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import subprocess
-import sys
-import types
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _ADD_COLUMN = re.compile(
     r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.I)
@@ -132,95 +127,23 @@ def boot(raw: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Old-schema fixtures, built from git history at test time
+# Portable old-schema fixtures
 # ---------------------------------------------------------------------------
 
-def git_show(commit: str, path: str) -> str | None:
-    """``git show commit:path``, or None when the object is not available
-    (a shallow checkout, or no git at all)."""
-    try:
-        return subprocess.run(
-            ["git", "show", f"{commit}:{path}"], cwd=REPO_ROOT, capture_output=True,
-            text=True, check=True, timeout=30,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
+SCHEMA_FIXTURES = Path(__file__).with_name("fixtures")
 
 
-def _module_from_source(name: str, source: str) -> types.ModuleType:
-    module = types.ModuleType(name)
-    module.__file__ = f"<git:{name}>"
-    exec(compile(source, module.__file__, "exec"), module.__dict__)
-    return module
+def build_old_database(raw: sqlite3.Connection, version: int) -> None:
+    """Load a frozen schema-only fixture, never today's schema or git history.
 
-
-@contextmanager
-def _swap_modules(replacements: dict):
-    """Serve ``replacements`` from ``sys.modules`` for the block, touching no
-    other entry (``patch.dict`` would also evict modules first imported
-    inside the block)."""
-    saved = {name: sys.modules.get(name) for name in replacements}
-    sys.modules.update(replacements)
-    try:
-        yield
-    finally:
-        for name, module in saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
-
-
-def build_old_database(raw: sqlite3.Connection, commit: str, *, with_column_pass: bool) -> bool:
-    """Create the schema commit ``commit`` would have created on first boot.
-
-    Runs that commit's own ``create_postgres_schema`` (with that commit's
-    ``app.db.network`` / ``app.db.mobile_hub`` schema modules when it imports
-    them) and, when asked, that commit's ``_run_column_migrations`` — the
-    whole of its ``init_database`` for a fresh install. Returns False when git
-    cannot supply the sources.
+    v49 includes the old column pass; v88 is the bootstrap-only boundary.
+    The SQL contains only table/index definitions and the schema version row;
+    application data is seeded explicitly by each lifecycle test.
     """
-    import json
-    import logging
-
-    import psycopg2
-
-    from app.db import base, compat
-    from tests.pg_shim import ShimCursor
-
-    schema_source = git_show(commit, "app/db/schema_postgres.py")
-    if schema_source is None:
-        return False
-    old_modules = {}
-    for dotted, path in (("app.db.network", "app/db/network.py"),
-                         ("app.db.mobile_hub", "app/db/mobile_hub.py")):
-        if dotted in schema_source:
-            source = git_show(commit, path)
-            if source is None:
-                return False
-            old_modules[dotted] = _module_from_source(dotted, source)
-
-    with _swap_modules(old_modules):
-        schema = _module_from_source("old_schema_postgres", schema_source)
-        cursor = ShimCursor(raw.cursor())
-        schema.create_postgres_schema(cursor)
-        if with_column_pass:
-            database_source = git_show(commit, "app/db/database.py")
-            if database_source is None:
-                return False
-            start = database_source.index("def _run_column_migrations(cursor):")
-            end = database_source.index("def init_database():")
-            namespace = {
-                "json": json, "logger": logging.getLogger("old_database"), "psycopg2": psycopg2,
-                "_DB_ERRORS": (psycopg2.Error, sqlite3.Error),
-                "column_exists": base.column_exists, "table_exists": base.table_exists,
-                "column_is_not_null": base.column_is_not_null,
-                "_validate_identifier": base._validate_identifier, "ph": compat.ph,
-            }
-            exec(compile(database_source[start:end], "<git:old_database>", "exec"), namespace)
-            namespace["_run_column_migrations"](cursor)
+    if version not in (49, 88):
+        raise ValueError(f"Unsupported schema fixture: {version}")
+    raw.executescript((SCHEMA_FIXTURES / f"schema_v{version}.sql").read_text(encoding="utf-8"))
     raw.commit()
-    return True
 
 
 # ---------------------------------------------------------------------------

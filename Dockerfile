@@ -140,7 +140,7 @@ RUN set -eux; \
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
-    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude && \
+    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.config/gh /home/appuser/.claude /home/appuser/.local/bin /home/appuser/chrome-profile && \
     mkdir -p /data /workspace && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
@@ -176,32 +176,34 @@ COPY fluid/ /opt/fluid/
 RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid, importlib.util; assert importlib.util.find_spec('claude_agent_sdk') is None"
 
 # ── Backend code ──
-COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=root:root app/ ./app/
 
 # ── Maintenance / migration scripts (e.g. credential_keys, backup, usage backfills) ──
-COPY --chown=appuser:appuser scripts/ ./scripts/
+COPY --chown=root:root scripts/ ./scripts/
 
 # ── Copy pre-built frontend assets from builder stage ──
 RUN mkdir -p /app/app/static
-COPY --from=frontend-builder --chown=appuser:appuser /src/frontend/build/ /app/app/static/
+COPY --from=frontend-builder --chown=root:root /src/frontend/build/ /app/app/static/
 
 # ── Copy pre-built AI tools from builder stage ──
-COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
+COPY --from=tools-builder --chown=root:root /tools/ /opt/ai-tools/
 
 # ── Copy the built browser-automation MCP server from its builder stage ──
 # Fluid launches `node /opt/browser-mcp/dist/index.js` when the tool is used (see
 # app/core/builtin_mcp_servers.py DEFAULT_BROWSER_MCP_ENTRY). node_modules here
 # is the pruned prod-only set; package.json ships so its `"type": "module"`
 # resolves at runtime.
-COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/dist/ /opt/browser-mcp/dist/
-COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
-COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
+COPY --from=browser-mcp-builder --chown=root:root /browser-mcp/dist/ /opt/browser-mcp/dist/
+COPY --from=browser-mcp-builder --chown=root:root /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
+COPY --from=browser-mcp-builder --chown=root:root /browser-mcp/package.json /opt/browser-mcp/package.json
+# Runtime tools read these trees; generated files belong in the workspace/data.
+RUN chmod -R go-w /opt/ai-tools /opt/browser-mcp
 
-COPY --chown=appuser:appuser .env.example .
-COPY --chown=appuser:appuser THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+COPY --chown=root:root .env.example .
+COPY --chown=root:root THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
-COPY entrypoint.sh /entrypoint.sh
+COPY --chown=root:root entrypoint.sh /entrypoint.sh
 COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
 COPY docker/agent_isolation.py ./docker/
 COPY Dockerfile entrypoint.sh ./
@@ -210,10 +212,11 @@ COPY desktop/build/application-update-key.pem ./docker/application-update-key.pe
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
 COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
-RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
+RUN chmod 755 /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
 
-# Ensure /app is owned by appuser
-RUN chown appuser:appuser /app
+# Image code and its parent stay read-only regardless of agent isolation or PUID.
+# Runtime state, generated assets and update builds live on /data or in the home.
+RUN chown root:root /app && chmod -R go-w /app
 
 # Limit glibc arena retention after threaded JSON decoding. Docker -e overrides it.
 ENV MALLOC_ARENA_MAX=2

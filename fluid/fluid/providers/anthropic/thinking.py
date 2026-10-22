@@ -5,7 +5,8 @@ request rather than clamping:
 
 * ``output_config.effort``: Opus 4.7/4.8, Sonnet 5, Opus 5 and later, and
   Fable/Mythos and Haiku 5.5 take low, medium, high, xhigh and max. Opus 4.6
-  and Sonnet 4.6 take everything but xhigh. Opus 4.5 takes low, medium and high. Haiku 4.5,
+  and Sonnet 4.6, plus the named Mythos preview, take everything but xhigh.
+  Opus 4.5 takes low, medium and high. Haiku 4.5,
   Sonnet 4.5 and older models reject the parameter.
 * ``thinking``: Opus 4.7 and later reject ``{"type": "enabled",
   "budget_tokens": N}`` and take ``{"type": "adaptive"}``. Fable, Mythos and
@@ -33,6 +34,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 EFFORT_LADDER: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+# Named previews need an exact contract, not a numeric-version inference.
+_NAMED_EFFORTS = {"claude-mythos-preview": ("low", "medium", "high", "max")}
 
 
 @dataclass(frozen=True)
@@ -121,10 +124,12 @@ def clamp_effort(model: str | None, effort: str | None) -> str | None:
     """
     if effort is None or effort not in EFFORT_LADDER:
         return effort
-    parsed = parse_claude_model(model)
-    if parsed is None:
-        return effort
-    accepted = _accepted_efforts(parsed)
+    accepted = _NAMED_EFFORTS.get((model or "").lower().removesuffix("[1m]"))
+    if accepted is None:
+        parsed = parse_claude_model(model)
+        if parsed is None:
+            return effort
+        accepted = _accepted_efforts(parsed)
     if effort in accepted:
         return effort
     if not accepted:

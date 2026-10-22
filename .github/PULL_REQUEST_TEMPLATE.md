@@ -4,7 +4,7 @@
 
 ## Local checks
 
-<!-- List the exact commands and results. Run targeted tests while working, then commit and run python scripts/local_ci.py before pushing. CI runs no tests on PRs or branch pushes. -->
+<!-- List exact commands and results. Run targeted tests while working, then commit and run python scripts/local_ci.py fast before pushing. The offline secret scan is mandatory, including cached passes. Full suites run on every PR, drafts included; merge only after CI is green and reviewed. Include head-SHA CI run links. Edge/nightly publication still needs a local attested full run on main. -->
 
 ## Running-app checks
 

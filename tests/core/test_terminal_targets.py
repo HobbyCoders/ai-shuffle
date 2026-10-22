@@ -15,11 +15,9 @@ from app.network import control, engine, terminal_relay as relay
 
 @pytest.fixture
 def peers(monkeypatch, tmp_path):
-    # TRANSPORT-ONLY fixture: production dispatch remains closed until it has
-    # independent recipient owner proof. Never use these stubs for auth tests;
-    # the malicious-member regressions below exercise the real entry point.
+    # In-process transport, with the production recipient approval gate. Real
+    # owner credentials are covered separately by the API authorization tests.
     monkeypatch.setattr(relay, "peer_targets_enabled", lambda: True)
-    monkeypatch.setattr(relay, "require_recipient_owner", lambda: None)
     secure_context = control.inbound_https.set(True)
     directory = {"runners": [
         {"id": "peer", "device_name": "Peer", "is_self": False, "online": True, "capabilities": {"terminal": 2}},
@@ -27,6 +25,8 @@ def peers(monkeypatch, tmp_path):
         {"id": "offline", "device_name": "Offline", "is_self": False, "online": False, "capabilities": {"terminal": 2}},
         {"id": "missing", "device_name": "Missing", "is_self": False, "online": True, "capabilities": {}},
     ]}
+    for row in directory["runners"]:
+        row["endpoints"] = ["https://peer.example"]
     monkeypatch.setattr(targets.runners, "directory", lambda: directory)
     monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda device: (
         SimpleNamespace(kind="worker", status="active") if device in ("source", "peer") else None)))
@@ -48,19 +48,49 @@ def peers(monkeypatch, tmp_path):
     yield receiver, directory
     receiver.kill_all_now()
     relay._owners.clear()
+    relay._approvals.clear()
     for entry in relay._sessions.values():
         entry[3].cancel()
     relay._sessions.clear()
     control.inbound_https.reset(secure_context)
 
 
+async def approved_target(request):
+    lease = relay.authorize(request, "owner", "peer")
+    pending = await relay.handle({"lease": lease, "op": "request"}, "source")
+    await relay.approve_request(pending["request_id"], SimpleNamespace(valid=True), "owner")
+    return api.TargetRef(worker_id="peer", authorization_id=lease)
+
+
 @pytest.mark.asyncio
 async def test_discovery_requires_online_and_relay_capability(peers):
-    assert await targets.targets(None) == [{"kind": "worker", "worker_id": "peer", "name": "Peer", "available": True}]
+    rows = await targets.targets(None)
+    assert {row["worker_id"]: row["reason_code"] for row in rows} == {
+        "peer": "recipient_approval_required", "old": "peer_unsupported_or_disabled",
+        "offline": "peer_offline", "missing": "peer_unsupported_or_disabled"}
+    assert not any(row["available"] for row in rows)
     for device in ("old", "offline", "missing", "unknown"):
         with pytest.raises(service.TerminalError, match="Choose an online"):
             await targets.create(service.TerminalRegistry(), api.CreateTerminal(target=api.TargetRef(worker_id=device)),
                                  "owner", SimpleNamespace(valid=True))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["peer_terminals_disabled", "not_supported"])
+async def test_discovery_probes_recipient_despite_stale_capabilities(peers, monkeypatch, code):
+    monkeypatch.setattr(relay, "availability", lambda: {"available": False, "reason_code": code, "reason": "Unavailable"})
+    rows = await targets.targets(None)
+    assert rows[0]["reason_code"] == code and not rows[0]["available"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_reports_unreachable_and_insecure_peers(peers, monkeypatch):
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=ConnectionError("offline")))
+    rows = await targets.targets(None)
+    assert rows[0]["reason_code"] == "peer_unavailable"
+    peers[1]["runners"][0]["endpoints"] = ["http://peer.example"]
+    rows = await targets.targets(None)
+    assert rows[0]["reason_code"] == "https_required"
 
 
 @pytest.mark.asyncio
@@ -82,18 +112,22 @@ async def test_peer_rechecks_membership_target_bound_owner_lease_and_revocation(
 async def test_peer_open_refusal_preserves_error_and_releases_reservation(peers, tmp_path):
     source = service.TerminalRegistry()
     with pytest.raises(service.TerminalError) as exc:
-        await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer"),
-                             cwd=str(tmp_path / "missing")), "owner", SimpleNamespace(valid=True))
+        request = SimpleNamespace(valid=True)
+        target = await approved_target(request)
+        await targets.create(source, api.CreateTerminal(target=target,
+                             cwd=str(tmp_path / "missing")), "owner", request)
     assert exc.value.code == "bad_folder"
     assert source.count == peers[0].count == 0
-    assert not relay._owners and not relay._opening
+    assert target.authorization_id in relay._owners and not relay._opening
+    assert not relay._approvals[("source", target.authorization_id)]["used"]
 
 
 @pytest.mark.asyncio
 async def test_stream_relays_arbitrary_bytes_input_resize_and_close(peers):
     source = service.TerminalRegistry()
-    terminal = await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer")),
-                                    "owner", SimpleNamespace(valid=True))
+    request = SimpleNamespace(valid=True)
+    target = await approved_target(request)
+    terminal = await targets.create(source, api.CreateTerminal(target=target), "owner", request)
     remote = peers[0].list()[0]
     payload = b"\x00\xff\x1b[31mpeer bytes\r\n"
     remote._on_output(payload)
@@ -117,10 +151,20 @@ async def test_stream_relays_arbitrary_bytes_input_resize_and_close(peers):
 
 
 @pytest.mark.asyncio
+async def test_immediate_source_close_releases_recipient_before_reader_runs(peers):
+    source = service.TerminalRegistry()
+    request = SimpleNamespace(valid=True)
+    terminal = await targets.create(source, api.CreateTerminal(target=await approved_target(request)), "owner", request)
+    await source.close(terminal.id, by="owner")
+    assert peers[0].count == 0
+    assert not relay._owners
+
+
+@pytest.mark.asyncio
 async def test_peer_disconnect_lease_closes_shell(peers, monkeypatch):
     monkeypatch.setattr(relay, "LEASE_SECONDS", .02)
-    lease = relay.authorize(SimpleNamespace(valid=True), "owner", "peer")
-    opened = await relay.handle({"lease": lease, "op": "open", "options": {}}, "source")
+    target = await approved_target(SimpleNamespace(valid=True))
+    opened = await relay.handle({"lease": target.authorization_id, "op": "open", "options": {}}, "source")
     assert "terminal" in opened, opened
     assert peers[0].count == 1
     async with asyncio.timeout(2):
@@ -230,7 +274,8 @@ async def test_real_grant_producer_feeds_terminal_and_immediate_revocation(ssh, 
 async def test_revoked_peer_owner_closes_stream_and_refuses_new_input(peers):
     request = SimpleNamespace(valid=True)
     source = service.TerminalRegistry()
-    terminal = await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer")), "owner", request)
+    target = await approved_target(request)
+    terminal = await targets.create(source, api.CreateTerminal(target=target), "owner", request)
     request.valid = False
     with pytest.raises(service.TerminalError):
         await terminal.write(b"not delivered")

@@ -35,7 +35,11 @@ const sessions = {
 async function measure({ width, actions, title }) {
 	const context = await browser.newContext({ viewport: { width, height: 300 }, deviceScaleFactor: 1, serviceWorkers: 'block' });
 	await context.route((u) => u.pathname.startsWith('/api/'), (route) => {
-		const id = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop() || '');
+		const path = new URL(route.request().url()).pathname.replace(/^\/api\/v1/, '');
+		if (path === '/auth/status') return route.fulfill({ json: { authenticated: true, is_admin: true, setup_required: false } });
+		if (path === '/assistant/agents') return route.fulfill({ json: [] });
+		if (path === '/assistant') return route.fulfill({ json: { home_session_id: 'assistant' } });
+		const id = decodeURIComponent(path.split('/').pop() || '');
 		return sessions[id] ? route.fulfill({ json: sessions[id] }) : route.fulfill({ status: 404, json: {} });
 	});
 	const page = await context.newPage();
@@ -44,6 +48,7 @@ async function measure({ width, actions, title }) {
 	const query = new URLSearchParams({ actions: String(actions), ...(title ? { title } : {}) });
 	await page.goto(`${base}?${query}`);
 	await page.locator('.crumb.parent', { hasText: 'Assistant' }).waitFor();
+	await page.locator('.current .title-text').waitFor();
 	await page.evaluate(() => document.fonts.ready);
 	const name = `${width}px, actions ${actions}px${title ? `, "${title}"` : ''}`;
 	if (shots) await page.locator('.topbar').screenshot({ path: join(shots, `crumb-strip-${width}-${actions}-${(title || 'default').length}.png`) });

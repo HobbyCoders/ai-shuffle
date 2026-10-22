@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { registerShortcut, clearAllShortcuts } from './keyboard';
+import { registerShortcut, clearAllShortcuts, NOT_HANDLED } from './keyboard';
 
 afterEach(() => {
 	clearAllShortcuts();
@@ -34,5 +34,16 @@ describe('keyboard shortcut handler', () => {
 		expect(() => window.dispatchEvent(event)).not.toThrow();
 
 		registration.unregister();
+	});
+
+	it.each([
+		['prevents the default of a handled shortcut', () => {}, true],
+		['prevents the default when the action returns false (only NOT_HANDLED opts out)', () => false, true],
+		['leaves the event alone when the action returns NOT_HANDLED', () => NOT_HANDLED, false],
+	])('%s', (_label, action, prevented) => {
+		registerShortcut({ id: 'esc', description: 'Esc', key: 'Escape', category: 'general', action });
+		const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+		window.dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(prevented);
 	});
 });
