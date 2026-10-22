@@ -122,6 +122,136 @@ class TestUnauthenticated:
 
 
 # ============================================================================
+# Preview access
+# ============================================================================
+
+class TestPreviewVoiceAccess:
+    """Use real cookie issuance and auth; never override require_auth."""
+
+    @pytest.fixture
+    def voice_auth_client(self, mock_db, _api_unit_credentials, tmp_path, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api import auth, voice, voice_context
+        from app.core import owner_auth
+        from app.core.config import settings
+        from app.serve import IngressApplication
+
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
+        monkeypatch.setattr(settings, "shuffle_local_access", True)
+        monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
+        # Verify the grant against the session row, not just its signature.
+        monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session("preview-voice")
+        app = FastAPI()
+        for router in (auth.router, voice.router, voice_context.router):
+            app.include_router(router)
+        with TestClient(
+            IngressApplication(app, local_port=18090),
+            base_url="http://10.0.0.30:18090", client=("10.0.0.20", 54321),
+            headers={"Origin": "http://10.0.0.30:18090"},
+        ) as client:
+            yield client
+
+    @staticmethod
+    def _preview_login(client, *, also_owner):
+        from app.core import preview_access
+
+        if not also_owner:
+            client.headers["X-Forwarded-Host"] = "localhost:5173"
+        response = client.get(
+            "/api/v1/auth/preview-access",
+            params={"token": preview_access.mint("preview-voice")},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert preview_access.cookie_name() in client.cookies
+
+    @pytest.mark.parametrize("also_owner", [False, True])
+    @pytest.mark.parametrize("model", [
+        "gpt-realtime-2.1", "gpt-live-1", "gpt-live-1-codex",
+        "grok-voice-latest", "fal-ai/personaplex/realtime",
+    ])
+    @pytest.mark.parametrize("method,path,body", [
+        ("post", "/preview", {"voice": "marin"}),
+        ("post", "/sessions", {}),
+        ("post", "/sessions/preview-voice/attach", {}),
+        ("post", "/sessions/preview-voice/secret", {}),
+        ("post", "/sessions/preview-voice/call", {"call_id": "rtc_preview"}),
+        ("post", "/sessions/preview-voice/hangup", {}),
+        ("patch", "/sessions/preview-voice/context", {"fast": True}),
+    ])
+    def test_preview_cannot_mutate_voice(
+        self, voice_auth_client, also_owner, model, method, path, body,
+    ):
+        from app.db.sessions import set_session_voice_binding
+
+        db.set_system_setting("voice_model", model)
+        set_session_voice_binding("preview-voice", {"model": model})
+        self._preview_login(voice_auth_client, also_owner=also_owner)
+        response = voice_auth_client.request(method, VOICE_ROOT + path, json=body)
+        assert response.status_code == 403, response.text
+        assert response.json()["detail"] == "Voice calls are not available in preview access"
+        assert voice_auth_client.get(f"{VOICE_ROOT}/providers").status_code == 200
+
+    @pytest.mark.parametrize("also_owner", [False, True])
+    @pytest.mark.parametrize("resume", ["", "?resume=1"])
+    @pytest.mark.parametrize("model", [
+        "gpt-live-1", "gpt-live-1-codex", "grok-voice-latest", "fal-ai/personaplex/realtime",
+    ])
+    def test_preview_cannot_join_or_resume_audio(
+        self, voice_auth_client, monkeypatch, also_owner, resume, model,
+    ):
+        from unittest.mock import AsyncMock
+        from starlette.websockets import WebSocketDisconnect
+        from app.core import voice_stream
+        from app.db.sessions import set_session_voice_binding
+        from app.api import voice
+
+        set_session_voice_binding("preview-voice", {"model": model})
+        credentials = AsyncMock(side_effect=AssertionError("must not resolve credentials"))
+        takeover = AsyncMock(side_effect=AssertionError("must not replace an existing call"))
+        monkeypatch.setattr(voice, "_provider_api_key", credentials)
+        monkeypatch.setattr(voice_stream, "take_over", takeover)
+        self._preview_login(voice_auth_client, also_owner=also_owner)
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with voice_auth_client.websocket_connect(
+                f"ws://10.0.0.30:18090{VOICE_ROOT}/sessions/preview-voice/audio{resume}",
+            ):
+                pass
+        assert refused.value.code == 4403
+        assert refused.value.reason == "Voice calls are not available in preview access"
+        credentials.assert_not_awaited()
+        takeover.assert_not_awaited()
+
+    def test_owner_without_preview_can_create_mint_and_join(
+        self, voice_auth_client, monkeypatch, sidebands,
+    ):
+        _install_mock_transport(monkeypatch, _secret_handler())
+        response = voice_auth_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
+        assert response.status_code == 200, response.text
+        assert voice_auth_client.post(
+            f"{VOICE_ROOT}/sessions/preview-voice/secret",
+        ).status_code == 200
+        response = voice_auth_client.post(
+            f"{VOICE_ROOT}/sessions/preview-voice/call", json={"call_id": "rtc_owner"},
+        )
+        assert response.status_code == 200, response.text
+        assert [s.call_id for s in sidebands] == ["rtc_owner"]
+
+    @pytest.mark.parametrize("resume", ["", "?resume=1"])
+    def test_owner_without_preview_can_stream_audio(
+        self, voice_auth_client, mock_db, fal_streams, resume,
+    ):
+        _fal_voice_setup(mock_db, api_user_id=None)
+        with voice_auth_client.websocket_connect(f"ws://10.0.0.30:18090{VOICE_ROOT}/sessions/{FAL_SESSION}/audio{resume}"):
+            pass
+        assert fal_streams == [OWNER_FAL_KEY]
+
+
+# ============================================================================
 # Settings
 # ============================================================================
 
@@ -523,6 +653,8 @@ class TestCreateVoiceSession:
         from app.api import voice
         from app.core import voice_stream
         websocket = AsyncMock()
+        websocket.cookies = {}
+        websocket.scope = {"type": "websocket"}
         monkeypatch.setattr("app.api.ws_auth.authenticate_websocket", AsyncMock(return_value=(True, None)))
         monkeypatch.setattr(voice, "_require_voice_enabled", AsyncMock(return_value={}))
         monkeypatch.setattr(voice, "_load_voice_session", AsyncMock(return_value={"id": "unavailable"}))

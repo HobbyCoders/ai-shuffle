@@ -56,8 +56,11 @@ The cookie is honoured only on the local listener from a private-network
 peer, only while the bound session exists, and expires on its own. It never
 grants the mutations that change ownership or reach: auth, pairing,
 credentials, settings, network, plugins and the internal control plane refuse
-unsafe methods on it. The remote listener ignores it entirely. It is not a
-login: the local owner boundary above is unchanged.
+unsafe methods on it. Voice calls are also unavailable for every engine: the
+cookie blocks voice mutations, audio WebSockets (including resume), voice
+samples and client-secret minting, even if the browser is independently the
+owner. Read-only voice discovery stays available. The remote listener ignores
+it entirely. It is not a login: the local owner boundary above is unchanged.
 
 ### Obsolete session cookies in an isolated preview
 
