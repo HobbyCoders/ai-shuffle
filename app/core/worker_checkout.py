@@ -63,13 +63,13 @@ _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 # Serialize branch + worktree creation per project: parallel Swarm launches
 # otherwise race on the same repository's ref and worktree locks, and a lost
 # race surfaces as a permanent "could not create" start failure.
-_project_locks: Dict[str, threading.RLock] = {}
+_project_locks: Dict[str, threading.Lock] = {}
 _project_locks_guard = threading.Lock()
 
 
-def _project_lock(project_id: str) -> threading.RLock:
+def _project_lock(project_id: str) -> threading.Lock:
     with _project_locks_guard:
-        return _project_locks.setdefault(project_id, threading.RLock())
+        return _project_locks.setdefault(project_id, threading.Lock())
 
 
 class WorkerCheckoutError(RuntimeError):
@@ -842,8 +842,16 @@ def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str,
     base, head = block.get("base"), block.get("head")
     try:
         if not block.get("commits") and base and head == base:
-            released = checkout_transfer.delete_untouched_task_branch(repo, branch, base)
+            from app.db import remote_tasks
+
+            dispatch = remote_tasks.get_dispatch(worker_session_id) or {}
+            published = dispatch.get("published_base")
+            # The receiver may fork from a newer default tip. Delete only the
+            # SHA we actually published, never a ref observed after dispatch.
+            expected = published if isinstance(published, str) and _SHA.fullmatch(published) else base
+            released = checkout_transfer.delete_untouched_task_branch(repo, branch, expected)
             outcome["released"] = bool(released.get("deleted"))
+            outcome["reason"] = released.get("reason")
             return outcome
         if not block.get("pushed") or not head:
             return outcome
