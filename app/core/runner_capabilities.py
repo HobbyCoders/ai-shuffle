@@ -171,8 +171,11 @@ def _detect_claude_cli_signed_in() -> bool:
 # Version 5 names the worker's branch ``chore/task-<id>`` (pushable to an origin
 # that accepts only fix/, feat/ and chore/ branches); an older target gets
 # ``task/<id>``.
-# Version 6 forks target-only projects from the target's own upstream/default ref.
-REMOTE_TASK_VERSION = 6
+# Version 6 accepts checkout.base_policy="fresh-default-v1": the receiver
+# fetches its own origin/default before choosing between that tip and caller HEAD.
+# Version 7 adds target-only projects and explicit sender chat-ceiling opt-in;
+# released v6 workers do not understand these fields and must refuse, not fall back.
+REMOTE_TASK_VERSION = 7
 # Remote StartSession separates report delivery from legacy assistant Away handling.
 START_SESSION_PERMISSIONS_VERSION = 1
 

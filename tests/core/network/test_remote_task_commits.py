@@ -181,7 +181,7 @@ def test_remote_only_named_task_uses_target_upstream_and_leaves_main_untouched(w
                "_task_source_branch": source_branch}
         result = dispatch(world.a, world.b, caller_row=row, worker={
             "device_id": world.a.device_id, "device_name": "Target",
-            "capabilities": {"remote_task": 6}})
+            "capabilities": {"remote_task": 7}})
         assert result["ok"], result
     child = result["worker_session_id"]
     path = world.child_path(child)
@@ -193,7 +193,8 @@ def test_remote_only_named_task_uses_target_upstream_and_leaves_main_untouched(w
     assert ("fetch failed" in world.wake().lower()) is fetch_fails
 
 
-def test_remote_only_named_task_requires_new_peer_without_dispatch_or_fallback(world):
+@pytest.mark.parametrize("target_version", [5, 6])
+def test_remote_only_named_task_requires_new_peer_without_dispatch_or_fallback(world, target_version):
     from tests.core.network.test_remote_task_control import dispatch
 
     with world.b.active(), get_db() as conn:
@@ -201,7 +202,9 @@ def test_remote_only_named_task_requires_new_peer_without_dispatch_or_fallback(w
                               (str(world.parent / "missing"), world.project_id))
     with world.b.active():
         row = {**database.get_session("caller"), "_task_named_project": True}
-        result = dispatch(world.a, world.b, caller_row=row)
+        result = dispatch(world.a, world.b, caller_row=row, worker={
+            "device_id": world.a.device_id, "device_name": "Target",
+            "capabilities": {"remote_task": target_version}})
         assert not result["ok"] and "update that worker" in result["error"].lower()
     with world.a.active(), get_db() as conn:
         cursor = conn.cursor()
@@ -226,7 +229,7 @@ def test_no_project_task_producer_creates_target_only_project_checkout(world, mo
     monkeypatch.setattr(task_dispatch, "_credential_gap", lambda _: None)
     monkeypatch.setattr(runners, "resolve_worker", lambda *a, **kw: {
         "device_id": world.a.device_id, "device_name": "Target", "is_self": False,
-        "online": True, "capabilities": {"remote_task": 6}})
+        "online": True, "capabilities": {"remote_task": 7}})
     with world.b.active():
         result = asyncio.run(task_dispatch.dispatch_task_tool({
             "agent": "code-helper", "prompt": "Work in the project.", "project": world.project_id,

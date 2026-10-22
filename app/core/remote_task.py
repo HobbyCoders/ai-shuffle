@@ -119,7 +119,10 @@ EFFORT_VERSION = 4
 #: The ``remote_task`` capability that expects ``chore/task-<id>``; an older
 #: target is sent the ``task/<id>`` name it checks for.
 CHORE_BRANCH_VERSION = 5
-TARGET_DEFAULT_VERSION = 6
+#: The receiver fetches its own default branch and preserves unique caller work.
+FRESH_BASE_VERSION = 6
+#: v6 was released for fresh bases; target-only projects and chat opt-in use v7.
+TARGET_DEFAULT_VERSION = 7
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -423,7 +426,8 @@ async def dispatch_remote(
         else:
             state = await asyncio.to_thread(
                 publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
-                legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
+                legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION,
+                fresh_base=_remote_task_version(worker) >= FRESH_BASE_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
     if caller_row.get("_task_named_project") and state.mode == REMOTE_NONE:
@@ -473,7 +477,7 @@ async def dispatch_remote(
         remote_tasks.record_dispatch, worker_session_id=worker_id,
         target_device_id=worker["device_id"], owner_session_id=caller_session_id,
         root_session_id=root_session_id, tool_use_id=launch_tool_use_id, mode=mode,
-        label=label, agent=result_agent, target_name=name)
+        label=label, agent=result_agent, target_name=name, published_base=state.base_commit)
     # Its spend counts against the assistant's limits when the assistant started it.
     await asyncio.to_thread(_link_job, caller_session_id, worker_id, worker["device_id"], label)
 
@@ -653,7 +657,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
     session_mode = body.get("session_mode")
     if session_mode is not None and (session_mode != "chat"
             or type(body.get("sender_version")) is not int or body["sender_version"] != TARGET_DEFAULT_VERSION):
-        raise ValueError("The chat ceiling requires an explicit version-6 sender request; update that worker.")
+        raise ValueError("The chat ceiling requires an explicit version-7 sender request; update that worker.")
     unknown = set(body) - _BODY_KEYS
     if unknown:
         raise ValueError(f"Unknown subagent request fields: {', '.join(sorted(unknown))}")

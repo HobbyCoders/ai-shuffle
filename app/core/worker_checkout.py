@@ -1,7 +1,7 @@
 """Host-owned Git isolation for Task and Swarm workers.
 
-Use the caller's committed HEAD or an explicit validated review commit, never
-an inferred origin tip or the routing root.
+Use fresh origin/default when the caller is only behind; preserve the caller's
+unique commits and explicit validated review commits, never the routing root.
 No model-chosen paths, credential copies, shared runtime links or automatic
 merges. A worker checkout that holds work (commits or file changes) is retained
 for review; one that provably holds nothing — a provisioning failure, a launch
@@ -85,6 +85,7 @@ class WorkerCheckout:
     project_v2_id: str
     parent_branch: str | None
     runtime: dict | None = None
+    base_note: str | None = None
 
     def instructions(self) -> str:
         return (
@@ -92,7 +93,8 @@ class WorkerCheckout:
             + json.dumps({"path": self.path, "branch": self.branch,
                           "base_commit": self.base_commit,
                           "integration_target": self.parent_branch,
-                          "runtime": self.runtime})
+                          "runtime": self.runtime,
+                          **({"base_note": self.base_note} if self.base_note else {})})
             + "\nThe app created and bound this dedicated checkout before launch. "
             "Use it for this repository, over any path the brief names. For a "
             "different repository the host does "
@@ -239,13 +241,14 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     branch = branch or worker_branch(worker_session_id)
 
     with _project_lock(project["id"]):
-        ref = base_commit or "HEAD"
+        from app.core.git_fork_base import choose_worker_base
+
+        ref, base_note = choose_worker_base(parent_path, base_commit=base_commit)
         tip = git_service._run_git(parent_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
         sha = tip.stdout.strip()
         if tip.returncode or not _SHA.fullmatch(sha) or (base_commit and sha != base_commit):
             raise WorkerCheckoutError("The requested base commit is unavailable locally; fetch it before dispatch.")
-        # Creating the ref first prevents add_worktree's new-branch path fetching
-        # origin and preferring an origin/<base> tip over the actual caller HEAD.
+        # Pin the chosen SHA: add_worktree must not prefer another origin tip.
         if not git_service.create_branch(parent_path, branch, start_point=sha):
             raise WorkerCheckoutError(f"Could not create dedicated worker branch {branch}; refusing to reuse it.")
         path = None
@@ -271,7 +274,7 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     from app.core.worker_runtime import runtime_receipt
 
     return WorkerCheckout(path, branch, sha, project["id"], target,
-                          runtime_receipt(parent_path, path))
+                          runtime_receipt(parent_path, path), base_note)
 
 
 def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str) -> bool:
@@ -441,7 +444,7 @@ REMOTE_BRANCH = "branch"
 REMOTE_SHARED = "shared"
 #: No project or not Git: nothing to transfer; run in the target's workspace.
 REMOTE_NONE = "none"
-#: Protocol v6: fork a target-only project's own upstream/default branch.
+#: Protocol v7: fork a target-only project's own upstream/default branch.
 REMOTE_DEFAULT = "default"
 
 _INVALID_STATE = "The worker checkout description is invalid; nothing was started."
@@ -459,9 +462,11 @@ class RemoteWorkerBranch:
     remote: Optional[str] = None
     pushed: bool = False
     reason: Optional[str] = None
+    base_policy: Optional[str] = None
 
     def to_wire(self) -> Dict[str, Any]:
-        return {key: getattr(self, key) for key in self.__dataclass_fields__}
+        return {key: getattr(self, key) for key in self.__dataclass_fields__
+                if key != "base_policy" or self.base_policy is not None}
 
     @classmethod
     def from_wire(cls, body: Any) -> "RemoteWorkerBranch":
@@ -469,6 +474,8 @@ class RemoteWorkerBranch:
             raise WorkerCheckoutError(_INVALID_STATE)
         text = {key: body.get(key) for key in cls.__dataclass_fields__ if key not in ("mode", "pushed")}
         if any(value is not None and not isinstance(value, str) for value in text.values()):
+            raise WorkerCheckoutError(_INVALID_STATE)
+        if text["base_policy"] not in (None, "fresh-default-v1"):
             raise WorkerCheckoutError(_INVALID_STATE)
         return cls(str(body["mode"]), pushed=body.get("pushed") is True, **text)
 
@@ -493,7 +500,7 @@ def _state(state) -> RemoteWorkerBranch:
 
 
 def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowlist=None, *,
-                          legacy_branch=False) -> RemoteWorkerBranch:
+                          legacy_branch=False, fresh_base=False) -> RemoteWorkerBranch:
     """Parent side: push ``chore/task-<worker id>`` at the caller's committed HEAD.
 
     Same decisions as :func:`prepare_worker_checkout`: research-only surfaces
@@ -541,6 +548,7 @@ def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowl
         REMOTE_BRANCH, project_v2_id=project["id"], branch=branch, base_commit=sha,
         parent_branch=target, remote=published["remote"], pushed=published["pushed"],
         reason=published["reason"],
+        base_policy="fresh-default-v1" if fresh_base else None,
     )
 
 
@@ -613,8 +621,9 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
     """Target side: fetch the parent's ``chore/task-<id>`` and provision its checkout.
 
     Refuses by name when the project is not checked out here or this origin is
-    a different repository. The new checkout must sit at exactly the SHA the
-    parent sent; any failure reclaims what this call created.
+    a different repository. Legacy peers use the exact published SHA; negotiated
+    peers fetch and select a fresh default tip only when it contains that SHA.
+    Any failure reclaims what this call created.
     """
     from app.core import checkout_manager, checkout_transfer
     from app.core.git_service import git_service
@@ -655,8 +664,16 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
             checkout_transfer.fetch_task_branch(base, branch, sha, sent.remote)
         except ValueError as exc:
             raise WorkerCheckoutError(f"{exc} Nothing was started.") from None
-        # The local ref first, at the fetched SHA, so ensure_checkout adopts it
-        # instead of forking from an origin/<base> tip.
+        base_note = "Caller HEAD (legacy peer)."
+        if sent.base_policy == "fresh-default-v1":
+            from app.core.git_fork_base import choose_worker_base
+
+            ref, base_note = choose_worker_base(base, sha)
+            chosen = git_service._run_git(base, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+            if chosen.returncode or not _SHA.fullmatch(chosen.stdout.strip()):
+                raise WorkerCheckoutError("The chosen worker base is unavailable; nothing was started.")
+            sha = chosen.stdout.strip()
+        # Pin the receiving worker's chosen base, not its own checkout HEAD.
         if not git_service.create_branch(base, branch, start_point=sha):
             raise WorkerCheckoutError(f"Could not create dedicated worker branch {branch}; refusing to reuse it.")
         path = None
@@ -667,13 +684,13 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
             checkout_manager._require_branch_binding(path, branch)
             actual = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=5)
             if actual.returncode or actual.stdout.strip() != sha:
-                raise WorkerCheckoutError(f"Dedicated checkout {path} does not match the commit the calling "
-                                          "worker sent; refusing launch.")
+                raise WorkerCheckoutError(f"Dedicated checkout {path} does not match its chosen base; refusing launch.")
         except BaseException:
             # Nothing has run in it yet: reclaim what this call created.
             _reclaim(base, project["id"], path, branch, sha)
             raise
-    checkout = WorkerCheckout(path, branch, sha, project["id"], sent.parent_branch)
+    checkout = WorkerCheckout(path, branch, sha, project["id"], sent.parent_branch,
+                              base_note=base_note)
     return ReceivedWorkerCheckout(REMOTE_BRANCH, path, checkout)
 
 
@@ -882,8 +899,16 @@ def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str,
     base, head = block.get("base"), block.get("head")
     try:
         if not block.get("commits") and base and head == base:
-            released = checkout_transfer.delete_untouched_task_branch(repo, branch, base)
+            from app.db import remote_tasks
+
+            dispatch = remote_tasks.get_dispatch(worker_session_id) or {}
+            published = dispatch.get("published_base")
+            # The receiver may fork from a newer default tip. Delete only the
+            # SHA we actually published, never a ref observed after dispatch.
+            expected = published if isinstance(published, str) and _SHA.fullmatch(published) else base
+            released = checkout_transfer.delete_untouched_task_branch(repo, branch, expected)
             outcome["released"] = bool(released.get("deleted"))
+            outcome["reason"] = released.get("reason")
             return outcome
         if not block.get("pushed") or not head:
             return outcome

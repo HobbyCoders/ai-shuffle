@@ -163,15 +163,15 @@ def test_parent_starts_a_child_on_the_other_worker(workers, monkeypatch, kicks):
     assert kicks == [child]
 
 
-@pytest.mark.parametrize("target_version", [5, 6])
-def test_remote_none_chat_child_requires_v6_opt_in(workers, monkeypatch, kicks, target_version):
+@pytest.mark.parametrize("target_version", [5, 6, 7])
+def test_remote_none_chat_child_requires_v7_opt_in(workers, monkeypatch, kicks, target_version):
     a, b, _ = network(workers, monkeypatch)
     with b.active():
         caller = {**database.get_session("caller"), "mode": "chat"}
         result = dispatch(a, b, caller_row=caller, tool_allowlist=["Read", "Glob", "Grep"],
                           worker={"device_id": a.device_id, "device_name": "ServerWorker",
                                   "capabilities": {"remote_task": target_version}})
-    if target_version < 6:
+    if target_version < 7:
         assert not result["ok"] and "update that worker" in result["error"]
         assert kicks == []
     else:

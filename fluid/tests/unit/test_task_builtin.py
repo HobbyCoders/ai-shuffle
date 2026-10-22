@@ -134,6 +134,7 @@ def test_delegated_disallowed_tools_argv():
     loop.disallowed_tools = ["Task", "Agent", "Workflow"]
     loop.partial = False
     loop.settings = None
+    loop.commit_attribution = True
     loop.setting_sources = None
     loop.effort = None
     argv = loop._build_argv()
@@ -158,6 +159,7 @@ def test_delegated_effort_argv():
     loop.disallowed_tools = None
     loop.partial = False
     loop.settings = None
+    loop.commit_attribution = True
     loop.setting_sources = None
     loop.effort = "xhigh"
     argv = loop._build_argv()
