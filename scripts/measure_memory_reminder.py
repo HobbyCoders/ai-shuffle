@@ -286,7 +286,9 @@ async def _delegated(store, legacy: bool, cwd: str, prefix_chars: int) -> list[d
         stack.enter_context(patch.object(ha, "_resolve_claude_cmd",
                                          return_value=[sys.executable, str(fake)]))
         stack.enter_context(patch.dict(os.environ, {"FAKE_CLAUDE_SCENARIO": "x"}))
-        # Offline: an in-memory session store and no app database.
+        # Offline: an in-memory session store and no app database. Freeze the
+        # owner preference at its default so the benchmark never reads a DB.
+        stack.enter_context(patch("app.core.commit_attribution.read", return_value=True))
         from app.core.config import settings
         from fluid.store.base import MemoryStore
 
