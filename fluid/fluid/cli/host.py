@@ -540,7 +540,7 @@ class CliHost:
         worker.engine = child
         self.workers[worker.task_id] = worker
 
-        if input.get("mode") != "sync":
+        if str(input.get("mode") or "").strip().lower() != "sync":
             worker.task = asyncio.create_task(
                 self._run_child_detached(worker, child, UserTurn(content=prompt)),
                 name=f"fluid-task-{worker.task_id}",

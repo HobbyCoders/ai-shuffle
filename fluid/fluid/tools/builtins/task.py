@@ -271,7 +271,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
-    if input.get("mode") != "sync":
+    # Normalised the way the host reads it: "Sync" must not detach here while
+    # the host runs a blocking dispatch with no receipt.
+    if str(input.get("mode") or "").strip().lower() != "sync":
         # The spawn acknowledgement is an atomic detach boundary. Interrupting
         # the parent turn may stop consuming this tool result, but must not cancel
         # a worker the host has already started or lose its durable task id.

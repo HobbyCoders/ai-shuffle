@@ -2166,7 +2166,7 @@ async def _dispatch_task_tool(
             "description": label,
             "note": (
                 "Still running: moved to the background at the "
-                f"{handoff.seconds:.0f}s limit for a synchronous Task. Do not "
+                f"{sync_cap:.0f}s limit for a synchronous Task. Do not "
                 "re-dispatch it or redo its work; you will be woken with its "
                 "report when it completes. End the turn now unless you have "
                 "genuinely disjoint work."

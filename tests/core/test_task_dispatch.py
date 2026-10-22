@@ -714,11 +714,13 @@ def test_write_capable_agent_defaults_to_background(agents):
     assert "requested_mode_ignored" not in payload
 
 
-def test_explicit_sync_still_blocks_for_a_write_capable_target(agents):
-    """Sync is opt-in, and an explicit request is still honoured."""
+@pytest.mark.parametrize("mode", ["sync", "Sync", " sync "])
+def test_explicit_sync_still_blocks_for_a_write_capable_target(agents, mode):
+    """Sync is opt-in, and an explicit request is still honoured (read the
+    same way fluid's Task handler reads it)."""
     _mk_session(agents, "s-editor-sync", "root-agent")
     payload, seen = _dispatch_watching_mode(
-        {"agent": "editor", "prompt": "go", "mode": "sync"}, "s-editor-sync"
+        {"agent": "editor", "prompt": "go", "mode": mode}, "s-editor-sync"
     )
     assert payload["mode"] == "sync"
     assert payload["report_head"] == "done"

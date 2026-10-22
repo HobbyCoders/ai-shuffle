@@ -720,6 +720,8 @@ class TestSyncHandoff:
             assert payload["worker_session_id"] == worker_id
             assert "report_head" not in payload
             assert "Do not re-dispatch" in payload["note"]
+            # The configured cap, not the attempt's remaining budget.
+            assert f"at the {self.CAP:.0f}s limit" in payload["note"]
             # Still running: not stopped, nobody woken yet, and armed exactly
             # like a background dispatch (owner's lanes, spared at turn end).
             assert worker_env.tm.interrupts == []
@@ -867,6 +869,112 @@ class TestSyncHandoff:
         assert td._BACKGROUND_TASKS == set() or all(
             t.done() for t in td._BACKGROUND_TASKS
         )
+
+    def test_a_parent_cancelled_right_after_the_move_still_gets_one_wake(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """The admitted gap: the call is cancelled once the move has happened
+        but before it returns. The worker is background by then, so it keeps
+        running and its completion still reaches the parent exactly once."""
+        from app.core import turn_manager as tm_mod
+
+        original_move = pa.SyncHandoff.move
+        holder = {}
+
+        def move_then_cancel(self_, worker_session_id, seconds):
+            original_move(self_, worker_session_id, seconds)
+            holder["call"].cancel()
+
+        monkeypatch.setattr(pa.SyncHandoff, "move", move_then_cancel)
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            call = asyncio.ensure_future(self._dispatch(handoff_caller))
+            holder["call"] = call
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            [record] = sup.live_workers(handoff_caller)
+            assert record.background is True
+            assert worker_env.tm.interrupts == []
+            release.set()
+            await self._drain_background()
+            await asyncio.sleep(0.05)
+            return record.worker_session_id
+
+        worker_id = _run(scenario())
+        assert worker_env.tm.interrupts == []
+        assert [(sid, f["task_id"], f["status"]) for sid, f in worker_env.wakes] == [
+            (handoff_caller, worker_id, "completed")
+        ]
+
+    def test_stop_reaches_a_moved_job(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """A moved job is supervised like a background dispatch: the user's
+        Stop on the session cancels it and the worker is stopped."""
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            payload = await self._dispatch(handoff_caller)
+            assert payload["moved_to_background"] is True
+            jobs = [t for t in td._BACKGROUND_TASKS if not t.done()]
+            assert len(jobs) == 1
+            try:
+                task_registry.mark_user_stopped(handoff_caller)
+                await asyncio.wait_for(
+                    asyncio.gather(*jobs, return_exceptions=True), 5
+                )
+            finally:
+                task_registry.clear_user_stop(handoff_caller)
+                release.set()
+            return payload["task_id"], jobs[0]
+
+        worker_id, job = _run(scenario())
+        assert job.cancelled()
+        assert (worker_id, "stop") in worker_env.tm.interrupts
+        assert task_registry.get_task(handoff_caller, worker_id)["status"] == "killed"
+        assert sup.get_worker(handoff_caller, worker_id) is None
+
+    def test_no_move_when_the_background_limit_is_already_spent(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """A loop-guard limit below the sync cap has run out by the time the
+        cap fires: stop with the guard's own result, never "still running"."""
+        from app.core import loop_guard
+        from app.core import turn_manager as tm_mod
+
+        monkeypatch.setattr(loop_guard, "session_origin", lambda sid: "automation")
+        monkeypatch.setattr(loop_guard, "covers_worker", lambda provider_id, origin: True)
+        monkeypatch.setattr(
+            loop_guard, "worker_max_seconds", lambda provider_id, origin: 0.1
+        )
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            try:
+                return await self._dispatch(handoff_caller)
+            finally:
+                release.set()
+                await self._drain_background()
+
+        payload = _run(scenario())
+        assert payload["ok"] is False
+        assert "moved_to_background" not in payload
+        assert payload["error"].startswith("Loop guard:")
+        worker_id = payload["worker_session_id"]
+        assert worker_env.tm.interrupts == [(worker_id, "stop")]
+        assert worker_env.wakes == []
+        assert not task_registry.is_own_background_task(handoff_caller, worker_id)
 
     def test_omitted_mode_dispatches_a_coding_agent_in_the_background(
         self, handoff_caller, worker_env, monkeypatch

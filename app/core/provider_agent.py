@@ -1547,14 +1547,20 @@ class SyncHandoff:
     :attr:`moved` before it reads the dispatch's own result.
 
     A worker with no progress at the cap is dead or stuck: it keeps today's
-    stop-and-fail result and nothing is moved.
+    stop-and-fail result and nothing is moved. "Progress" is any progress
+    ever seen, so a worker that streamed once and then hung does move; from
+    there it is bounded like any background worker (fluid's stream and turn
+    watchdogs, the park watchdog's settle), not by the sync cap. Nor does it
+    move when the background lane's own limit (the loop guard's) is already
+    spent: it is stopped with that limit's result instead.
     """
 
     def __init__(self, on_move: Optional[Callable[[str], None]] = None) -> None:
         self.on_move = on_move
         #: The moved worker's session id; None until the move.
         self.worker_session_id: Optional[str] = None
-        #: The foreground cap the worker reached.
+        #: The attempt's remaining sync budget when it moved (logging only;
+        #: the parent is told the configured cap).
         self.seconds: float = 0.0
         self._future: Optional[asyncio.Future] = None
 
@@ -2872,14 +2878,26 @@ async def dispatch_worker(
                 )
                 if supervised.torn_down:
                     break
+                background_cap = _WallCap(
+                    _clock, bg_wall_seconds, provider_id=provider_id,
+                    origin=origin, loop_guarded=bg_guarded,
+                )
+                background_deadline = background_cap.deadline()
+                if (
+                    background_deadline is not None
+                    and asyncio.get_event_loop().time() >= background_deadline
+                ):
+                    # The background lane's own limit (the loop guard's, set
+                    # below the sync cap) has already run out: moving would
+                    # only say "still running" and then stop it. Stop it here
+                    # with that limit's own result, still in the foreground.
+                    wall_cap = background_cap
+                    break
                 foreground_seconds = wall_cap.seconds
                 background = True
                 supervised.background = True
                 task_registry.mark_background_launch(owner_session_id, launch_key)
-                wall_cap = _WallCap(
-                    _clock, bg_wall_seconds, provider_id=provider_id,
-                    origin=origin, loop_guarded=bg_guarded,
-                )
+                wall_cap = background_cap
                 logger.info(
                     "ProviderAgent: worker %s still running at the %.0fs sync "
                     "cap — moved to the background", worker_session_id,

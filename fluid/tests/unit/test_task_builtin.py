@@ -120,8 +120,10 @@ async def test_background_spawn_crosses_parent_cancellation_boundary(mode):
 
 
 @pytest.mark.asyncio
-async def test_explicit_sync_is_cancelled_with_the_parent():
-    """Only an explicit sync request stays tied to the parent's call."""
+@pytest.mark.parametrize("mode", ["sync", "Sync", " sync "])
+async def test_explicit_sync_is_cancelled_with_the_parent(mode):
+    """Only an explicit sync request stays tied to the parent's call, read the
+    way the host reads it (case and surrounding space do not matter)."""
     dispatched = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -135,7 +137,7 @@ async def test_explicit_sync_is_cancelled_with_the_parent():
 
     tracked = set()
     call = asyncio.create_task(handler(
-        {"agent": "helper", "prompt": "go", "mode": "sync"},
+        {"agent": "helper", "prompt": "go", "mode": mode},
         ToolCtx(extra={"task_dispatch": dispatch, "background_spawn_tasks": tracked}),
     ))
     await dispatched.wait()
