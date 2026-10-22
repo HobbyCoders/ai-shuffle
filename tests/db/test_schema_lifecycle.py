@@ -8,15 +8,15 @@ source. Below ``SCHEMA_VERSION`` boot runs the pre-schema renames
 ``create_postgres_schema`` bootstrap and then the guarded
 ``_run_column_migrations`` pass; at the current version the pass runs only
 when the stored fingerprint differs. There is no per-version step list, so
-"step by step from the oldest schema" means: build the schema an older commit
-created, then run today's entry point on it.
+"step by step from the oldest schema" means: load a frozen old schema,
+then run today's entry point on it.
 
 Everything here runs hermetically on file-backed SQLite through the test shim
 (``tests/db/schema_lifecycle_helpers.py``), except the real-PostgreSQL
 concurrent-start test (marked ``boot_smoke``; see its docstring). The
-old-schema fixtures are built from ``git show <commit>:app/db/...`` at test
-time; those tests skip when the checkout has no history for the commit (a
-shallow clone).
+old-schema fixtures are checked-in schema-only SQL in ``tests/db/fixtures``:
+v49 (after its column pass, before profiles/subagents became agents) and v88
+(bootstrap-only, including worker-network tables). No git history is needed.
 """
 
 from __future__ import annotations
@@ -33,14 +33,6 @@ import pytest
 
 from app.db import database
 from tests.db import schema_lifecycle_helpers as lifecycle
-
-#: 2026-06-29, schema v49 (about three months before this test was written).
-#: Oldest fixture: predates the agents unification (v71: ``profiles`` +
-#: ``subagents``), the ``sessions.is_favorite`` -> ``is_active`` rename and
-#: every network table.
-V49_COMMIT = "959f51cb"
-#: 2026-09-15, schema v88: carries the worker-network tables.
-V88_COMMIT = "4f4aa2df"
 
 #: Column changes the migration pass makes ONLY on PostgreSQL (``ALTER COLUMN
 #: .. SET DEFAULT`` / ``TYPE`` and ``DO $$`` blocks, which SQLite cannot run
@@ -83,33 +75,33 @@ def _fresh(tmp_path, name="fresh.db"):
     return raw
 
 
-def _old(tmp_path, commit, *, with_column_pass, name="old.db"):
+def _old(tmp_path, version, *, name="old.db"):
     raw = lifecycle.connect(tmp_path / name)
-    if not lifecycle.build_old_database(raw, commit, with_column_pass=with_column_pass):
+    try:
+        lifecycle.build_old_database(raw, version)
+    except Exception:
         raw.close()
-        message = f"git history for {commit} is not available (shallow checkout)"
-        # CI checks out full history and sets this: a skip there would hide
-        # a shallow checkout or a pinned commit that was garbage-collected.
-        if os.environ.get("SCHEMA_LIFECYCLE_REQUIRED") == "1":
-            pytest.fail(message)
-        pytest.skip(message)
+        raise
     return raw
 
 
-def test_missing_history_fails_instead_of_skipping_when_required(tmp_path, monkeypatch):
-    """R10-29: CI runs ``-q`` without ``-rs``, so a skip there went unnoticed."""
-    monkeypatch.setattr(lifecycle, "build_old_database", lambda raw, commit, **kw: False)
-    outcomes = []
-    for required in ("1", None):
-        if required:
-            monkeypatch.setenv("SCHEMA_LIFECYCLE_REQUIRED", required)
-        else:
-            monkeypatch.delenv("SCHEMA_LIFECYCLE_REQUIRED", raising=False)
-        try:
-            _old(tmp_path, V49_COMMIT, with_column_pass=False, name=f"old-{required}.db")
-        except BaseException as exc:  # noqa: BLE001 - pytest's outcomes are BaseException
-            outcomes.append(type(exc))
-    assert outcomes == [pytest.fail.Exception, pytest.skip.Exception]
+def test_missing_fixture_fails_instead_of_skipping(tmp_path, monkeypatch):
+    """A clean/public checkout must exercise upgrades, never silently skip."""
+    monkeypatch.setattr(lifecycle, "SCHEMA_FIXTURES", tmp_path / "missing")
+    with pytest.raises(FileNotFoundError, match="schema_v49.sql"):
+        _old(tmp_path, 49)
+
+
+@pytest.mark.parametrize("version, legacy_table", [(49, "profiles"), (88, "agents")])
+def test_portable_fixture_is_an_old_schema_without_application_rows(tmp_path, version, legacy_table):
+    old = _old(tmp_path, version)
+    assert _version(old) == [version]
+    assert _count(old, legacy_table) == 0
+    assert _count(old, "sessions") == 0
+    assert old.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert "message_template" in {c[1] for c in old.execute("PRAGMA table_info('project_hooks')")}
+    _seed(old, V49_SEED if version == 49 else V88_SEED)
+    assert _count(old, "sessions") == 1
 
 
 def _comparable(snapshot):
@@ -325,7 +317,7 @@ def test_retired_tables_are_not_part_of_the_current_schema(tmp_path):
 
 def test_upgrade_from_v49_drops_the_retired_tables(tmp_path):
     """v49 created every retired table; v90 drops them all on upgrade."""
-    old = _old(tmp_path, V49_COMMIT, with_column_pass=True)
+    old = _old(tmp_path, 49)
     names = {r[0] for r in old.execute("SELECT name FROM sqlite_master")}
     assert set(RETIRED_TABLES_DROPPED) <= names
 
@@ -334,13 +326,10 @@ def test_upgrade_from_v49_drops_the_retired_tables(tmp_path):
     _assert_no_retired_tables(old)
 
 
-@pytest.mark.parametrize("commit, with_column_pass", [
-    (V49_COMMIT, True),
-    (V88_COMMIT, False),
-], ids=["from-v49", "from-v88"])
-def test_upgraded_schema_matches_fresh_install(tmp_path, commit, with_column_pass):
+@pytest.mark.parametrize("version", [49, 88], ids=["from-v49", "from-v88"])
+def test_upgraded_schema_matches_fresh_install(tmp_path, version):
     fresh = _fresh(tmp_path)
-    old = _old(tmp_path, commit, with_column_pass=with_column_pass)
+    old = _old(tmp_path, version)
     assert _version(old)[0] < database.SCHEMA_VERSION
 
     lifecycle.boot(old)
@@ -390,7 +379,7 @@ def test_second_boot_changes_nothing(tmp_path, monkeypatch):
 
 
 def test_second_boot_after_upgrade_changes_nothing(tmp_path, monkeypatch):
-    old = _old(tmp_path, V49_COMMIT, with_column_pass=True)
+    old = _old(tmp_path, 49)
     _seed(old, V49_SEED)
     lifecycle.boot(old)
     schema_before, rows_before = lifecycle.schema(old), _stable_dump(old)
@@ -410,7 +399,7 @@ def test_second_boot_after_upgrade_changes_nothing(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_upgrade_from_v49_preserves_rows(tmp_path):
-    old = _old(tmp_path, V49_COMMIT, with_column_pass=True)
+    old = _old(tmp_path, 49)
     _seed(old, V49_SEED)
     before = {t: _rows(old, t) for t in V49_SEED}
     counts = {t: len(r) for t, r in before.items()}
@@ -437,7 +426,7 @@ def test_upgrade_from_v49_preserves_rows(tmp_path):
 
 
 def test_upgrade_from_v88_preserves_rows(tmp_path):
-    old = _old(tmp_path, V88_COMMIT, with_column_pass=False)
+    old = _old(tmp_path, 88)
     _seed(old, V88_SEED)
     before = {t: _rows(old, t) for t in V88_SEED}
 
@@ -453,7 +442,7 @@ def test_upgrade_from_v88_retires_message_hooks(tmp_path):
     """v90: the never-delivered ``message`` hook type is gone. Its rows and
     their sync envelopes are deleted, ``message_template`` is dropped, and
     the bash and webhook hooks next to them are untouched."""
-    old = _old(tmp_path, V88_COMMIT, with_column_pass=False)
+    old = _old(tmp_path, 88)
     _seed(old, V88_SEED)
     _seed(old, {
         "project_hooks": [
@@ -493,7 +482,7 @@ def test_upgrade_from_v88_retires_webhooks_and_legacy_push(tmp_path):
     endpoint loses the endpoint column AND its FCM token, so it stays unable
     to receive push once the marker column is gone; a row without an endpoint
     keeps its token."""
-    old = _old(tmp_path, V88_COMMIT, with_column_pass=False)
+    old = _old(tmp_path, 88)
     _seed(old, V88_SEED)
     _seed(old, {
         "webhooks": [{"id": "wh-1", "url": "https://example.invalid/hook",
