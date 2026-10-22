@@ -924,10 +924,18 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
         return None
 
     from app.core.session_modes import (
+        normalize_session_mode,
         permission_ceiling,
         permission_mode_for_session_mode,
         strictest_permission_mode,
     )
+
+    # A no-project (chat) caller's workers always start on Ask, even when the
+    # owner has put the chat itself in Auto or Bypass (#371 step 4): a worker
+    # gets tools the chat's own ceiling never had. Same rule as a chat
+    # starter's StartSession children (session_orchestration).
+    if normalize_session_mode(caller_row.get("mode")) == "chat":
+        return "default"
 
     mode: Optional[str] = None
     session_id = caller_row.get("id")

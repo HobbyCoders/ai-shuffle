@@ -65,6 +65,23 @@ def test_caller_permission_fallback_without_live_pool(
     assert pa._caller_permission_mode(caller) == expected
 
 
+@pytest.mark.parametrize("live_mode", ["bypassPermissions", "auto", "default"])
+def test_chat_caller_in_bypass_still_starts_workers_on_ask(monkeypatch, live_mode):
+    """#371 step 4 lets a no-project chat run in Auto or Bypass itself; its
+    Task workers still start on Ask, live pool state or not."""
+    from types import SimpleNamespace
+
+    from app.core.session_pool import get_session_pool
+
+    live = SimpleNamespace(is_connected=True, callback_refs={"permission_mode": live_mode})
+    monkeypatch.setattr(get_session_pool(), "peek", lambda _: live)
+    caller = {"id": "chat-caller", "mode": "chat", "permission_mode": live_mode, "profile_id": None}
+
+    assert pa._caller_permission_mode(caller) == "default"
+    # A project caller in the same state still passes its live mode on.
+    assert pa._caller_permission_mode({**caller, "mode": None}) == live_mode
+
+
 def _provider(
     provider_id="prov-openai",
     name="My OpenAI",
