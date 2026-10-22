@@ -63,17 +63,20 @@ class IsolationCheck(Check):
         # Root, as tools/backup-db.sh runs it; the CLI drops to the split itself.
         return self.docker("exec", container, "python", RUNTIME, "dump", "--file", "-", timeout=180).stdout
 
+    def prepare_protected_keys(self, container):
+        # These keys are lazy: materialize them through the app's real producers
+        # before testing all six protected entries, including required mode.
+        self.docker("exec", "--user", AGENT, "--workdir", "/app", container, "python", "-c",
+                    "from app.core import managed_credentials, preview_access; "
+                    "preview_access._key(); managed_credentials._key(create=True)")
+
     def round_trip(self):
         volume = self.volume()
         app = self.launch(volume)
         self.ready(app)
         identity = self.system_id(app)
         self.sql(app, "CREATE TABLE agent_isolation_check (value text); INSERT INTO agent_isolation_check VALUES ('kept');")
-        # The preview and managed-connection keys are created on first use;
-        # make them the way the app does.
-        self.docker("exec", "--user", AGENT, "--workdir", "/app", app, "python", "-c",
-                    "from app.core import managed_credentials, preview_access; "
-                    "preview_access._key(); managed_credentials._key(create=True)")
+        self.prepare_protected_keys(app)
         self.stop(app)
         before = self.owners(volume)
         # managed-postgres.json exists only while PostgreSQL runs.
@@ -148,6 +151,7 @@ class IsolationCheck(Check):
         self.ready(seed)
         self.sql(seed, "CREATE TABLE required_migration_check (value text); "
                        "INSERT INTO required_migration_check VALUES ('kept');")
+        self.prepare_protected_keys(seed)
         self.stop(seed)
         # Inject a filesystem failure only in a disposable volume, after the
         # first protected key migrated. Required mode must never give it back.

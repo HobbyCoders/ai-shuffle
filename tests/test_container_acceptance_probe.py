@@ -14,6 +14,18 @@ def test_removed_env_probe_runs_as_managed_app_user():
     assert args[4:6] == ("python", "-c")
 
 
+def test_isolation_probe_materializes_lazy_keys_through_app_producers():
+    from scripts.ci.verify_agent_isolation import IsolationCheck
+
+    harness = Mock()
+    IsolationCheck.prepare_protected_keys(harness, "disposable-container")
+    args = harness.docker.call_args.args
+    assert args[:6] == ("exec", "--user", "99:100", "--workdir", "/app", "disposable-container")
+    assert args[6:8] == ("python", "-c")
+    assert "preview_access._key()" in args[8]
+    assert "managed_credentials._key(create=True)" in args[8]
+
+
 def test_required_probe_prepares_the_bypassed_entrypoint_account(tmp_path, monkeypatch):
     """The inspection container has image UID 1000, not entrypoint PUID 99."""
     import importlib.util
@@ -80,6 +92,7 @@ def test_required_probe_prepares_the_bypassed_entrypoint_account(tmp_path, monke
         seed = harness.launch.return_value
         harness.launch.assert_called_once_with(volume, env={"AGENT_ISOLATION": "off"})
         harness.ready.assert_called_once_with(seed)
+        harness.prepare_protected_keys.assert_called_once_with(seed)
         harness.stop.assert_called_once_with(seed)
         assert "CREATE TABLE required_migration_check" in harness.sql.call_args.args[1]
         # Execute the actual producer up to migration, confined to scratch data.
