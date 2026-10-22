@@ -1,0 +1,214 @@
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn() }));
+const identity = vi.hoisted(() => ({ epoch: 0, listeners: new Set<() => void>() }));
+vi.mock('$lib/api/client', () => ({ api: transport, getErrorMessage: (_e: unknown, fallback: string) => fallback }));
+vi.mock('$lib/stores/session-owner', () => ({
+	sessionOwnerEpoch: () => identity.epoch,
+	sessionOwnerBoundary: {
+		subscribe(callback: () => void) {
+			identity.listeners.add(callback);
+			callback();
+			return () => identity.listeners.delete(callback);
+		}
+	}
+}));
+
+import VoicePage from './VoicePage.svelte';
+import { resourceSync } from '$lib/services/resource-sync';
+import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
+import { settingsNav } from '$lib/settings/navigation.svelte';
+
+const CODEX = 'gpt-live-1-codex';
+const LABEL = 'ChatGPT voice (unofficial, unsupported)';
+const UNAVAILABLE =
+	'Unofficial ChatGPT voice is not available on this system. Optional audio libraries could not be loaded.';
+const PREVIEW_NOTE = 'Unofficial, unsupported ChatGPT subscription access. Off by default; explicitly select this engine to opt in. Previews are unavailable.';
+
+type Details = Record<string, unknown>;
+let server: Record<string, unknown> & { voice_model: string; voice_voice: string; model_details: Details };
+let providers: { id: string; name: string; provider_type?: string }[];
+let runtimeAvailable: boolean;
+
+/** Server rule: model_details describe the CURRENTLY selected engine only. */
+function serve(patch: Record<string, unknown> = {}) {
+	const next = { ...server, ...patch } as typeof server;
+	const codex = next.voice_model === CODEX;
+	server = {
+		...next,
+		voice_voice: codex ? 'cove' : next.voice_voice,
+		model_details: codex
+			? {
+					...next.model_details,
+					model: CODEX,
+					label: LABEL,
+					available: runtimeAvailable,
+					unavailable_reason: runtimeAvailable ? null : UNAVAILABLE,
+					voices: [{ id: 'cove', label: 'Cove' }],
+					preview_note: PREVIEW_NOTE
+				}
+			: { ...next.model_details, model: next.voice_model }
+	};
+	return structuredClone(server);
+}
+
+beforeEach(() => {
+	transport.get.mockReset();
+	transport.put.mockReset();
+	identity.epoch++;
+	for (const listener of identity.listeners) listener();
+	runtimeAvailable = true;
+	server = {
+		voice_mode_enabled: true,
+		voice_model: 'gpt-live-1',
+		voice_voice: 'marin',
+		voice_provider_id: null,
+		voice_max_call_minutes: 60,
+		voice_app_tools_enabled: false,
+		voice_input_model: 'fal-ai/whisper',
+		voice_input_mode: 'auto',
+		voice_input_silence_seconds: 5,
+		voice_input_models: [{ id: 'fal-ai/whisper', name: 'Whisper (Large v3)', provider: 'fal-ai' }],
+		voice_options: { opening: '', instructions: '', delegation_instructions: '' },
+		model_details: {
+			model: 'gpt-live-1',
+			transport: 'stream',
+			voices: [{ id: 'marin', label: 'marin' }],
+			runtime_settings: [],
+			prompts: [],
+			prompt_note: '',
+			preview_note: ''
+		}
+	};
+	providers = [
+		{ id: 'openai-key', name: 'OpenAI API key', provider_type: 'openai' },
+		{ id: 'xai-key', name: 'xAI API key', provider_type: 'xai' },
+		{ id: 'chatgpt-login', name: 'ChatGPT Plus', provider_type: 'chatgpt' }
+	];
+	transport.get.mockImplementation(async (path: string) => {
+		if (path === '/settings/voice') return structuredClone(server);
+		if (path === '/voice/providers') return providers;
+		return [];
+	});
+	transport.put.mockImplementation(async (_path: string, patch: Record<string, unknown>) => serve(patch));
+	hotkeyPreferences.setGlobalSttEnabled(false);
+	settingsNav.reset();
+});
+afterEach(() => {
+	cleanup();
+	resourceSync.clear();
+});
+
+async function mountPage() {
+	const view = render(VoicePage);
+	await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe(server.voice_voice));
+	await waitFor(() => expect(transport.get.mock.calls.some(([path]) => path === '/voice/providers')).toBe(true));
+	return view;
+}
+
+const engine = () => screen.getByRole('combobox', { name: 'Voice engine' }) as HTMLSelectElement;
+const rowOf = (el: HTMLElement) => el.closest('[data-setting-anchor]') as HTMLElement;
+
+describe('ChatGPT voice (unofficial, unsupported)', () => {
+	it('is offered in the picker but never the default', async () => {
+		await mountPage();
+		expect(engine().value).toBe('gpt-live-1');
+		expect(Array.from(engine().options).map((o) => [o.value, o.textContent])).toEqual([
+			['gpt-live-1', 'GPT Live 1'],
+			['grok-voice-latest', 'Grok Voice'],
+			[CODEX, LABEL]
+		]);
+		expect(transport.put).not.toHaveBeenCalled();
+	});
+
+	it('selecting it is the opt-in: saves the engine with the old API pin cleared and uses its own voices', async () => {
+		server.voice_provider_id = 'openai-key';
+		await mountPage();
+		await fireEvent.change(engine(), { target: { value: CODEX } });
+		await waitFor(() => expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_model: CODEX, voice_provider_id: null }));
+		await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe('cove'));
+		expect(screen.getByRole('option', { name: 'Cove' })).toBeTruthy();
+		expect(screen.queryByRole('option', { name: 'marin' })).toBeNull();
+		expect(screen.getByText('ChatGPT subscription login · server VAD')).toBeTruthy();
+		expect(screen.getByText('Unofficial; no API-key fallback.')).toBeTruthy();
+		expect(screen.getByText(/a connected ChatGPT subscription login is required/i)).toBeTruthy();
+		expect(screen.getByText(/the provider may still refuse access/i)).toBeTruthy();
+		expect(screen.getByText(/model, effort and permissions follow the chat composer/i)).toBeTruthy();
+	});
+
+	it('runs calls on connected ChatGPT subscription logins only, never on API keys', async () => {
+		serve({ voice_model: CODEX });
+		await mountPage();
+		const link = screen.getByRole('button', { name: /Calls run on ChatGPT Plus/ });
+		expect(link).toBeTruthy();
+		expect(screen.queryByText('OpenAI API key')).toBeNull();
+		expect(screen.queryByText('xAI API key')).toBeNull();
+		await fireEvent.click(link);
+		expect(settingsNav.category).toBe('providers');
+	});
+
+	it('lets the user pick between several ChatGPT logins and lists only those', async () => {
+		providers.push({ id: 'chatgpt-2', name: 'ChatGPT Pro', provider_type: 'chatgpt' });
+		serve({ voice_model: CODEX });
+		await mountPage();
+		const select = screen.getByRole('combobox', { name: 'Calls run on' }) as HTMLSelectElement;
+		expect(Array.from(select.options).map((o) => o.textContent)).toEqual(['ChatGPT Plus', 'ChatGPT Pro']);
+		await fireEvent.change(select, { target: { value: 'chatgpt-2' } });
+		await waitFor(() => expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_provider_id: 'chatgpt-2' }));
+	});
+
+	it('says a ChatGPT login is needed when none is connected, even with API keys present', async () => {
+		providers = providers.filter((p) => p.provider_type !== 'chatgpt');
+		serve({ voice_model: CODEX });
+		await mountPage();
+		const connect = await screen.findAllByRole('button', { name: /Connect ChatGPT/ });
+		expect(rowOf(engine()).textContent).toContain('Needs a ChatGPT login');
+		await fireEvent.click(connect[0]);
+		expect(settingsNav.category).toBe('providers');
+		expect(screen.queryByText('OpenAI API key')).toBeNull();
+	});
+
+	it('shows the sanitized unavailable reason and a saved selection, not a traceback', async () => {
+		runtimeAvailable = false;
+		serve({ voice_model: CODEX });
+		await mountPage();
+		expect(engine().value).toBe(CODEX);
+		const note = screen.getAllByRole('status').find((el) => el.textContent?.includes(UNAVAILABLE));
+		expect(note).toBeTruthy();
+		expect(rowOf(engine()).textContent).toContain('Unavailable on this system');
+		expect(document.body.textContent).not.toMatch(/Traceback|Error:|ImportError|OSError/);
+	});
+
+	it('does not show the unavailable notice while the runtime is available', async () => {
+		serve({ voice_model: CODEX });
+		await mountPage();
+		expect(document.body.textContent).not.toContain('could not be loaded');
+		expect(rowOf(engine()).textContent).not.toContain('Unavailable on this system');
+	});
+
+	it('disables the sample button with the server preview note instead of requesting one', async () => {
+		const module = await import('$lib/api/voice');
+		const preview = vi.spyOn(module, 'previewVoice');
+		try {
+			serve({ voice_model: CODEX });
+			await mountPage();
+			const button = screen.getByRole('button', { name: 'Samples are not available for ChatGPT voice (unofficial, unsupported)' }) as HTMLButtonElement;
+			expect(button.disabled).toBe(true);
+			expect(button.title).toBe(PREVIEW_NOTE);
+			expect(rowOf(button).textContent).toContain('No samples for this engine');
+			await fireEvent.click(button);
+			expect(preview).not.toHaveBeenCalled();
+		} finally {
+			preview.mockRestore();
+		}
+	});
+
+	it('leaves the default engine unchanged: samples enabled, API-key access, OpenAI providers only', async () => {
+		await mountPage();
+		expect((screen.getByRole('button', { name: 'Play marin sample' }) as HTMLButtonElement).disabled).toBe(false);
+		expect(screen.getAllByText('OpenAI API key').length).toBeGreaterThan(0);
+		expect(screen.queryByRole('button', { name: /ChatGPT/ })).toBeNull();
+		expect(screen.getByRole('button', { name: /Calls run on OpenAI API key/ })).toBeTruthy();
+	});
+});

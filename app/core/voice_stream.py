@@ -230,8 +230,8 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # Only a live binding carries LiveOptions; a WebRTC binding stores the
     # realtime option set, which LiveOptions rejects as extra fields.
     instructions = DELEGATION_INSTRUCTIONS
-    from app.core.voice_models import GROK_MODEL
-    if binding.get("model") in (LIVE_MODEL, GROK_MODEL):
+    from app.core.voice_models import CODEX_MODEL, GROK_MODEL
+    if binding.get("model") in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL):
         options = validate_options(binding["model"], binding.get("options") or {})
         instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
     # Submit to the SAME session: reuse its history/client and normal queue,
@@ -1225,17 +1225,20 @@ class VoiceStream:
             logger.info("Voice %s: the browser closed the audio connection (%s)", self.session_id,
                         self.browser_close or "no close code")
 
-    async def run(self):
-        tasks = []
-        provider = []
-        url = self.upstream_url
+    async def open_upstream(self):
         auth = ("Bearer " if self.is_live else "Key ") + self.api_key
         if not self.is_live:
             self.api_key = ""  # PersonaPlex is never reconnected; Live keeps it to reconnect.
+        return await connect(self.upstream_url, additional_headers={"Authorization": auth},
+                             open_timeout=45, max_size=2_000_000)
+
+    async def run(self):
+        tasks = []
+        provider = []
         budget = asyncio.timeout(self.max_seconds)
         try:
             async with budget:
-                upstream = await connect(url, additional_headers={"Authorization": auth}, open_timeout=45, max_size=2_000_000)
+                upstream = await self.open_upstream()
                 if self.closed:
                     await upstream.close()
                     return

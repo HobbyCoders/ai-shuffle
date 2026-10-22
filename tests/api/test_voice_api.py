@@ -391,6 +391,184 @@ class TestVoicePreview:
 
 
 class TestCreateVoiceSession:
+    @pytest.mark.parametrize("selection", ["pinned", "explicit", "automatic"])
+    def test_chatgpt_api_user_refused_before_credentials(self, client, mock_db, monkeypatch, selection):
+        from unittest.mock import AsyncMock, Mock
+        from app.api import voice
+        from app.core.provider import fluid_credentials
+
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove",
+                      voice_provider_id="prov-sub" if selection == "pinned" else None)
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        credentials = AsyncMock(side_effect=AssertionError("must refuse before loading credentials"))
+        decrypt = Mock(side_effect=AssertionError("must not decrypt the owner's token"))
+        load = AsyncMock(side_effect=AssertionError("must not load the owner's subscription"))
+        create = Mock(side_effect=AssertionError("must refuse before creating a session"))
+        monkeypatch.setattr(voice, "_provider_api_key", credentials)
+        monkeypatch.setattr(fluid_credentials, "_decrypt_auth_token", decrypt)
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
+        monkeypatch.setattr(db, "create_session", create)
+        body = {"model": "sonnet", "profile_id": "default"}
+        if selection == "explicit":
+            body["provider_id"] = "prov-sub"
+        response = client.post(f"{VOICE_ROOT}/sessions", json=body,
+                               headers=_api_user("voice-api", "aih_voice_subscription_test"))
+        credentials.assert_not_called()
+        decrypt.assert_not_called()
+        load.assert_not_called()
+        create.assert_not_called()
+        assert response.status_code == 400, response.text
+
+    @pytest.mark.parametrize("selection", ["pinned", "explicit", "automatic"])
+    def test_chatgpt_requires_login_without_api_key_fallback(self, authenticated_client, mock_db, monkeypatch, selection):
+        from unittest.mock import AsyncMock
+        from app.api import voice
+
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove",
+                      voice_provider_id="prov-openai" if selection == "pinned" else None)
+        _make_provider()  # An API key cannot substitute for a ChatGPT login.
+        credentials = AsyncMock(side_effect=AssertionError("no API-key fallback"))
+        monkeypatch.setattr(voice, "_provider_api_key", credentials)
+        body = {"provider_id": "prov-openai"} if selection == "explicit" else {}
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json=body)
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == (
+            "A connected ChatGPT subscription login is required for this voice engine. "
+            "Connect one in Settings > Providers. There is no API-key fallback."
+        )
+        credentials.assert_not_called()
+
+    def test_automatic_provider_lookup_preserves_api_user(self, mock_db, monkeypatch):
+        from unittest.mock import Mock
+        from app.api import voice
+
+        _make_provider()
+        lookup = Mock(wraps=voice._eligible_provider_row)
+        monkeypatch.setattr(voice, "_eligible_provider_row", lookup)
+        api_user = {"id": "voice-api"}
+        assert voice._resolve_provider_row(None, None, api_user)["id"] == "prov-openai"
+        lookup.assert_called_once_with("prov-openai", api_user)
+
+    def test_paired_device_can_use_pinned_chatgpt_login(self, client, mock_db, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import AsyncMock
+        from app.core import pairing
+        from app.core.provider import fluid_credentials
+
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove", voice_provider_id="prov-sub")
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
+        load = AsyncMock(return_value=("fake-token", None))
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
+        db.create_pairing_grant(
+            token_hash="voice-grant", purpose="controller", scopes=["controller"],
+            target_install_id="runner", endpoint_url=None, device_label=None, created_by="test",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        session_token = "shc_voice-paired-test"
+        db.exchange_grant_for_client(
+            token_hash="voice-grant", device_id="voice-device", device_name="Paired device",
+            platform="web", client_type="browser",
+            session_token_hash=pairing.hash_controller_session(session_token),
+            session_expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        response = client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet", "profile_id": "default"},
+                               headers={"Authorization": f"Bearer {session_token}"})
+        assert response.status_code == 200, response.text
+        row = db.get_session(response.json()["session_id"])
+        assert row["api_user_id"] is None
+        assert json.loads(row["voice_config"])["provider_id"] == "prov-sub"
+        load.assert_awaited_once_with("prov-sub")
+
+    def test_unofficial_codex_unavailable_does_not_create_a_session(self, authenticated_client, mock_db, monkeypatch):
+        from unittest.mock import AsyncMock, Mock
+        from app.core.provider import fluid_credentials
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove")
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        load = AsyncMock(return_value=("fake-token", None))
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
+        monkeypatch.setattr("app.core.voice_dependencies.install", Mock(return_value=False))
+        reason = "Unofficial ChatGPT voice is not available on this system."
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (False, reason))
+        create = Mock(side_effect=AssertionError("must refuse before creating a session"))
+        monkeypatch.setattr(db, "create_session", create)
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "profile_id":"default"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == reason + " Install will be retried on Start after a 10-minute cool-down."
+        create.assert_not_called()
+        load.assert_not_awaited()
+
+    def test_removed_chatgpt_login_returns_clear_400(self, authenticated_client, mock_db, monkeypatch):
+        from unittest.mock import AsyncMock
+        from app.core.provider import fluid_credentials
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove", voice_provider_id="prov-sub")
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(
+            side_effect=fluid_credentials.ProviderCredentialError("synthetic-private-detail")))
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet", "profile_id": "default"})
+        assert response.status_code == 400
+        assert "Reconnect" in response.json()["detail"]
+        assert "no API-key fallback" in response.json()["detail"]
+        assert "synthetic-private-detail" not in response.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resume", [None, "1"])
+    async def test_codex_audio_unavailable_refuses_before_token_or_takeover(self, mock_db, monkeypatch, resume):
+        from unittest.mock import AsyncMock, Mock
+        from app.api import voice
+        from app.core import voice_stream
+        websocket = AsyncMock()
+        monkeypatch.setattr("app.api.ws_auth.authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(voice, "_require_voice_enabled", AsyncMock(return_value={}))
+        monkeypatch.setattr(voice, "_load_voice_session", AsyncMock(return_value={"id": "unavailable"}))
+        monkeypatch.setattr(voice, "_check_voice_session_access", Mock())
+        monkeypatch.setattr(voice, "_reject_when_capped", Mock())
+        monkeypatch.setattr(voice, "session_config", Mock(return_value={"model": "gpt-live-1-codex", "provider_id": "sub"}))
+        monkeypatch.setattr(voice, "_resolve_provider_row", Mock(return_value={"id": "sub"}))
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (False, "Voice libraries unavailable"))
+        monkeypatch.setattr("app.core.voice_dependencies.install", Mock(return_value=False))
+        key = AsyncMock(side_effect=AssertionError("must not load a token"))
+        takeover = AsyncMock(side_effect=AssertionError("must not replace a call"))
+        monkeypatch.setattr(voice, "_provider_api_key", key)
+        monkeypatch.setattr(voice_stream, "take_over", takeover)
+        await voice.voice_audio_socket(websocket, "unavailable", token=None, resume=resume)
+        websocket.close.assert_awaited_once_with(code=4400, reason=(
+            "Unofficial ChatGPT voice is not available on this system. "
+            "Install will be retried on Start after a 10-minute cool-down."
+        ))
+        websocket.accept.assert_not_awaited()
+        key.assert_not_awaited()
+        takeover.assert_not_awaited()
+
+    @pytest.mark.parametrize("pinned", [False, True])
+    def test_unofficial_codex_pins_subscription_without_minting_a_client_secret(self, authenticated_client, mock_db, monkeypatch, pinned):
+        from unittest.mock import AsyncMock
+        from app.api import voice
+        from app.core.provider import fluid_credentials
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove",
+                      voice_provider_id="prov-sub" if pinned else None)
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(return_value=("fake-token", None)))
+        mint = AsyncMock(side_effect=AssertionError("Subscription voice must never mint an API-key secret"))
+        monkeypatch.setattr(voice, "_mint_client_secret", mint)
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "profile_id":"default"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["model"] == "gpt-live-1-codex" and body["client_secret"] == ""
+        assert "fake-token" not in response.text
+        row = db.get_session(body["session_id"])
+        config = json.loads(row["voice_config"])
+        assert config["provider_id"] == "prov-sub"
+        assert row["model"] == "sonnet"  # The selected chat agent remains independent.
+        mint.assert_not_called()
+
     def test_disabled_flag_returns_403(self, authenticated_client, mock_db):
         _make_provider()
         resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})

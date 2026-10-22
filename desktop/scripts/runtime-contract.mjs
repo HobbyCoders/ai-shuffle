@@ -10,7 +10,7 @@ export async function runtimeContract(root) {
 export async function pythonDependencies(root) {
   const hash = createHash('sha256');
   // Same list as PYTHON_INPUTS in src/main/source-build.ts: the hash-pinned locks the runtime installs from.
-  for (const name of ['requirements.lock', 'requirements-native.lock', 'fluid/pyproject.toml']) {
+  for (const name of ['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml']) {
     hash.update(name + '\0' + (await readFile(path.join(root, name), 'utf8')).replace(/\r\n/g, '\n') + '\0');
   }
   return hash.digest('hex');

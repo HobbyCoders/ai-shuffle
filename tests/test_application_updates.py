@@ -572,7 +572,8 @@ def test_cached_runtime_reverified_before_launch(feed, mutation):
     assert "booting" not in updater.state
 
 
-def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, monkeypatch):
+@pytest.mark.parametrize("voice_failure", [False, True])
+def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, monkeypatch, voice_failure):
     updater = feed[0]
     artifacts = [runtime_artifact(kind) for kind in ("python", "node", "chromium")]
     tool, data = runtime_artifact("tools", entries={"tools/bin/tool": b"tool", "tools/lib/libtest.so": b"lib"},
@@ -584,6 +585,8 @@ def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, mo
     commands = []
     def run(command, cwd, env):
         commands.append((command, dict(env)))
+        if voice_failure and "app/core/voice_dependencies.py" in command:
+            raise UpdateError("synthetic optional install failure")
         if "venv" in command:
             stub_venv(Path(command[-1]).parent, command[0])
         if command == ["npm", "run", "build"] and cwd.name == "frontend":

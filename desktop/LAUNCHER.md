@@ -68,10 +68,12 @@ launcher swap to this one after the update's first healthy start; from the
 next update on, the launcher makes the restore point again. Run the acceptance
 run below against a 0.9.6 installer and a 1.0.x installer before release.
 
-Current version is **6**, with **minimum 4** and **start 3** unchanged. It retains
-the start-floor/staged replacement changes and waits for a timed-out self-test
-to close after killing it (bounded to 10 seconds) before rejecting the candidate.
-Launcher 6 still runs the full `ColdClusterCopy.validate()` content read-back
+Current version is **7**, with **minimum 4** and **start 3** unchanged. It adds
+best-effort optional voice dependency installation and includes the voice lock in
+the Python environment fingerprint. It retains the start-floor/staged replacement
+changes and waits for a timed-out self-test to close after killing it (bounded to
+10 seconds) before rejecting the candidate.
+Launcher 7 still runs the full `ColdClusterCopy.validate()` content read-back
 on a ready journal: every snapshot file is hashed against the manifest before
 selection. There is no redundant copy or second read in this path to remove;
 a structure-only or manifest-trust check would weaken the rollback guarantee.
@@ -86,6 +88,14 @@ and `ready-journal launcher preparation reads every snapshot byte once without r
 in [`test/source-updates.test.mjs`](test/source-updates.test.mjs) prove it, including
 rejection of same-size content corruption. Launchers 4, 5 and 6 are explicitly
 trusted; any future version still requires a fresh audit.
+
+Launcher 7 audit: the optional voice changes are confined to dependency building
+in `source-build.ts`; `installed-entry.ts`, `prepareRollback` and `ColdClusterCopy`
+retain launcher 6's full ready-point validation. The same installed-factory test
+now runs against launcher 7 and rejects same-size snapshot corruption. Launcher 7
+is explicitly added to `RESTORE_POINT_VALIDATING_LAUNCHERS`; unknown versions,
+non-Windows handoffs and migration-risk recovery still require full validation.
+This test audit is not a Windows installed-app acceptance run.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.

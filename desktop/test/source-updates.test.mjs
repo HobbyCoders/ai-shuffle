@@ -100,7 +100,7 @@ test('installed-entry factory fully hashes a real ready journal before selection
  const { f, u } = await rollbackFixture(t);
  const { version } = JSON.parse(await fs.readFile(new URL('../launcher.json', import.meta.url), 'utf8'));
  const { launcherValidatedRestorePoint } = require('../dist/main/update-restore-point.js');
- assert.equal(version, 6, 'the audited installed factory must cover the shipped launcher');
+ assert.equal(version, 7, 'the audited installed factory must cover the shipped launcher');
  assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
  const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
@@ -1275,8 +1275,10 @@ test('Python dependencies install only from the hash-pinned locks, like the cont
  const {pythonInstallSteps,pythonDependencyKey,buildSource}=require('../dist/main/source-build.js');
  const steps=pythonInstallSteps();
  assert(!steps[1].includes('--no-deps'));assert(steps[1].includes('--only-binary=pynput,evdev-binary'));assert(steps[1].includes('desktop/vendor'));
- assert.deepEqual(steps.map(args=>args.slice(-3)),[['--require-hashes','-r','requirements.lock'],['--require-hashes','-r','requirements-native.lock'],['--no-deps','--no-build-isolation','./fluid']]);
- for(const args of steps){assert.deepEqual(args.slice(0,3),['-m','pip','install']);assert(!args.includes('requirements.txt')&&!args.includes('requirements-native.txt'));}
+ assert.deepEqual(steps[2],['app/core/voice_dependencies.py','--install']);
+ const pipSteps=steps.filter((_,i)=>i!==2);
+ assert.deepEqual(pipSteps.map(args=>args.slice(-3)),[['--require-hashes','-r','requirements.lock'],['--require-hashes','-r','requirements-native.lock'],['--no-deps','--no-build-isolation','./fluid']]);
+ for(const args of pipSteps){assert.deepEqual(args.slice(0,3),['-m','pip','install']);assert(!args.includes('requirements.txt')&&!args.includes('requirements-native.txt'));}
  // The bundled runtime is reused only when it was installed from the same locks.
  const {pythonDependencies}=await import('../scripts/runtime-contract.mjs');
  const repo=fileURLToPath(new URL('../..',import.meta.url));

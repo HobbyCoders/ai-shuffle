@@ -33,7 +33,10 @@
 	import HotkeyField from '../rows/HotkeyField.svelte';
 	import RangeField from '../rows/RangeField.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
+	import InlineBanner from '../rows/InlineBanner.svelte';
 	import CallPromptsEditor from './editors/CallPromptsEditor.svelte';
+	import { CODEX_VOICE_MODEL } from '$lib/constants/voice-engines';
+	import { voiceModelLabel } from '$lib/api/voice';
 	import { VoicePreview, VoiceState } from './voice-state.svelte';
 	import { voiceVolume, setVoiceVolume, MAX_VOICE_VOLUME } from '$lib/services/voiceVolume';
 	import './editors/editors.css';
@@ -72,9 +75,28 @@
 	});
 	const voiceLabel = $derived(voiceOptions.find((o) => o.value === s?.voice_voice)?.label ?? s?.voice_voice ?? '');
 
+	/**
+	 * ChatGPT voice (unofficial, unsupported): selecting it is the opt-in. It is
+	 * funded only by a connected ChatGPT subscription login (provider_type
+	 * "chatgpt"), never an API key. Whether the native runtime can run here is
+	 * per-system and reported for the selected engine only, as a sanitized reason.
+	 */
+	const chatgpt = $derived(s?.voice_model === CODEX_VOICE_MODEL);
+	const chatgptLabel = voiceModelLabel(CODEX_VOICE_MODEL);
+	const chatgptUnavailable = $derived(chatgpt && details?.available === false);
+	const chatgptReason = $derived(details?.unavailable_reason || 'Unofficial ChatGPT voice is not available on this system.');
+	const engineOptions = $derived([
+		{ value: 'gpt-live-1', label: 'GPT Live 1' },
+		{ value: 'grok-voice-latest', label: 'Grok Voice' },
+		{ value: CODEX_VOICE_MODEL, label: chatgptLabel }
+	]);
+
 	/** The provider a new call runs on: the pin when it is still eligible, else the first by name (server rule). */
 	const grok = $derived(s?.voice_model === 'grok-voice-latest');
-	const providers = $derived(voice.providers?.filter((p) => (p.provider_type ?? 'openai') === (grok ? 'xai' : 'openai')) ?? null);
+	const providerType = $derived(chatgpt ? 'chatgpt' : grok ? 'xai' : 'openai');
+	const providers = $derived(voice.providers?.filter((p) => (p.provider_type ?? 'openai') === providerType) ?? null);
+	const chatgptNeedsLogin = $derived(chatgpt && providers !== null && providers.length === 0);
+	const engineHint = $derived(chatgptUnavailable ? 'Unavailable on this system' : chatgptNeedsLogin ? 'Needs a ChatGPT login' : undefined);
 	const effectiveProvider = $derived.by(() => {
 		if (!providers?.length) return null;
 		const pinned = providers.find((p) => p.id === s?.voice_provider_id);
@@ -192,19 +214,40 @@
 		>
 			<Switch checked={callsOn} disabled={locked} onchange={(v) => voice.save({ voice_mode_enabled: v })} />
 		</SettingRow>
-		<SettingRow id="voice.engine" value={s?.voice_model} onReset={() => voice.save({ voice_model: 'gpt-live-1', voice_provider_id: null })}>
-			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={[{ value: 'gpt-live-1', label: 'GPT Live 1' }, { value: 'grok-voice-latest', label: 'Grok Voice' }]} width={180} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
+		<SettingRow
+			id="voice.engine"
+			hint={engineHint}
+			value={s?.voice_model}
+			onReset={() => voice.save({ voice_model: 'gpt-live-1', voice_provider_id: null })}
+			expanded={chatgpt ? chatgptNote : undefined}
+		>
+			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={engineOptions} width={chatgpt ? 340 : 180} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
 		</SettingRow>
-		<SettingRow label="Voice access" hint="Subscription voice access is not verified; an API key is required.">
-			<ValueText value={grok ? 'xAI API key · server VAD' : 'OpenAI API key'} />
+		<SettingRow
+			label="Voice access"
+			hint={chatgpt ? 'Unofficial; no API-key fallback.' : 'Subscription voice access is not verified; an API key is required.'}
+		>
+			<ValueText value={chatgpt ? 'ChatGPT subscription login · server VAD' : grok ? 'xAI API key · server VAD' : 'OpenAI API key'} />
 		</SettingRow>
 		<SettingRow
 			id="voice.voice"
 			dim={!callsOn}
+			hint={chatgpt ? 'No samples for this engine' : undefined}
 			value={s?.voice_voice}
-			onReset={() => voice.save({ voice_voice: grok ? 'eve' : defaultOf<string>('voice.voice') })}
+			onReset={() => voice.save({ voice_voice: chatgpt ? 'cove' : grok ? 'eve' : defaultOf<string>('voice.voice') })}
 		>
-			{#if s?.voice_voice}
+			{#if s?.voice_voice && chatgpt}
+				<!-- The server cannot preview an unofficial engine; say why instead of failing on click. -->
+				<button
+					type="button"
+					class="st-btn ghost icon"
+					aria-label="Samples are not available for {chatgptLabel}"
+					title={details?.preview_note || 'Samples are not available for this engine.'}
+					disabled
+				>
+					<Play />
+				</button>
+			{:else if s?.voice_voice}
 				<button
 					type="button"
 					class="st-btn ghost icon"
@@ -255,7 +298,7 @@
 		</SettingRow>
 		<SettingRow id="voice.callsRunOn" dim={!callsOn} hint={s?.voice_model} hintMono>
 			{#if providers === null}
-				<ValueText value={voice.status === 'forbidden' ? FORBIDDEN_TEXT : 'OpenAI API key'} />
+				<ValueText value={voice.status === 'forbidden' ? FORBIDDEN_TEXT : chatgpt ? 'ChatGPT login' : 'OpenAI API key'} />
 			{:else if providers.length > 1 && effectiveProvider}
 				<SelectField
 					value={effectiveProvider.id}
@@ -271,7 +314,7 @@
 					ariaLabel="Calls run on {effectiveProvider.name}. Open in Providers"
 				/>
 			{:else}
-				<LinkValue label={grok ? "Add an xAI API key" : "Add an OpenAI API key"} target={{ category: 'providers' }} />
+				<LinkValue label={chatgpt ? 'Connect ChatGPT' : grok ? 'Add an xAI API key' : 'Add an OpenAI API key'} target={{ category: 'providers' }} />
 			{/if}
 		</SettingRow>
 		<SettingRow
@@ -313,6 +356,25 @@
 	{#if voice.error}<p class="st-msg err" role="alert">{voice.error}</p>{/if}
 </PreferencePage>
 
+{#snippet chatgptNote()}
+	<div class="chatgpt-note">
+		<InlineBanner tone="warn">
+			Unofficial and unsupported by OpenAI; it may stop working at any time. A connected ChatGPT subscription login is required, and the provider may still refuse access. Calls never fall back to an API key. Model, effort and permissions follow the chat composer.
+			{#snippet actions()}
+				{#if chatgptNeedsLogin}
+					<LinkValue label="Connect ChatGPT" target={{ category: 'providers' }} ariaLabel="Connect a ChatGPT subscription login in Providers" />
+				{/if}
+			{/snippet}
+		</InlineBanner>
+		{#if chatgptUnavailable}
+			<InlineBanner tone="warn">
+				{chatgptReason}
+				<span class="needs">Needs Linux with glibc 2.28+, macOS 14+ or Windows x64.</span>
+			</InlineBanner>
+		{/if}
+	</div>
+{/snippet}
+
 {#snippet promptsEditor()}
 	{#if details && s?.voice_options}
 		{#key s.voice_model}
@@ -330,5 +392,17 @@
 <style>
 	:global(.settings-shell) :global(.st-spin-icon) {
 		animation: st-spin 0.8s linear infinite;
+	}
+	/* The row expansion already pads the notices; keep the icon beside the text on a phone. */
+	.chatgpt-note :global(.st-banner) {
+		margin: 0 0 8px;
+	}
+	.chatgpt-note :global(.st-banner .msg) {
+		flex: 1 1 220px;
+	}
+	.chatgpt-note .needs {
+		display: block;
+		margin-top: 2px;
+		color: var(--st-mfg);
 	}
 </style>

@@ -36,8 +36,8 @@ except ImportError:  # pip always vendors packaging
 
 ROOT = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parent / "third_party_notices"
-REQUIREMENT_FILES = ["requirements.txt", "requirements-dev.txt", "requirements-native.txt"]
-PYTHON_LOCK_FILES = ["requirements.lock", "requirements-native.lock"]
+REQUIREMENT_FILES = ["requirements.txt", "requirements-dev.txt", "requirements-native.txt", "requirements-voice.txt"]
+PYTHON_LOCK_FILES = ["requirements.lock", "requirements-native.lock", "requirements-voice.lock"]
 NPM_PROJECTS = [("frontend", True), ("browser-mcp", False), ("tools", False), ("desktop", False)]
 # Android declarations are not npm dependencies; licenses come from their Maven POMs.
 ANDROID_LICENSES = {
@@ -53,6 +53,31 @@ ANDROID_LICENSES = {
 }
 # Packages whose metadata names no license, checked by hand against their repositories.
 LICENSE_OVERRIDES = {"google-crc32c": "Apache-2.0"}
+
+AV_BUNDLED_LIBRARIES = """## Bundled libraries in the optional PyAV (`av`) wheels
+
+The `av` package row describes PyAV's BSD-3-Clause wrapper, not the licences of
+its bundled native libraries. The pinned `av` 17.1.0 manylinux wheels include a
+GPL-enabled FFmpeg build, including:
+
+| Bundled library | Licence |
+| --- | --- |
+| FFmpeg, libx264, libx265 | GPL-2.0-or-later (FFmpeg build configured with GPL components) |
+| libmp3lame | LGPL-2.0-or-later |
+| GnuTLS | LGPL-2.1-or-later |
+| nettle, GMP, libunistring | LGPL-3.0-or-later or GPL-2.0-or-later |
+| opencore-amr | Apache-2.0 |
+| libvpx, libopus, SVT-AV1 | BSD-3-Clause |
+| dav1d | BSD-2-Clause |
+| libxcb | MIT |
+
+Corresponding source, build recipes and source archive references are maintained
+at https://github.com/PyAV/pyav-ffmpeg (the FFmpeg build used by PyAV wheels).
+See those recipes and each library's included copyright and licence notices;
+wheel contents and enabled codecs vary by platform. These libraries are bundled
+where the optional voice wheel is installed, including Docker and desktop runtimes.
+"""
+
 
 
 # ── Python ────────────────────────────────────────────────────────────────
@@ -219,7 +244,7 @@ def render() -> str:
     parts.append(
         "## Python packages\n\n"
         "Installed into the Docker image and the desktop installer's Python runtime "
-        "(`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the "
+        "(`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt`, optional `requirements-voice.lock` and the "
         "fluid harness, with their dependencies). No Claude Code CLI binary is bundled; "
         "the user's separately installed stock CLI is licensed by Anthropic under its "
         "own terms. Platform-specific dependencies "
@@ -230,6 +255,8 @@ def render() -> str:
             "Not installed in the environment this file was generated from, so not "
             "listed above: " + ", ".join(f"`{m}`" for m in missing) + "."
         )
+
+    parts.append(AV_BUNDLED_LIBRARIES.rstrip())
 
     for project, include_dev in NPM_PROJECTS:
         scope = "all locked packages (the build bundles from them)" if include_dev else "production dependencies"

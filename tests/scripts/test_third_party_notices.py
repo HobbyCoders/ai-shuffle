@@ -38,7 +38,7 @@ def test_python_locks_are_noticed_for_every_platform():
     rows = {(notices.canonicalize_name(cells[1].strip()), cells[2].strip())
             for line in text.splitlines() if line.startswith("| ")
             for cells in [line.split("|")]}
-    for filename in ("requirements.lock", "requirements-native.lock"):
+    for filename in ("requirements.lock", "requirements-native.lock", "requirements-voice.lock"):
         pins = re.findall(r"^([A-Za-z0-9_.-]+)==([^ ;\\\n]+)",
                           (ROOT / filename).read_text(), flags=re.MULTILINE)
         assert pins, filename
@@ -54,6 +54,7 @@ def test_generator_keeps_all_lock_versions_regardless_of_host_platform(tmp_path,
         'example==1.0 ; sys_platform == "win32" \\\n    --hash=sha256:abc\n'
     )
     (tmp_path / "requirements-native.lock").write_text('example==2.0 ; sys_platform == "darwin"\n')
+    (tmp_path / "requirements-voice.lock").write_text('example==1.0\n')
     meta = Message()
     meta["Name"] = "example"
     meta["License-Expression"] = "MIT"
@@ -68,3 +69,14 @@ def test_generator_keeps_all_lock_versions_regardless_of_host_platform(tmp_path,
     rows, missing = notices.python_packages()
     assert [(row[0], row[1]) for row in rows] == [("example", "1.0"), ("example", "2.0")]
     assert missing == ["fluid"]
+
+def test_pyav_bundled_libraries_have_licenses_and_corresponding_source():
+    text = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    assert notices.AV_BUNDLED_LIBRARIES in text
+    for library in ("FFmpeg", "libx264", "libx265", "libmp3lame", "GnuTLS",
+                    "nettle", "GMP", "libunistring", "opencore-amr", "libvpx",
+                    "libopus", "dav1d", "SVT-AV1", "libxcb"):
+        assert library in notices.AV_BUNDLED_LIBRARIES
+    assert "GPL-2.0-or-later" in notices.AV_BUNDLED_LIBRARIES
+    assert "https://github.com/PyAV/pyav-ffmpeg" in notices.AV_BUNDLED_LIBRARIES
+    assert notices.AV_BUNDLED_LIBRARIES.rstrip() in notices.render()

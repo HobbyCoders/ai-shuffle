@@ -233,7 +233,8 @@ async function installPython() {
 
 	if (args['keep-python'] && existsSync(pythonExe(path.join(outDir, 'python')))) {
 		log('keeping the existing python/ directory (--keep-python)');
-		return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple, kept: true };
+		// Kept directories have not been verified against this optional lock.
+		return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple, kept: true, optionalVoiceInstalled: false };
 	}
 	const asset = `cpython-${PYTHON_VERSION}+${PYTHON_BUILD}-${triple}-install_only.tar.gz`;
 	const base = `https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD}/`;
@@ -255,9 +256,16 @@ async function installPython() {
 	const pip = ['-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', '--timeout', '120', '--retries', '10'];
 	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements.lock')], { env, cwd: repoDir });
 	run(py, [...pip, '--find-links', path.join(repoDir, 'desktop/vendor'), '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
+	let optionalVoiceInstalled = false;
+	try {
+		run(py, [path.join(repoDir, 'app/core/voice_dependencies.py'), '--install'], { env, cwd: repoDir });
+		optionalVoiceInstalled = true;
+	} catch {
+		log('Optional ChatGPT voice libraries unavailable; leaving the dependency fingerprint incomplete for retry.');
+	}
 	run(py, [...pip, '--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')], { env, cwd: repoDir });
 	run(py, ['-c', 'import importlib.util; import fluid, mcp, psycopg2, pygit2, fastapi; assert importlib.util.find_spec("claude_agent_sdk") is None; print("python deps ok (no agent SDK)")'], { env });
-	return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple };
+	return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple, optionalVoiceInstalled };
 }
 
 async function installNode() {
@@ -379,7 +387,7 @@ async function copyServer() {
 	await cp(path.join(repoDir, 'fluid', 'fluid'), path.join(dest, 'fluid'), {
 		recursive: true, verbatimSymlinks: true, filter: src => !src.split(path.sep).includes('__pycache__') && !src.endsWith('.pyc')
 	});
-	for (const file of ['requirements.txt', 'requirements-native.txt', 'LICENSE']) {
+	for (const file of ['requirements.txt', 'requirements-native.txt', 'requirements-voice.lock', 'LICENSE']) {
 		await cp(path.join(repoDir, file), path.join(dest, file));
 	}
 }
@@ -459,7 +467,7 @@ async function main() {
 		stub: false,
 		appVersion: pkg.version,
 		runtime: await runtimeContract(repoDir),
-		pythonDependencies: await pythonDependencies(repoDir),
+		pythonDependencies: python.optionalVoiceInstalled === false ? null : await pythonDependencies(repoDir),
 		platform,
 		arch,
 		python,

@@ -25,3 +25,5 @@ compile requirements.txt fluid/pyproject.toml requirements-build.txt \
 compile requirements-native.txt -c requirements.lock \
   --find-links desktop/vendor --only-binary pynput --only-binary evdev-binary \
   -o requirements-native.lock "$@"
+# The optional media closure may not replace any shared main-lock dependency.
+compile requirements-voice.txt -c requirements.lock -o requirements-voice.lock "$@"

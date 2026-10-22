@@ -38,7 +38,7 @@
 					? 'Speaking…'
 					: call.userSpeaking
 						? 'Hearing you…'
-						: realtime || call.model === 'gpt-live-1' || call.model === 'grok-voice-latest' ? 'Listening' : 'Audio connected'
+						: realtime || call.model === 'gpt-live-1' || call.model === 'grok-voice-latest' || call.model === 'gpt-live-1-codex' ? 'Listening' : 'Audio connected'
 			: status === 'connecting'
 				? 'Connecting…'
 				: status === 'reconnecting'

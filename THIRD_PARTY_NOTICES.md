@@ -84,7 +84,7 @@ is at the end of this file.
 
 ## Python packages
 
-Installed into the Docker image and the desktop installer's Python runtime (`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the fluid harness, with their dependencies). No Claude Code CLI binary is bundled; the user's separately installed stock CLI is licensed by Anthropic under its own terms. The inventory covers every platform in `requirements.lock` and `requirements-native.lock`, including build requirements and the patched pynput distribution, plus development dependencies. Added package licenses were checked against their versioned PyPI metadata. Regeneration must pass `tests/scripts/test_third_party_notices.py`; resolve any missing platform metadata instead of dropping its entries.
+Installed into the Docker image and the desktop installer's Python runtime (`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the fluid harness, with their dependencies). No Claude Code CLI binary is bundled; the user's separately installed stock CLI is licensed by Anthropic under its own terms. The inventory covers every platform in `requirements.lock`, `requirements-native.lock` and the optional `requirements-voice.lock`, including build requirements and the patched pynput distribution, plus development dependencies. Added package licenses were checked against their versioned PyPI metadata. Regeneration must pass `tests/scripts/test_third_party_notices.py`; resolve any missing platform metadata instead of dropping its entries.
 
 | Package | Version | License | URL |
 | --- | --- | --- | --- |
@@ -92,6 +92,8 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | aiogram | 3.31.0 | MIT | https://aiogram.dev/ |
 | aiohappyeyeballs | 2.7.1 | Python Software Foundation License | https://github.com/aio-libs/aiohappyeyeballs |
 | aiohttp | 3.14.3 | Apache-2.0 AND MIT | https://github.com/aio-libs/aiohttp |
+| aioice | 0.10.2 | BSD-3-Clause | https://github.com/aiortc/aioice |
+| aiortc | 1.15.0 | BSD-3-Clause | https://github.com/aiortc/aiortc |
 | aiosignal | 1.4.0 | Apache Software License | https://github.com/aio-libs/aiosignal |
 | annotated-doc | 0.0.5 | MIT | https://github.com/fastapi/annotated-doc |
 | annotated-types | 0.8.0 | MIT | https://github.com/annotated-types/annotated-types |
@@ -100,6 +102,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | asyncssh | 2.24.0 | EPL-2.0 OR GPL-2.0-or-later | http://asyncssh.timeheart.net |
 | audioop-lts | 0.2.2 | PSF-2.0 | https://pypi.org/project/audioop-lts/0.2.2/ |
 | attrs | 26.1.0 | MIT | https://github.com/python-attrs/attrs |
+| av | 17.1.0 | BSD-3-Clause | https://pyav.basswood-io.com |
 | bcrypt | 4.2.1 | Apache Software License | https://github.com/pyca/bcrypt/ |
 | CacheControl | 0.14.4 | Apache-2.0 | https://pypi.org/project/CacheControl/ |
 | certifi | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | https://github.com/certifi/python-certifi |
@@ -111,6 +114,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | coverage | 7.16.1 | Apache-2.0 | https://github.com/coveragepy/coveragepy |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | discord.py | 2.7.1 | MIT License | https://pypi.org/project/discord-py/ |
+| dnspython | 2.9.0 | ISC | https://www.dnspython.org |
 | evdev | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev/2.0.0/ |
 | evdev-binary | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev-binary/2.0.0/ |
 | execnet | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
@@ -138,6 +142,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | httpx | 0.27.2 | BSD-3-Clause | https://github.com/encode/httpx |
 | httpx-sse | 0.4.3 | MIT | https://github.com/florimondmanca/httpx-sse |
 | idna | 3.20 | BSD-3-Clause | https://github.com/kjd/idna |
+| ifaddr | 0.2.0 | MIT License | https://github.com/pydron/ifaddr |
 | iniconfig | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
 | jsonschema | 4.26.0 | MIT | https://github.com/python-jsonschema/jsonschema |
 | jsonschema-specifications | 2025.9.1 | MIT | https://github.com/python-jsonschema/jsonschema-specifications |
@@ -163,6 +168,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | pydantic | 2.11.7 | MIT | https://github.com/pydantic/pydantic |
 | pydantic-settings | 2.6.1 | MIT | https://github.com/pydantic/pydantic-settings |
 | pydantic_core | 2.33.2 | MIT License | https://github.com/pydantic/pydantic-core |
+| pyee | 15.0.0 | MIT License | https://github.com/jfhbrook/pyee |
 | pygit2 | 1.20.1 | GPLv2 with linking exception | https://github.com/libgit2/pygit2 |
 | Pygments | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | PyJWT | 2.15.0 | MIT | https://github.com/jpadilla/pyjwt |
@@ -172,6 +178,8 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | pyobjc-framework-Cocoa | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-Cocoa/12.2.2/ |
 | pyobjc-framework-CoreText | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-CoreText/12.2.2/ |
 | pyobjc-framework-Quartz | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-Quartz/12.2.2/ |
+| pylibsrtp | 1.0.0 | BSD-3-Clause | https://github.com/aiortc/pylibsrtp |
+| pyOpenSSL | 26.4.0 | Apache Software License | https://github.com/pyca/pyopenssl |
 | pyparsing | 3.3.3 | MIT | https://github.com/pyparsing/pyparsing/ |
 | pytest | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | pytest-asyncio | 1.4.0 | Apache-2.0 | https://github.com/pytest-dev/pytest-asyncio |
@@ -208,6 +216,29 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | watchfiles | 1.3.0 | MIT License | https://github.com/samuelcolvin/watchfiles |
 | websockets | 16.1.1 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 | yarl | 1.25.1 | Apache-2.0 | https://github.com/aio-libs/yarl |
+
+## Bundled libraries in the optional PyAV (`av`) wheels
+
+The `av` package row describes PyAV's BSD-3-Clause wrapper, not the licences of
+its bundled native libraries. The pinned `av` 17.1.0 manylinux wheels include a
+GPL-enabled FFmpeg build, including:
+
+| Bundled library | Licence |
+| --- | --- |
+| FFmpeg, libx264, libx265 | GPL-2.0-or-later (FFmpeg build configured with GPL components) |
+| libmp3lame | LGPL-2.0-or-later |
+| GnuTLS | LGPL-2.1-or-later |
+| nettle, GMP, libunistring | LGPL-3.0-or-later or GPL-2.0-or-later |
+| opencore-amr | Apache-2.0 |
+| libvpx, libopus, SVT-AV1 | BSD-3-Clause |
+| dav1d | BSD-2-Clause |
+| libxcb | MIT |
+
+Corresponding source, build recipes and source archive references are maintained
+at https://github.com/PyAV/pyav-ffmpeg (the FFmpeg build used by PyAV wheels).
+See those recipes and each library's included copyright and licence notices;
+wheel contents and enabled codecs vary by platform. These libraries are bundled
+where the optional voice wheel is installed, including Docker and desktop runtimes.
 
 ## npm packages: frontend/
 
