@@ -666,3 +666,70 @@ html:root[data-platform='mobile'] .banner-close {
 	min-width: 44px;
 	min-height: 44px;
 }
+
+/* ── #371 step 4: the agent-first new-session screen ──────────────────────── */
+
+/* frontend/src/lib/components/layout/AgentCard.svelte — the card is the first
+   thing under the top bar; Runs on wraps under the identity row. */
+html:root[data-platform='mobile'] .agent-card { padding: 16px 14px 12px; }
+html:root[data-platform='mobile'] .agent-card .ac-top { gap: 12px; }
+html:root[data-platform='mobile'] .agent-card .ac-rule { margin: 12px -14px 10px; }
+html:root[data-platform='mobile'] .agent-card .ac-ctrls .grow { display: none; }
+
+/* frontend/src/lib/components/chat/VoiceCallButton.svelte (variant="card") —
+   the orb alone is the 44px target; the label stays for screen readers. */
+html:root[data-platform='mobile'] .call-card { padding: 0; height: 44px; }
+html:root[data-platform='mobile'] .call-card .call-card-label {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+/* frontend/src/lib/components/layout/RunsOnPicker.svelte */
+html:root[data-platform='mobile'] .runs-on { height: 44px; font-size: 14px; padding: 0 12px; }
+html:root[data-platform='mobile'] .runs-on-menu { left: 0; right: auto; }
+
+/* frontend/src/lib/components/layout/ChatView.svelte + ProjectSlot.svelte —
+   the add-project row and the project strip share the composer's gutter. */
+html:root[data-platform='mobile'] .project-slot-wrap { padding: 0 0.75rem; margin-top: -0.25rem; }
+html:root[data-platform='mobile'] .project-strip { align-items: flex-start; padding: 8px; }
+html:root[data-platform='mobile'] .project-strip .strip-clear { width: 44px; height: 44px; }
+/* The strip reuses the controls sheet's project/worktree tiles; here they
+   flow in one wrapping row instead of the sheet's two-column grid. */
+html:root[data-platform='mobile'] .project-strip .branch-wt-row { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+html:root[data-platform='mobile'] .project-strip .branch-wt-row > * { flex: 1 1 auto; min-width: 0; }
+
+/* frontend/src/lib/components/layout/WorkspaceSelector.svelte (variant="add") */
+html:root[data-platform='mobile'] .add-project-row { flex-direction: column; align-items: flex-start; gap: 0; padding-left: 0; }
+html:root[data-platform='mobile'] .add-project-row .add-project { height: 44px; padding: 0 12px; font-size: 14px; }
+html:root[data-platform='mobile'] .add-project-row .add-project-hint { padding-left: 12px; }
+
+/* frontend/src/lib/components/layout/AttachProjectSheet.svelte — a bottom
+   sheet with a grab handle and touch-sized rows. */
+html:root[data-platform='mobile'] .attach-layer { place-items: end stretch; padding: 0; }
+html:root[data-platform='mobile'] .attach-sheet {
+	width: 100%;
+	max-height: 86dvh;
+	border-radius: 20px 20px 0 0;
+	border-bottom: none;
+	padding: 8px 14px calc(14px + env(safe-area-inset-bottom));
+	animation-name: attach-sheet-up;
+}
+html:root[data-platform='mobile'] .attach-sheet .grab {
+	display: block;
+	width: 36px;
+	height: 4px;
+	margin: 2px auto 10px;
+	border-radius: 4px;
+	background: var(--border-strong);
+}
+html:root[data-platform='mobile'] .attach-sheet .proj-row { min-height: 48px; font-size: 15px; }
+html:root[data-platform='mobile'] .attach-sheet .icon-btn { width: 44px; height: 44px; }
+html:root[data-platform='mobile'] .attach-sheet .btn { height: 44px; flex: 1; justify-content: center; }
+@keyframes attach-sheet-up { from { transform: translateY(100%); } }
+@media (prefers-reduced-motion: reduce) {
+	html:root[data-platform='mobile'] .attach-sheet { animation: none; }
+}

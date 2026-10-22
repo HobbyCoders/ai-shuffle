@@ -54,7 +54,8 @@ import { getOrCreateDeviceId } from './device-id';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from './worker-selection';
 import { appData } from './app-data.svelte';
 import { composerPreferences, resolveComposerProject } from './composer-preferences';
-import { appMode, type SessionMode } from './sessionMode.svelte';
+import { type SessionMode } from './sessionMode.svelte';
+import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
@@ -113,12 +114,10 @@ export interface ActiveSessionState {
 	/** Ownership from /live, including sessions absent from the sidebar. */
 	isRemote?: boolean;
 	ownerDeviceName?: string | null;
-	/** Which sidepanel lane this surface belongs to — the single thing every
-	 *  component reads to decide what to render, because it covers both cases
-	 *  uniformly: for an OPEN session it is the session row's own mode, and for
-	 *  a brand-new compose screen it is `appMode.current`. Components must not
-	 *  read `appMode` directly; doing so would repaint an open code session as
-	 *  chat the moment the user flipped the sidepanel switcher. */
+	/** Whether this surface has a project ('code') or not ('chat'); 'voice'
+	 *  only on historical call sessions. For an OPEN session it is the row's
+	 *  own mode; on a new-session screen it follows the project pick (#371
+	 *  step 4: no project by default, picking one makes it 'code'). */
 	mode: SessionMode;
 	title: string;
 	messages: ChatMessage[];
@@ -343,9 +342,10 @@ function getAuthToken(): string | null {
 function defaultState(): ActiveSessionState {
 	return {
 		sessionId: null,
-		// A fresh surface opens in whichever lane the sidepanel is showing;
-		// switchSession overwrites this from the session's own row.
-		mode: appMode.current,
+		// A fresh surface starts without a project (#371 step 4); picking one
+		// makes it a project session. switchSession overwrites this from the
+		// session's own row.
+		mode: 'chat',
 		title: 'New Chat',
 		messages: [],
 		isStreaming: false,
@@ -890,6 +890,17 @@ function composerCheckoutDefaults(code: boolean, selectedProject = composerPrefe
 	};
 }
 
+/**
+ * The Access pick for an unbound compose whose project was just added or
+ * cleared. Clearing the project clamps Accept Edits to Ask; adding one back
+ * restores the remembered pick when the current value is only that clamp.
+ */
+function accessForCompose(mode: SessionMode, current: string | null): string | null {
+	if (mode === 'chat') return noProjectPermission(current);
+	const remembered = getPersistedPermissionMode();
+	return remembered && current === noProjectPermission(remembered) ? remembered : current;
+}
+
 export const activeSession = {
 	get current() { return _state; },
 
@@ -1053,18 +1064,54 @@ export const activeSession = {
 		const nextV2 = projectV2Id === undefined
 			? appData.current.clusterProjects.find(p => p.local_project_id === projectId)?.project_v2_id ?? null
 			: projectV2Id;
-		composerPreferences.set('project', {projectId, projectV2Id:nextV2});
-		if (_state.project === projectId && _state.projectV2Id === nextV2) {
+		// Clearing the pick is not a new preference; a project is.
+		if (projectId || nextV2) composerPreferences.set('project', {projectId, projectV2Id:nextV2});
+		// On a new session the project decides its kind (#371 step 4): picking
+		// one makes it a project session, clearing it makes it one without.
+		const nextMode: SessionMode = _state.sessionId ? _state.mode : (projectId || nextV2 ? 'code' : 'chat');
+		if (_state.project === projectId && _state.projectV2Id === nextV2 && _state.mode === nextMode) {
 			return;
 		}
 		_update(s => ({
 			...s,
+			mode: nextMode,
 			workspaceProjectIds: (s.workspaceProjectIds ?? []).filter(id => id !== projectId),
+			// Without a project Accept Edits has nothing to approve; adding one
+			// gives back a remembered Accept Edits the clamp had set aside.
+			...(s.sessionId ? {} : { permissionModeOverride: accessForCompose(nextMode, s.permissionModeOverride) }),
 			// Re-read this project's defaults without clearing the project we left.
 			...(s.sessionId ? {project:projectId, projectV2Id:nextV2}
-				: composerCheckoutDefaults(s.mode !== 'chat', {projectId, projectV2Id:nextV2}, {project:projectId, projectV2Id:nextV2})),
+				: composerCheckoutDefaults(nextMode !== 'chat', {projectId, projectV2Id:nextV2}, {project:projectId, projectV2Id:nextV2})),
+			// The worker pick rides on the project row's eligibility; a cleared
+			// project keeps it (a no-project session can run on any worker).
 			isCreatingWorktree: false,
 			worktreeError: null,
+		}));
+		persistSession();
+	},
+
+	/** Leave a new session without a project (the strip's ✕). */
+	clearProject() {
+		if (_state.sessionId) return;
+		activeSession.setProject('', null);
+	},
+
+	/**
+	 * A running no-project session was given a project (POST attach-project).
+	 * The row is now an ordinary project session; mirror it so the composer,
+	 * git button and project controls appear without a reload.
+	 */
+	applyAttachedProject(sessionId: string, projectId: string, projectV2Id: string | null) {
+		if (_state.sessionId !== sessionId) return;
+		_update(s => ({
+			...s,
+			mode: 'code',
+			project: projectId,
+			projectV2Id,
+			worktreeIntent: 'local',
+			worktreeId: null,
+			worktreeBranch: '',
+			selectedWorktreeBranch: null,
 		}));
 		persistSession();
 	},
@@ -1241,7 +1288,7 @@ export const activeSession = {
 		const code = _state.mode !== 'chat';
 		_update(s => ({...s,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
-			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : null, fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
+			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)), fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
 			contextWindowChoice:getPersistedContextWindowChoice(),
 			...composerCheckoutDefaults(code),
 		}));

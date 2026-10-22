@@ -18,7 +18,8 @@ describe('voice composer parity', () => {
   expect(source('components/chat/ContextPillBar.svelte')).toContain("{#if $activeSession.mode !== 'chat'}");
 		const dock = source('components/chat/ControlsDock.svelte');
 		expect(dock).toContain("$activeSession.mode !== 'chat'");
-		expect(dock).toContain('showCodeControls={isCodeLane && !assistantMode}');
+		// Access shows in every lane (#371 step 4); only its options follow the project.
+		expect(dock).toContain('showCodeControls={!assistantMode}');
 		expect(dock).toContain('const showAttach = true;');
 	});
 	it('restores failed sends only to the originating draft', () => {

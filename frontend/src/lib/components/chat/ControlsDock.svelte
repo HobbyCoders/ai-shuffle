@@ -11,12 +11,12 @@
 	 *   model name as plain text (opens the model picker) · effort as a filled
 	 *   tag (opens the compact effort popover) · the context-usage ring.
 	 *
-	 * The permission control is CODE-LANE ONLY, on both viewports. Chat and voice
-	 * sessions run a fixed tool surface the user cannot widen, so a tool-access
-	 * menu there would offer a choice with nothing behind it. Attach is dropped
-	 * only in the voice lane, which has no composer upload path. Everything else
-	 * — dictate/call, model, effort, the usage ring and the mobile settings
-	 * trigger — is present in every lane.
+	 * The permission control shows in every session, on both viewports (#371
+	 * step 4): Ask, Auto, Bypass and Away everywhere; Accept Edits only once a
+	 * project is picked, since a session without one has no file edit to
+	 * approve (session-scope.ts holds that rule). Everything else — dictate/call,
+	 * model, effort, the usage ring and the mobile settings trigger — is
+	 * present in every session too.
 	 *
 	 * Only one dock popover is open at a time; the ring's own popover closes
 	 * itself on any outside click, so the two never stack.
@@ -70,6 +70,7 @@
 	import { attachmentBlockReason } from './attach-disable';
 	import { awayMode } from '$lib/stores/away-mode.svelte';
 	import { sessions } from '$lib/stores/app-data.svelte';
+	import { accessModes, effectiveAccessMode } from './session-scope';
 
 	interface Props {
 		isUploading: boolean;
@@ -187,10 +188,12 @@
 		return standardContextCap($activeSession);
 	});
 	const autoPermission = $derived(supportsAutoPermission($activeSession.modelOverride || $activeSession.liveRequestedModel || $activeSession.liveModel || getDefaultModel()));
-	const permissionValue = $derived($activeSession.permissionModeOverride === 'auto' && !autoPermission ? 'default' : $activeSession.permissionModeOverride ?? 'default');
-	// Chat and voice are projectless, web-only lanes with a fixed tool surface
-	// (decided server-side), so there is no access to grant.
-	const isCodeLane = $derived($activeSession.mode !== 'chat'); // voice shares code controls
+	// A session with a project ('code'; historical voice shares it) offers
+	// Accept Edits too. The selected value reads as Ask when the menu does not
+	// offer it, which is what the backend runs it as.
+	const hasProject = $derived($activeSession.mode !== 'chat');
+	const accessContext = $derived({ hasProject, autoSupported: autoPermission });
+	const permissionValue = $derived(effectiveAccessMode($activeSession.permissionModeOverride, accessContext));
 	// The assistant's home has no project by construction; see projectRulesLane.
 	const projectLane = $derived(projectRulesLane($activeSession.mode, assistantMode));
 	// Attach survives into the chat lane. Its uploads skip the project endpoint
@@ -200,12 +203,6 @@
 	// composer to attach into.
 	const showAttach = true;
 
-	// Flipping lanes (or opening a chat session) unmounts the permission trigger.
-	// `openPopover` would stay pinned to it, and `handleDocumentClick` bails when
-	// the wrapper is gone — leaving the dock unable to open any other popover.
-	$effect(() => {
-		if (!isCodeLane && openPopover === 'permission') openPopover = null;
-	});
 	const attachDisabled = $derived(
 		!$anyCredential || isUploading || !!attachmentBlockReason(
 			$activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId
@@ -448,12 +445,7 @@
 		}
 	}
 
-	const permissionModes = $derived([
-		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
-		...(autoPermission ? [{ value: 'auto', label: 'Auto', description: 'The provider checks each tool call and approves safe ones' }] : []),
-		{ value: 'acceptEdits', label: 'Accept Edits', description: 'File edits run without asking; every other tool asks' },
-		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
-	]);
+	const permissionModes = $derived(accessModes(accessContext));
 
 	const effortModel = $derived(voiceLane ? modelValue : resolveEffortModel(
 		$activeSession.modelOverride, liveModel, liveRequestedModel, $activeSession.liveProvider
@@ -500,8 +492,8 @@
 		>
 			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
 		</button>
-		{#if isCodeLane && !assistantMode}
-			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
+		{#if !assistantMode}
+			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef} data-decision="access">
 				<button
 					type="button"
 					class="dock-txt"
@@ -769,7 +761,7 @@
 	awayAvailable={!!awaySessionId}
 	awayBusy={!!(awaySessionId && awayMode.busy[awaySessionId])}
 	onToggleAway={toggleAway}
-	showCodeControls={isCodeLane && !assistantMode}
+	showCodeControls={!assistantMode}
 	showSetup={!assistantMode}
 	showEffort={!assistantMode}
 	{assistantMode}

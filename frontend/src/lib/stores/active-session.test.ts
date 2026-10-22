@@ -157,6 +157,11 @@ describe('live permission selection', () => {
 		await pending;
 		expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
 		expect(composerPreferences.current.permissionMode).toBe('acceptEdits');
+		activeSession.setProject('proj-accept', null);
+		expect(activeSession.current.mode).toBe('code');
+		expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
+		activeSession.clearProject();
+		expect(activeSession.current.permissionModeOverride).toBe('default');
 	});
 
 	it('retires an acknowledgement from a previous account', async () => {
@@ -181,9 +186,22 @@ describe('live permission selection', () => {
 		expect(activeSession.current.permissionModeOverride).toBe('default');
 		Object.assign(activeSession.current, { draft: '', worktreeBranch: '', worktreeId: null });
 		activeSession.newChat();
-		expect(activeSession.current.permissionModeOverride).toBe(lane === 'chat' ? null : 'bypassPermissions');
+		// A new session starts without a project (#371 step 4), whose Access
+		// menu offers Bypass — so the pick carries over whichever lane was shown.
+		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
 		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
 		appMode.set('code', false);
+	});
+
+	it('starts a fresh composer on Ask after Accept Edits, and gives it back once a project is added', async () => {
+		activeSession.current.sessionId = null;
+		await activeSession.setPermissionModeOverride('acceptEdits');
+		Object.assign(activeSession.current, { draft: '', worktreeBranch: '', worktreeId: null });
+		activeSession.newChat();
+		// No project: nothing for Accept Edits to approve.
+		expect(activeSession.current.mode).toBe('chat');
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+		expect(composerPreferences.current.permissionMode).toBe('acceptEdits');
 	});
 
 	it.each([

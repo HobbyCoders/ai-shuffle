@@ -66,6 +66,7 @@
 	import NotificationDock from '$lib/components/NotificationDock.svelte';
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
+	import NoProjectPill from './NoProjectPill.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
@@ -952,6 +953,11 @@
 {/snippet}
 
 {#snippet headerActions()}
+	<!-- A running session without a project: the pill opens the one-way
+	     attach sheet (#371 step 4). It hides itself everywhere else. -->
+	{#if $activeView?.type === 'session' && activeTab?.sessionId}
+		<NoProjectPill {assistantMode} compact={!!header} />
+	{/if}
 	<!-- Not in a subagent's chat: its requests and approvals show in its main
 	     chat's panel, labelled with the subagent. -->
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && !activeIsSubagent}

@@ -17,9 +17,16 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 	getUsageLimits: vi.fn().mockResolvedValue({ available: false, buckets: {}, provider_buckets: {} })
 }));
 
+// A new session starts without a project (#371 step 4), where Accept edits is
+// not offered; these cover a project session's full Tool access set.
+function newProjectCompose() {
+	activeSession.newChat();
+	activeSession.setProject('proj-mobile', null);
+}
+
 beforeEach(async () => {
 	appMode.set('code');
-	activeSession.newChat();
+	newProjectCompose();
 	await activeSession.setPermissionModeOverride('default');
 });
 afterEach(() => {
@@ -48,12 +55,21 @@ describe('mobile tool-access persistence', () => {
 		await waitFor(() => expect(activeSession.current.permissionModeOverride).toBe(mode));
 		component.setMobileSheetOpen(false);
 		await tick();
-		activeSession.newChat();
+		newProjectCompose();
 		component.setMobileSheetOpen(true);
 		await tick();
 		expect(panelAccess().getByRole('radio', { name: label }).getAttribute('aria-checked')).toBe('true');
 		// The quick bar names the same choice.
 		expect(screen.getByRole('button', { name: new RegExp(`^Tool access: ${label}`, 'i') })).toBeTruthy();
+	});
+
+	it('offers no Accept edits in the phone panel without a project', async () => {
+		activeSession.clearProject();
+		const { access } = await openControls();
+		const names = access.getAllByRole('radio').map((r) => r.getAttribute('aria-label') ?? r.textContent ?? '');
+		expect(names.some((n) => /accept/i.test(n))).toBe(false);
+		expect(access.getByRole('radio', { name: 'Ask' })).toBeTruthy();
+		expect(access.getByRole('radio', { name: 'Bypass' })).toBeTruthy();
 	});
 
 	it('keeps the saved selection while saving and disables ignored repeat taps until acknowledgement', async () => {

@@ -61,14 +61,13 @@
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { terminalAccess } from '$lib/terminal/gating';
-	import { appMode, sessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
+	import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { splitWorkspaceItems, workspacePrefs } from '$lib/stores/sidebar-prefs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
-	import SessionModeSwitcher from './SessionModeSwitcher.svelte';
 	import SidebarRail from './sidebar/SidebarRail.svelte';
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
@@ -98,7 +97,7 @@
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
-		/** Notified after the mode toggle has already written `appMode`. */
+		/** Retired with the chat/code switch (#371 step 4); kept so callers compile. */
 		onSelectMode?: (mode: SessionMode) => void;
 		/** Extra control for the header row (the drawer's close button). */
 		headerAction?: Snippet;
@@ -162,10 +161,10 @@
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
 	const liveKeys = $derived(liveProjectKeys($projects, $clusterProjects));
-	// One lane at a time. This is the ONLY place the mode partition is applied:
-	// the filter options, `rows`, the three groups and the PR-branch fetch set
-	// all derive from `sidebarSessions`, so a row excluded here is absent from
-	// every one of them.
+	// Every session, with or without a project, is listed together. This is
+	// the one place rows are excluded (the assistant home, hidden rows): the
+	// filter options, `rows`, the three groups and the PR-branch fetch set all
+	// derive from `sidebarSessions`.
 	const sidebarSessions = $derived(
 		$sessions.filter((s) => s.id !== $assistantState?.home_session_id && isVisibleSidebarSession(s, liveKeys))
 	);
@@ -467,7 +466,8 @@
 	);
 	const split = $derived(splitWorkspaceItems(destinations, $workspacePrefs));
 	const moreOn = $derived(split.hidden.some((item) => item.on));
-	const newLabel = $derived($sessionMode === 'code' ? 'New workspace session' : 'New chat');
+	// One kind of session; the project is picked (or not) on the new screen.
+	const newLabel = 'New session';
 
 	/** Which overlay is up: the More menu, the filter, or neither. */
 	let sheet = $state<'more' | 'filter' | null>(null);
@@ -661,19 +661,6 @@
 		e.stopPropagation();
 	}
 
-	/** Switch lanes. The sidebar owns the store write, then lands on the new
-	 *  lane's compose screen: the session on screen belongs to the lane just
-	 *  left and would otherwise sit there while the list beside it no longer
-	 *  contains it. */
-	function selectMode(mode: SessionMode) {
-		// A historical voice session shows the Chat capability as selected.
-		if (mode === ($sessionMode === 'voice' ? 'chat' : $sessionMode)) return;
-		sheet = null;
-		appMode.set(mode);
-		onSelectMode?.(mode);
-		onNewSession();
-	}
-
 	function pickFeature(type: ViewType) {
 		sheet = null;
 		onOpenFeature(type);
@@ -784,7 +771,7 @@
 
 		<div class="p-top">
 			<header class="p-head">
-				<SessionModeSwitcher value={$sessionMode === 'voice' ? 'chat' : $sessionMode} onSelect={selectMode} />
+				<span class="p-title">Sessions</span>
 				<DesktopUpdateButton bind:this={updater} bind:canCheck />
 				<!-- The bell's only home: it used to sit in both top bars, which meant
 				     two copies on mobile and none while the drawer was open. -->
@@ -1014,7 +1001,7 @@
 	.p-top { flex: none; position: relative; padding: 0 8px; background: var(--sidebar); }
 	.phone .p-top { padding-top: env(safe-area-inset-top, 0px); }
 	.p-head { display: flex; align-items: center; gap: 2px; height: 52px; }
-	.p-head :global(.modetog) { margin-right: auto; }
+	.p-title { margin-right: auto; padding-left: 6px; font-size: 13px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
 
 	/* The bell is shared with the top bars, where it is right-anchored under a
 	   wide header. Inside the panel that anchor puts most of it off the left

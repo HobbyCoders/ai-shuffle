@@ -21,9 +21,14 @@
 
 	interface Props {
 		sheetMode?: boolean;
+		/**
+		 * `card`: the new-session agent card's name (#371 step 4). The agent's
+		 * name in the display face with a chevron; the same menu opens below it.
+		 */
+		variant?: 'chip' | 'card';
 	}
 
-	let { sheetMode = false }: Props = $props();
+	let { sheetMode = false, variant = 'chip' }: Props = $props();
 
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
@@ -100,8 +105,24 @@
 	});
 </script>
 
-<div class="selector-wrapper" class:sheet-mode={sheetMode} bind:this={profileDropdownRef}>
-	{#if assistant}
+<div class="selector-wrapper" class:sheet-mode={sheetMode} class:card-variant={variant === 'card'} bind:this={profileDropdownRef}>
+	{#if variant === 'card' && !assistant}
+	<button
+		type="button"
+		class="card-name {$activeSession.profile ? '' : 'unset'}"
+		class:open={showProfileDropdown}
+		onclick={handleProfileClick}
+		title="Change agent"
+		aria-label="Agent: {selectedProfileName}"
+		aria-haspopup="menu"
+		aria-expanded={showProfileDropdown}
+	>
+		<span class="card-name-text">{$activeSession.profile || hasNoAgents ? selectedProfileName : 'Pick an agent'}</span>
+		<svg class="card-name-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+		</svg>
+	</button>
+	{:else if assistant}
 	<button
 		type="button"
 		class="ctx-chip context-selector-btn assistant-chip"
@@ -289,6 +310,53 @@
 	}
 
 	/* Scrollbar styling for dropdown */
+	/* ===== CARD VARIANT (new-session agent card) ===== */
+	.card-name {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		max-width: 100%;
+		margin-left: -6px;
+		padding: 0 6px;
+		border: none;
+		border-radius: calc(var(--radius, 10px) * 0.8);
+		background: transparent;
+		color: var(--foreground);
+		font-family: var(--font-display, Georgia, serif);
+		font-size: clamp(1.5rem, 3.2vw, 1.875rem);
+		font-weight: 700;
+		line-height: 1.15;
+		letter-spacing: -0.02em;
+		cursor: pointer;
+		transition: background 150ms cubic-bezier(0.4, 0, 0.2, 1);
+	}
+	.card-name:hover, .card-name.open { background: var(--hover-overlay); }
+	.card-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.card-name.unset { color: var(--warning); }
+	.card-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.card-name-chev {
+		flex: none;
+		width: 16px;
+		height: 16px;
+		color: var(--subtle-foreground);
+		transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	.card-name.open .card-name-chev { transform: rotate(180deg); }
+	/* The card sits above the composer: its menu opens downward. */
+	.card-variant .selector-dropdown {
+		bottom: auto;
+		top: calc(100% + 6px);
+		animation-name: dropdown-fade-down;
+	}
+	@keyframes dropdown-fade-down {
+		from { opacity: 0; transform: translateY(-4px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.card-name, .card-name-chev { transition: none; }
+		.selector-dropdown { animation: none; }
+	}
+
 	.selector-dropdown::-webkit-scrollbar {
 		width: 6px;
 	}

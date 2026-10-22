@@ -73,7 +73,8 @@ describe('assistant mode flag', () => {
 	});
 
 	it('drops the context chips and the browser toggle from the composer in the home', () => {
-		expect(chatInput).toMatch(/\{#if !assistantMode\}\s*<div class="context-pill-row"><ContextPillBar \/><\/div>\s*\{\/if\}/);
+		// The new-session screen's agent card and project strip carry them too.
+		expect(chatInput).toMatch(/\{#if !assistantMode && !agentCard\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="context-pill-row"><ContextPillBar \/><\/div>\s*\{\/if\}/);
 		expect(chatInput).toContain('onBrowserToggle={assistantMode ? undefined : onBrowserToggle}');
 	});
 

@@ -1602,16 +1602,16 @@ describe('Sidebar Check for updates (#1623)', () => {
 });
 
 describe('Sidebar header', () => {
-	it('starts a new session from the rail, named for the selected capability', async () => {
+	it('starts a new session from the rail, one kind whatever lane was last shown', async () => {
 		const onNewSession = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
 
-		await fireEvent.click(railItem('New workspace session'));
+		await fireEvent.click(railItem('New session'));
 		expect(onNewSession).toHaveBeenCalledTimes(1);
 
 		appMode.set('chat');
 		await tick();
-		expect(railItem('New chat')).toBeTruthy();
+		expect(railItem('New session')).toBeTruthy();
 	});
 
 	it('opens the spotlight from the search field', async () => {
@@ -1645,11 +1645,14 @@ describe('Sidebar header', () => {
 		expect(screen.getByRole('button', { name: /Notifications/ })).toBeTruthy();
 	});
 
-	it('keeps the capability switcher in the header', () => {
+	it('names the list instead of offering a lane switcher (#371 step 4)', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		const head = document.querySelector('.p-head');
-		expect(head?.querySelector('[role="radiogroup"]')).toBeTruthy();
+		// One kind of session: the project is picked on the new-session screen.
+		expect(head?.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(screen.queryAllByRole('radio')).toHaveLength(0);
+		expect(head?.textContent).toContain('Sessions');
 	});
 });
 
@@ -1676,53 +1679,16 @@ describe('Sidebar unified conversation history', () => {
 		const empties = Array.from(document.querySelectorAll('.empty')).map((n) => n.textContent?.trim());
 		expect(empties).toEqual(['Nothing active. Swipe a settled session left to bring it back.', 'No sessions yet']);
 	});
-	it('retains explicit project scope when new-conversation capabilities change', async () => {
+	it('keeps an explicit project scope across lanes', async () => {
 		mocks.sessions.set(fixture());
 		render(Sidebar, { props: sidebarProps });
 		await openFilter();
 		await fireEvent.click(filterOption('Visible Project'));
-		await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+		appMode.set('chat');
+		await tick();
 		expect(cardIds()).toEqual(['legacy', 'coded']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
 		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
-	});
-	it('offers Workspace and narrow Chat capabilities, not a Voice history lane', () => {
-		render(Sidebar, { props: sidebarProps });
-		const radios = screen.getAllByRole('radio');
-		expect(radios.map((r) => r.getAttribute('aria-label'))).toEqual(['Workspace', 'Chat']);
-		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false']);
-		expect(screen.getByRole('radiogroup', { name: 'New conversation capabilities' })).toBeTruthy();
-	});
-	it('opens a new Chat without filtering any session out', async () => {
-		const onNewSession = vi.fn();
-		const onSelectMode = vi.fn(() => expect(appMode.current).toBe('chat'));
-		mocks.sessions.set(fixture());
-		render(Sidebar, { props: { ...sidebarProps, onNewSession, onSelectMode } });
-		await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
-		expect(onNewSession).toHaveBeenCalledTimes(1);
-		expect(onSelectMode).toHaveBeenCalledWith('chat');
-		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
-	});
-	it('does not discard the current conversation when its capability is reselected', async () => {
-		const onNewSession = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
-		await fireEvent.click(screen.getByRole('radio', { name: 'Workspace' }));
-		expect(onNewSession).not.toHaveBeenCalled();
-	});
-	it('treats Chat as already selected while a historical voice session is open', async () => {
-		appMode.set('voice', false);
-		const onNewSession = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
-		expect(screen.getByRole('radio', { name: 'Chat' }).getAttribute('aria-checked')).toBe('true');
-		await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
-		expect(onNewSession).not.toHaveBeenCalled();
-	});
-	it('supports roving keyboard focus with no implicit microphone action', async () => {
-		render(Sidebar, { props: sidebarProps });
-		await fireEvent.keyDown(screen.getByRole('radio', { name: 'Workspace' }), { key: 'End' });
-		expect(appMode.current).toBe('chat');
-		await fireEvent.keyDown(screen.getByRole('radio', { name: 'Chat' }), { key: 'Home' });
-		expect(appMode.current).toBe('code');
 	});
 });
 

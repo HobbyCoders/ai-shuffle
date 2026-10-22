@@ -37,6 +37,7 @@ import { pendingQueue } from './pending-queue';
 import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
+import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
 import {
 	contextChoiceFromWindow,
@@ -995,11 +996,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const savedDraft = newChatEphemeral && (hasComposerDraft(newChatEphemeral.draft) || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
 			? newChatEphemeral : null;
 
-		// A new session is created into whichever lane the sidepanel is showing.
-		// Voice is a call on a conversation, never a new-conversation lane: an
-		// opened historical voice session hands its new chat to the chat lane.
-		if (appMode.current === 'voice') appMode.set('chat');
-		const mode = appMode.current;
+		// A new session starts without a project (#371 step 4): the project is
+		// optional and added on the new-session screen, which switches the
+		// compose to a project session. Only a kept draft that was typed for a
+		// project reopens with it.
+		const mode: SessionMode = savedDraft && (savedDraft.project || savedDraft.projectV2Id) ? 'code' : 'chat';
 
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
@@ -1044,16 +1045,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// A fresh compose restores the complete last-used run binding. Existing
 			// sessions still restore their own row/cache values in switchSession().
 			modelOverride: getPersistedModel(),
-			// ...except the permission mode outside the code lane. Only the code
-			// composer renders the tool-access control, so a chat or voice session
-			// that inherited the last code-lane pick would be stuck with it for
-			// life: reopening it restores 'chat' from the row, which keeps the
-			// control hidden. Inheriting 'plan' would be a deadlock (the plan-exit
-			// tool is not on the chat ceiling, so the turn could never leave plan
-			// mode) and inheriting 'bypassPermissions' would loosen a lane whose
-			// whole premise is a hard ceiling. null means "no session binding",
-			// so the backend settles it — and pins it for chat besides.
-			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : null,
+			// Without a project the composer offers Ask, Auto and Bypass, so the
+			// last pick carries over except Accept Edits (nothing to edit).
+			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : noProjectPermission(getPersistedPermissionMode()),
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
 			workspaceProjectIds: newChatEphemeral?.workspaceProjectIds ?? [],
@@ -1095,7 +1089,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		if (savedDraft) update(s => ({...s,
 			profile:savedDraft.profile ?? s.profile,
 			modelOverride:savedDraft.modelOverride, effortLevelOverride:savedDraft.effortLevelOverride,
-			permissionModeOverride:mode === 'chat' ? null : normalizePermissionMode(savedDraft.permissionModeOverride),
+			permissionModeOverride:mode === 'chat' ? noProjectPermission(normalizePermissionMode(savedDraft.permissionModeOverride)) : normalizePermissionMode(savedDraft.permissionModeOverride),
 			fastMode:savedDraft.fastMode ?? false,
 			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
 			...(mode === 'chat' ? {} : {

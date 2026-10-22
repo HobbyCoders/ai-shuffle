@@ -60,9 +60,11 @@
 		 * so the row reads runner · repo · branch · worktree in DOM order.
 		 */
 		between?: Snippet;
+		/** The new-session agent card owns "Runs on" (#371 step 4); hide the runner chip here. */
+		hideRunner?: boolean;
 	}
 
-	let { sheetMode = false, between }: Props = $props();
+	let { sheetMode = false, between, hideRunner = false }: Props = $props();
 
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
@@ -420,6 +422,7 @@
 		     listing every worker as a radio row (WorkerMenuList, shared with the
 		     active session's runner menu). The worktree modifier is its own
 		     checkbox chip further along the row. -->
+		{#if !hideRunner}
 		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
@@ -462,6 +465,8 @@
 				</div>
 			{/if}
 		</div>
+
+		{/if}
 
 		<!-- Repository chip and, in local mode, the checkout branch chip — owned
 		     by the parent row so they can sit between the runner and the worktree

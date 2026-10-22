@@ -495,14 +495,17 @@ describe('session-init · the restored session keeps its own lane', () => {
 		expect(getState().mode).toBe('code');
 	});
 
-	it('leaves an unbound compose on the sidepanel lane', async () => {
-		// No sessionId means no session to defer to — there, the sidepanel's
-		// pick IS the truth, and newChat has already stamped it.
-		const { init, getState, deps } = makeInit(persistedIn('code', null));
-		deps.update((s) => ({ ...s, mode: 'chat' }));
+	it.each([
+		['proj-1', 'code'], ['', 'chat'],
+	] as const)('takes an unbound compose\'s kind from its project (%j → %s)', async (project, expected) => {
+		// No sessionId means no row to defer to. One kind of session (#371
+		// step 4): a compose with a project is a project session, else not.
+		const { init, getState, deps } = makeInit({ ...persistedIn('chat', null), project } as PersistedSession);
+		deps.update((s) => ({ ...s, mode: expected === 'code' ? 'chat' : 'code' }));
 
 		await init();
 
-		expect(getState().mode).toBe('chat');
+		expect(getState().mode).toBe(expected);
+		expect(getState().project).toBe(project);
 	});
 });

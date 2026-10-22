@@ -1,8 +1,8 @@
 <script lang="ts">
 	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
-	/**
-	/** Chat surface for code, chat and voice. Lane-specific heroes share one
-	 * persistent editor. A live voice call adds compact controls alongside it. */
+	/** Chat surface for every session. A new session opens on the agent card
+	 * (#371 step 4) with the project optional below the composer; heroes share
+	 * one persistent editor. A live voice call adds compact controls alongside it. */
 	import { onDestroy, tick, untrack } from 'svelte';
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
@@ -29,8 +29,8 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
-	import WorkspaceSelector from './WorkspaceSelector.svelte';
-	import ChatModeHero from './ChatModeHero.svelte';
+	import AgentCard from './AgentCard.svelte';
+	import ProjectSlot from './ProjectSlot.svelte';
 	import ChatUnavailableNotice from './ChatUnavailableNotice.svelte';
 	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
@@ -123,12 +123,6 @@
 	}
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
 
-	// The lane this surface belongs to. The store carries it for BOTH an opened
-	// session (adopted from the row) and a brand-new compose screen (adopted from
-	// the sidepanel switcher), so this one read covers every case — no separate
-	// "what did the switcher say" lookup that could disagree with the session.
-	const surfaceMode = $derived($activeSession.mode);
-
 	// Voice (ruling VM18). The gate is the CALL, not the session's mode: a voice
 	// session with no call running is an ordinary chat, and only an in-flight call
 	// on the session currently being viewed takes over the composer slot. The
@@ -143,6 +137,10 @@
 	// mid-call. The transcript column takes over and fills in as the exchange
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
+	// A brand-new session (not a cleared one, the assistant home or the
+	// "could not open" notice) leads with the agent card; the project is an
+	// optional strip under the composer.
+	const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !primaryAssistant && !unavailable);
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
@@ -264,11 +262,6 @@
 		if (!sent) notify.error('Your answer was not sent. Reconnect and try again.');
 	}
 
-	// Handle project selection from WorkspaceSelector
-	function handleProjectSelect(projectId: string, projectV2Id?: string | null) {
-		activeSession.setProject(projectId, projectV2Id ?? null);
-	}
-
 	// Manually re-establish the WebSocket (the Reconnect button on the
 	// disconnection banner). Replace a suspect socket and reset retry backoff.
 	function handleReconnect() {
@@ -334,16 +327,10 @@
 						<h1 class="cleared-title" title={clearedTitle}>{clearedTitle}</h1>
 						<p class="cleared-hint">Conversation cleared — send a message to start fresh.</p>
 					</div>
-				{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}
-					<!-- Projectless conversation lane — no workspace to pick. Voice is
-					     a call on a conversation, so a voice surface gets the chat hero. -->
-					<ChatModeHero />
 				{:else}
-					<WorkspaceSelector
-						selectedProject={$activeSession.project}
-						selectedProjectV2Id={$activeSession.projectV2Id}
-						onSelectProject={handleProjectSelect}
-					/>
+					<!-- New session: the agent leads; no hero copy, no project
+					     required. The project row sits under the composer. -->
+					<AgentCard />
 				{/if}
 			</div>
 		</div>
@@ -423,8 +410,13 @@
 						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
 						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
-					<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
+					<ChatInput compact={!showEmptyHero} {assistantMode} agentCard={showAgentCard} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}
+			{/if}
+			{#if showAgentCard && !archivedSessionId}
+				<div class="project-slot-wrap">
+					<ProjectSlot />
+				</div>
 			{/if}
 		</div>
 	{/if}
@@ -575,6 +567,15 @@
 
 	.empty-bottom-spacer {
 		flex: 1;
+	}
+
+	/* Same gutters as the composer box above it, so the add-project row and
+	   the project strip share the box's left edge. */
+	.project-slot-wrap {
+		position: relative;
+		z-index: 25;
+		padding: 0 1.5rem;
+		margin-top: -0.5rem;
 	}
 
 	/* Overlay the error so it doesn't shift the vertically-centered content. */
