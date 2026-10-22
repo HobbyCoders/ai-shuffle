@@ -31,6 +31,7 @@ import { contextChoiceFromWindow } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
+import { sessionEphemeralCache } from '../session-cache';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -611,6 +612,29 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			// card status is derived fresh. Unsettle clears nothing.
 			if (updates.is_active === false) {
 				dismissSettledSessionPrompts(sessionId, { backgroundPermissions, getState, update });
+			}
+			// A project attached from another tab or device (#371). The attach
+			// also put the session back on Ask. A tab still showing the old
+			// Bypass would send Bypass with its next message, and a send stores
+			// its pick as the session's binding, so adopt both here: on screen
+			// and in the cached copy a later switch-back restores (it wins over
+			// the row).
+			const attachedProject = typeof updates.project_id === 'string' && updates.project_id
+				&& 'mode' in updates && updates.mode === null ? updates.project_id : null;
+			if (sessionId && attachedProject) {
+				const permissionMode = typeof updates.permission_mode === 'string' ? updates.permission_mode : 'default';
+				const projectV2Id = typeof updates.project_v2_id === 'string' ? updates.project_v2_id : null;
+				const cached = sessionEphemeralCache.restore(sessionId);
+				if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode });
+				const open = getState();
+				if (sessionId === open.sessionId && open.mode === 'chat' && !open.project) {
+					update(s => ({
+						...s, mode: 'code', project: attachedProject, projectV2Id,
+						worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
+						permissionModeOverride: permissionMode,
+					}));
+					onPersistSession();
+				}
 			}
 			// Same policy as session_updated: patch the row, and only reload when
 			// the row is unknown here or the change reshapes the list server-side
