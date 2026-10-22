@@ -143,7 +143,7 @@ def test_process_scan_failure_is_fail_closed(tmp_path):
 def test_process_permission_failure_is_fail_closed(tmp_path, monkeypatch):
     path = stale(tmp_path)
 
-    def denied(*args):
+    def denied(*args, **kwargs):
         raise PermissionError("unreadable process metadata")
 
     monkeypatch.setattr(reaper, "_references", denied)
@@ -344,6 +344,65 @@ def test_opaque_application_entry_points(tmp_path, argv, name, ancestor, safe):
     own.mkdir()
     (own / "status").write_text(f"PPid:\t{int(ancestor)}\n")
     assert reaper._uninspectable_is_unrelated(target, proc) == safe
+
+
+@pytest.fixture
+def opaque_python_process(tmp_path, monkeypatch):
+    proc = tmp_path / "opaque-proc"
+    target = proc / "123"
+    target.mkdir(parents=True)
+    uid = os.getuid()
+    (target / "status").write_text(f"Name:\tpython\nUid:\t{uid} {uid} {uid} {uid}\n")
+    original = os.scandir
+
+    def scan(path):
+        if not isinstance(path, int) and Path(path) == target / "fd":
+            raise PermissionError("uninspectable")
+        return original(path)
+
+    monkeypatch.setattr(reaper.os, "scandir", scan)
+    return proc, target
+
+
+@pytest.mark.parametrize("module", ["app.main", "app.preview_process"])
+def test_opaque_app_keeps_dead_owner_preview_only(tmp_path, opaque_python_process, module):
+    proc, target = opaque_python_process
+    (target / "cmdline").write_bytes(b"python\0-m\0" + module.encode() + b"\0")
+    preview = stale(tmp_path, "ai-shuffle-preview-")
+    pytest_tree = stale(tmp_path, "ai-shuffle-pytest-")
+    ci_tree = stale(tmp_path, "ai-shuffle-ci-")
+
+    assert reaper.sweep(tmp_path, proc=proc) == 2
+    assert preview.exists()
+    assert not pytest_tree.exists()
+    assert not ci_tree.exists()
+    # The exemption is local to this scan, not a permanent preview opt-out.
+    assert reaper.sweep(tmp_path, proc=tmp_path / "proc") == 1
+    assert not preview.exists()
+
+
+@pytest.mark.parametrize("error", [ImportError, ModuleNotFoundError])
+def test_shim_import_failure_disables_sweep_once(tmp_path, opaque_python_process, monkeypatch, caplog, error):
+    import builtins
+
+    proc, target = opaque_python_process
+    (target / "cmdline").write_bytes(b"python\0-s\0-c\0shim\0")
+    path = stale(tmp_path)
+    original = builtins.__import__
+
+    def importing(name, *args, **kwargs):
+        if name == "docker.agent_isolation":
+            raise error("unavailable shim")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", importing)
+    monkeypatch.setattr(reaper, "_disabled_logged", False)
+    for _ in range(2):
+        assert reaper.sweep(tmp_path, proc=proc) == 0
+        assert path.exists()
+    assert sum("sweep disabled" in message for message in caplog.messages) == 1
+    assert "potentially relevant process is not inspectable" in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_opaque_agent_isolation_shim_requires_exact_code(tmp_path):

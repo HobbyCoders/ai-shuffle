@@ -141,9 +141,11 @@ scratch, cannot inherit its descriptors/cwd, and are trusted not to open it late
 Normal app startup makes processes non-dumpable. Readable status and exact
 Python entry-point argv identify same-user `app.main` instances (including
 runners), `app.preview_process`, and the exact agent-isolation app shim; these
-do not block sweeping. Their scratch receipts name their own PID, so live-owner
-checks protect their trees, and app code does not hold a dead owner's scratch
-open. The non-dumpable `docker/container_runtime.py run` supervisor is also
+do not block sweeping other prefixes. Their own live-owner receipts protect
+scratch, but an orphaned preview app can retain a dead launcher's preview tree.
+Whenever the scan exempts an opaque `app.main` or `app.preview_process`, it skips
+all `ai-shuffle-preview-*` trees for that sweep; pytest/CI and other prefixes
+remain eligible. The non-dumpable `docker/container_runtime.py run` supervisor is also
 exempt only when it is an ancestor: it starts/reaps children without opening
 their scratch. Other uninspectable root or same-user processes fail closed,
 logging the disabled sweep once per worker. A process retaining scratch cwd/fds

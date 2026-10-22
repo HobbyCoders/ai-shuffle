@@ -34,14 +34,14 @@ def _disabled(reason):
     return None
 
 
-def _uninspectable_is_unrelated(base, proc):
+def _uninspectable_is_unrelated(base, proc, protected_prefixes=None):
     status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
     uids = {int(uid) for uid in status["Uid"].split()}
     if 0 not in uids:
         # Retaining cwd/fds then switching every UID to another user is a known gap.
         if os.getuid() not in uids:
             return True
-        return _is_application_process(base, status, proc)
+        return _is_application_process(base, status, proc, protected_prefixes)
     # Only exempt established init ancestors, not arbitrary root daemons or
     # elevated children. Init shims predate our scratch and only reap/forward
     # signals; they cannot have inherited its cwd/fds. Trust their fixed role
@@ -52,11 +52,12 @@ def _uninspectable_is_unrelated(base, proc):
     return _is_ancestor(base, proc)
 
 
-def _is_application_process(base, status, proc):
-    # Normal startup makes app/runner processes non-dumpable. Their scratch
-    # receipts name their own PID, so the live-owner check protects it; app code
-    # does not keep another, dead owner's scratch open. The container supervisor
-    # only starts/reaps children and never opens their scratch.
+def _is_application_process(base, status, proc, protected_prefixes=None):
+    # Normal startup makes app/runner processes non-dumpable. Live-owner receipts
+    # protect their own scratch, but an orphaned preview app can retain a dead
+    # launcher's tree. Exempting an opaque app therefore protects ALL preview
+    # trees for this sweep. The supervisor only starts/reaps children and never
+    # opens their scratch.
     if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", status["Name"].strip()):
         return False
     argv = (base / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
@@ -66,6 +67,8 @@ def _is_application_process(base, status, proc):
     while args and args[0] in {b"-s", b"-I", b"-E", b"-u", b"-B"}:
         args = args[1:]
     if args in ([b"-m", b"app.main"], [b"-m", b"app.preview_process"]):
+        if protected_prefixes is not None:
+            protected_prefixes.add("ai-shuffle-preview-")
         return True
     if len(args) == 2 and args[0] == b"-c":
         from docker.agent_isolation import APP_SHIM
@@ -93,7 +96,7 @@ def _is_ancestor(base, proc):
     return False
 
 
-def _references(proc, deadline):
+def _references(proc, deadline, *, protected_prefixes=None):
     references = set()
     count = 0
     descriptor_count = 0
@@ -125,11 +128,11 @@ def _references(proc, deadline):
                 continue  # exited during observation
             except PermissionError:
                 try:
-                    if _uninspectable_is_unrelated(base, proc):
+                    if _uninspectable_is_unrelated(base, proc, protected_prefixes):
                         continue
                 except (FileNotFoundError, ProcessLookupError):
                     continue
-                except (OSError, ValueError, KeyError):
+                except (OSError, ValueError, KeyError, ImportError):
                     pass
                 return _disabled("potentially relevant process is not inspectable")
     return references
@@ -168,7 +171,8 @@ def sweep(root=None, *, ttl=21600, proc=Path("/proc"), now=None):
     deadline = time.monotonic() + SWEEP_SECONDS
     removed = 0
     try:
-        references = _references(proc, deadline)
+        protected_prefixes = set()
+        references = _references(proc, deadline, protected_prefixes=protected_prefixes)
         if references is None:
             return 0
         with os.scandir(root) as entries:
@@ -176,6 +180,8 @@ def sweep(root=None, *, ttl=21600, proc=Path("/proc"), now=None):
                 if index >= MAX_ENTRIES or removed >= MAX_REMOVALS or time.monotonic() >= deadline:
                     break
                 if not entry.name.startswith(PREFIXES) or not entry.is_dir(follow_symlinks=False):
+                    continue
+                if any(entry.name.startswith(prefix) for prefix in protected_prefixes):
                     continue
                 path = Path(entry.path)
                 try:
