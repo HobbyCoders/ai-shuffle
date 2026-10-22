@@ -217,6 +217,29 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | websockets | 16.1.1 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 | yarl | 1.25.1 | Apache-2.0 | https://github.com/aio-libs/yarl |
 
+## Bundled libraries in the optional PyAV (`av`) wheels
+
+The `av` package row describes PyAV's BSD-3-Clause wrapper, not the licences of
+its bundled native libraries. The pinned `av` 17.1.0 manylinux wheels include a
+GPL-enabled FFmpeg build, including:
+
+| Bundled library | Licence |
+| --- | --- |
+| FFmpeg, libx264, libx265 | GPL-2.0-or-later (FFmpeg build configured with GPL components) |
+| libmp3lame | LGPL-2.0-or-later |
+| GnuTLS | LGPL-2.1-or-later |
+| nettle, GMP, libunistring | LGPL-3.0-or-later or GPL-2.0-or-later |
+| opencore-amr | Apache-2.0 |
+| libvpx, libopus, SVT-AV1 | BSD-3-Clause |
+| dav1d | BSD-2-Clause |
+| libxcb | MIT |
+
+Corresponding source, build recipes and source archive references are maintained
+at https://github.com/PyAV/pyav-ffmpeg (the FFmpeg build used by PyAV wheels).
+See those recipes and each library's included copyright and licence notices;
+wheel contents and enabled codecs vary by platform. These libraries are bundled
+where the optional voice wheel is installed, including Docker and desktop runtimes.
+
 ## npm packages: frontend/
 
 From `frontend/package-lock.json`, all locked packages (the build bundles from them).

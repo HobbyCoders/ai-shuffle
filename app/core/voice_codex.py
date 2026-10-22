@@ -24,6 +24,9 @@ class CodexVoiceStream(VoiceStream):
         return None
 
     async def start_live(self, history):
+        if self.closed:
+            self.api_key = ""
+            return
         from app.core.voice_dependencies import availability
         available, reason = availability()
         if not available:
@@ -39,6 +42,8 @@ class CodexVoiceStream(VoiceStream):
             session["instructions"] += "\n\n" + await run_sync(conversation_instructions, row)
         token, account = await _load_codex_access_token(self.config["provider_id"])
         try:
+            if self.closed:
+                return
             async with asyncio.timeout(20):
                 await self.upstream.open(get_http_client(), token, account, session)
                 pending = []

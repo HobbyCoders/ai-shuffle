@@ -1129,7 +1129,12 @@ class ContainerUpdates:
         pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
         self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
         # Optional media failure must not block an otherwise valid app update.
-        self.run_build([str(python), "app/core/voice_dependencies.py", "--install"], source, env)
+        try:
+            self.run_build([str(python), "app/core/voice_dependencies.py", "--install"], source, env)
+        except UpdateError:
+            # Optional media failure must not prevent the base app update.
+            # The call-start path can retry from this source's hash-pinned lock.
+            _log("Optional ChatGPT voice libraries unavailable; call start can retry")
         self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
         for package in ("frontend", "tools", "browser-mcp"):
             self.publish("downloading", f"Building {package}…", version=revision)

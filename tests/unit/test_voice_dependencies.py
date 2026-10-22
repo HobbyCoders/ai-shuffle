@@ -66,3 +66,81 @@ def test_unsupported_install_never_runs_pip(monkeypatch, tmp_path):
     monkeypatch.setattr(deps.subprocess, "run", run)
     assert deps.install(tmp_path) is False
     run.assert_not_called()
+
+
+@pytest.mark.parametrize("usable", [False, True])
+def test_pip_success_is_complete_only_after_native_imports_work(monkeypatch, tmp_path, usable):
+    monkeypatch.setattr(deps, "platform_reason", lambda: None)
+    (tmp_path / "requirements-voice.lock").write_text("synthetic")
+    run = Mock(side_effect=[Mock(returncode=0), Mock(returncode=0 if usable else 1)])
+    monkeypatch.setattr(deps.subprocess, "run", run)
+    assert deps.install(tmp_path) is usable
+    assert run.call_args_list[0].kwargs["timeout"] == 180
+    assert 0 < run.call_args_list[1].kwargs["timeout"] <= 180
+    assert run.call_args_list[1].args[0][-1] == "import aiortc, av"
+
+
+@pytest.mark.asyncio
+async def test_failed_optional_install_is_retryable_on_next_call(monkeypatch):
+    monkeypatch.setattr(deps, "platform_reason", lambda: None)
+    state = {"ready": False, "attempts": 0}
+    monkeypatch.setattr(deps, "availability", lambda: (state["ready"], None if state["ready"] else deps.UNAVAILABLE))
+
+    def install(root):
+        state["attempts"] += 1
+        state["ready"] = state["attempts"] == 2
+        return state["ready"]
+
+    monkeypatch.setattr(deps, "install", install)
+    assert await deps.ensure_available() == (False, deps.UNAVAILABLE)
+    assert await deps.ensure_available() == (True, None)
+    assert await deps.ensure_available() == (True, None)
+    assert state["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_installer_is_queued_behind_an_active_attempt(monkeypatch):
+    monkeypatch.setattr(deps, "platform_reason", lambda: None)
+    monkeypatch.setattr(deps, "availability", lambda: (False, deps.UNAVAILABLE))
+    install = Mock(side_effect=AssertionError("must not start a second installer"))
+    monkeypatch.setattr(deps, "install", install)
+    deps._INSTALL_LOCK.acquire()
+    try:
+        assert await deps.ensure_available() == (False, deps.UNAVAILABLE)
+    finally:
+        deps._INSTALL_LOCK.release()
+    install.assert_not_called()
+
+
+def test_optional_cli_reports_failure_without_running_real_pip(monkeypatch):
+    import runpy
+    import sys
+    monkeypatch.setattr(sys, "argv", [deps.__file__, "--install"])
+    run = Mock(return_value=Mock(returncode=1))
+    monkeypatch.setattr(deps.subprocess, "run", run)
+    monkeypatch.setattr(deps.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(deps.platform, "libc_ver", lambda: ("glibc", "2.28"))
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(deps.__file__, run_name="__main__")
+    assert error.value.code == 1
+    run.assert_called_once()
+
+
+def test_native_probe_cannot_extend_the_install_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(deps, "platform_reason", lambda: None)
+    (tmp_path / "requirements-voice.lock").write_text("synthetic")
+    monkeypatch.setattr(deps, "time", Mock(monotonic=Mock(side_effect=[100.0, 280.0])))
+    run = Mock(return_value=Mock(returncode=0))
+    monkeypatch.setattr(deps.subprocess, "run", run)
+    assert deps.install(tmp_path) is False
+    run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_system_never_retries_install_on_call_start(monkeypatch):
+    monkeypatch.setattr(deps, "availability", lambda: (False, deps.UNAVAILABLE))
+    monkeypatch.setattr(deps, "platform_reason", lambda: deps.UNAVAILABLE)
+    install = Mock(side_effect=AssertionError("unsupported system"))
+    monkeypatch.setattr(deps, "install", install)
+    assert await deps.ensure_available() == (False, deps.UNAVAILABLE)
+    install.assert_not_called()
