@@ -84,7 +84,7 @@ from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
 from fluid.engine.claude_mod_compaction import (
-    COMPACT_PATH, COMPACTION_ENV, MAX_COMPACT_BODY_BYTES, compact_messages, compaction_enabled,
+    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, compact_messages,
 )
 from fluid.context.recall import HistoryRecall
 from fluid.engine.delegated_proto import (
@@ -364,13 +364,17 @@ CLAUDE_MOD_ENV = "FLUID_CLAUDE_MOD"
 # Where the mod posts the plan usage the CLI measures (``claude_mod/hooks/
 # usage.ts``, contract in ``claude_mod_usage``): the bridge's HTTP route, the
 # unix socket it goes over (unset on a loopback port), and a per-session token
-# that authorizes only the mod's usage and opt-in compaction routes, never a
+# that authorizes only the mod's usage and compaction routes, never a
 # tool call. Set in the CLI's env only when the mod is loaded and either route
 # is mounted; the mod reads them once and unsets them, so the
 # commands the model runs do not inherit them.
 CLAUDE_MOD_URL_ENV = "FLUID_CLAUDE_MOD_URL"
 CLAUDE_MOD_SOCKET_ENV = "FLUID_CLAUDE_MOD_SOCKET"
 CLAUDE_MOD_TOKEN_ENV = "FLUID_CLAUDE_MOD_TOKEN"
+# The compaction route's URL, set only when this spawn's bridge mounts it: the
+# mod's handshake that the route exists (``claude_mod/hooks/mechanical.ts``,
+# ``mounted``), never a switch. Always dropped from the inherited environment.
+CLAUDE_MOD_COMPACT_URL_ENV = "FLUID_CLAUDE_MOD_COMPACT_URL"
 
 
 def claude_mod_enabled(env: dict[str, str] | None = None) -> bool:
@@ -692,7 +696,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ] | None = None,
         journal: Any | None = None,
         claude_mod: bool | None = None,
-        claude_mod_compaction: bool | None = None,
+        claude_mod_compaction: bool = True,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
@@ -902,10 +906,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.plan_usage_sink = plan_usage_sink
         self._mod_token = secrets.token_urlsafe(32)
         self._usage_route = False
-        self.claude_mod_compaction = (
-            compaction_enabled({**os.environ, **(env or {})})
-            if claude_mod_compaction is None else bool(claude_mod_compaction)
-        )
+        # Main-conversation compaction through Fluid (``claude_mod_compaction``)
+        # instead of the CLI's own summary. The host decides; nothing reads
+        # the environment for it. A spawn without the mod (older CLI, mod
+        # off) compacts on the CLI's own, the same as off.
+        self.claude_mod_compaction = bool(claude_mod_compaction)
         self._compaction_route = False
 
         self._session: SessionMeta | None = None
@@ -1547,16 +1552,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )):
             return {}
         address = self._socket_path or ""
-        if address.startswith("tcp:"):
-            env = {CLAUDE_MOD_URL_ENV: f"http://{address[4:]}{USAGE_PATH}"}
-        else:
-            env = {
-                CLAUDE_MOD_URL_ENV: f"http://localhost{USAGE_PATH}",
-                CLAUDE_MOD_SOCKET_ENV: address,
-            }
+        origin = f"http://{address[4:]}" if address.startswith("tcp:") else "http://localhost"
+        env = {CLAUDE_MOD_URL_ENV: f"{origin}{USAGE_PATH}"}
+        if not address.startswith("tcp:"):
+            env[CLAUDE_MOD_SOCKET_ENV] = address
         env[CLAUDE_MOD_TOKEN_ENV] = self._mod_token
         if self._compaction_route:
-            env[COMPACTION_ENV] = "1"
+            env[CLAUDE_MOD_COMPACT_URL_ENV] = f"{origin}{COMPACT_PATH}"
         return env
 
     async def _compact_mod_messages(self, body: Any) -> dict[str, Any]:
@@ -1692,7 +1694,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._mcp_config_path and "--mcp-config" not in argv:
             argv += ["--mcp-config", self._mcp_config_path, "--strict-mcp-config"]
         # After the argv, which decides whether this spawn gets the mod.
-        child_env = {**self._child_env(), **self._claude_mod_env()}
+        child_env = self._child_env()
+        # Only this spawn's own bridge may announce the compaction route.
+        child_env.pop(CLAUDE_MOD_COMPACT_URL_ENV, None)
+        child_env.update(self._claude_mod_env())
         from fluid.tools import agent_runner
 
         argv, cwd, child_env = agent_runner.wrap(argv, self.cwd, child_env)

@@ -629,6 +629,39 @@ CLI prompt. Delegated settings must be a JSON object: file-path and non-object
 settings are rejected before spawn rather than passed through, since they could
 silently restore provider attribution. Existing app spawns use JSON objects.
 
+### GET /api/v1/settings/claude-compaction
+
+Read whether Claude sessions compact through AI Shuffle. **Auth:** Required.
+
+```json
+{"enabled": true}
+```
+
+On by default. When enabled, a Claude Code chat's compaction keeps the recent
+work as it is, trims older tool results and digests older turns, with the
+originals still readable through `HistoryExpand`, instead of Claude Code
+replacing the conversation with a short summary. More of the conversation stays
+in context afterwards, so later turns send more tokens. It needs Claude Code
+2.1.287 or newer; an older CLI compacts on its own, as when this is off.
+
+### PUT /api/v1/settings/claude-compaction
+
+Replace the setting. **Auth:** Owner only. Send a required JSON boolean
+`enabled`; missing, null, string and numeric values return `422`. The response
+is the same shape as GET.
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/claude-compaction \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+Stored as the shared `system_settings` key `claude_compaction`, replicated by
+the network settings sync. Each executing worker reads it when a Claude session
+starts, so a change applies to Claude sessions started afterwards, not to one
+whose Claude Code process is already running.
+
 ### GET /api/v1/settings/subagent-default
 
 The model every agent runs on when another agent starts it as a subagent and the agent has no model of its own.

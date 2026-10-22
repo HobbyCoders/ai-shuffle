@@ -22,6 +22,7 @@ import pytest
 
 import fluid.engine.delegated as delegated_mod
 from fluid.engine.delegated import (
+    CLAUDE_MOD_COMPACT_URL_ENV,
     CLAUDE_MOD_PLUGIN,
     CLAUDE_MOD_SINCE,
     CLAUDE_MOD_SOCKET_ENV,
@@ -87,10 +88,11 @@ def test_the_mod_never_asks_for_credentials() -> None:
     assert source.count("$.http") == 2
     assert re.search(r"\$\.http\s*\.fetch\(target\.url", source)
     assert re.search(r"\bauth\s*:", source) is None
-    # Only bridge variables and the two non-secret feature switches.
+    # Only bridge variables (the compaction route's handshake among them) and
+    # the one non-secret feature switch.
     assert set(re.findall(r"\$\.env\.(?:get|set)\('([A-Z_]+)'", source)) == {
         CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
-        "FLUID_BASH_FILE_GUARD", "FLUID_CLAUDE_MOD_COMPACTION",
+        CLAUDE_MOD_COMPACT_URL_ENV, "FLUID_BASH_FILE_GUARD",
     }
 
 
