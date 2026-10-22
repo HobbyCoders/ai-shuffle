@@ -380,7 +380,8 @@ async def test_remote_start_session_body_carries_the_senders_current_binding(tig
     wake = await tightened_sender._enqueue_context_wake("caller", "unpark", [], ["job"], "done")
     from app.db import turns
     turns.start_turn(wake["id"])
-    remote = {"device_id": "dev-2", "device_name": "DesktopWorker"}
+    remote = {"device_id": "dev-2", "device_name": "DesktopWorker",
+              "capabilities": {"start_session_permissions": 1}}
     with patch.object(orch, "_remote_worker", return_value=remote):
         planned = orch._queue("caller", {"title": "Child", "prompt": "go", "request_id": "r2",
                                          "worker": "DesktopWorker"}, "start")

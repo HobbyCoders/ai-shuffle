@@ -520,7 +520,10 @@ def _job_usage(cursor, session_id, from_device, now):
     session = row_to_dict(cursor.fetchone())
     if not session or session.get("api_user_id") or control.owner_of(session) is not None:
         return {"known": False}
-    cursor.execute("SELECT payload FROM turns WHERE session_id=%s ORDER BY created_at ASC LIMIT 1", (session_id,))
+    # Creation timestamps can tie (especially rows enqueued in one transaction).
+    # Do not mistake a later answer for the first turn's remote provenance.
+    cursor.execute("SELECT payload FROM turns WHERE session_id=%s "
+                   "ORDER BY created_at ASC, position ASC, id ASC LIMIT 1", (session_id,))
     first = row_to_dict(cursor.fetchone())
     if not _started_by(_payload((first or {}).get("payload")), from_device):
         return {"known": False}

@@ -357,7 +357,12 @@ def test_a_remote_chat_past_its_job_time_is_stopped_turn_by_turn_and_owner_turns
                                        payload={"question_answer_human_input": False})
         assert turns.start_turn(automatic["id"])
         with get_db() as conn:
-            usage = limits._job_usage(conn.cursor(), "remote-chat", b.device_id, datetime.now(timezone.utc))
+            cursor = conn.cursor()
+            # Equal timestamps must not pick a later human/automatic turn as
+            # the session's provenance; queue position records creation order.
+            cursor.execute("UPDATE turns SET created_at=%s WHERE session_id='remote-chat'",
+                           (datetime(2026, 1, 1, tzinfo=timezone.utc),))
+            usage = limits._job_usage(cursor, "remote-chat", b.device_id, datetime.now(timezone.utc))
         assert usage["turns"] == [{"turn_id": automatic["id"], "person": False}]
         # The previous stop is durable; this test starts a turn directly only
         # to inspect its usage classification, not to bypass that admission guard.

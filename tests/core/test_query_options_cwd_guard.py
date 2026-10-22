@@ -173,10 +173,10 @@ def test_v2_worktree_on_wrong_branch_names_the_branch_instead_of_missing():
 
 
 def test_orphan_owner_session_uses_confined_chat_cwd(tmp_path, monkeypatch):
-    """No project means coordination, never an implicit worker workspace grant."""
+    """A stored chat stays confined; legacy code migration belongs to step 4."""
     ws = tmp_path / "ws"
     monkeypatch.setattr(qo.settings, "workspace_dir", ws)
-    session = {"id": "ses-1", "project_v2_id": None, "branch": None}
+    session = {"id": "ses-1", "mode": "chat", "project_v2_id": None, "branch": None}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
@@ -198,7 +198,7 @@ def test_orphan_owner_session_cannot_escape_with_profile_config_cwd(tmp_path):
     """An agent-config cwd cannot lift a no-project owner's file ceiling."""
     cfg_dir = tmp_path / "cfgcwd"
     cfg_dir.mkdir()
-    session = {"id": "ses-1", "project_v2_id": None, "branch": None}
+    session = {"id": "ses-1", "mode": "chat", "project_v2_id": None, "branch": None}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
