@@ -157,6 +157,33 @@ def test_javascript_audits_use_npm_11_without_reducing_scope(step_name, director
     assert audits == ["npx -y npm@11 audit --audit-level=high"]
 
 
+def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
+    job = workflow("ci-frontend.yml")["jobs"]["frontend"]
+    assert job["timeout-minutes"] == "20"
+    steps = job["steps"]
+    setup = next(step for step in steps if step.get("name") == "Prepare sandboxed Chromium")
+    cache = next(step for step in steps if step.get("name") == "Cache managed Chromium")
+    tests = next(step for step in steps if step.get("name") == "Browser MCP build and tests")
+    assert cache["uses"] == "actions/cache@v4"
+    assert cache["with"]["path"] == "~/.cache/ms-playwright"
+    assert "hashFiles('browser-mcp/package-lock.json')" in cache["with"]["key"]
+    assert steps.index(cache) < steps.index(setup) < steps.index(tests)
+    assert setup["timeout-minutes"] == "4"
+    assert "if" not in setup  # OS dependencies are needed even on a cache hit.
+    assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
+    assert "for attempt in 1 2; do" in setup["run"]
+    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium" in setup["run"]
+    assert 'echo "::error::Chromium dependency installation failed' in setup["run"]
+    assert setup["run"].rstrip().endswith("exit 1")
+    assert tests["timeout-minutes"] == "6"
+    assert "timeout --kill-after=10s 240s npm test" in tests["run"]
+    assert 'exit "$result"' in tests["run"]
+    assert "::error::Browser MCP tests failed" in tests["run"]
+    assert all("continue-on-error" not in step for step in steps)
+    editor = (ROOT / "browser-mcp/test/editors.test.ts").read_text()
+    assert "headless: true, chromiumSandbox: true" in editor
+
+
 def test_pr_triggers_are_only_for_read_only_secret_free_checks():
     assert set(workflow("release.yml")["on"]) == {"workflow_dispatch"}
     allowed = {

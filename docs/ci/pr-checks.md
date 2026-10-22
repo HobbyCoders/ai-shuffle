@@ -45,21 +45,22 @@ repository. App checks do not need that checkout. When app docs/install files
 change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
 and its README; the app still checks `docs/content` against the frontend copy.
 
-## Temporarily non-blocking
+## Hosted browser and PostgreSQL prerequisites
 
-The owner approved merging the initial PR-CI rollout with these known-red checks
-tracked separately. All checks still run; no failures are hidden or converted
-into passing results. Restore each job to green on a repair PR:
+The JavaScript job keeps its 20-minute overall limit. Managed Chromium uses a
+lockfile-keyed browser cache, while OS dependencies are installed on every run.
+Installation has two 90-second attempts within a four-minute step; Browser MCP
+build/tests have a separate six-minute step and a 240-second test deadline with
+an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
+restriction is disabled only on the disposable runner so the sandboxed editor
+fixture can launch. Production browser security settings are unchanged.
 
-- [#389](https://github.com/HobbyCoders/ai-shuffle/issues/389): Backend tests —
-  mobile PostgreSQL fixture setup.
-- [#390](https://github.com/HobbyCoders/ai-shuffle/issues/390): JavaScript package
-  checks — editor integration browser launch.
-- [#391](https://github.com/HobbyCoders/ai-shuffle/issues/391): Single-container
-  PostgreSQL and browser — required-isolation probe.
-
-This exception is limited to these tracked failures; other failures still block
-merging, and review remains required.
+Real PostgreSQL fixtures initialize mobile-tool provenance through the production
+schema helper and include the audit retention primary key. Container isolation
+probes materialize lazy protected keys through application helpers before
+checking access denial. These repairs cover #389, #390 and #391; those jobs are
+required to pass, not temporary exceptions. Network migration, pool safety and
+both Python dependency audits remain mandatory steps after mobile contracts.
 
 ## Before every push
 
