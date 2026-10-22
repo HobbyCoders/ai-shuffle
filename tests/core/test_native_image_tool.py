@@ -24,6 +24,13 @@ from app.core.provider.native_images import SPEC, make_handler
 from app.core.query_streaming import extract_mcp_image
 
 
+@pytest.fixture(autouse=True)
+def verified_chatgpt_account(monkeypatch):
+    from app.db import database
+    monkeypatch.setattr(database, "get_model_provider", lambda *a, **kw: {"id": "chatgpt-row", "provider_type": "chatgpt"})
+    monkeypatch.setattr(database, "get_system_setting", lambda key: None)
+
+
 def png():
     def chunk(kind, data):
         return struct.pack("!I", len(data)) + kind + data + struct.pack("!I", zlib.crc32(kind + data))
@@ -55,8 +62,8 @@ async def test_current_provider_request_saved_media_and_durable_inline_replay(tm
         provider = OpenAIResponsesClient(api_key="only-configured-test-key", base_url="https://configured.example/v1/responses", http_client=http)
         engine = NativeLoop(provider=provider, store=MemoryStore(), model="configured-orchestrator")
         engine.record_auxiliary_usage = AsyncMock()
-        outcome = await make_handler(lambda: engine, lambda: "app-session")(
-            {"prompt": "A tree", "image_model": "requested-image-model"}, ToolCtx(cwd=str(tmp_path)))
+        outcome = await make_handler(lambda: engine, lambda: "app-session", provider_id_supplier=lambda: "chatgpt-row")(
+            {"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
     assert not outcome.is_error
     assert len(requests) == 1
     request = requests[0]
@@ -65,7 +72,7 @@ async def test_current_provider_request_saved_media_and_durable_inline_replay(tm
     body = json.loads(request.content)
     assert body["model"] == "configured-orchestrator"
     assert body["tool_choice"] == {"type": "image_generation"}
-    assert body["tools"] == [{"type": "image_generation", "model": "requested-image-model", "output_format": "png", "partial_images": 0}]
+    assert body["tools"] == [{"type": "image_generation", "output_format": "png", "partial_images": 0}]
     result = json.loads(outcome.text)
     assert Path(result["images"][0]["path"]).read_bytes() == data
     assert "session_id=app-session" in result["image_url"]
@@ -91,7 +98,7 @@ async def test_rejection_is_specific_to_native_route_and_never_replayed(tmp_path
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         provider = OpenAIResponsesClient(api_key="test-only", http_client=http, retry=RetryPolicy(base_delay=0))
         engine = SimpleNamespace(provider=provider, model="configured", record_auxiliary_usage=AsyncMock())
-        outcome = await make_handler(lambda: engine, lambda: "session")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
+        outcome = await make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "chatgpt-row")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
     assert len(requests) == 1 and outcome.is_error
     assert f"HTTP {status}" in outcome.text
     assert "fal.ai availability is independent" in outcome.text
@@ -109,7 +116,7 @@ async def test_uncertain_transport_failure_is_not_replayed(tmp_path):
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         provider = OpenAIResponsesClient(api_key="test-only", http_client=http, retry=RetryPolicy(base_delay=0))
         engine = SimpleNamespace(provider=provider, model="configured", record_auxiliary_usage=AsyncMock())
-        outcome = await make_handler(lambda: engine, lambda: "session")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
+        outcome = await make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "chatgpt-row")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
     assert outcome.is_error and len(requests) == 1
 
 
@@ -129,7 +136,7 @@ async def test_cancelled_stream_preserves_observed_usage_without_publishing_prev
                 closed.set()
 
     engine = SimpleNamespace(provider=Provider(), model="configured", record_auxiliary_usage=AsyncMock())
-    task = asyncio.create_task(make_handler(lambda: engine, lambda: "session")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path))))
+    task = asyncio.create_task(make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "chatgpt-row")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path))))
     await asyncio.wait_for(entered.wait(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -148,7 +155,7 @@ async def test_invalid_images_are_not_published(tmp_path, result):
             yield StreamChunk("image_generation", {"status": "completed", "result": result})
 
     engine = SimpleNamespace(provider=Provider(), model="configured", record_auxiliary_usage=AsyncMock())
-    outcome = await make_handler(lambda: engine, lambda: "session")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
+    outcome = await make_handler(lambda: engine, lambda: "session", provider_id_supplier=lambda: "chatgpt-row")({"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path)))
     assert outcome.is_error
     assert list((tmp_path / "generated-images").iterdir()) == []
 
@@ -167,7 +174,7 @@ async def test_chat_mode_creates_only_a_session_owned_artifact(tmp_path, mock_db
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         engine = SimpleNamespace(provider=OpenAIResponsesClient(api_key="test-only", http_client=http),
                                  model="configured", record_auxiliary_usage=AsyncMock())
-        outcome = await make_handler(lambda: engine, lambda: "image-chat", chat_mode=True)(
+        outcome = await make_handler(lambda: engine, lambda: "image-chat", chat_mode=True, provider_id_supplier=lambda: "chatgpt-row")(
             {"prompt": "A tree"}, ToolCtx(cwd=str(tmp_path / "forbidden-or-absent-workspace")))
     assert not outcome.is_error
     result = json.loads(outcome.text)
@@ -182,14 +189,16 @@ async def test_chat_mode_creates_only_a_session_owned_artifact(tmp_path, mock_db
 @pytest.mark.parametrize("kind,mode,exposed", [("openai_responses", "code", True),
                                                ("openai_responses", "chat", True),
                                                ("anthropic", "code", False), ("openrouter", "code", False)])
-async def test_registry_exposure_tracks_transport_not_model_name(kind, mode, exposed):
+async def test_registry_exposure_tracks_transport_not_model_name(monkeypatch, kind, mode, exposed):
     from app.core.provider.types import SessionOptions
 
     adapter = HarnessAdapter()
     adapter._provider_kind = kind
-    registry = await adapter._build_registry(SessionOptions(model="unrelated-model-name", extra={"session_mode": mode}), native=True)
-    # Registered (callable, announced in the deferred tier) on the Responses
-    # transport only; outside the turn-by-turn core it is not eagerly loaded.
+    from app.core.provider import harness_adapter
+    monkeypatch.setattr(harness_adapter, "_lookup_provider_row", lambda key: {"id": key, "provider_type": "chatgpt"})
+    registry = await adapter._build_registry(SessionOptions(model="unrelated-model-name", extra={"session_mode": mode, "provider_id": "chatgpt-row"}), native=True)
+    # A verified ChatGPT account on the Responses transport gets the tool;
+    # outside the turn-by-turn core it is not eagerly loaded.
     assert (SPEC.name in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
     assert SPEC.name not in {s.name for s in registry.list_tools()}
 
@@ -221,7 +230,7 @@ async def test_full_native_loop_calls_image_provider_and_records_its_usage_once(
         engine = NativeLoop(provider=OpenAIResponsesClient(api_key="test-only", http_client=http),
                             model="configured", store=MemoryStore(), registry=registry,
                             permissions=PermissionEngine(approval_policy="never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
-        registry.register_builtin(SPEC, make_handler(lambda: engine, lambda: "app-session"))
+        registry.register_builtin(SPEC, make_handler(lambda: engine, lambda: "app-session", provider_id_supplier=lambda: "chatgpt-row"))
         try:
             await engine.submit(UserTurn(content="Draw a tree with the native image tool."))
             await asyncio.wait_for(engine.wait_turn(), 5)
@@ -265,7 +274,7 @@ async def _run_native_loop(tmp_path, transport, *, during_turn=None):
                                                            retry=RetryPolicy(base_delay=0)),
                             model="configured", store=MemoryStore(), registry=registry,
                             permissions=PermissionEngine(approval_policy="never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
-        registry.register_builtin(SPEC, make_handler(lambda: engine, lambda: "app-session"))
+        registry.register_builtin(SPEC, make_handler(lambda: engine, lambda: "app-session", provider_id_supplier=lambda: "chatgpt-row"))
         try:
             await engine.submit(UserTurn(content="Draw a tree with the native image tool."))
             if during_turn is not None:

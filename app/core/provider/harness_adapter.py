@@ -4891,12 +4891,27 @@ class HarnessAdapter(ProviderAdapter):
 
             register_builtins(registry)
             if self._provider_kind == "openai_responses":
-                from app.core.provider.native_images import SPEC, make_handler
-
-                registry.register_builtin(SPEC, make_handler(
-                    lambda: self._engine, self._resolve_app_session_id,
-                    chat_mode=_session_mode(options) == "chat",
-                ))
+                from app.core.native_generation_settings import capabilities, provider_kind
+                native_account = (options.extra or {}).get("provider_id")
+                native_caps = {}
+                if native_account:
+                    try:
+                        native_caps = capabilities(provider_kind(_lookup_provider_row(native_account) or {}))
+                    except ValueError:
+                        pass  # Unknown/API-key accounts are not verified native media lanes.
+                if native_caps.get("image", {}).get("available"):
+                    from app.core.provider.native_images import SPEC, make_handler
+                    registry.register_builtin(SPEC, make_handler(
+                        lambda: self._engine, self._resolve_app_session_id,
+                        chat_mode=_session_mode(options) == "chat",
+                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
+                    ))
+                if native_caps.get("video", {}).get("available"):
+                    from app.core.provider.native_video import SPEC as VIDEO_SPEC, make_handler as video_handler
+                    registry.register_builtin(VIDEO_SPEC, video_handler(
+                        lambda: self._engine, self._resolve_app_session_id,
+                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
+                    ))
             builtins_registered = True
             logger.info(
                 "[HarnessAdapter] registered fluid builtin tools for native leg",
