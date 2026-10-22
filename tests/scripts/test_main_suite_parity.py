@@ -32,7 +32,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     config = workflow()
     assert config["permissions"] == {"contents": "read"}
     assert set(config["on"]) == {"push", "workflow_dispatch"}
-    assert "main" in config["on"]["push"]["branches"]
+    assert config["on"]["push"] == {"branches": ["main"]}
     assert config["concurrency"]["cancel-in-progress"] == "true"
     jobs = config["jobs"]
     gate = jobs["main-suite"]

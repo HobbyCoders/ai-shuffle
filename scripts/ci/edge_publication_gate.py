@@ -207,8 +207,12 @@ def update_reach_readiness(revision, *, api=None, base=None, root=None, reposito
         return False, f"Update reach refused: could not verify published edge/merged PR evidence ({type(error).__name__})."
 
 
-def owner_status(api, revision):
-    """The newest local/full-suite status the owner posted on ``revision``, or None."""
+def owner_status(api, revision, *, terminal=False):
+    """Newest owner local/full-suite status, optionally ignoring pending retries.
+
+    The default preserves merge/stable callers' latest-status semantics. Nightly
+    uses the newest terminal outcome so pending cannot erase an owner veto.
+    """
     for page in range(1, 11):
         statuses = api(f"commits/{revision}/statuses?per_page=100&page={page}")
         if not isinstance(statuses, list):
@@ -216,7 +220,8 @@ def owner_status(api, revision):
         # GitHub lists statuses newest first.
         for status in statuses:
             if (status.get("context") == CONTEXT
-                    and str((status.get("creator") or {}).get("id")) == OWNER_ID):
+                    and str((status.get("creator") or {}).get("id")) == OWNER_ID
+                    and (not terminal or status.get("state") in ("success", "failure", "error"))):
                 return status
         if len(statuses) < 100:
             return None
@@ -294,9 +299,9 @@ def hosted_status(api, revision, *, metadata=None):
 
 
 def suite_status(api, revision, *, metadata=None):
-    status = owner_status(api, revision)
+    status = owner_status(api, revision, terminal=True)
     if status:
-        if status.get("state") == "failure":
+        if status.get("state") in ("failure", "error"):
             # An explicit owner failure is a veto on this exact revision. A
             # newer commit or a later owner success, not hosted CI, clears it.
             return None

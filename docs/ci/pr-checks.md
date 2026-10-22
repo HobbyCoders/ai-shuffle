@@ -111,9 +111,10 @@ After a successful main run, `desktop-source.yml` starts via `workflow_run` and
 re-verifies canonical repository, main/push-or-dispatch identity, root workflow
 path/ID, exact SHA, latest run/attempt and successful aggregate through the API.
 The latest attempt number and URL are included in publication logs. Owner-local
-`local/full-suite` successes remain accepted independently. A newest owner
-failure vetoes that exact revision even if hosted CI passed; a newer commit or
-later owner success unblocks it. Stable staging and Linux/Windows local release
+`local/full-suite` successes remain accepted independently. The newest terminal
+owner outcome decides, ignoring pending retries: failure/error vetoes that exact
+revision even if hosted CI passed; a newer commit or later owner success
+unblocks it. Without a terminal owner outcome, hosted evidence can still pass. Stable staging and Linux/Windows local release
 requirements are unchanged.
 
 ## Hosted browser and PostgreSQL prerequisites

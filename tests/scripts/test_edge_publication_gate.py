@@ -190,13 +190,30 @@ def test_successful_local_pass_needs_no_hosted_api():
     assert not any(call.startswith("actions/") for call in api.calls)
 
 
-def test_hosted_cannot_override_explicit_owner_failure():
-    api = HostedGitHub(statuses=[status(state="failure")])
+@pytest.mark.parametrize("statuses", [
+    [status(state="failure")], [status(state="error")],
+    [status(state="pending"), status(state="failure")],
+    [status(state="pending"), status(state="error")],
+    [status(state="pending")] * 100 + [status(state="failure")],
+    [status(state="failure"), status()],
+])
+def test_hosted_cannot_override_sticky_owner_failure_or_error(statuses):
+    api = HostedGitHub(statuses=statuses)
     assert not gate.exact_main_readiness(api, REVISION)[0]
     assert not any(call.startswith("actions/") for call in api.calls)
-    # A new owner success clears the veto, but older success does not.
-    assert gate.exact_main_readiness(HostedGitHub(statuses=[status(), status(state="failure")]), REVISION)[0]
-    assert not gate.exact_main_readiness(HostedGitHub(statuses=[status(state="failure"), status()]), REVISION)[0]
+
+
+@pytest.mark.parametrize("statuses", [
+    [status(), status(state="failure")],
+    [status(state="pending"), status(), status(state="failure")],
+])
+def test_later_owner_success_clears_failure_even_during_pending_retry(statuses):
+    assert gate.exact_main_readiness(HostedGitHub(statuses=statuses), REVISION)[0]
+
+
+@pytest.mark.parametrize("statuses", [[], [status(state="pending")]])
+def test_hosted_accepts_without_terminal_owner_outcome(statuses):
+    assert gate.exact_main_readiness(HostedGitHub(statuses=statuses), REVISION)[0]
 
 
 def test_owner_success_on_current_main_publishes():
