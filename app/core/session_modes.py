@@ -86,7 +86,7 @@ CHAT_MODE_QUESTION_TOOLS: List[str] = ["AskUser"]
 CHAT_MODE_BASIC_TOOL_SURFACE: List[str] = [
     "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
     # Native generation stores only session-owned artifacts in chat mode.
-    "GenerateNativeImage",
+    "GenerateNativeImage", "GenerateNativeVideo",
     *CHAT_MODE_QUESTION_TOOLS, *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
 ]
 
@@ -512,7 +512,7 @@ PROACTIVE_DENIED_TOOLS = [
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
-    "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "Skill", "ToolSearch",
+    "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "GenerateNativeVideo", "Skill", "ToolSearch",
     "run_python", "list_tools", "search_tools", "read_tool_docs",
     "save_skill", "delete_skill", "save_plugin",
 ]
