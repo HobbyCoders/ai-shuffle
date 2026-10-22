@@ -45,6 +45,22 @@ repository. App checks do not need that checkout. When app docs/install files
 change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
 and its README; the app still checks `docs/content` against the frontend copy.
 
+## Temporarily non-blocking
+
+The owner approved merging the initial PR-CI rollout with these known-red checks
+tracked separately. All checks still run; no failures are hidden or converted
+into passing results. Restore each job to green on a repair PR:
+
+- [#389](https://github.com/HobbyCoders/ai-shuffle/issues/389): Backend tests —
+  mobile PostgreSQL fixture setup.
+- [#390](https://github.com/HobbyCoders/ai-shuffle/issues/390): JavaScript package
+  checks — editor integration browser launch.
+- [#391](https://github.com/HobbyCoders/ai-shuffle/issues/391): Single-container
+  PostgreSQL and browser — required-isolation probe.
+
+This exception is limited to these tracked failures; other failures still block
+merging, and review remains required.
+
 ## Before every push
 
 ```bash
