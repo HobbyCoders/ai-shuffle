@@ -405,16 +405,26 @@ def select_backend_tests(ctx: Context) -> list[str] | str:
     return select_by_name(ctx.files or [])
 
 
+def test_file_path(name: str) -> bool:
+    """A changed pytest file owns itself, even outside the usual discovery roots."""
+    return (name.startswith(("tests/", "fluid/tests/"))
+            and Path(name).name.startswith("test_") and name.endswith(".py"))
+
+
+def backend_wide_change(files: list[str]) -> bool:
+    return any(fnmatch(name, pattern) for name in files
+               for pattern in ("requirements*", "pytest.ini", "tests/conftest.py", "tests/*/conftest.py"))
+
+
 def select_by_name(files: list[str]) -> list[str] | str:
-    if any(fnmatch(name, pattern) for name in files
-           for pattern in ("requirements*", "pytest.ini", "tests/conftest.py", "tests/*/conftest.py")):
+    if backend_wide_change(files):
         return "all"
     roots = [ROOT / d for d in FAST_SUBSET]
     tests = [p.relative_to(ROOT).as_posix() for d in roots for p in d.rglob("test_*.py")]
     tests += [p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").glob("test_*.py")]
-    selected = {name for name in files if name in tests}
+    selected = {name for name in files if test_file_path(name)}
     for name in files:
-        if not name.endswith(".py") or name.startswith("tests/"):
+        if not name.endswith(".py") or test_file_path(name):
             continue
         module = name[:-3].replace("/", ".")
         if module.startswith("fluid.fluid."):
@@ -422,35 +432,53 @@ def select_by_name(files: list[str]) -> list[str] | str:
         stem = module.rsplit(".", 1)[-1]
         parent = module.rsplit(".", 1)[0] if "." in module else ""
         pattern = re.compile(rf"\b{re.escape(module)}\b|from {re.escape(parent)} import [^\n]*\b{re.escape(stem)}\b")
+        if name.startswith("tests/"):
+            # Helper names also appear in relative/bare imports and dynamic loads.
+            pattern = re.compile(rf"\b{re.escape(stem)}\b")
         for test in tests:
             try:
-                if pattern.search((ROOT / test).read_text(encoding="utf-8", errors="ignore")):
+                if (Path(test).stem == f"test_{stem}"
+                        or pattern.search((ROOT / test).read_text(encoding="utf-8", errors="ignore"))):
                     selected.add(test)
             except OSError:
                 continue
-    return sorted(t for t in selected if t not in FAST_SUBSET_EXCLUDED and (ROOT / t).is_file())
+    return sorted(t for t in selected
+                  if (t not in FAST_SUBSET_EXCLUDED or t in files) and (ROOT / t).is_file())
 
 
 # --- suites ----------------------------------------------------------------
 
 def affected_backend_tests(ctx: Context, *, use_map: bool = True) -> list[str] | str:
-    """Reuse the dependency map, or name matching with a per-path safe fallback."""
+    """Pick affected tests; unmapped paths are covered by full PR CI, not this gate."""
+    if backend_wide_change(ctx.files or []):
+        return "all"
     if (use_map and MAP_PATH.is_file()
+            and not any(test_file_path(name) or name.startswith("fluid/") for name in ctx.files or [])
             and set(changed_files(ctx.base)) <= set(ctx.files or [])):
         # The map CLI compares the whole Git diff. When other areas were
         # removed from this context (notably workflow changes), do not let
         # those unrelated paths turn a targeted backend check into "all".
-        return select_backend_tests(ctx)
+        mapped = select_backend_tests(ctx)
+        if mapped != "all":
+            return mapped
+        # "all" can also mean the recorded map has an unknown source path.
+        # Only the shared pytest/dependency inputs above justify a full backend.
     selected: set[str] = set()
     for name in ctx.files or []:
+        if test_file_path(name) and name.startswith("fluid/tests/"):
+            continue  # The fluid suite owns these, never the backend fallback.
         if not any(fnmatch(name, pattern) for pattern in BACKEND_PATHS):
             continue
         matches = select_by_name([name])
-        if matches == "all" or not matches:
-            ctx.notes.append(f"No test mapping for {name}; running the backend suite.")
+        if test_file_path(name):
+            selected.update(matches)  # A deleted test needs no execution.
+            continue
+        if matches == "all":
             return "all"
+        if not matches and not name.startswith("fluid/"):
+            ctx.notes.append(f"No local test mapping for {name}; covered by the full suite on PR CI")
         selected.update(matches)
-    return sorted(selected) or "all"
+    return sorted(selected)
 
 
 def backend(ctx: Context) -> None:
@@ -558,11 +586,17 @@ FLUID_TESTS = "fluid/tests/unit"
 
 def fluid(ctx: Context) -> None:
     env, extra = python_env(), []
+    targets = [FLUID_TESTS]
+    changed = [name for name in ctx.files or [] if name.startswith("fluid/")]
+    if ctx.mode == "fast" and changed and all(test_file_path(name) for name in changed):
+        targets = [name for name in changed if (ROOT / name).is_file()]
+        if not targets:
+            return  # Only deleted tests changed.
     if ctx.backend_selected is not None:
         # One full --step shard: the same directory and hooks, other files ignored.
         env = {**env, "LOCAL_CI_BACKEND_BATCH": json.dumps(ctx.backend_selected)}
         extra = ["-p", "scripts.ci.local_ci_batch"]
-    run([ctx.python, "-m", "pytest", FLUID_TESTS, *extra, *pytest_args(ctx.python)], env=env)
+    run([ctx.python, "-m", "pytest", *targets, *extra, *pytest_args(ctx.python)], env=env)
 
 
 def frontend(ctx: Context) -> None:
@@ -1086,21 +1120,21 @@ def workflow_path(name: str) -> bool:
 
 
 def affected_suites(files: list[str]) -> list[Suite]:
-    """Use SUITES as the area map; an unrecognised area must not silently pass."""
+    """Use SUITES as the area map; unknown areas are noted and deferred to PR CI."""
     code = [name for name in files if not documentation_path(name)]
     ctx = Context(mode="fast", base="", files=code, python="")
     selected = [suite for suite in SUITES if ctx.changed(suite.paths)]
     # The dedicated workflow suite already runs gate and publication regression
     # tests. Do not turn its scripts into an unrelated backend-wide fallback.
-    backend_files = [name for name in code if any(fnmatch(name, pattern) for pattern in BACKEND_PATHS)]
-    if backend_files and all(workflow_path(name) for name in backend_files):
+    backend_files = [name for name in code
+                     if any(fnmatch(name, pattern) for pattern in BACKEND_PATHS)
+                     and (not name.startswith("fluid/")
+                          or (name.endswith(".py") and not test_file_path(name)
+                              and select_by_name([name])))]
+    if not backend_files or all(workflow_path(name) for name in backend_files):
         selected = [suite for suite in selected if suite.name != "backend"]
     if any(documentation_path(name) for name in files):
         selected += [suite for suite in SUITES if suite.name == "docs" and suite not in selected]
-    if any(not any(fnmatch(name, pattern) for suite in SUITES for pattern in suite.paths)
-           and not any(fnmatch(name, pattern) for patterns, _ in NOT_LOCAL for pattern in patterns)
-           for name in code):
-        return list(SUITES)  # unknown top-level area: conservatively check all areas
     return selected
 
 
@@ -1119,6 +1153,10 @@ def cmd_fast(args) -> int:
     ctx = Context(mode="fast", base=base,
                   files=[name for name in files if not documentation_path(name)], python=python)
     ran, skipped = [], []
+    for name in ctx.files or []:
+        if (not any(fnmatch(name, pattern) for suite in SUITES for pattern in suite.paths)
+                and not any(fnmatch(name, pattern) for patterns, _ in NOT_LOCAL for pattern in patterns)):
+            ctx.notes.append(f"No local test mapping for {name}; covered by the full suite on PR CI")
     for suite in affected_suites(files):
         reason = suite.unavailable()
         if reason:

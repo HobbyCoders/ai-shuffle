@@ -56,12 +56,19 @@ python scripts/local_ci.py list      # what each suite runs, and when
 `fast` compares against the remote main merge-base (the push remote when called
 by the hook, otherwise the configured public comparison ref). It reuses the
 existing `SUITES` area map. Backend files use the recorded dependency map when
-available, otherwise per-file test-name/import matching. If any backend path
-has no known test mapping, it runs the whole backend area, even if another
-changed path did match. Other areas run their unit suites; frontend and mobile
-use all area tests as a safe fallback for dynamic source-reading tests, without
-a production build. Docs paths and Markdown/reStructuredText files run docs
-checks only. Unknown top-level areas conservatively run all local suites.
+available, otherwise per-file test-name/import matching. Changed test files
+select themselves, and helper modules under `tests/` select their importers
+(including relative and bare imports) and matching test filenames. Fluid source
+and non-Python files run the Fluid suite; Fluid Python modules also select
+matching backend tests. An unmapped path adds no extra local tests and prints
+`No local test mapping for X; covered by the full suite on PR CI`. Unknown
+top-level paths use the same note rather than running all local suites.
+Requirements, `pytest.ini`, and backend `conftest.py` changes still select the
+whole backend area. Other areas run their unit suites; frontend and mobile use
+all area tests for dynamic source-reading coverage, without a production build.
+Docs paths and Markdown/reStructuredText files run docs checks only. Secret
+scanning and update-reach checks are unchanged; full hosted PR CI remains
+required before merge (apart from the documented baseline failures below).
 
 `check` remains the existing changed-suite check with dependency audits, and
 `full` still runs every local suite and records the backend dependency map.

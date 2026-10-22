@@ -586,6 +586,47 @@ curl -X PUT http://localhost:8000/api/v1/settings/text-generation \
   -d '{"text_generation_model": "haiku", "text_generation_effort": "low"}'
 ```
 
+### GET /api/v1/settings/commit-attribution
+
+Read the owner's commit and PR attribution policy. **Auth:** Required.
+
+```json
+{"enabled": true}
+```
+
+Attribution defaults to **on**. When enabled, agent commits end with exactly
+`Co-Authored-By: AI Shuffle <noreply@hobbycoders.com>` and PR descriptions end with
+`🤖 Generated with [AI Shuffle](https://hobbycoders.com)`. Provider and model
+co-authors are never added. When disabled, neither a co-author trailer nor a
+generated-by line is added: the commit is the user's alone.
+
+### PUT /api/v1/settings/commit-attribution
+
+Replace the policy. **Auth:** Owner only. Send a required JSON boolean `enabled`;
+missing, null, string and numeric values return `422`. The response is the same
+shape as GET.
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/commit-attribution \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+Stored as the shared `system_settings` key `commit_attribution`, replicated by
+the existing network settings sync. Each executing worker reads its local copy
+when connecting a session, including Task and subagent children. Changes apply
+on the next connection, not to an already-connected session's cached prefix;
+a peer must receive settings sync before starting a child with the new value.
+
+Native providers receive one stable system-prompt instruction. Delegated Claude
+receives `attribution.commit` and `attribution.pr` through CLI `--settings`
+(empty strings when off); `attribution.sessionUrl` is always false to prevent a
+provider session link. No duplicate attribution instruction is appended to the
+CLI prompt. Delegated settings must be a JSON object: file-path and non-object
+settings are rejected before spawn rather than passed through, since they could
+silently restore provider attribution. Existing app spawns use JSON objects.
+
 ### GET /api/v1/settings/subagent-default
 
 The model every agent runs on when another agent starts it as a subagent and the agent has no model of its own.
@@ -624,6 +665,81 @@ curl -X PUT http://localhost:8000/api/v1/settings/subagent-default   -H "Authori
 ```
 
 The id must be a model this install can run: a Claude alias from `GET /api/v1/models` (a full Claude id such as `claude-opus-4-6` is saved as its alias), or a model in the curated list of an enabled provider. Any other value returns `400` and nothing is saved. An `allowed` list, which older pages send, is accepted and ignored. The response has the same shape as the `GET`. The setting is shared with the owner's other workers.
+
+### Native generation (per provider account)
+
+Native generation is separate from the AI Shuffle direct tools and does not
+change the existing ChatGPT subscription text-to-image choice. The proposed
+settings UI is cancelled and superseded by #379 ("say what you want" generation).
+These backend endpoints do not implement a settings UI.
+
+- Authenticated `GET /api/v1/settings/native-generation` returns
+  `{"accounts": [{"provider_id": "...", "name": "...", "provider_kind": "grok", "settings": {"image": {...}, "video": {...}}, "capabilities": {...}}]}`.
+- `GET /api/v1/settings/native-generation/{provider_id}` returns one account.
+- Each account includes `stale: false`. Stale settings return `stale: true` and
+  a sanitized `reason`. When JSON parses, each group is validated independently:
+  explicit `null` stays disabled and valid peer groups are unchanged. An invalid
+  Image group uses the verified image default (or `null` if unavailable); an
+  invalid Video group becomes `null`. Unparseable JSON uses the verified Image
+  default (or `null` if unavailable) and disables Video because the owner's
+  choice is unknown. Accounts with no stored settings keep provider defaults,
+  including Video on SuperGrok. Reads/tools never rewrite the stored row, and
+  one stale account does not fail the list.
+- Owner-only `PUT` to that account path replaces both groups. Each group may be
+  `null` (disabled); unsupported options, extra fields or unknown accounts return
+  `422`. Image fields are `model`, `size`, `quality` (nullable) and `format`.
+  Video fields are `model`, `duration` (integer seconds), `resolution`,
+  `aspect_ratio` and `generate_audio` (boolean).
+
+Each capability group (`image`, `video`) contains `available`,
+`verified_combination` and `fields`. Field options are objects such as
+`{"value": "2k", "verified": false, "selectable": false, "reason": "not yet verified"}`.
+Only verified options may be selected. SuperGrok image quality has
+`quality_visible: false`, an empty options list and a `null` setting until tested.
+ChatGPT has no video controls. Unprobed OpenAI/xAI API-key accounts are listed
+with unavailable groups and locked options, not inferred subscription support.
+
+| Account / media | Verified selectable combination |
+|---|---|
+| ChatGPT image | `default` model, `auto` size, `auto` quality, `png` |
+| SuperGrok image | `grok-imagine-image`, square `1k`, `jpeg`; quality hidden |
+| SuperGrok video | `grok-imagine-video-1.5-lite`, 1 s, `480p`, `16:9`, `generate_audio: false` |
+
+`GenerateNativeImage` is registered only when the bound account's Image
+capability is available. OpenAI/xAI API-key and no-account/environment-fallback
+sessions do not receive it until verified; direct calls without an account are
+refused without a request. It reads the account's Image group, falling back to
+verified defaults for stale stored settings. ChatGPT's default request is unchanged. SuperGrok sends one images-endpoint request (`n=1`), without
+OpenAI-only fields, and detects JPEG/PNG from returned bytes. Its `2.0` model,
+`2k`, and PNG request format are locked, not claimed as supported.
+
+`GenerateNativeVideo` is exposed only to SuperGrok subscription sessions. It
+submits once, polls asynchronously for at most 180 seconds, and saves a
+session-owned MP4. Its `/api/v1/artifacts/{hash}/video.mp4?session_id=...` URL
+is recognizable as video, uses inline Content-Disposition, and supports browser
+byte-range requests with the existing artifact/session authorization. Reported
+cost remains in the structured tool result. Timeout/cancellation never resubmits
+a possibly billed job; do not call again without the user's go-ahead. Images and
+video share one auth-refresh budget per operation: a definite 401 may refresh
+once and retry only the rejected request (including a poll), never an accepted job.
+Only text-to-video is offered; image-to-video and editing are unprobed.
+Documented 2–15 s durations, 720p/1080p, other aspect ratios and audio are locked
+**not yet verified**. The tool surfaces `cost_in_usd_ticks` and
+`reported_cost_usd` when supplied by xAI (ticks divided by 10,000,000,000).
+The verified probe reported **$0.02**, not free or unlimited usage; this does not
+establish an invoice charge or subscription quota debit. Native media charges
+are not inferred from the chat model's token price.
+
+Subscription credentials and signed download URLs remain server-side. Errors
+are sanitized; no route falls back to fal.ai or paid API keys. Direct tools may
+still explicitly select `chatgpt-subscription` or the distinct
+`supergrok-subscription` image choice using the endpoint below. The latter is
+not fal.ai Grok Imagine Image, and refuses unverified editing/defaults.
+
+Settings persist as JSON under `native_generation:{provider_id}` in the existing
+settings store. Reads accept the earlier family-level `native_images_chatgpt` /
+`native_images_grok` defaults without writing; account-specific writes do not
+affect another account. No database schema migration is required.
 
 ### Media tool models
 

@@ -54,7 +54,7 @@ REPORT_STATUSES = ("completed", "failed", "stopped")
 MAX_NEEDS_OWNER = 10
 # Turn sources that begin work in a chat. Continuations (unpark, auto-continue,
 # failover) belong to the most recent of these.
-_ORIGIN_SOURCES = ("user", "queue", "agent_message")
+_ORIGIN_SOURCES = ("user", "queue", "api", "agent_message")
 
 
 def _text(data, key, limit):
@@ -960,11 +960,21 @@ def _reply_credit(cursor, sender_id, target_id):
     """
     cursor.execute(
         "SELECT incoming.id FROM turns incoming WHERE incoming.session_id=%s "
-        "AND incoming.source='agent_message' AND incoming.state<>'aborted' "
+        "AND ((incoming.source='agent_message' AND "
+        "COALESCE(CAST(incoming.payload ->> 'continued_turn' AS TEXT), 'false') NOT IN ('true','1')) OR "
+        "((incoming.source NOT IN ('user','queue','api') OR "
+        "CAST(incoming.payload ->> 'question_answer_human_input' AS TEXT) IN ('false','0')) AND "
+        "CAST(incoming.payload ->> 'continued_turn' AS TEXT) IN ('true','1') AND "
+        "incoming.payload ->> 'birth_source'='agent_message' AND "
+        "CAST(incoming.payload ->> 'orchestration_reply_eligible' AS TEXT) IN ('true','1') AND "
+        "incoming.payload ->> 'orchestration_reply_credit'=incoming.id)) "
+        "AND incoming.state<>'aborted' AND COALESCE(incoming.stop_reason, '')<>'steered' "
         "AND incoming.payload ->> 'orchestration_sender'=%s "
         "AND incoming.payload ->> 'orchestration_reply_to' IS NULL "
+        "AND incoming.payload ->> 'orchestration_reply_receipt' IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM turns reply WHERE reply.session_id IN (%s, %s) "
-        "AND reply.payload ->> 'orchestration_reply_to'=incoming.id) "
+        "AND (reply.payload ->> 'orchestration_reply_to'=incoming.id OR "
+        "reply.payload ->> 'orchestration_reply_receipt'=incoming.id)) "
         "ORDER BY incoming.created_at DESC LIMIT 1",
         (sender_id, target_id, target_id, REMOTE_MESSAGE_PREFIX + target_id))
     row = cursor.fetchone()
@@ -1007,7 +1017,8 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
             return {"remote_message": peer, "receipt_id": previous["id"], "reserved": False, "body": body}
         reply_to = _reply_credit(cursor, sender["id"], session_id)
         cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%' "
-                       "AND payload ->> 'orchestration_reply_to' IS NULL", (root_id,))
+                       "AND payload ->> 'orchestration_reply_to' IS NULL "
+                       "AND payload ->> 'orchestration_reply_receipt' IS NULL", (root_id,))
         if reply_to is None and len(cursor.fetchall()) >= MAX_ACTIONS:
             raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); "
                              "ask the user to continue.")
@@ -1377,7 +1388,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         if reply_to:
             payload["orchestration_reply_to"] = reply_to
         cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%' "
-                       "AND payload ->> 'orchestration_reply_to' IS NULL", (root_id,))
+                       "AND payload ->> 'orchestration_reply_to' IS NULL "
+                       "AND payload ->> 'orchestration_reply_receipt' IS NULL", (root_id,))
         commands = [row["command_id"] for row in cursor.fetchall()]
         if ((reply_to is None and len(commands) >= MAX_ACTIONS)
                 or (action == "start" and sum(c.startswith("orchestration:start:") for c in commands) >= MAX_STARTS)):
@@ -1630,12 +1642,17 @@ def _origin_turn(session_id, settled):
     recent user/queue/peer turn before a continuation)."""
     from app.db import turns
     from app.db.base import get_db
-    if settled.get("source") in _ORIGIN_SOURCES:
+    if turns.logical_source(settled) in _ORIGIN_SOURCES:
         return settled
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source IN ('user','queue','agent_message') "
-                       "AND state IN ('completed','aborted') AND position <= %s "
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND "
+                       "(source IN ('user','queue','api','agent_message') OR "
+                       "(source NOT IN ('user','queue','api') AND "
+                       "CAST(payload ->> 'continued_turn' AS TEXT) IN ('true','1') AND "
+                       "payload ->> 'birth_source' IN ('user','queue','api','agent_message'))) "
+                       "AND state IN ('completed','aborted') AND COALESCE(stop_reason, '')<>'steered' "
+                       "AND position <= %s "
                        "ORDER BY position DESC LIMIT 1", (session_id, settled.get("position") or 0))
         return turns._row(cursor.fetchone())
 
@@ -1700,13 +1717,13 @@ def build_started_report(session_id, settled, outcome):
     device = start_payload.get("orchestration_report_device")
     if not home and not device:
         return None
+    from app.db import sessions, turns
     origin = _origin_turn(session_id, settled)
     origin_payload = (origin or {}).get("payload") or {}
     # Work the owner typed into that chat is theirs, not a job to report.
-    if (not origin or origin.get("source") != "agent_message"
+    if (not origin or turns.logical_source(origin) != "agent_message"
             or origin_payload.get("orchestration_sender") != start_payload.get("orchestration_sender")):
         return None
-    from app.db import sessions
     status, report, needs = _turn_report(session_id, settled["id"], outcome, origin["id"])
     row = sessions.get_session(session_id) or {}
     frame = {"task_id": session_id, "status": status, "summary": defang_harness_markers(report),

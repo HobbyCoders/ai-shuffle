@@ -181,6 +181,49 @@ def dispatch(args):
 
 # --- end to end: the parent dispatches, the target starts the child ---------
 
+@pytest.mark.parametrize("moved", [False, True])
+@pytest.mark.parametrize("peer_version", [5, remote_task.FRESH_BASE_VERSION])
+def test_dispatch_negotiates_fresh_base_with_real_receiver(world, monkeypatch, peer_version, moved):
+    # A long-running caller with no unique commits, behind an un-fetched origin.
+    git(world.parent, "switch", "-c", "behind", "HEAD~1")
+    caller = git(world.parent, "rev-parse", "HEAD")
+    seed = world.tmp / "seed"
+    fresh = commit(seed, "new-main.txt", "fresh main work")
+    git(seed, "push", "origin", "main")
+    peer = {**UNRAID, "capabilities": {**UNRAID["capabilities"], "remote_task": peer_version}}
+    monkeypatch.setattr(runners, "directory", lambda: {"runners": [SELF, peer]})
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({"mode": "background"})
+    assert result["ok"], result
+    [(_, _, body)] = calls
+    modern = peer_version >= remote_task.FRESH_BASE_VERSION
+    assert ("base_policy" in body["checkout"]) == modern
+    child = database.get_session(result["worker_session_id"])
+    assert git(child["worktree_path"], "rev-parse", "HEAD") == (fresh if modern else caller)
+    assert git(world.parent, "rev-parse", "HEAD") == caller
+    assert git(world.parent, "branch", "--show-current") == "behind"
+    from app.db import remote_tasks
+    from app.core import worker_checkout
+
+    child_id = result["worker_session_id"]
+    assert remote_tasks.get_dispatch(child_id)["published_base"] == caller
+    with world.net.as_target():
+        block = remote_task.git_summary(child_id)
+    assert block["base"] == block["head"] == (fresh if modern else caller)
+    assert block["commits"] == 0
+    if moved:
+        other = commit(seed, "third.txt", "someone else's work")
+        git(seed, "push", "origin", f"HEAD:refs/heads/{child['branch']}")
+    outcome = worker_checkout.fetch_worker_commits(database.get_session("parent"), child_id, block)
+    if moved:
+        assert not outcome["released"] and "moved past its base" in outcome["reason"]
+        assert remote_tip(world.parent, child["branch"]) == other
+    else:
+        assert outcome == {"fetched": False, "released": True, "reason": None}
+        assert remote_tip(world.parent, child["branch"]) is None
+
+
 @pytest.mark.parametrize("receiver_has_model", [True, False])
 def test_spoken_model_task_is_checked_again_on_receiver(world, monkeypatch, receiver_has_model):
     from app.db import turns, remote_tasks
@@ -458,6 +501,95 @@ def test_a_retried_start_returns_the_same_answer(world):
     with pytest.raises(ValueError, match="different arguments"):
         start_on_target(world, {**body, "prompt": "Something else."})
     assert len(child_turns(body["worker_session_id"])) == 1
+
+
+
+
+@pytest.mark.parametrize("wake_payload", [None, {}, {
+    "task_report_device": "stranger-device",
+    "task_report": {"owner_session_id": "stranger"},
+    "task_start_fingerprint": "wrong",
+    "loop_guard_origin": "user",
+    "birth_source": "user",
+}])
+def test_parked_first_turn_wake_keeps_task_identity(world, monkeypatch, wake_payload):
+    from app.core import loop_guard, remote_task_approvals, session_runtime
+    from app.db import turns
+
+    body = body_for(world, state=RemoteWorkerBranch("none"), origin="automation", depth=3)
+    first = start_on_target(world, body)
+    sid = body["worker_session_id"]
+    turn = child_turns(sid)[0]
+    owed = remote_task.report_owed(sid)
+    assert turns.start_turn(turn["id"], "run-one", TARGET_RUNNER)
+    assert turns.park_turn(turn["id"], ["background-monitor"])
+    if wake_payload is None:
+        from app.core.task_registry import task_registry
+
+        monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+        task_registry.start_task(sid, "background-monitor", "shell", "monitor", tool_use_id="background-monitor")
+        task_registry.mark_background_launch(sid, "background-monitor")
+        asyncio.run(turn_scheduler.on_task_terminal(sid, {
+            "task_id": "background-monitor", "status": "completed", "summary": "monitor completed",
+        }))
+        queued = turns.get_queued_turns(sid)
+        assert len(queued) == 1 and queued[0]["source"] == "unpark"
+        wake = queued[0]
+        assert wake["payload"]["task_ids"] == ["background-monitor"]
+    else:
+        wake = turns.enqueue_turn(sid, "unpark", prompt="monitor completed",
+                                  profile_id=turn["profile_id"], overrides=turn["overrides"],
+                                  payload=wake_payload)
+    resumed = turns.start_turn(wake["id"], "run-two", TARGET_RUNNER,
+                               can_resume=session_runtime.SessionRuntime._can_resume_parked)
+    assert resumed["id"] == turn["id"]
+    assert resumed["source"] == "unpark"
+    assert remote_task.report_owed(sid) == owed
+    assert remote_task_approvals.remote_child(sid) == owed
+    assert remote_task.remote_child_in_chain(sid)
+    assert td.caller_chain(sid)[1:] == (sid, 3)
+    assert loop_guard.turn_origin(resumed) == "automation"
+    for key, value in turn["payload"].items():
+        assert resumed["payload"][key] == value
+
+    with world.net.as_target():
+        message = {"version": remote_task.WIRE_VERSION, "to": "child",
+                   "worker_session_id": sid, "message_id": "owner-message",
+                   "sender_session_id": "parent", "text": "Keep going", "urgent": False}
+        answer = asyncio.run(remote_task.handle_task_message(message, PARENT))
+        assert answer["status"] in ("held", "delivered", "queued")
+        with pytest.raises(PermissionError, match="Only the conversation"):
+            asyncio.run(remote_task.handle_task_message(
+                {**message, "message_id": "stranger-message", "sender_session_id": "stranger"}, PARENT))
+    second = start_on_target(world, body)
+    assert first["created"] is True and second["created"] is False
+    assert second["turn_id"] == first["turn_id"]
+
+
+@pytest.mark.parametrize("identity_survives", [True, False])
+def test_task_start_lookup_uses_command_not_mutable_source(world, identity_survives):
+    body = body_for(world, state=RemoteWorkerBranch("none"))
+    first = start_on_target(world, body)
+    sid = body["worker_session_id"]
+    owed = remote_task.report_owed(sid)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE turns SET source='unpark' WHERE session_id=%s", (sid,))
+        if not identity_survives:
+            # Old builds retained command_id but irreversibly discarded birth
+            # payload. Finding that row must not guess who is authorized.
+            cursor.execute("UPDATE turns SET payload=%s WHERE session_id=%s",
+                           (json.dumps({"continued_turn": True}), sid))
+    assert td._first_turn_source(sid) == "provider_agent"
+    if not identity_survives:
+        assert remote_task.report_owed(sid) is None
+        with pytest.raises(ValueError, match="different session already uses"):
+            start_on_target(world, body)
+        return
+    assert remote_task.report_owed(sid) == owed
+    second = start_on_target(world, body)
+    assert second["created"] is False
+    assert second["turn_id"] == first["turn_id"]
 
 
 def test_concurrent_retries_start_one_child(world):

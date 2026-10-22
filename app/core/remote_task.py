@@ -119,6 +119,8 @@ EFFORT_VERSION = 4
 #: The ``remote_task`` capability that expects ``chore/task-<id>``; an older
 #: target is sent the ``task/<id>`` name it checks for.
 CHORE_BRANCH_VERSION = 5
+#: The receiver fetches its own default branch and preserves unique caller work.
+FRESH_BASE_VERSION = 6
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -140,15 +142,13 @@ def report_owed(worker_session_id: Optional[str]) -> Optional[Dict[str, Any]]:
     if not worker_session_id:
         return None
     try:
-        from app.core.provider_agent import WORKER_TURN_SOURCE
         from app.db.base import get_db, parse_jsonb
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT payload FROM turns WHERE session_id = %s AND source = %s "
-                "ORDER BY created_at ASC LIMIT 1",
-                (worker_session_id, WORKER_TURN_SOURCE),
+                "SELECT payload FROM turns WHERE session_id = %s AND command_id = %s",
+                (worker_session_id, COMMAND_PREFIX + worker_session_id),
             )
             row = cursor.fetchone()
         payload = parse_jsonb(row["payload"]) if row else None
@@ -411,7 +411,8 @@ async def dispatch_remote(
     try:
         state = await asyncio.to_thread(
             publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
-            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
+            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION,
+            fresh_base=_remote_task_version(worker) >= FRESH_BASE_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
     if state.mode == REMOTE_BRANCH and not state.pushed:
@@ -450,7 +451,7 @@ async def dispatch_remote(
         remote_tasks.record_dispatch, worker_session_id=worker_id,
         target_device_id=worker["device_id"], owner_session_id=caller_session_id,
         root_session_id=root_session_id, tool_use_id=launch_tool_use_id, mode=mode,
-        label=label, agent=result_agent, target_name=name)
+        label=label, agent=result_agent, target_name=name, published_base=state.base_commit)
     # Its spend counts against the assistant's limits when the assistant started it.
     await asyncio.to_thread(_link_job, caller_session_id, worker_id, worker["device_id"], label)
 
@@ -724,7 +725,6 @@ def _existing(start: _Start, from_device: str) -> Optional[Dict[str, Any]]:
     A retry of the same request (a timeout on the parent) reads the same child
     back; anything else using the id is refused.
     """
-    from app.core.provider_agent import WORKER_TURN_SOURCE
     from app.db import database, turns
     from app.db.base import get_db
 
@@ -733,9 +733,8 @@ def _existing(start: _Start, from_device: str) -> Optional[Dict[str, Any]]:
         return None
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s AND source=%s",
-                       (start.worker_session_id, COMMAND_PREFIX + start.worker_session_id,
-                        WORKER_TURN_SOURCE))
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s",
+                       (start.worker_session_id, COMMAND_PREFIX + start.worker_session_id))
         turn = turns._row(cursor.fetchone())
     payload = (turn or {}).get("payload") or {}
     if turn is None or payload.get(REPORT_DEVICE_KEY) != from_device:

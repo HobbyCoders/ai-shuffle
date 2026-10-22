@@ -59,6 +59,49 @@ _INTEGRITY_ERRORS = (psycopg2.IntegrityError, sqlite3.IntegrityError)
 # Terminal states — settle/park are idempotent no-ops once a turn is here.
 TERMINAL_STATES = ("completed", "aborted", "parked")
 
+# Birth identity read from the original turn by remote_task, loop_guard,
+# session_orchestration, model_override and assistant_limits. A compatible
+# wake replaces attempt input, not who launched the work or what it owes.
+# Keep this explicit: merging the entire old payload would replay attachments,
+# question answers, task_ids and other per-attempt state. Original values win
+# even if a wake supplies conflicting identity keys.
+_PARKED_IDENTITY_PAYLOAD_KEYS = (
+    "task_report_device", "task_report", "task_start_fingerprint", "task_checkout_mode",
+    "loop_guard_origin", "orchestration_sender", "orchestration_fingerprint",
+    "orchestration_report_device", "model_override",
+)
+# Unlike launch identity, these belong to the current automated budget. Owner
+# input starts a fresh root even when it resumes the same parked row (as do
+# human question answers in interactions.answer_question_and_enqueue).
+_PARKED_CHAIN_PAYLOAD_KEYS = (
+    "orchestration_root", "orchestration_depth", "orchestration_remote_origin",
+)
+HUMAN_INPUT_SOURCES = frozenset({"user", "queue", "api"})
+
+
+def _is_human_input(source: Optional[str], payload: Dict[str, Any]) -> bool:
+    # Away answers share the user lane, but only an actual owner answer grants
+    # a fresh budget. The question producer persists this distinction.
+    return source in HUMAN_INPUT_SOURCES and payload.get("question_answer_human_input") is not False
+
+
+def logical_source(turn: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The source that began the current work, not an in-place wake's source.
+
+    Automatic continuations retain that source durably across parks/restarts.
+    Human input supersedes it, and the next automatic wake follows the human
+    job, not the older worker/peer job that originally occupied this row.
+    """
+    if not turn:
+        return None
+    source = turn.get("source")
+    payload = _parse_json(turn.get("payload")) or {}
+    if not _is_human_input(source, payload) and payload.get("continued_turn"):
+        birth_source = payload.get("birth_source")
+        if isinstance(birth_source, str) and birth_source:
+            return birth_source
+    return source
+
 
 def _row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Normalize a fetched turn row: decode JSONB columns to Python objects."""
@@ -773,7 +816,46 @@ def start_turn(
                     # Persist the new prompt before retiring that row so a crash
                     # can requeue the SAME turn without losing the user's send.
                     payload = dict(queued.get("payload") or {})
-                    reply_to = (previous.get("payload") or {}).get("agent_message_reply_to")
+                    original_payload = previous.get("payload") or {}
+                    for key in _PARKED_IDENTITY_PAYLOAD_KEYS:
+                        if key in original_payload:
+                            payload[key] = original_payload[key]
+                    # Credit accounting belongs to the original delivery, not
+                    # the wake. Keep its spent receipt even when reply text is
+                    # dropped. Legacy continuations with erased reply ancestry
+                    # cannot prove eligibility and therefore earn no new credit.
+                    payload["orchestration_reply_eligible"] = original_payload.get(
+                        "orchestration_reply_eligible",
+                        not original_payload.get("continued_turn") and not original_payload.get("orchestration_reply_to"),
+                    )
+                    # Bind eligibility to this actual delivery. Copies into a
+                    # new question/retry row must keep the old id, not rebind.
+                    payload["orchestration_reply_credit"] = original_payload.get(
+                        "orchestration_reply_credit",
+                        previous["id"] if previous["source"] == "agent_message"
+                        and not original_payload.get("continued_turn") else None,
+                    )
+                    credit_receipt = (original_payload.get("orchestration_reply_receipt")
+                                      or original_payload.get("orchestration_reply_to"))
+                    if credit_receipt:
+                        payload["orchestration_reply_receipt"] = credit_receipt
+                    else:
+                        payload.pop("orchestration_reply_receipt", None)
+                    if _is_human_input(queued["source"], payload):
+                        payload["orchestration_root"] = queued["id"]
+                        payload.pop("orchestration_depth", None)
+                        payload.pop("orchestration_remote_origin", None)
+                        payload["birth_source"] = queued["source"]
+                    else:
+                        for key in _PARKED_CHAIN_PAYLOAD_KEYS:
+                            if key in original_payload:
+                                payload[key] = original_payload[key]
+                        payload["birth_source"] = logical_source(previous)
+                    # These describe the old delivery, not this wake's prompt.
+                    for key in ("peer_message_content", "peer_sender_label",
+                                "forwarded_by_device", "orchestration_reply_to"):
+                        payload.pop(key, None)
+                    reply_to = original_payload.get("agent_message_reply_to")
                     if reply_to:
                         payload.setdefault("agent_message_reply_to", reply_to)
                     payload["continued_turn"] = True

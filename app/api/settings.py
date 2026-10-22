@@ -16,6 +16,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_admin, require_auth
 from app.api.settings_updates import updates_router
+from app.api.settings_native_generation import router as native_generation_router
 from app.core import encryption
 from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
@@ -46,6 +47,7 @@ router.include_router(stt_stream_router)
 router.include_router(media_router)
 router.include_router(credentials_router)
 router.include_router(updates_router)
+router.include_router(native_generation_router)
 
 
 # ============================================================================
@@ -1198,6 +1200,38 @@ async def update_text_generation_settings(
         return get_text_generation_settings()
 
     return TextGenerationSettingsResponse(**await run_sync(_apply))
+
+
+# ============================================================================
+# Commit and PR attribution
+# ============================================================================
+
+class CommitAttributionResponse(BaseModel):
+    enabled: bool
+
+
+class CommitAttributionUpdateRequest(BaseModel):
+    enabled: StrictBool
+
+
+@router.get("/commit-attribution", response_model=CommitAttributionResponse)
+async def get_commit_attribution(token: str = Depends(require_auth)):
+    """Owner-wide attribution policy (enabled by default)."""
+    from app.core import commit_attribution
+
+    return CommitAttributionResponse(enabled=await run_sync(commit_attribution.read))
+
+
+@router.put("/commit-attribution", response_model=CommitAttributionResponse)
+async def update_commit_attribution(
+    request: CommitAttributionUpdateRequest,
+    token: str = Depends(require_admin),
+):
+    """Save the network-shared policy. Applies at the next session connect."""
+    from app.core import commit_attribution
+
+    await run_sync(commit_attribution.write, request.enabled)
+    return CommitAttributionResponse(enabled=request.enabled)
 
 
 # ============================================================================

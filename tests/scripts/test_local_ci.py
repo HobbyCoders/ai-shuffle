@@ -501,7 +501,7 @@ def test_windows_known_failures_list_is_well_formed():
 
 @pytest.mark.parametrize("files,expected", [
     (["app/core/deploy_status.py"], {"backend"}),
-    (["fluid/fluid/loop.py"], {"fluid", "backend"}),
+    (["fluid/fluid/engine/delegated.py"], {"fluid", "backend"}),
     (["frontend/src/lib/api.ts"], {"frontend", "mobile"}),
     (["desktop/src/new.ts"], {"desktop"}),
     (["frontend/src/lib/docs/search.ts"], {"frontend", "mobile"}),
@@ -512,18 +512,128 @@ def test_fast_reuses_area_map_and_docs_only(files, expected):
     assert {suite.name for suite in local_ci.affected_suites(files)} == expected
 
 
-def test_fast_unknown_area_runs_all_suites():
-    assert local_ci.affected_suites(["new-area/config.json"]) == local_ci.SUITES
+def test_fast_unknown_area_defers_to_pr_ci():
+    assert local_ci.affected_suites(["new-area/config.json"]) == []
+    assert {suite.name for suite in local_ci.affected_suites([
+        "new-area/config.json", "frontend/src/lib/api.ts",
+    ])} == {"frontend", "mobile"}
 
 
-def test_fast_backend_mapping_falls_back_per_path(monkeypatch, tmp_path):
+def test_fast_backend_unmapped_paths_defer_to_pr_ci(monkeypatch, tmp_path):
     monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
-    assert "tests/core/test_deploy_status.py" in local_ci.affected_backend_tests(
-        context(["app/core/deploy_status.py"]))
+    mapped = local_ci.affected_backend_tests(context(["app/core/deploy_status.py"]))
+    assert "tests/core/test_deploy_status.py" in mapped
     for unknown in ("app/core/unmapped.py", "app/core/new-schema.json"):
-        assert local_ci.affected_backend_tests(context([unknown])) == "all"
+        ctx = context([unknown])
+        assert local_ci.affected_backend_tests(ctx) == []
+        assert ctx.notes == [f"No local test mapping for {unknown}; covered by the full suite on PR CI"]
         assert local_ci.affected_backend_tests(context([
-            "app/core/deploy_status.py", unknown])) == "all"
+            "app/core/deploy_status.py", unknown])) == mapped
+
+
+@pytest.mark.parametrize("name", [
+    "fluid/pyproject.toml", "fluid/tests/unit/data/schema.json", "fluid/fluid/unmapped.py",
+])
+def test_fast_fluid_only_paths_use_fluid_not_backend(monkeypatch, tmp_path, name):
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    assert {suite.name for suite in local_ci.affected_suites([name])} == {"fluid"}
+    ctx = context([name])
+    assert local_ci.affected_backend_tests(ctx) == []
+    assert ctx.notes == []  # These are covered locally by the Fluid suite.
+
+
+@pytest.mark.parametrize("test_name,content", [
+    ("test_importer.py", "from fluid.engine import sample\n"),
+    ("test_sample.py", "# Coverage selected by test filename.\n"),
+])
+def test_fast_fluid_module_keeps_matching_backend_tests(monkeypatch, tmp_path, test_name, content):
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    name = "tests/core/" + test_name
+    test = tmp_path / name
+    test.parent.mkdir(parents=True)
+    test.write_text(content, encoding="utf-8")
+    paths = ["fluid/fluid/engine/sample.py"]
+    assert local_ci.affected_backend_tests(context(paths)) == [name]
+    assert {suite.name for suite in local_ci.affected_suites(paths)} == {"backend", "fluid"}
+
+
+def test_fast_unmapped_backend_helper_defers_with_note(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    test = tmp_path / "tests/core/test_unrelated.py"
+    test.parent.mkdir(parents=True)
+    test.write_text("# No helper references.\n", encoding="utf-8")
+    name = "tests/core/unmapped_helper.py"
+    ctx = context([name])
+    assert local_ci.affected_backend_tests(ctx) == []
+    assert ctx.notes == [f"No local test mapping for {name}; covered by the full suite on PR CI"]
+
+
+@pytest.mark.parametrize("test_name,content", [
+    ("test_flow.py", "from .query_engine_flow_harness import make_flow\n"),
+    ("test_flow.py", "from tests.core.query_engine_flow_harness import make_flow\n"),
+    ("test_flow.py", "from tests.core import query_engine_flow_harness\n"),
+    ("test_flow.py", "import query_engine_flow_harness\n"),
+    ("test_flow.py", "from . import query_engine_flow_harness\n"),
+    ("test_query_engine_flow_harness.py", "# Named coverage for the helper.\n"),
+])
+def test_fast_backend_test_helpers_select_importers(monkeypatch, tmp_path, test_name, content):
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    name = "tests/core/" + test_name
+    test = tmp_path / name
+    test.parent.mkdir(parents=True)
+    test.write_text(content, encoding="utf-8")
+    assert local_ci.affected_backend_tests(context([
+        "tests/core/query_engine_flow_harness.py",
+    ])) == [name]
+
+
+@pytest.mark.parametrize("name", [
+    "requirements.txt", "requirements-dev.txt", "pytest.ini", "tests/conftest.py",
+    "tests/core/conftest.py",
+])
+def test_fast_shared_pytest_inputs_still_select_all(monkeypatch, tmp_path, name):
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    assert local_ci.affected_backend_tests(context([name])) == "all"
+
+
+@pytest.mark.parametrize("name", [
+    "tests/new_area/test_added.py",
+    "tests/core/test_container_runtime.py",
+])
+def test_changed_backend_test_selects_itself_outside_the_fast_subset(monkeypatch, tmp_path, name):
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    path = tmp_path / name
+    path.parent.mkdir(parents=True)
+    path.write_text("def test_example(): pass\n", encoding="utf-8")
+    assert local_ci.select_by_name([name]) == [name]
+    assert local_ci.affected_backend_tests(context([name])) == [name]
+
+
+def test_changed_fluid_test_is_owned_by_fluid_not_backend(monkeypatch, tmp_path):
+    name = "fluid/tests/unit/test_delegated_spawn_contract.py"
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    assert local_ci.select_by_name([name]) == [name]
+    assert local_ci.affected_backend_tests(context([name])) == []
+    assert {suite.name for suite in local_ci.affected_suites([name])} == {"fluid"}
+    selected = local_ci.affected_backend_tests(context([
+        "tests/core/test_deploy_status.py", name,
+    ]))
+    assert selected == ["tests/core/test_deploy_status.py"]
+
+
+def test_fast_fluid_test_change_runs_only_that_file(monkeypatch):
+    name = "fluid/tests/unit/test_delegated_spawn_contract.py"
+    commands = []
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append(argv))
+    monkeypatch.setattr(local_ci, "pytest_args", lambda python: ["-q"])
+    ctx = context([name])
+    ctx.mode = "fast"
+    local_ci.fluid(ctx)
+    assert commands == [[ctx.python, "-m", "pytest", name, "-q"]]
 
 
 def test_fast_failed_dependency_map_still_falls_back_safely(monkeypatch, tmp_path):
@@ -536,8 +646,8 @@ def test_fast_failed_dependency_map_still_falls_back_safely(monkeypatch, tmp_pat
     ctx = context(["app/core/deploy_status.py", "app/core/unmapped.py"])
     ctx.mode = "fast"
     monkeypatch.setattr(local_ci, "changed_files", lambda base: ctx.files)
-    assert local_ci.affected_backend_tests(ctx) == "all"
-    assert local_ci.affected_backend_tests(context(["unknown-area/config.json"]), use_map=False) == "all"
+    assert "tests/core/test_deploy_status.py" in local_ci.affected_backend_tests(ctx)
+    assert local_ci.affected_backend_tests(context(["unknown-area/config.json"]), use_map=False) == []
 
 
 def test_fast_map_does_not_include_unrelated_workflow_paths(monkeypatch, tmp_path):
@@ -565,7 +675,25 @@ def test_fast_reuses_recorded_backend_map(monkeypatch, tmp_path):
     assert calls == [ctx]
 
 
-def test_fast_docs_producing_path_through_real_hook(asset_repo):
+def test_fast_recorded_map_all_uses_name_matching_unless_shared_inputs(monkeypatch, tmp_path):
+    mapping = tmp_path / "map"
+    mapping.touch()
+    monkeypatch.setattr(local_ci, "MAP_PATH", mapping)
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: ["app/core/unmapped.py"])
+    monkeypatch.setattr(local_ci, "select_backend_tests", lambda ctx: "all")
+    ctx = context(["app/core/unmapped.py"])
+    assert local_ci.affected_backend_tests(ctx) == []
+    assert ctx.notes == ["No local test mapping for app/core/unmapped.py; covered by the full suite on PR CI"]
+    assert local_ci.affected_backend_tests(context(["requirements.txt"])) == "all"
+
+
+@pytest.mark.parametrize("name,suite,note", [
+    ("docs/change.md", "docs", None),
+    ("new-area/config.json", "nothing to run",
+     "No local test mapping for new-area/config.json; covered by the full suite on PR CI"),
+])
+def test_fast_docs_and_unmapped_producing_path_through_real_hook(asset_repo, name, suite, note):
+    changed_path = name
     repo, git, commit, pre_push = asset_repo
     # This test commits the gate itself; the asset fixture's sentinel rule
     # deliberately matches its own regex, so use the production config here.
@@ -579,10 +707,12 @@ def test_fast_docs_producing_path_through_real_hook(asset_repo):
     git("branch", "main")
     git("remote", "add", "test", str(repo))
     git("config", "local-ci.base", "test/main")
-    tip = commit("docs/change.md", "Documentation change")
+    tip = commit(changed_path, "Documentation or unmapped change")
     result = pre_push(tip)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Affected checks passed: docs" in result.stdout
+    assert f"Affected checks passed: {suite}" in result.stdout
+    if note:
+        assert note in result.stdout
     assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
     # The real gate wrote the receipt, not a seeded fixture. It also scanned
     # the outgoing commits again when that receipt was reused.
