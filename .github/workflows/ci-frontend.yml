@@ -131,14 +131,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           # Keep OS dependency setup even on a browser cache hit. Bound apt and
           # browser downloads together and retry once for transient mirrors.
-          for attempt in 1 2; do
-            if timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium; then
-              exit 0
-            fi
-            echo "::warning::Chromium dependency install attempt $attempt failed or exceeded 90s"
-          done
-          echo "::error::Chromium dependency installation failed after two bounded attempts"
-          exit 1
+          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install --with-deps chromium
 
       - name: Browser MCP build and tests
         timeout-minutes: 8

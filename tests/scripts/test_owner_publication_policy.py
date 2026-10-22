@@ -164,11 +164,9 @@ def test_fluid_ripgrep_uses_signed_ubuntu_sources_not_optional_runner_feeds():
     command = install["run"]
     assert "Dir::Etc::sourcelist=sources.list.d/ubuntu.sources" in command
     assert "Dir::Etc::sourceparts=-" in command
-    assert "sudo apt-get install -y -qq ripgrep" in command
+    assert "apt-get install -y -qq ripgrep" in command
     assert install["timeout-minutes"] == "4"
-    assert "timeout --kill-after=10s 90s sh -c" in command
-    assert "for attempt in 1 2; do" in command
-    assert command.rstrip().endswith("exit 1")
+    assert "python3 scripts/ci/bounded_apt.py sh -c" in command
     assert "--allow-unauthenticated" not in command
     assert "continue-on-error" not in install
 
@@ -192,10 +190,7 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert setup["timeout-minutes"] == "4"
     assert "if" not in setup  # OS dependencies are needed even on a cache hit.
     assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
-    assert "for attempt in 1 2; do" in setup["run"]
-    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium" in setup["run"]
-    assert 'echo "::error::Chromium dependency installation failed' in setup["run"]
-    assert setup["run"].rstrip().endswith("exit 1")
+    assert "python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install --with-deps chromium" in setup["run"]
     assert tests["timeout-minutes"] == "8"
     assert "timeout --kill-after=10s 420s npm test" in tests["run"]
     assert 'exit "$result"' in tests["run"]

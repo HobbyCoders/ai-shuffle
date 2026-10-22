@@ -64,9 +64,10 @@ jobs:
           npm ci --ignore-scripts --prefix browser-mcp
           npm run build --prefix browser-mcp
       - name: Install isolated Chromium
+        timeout-minutes: 4
         working-directory: browser-mcp
         run: |
-          npx --no-install playwright-core install --with-deps chromium
+          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install --with-deps chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
       - name: Verify shadow-root auth editor discovery and edits
         working-directory: browser-mcp

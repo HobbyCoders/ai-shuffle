@@ -60,6 +60,12 @@ distro/snap wrapper over the managed browser. Production browser security
 settings are unchanged. Fluid's
 ripgrep install also has a four-minute step and two 90-second attempts; its apt
 refresh uses signed Ubuntu sources rather than optional third-party runner feeds.
+These installs and the browser-workspace Chromium install share
+`scripts/ci/bounded_apt.py`. Its elevated supervisor kills the entire attempt's
+process group (including root apt children) with a ten-second termination grace.
+Lock waiting and `dpkg --configure -a` after an interrupted attempt are included
+in the next attempt's 90-second budget, not added to it. Both failures still fail
+the step; lock files are never deleted.
 
 Frame visibility consumes any already-computed `IntersectionObserver` records
 before its 250 ms watchdog disconnects the observer: a due timer may run before

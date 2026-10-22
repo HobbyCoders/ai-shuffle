@@ -41,18 +41,11 @@ jobs:
         timeout-minutes: 4
         run: |
           if command -v rg; then exit 0; fi
-          for attempt in 1 2; do
-            if timeout --kill-after=10s 90s sh -c '
-              sudo apt-get update -qq \
-                -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources \
-                -o Dir::Etc::sourceparts=- &&
-              sudo apt-get install -y -qq ripgrep'; then
-              exit 0
-            fi
-            echo "::warning::ripgrep installation attempt $attempt failed or exceeded 90s"
-          done
-          echo "::error::ripgrep installation failed after two bounded attempts"
-          exit 1
+          python3 scripts/ci/bounded_apt.py sh -c '
+            apt-get update -qq \
+              -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources \
+              -o Dir::Etc::sourceparts=- &&
+            apt-get install -y -qq ripgrep'
 
       - name: Run the unit suite
         # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
