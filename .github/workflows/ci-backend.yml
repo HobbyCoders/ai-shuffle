@@ -1,14 +1,14 @@
 name: CI Backend
-run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} test workers)"
+run-name: "${{ github.workflow }} (4 shards, 2 workers each)"
 
-# Full backend checks on every PR, including drafts. Edge publication still
-# requires a separate attested local full run on main.
+# Stable gate and security checks on every PR, including drafts. Heavy backend
+# coverage is skipped only for explicitly classified unrelated paths.
 on:
   pull_request:
   workflow_dispatch:
     inputs:
       runner_cpus:
-        description: 'Pytest workers (legacy input name; runner is always ubuntu-latest)'
+        description: 'Legacy input (retained for callers); shards use two workers on ubuntu-latest'
         type: choice
         options: ['2', '4']
         default: '2'
@@ -23,23 +23,39 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  backend:
-    name: Backend tests
-    # Hard cap. Measured healthy 2 vCPU runs: about 7 min on 2026-09-15
-    # (11.4k tests, fast subset 358 s) and 16-19 min on 2026-10-05 (21.5k
-    # tests, fast subset 900-1040 s; one passing run took 30.5 min). Issue
-    # #1860: every test rebuilt the whole schema in tests/pg_shim.py, the
-    # largest share of that time; it is now built once per worker. Measure
-    # runs after that change before lowering this cap. The suite
-    # has a rare hard-wedge (silent infinite hang) —
-    # never let a wedged job ride the 6-hour GitHub default.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full_backend: ${{ steps.classify.outputs.full_backend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Classify explicit base/head diff (failure means full coverage)
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/ci/changed_paths.py --base "$BASE_SHA" --head "$HEAD_SHA"
+
+  backend-shard:
+    name: backend-shard ${{ matrix.shard }}
+    needs: changes
+    if: needs.changes.outputs.full_backend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     timeout-minutes: 35
-    # Standard public Linux runner; the dispatch input controls test workers only.
     runs-on: ubuntu-latest
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
-      PYTEST_WORKERS: ${{ inputs.runner_cpus == '4' && '4' || '2' }}
+      PYTHONPATH: .:fluid
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +71,10 @@ jobs:
           # harness's requires-python floor.
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: |
+            requirements*.txt
+            requirements-voice.lock
+            fluid/pyproject.toml
 
       - name: Install dependencies
         # The fluid harness (fluid/) must be importable or tests/core's fluid
@@ -73,12 +93,8 @@ jobs:
       - name: Secure hosted Python dependency permissions
         run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
 
-      - name: Reject blocking database calls on the event loop
-        # The only run of tests/test_scan_blocking_db.py: the fast subset
-        # ignores it.
-        run: |
-          python -m pytest tests/test_scan_blocking_db.py -o addopts="" -q
-          python scripts/scan_blocking_db.py
+      - name: Record runner capacity
+        run: nproc
 
       - name: Run fast test subset
         # The suite uses an in-memory SQLite shim — no Postgres service needed.
@@ -86,8 +102,7 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the job
         # timeout with no diagnosis.
-        # The legacy runner_cpus input selects test parallelism only;
-        # every run uses the standard GitHub-hosted Linux runner.
+        # Four deterministic partitions of the actual full collection, two workers each.
         # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
         # The excluded files run in full in a step of this job with the same
         # or a stronger setup (named in each step's comment), so they are not
@@ -97,42 +112,75 @@ jobs:
         # here; they skip without ALLOW_REAL_PG=1 and run in the PostgreSQL
         # safety step.
         run: |
-          python -m pytest tests/api tests/core tests/db tests/middleware tests/contract \
+          python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
               tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py \
               --deselect=tests/test_scan_blocking_db.py \
               --ignore=tests/core/test_chat_shell.py \
               --ignore=tests/core/test_container_runtime.py \
               --ignore=tests/core/test_container_image_contract.py \
-              -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
+              -o addopts="" -q -p no:cacheprovider --timeout=120 -n 2 \
+              -p scripts.ci.backend_shards --backend-shard "${{ matrix.shard }}"
 
-      - name: Isolated folder shell escape tests (real bubblewrap)
-        # The only run of tests/core/test_chat_shell.py: the fast subset
-        # ignores it, since without bubblewrap it could run only the tests
-        # that do not need the sandbox, and this step runs all of them.
-        # Install bubblewrap, lift Ubuntu 24.04's AppArmor block on
-        # unprivileged user namespaces (the image's container needs the
-        # equivalent compose security_opt lines), and require the sandbox so
-        # a broken setup fails instead of skipping. ~10 s.
-        env:
-          CHAT_SHELL_REQUIRE_SANDBOX: '1'
-          PYTHONPATH: .:fluid
+      - name: Upload backend-shard-${{ matrix.shard }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-shard-${{ matrix.shard }}
+          path: |
+            reports/
+            backend-results/
+          if-no-files-found: error
+          retention-days: 14
+
+  backend-contracts:
+    name: backend-contracts
+    needs: changes
+    if: needs.changes.outputs.full_backend == 'true'
+    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    env:
+      TESTING: "1"
+      ALLOW_REAL_PG: "0"
+      PYTHONPATH: .:fluid
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Keep history for tests that inspect public revisions. Schema lifecycle
+          # tests use checked-in SQL fixtures and need no private-era commits.
+          fetch-depth: 0
+
+      # Official setup actions use the GitHub Actions dependency cache.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # 3.12 matches production (the Docker image) and the fluid
+          # harness's requires-python floor.
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements*.txt
+            requirements-voice.lock
+            fluid/pyproject.toml
+
+      - name: Install dependencies
+        # The fluid harness (fluid/) must be importable or tests/core's fluid
+        # modules fail at COLLECTION, aborting the whole run before any test
+        # executes. fluid's own unit suite runs separately in ci-fluid.yml;
+        # never install its dev extras here, they upgrade mcp past the app's
+        # pin and break a dozen app tests.
         run: |
-          sudo apt-get install -y -qq --no-install-recommends bubblewrap >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends bubblewrap)
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
-          bwrap --version
-          python -m pytest tests/core/test_chat_shell.py -o addopts="" -q -rs -p no:cacheprovider --timeout=120
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./fluid
 
-      - name: Agent isolation with real accounts (root)
-        # tests/core/test_agent_isolation_root.py (#1957) needs root: it
-        # migrates a throwaway DATA_DIR to a second uid and runs the Bash tool
-        # and Monitor shells through the spawn runner as a third, checking
-        # each protected entry gives "Permission denied". sudo keeps the
-        # runner's Python; no bytecode is written as root. ~10 s.
-        env:
-          AGENT_ISOLATION_ROOT_REQUIRED: '1'
-          PYTHONDONTWRITEBYTECODE: '1'
-          PYTHONPATH: .:fluid
-        run: sudo -E env "PATH=$PATH" python -m pytest tests/core/test_agent_isolation_root.py -o addopts="" -q -rs -p no:cacheprovider --timeout=180
+      # setup-python's hosted tool cache can contain group/world-writable
+      # stdlib files. Match the image's trusted dependency permissions rather
+      # than weakening the root-phase import provenance assertions.
+      - name: Secure hosted Python dependency permissions
+        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+
+      - name: Record runner capacity
+        run: nproc
 
       - name: Boot smoke test (real server process)
         # Starts `python -m app.main` as a subprocess against a private
@@ -149,7 +197,7 @@ jobs:
         env:
           BOOT_SMOKE_REQUIRED: '1'
           SMOKE_PG_BIN: /usr/lib/postgresql/16/bin
-        run: python -m pytest tests/smoke tests/db/test_schema_lifecycle.py -m boot_smoke -o addopts="" -q -rs -p no:cacheprovider --timeout=240
+        run: python -m pytest --durations=50 --junitxml=reports/contracts-8-1.xml tests/smoke tests/db/test_schema_lifecycle.py -m boot_smoke -o addopts="" -q -rs -p no:cacheprovider --timeout=240
 
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
@@ -183,7 +231,7 @@ jobs:
         run: |
           export PATH="/usr/lib/postgresql/16/bin:$PATH"
           python -c "import os; print('Pre-measurement load average:', os.getloadavg())"
-          python -m pytest tests/core/test_container_runtime.py tests/core/test_container_image_contract.py -o addopts="" -q -s -p no:cacheprovider --timeout=120
+          python -m pytest --durations=50 --junitxml=reports/contracts-10-1.xml tests/core/test_container_runtime.py tests/core/test_container_image_contract.py -o addopts="" -q -s -p no:cacheprovider --timeout=120
 
       - name: Mobile PostgreSQL contracts
         env:
@@ -198,7 +246,7 @@ jobs:
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .
         run: >-
-          python -m pytest tests/integration/test_mobile_postgres.py
+          python -m pytest --durations=50 --junitxml=reports/contracts-11-1.xml tests/integration/test_mobile_postgres.py
           --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
           --timeout=60 -v
 
@@ -211,10 +259,120 @@ jobs:
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .
         run: >-
-          python -m pytest tests/integration/test_network_migration_postgres.py
+          python -m pytest --durations=50 --junitxml=reports/contracts-12-1.xml tests/integration/test_network_migration_postgres.py
           tests/integration/test_network_heads_postgres.py
           --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
           --timeout=120 -v
+
+      - name: Upload backend-contracts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-contracts
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  backend-security:
+    name: backend-security
+    if: always()
+    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    env:
+      TESTING: "1"
+      ALLOW_REAL_PG: "0"
+      PYTHONPATH: .:fluid
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Keep history for tests that inspect public revisions. Schema lifecycle
+          # tests use checked-in SQL fixtures and need no private-era commits.
+          fetch-depth: 0
+
+      # Official setup actions use the GitHub Actions dependency cache.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # 3.12 matches production (the Docker image) and the fluid
+          # harness's requires-python floor.
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements*.txt
+            requirements-voice.lock
+            fluid/pyproject.toml
+
+      - name: Install dependencies
+        # The fluid harness (fluid/) must be importable or tests/core's fluid
+        # modules fail at COLLECTION, aborting the whole run before any test
+        # executes. fluid's own unit suite runs separately in ci-fluid.yml;
+        # never install its dev extras here, they upgrade mcp past the app's
+        # pin and break a dozen app tests.
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./fluid
+
+      # setup-python's hosted tool cache can contain group/world-writable
+      # stdlib files. Match the image's trusted dependency permissions rather
+      # than weakening the root-phase import provenance assertions.
+      - name: Secure hosted Python dependency permissions
+        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+
+      - name: Record runner capacity
+        run: nproc
+
+      - name: Reject blocking database calls on the event loop
+        # The only run of tests/test_scan_blocking_db.py: the fast subset
+        # ignores it.
+        run: |
+          python -m pytest --durations=50 --junitxml=reports/security-4-1.xml tests/test_scan_blocking_db.py -o addopts="" -q
+          python scripts/scan_blocking_db.py
+
+      - name: Isolated folder shell escape tests (real bubblewrap)
+        # The only run of tests/core/test_chat_shell.py: the fast subset
+        # ignores it, since without bubblewrap it could run only the tests
+        # that do not need the sandbox, and this step runs all of them.
+        # Install bubblewrap, lift Ubuntu 24.04's AppArmor block on
+        # unprivileged user namespaces (the image's container needs the
+        # equivalent compose security_opt lines), and require the sandbox so
+        # a broken setup fails instead of skipping. ~10 s.
+        env:
+          CHAT_SHELL_REQUIRE_SANDBOX: '1'
+          PYTHONPATH: .:fluid
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends bubblewrap >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends bubblewrap)
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          bwrap --version
+          python -m pytest --durations=50 --junitxml=reports/security-6-1.xml tests/core/test_chat_shell.py -o addopts="" -q -rs -p no:cacheprovider --timeout=120
+
+      - name: Agent isolation with real accounts (root)
+        # tests/core/test_agent_isolation_root.py (#1957) needs root: it
+        # migrates a throwaway DATA_DIR to a second uid and runs the Bash tool
+        # and Monitor shells through the spawn runner as a third, checking
+        # each protected entry gives "Permission denied". sudo keeps the
+        # runner's Python; no bytecode is written as root. ~10 s.
+        env:
+          AGENT_ISOLATION_ROOT_REQUIRED: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: .:fluid
+        run: sudo -E env "PATH=$PATH" python -m pytest --durations=50 --junitxml=reports/security-7-1.xml tests/core/test_agent_isolation_root.py -o addopts="" -q -rs -p no:cacheprovider --timeout=180
+
+      - name: Start the runner's PostgreSQL
+        # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
+        # starting it costs seconds, where a service container costs a pull
+        # and a health-check wait on every run. One database per contract
+        # suite so neither sees the other's tables.
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -v ON_ERROR_STOP=1 \
+            -c "CREATE USER shuffle_mobile_test WITH PASSWORD 'mobile-test-only'" \
+            -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test" \
+            -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'" \
+            -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test" \
+            -c "CREATE USER shuffle_safety_test WITH PASSWORD 'safety-test-only'" \
+            -c "CREATE DATABASE shuffle_safety_test OWNER shuffle_safety_test"
+          pg_isready -h 127.0.0.1 -p 5432
 
       - name: Verify PostgreSQL pool and transaction safety
         env:
@@ -225,10 +383,10 @@ jobs:
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .
         run: |
-          python -m pytest tests/integration/test_postgres_safety.py \
+          python -m pytest --durations=50 --junitxml=reports/security-13-1.xml tests/integration/test_postgres_safety.py \
             --confcutdir=tests/integration -o addopts="" -p no:cacheprovider \
             --timeout=120 -v
-          python -m pytest tests/db/test_usage_budget_postgres.py tests/db/test_openrouter_usage_postgres.py \
+          python -m pytest --durations=50 --junitxml=reports/security-13-2.xml tests/db/test_usage_budget_postgres.py tests/db/test_openrouter_usage_postgres.py \
             tests/db/test_dedupe_cancelled_usage_postgres.py tests/db/test_turn_usage_settlement_postgres.py \
             tests/db/test_fluid_delegated_batching_postgres.py tests/db/test_fluid_native_batching_postgres.py \
             tests/db/test_universal_search_pg.py tests/db/test_runs_activity_postgres.py \
@@ -242,3 +400,50 @@ jobs:
           python -m pip install pip-audit==2.10.1
           python -m pip_audit --skip-editable
           python -m pip_audit -r requirements-voice.lock
+      - name: Lint all workflow syntax/actions (pinned actionlint)
+        run: |
+          lint_dir="$(mktemp -d)"
+          trap 'rm -rf "$lint_dir"' EXIT
+          curl --fail --location --retry 2 --max-time 120 https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz -o "$lint_dir/actionlint.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $lint_dir/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$lint_dir/actionlint.tar.gz" -C "$lint_dir" actionlint
+          "$lint_dir/actionlint" -shellcheck=
+
+      - name: Full workflow, publication, security and docs policy regressions
+        run: >-
+          python -m pytest tests/scripts tests/test_buyer_docs.py tests/core/test_docs_content.py
+          -o addopts="" -q -p no:cacheprovider --timeout=120
+          --durations=50 --junitxml=reports/policy.xml
+
+      - name: Upload backend-security
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-security
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  backend:
+    name: Backend tests
+    if: always()
+    needs: [changes, backend-shard, backend-contracts, backend-security]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download successful shard receipts
+        if: needs.changes.outputs.full_backend == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*
+          path: shard-results
+      - name: Fail closed on incomplete coverage
+        if: always()
+        env:
+          BACKEND_NEEDS: ${{ toJSON(needs) }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python scripts/ci/changed_paths.py --gate --head "$HEAD_SHA"

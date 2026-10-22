@@ -1,0 +1,4 @@
+{
+  "source": "Bootstrap only: all tests conservatively cost 10s until a successful main hosted run is available. Refresh with python -m scripts.ci.backend_shards --refresh RUN --download-dir NEW_SCRATCH_DIR.",
+  "durations": {}
+}

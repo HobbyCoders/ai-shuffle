@@ -1,0 +1,157 @@
+"""Partition invariants, actual xdist collection and workflow security contracts."""
+from collections import Counter
+import json
+import os
+from pathlib import Path
+import random
+import subprocess
+import sys
+
+import pytest
+import yaml
+
+from scripts.ci import backend_shards as bs
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_deterministic_duration_balancing_and_exact_union():
+    nodes = [f"tests/test_a.py::test_{i}" for i in range(100)]
+    durations = {node: float(i + 1) for i, node in enumerate(nodes)}
+    expected = bs.partition(nodes, durations)
+    shuffled = list(nodes)
+    random.Random(42).shuffle(shuffled)
+    assert bs.partition(shuffled, durations) == expected
+    assert Counter(node for shard in expected for node in shard) == Counter(nodes)
+    assert all(expected)
+    loads = [sum(durations[node] for node in shard) for shard in expected]
+    assert max(loads) - min(loads) <= max(durations.values())
+
+
+def test_unknown_nodes_are_conservative_and_never_dropped():
+    nodes = [f"node-{i}" for i in range(16)]
+    shards = bs.partition(nodes, {"node-0": 60, "node-1": 0.01})
+    assert sorted(node for shard in shards for node in shard) == sorted(nodes)
+    assert all(shards)
+    # A single known long test must not share with the known short one while
+    # another bin could accommodate an unknown conservative long test.
+    assert next(s for s in shards if "node-0" in s)
+
+
+@pytest.mark.parametrize("durations", [{"a": -1}, {"a": float("nan")}, {"a": float("inf")}, {"a": "3"}, {"a": True}])
+def test_bad_durations_fail_collection(durations):
+    with pytest.raises(ValueError):
+        bs.partition(list("abcd"), durations)
+
+
+@pytest.mark.parametrize("nodes,shards", [
+    (list("abcd"), [["a"], ["b"], ["c"], ["c"]]),
+    (list("abcd"), [["a"], ["b"], ["c"], []]),
+    (list("abcd"), [["a"], ["b"], ["c"]]),
+    (list("abcd"), [["a"], ["b"], ["c"], ["d", "e"]]),
+    (list("aabc"), [["a"], ["a"], ["b"], ["c"]]),
+])
+def test_fault_injected_partition(nodes, shards):
+    with pytest.raises(ValueError):
+        bs.validate_partition(nodes, shards)
+
+
+@pytest.mark.parametrize("nodes", [[], list("abc"), list("aabcd")])
+def test_partition_rejects_empty_or_duplicate_collection(nodes):
+    with pytest.raises(ValueError):
+        bs.partition(nodes, {})
+
+
+def test_actual_xdist_collection_producing_path(tmp_path):
+    # A real two-worker invocation, outside the repository test tree. The
+    # generated tests never recurse into this test file or touch app state.
+    fixture = tmp_path / "test_fixture.py"
+    fixture.write_text("import pytest\n@pytest.mark.parametrize('value', range(12))\ndef test_value(value):\n    assert value >= 0\n")
+    manifest = tmp_path / "durations.json"
+    manifest.write_text(json.dumps({"durations": {}}))
+    env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
+    # This test is run serially locally: no nested workers beyond the shared
+    # machine-wide two-worker limit. Hosted policy tests also run it serially.
+    collected = []
+    for index in range(1, 5):
+        output = tmp_path / f"shard-{index}"
+        result = subprocess.run([
+            sys.executable, "-m", "pytest", str(fixture), "--rootdir", str(tmp_path),
+            "-o", "addopts=", "-p", "scripts.ci.backend_shards", "-n", "2",
+            "--backend-shard", str(index), "--backend-durations", str(manifest),
+            "--backend-results", str(output), "-q"],
+            cwd=tmp_path, env=env, text=True, capture_output=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        receipt = json.loads((output / "receipt.json").read_text())
+        assert receipt["count"] == 3
+        assert receipt["total"] == 12
+        assert receipt["workers"] == 2
+        assert receipt["head"] == "integration-head"
+        assert "Partition evidence:" in result.stdout
+        collected.extend(json.loads((output / "durations.json").read_text()))
+    assert len(collected) == len(set(collected)) == 12
+
+
+def workflow():
+    return yaml.load((ROOT / ".github/workflows/ci-backend.yml").read_text(), Loader=yaml.BaseLoader)
+
+
+def test_workflow_stable_fail_closed_gate_and_free_runner():
+    config = workflow()
+    assert "pull_request" in config["on"]
+    assert not config["on"]["pull_request"]
+    jobs = config["jobs"]
+    assert jobs["backend"]["name"] == "Backend tests"
+    assert jobs["backend"]["if"] == "always()"
+    assert set(jobs["backend"]["needs"]) == {"changes", "backend-shard", "backend-contracts", "backend-security"}
+    assert all(job["runs-on"] == "ubuntu-latest" for job in jobs.values())
+    assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
+    assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}}
+    assert jobs["backend-security"]["if"] == "always()"
+    assert "needs" not in jobs["backend-security"]
+    for job in ("backend-shard", "backend-contracts"):
+        assert jobs[job]["if"] == "needs.changes.outputs.full_backend == 'true'"
+        assert jobs[job]["timeout-minutes"] == "35"
+    text = json.dumps(jobs["backend-shard"])
+    for target in ("tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract", "tests/performance",
+                   "tests/mcp", "tests/services", "tests/unit", "tests/scripts", "tests/test_*.py"):
+        assert target in text
+    for exclusion in ("--deselect=tests/test_scan_blocking_db.py", "--ignore=tests/core/test_chat_shell.py",
+                      "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
+        assert exclusion in text
+    assert '-n 2' in text and 'scripts.ci.backend_shards' in text
+
+
+def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional():
+    jobs = workflow()["jobs"]
+    security = jobs["backend-security"]
+    text = json.dumps(security)
+    for command in ("tests/test_scan_blocking_db.py", "scripts/scan_blocking_db.py",
+                    "tests/core/test_chat_shell.py", "tests/core/test_agent_isolation_root.py",
+                    "tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
+                    "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py",
+                    "python -m pip_audit --skip-editable", "python -m pip_audit -r requirements-voice.lock",
+                    "tests/scripts", "tests/test_buyer_docs.py", "tests/core/test_docs_content.py"):
+        assert command in text
+    for flag in ("CHAT_SHELL_REQUIRE_SANDBOX", "AGENT_ISOLATION_ROOT_REQUIRED", "PG_SAFETY_TEST"):
+        assert any(step.get("env", {}).get(flag) == "1" for step in security["steps"])
+    assert 'chmod -R go-w' in text
+    contracts = json.dumps(jobs["backend-contracts"])
+    for flag in ("BOOT_SMOKE_REQUIRED", "CONTAINER_RUNTIME_TEST_PG", "CONTAINER_RUNTIME_TEST_PRESSURE", "MOBILE_POSTGRES_TEST", "NETWORK_POSTGRES_TEST"):
+        assert flag in contracts
+    for name in ("backend-security", "backend-contracts", "backend-shard"):
+        for step in jobs[name]["steps"]:
+            run = step.get("run", "")
+            if "python -m pytest" in run:
+                assert "--durations=50" in run and "--junitxml=" in run
+        uploads = [s for s in jobs[name]["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+        assert len(uploads) == 1 and uploads[0]["if"] == "always()"
+
+
+@pytest.mark.parametrize("field,value", [("conclusion", "failure"), ("headBranch", "feature"), ("event", "pull_request"), ("workflowName", "Other")])
+def test_refresh_rejects_untrusted_or_failed_runs(monkeypatch, tmp_path, field, value):
+    run = {"conclusion": "success", "headBranch": "main", "event": "workflow_dispatch", "workflowName": "CI Backend"}
+    run[field] = value
+    monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
+    with pytest.raises(ValueError, match="successful main"):
+        bs.refresh("123", tmp_path / "new", tmp_path / "manifest.json")
