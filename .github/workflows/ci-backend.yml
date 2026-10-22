@@ -1,8 +1,8 @@
 name: CI Backend
 run-name: "${{ github.workflow }} (4 shards, 2 workers each)"
 
-# Stable gate and security checks on every PR, including drafts. Heavy backend
-# coverage is skipped only for explicitly classified unrelated paths.
+# Full backend coverage and security checks on every PR, including drafts.
+# Cross-tree contracts and credential-path checks make path-based skips unsafe.
 on:
   pull_request:
   workflow_dispatch:
@@ -23,29 +23,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      full_backend: ${{ steps.classify.outputs.full_backend }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Classify explicit base/head diff (failure means full coverage)
-        id: classify
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: python scripts/ci/changed_paths.py --base "$BASE_SHA" --head "$HEAD_SHA"
-
   backend-shard:
     name: backend-shard ${{ matrix.shard }}
-    needs: changes
-    if: needs.changes.outputs.full_backend == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -134,8 +113,6 @@ jobs:
 
   backend-contracts:
     name: backend-contracts
-    needs: changes
-    if: needs.changes.outputs.full_backend == 'true'
     timeout-minutes: 35
     runs-on: ubuntu-latest
     env:
@@ -427,7 +404,7 @@ jobs:
   backend:
     name: Backend tests
     if: always()
-    needs: [changes, backend-shard, backend-contracts, backend-security]
+    needs: [backend-shard, backend-contracts, backend-security]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -436,7 +413,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Download successful shard receipts
-        if: needs.changes.outputs.full_backend == 'true'
         uses: actions/download-artifact@v4
         with:
           pattern: backend-shard-*
@@ -446,4 +422,4 @@ jobs:
         env:
           BACKEND_NEEDS: ${{ toJSON(needs) }}
           HEAD_SHA: ${{ github.sha }}
-        run: python scripts/ci/changed_paths.py --gate --head "$HEAD_SHA"
+        run: python scripts/ci/backend_gate.py --head "$HEAD_SHA"

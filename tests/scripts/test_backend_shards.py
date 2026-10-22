@@ -145,14 +145,16 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     jobs = config["jobs"]
     assert jobs["backend"]["name"] == "Backend tests"
     assert jobs["backend"]["if"] == "always()"
-    assert set(jobs["backend"]["needs"]) == {"changes", "backend-shard", "backend-contracts", "backend-security"}
+    assert set(jobs["backend"]["needs"]) == {"backend-shard", "backend-contracts", "backend-security"}
+    assert set(jobs) == {"backend", "backend-shard", "backend-contracts", "backend-security"}
     assert all(job["runs-on"] == "ubuntu-latest" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
     assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}}
     assert jobs["backend-security"]["if"] == "always()"
     assert "needs" not in jobs["backend-security"]
     for job in ("backend-shard", "backend-contracts"):
-        assert jobs[job]["if"] == "needs.changes.outputs.full_backend == 'true'"
+        assert "if" not in jobs[job]
+        assert "needs" not in jobs[job]
         assert jobs[job]["timeout-minutes"] == "35"
     text = json.dumps(jobs["backend-shard"])
     for target in ("tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract", "tests/performance",

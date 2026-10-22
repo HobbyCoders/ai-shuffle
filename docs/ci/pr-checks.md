@@ -2,8 +2,8 @@
 
 Before a push, run affected tests plus the offline secret scan. Every pull
 request, including drafts and forks, runs the hosted gates in parallel. Backend
-security is unconditional; only explicitly unrelated paths can skip the heavy
-backend suite and non-security contracts. Merge requires green CI and review. Edge/nightly publication remains separate:
+shards, real contracts and security all run unconditionally, regardless of paths.
+Merge requires green CI and review. Edge/nightly publication remains separate:
 the attested full run on main stays local on the publication worker.
 
 PR workflows use only free standard GitHub-hosted `ubuntu-latest` and
@@ -31,7 +31,7 @@ These workflows retain manual dispatch and also run on unfiltered
   must form an exact disjoint union; the aggregate reports runtime test counts
   and verifies the moved test-body snapshot. The full manual Windows matrix is
   unchanged (Internal tracking: #381). Linux PR checks still run the complete
-  backend suite for backend/shared changes. No assertions or failure behavior
+  backend suite on every PR. No assertions or failure behavior
   are weakened.
 - `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
 - `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
@@ -101,20 +101,12 @@ required to pass, not temporary exceptions. Network migration and mobile contrac
 run in the parallel backend-contracts job for backend/shared changes. Pool safety
 and both Python dependency audits remain unconditional in backend-security.
 
-### Backend shards and conservative path classification
+### Unconditional backend shards and contracts
 
-The `changes` job compares explicit base/head commits using
-`git diff --name-status -z --no-renames`. Missing history, malformed records,
-unknown paths, executable files, symlinks, submodules and mode changes all request
-full coverage. Sensitive trees (`app/`, `fluid/`, `docker/`, `tests/`, `scripts/`),
-root requirements and backend/shared configuration always request the full backend,
-even for Markdown. Deletes and both sides of renames participate in classification.
-
-Only allowlisted non-executable docs (excluding all `docs/install/`), frontend/mobile,
-workflow and explicitly mapped JS/native paths can omit heavy backend coverage.
-Mixed paths take the union; an unknown path overrides the shortcut. The classifier
-currently controls only CI Backend; all other PR workflows remain unconditional.
-The selected paths and coverage decision are written to the workflow summary.
+Every PR runs the full backend, including docs-only, frontend-only, desktop-only,
+tools-only and workflow-only changes. Backend credential-path checks and contracts
+read those trees too, and `docs/content/` is served at runtime. There is no path
+classifier, skip approval, or reduced-coverage lane.
 
 Full coverage runs four `ubuntu-latest` shards with two xdist workers apiece and
 `fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
@@ -133,11 +125,12 @@ full workflow/publication/security/docs policy regression suite. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
 
-The stable `Backend tests` gate uses `if: always()` and depends on classification,
-all shards, contracts and security. Heavy jobs may be skipped only after an
-explicit successful `full_backend=false` decision. Failed/cancelled/missing jobs,
-unknown classifier output, missing/duplicate shard receipts, inconsistent
-collection/partition digests and incomplete counts all fail closed.
+The stable `Backend tests` gate uses `if: always()` and depends on all shards,
+contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
+succeed and all four successful shard receipts. Failed, cancelled, missing or
+skipped jobs, missing/duplicate receipts, inconsistent collection/partition
+digests and incomplete counts all fail closed. No classifier output can approve
+a skipped job.
 
 `tests/backend-durations.json` is versioned scheduling data, never execution
 authority. Its keys are SHA-256 hashes of node IDs: parametrized IDs can contain
