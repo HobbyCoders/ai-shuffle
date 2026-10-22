@@ -412,6 +412,61 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       if (where === "visible") expect(text).toContain("ScrollSlotMarker");
       else expect(text).not.toContain("ScrollSlotMarker");
     });
+    it.each(["visible", "inside", "outside"])("reads real queued intersections when the %s frame notification is delayed", async where => {
+      const page = await load('<p>Main prose</p><div id="outer"><div style="height:100px;overflow:auto"><div style="height:800px"></div><div id="host"><iframe srcdoc="<p>QueuedIntersectionMarker</p>"></iframe></div></div></div>');
+      const restore = await page.evaluateHandle(where => {
+        document.getElementById("host")!.attachShadow({ mode: "closed" }).innerHTML =
+          `<div style="overflow:hidden;height:${where === "inside" ? 0 : 200}px"><slot></slot></div>`;
+        if (where === "outside") document.getElementById("outer")!.attachShadow({ mode: "closed" }).innerHTML =
+          '<div style="overflow:hidden;height:0"><slot></slot></div>';
+        // Native Chromium still computes every rectangle. Hold only delivery to
+        // the consumer, modelling an IO notification task behind a due timer.
+        const Native = IntersectionObserver;
+        const queued = new WeakMap<IntersectionObserver, IntersectionObserverEntry[]>();
+        window.IntersectionObserver = class extends Native {
+          constructor(_callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+            super((entries, observer) => {
+              queued.set(observer, [...(queued.get(observer) ?? []), ...entries]);
+            }, options);
+          }
+          takeRecords() {
+            const entries = [...(queued.get(this) ?? []), ...super.takeRecords()];
+            queued.delete(this);
+            return entries;
+          }
+        };
+        return () => { window.IntersectionObserver = Native; };
+      }, where);
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.getByText("QueuedIntersectionMarker").waitFor({ state: "attached" });
+      try {
+        expect(await observationRootStatus({ frame, primary: false })).toBe(where === "visible" ? "included" : "hidden");
+      } finally {
+        // Do not spend a second artificial 250 ms delay inside read_text's
+        // independent 300 ms child budget; its real visibility stays strict.
+        await restore.evaluate(restore => restore());
+        await restore.dispose();
+      }
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_hidden: where === "visible" ? 0 : 1, frames_skipped: 0 });
+      const text = (result.content[1] as { text: string }).text;
+      if (where === "visible") expect(text).toContain("QueuedIntersectionMarker");
+      else expect(text).not.toContain("QueuedIntersectionMarker");
+    });
+    it("still fails closed when Chromium produces no intersection record", async () => {
+      const page = await load('<p>Main prose</p><iframe srcdoc="<p>UnobservedMarker</p>"></iframe>');
+      await page.evaluate(() => {
+        window.IntersectionObserver = class extends IntersectionObserver {
+          observe() { /* No rendering result: there is nothing safe to drain. */ }
+        };
+      });
+      const frame = page.mainFrame().childFrames()[0];
+      await frame.getByText("UnobservedMarker").waitFor({ state: "attached" });
+      await expect(observationRootStatus({ frame, primary: false })).rejects.toThrow("layout visibility timed out");
+      const result = await runReadText(session);
+      expect(body(result)).toMatchObject({ frames_skipped: 1 });
+      expect((result.content[1] as { text: string }).text).not.toContain("UnobservedMarker");
+    });
     it("FOLLOWUP back and forward restore bfcache within the readiness budget and invalidate refs", async () => {
       const page = await session.ensurePage();
       page.setDefaultNavigationTimeout(3000);

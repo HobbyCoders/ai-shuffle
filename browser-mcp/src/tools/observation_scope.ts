@@ -189,14 +189,23 @@ export async function observationRootStatus(root: ObservationRoot, mode: "reader
           const bounds = root instanceof Element ? root : doc;
           const margin = Math.max(Math.abs(box.left), Math.abs(box.top), Math.abs(box.right), Math.abs(box.bottom),
             bounds.scrollWidth, bounds.scrollHeight, innerWidth, innerHeight) + 1;
-          // A never-delivered callback fails closed: the bounded task rejects
-          // and read_text reports the frame in frames_skipped, not as readable.
-          const timer = setTimeout(() => { observer.disconnect(); reject(new Error("layout visibility timed out")); }, 250);
-          const observer = new IntersectionObserver(entries => {
+          const finish = (entries: IntersectionObserverEntry[]): boolean => {
+            if (!entries.length) return false;
             clearTimeout(timer); observer.disconnect();
             const intersection = entries[0].intersectionRect;
             resolve(intersection.width > 2 && intersection.height > 2);
-          }, { root, rootMargin: `${margin}px` });
+            return true;
+          };
+          const observer = new IntersectionObserver(entries => { finish(entries); }, { root, rootMargin: `${margin}px` });
+          const timer = setTimeout(() => {
+            // Rendering queues entries before its separate notification task.
+            // A due timer can win that race on a busy page: consume the actual
+            // computed geometry before disconnect() discards the queued result.
+            if (finish(observer.takeRecords())) return;
+            observer.disconnect();
+            // No rendering result still fails closed, under the same deadline.
+            reject(new Error("layout visibility timed out"));
+          }, 250);
           observer.observe(target);
         })));
         return results.every(Boolean);

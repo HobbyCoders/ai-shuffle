@@ -61,6 +61,13 @@ settings are unchanged. Fluid's
 ripgrep install also has a four-minute step and two 90-second attempts; its apt
 refresh uses signed Ubuntu sources rather than optional third-party runner feeds.
 
+Frame visibility consumes any already-computed `IntersectionObserver` records
+before its 250 ms watchdog disconnects the observer: a due timer may run before
+the separate notification task on a busy page. The deadline and geometric
+visibility checks are unchanged; no rendering result still fails closed and is
+reported as a skipped frame, not readable text. Real-browser regressions retain
+closed-shadow clipping assertions and cover delayed delivery and missing records.
+
 Real PostgreSQL fixtures initialize mobile-tool provenance through the production
 schema helper and include the audit retention primary key. Network pruning routes
 shared retention batches into the fixture's disposable schema too. Container isolation
