@@ -8,7 +8,7 @@ import { readEditors, readChoices, editField, uploadField, rememberFileChooser, 
 // Browser-dependent lane is opt-in; plain npm test must also work without Chrome.
 describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () => {
   it('skips geometry for large hidden forms without losing visible editors or hidden choosers', async () => {
-    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, chromiumSandbox: true });
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });
     try {
       const page = await browser.newPage();
       await page.setContent('<div hidden>' + '<input>'.repeat(50000) + '</div><input aria-label="Visible" value="kept"><input type="password" value="synthetic"><input type="file" id="chooser" hidden>');
