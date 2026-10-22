@@ -91,12 +91,35 @@ def _protected(root):
 # --- settings ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("raw,expected", [("", "off"), ("0", "off"), ("off", "off"), ("FALSE", "off"),
-                                          ("on", "on"), (" On ", "on"), ("1", "on"), ("yes", "on"),
-                                          ("required", "required"), (" REQUIRED ", "required"),
-                                          ("maybe", "invalid")])
+ACCEPTED_SETTINGS = [(None, "off"), ("", "off"), (" ", "off"), ("off", "off"), ("OFF", "off"),
+                     ("0", "off"), ("false", "off"), (" NO ", "off"),
+                     ("on", "on"), ("ON", "on"), (" On ", "on"),
+                     ("1", "on"), ("true", "on"), (" YES ", "on"),
+                     ("required", "required"), (" required ", "required")]
+
+
+@pytest.mark.parametrize("raw,expected", ACCEPTED_SETTINGS)
 def test_setting(raw, expected):
-    assert iso.setting({iso.SETTING: raw}) == expected
+    assert iso.setting({} if raw is None else {iso.SETTING: raw}) == expected
+
+
+@pytest.mark.parametrize("raw,expected", ACCEPTED_SETTINGS)
+def test_all_isolation_readers_accept_the_same_values(raw, expected, runtime, monkeypatch, tmp_path):
+    from app.core import owner_auth
+    from app.main import require_agent_isolation
+
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
+    if raw is None:
+        monkeypatch.delenv("AGENT_ISOLATION", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_ISOLATION", raw)
+    assert iso.setting() == expected
+    assert runtime.isolation_setting() == expected
+    monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    monkeypatch.setattr(runtime, "_isolation", None)
+    assert runtime.isolation_setting() == expected
+    monkeypatch.setenv("SHUFFLE_AGENT_ISOLATION", "on")
+    require_agent_isolation()
 
 
 
@@ -293,7 +316,9 @@ def test_main_marks_maintenance_actions(runtime, monkeypatch, action):
 
 
 def test_app_refuses_direct_entrypoint_override(monkeypatch):
+    from app.core import owner_auth
     from app.main import require_agent_isolation
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
     monkeypatch.setenv("AGENT_ISOLATION", "required")
     monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION", raising=False)
     with pytest.raises(RuntimeError, match="required agent isolation: startup refused"):
@@ -302,14 +327,40 @@ def test_app_refuses_direct_entrypoint_override(monkeypatch):
     require_agent_isolation()
 
 
-def test_invalid_setting_nonroot_logs_choices(runtime, monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("AGENT_ISOLATION", "requried")
-    monkeypatch.setattr(runtime.os, "geteuid", lambda: 1000)
-    monkeypatch.delenv("PUID", raising=False)
-    monkeypatch.delenv("PGID", raising=False)
-    monkeypatch.setattr(runtime, "check_owned", lambda *a, **k: None)
-    runtime.drop_privileges(SimpleNamespace(effective_data_dir=tmp_path))
-    assert "use required, on or off" in capsys.readouterr().err
+@pytest.mark.parametrize("raw", ["isolated", "requried"])
+def test_invalid_setting_refuses(raw, runtime, monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ISOLATION", raw)
+    message = "AGENT_ISOLATION.*startup refused.*off, on, required"
+    with pytest.raises(iso.IsolationError, match=message):
+        iso.setting()
+    for uid in (0, 1000):
+        monkeypatch.setattr(runtime.os, "geteuid", lambda: uid)
+        # Refusal must happen before even inspecting or creating data directories.
+        with pytest.raises(runtime.RuntimeFailure, match=message):
+            runtime.drop_privileges(SimpleNamespace())
+    for method in (runtime.isolate, runtime.maintenance_isolation):
+        with pytest.raises(runtime.RuntimeFailure, match=message):
+            method(SimpleNamespace(), SimpleNamespace())
+    monkeypatch.setattr(runtime, "_ISOLATION_FILE", tmp_path / "missing.py")
+    monkeypatch.setattr(runtime, "_isolation", None)
+    with pytest.raises(runtime.RuntimeFailure, match=message):
+        runtime.drop_privileges(SimpleNamespace())
+    from app.core import owner_auth
+    from app.main import require_agent_isolation
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
+    with pytest.raises(RuntimeError, match=message):
+        require_agent_isolation()
+
+
+@pytest.mark.parametrize("raw", ["isolated", "requried", "required"])
+def test_native_app_ignores_container_isolation_setting(monkeypatch, raw):
+    from app.core import owner_auth
+    from app.main import require_agent_isolation
+
+    monkeypatch.setattr(owner_auth, "container_install", lambda: False)
+    monkeypatch.setenv("AGENT_ISOLATION", raw)
+    monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION", raising=False)
+    require_agent_isolation()
 
 
 def test_setting_defaults_off():
@@ -559,7 +610,9 @@ def test_protect_and_release_code(app_dir):
     assert ops.lstat(app / "frontend").st_uid == PUID
     assert any("/app/frontend" in m for m in messages)
     iso.release_code(app, IDENT, ops)
-    assert all(ops.lstat(p).st_uid == PUID for p in [app, *app.rglob("*")])
+    assert ops.lstat(app).st_uid == 0
+    assert ops.lstat(app / "app" / "core" / "x.py").st_uid == 0
+    assert ops.lstat(app / "frontend").st_uid == PUID
 
 
 def test_a_mounted_source_tree_is_never_chowned(app_dir):
@@ -600,7 +653,8 @@ def test_bootstrap_on_then_off(data, app_dir, monkeypatch):
     monkeypatch.setenv(iso.SETTING, "off")
     assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=lambda _m: None) is None
     assert all(ops.lstat(p).st_uid == PUID for p in _protected(root))
-    assert ops.lstat(app_dir[0] / "app").st_uid == PUID
+    assert ops.lstat(app_dir[0] / "app").st_uid == 0
+    assert ops.lstat(app_dir[0]).st_uid == 0
     assert not (root / iso.RECORD_NAME).exists()
 
 
@@ -612,15 +666,15 @@ def test_bootstrap_failure_rolls_back_and_runs_unisolated(data, app_dir, monkeyp
     messages = []
     assert iso.bootstrap(root, IDENT, app_dir=app_dir[0], ops=ops, log=messages.append) is None
     assert any("could NOT be enabled" in m for m in messages)
-    assert ops.lstat(app_dir[0] / "app").st_uid == PUID  # code protection undone
+    assert ops.lstat(app_dir[0] / "app").st_uid == 0  # image code stays protected
 
 
-def test_bootstrap_ignores_an_invalid_setting(data, monkeypatch):
+def test_bootstrap_refuses_an_invalid_setting_without_changing_ownership(data, monkeypatch):
     root, ops = data
     monkeypatch.setenv(iso.SETTING, "perhaps")
-    messages = []
-    assert iso.bootstrap(root, IDENT, ops=ops, log=messages.append) is None
-    assert not ops.changes and any("ignoring" in m for m in messages)
+    with pytest.raises(iso.IsolationError, match="AGENT_ISOLATION.*startup refused.*off, on, required"):
+        iso.bootstrap(root, IDENT, ops=ops)
+    assert not ops.changes
 
 
 def test_ensure_account_requires_the_image_account(monkeypatch):

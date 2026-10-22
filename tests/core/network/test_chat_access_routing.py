@@ -55,6 +55,13 @@ class Network:
         self.seen = []
         self.real_client = httpx.AsyncClient
         monkeypatch.setattr(httpx, "AsyncClient", self._client)
+        # Token authentication advertises the caller before the ASGI receiver
+        # runs. Keep both sides on this simulated network, not the host's LAN.
+        monkeypatch.setattr(engine, "_own_endpoints", self._own_endpoints)
+
+    def _own_endpoints(self):
+        device_id = engine.require_context().device_id
+        return [url for url, (worker, _) in self.servers.items() if worker.device_id == device_id]
 
     def _client(self, *args, **kwargs):
         kwargs["transport"] = httpx.MockTransport(self._handle)
@@ -64,9 +71,7 @@ class Network:
         for base, (worker, asgi) in self.servers.items():
             if str(request.url).startswith(base):
                 self.seen.append((base, request.url.path, request.content))
-                # Advertise the listener configuration, not caller-supplied headers.
-                endpoints = [url for url, (owner, _) in self.servers.items() if owner is worker]
-                with worker.active(), patch.object(engine, "_own_endpoints", return_value=endpoints):
+                with worker.active():
                     response = await asgi.handle_async_request(request)
                     content = await response.aread()
                 return httpx.Response(response.status_code, content=content,
@@ -348,6 +353,8 @@ async def test_unreachable_owner_shows_nothing_and_refuses_changes(pair, monkeyp
 
 
 async def test_owner_push_refreshes_the_viewer_only_from_the_real_owner(pair, monkeypatch):
+    # A hosted runner's detected LAN address is not an in-process worker route.
+    monkeypatch.setattr(engine, "_own_endpoints", lambda: ["http://192.0.2.17:8000"])
     Network(monkeypatch, {A_URL: pair.a, B_URL: pair.b})
     _reach(pair.b, pair.a, A_URL)
     _reach(pair.a, pair.b, B_URL)

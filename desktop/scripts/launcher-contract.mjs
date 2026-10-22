@@ -21,10 +21,13 @@
 // it from its own verified source (desktop/LAUNCHER.md). Minimum 3 is the
 // owner-accepted signing-key bridge. Minimum 4 replaces launchers without
 // database restore points (0.9.6) and the 1.0.0 ones that report 3; every
-// bump needs a Windows acceptance run. Version 5 includes the start-floor/staged
+// bump needs a Windows acceptance run. Current version 6 retains the start-floor/staged
 // replacement changes and waits for a timed-out self-test to close before cleanup.
-// Minimum stays 4 and start stays 3. Launcher 5 still fully reads back and hashes
-// the ready database restore point before selecting the update.
+// Minimum stays 4 and start stays 3. Launcher 6's functional changes are source-updates.ts
+// check() withdrawal handling and source-auth.ts/source-updates.ts lease/key transport
+// removal (e02a8a6ff). prepareRollback, ColdClusterCopy and installed-entry.ts are untouched.
+// The re-audited allowlist is 4, 5, 6: all fully hash ready points before selection.
+// Any future launcher version needs a fresh audit.
 export function readLauncher(text) {
  const value = JSON.parse(text);
  const count = n => Number.isSafeInteger(n) && n >= 0;

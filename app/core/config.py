@@ -194,8 +194,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
-    # Default-off rollout gate: existing aliases and old peers must keep working.
-    network_token_binding_enabled: bool = False
+    # Endpoint binding is on by default; false is the network-wide rollback switch.
+    # Legacy peers remain accepted until their authenticated binding support is pinned.
+    network_token_binding_enabled: bool = True
     # With binding enabled, require it even for peers without a durable pin.
     network_require_token_binding: bool = False
 

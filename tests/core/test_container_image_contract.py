@@ -20,11 +20,40 @@ def test_docker_defaults_glibc_arenas_without_overriding_runtime_environment():
     # Allocator tuning must not invalidate apt/PostgreSQL/Node/gh/pip layers.
     arena_env = "ENV MALLOC_ARENA_MAX=2"
     assert image.count(arena_env) == 1
-    assert image.index("RUN chown appuser:appuser /app") < image.index(arena_env)
+    assert image.index("RUN chown root:root /app") < image.index(arena_env)
     assert image.index(arena_env) < image.index("ARG GIT_SHA=unknown")
     # Docker ENV is a default (-e/Compose overrides it); startup must not reset it.
     entrypoint = (ROOT / "entrypoint.sh").read_text()
     assert not re.search(r"(?m)^\s*(?:export\s+)?MALLOC_ARENA_MAX\s*=", entrypoint)
+
+
+
+
+def test_startup_code_and_parent_directories_are_read_only_image_assets():
+    image = (ROOT / "Dockerfile").read_text()
+    assert "COPY --chown=root:root app/ ./app/" in image
+    assert "COPY --chown=root:root scripts/ ./scripts/" in image
+    assert "RUN chown root:root /app" in image
+    assert "chmod -R go-w /app" in image
+    assert "COPY --chown=root:root entrypoint.sh /entrypoint.sh" in image
+    assert "RUN chmod 755 /entrypoint.sh" in image
+    assert "--chown=appuser:appuser /src/frontend/build/ /app/app/static/" not in image
+    entrypoint = (ROOT / "entrypoint.sh").read_text()
+    assert not re.search(r"chown[^\n]*appuser[^\n]*/app(?:[ /]|$)", entrypoint)
+    assert "SHUFFLE_CONTAINER_PATH=$PATH" in entrypoint
+    assert 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' in entrypoint
+    assert 'exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py' in entrypoint
+    assert "npm install" not in entrypoint
+    assert entrypoint.index('export PATH=') < entrypoint.index('require_bundled_tools "$@"')
+    assert not re.search(r"(?m)^\s*chown ", entrypoint)
+    assert 'usermod -o -u "$PUID" -d / appuser' in entrypoint
+    assert entrypoint.index("container_runtime.py remap-home") < entrypoint.index('# Only modify user')
+    home_repair = '[ "$(getent passwd appuser | cut -d: -f6)" = /home/appuser ] || usermod -d /home/appuser appuser'
+    assert home_repair in entrypoint
+    assert entrypoint.index(home_repair) > entrypoint.index('UID/GID already correct')
+    assert "/home/appuser/.local/bin /home/appuser/chrome-profile" in image
+    assert "cp /root/.config/gh" not in entrypoint
+    assert "/usr/bin/tar --no-same-owner -C /home/appuser/.config/gh -xf -" in entrypoint
 
 
 def test_docker_bundles_one_supported_postgres_major():

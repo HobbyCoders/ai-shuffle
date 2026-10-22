@@ -1,7 +1,9 @@
 <script lang="ts">
 	import BrowserNativeEditor from './BrowserNativeEditor.svelte';
 	import BrowserFileInput from './BrowserFileInput.svelte';
+	import BrowserPicker from './BrowserPicker.svelte';
 	import type { BrowserEditor } from '$lib/browser-panel/workspace';
+	import { isPickerKind, opensPicker, type BrowserChoices, type PickerChoice } from '$lib/browser-panel/pickers';
 	import { browserTextChunks } from '$lib/browser-panel/text-chunks';
 	/**
 	 * BrowserLiveView — draws the screencast frames into a letterboxed,
@@ -27,6 +29,13 @@
 	 * Touch: a touch drag is translated into wheel (scroll) events — the page
 	 * content follows the finger — and a tap (< slop movement) into a full
 	 * move/down/up click sequence, so handheld users can actually browse.
+	 *
+	 * Pickers: Chrome draws a `<select>` list and date/time pickers outside the
+	 * page, so they never reach the screencast. Those controls get a see-through
+	 * trigger instead, and the panel opens its own list or calendar
+	 * (BrowserPicker); the choice is set in the page with input/change events.
+	 * The keys that would open the real popup on a focused control open the
+	 * panel's one instead.
 	 *
 	 * Inspect mode (`inspecting`): pointer events are NOT forwarded to the page.
 	 * Hovering sends throttled `onInspect(x, y, 'hover')` hit-tests and a click
@@ -60,6 +69,16 @@
 		editors?: BrowserEditor[];
 		onEdit?: (args: Record<string, unknown>) => void;
 		onPickFiles?: (field: BrowserEditor) => (files: File[]) => Promise<void>;
+		/** Read a select's options from the page for the panel's own list. */
+		onChoices?: (field: BrowserEditor) => Promise<BrowserChoices>;
+		/**
+		 * Set a picker's choice in the page, resolving once the page has it. A
+		 * rejection keeps the picker open with the reason. Without it the
+		 * choice is sent through onEdit and the picker closes at once.
+		 */
+		onChoose?: (field: BrowserEditor, choice: PickerChoice) => Promise<void>;
+		/** The workspace state revision `editors` came from. */
+		revision?: number;
 		/** Whether input is accepted (true only while the stream is live). */
 		interactive?: boolean;
 		/** Keyboard ownership is independent of the coordinate/frame gate. */
@@ -90,6 +109,9 @@
 		editors = [],
 		onEdit,
 		onPickFiles,
+		onChoices,
+		onChoose,
+		revision = 0,
 		interactive: inputEnabled = true,
 		keyboardEnabled: keyboardAllowed = inputEnabled,
 		keyboardOpen = $bindable(false),
@@ -112,6 +134,70 @@
 	const editorScale = $derived(viewport ? Math.min(viewWidth / viewport.width, viewHeight / viewport.height) : 1);
 	const editorLeft = $derived(viewport ? (viewWidth - viewport.width * editorScale) / 2 : 0);
 	const editorTop = $derived(viewport ? (viewHeight - viewport.height * editorScale) / 2 : 0);
+	const fieldBox = (f: BrowserEditor) => ({ left: editorLeft + f.x * editorScale, top: editorTop + f.y * editorScale, width: f.width * editorScale, height: f.height * editorScale });
+
+	// ── Panel pickers for select / date / time controls ───────────────────
+	let pickerId = $state<string | null>(null);
+	/** Follows the field through workspace updates (it can move or re-render). */
+	const pickerField = $derived(pickerId === null ? null : (editors.find((f) => f.id === pickerId && isPickerKind(f.type)) ?? null));
+	/** The keyup of a key that opened a picker stays local, like its keydown. */
+	let swallowKeyUp: string | null = null;
+
+	function openPicker(field: BrowserEditor) {
+		if (!interactive || inspecting || !onEdit) return;
+		pickerId = field.id;
+		// Holds the remote viewport still and keeps control while choosing.
+		keyboardOpen = true;
+	}
+
+	function closePicker(refocus = true) {
+		if (pickerId === null) return;
+		pickerId = null;
+		keyboardOpen = false;
+		// Keys go back to the page through the live view.
+		if (refocus) wrapperEl?.focus({ preventScroll: true });
+	}
+
+	async function applyPicker(choice: PickerChoice) {
+		const field = pickerField;
+		if (!field) return;
+		if (!onChoose) {
+			closePicker();
+			onEdit?.({ field: field.id, action: 'set', ...choice });
+			return;
+		}
+		await onChoose(field, choice); // a refusal stays in the picker
+		if (pickerId === field.id) closePicker();
+	}
+
+	/**
+	 * The page's `focused` flag in `editors` lags the keys and presses this
+	 * view sends: after a Tab, the state still names the control Tab left, so
+	 * a quick Space would open that control's picker instead of reaching the
+	 * page. After sending one, the flag is ignored until a newer state
+	 * revision arrives (or, if the page reported no change, a moment passes).
+	 */
+	let focusStale: { revision: number; at: number } | null = null;
+	const FOCUS_SETTLE_MS = 1000;
+	const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock']);
+	function forward(payload: Record<string, unknown>) {
+		const movesFocus =
+			payload.kind === 'text' ||
+			(payload.kind === 'key' && !MODIFIER_KEYS.has(String(payload.key))) ||
+			(payload.kind === 'mouse' && (payload.event === 'down' || payload.event === 'up'));
+		if (movesFocus) focusStale = { revision, at: Date.now() };
+		onInput(payload);
+	}
+	function focusKnown() {
+		if (focusStale && revision <= focusStale.revision && Date.now() - focusStale.at < FOCUS_SETTLE_MS) return false;
+		focusStale = null;
+		return true;
+	}
+
+	// The control left the page, or input stopped: nothing to choose for.
+	$effect(() => {
+		if (pickerId !== null && (!pickerField || !interactive || inspecting || !onEdit)) closePicker(false);
+	});
 
 	let currentBitmap: ImageBitmap | null = null;
 	let currentMeta = $state.raw<FramePayload['metadata'] | null>(null);
@@ -438,7 +524,7 @@
 			noticeTimer = setTimeout(() => (notice = null), 5000);
 		}
 		for (const chunk of browserTextChunks(text))
-			onInput({ type: 'input', kind: 'text', text: chunk });
+			forward({ type: 'input', kind: 'text', text: chunk });
 	}
 
 	function commitText(text: string) {
@@ -472,7 +558,7 @@
 
 	function keyPair(key: string, code: string, keyCode: number, modifiers = 0) {
 		for (const event of ['down', 'up']) {
-			onInput({
+			forward({
 				type: 'input',
 				kind: 'key',
 				event,
@@ -592,7 +678,7 @@
 		if (!p) return;
 		// Left/right/middle/back/forward only: a pen eraser's 32 is not a mouse button.
 		const buttons = (e.buttons ?? 0) & 31;
-		onInput({
+		forward({
 			type: 'input',
 			kind: 'mouse',
 			event,
@@ -882,7 +968,7 @@
 	}
 
 	function sendKey(event: 'down' | 'up', e: KeyboardEvent) {
-		onInput({ type: 'input', kind: 'key', event, ...remoteKey(e, event) });
+		forward({ type: 'input', kind: 'key', event, ...remoteKey(e, event) });
 	}
 
 	/** Ctrl/Cmd+V: let the native paste event bring this device's clipboard. */
@@ -960,6 +1046,14 @@
 			if (e.key === 'Escape') onExitInspect?.();
 			return;
 		}
+		// A focused select/date control: open the panel's picker, not Chrome's
+		// invisible popup (which would swallow the next keys).
+		const pagePicker = focusKnown() ? editors.find((f) => f.focused && isPickerKind(f.type)) : undefined;
+		if (pagePicker && onEdit && isPickerKind(pagePicker.type) && opensPicker(pagePicker.type, e)) {
+			swallowKeyUp = e.key;
+			openPicker(pagePicker);
+			return;
+		}
 		// The key still reaches the page; the copy itself comes back to this device.
 		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c' && !e.repeat) onCopy?.();
 		sendKey('down', e);
@@ -974,6 +1068,10 @@
 		e.preventDefault();
 		e.stopPropagation();
 		if (inspecting) return;
+		if (swallowKeyUp !== null && e.key === swallowKeyUp) {
+			swallowKeyUp = null;
+			return;
+		}
 		sendKey('up', e);
 	}
 </script>
@@ -1017,10 +1115,46 @@
 				{#if onPickFiles}
 					<BrowserFileInput {field} scale={editorScale} left={editorLeft} top={editorTop} onPick={onPickFiles} onActive={(active) => keyboardOpen = active} />
 				{/if}
+			{:else if isPickerKind(field.type)}
+				{@const box = fieldBox(field)}
+				<button
+					type="button"
+					class="picker-trigger"
+					class:open={pickerId === field.id}
+					style:left={`${box.left}px`}
+					style:top={`${box.top}px`}
+					style:width={`${box.width}px`}
+					style:height={`${box.height}px`}
+					aria-label={`${field.label}: ${field.value || 'not set'}`}
+					aria-haspopup={field.type === 'select' ? 'listbox' : 'dialog'}
+					aria-expanded={pickerId === field.id}
+					onclick={(e) => {
+						e.stopPropagation();
+						if (pickerId === field.id) closePicker();
+						else openPicker(field);
+					}}
+					onkeydown={(e) => e.stopPropagation()}
+					onkeyup={(e) => e.stopPropagation()}
+					oncontextmenu={(e) => e.stopPropagation()}
+				></button>
 			{:else}
 				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} onText={commitText} onKey={(k) => bridgeKeyPair(k, k, k === 'Delete' ? 46 : 8)} onNavKey={overlayNavKey} surface={() => fieldSurface(field)} />
 			{/if}
 		{/each}
+		{#if pickerField}
+			{#key pickerField.id}
+				<BrowserPicker
+					field={pickerField}
+					anchor={fieldBox(pickerField)}
+					{viewWidth}
+					{viewHeight}
+					boundary={wrapperEl}
+					loadChoices={onChoices}
+					onApply={applyPicker}
+					onCancel={() => closePicker()}
+				/>
+			{/key}
+		{/if}
 	{/if}
 	<textarea
 		bind:this={keyboardEl}
@@ -1084,6 +1218,34 @@
 		touch-action: auto;
 		cursor: default;
 		overflow: hidden;
+		/* Never scrollable, not even by script: a field overlay wider than the
+		   view, or a focused/revealed element, must not shift the page image
+		   away from the input mapping. */
+		overflow: clip;
+	}
+
+	/* See-through stand-in over a page select/date control: a press opens the
+	   panel's own picker instead of Chrome's popup, which the stream can't show. */
+	.picker-trigger {
+		position: absolute;
+		z-index: 3;
+		box-sizing: border-box;
+		margin: 0;
+		padding: 0;
+		min-width: 0;
+		background: transparent;
+		border: 0;
+		border-radius: 3px;
+		cursor: pointer;
+		touch-action: manipulation;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.picker-trigger:hover {
+		background: color-mix(in oklch, var(--primary) 7%, transparent);
+	}
+	.picker-trigger:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 2px var(--background, #fff), 0 0 0 4px var(--ring, #6750a4);
 	}
 
 	.live-wrapper.inspecting {

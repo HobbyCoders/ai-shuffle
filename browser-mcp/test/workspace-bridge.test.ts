@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceBridge, bridgeConfig } from "../src/workspace-bridge.js";
+import { WorkspaceBridge, bridgeConfig, reportBatch } from "../src/workspace-bridge.js";
 import { Session } from "../src/session.js";
 import { BrowserManager } from "../src/browser.js";
 const bridges: WorkspaceBridge[] = [];
 afterEach(() => { bridges.forEach(b => b.stop()); bridges.length = 0; vi.useRealTimers(); vi.restoreAllMocks(); });
 const json = (data: unknown) => new Response(JSON.stringify(data), {headers:{"content-type":"application/json"}});
-function harness(options: { registerStatus?: number; reportFail?: boolean; pollStatus?: number; viewerCount?: number } = {}) {
+function harness(options: { registerStatus?: number; reportFail?: boolean; pollStatus?: number; viewerCount?: number; reportStatus?: (body: any) => number | undefined } = {}) {
   const calls: {endpoint:string;body:any}[] = [];
   let deliver: ((commands: unknown[], viewerCount?: number) => void) | undefined;
   let failedReport = false;
@@ -15,6 +15,8 @@ function harness(options: { registerStatus?: number; reportFail?: boolean; pollS
     if (endpoint === "register") return options.registerStatus ? new Response(null,{status:options.registerStatus}) : json({ok:true,viewer_count:options.viewerCount});
     if (endpoint === "report") {
       if (options.reportFail && !failedReport) {failedReport=true; return new Response(null,{status:503});}
+      const status = options.reportStatus?.(body);
+      if (status) return new Response(null,{status});
       return new Response(null,{status:204});
     }
     if (options.pollStatus) return new Response(null,{status:options.pollStatus});
@@ -126,6 +128,65 @@ describe("runtime bridge", () => {
     await h.bridge.shutdown();
     expect(h.calls.some(c=>c.endpoint==="report" && c.body.state.available===false)).toBe(true);
     expect(h.bridge.workspace.state().control.owner).toBe("agent");
+  });
+  it("reports at most one payload-carrying result (copy text or list options) per batch", () => {
+    const choices = { selected: 0, groups: [], options: [{ label: "A", disabled: false }] };
+    const results = [{ id: "a", ok: true }, { id: "b", ok: true, choices }, { id: "c", ok: true }, { id: "d", ok: true, text: "copied" }, { id: "e", ok: true }];
+    expect(reportBatch(results).map(r => r.id)).toEqual(["a"]);
+    expect(reportBatch(results.slice(1)).map(r => r.id)).toEqual(["b", "c"]);
+    expect(reportBatch(results.slice(3)).map(r => r.id)).toEqual(["d", "e"]);
+    expect(reportBatch(Array.from({ length: 70 }, (_, i) => ({ id: `r${i}`, ok: true })))).toHaveLength(64);
+  });
+  it.each([
+    ["refused by the server (422)", 50, 422],
+    ["refused by the server (413)", 50, 413],
+    ["too large to send at all", 1000, undefined],
+  ])("turns an option list %s into an error for its viewer instead of resending it", async (_, count, status) => {
+    const h = harness({ reportStatus: body => status && body.results.some((r: any) => r.choices) ? status : undefined });
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));
+    // Control characters cost 6 bytes of JSON each: 1000 such labels exceed the body limit.
+    const choices = { selected: 0, groups: [], options: Array.from({ length: count }, () => ({ label: "\u0001".repeat(200), disabled: false })) };
+    vi.spyOn(h.bridge.workspace, "receive").mockImplementation(async (raw: any) => raw.op === "options" ? { id: raw.id, ok: true, choices } : { id: raw.id, ok: true });
+    const command = (id: string, op: string) => ({id,runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"a",op,args:{},expires_at:Date.now()+30000});
+    h.send([command("opt", "options"), command("next", "heartbeat")]);
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="report" && c.body.results.some((r:any)=>r.id==="next"))).toBe(true), {timeout:2500});
+    const reported = h.calls.filter(c => c.endpoint === "report").flatMap(c => c.body.results);
+    expect(reported.filter((r: any) => r.id === "opt").at(-1)).toEqual({ id: "opt", ok: false, error: "This list is too long to show here." });
+    // Sent once at most (never, when it could not fit), not retried.
+    expect(h.calls.filter(c => c.endpoint === "report" && c.body.results.some((r: any) => r.choices))).toHaveLength(status ? 1 : 0);
+  });
+  it.each([[429], [408]])("keeps a valid option list and retries it after a transient %i (a proxy, not a refusal)", async status => {
+    let refusals = 0;
+    const h = harness({ reportStatus: body => body.results.some((r: any) => r.choices) && refusals++ < 2 ? status : undefined });
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));
+    const choices = { selected: 0, groups: [], options: [{ label: "A", disabled: false }] };
+    vi.spyOn(h.bridge.workspace, "receive").mockImplementation(async (raw: any) => raw.op === "options" ? { id: raw.id, ok: true, choices } : { id: raw.id, ok: true });
+    h.send([{id:"opt",runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"a",op:"options",args:{},expires_at:Date.now()+30000}]);
+    await vi.waitFor(() => expect(refusals).toBe(3), {timeout:4000});
+    const reports = h.calls.filter(c => c.endpoint === "report").flatMap(c => c.body.results).filter((r: any) => r.id === "opt");
+    expect(reports).toHaveLength(3);
+    for (const r of reports) expect(r).toEqual({ id: "opt", ok: true, choices });
+  });
+  it("does not replace a valid queued list when a state-only report is refused with 422", async () => {
+    let refusals = 0;
+    const h = harness({ reportStatus: body => !body.results.some((r: any) => r.choices) && body.results.length && refusals++ < 1 ? 422 : undefined });
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));
+    const choices = { selected: 0, groups: [], options: [{ label: "A", disabled: false }] };
+    vi.spyOn(h.bridge.workspace, "receive").mockImplementation(async (raw: any) => raw.op === "options" ? { id: raw.id, ok: true, choices } : { id: raw.id, ok: true });
+    const command = (id: string, op: string) => ({id,runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"a",op,args:{},expires_at:Date.now()+30000});
+    h.send([command("beat", "heartbeat"), command("opt", "options")]);
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="report" && c.body.results.some((r:any)=>r.id==="opt"))).toBe(true), {timeout:4000});
+    const reported = h.calls.filter(c => c.endpoint === "report").flatMap(c => c.body.results).filter((r: any) => r.id === "opt");
+    expect(reported).toEqual([{ id: "opt", ok: true, choices }]);
+  });
+  it("keeps retrying a refused report that carries no payload (the state itself may be at fault)", async () => {
+    let refusals = 0;
+    const h = harness({ reportStatus: body => body.results.length && refusals++ < 2 ? 422 : undefined });
+    await vi.waitFor(() => expect(h.calls.some(c=>c.endpoint==="poll")).toBe(true));
+    h.send([{id:"take",runtime_id:h.bridge.workspace.runtimeId,tab_id:null,viewer_id:"a",op:"takeover",args:{},expires_at:Date.now()+30000}]);
+    await vi.waitFor(() => expect(refusals).toBe(3), {timeout:4000});
+    const last = h.calls.filter(c => c.endpoint === "report").at(-1)!;
+    expect(last.body.results).toEqual([{ id: "take", ok: true }]);
   });
   it("is opt-in and derives control siblings from legacy URL", () => {
     expect(bridgeConfig({})).toBeUndefined();

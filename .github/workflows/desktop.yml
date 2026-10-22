@@ -1,24 +1,9 @@
 name: Desktop CI
 
-# Desktop app (desktop/). Manual only: pull requests run no CI, and
-# scripts/local_ci.py runs the desktop typecheck and tests before a push. The
-# release build that publishes installers lives in release.yml.
-#
-# Default packaging is Windows-only. Cheap typechecks/unit tests run on Linux;
-# full Linux desktop-runtime assembly requires an explicit manual opt-in.
-# Windows installs an isolated preview and exercises its real worker/PostgreSQL
-# before publishing a CI artifact, never a stable release/update.
-#
-# Dispatch it when a Windows install must be verified on a clean machine
-# and no Windows worker is available.
-#
-# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
-#
-# Nothing here is code signed: this workflow never sees the signing secrets. Release builds come from desktop-installer.yml (Windows,
-# signed), desktop-macos-artifact.yml (signed and notarized) and
-# desktop-linux-artifact.yml (unsigned, with checksums); see desktop/RELEASING.md.
-
+# Desktop typechecks and unit tests on every PR, including drafts.
+# Packaging and runtime assembly remain manual; releases live in release.yml.
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       upload_preview:
@@ -40,8 +25,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-${{ github.ref }}
-  cancel-in-progress: true
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -65,7 +50,7 @@ jobs:
   package:
     name: Package Windows shell
     timeout-minutes: 15
-    if: inputs.verify_stable_installer != true
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_stable_installer != true
     needs: check
     runs-on: windows-latest
     defaults:
@@ -130,7 +115,7 @@ jobs:
 
   windows-preview:
     name: Windows preview installer and fresh database
-    if: inputs.verify_stable_installer != true
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_stable_installer != true
     needs: check
     runs-on: windows-latest
     timeout-minutes: 35

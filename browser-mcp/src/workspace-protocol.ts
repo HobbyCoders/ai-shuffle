@@ -2,8 +2,20 @@
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
   accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
+  /** Date/time pickers: the page's own min/max/step attributes, unparsed, and
+   * its value attribute (`base`), which steps count from when there is no min.
+   * `zone` is the browser's IANA time zone, so the panel's Today/Now match the page. */
+  min?: string; max?: string; step?: string; base?: string; zone?: string;
+  /** A picker control (select, date, time…) that has the page's focus. */
+  focused?: boolean;
   style?: { fontSize: number; lineHeight: number | null; paddingLeft: number; paddingTop: number; borderLeft: number; borderTop: number; fontFamily: string };
   x: number; y: number; width: number; height: number;
+}
+/** A select's options for the panel's own list (no option values: the panel picks by index and label). */
+export interface BrowserChoices {
+  selected: number; groups: string[];
+  options: { label: string; disabled: boolean; group?: number }[];
+  truncated?: boolean;
 }
 export interface BrowserWorkspaceState {
   editors?: BrowserEditor[];
@@ -16,7 +28,7 @@ export interface BrowserWorkspaceState {
 }
 export interface BrowserCommand {
   id: string; runtime_id: string; tab_id: string | null; viewer_id: string;
-  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit" | "upload" | "copy";
+  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit" | "upload" | "copy" | "options";
   args: Record<string, unknown>; expires_at: number;
 }
 export function object(v: unknown): v is Record<string, unknown> {
@@ -83,10 +95,20 @@ export function validateCommand(raw: unknown, runtimeId: string, now = Date.now(
       if (!str(a.field, 128) || !Array.isArray(a.paths) || !a.paths.length || a.paths.length > 10 || !a.paths.every(p => str(p, 4096))) fail();
       break;
     case "edit":
-      keys(a, ["field", "action", "value", "start", "end"]);
-      if (!str(a.field, 128) || !['focus', 'blur', 'replace'].includes(String(a.action))) fail();
-      if (a.action === 'replace' && (typeof a.value !== 'string' || a.value.length > 16384 || !integer(a.start, 0, a.value.length) || !integer(a.end, a.start as number, a.value.length))) fail();
+      keys(a, ["field", "action", "value", "start", "end", "index", "label"]);
+      if (!str(a.field, 128) || !['focus', 'blur', 'replace', 'set'].includes(String(a.action))) fail();
+      if (a.action === 'replace' && (a.index !== undefined || typeof a.value !== 'string' || a.value.length > 16384 || !integer(a.start, 0, a.value.length) || !integer(a.end, a.start as number, a.value.length))) fail();
+      // A picker choice: a select option by index with the label the panel
+      // showed for it (200 code points at most), or a date/time value string.
+      if (a.action === 'set') {
+        if (a.start !== undefined || a.end !== undefined) fail();
+        if (a.index !== undefined
+          ? a.value !== undefined || !integer(a.index, 0, 9999) || typeof a.label !== 'string' || a.label.length > 400
+          : typeof a.value !== 'string' || a.value.length > 64 || a.label !== undefined) fail();
+      }
+      if (a.action !== 'set' && (a.index !== undefined || a.label !== undefined)) fail();
       break;
+    case "options": keys(a, ["field"]); if (!str(a.field, 128)) fail(); break;
     case "input": keys(a, ["method", "params"]); validateInputCommand(a.method, a.params); break;
     default: fail();
   }

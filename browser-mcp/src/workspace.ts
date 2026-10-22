@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { copySelection, editField, uploadField } from "./editors.js";
+import { copySelection, editField, readChoices, uploadField } from "./editors.js";
 import { Session, raceWithTimeout } from "./session.js";
-import { object, validateCommand, type BrowserCommand, type BrowserWorkspaceState } from "./workspace-protocol.js";
+import { object, validateCommand, type BrowserChoices, type BrowserCommand, type BrowserWorkspaceState } from "./workspace-protocol.js";
 
 // Internal app-owned process correlation; standalone sessions keep random IDs.
 const runtimeIdentities = new WeakMap<Session, string>();
@@ -19,8 +19,12 @@ export const HUMAN_LEASE_MS = 65000;
  * viewer operation.
  */
 export const EDIT_TIMEOUT_MS = 5000;
-/** `text` carries a viewer copy back to that viewer only; it is never put in workspace state. */
-export interface CommandResult { id: string; ok: boolean; error?: string; text?: string }
+/**
+ * `text` carries a viewer copy, `choices` a select's options, back to that
+ * viewer only; neither is ever put in workspace state.
+ */
+export interface CommandResult { id: string; ok: boolean; error?: string; text?: string; choices?: BrowserChoices }
+type Reply = Pick<CommandResult, "text" | "choices">;
 /** Page operations share one queue; an admitted Stop interrupts it. */
 export class BrowserWorkspace {
   readonly runtimeId: string;
@@ -117,7 +121,7 @@ export class BrowserWorkspace {
         return { id, ok: true };
       }
       this.queued++;
-      let copied: string | undefined;
+      let reply: Reply | undefined;
       try {
         await this.session.runExclusive(async () => {
           this.expireLease();
@@ -138,23 +142,28 @@ export class BrowserWorkspace {
           if (this.viewer !== c.viewer_id) throw new Error("human control required");
           const canBeNull = c.op === "tabs" && c.args.action === "create";
           if (!(canBeNull && c.tab_id === null) && (!c.tab_id || c.tab_id !== this.session.currentTabId())) throw new Error("stale tab: refresh workspace state");
-          copied = await this.execute(c);
+          reply = await this.execute(c);
         });
       } catch (err) {
         if (c.op === "takeover" && this.pending === c.viewer_id && generation === this.ownershipGeneration) this.clearControl();
         throw err;
       } finally { this.queued--; this.changed(); }
-      return copied === undefined ? { id, ok: true } : { id, ok: true, text: copied };
+      return { id, ok: true, ...reply };
     } catch (err) {
       // Protocol errors intentionally do not echo arbitrary CDP/page payloads.
       return { id, ok: false, error: (err instanceof Error ? err.message : "workspace command failed").slice(0, 1024) };
     }
   }
-  private async execute(c: BrowserCommand): Promise<string | undefined> {
+  private async execute(c: BrowserCommand): Promise<Reply | undefined> {
     const a = c.args;
     if (c.op === "copy") {
       if (!this.session.hasPage()) throw new Error("no active page; create a tab first");
-      return await raceWithTimeout(copySelection(await this.session.ensurePage()), EDIT_TIMEOUT_MS, "copy timed out");
+      return { text: await raceWithTimeout(copySelection(await this.session.ensurePage()), EDIT_TIMEOUT_MS, "copy timed out") };
+    }
+    if (c.op === "options") {
+      // Read-only: opening the panel's list neither navigates nor edits.
+      if (!this.session.hasPage()) throw new Error("no active page; create a tab first");
+      return { choices: await raceWithTimeout(readChoices(await this.session.ensurePage(), a), EDIT_TIMEOUT_MS, "list lookup timed out") };
     }
     this.session.notifyNavigation();
     if (c.op === "tabs") {

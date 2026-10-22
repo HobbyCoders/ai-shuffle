@@ -11,7 +11,7 @@
 	 * The emulator belongs to the worker, not the chat: every chat's panel shows
 	 * the same phone.
 	 */
-	import { onDestroy, untrack, type Snippet } from 'svelte';
+	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
 	import {
 		Smartphone,
 		LoaderCircle,
@@ -61,6 +61,7 @@
 	} from '$lib/emulator/protocol';
 	import { createEmulatorStream, type EmulatorStreamClient, type LinkState } from '$lib/emulator/stream-client';
 	import { copyText } from '$lib/utils/clipboard';
+	import { phonePanel } from '$lib/stores/phone-panel.svelte';
 
 	interface Props {
 		panelActions?: Snippet;
@@ -71,6 +72,11 @@
 	let { panelActions, mobile = false, WebSocketImpl }: Props = $props();
 
 	// ── Status ─────────────────────────────────────────────────────────────
+	let root = $state<HTMLElement | undefined>();
+	// "Show phone" unmounts the button that was focused; take focus here so
+	// keyboard and screen-reader users land in the panel (Esc then closes it).
+	// Opened by the agent's own call: leave focus where the user is typing.
+	onMount(() => { if (phonePanel.takeFocusRequest()) root?.focus(); });
 	let status = $state<EmulatorStatus | null>(null);
 	let loadError = $state<string | null>(null);
 	let refreshing = $state(false);
@@ -331,7 +337,7 @@
 	</div>
 {/snippet}
 
-<section class="phone-panel" class:mobile aria-label="Phone">
+<section bind:this={root} class="phone-panel" class:mobile aria-label="Phone" tabindex="-1">
 	<header class="bar">
 		<div class="title">
 			<Smartphone size={15} strokeWidth={1.75} aria-hidden="true" />
@@ -571,6 +577,7 @@
 
 <style>
 	.phone-panel {
+		outline: none;
 		display: flex;
 		flex-direction: column;
 		height: 100%;

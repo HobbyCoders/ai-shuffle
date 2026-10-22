@@ -91,6 +91,41 @@ def log(message):
     print(f"container runtime: {message}", file=sys.stderr, flush=True)
 
 
+def load_startup_settings():
+    """Only mount paths, from image-installed dependencies; no app imports.
+
+    Keep the same environment/.env precedence as Settings. Values are data,
+    never Python or shell code. The full application settings load after drop.
+    """
+    from pathlib import Path  # local namespace also supports standalone spec loaders
+    from pydantic_settings import BaseSettings
+    from types import SimpleNamespace
+
+    class Paths(BaseSettings):
+        data_dir: Path | None = None
+        workspace_dir: Path | None = None
+        model_config = {"extra": "ignore", "env_file_encoding": "utf-8"}
+
+    ref = os.environ.get("AI_SHUFFLE_ENV_FILE", "").strip()
+    paths = Paths(_env_file=ref if ref and os.path.isfile(ref) else ".env")
+    # Match platform.py's container detection and Linux/macOS local overrides.
+    local = os.environ.get("LOCAL_MODE", "").lower()
+    docker = local in {"false", "0", "no"} or (
+        local not in {"true", "1", "yes"} and (
+            Path("/.dockerenv").exists() or os.environ.get("USER") == "appuser"
+            or os.environ.get("HOME") == "/home/appuser"
+            or all(Path(p).exists() for p in ("/data", "/workspace", "/app"))))
+    home = Path.home()
+    if docker:
+        data, workspace = Path("/data"), Path("/workspace")
+    else:
+        data = (home / "Library/Application Support/ai-shuffle" if sys.platform == "darwin"
+                else Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "ai-shuffle")
+        workspace = home / "ai-shuffle-workspace"
+    return SimpleNamespace(effective_data_dir=paths.data_dir or data,
+                           effective_workspace_dir=paths.workspace_dir or workspace)
+
+
 def load_settings():
     # This uses Pydantic's sources and the app's normalization, including the
     # explicit-fields set (which includes env-file values even equal to defaults).
@@ -650,10 +685,25 @@ def isolation():
     return _isolation
 
 
+def isolation_setting():
+    module = isolation()
+    if hasattr(module, "setting"):
+        try:
+            return module.setting()
+        except module.IsolationError as error:
+            raise RuntimeFailure(str(error)) from None
+    # Packaging/older images may lack helpers, but must not silently accept typos.
+    mode = os.environ.get("AGENT_ISOLATION", "").strip().lower() or "off"
+    mode = {"1": "on", "true": "on", "yes": "on", "0": "off", "false": "off", "no": "off"}.get(mode, mode)
+    if mode not in {"off", "on", "required"}:
+        raise RuntimeFailure("AGENT_ISOLATION: startup refused; valid values: off, on, required")
+    return mode
+
+
 def isolate(settings, account):
     """Root, before the drop: migrate for AGENT_ISOLATION and return the
     identity to drop to, or None for the usual single-account drop."""
-    required = os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
+    required = isolation_setting() == "required"
     module = isolation()
     if not hasattr(module, "bootstrap"):
         if required:
@@ -772,14 +822,311 @@ def chrome_command(env):
             dict(env, START_CHROME_COMMAND=str(private / "start-chrome.sh")), private)
 
 
+def open_directory(path, *, create=False):
+    """Return a pinned directory, refusing symlinks in every component."""
+    path = Path(os.path.abspath(path))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(component, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def mount_points():
+    """Include same-filesystem bind mounts, which ismount alone misses."""
+    result = set()
+    try:
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split()
+            if len(fields) >= 5:
+                result.add(Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
+    except OSError:
+        pass
+    return result
+
+
+def mounted_directory(path):
+    return os.path.ismount(path) or path in mount_points()
+
+
+HOME_VOLUMES = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
+
+
+def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entries=20000, max_seconds=5):
+    """Best-effort, bounded repair of root writes in the fixed application home.
+
+    Descriptors pin every parent and changed inode. No symlinks, shared files,
+    retained storage aliases or unlisted mounts participate in ownership repair.
+    """
+    home = Path(os.path.abspath(home))
+    protected = [Path(os.path.abspath(path)) for path in (data_dir, workspace_dir)]
+    protected_inodes = set()
+    result = {"repaired": 0, "skipped": 0, "reasons": {}, "visited": 0, "limited": False}
+    sample = []
+    started = time.monotonic()
+
+    def skip(reason):
+        result["skipped"] += 1
+        result["reasons"][reason] = result["reasons"].get(reason, 0) + 1
+
+    def storage(path, info):
+        return ((info.st_dev, info.st_ino) in protected_inodes
+                or any(path == parent or parent in path.parents for parent in protected))
+
+    def limited():
+        result["limited"] = result["visited"] >= max_entries or time.monotonic() - started >= max_seconds
+        return result["limited"]
+
+    def walk(root, mounts, priority, *, shallow=False):
+        def visit(fd, name, child, device, depth):
+            if limited():
+                return
+            result["visited"] += 1
+            try:
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if storage(child, entry):
+                    skip("storage")
+                    return
+                if entry.st_dev != device:
+                    skip("device")
+                    return
+                if name != "." and (child in mounts or os.path.ismount(child)):
+                    skip("mount")
+                    return
+                if name != "." and child in priority:
+                    skip("priority")  # already scanned separately, including unmounted paths
+                    return
+                directory = stat.S_ISDIR(entry.st_mode)
+                if not directory and not stat.S_ISREG(entry.st_mode):
+                    skip("type")
+                    return
+                if not directory and entry.st_nlink != 1:
+                    skip("hardlink")
+                    return
+                if entry.st_uid != 0:
+                    skip("not-root")
+                    if not directory:
+                        return
+                child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    pinned = os.fstat(child_fd)
+                    if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
+                            or pinned.st_uid != entry.st_uid
+                            or not (stat.S_ISDIR(pinned.st_mode)
+                                    or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                        skip("changed")
+                        return
+                    if pinned.st_uid == 0:
+                        os.fchown(child_fd, uid, gid)
+                        result["repaired"] += 1
+                        if len(sample) < 5:
+                            sample.append(str(child.relative_to(home))[:120])
+                    if directory:
+                        if shallow and depth >= 1:
+                            return
+                        if depth >= 64:
+                            skip("depth")
+                            return
+                        # fwalk eagerly lists a whole directory before yielding. Stream
+                        # from the pinned fd instead, checking the clock during listing.
+                        with os.scandir(child_fd) as entries:
+                            while not limited():
+                                try:
+                                    item = next(entries)
+                                except StopIteration:
+                                    break
+                                if limited():
+                                    break
+                                visit(child_fd, item.name, child / item.name, device, depth + 1)
+                finally:
+                    os.close(child_fd)
+            except OSError:
+                skip("unavailable")
+
+        root_fd = open_directory(home)
+        try:
+            path = home
+            info = os.fstat(root_fd)
+            if storage(path, info):
+                skip("storage")
+                return
+            # Reopen fixed paths component-by-component from the pinned home;
+            # even an ancestor alias of retained storage must stay excluded.
+            for component in root.relative_to(home).parts:
+                child_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                os.close(root_fd)
+                root_fd = child_fd
+                path = path / component
+                current = os.fstat(root_fd)
+                if storage(path, current):
+                    skip("storage")
+                    return
+                if current.st_dev != info.st_dev and not (path in mounts or os.path.ismount(path)):
+                    skip("device")
+                    return
+                info = current
+            visit(root_fd, ".", root, info.st_dev, 0)
+        finally:
+            os.close(root_fd)
+
+    try:
+        if min(uid, gid) <= 0:
+            raise OSError("non-root destination required")
+        for path in protected:
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue
+            protected_inodes.add((info.st_dev, info.st_ino))
+        mounts = mount_points()
+        priority = {home / name for name in HOME_VOLUMES}
+        # Common exec-as-root destinations precede caches and package installs,
+        # whether or not these fixed paths are separately mounted.
+        early = {".fluid", ".claude"}
+        scans = [(home / name, False) for name in (".fluid", ".claude")]
+        scans.append((home, True))  # direct home writes precede large package subtrees
+        scans += [(home / name, False) for name in HOME_VOLUMES if name not in early]
+        scans.append((home, False))
+        for root, shallow in scans:
+            if limited():
+                break
+            try:
+                walk(root, mounts, priority, shallow=shallow)
+            except FileNotFoundError:
+                pass  # absent optional home directories need no repair
+            except OSError:
+                skip("unavailable")
+    except OSError:
+        skip("unavailable")
+    log(f"home ownership repair: repaired={result['repaired']} skipped={result['skipped']} "
+        f"reasons={json.dumps(result['reasons'], sort_keys=True)} visited={result['visited']} "
+        f"limit_reached={result['limited']} sample={json.dumps(sample)}")
+    return result
+
+
+def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
+    """Migrate agent-owned home entries, never service data or shared inodes."""
+    home, data_dir = safe_path(home), safe_path(data_dir)
+    try:
+        data = data_dir.stat()
+        data_inode = (data.st_dev, data.st_ino)
+    except FileNotFoundError:
+        data_inode = None
+    # Bind aliases on one host mount share this identity. Aliases reached through
+    # two distinct host filesystems may not: keep retained data on its own volume.
+    mounts = mount_points()
+    module = isolation()
+    try:
+        service_uid = module._id(os.environ, "AGENT_ISOLATION_SERVICE_UID")
+    except AttributeError:
+        service_uid = 64000  # standalone bootstrap copy without isolation helpers
+    except module.IsolationError as error:
+        if module.setting() == "required":
+            raise RuntimeFailure(f"required agent isolation: startup refused; {error}") from None
+        service_uid = module.DEFAULT_SERVICE_ID
+    roots = [(home, old_uid, old_gid, False)]
+    roots += [(home / name, None, None, True) for name in HOME_VOLUMES if home / name in mounts]
+    for root, previous_uid, previous_gid, mounted in roots:
+        root_fd = None
+        try:
+            # Pin every component from the fixed image home. A cached mount path
+            # is not proof its appuser-controlled parent still names that mount.
+            try:
+                root_fd = open_directory(root)
+            except OSError:
+                raise RuntimeFailure(f"home volume {root} must use real directories; check its mount and PUID:PGID ownership") from None
+            info = os.fstat(root_fd)
+            if (info.st_dev, info.st_ino) == data_inode:
+                raise RuntimeFailure(f"home volume {root} overlaps DATA_DIR; use separate home and data volumes")
+            if mounted:
+                previous_uid, previous_gid = info.st_uid, info.st_gid
+                if previous_uid == service_uid and previous_uid != new_uid:
+                    raise RuntimeFailure(f"home volume {root} belongs to the service account; set its host ownership to PUID:PGID")
+            if (previous_uid, previous_gid) == (new_uid, new_gid):
+                continue
+            for directory, dirs, files, fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False):
+                path = root / directory
+                current = os.fstat(fd)
+                if (current.st_dev, current.st_ino) == data_inode:
+                    dirs[:] = []
+                    continue
+                # A fresh Docker bind can have a root-owned root. Change only that
+                # directory inode, never any root-owned contents beneath it.
+                if mounted and previous_uid == 0:
+                    break
+                kept = []
+                for name in dirs:
+                    entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    child = path / name
+                    if (stat.S_ISDIR(entry.st_mode) and entry.st_dev == info.st_dev
+                            and child not in mounts and not os.path.ismount(child)
+                            and (entry.st_dev, entry.st_ino) != data_inode):
+                        kept.append(name)
+                dirs[:] = kept
+                for name in (files if path == root else [".", *files]):
+                    entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if entry.st_uid != previous_uid or not (
+                            stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1):
+                        continue
+                    # Pin the inode as well as its parent: even a concurrent hardlink
+                    # or parent-directory swap cannot redirect the ownership change.
+                    child_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        pinned = os.fstat(child_fd)
+                        if ((pinned.st_dev, pinned.st_ino) != (entry.st_dev, entry.st_ino)
+                                or pinned.st_uid != previous_uid
+                                or not (stat.S_ISDIR(pinned.st_mode)
+                                        or stat.S_ISREG(pinned.st_mode) and pinned.st_nlink == 1)):
+                            continue
+                        gid = new_gid if pinned.st_gid == previous_gid else pinned.st_gid
+                        os.fchown(child_fd, new_uid, gid)
+                    finally:
+                        os.close(child_fd)
+            if root_fd is None:
+                raise RuntimeFailure(f"home volume {root} changed during preparation; retry startup")
+            # Commit last: an interrupted walk leaves the previous volume owner
+            # as its retry marker, even after the container has been recreated.
+            current = os.fstat(root_fd)
+            if current.st_uid == previous_uid:
+                gid = new_gid if current.st_gid == previous_gid else current.st_gid
+                os.fchown(root_fd, new_uid, gid)
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
+
+
+def validate_mount_root(name, path):
+    """Do not turn an unmounted image/import directory into runtime storage."""
+    path = safe_path(path)
+    trees = {Path(p) for p in ("/app", "/opt", "/usr", "/bin", "/sbin", "/etc",
+                               "/lib", "/lib32", "/lib64", "/libx32",
+                               sys.prefix, sys.base_prefix)}
+    trees.add(Path(__file__).resolve().parents[1])
+    if any(path == tree or tree in path.parents for tree in trees) and not mounted_directory(path):
+        raise RuntimeFailure(f"{name} is inside an image tree; mount a volume at that path "
+                             "or choose a path outside the image trees")
+    return path
+
+
 def maintenance_isolation(settings, account):
-    """Dump/restore never migrate or release ownership, even against a live app.
+    """Dump/restore never migrate or release retained ownership, even against a live app.
 
     Reuse only a completed root-owned record. Database.open independently owns
     the cluster lock (online dumps may share; restores still require offline).
     """
     module = isolation()
-    required = os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required"
+    required = isolation_setting() == "required"
     prefix = "required agent isolation: startup refused; " if required else ""
     if not hasattr(module, "read_record"):
         if required:
@@ -813,18 +1160,28 @@ def maintenance_isolation(settings, account):
 def drop_privileges(settings, *, maintenance=False):
     """Root may prepare mount roots, never recursively repair database files."""
     global _agent_path
+    mode = isolation_setting()  # Validate before touching mount roots or ownership.
     if os.geteuid() == 0:
         account = pwd.getpwnam("appuser")
         if not account.pw_uid or not account.pw_gid:
             raise RuntimeFailure("PUID/PGID must identify a non-root account")
+        if account.pw_dir != "/home/appuser":
+            raise RuntimeFailure("appuser home must be /home/appuser; recreate the container to repair its account")
+        paths = [("DATA_DIR", settings.effective_data_dir)]
         if not maintenance:
-            for path in (Path(settings.effective_data_dir), Path(settings.effective_workspace_dir)):
-                safe_path(path)
-                path.mkdir(parents=True, exist_ok=True)
-                # Empty image-created mounts may still have the default UID when
-                # PUID changes. Retained contents (especially PG) are never chowned.
-                if not any(path.iterdir()):
-                    os.chown(path, account.pw_uid, account.pw_gid)
+            paths.append(("WORKSPACE_DIR", settings.effective_workspace_dir))
+        roots = [validate_mount_root(name, Path(path)) for name, path in paths]
+        for path in roots:
+            fd = open_directory(path, create=True)
+            try:
+                # New named volumes retain the image UID, including offline
+                # restore targets. Only the empty root inode may be re-owned;
+                # maintenance never traverses or repairs retained contents.
+                # Pin both lookup and chown against parent symlink swaps.
+                if not os.listdir(fd):
+                    os.fchown(fd, account.pw_uid, account.pw_gid)
+            finally:
+                os.close(fd)
         split = maintenance_isolation(settings, account) if maintenance else isolate(settings, account)
         if split is not None:
             try:
@@ -833,20 +1190,20 @@ def drop_privileges(settings, *, maintenance=False):
                 prefix = "required agent isolation: startup refused; " if isolation().setting() == "required" else ""
                 reason = str(error) if isinstance(error, isolation().IsolationError) else type(error).__name__
                 raise RuntimeFailure(prefix + reason) from None
-            _agent_path = os.environ.get("PATH", "")
+            _agent_path = os.environ.pop("SHUFFLE_CONTAINER_PATH", os.environ.get("PATH", ""))
             os.environ["PATH"] = isolation().trusted_path(_agent_path)
         else:
             os.initgroups(account.pw_name, account.pw_gid)
             os.setgid(account.pw_gid)
             os.setuid(account.pw_uid)
+            if "SHUFFLE_CONTAINER_PATH" in os.environ:
+                os.environ["PATH"] = os.environ.pop("SHUFFLE_CONTAINER_PATH")
         os.environ["HOME"] = account.pw_dir
-    elif os.environ.get("AGENT_ISOLATION", "").strip().lower() == "required":
+    elif mode == "required":
         raise RuntimeFailure("required agent isolation: startup refused (container must start as root; remove --user)")
-    elif getattr(isolation(), "setting", lambda: "off")() == "on":
+    elif mode == "on":
         log("agent isolation could NOT be enabled: the container did not start as root "
             "(--user or a hand-over); agents run unisolated")
-    elif getattr(isolation(), "setting", lambda: "off")() == "invalid":
-        log("agent isolation: ignoring invalid AGENT_ISOLATION; use required, on or off")
     # Real ids: with agent isolation the effective ids are the service account's.
     for name, actual in (("PUID", os.getuid()), ("PGID", os.getgid())):
         if name in os.environ and int(os.environ[name]) != actual:
@@ -1176,6 +1533,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("run")
+    remap = sub.add_parser("remap-home")
+    for name in ("old-uid", "old-gid", "new-uid", "new-gid"):
+        remap.add_argument("--" + name, type=int, required=True)
     for action in ("dump", "restore"):
         sub.add_parser(action).add_argument("--file", required=True)
     args = parser.parse_args(argv)
@@ -1183,8 +1543,21 @@ def main(argv=None):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: STOP.set())
     try:
+        if args.action == "remap-home":
+            if os.geteuid() != 0 or min(args.old_uid, args.old_gid, args.new_uid, args.new_gid) <= 0:
+                raise RuntimeFailure("home remapping requires root and non-root account IDs")
+            settings = load_startup_settings()
+            home = Path("/home/appuser")
+            remap_home(home, settings.effective_data_dir,
+                       args.old_uid, args.old_gid, args.new_uid, args.new_gid)
+            repair_home_root_files(home, settings.effective_data_dir, settings.effective_workspace_dir,
+                                   args.new_uid, args.new_gid)
+            return 0
+        drop_privileges(load_startup_settings(), maintenance=args.action in {"dump", "restore"})
+        # Only unprivileged code may import the application (or hand over to a
+        # retained update's supervisor/interpreter on the data volume).
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         settings = load_settings()
-        drop_privileges(settings, maintenance=args.action in {"dump", "restore"})
         # After the drop: setuid() resets the flag to suid_dumpable.
         harden_process_introspection(settings)
         if (args.action or "run") == "run":
@@ -1207,8 +1580,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    # Entrypoint and maintenance commands execute this absolute script. Python
-    # otherwise searches only /app/docker, not the sibling application package.
-    # Anchor imports to the installed script, never to a caller's working folder.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    # Entrypoint runs the image interpreter with -I: no user site, PYTHONPATH,
+    # or caller working directory participates in the root phase's imports.
     sys.exit(main())
