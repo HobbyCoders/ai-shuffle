@@ -267,7 +267,10 @@ function themeRule(theme: HtmlPreviewTheme): string {
 }
 
 // Zero-specificity selectors and placement before the page's own styles mean
-// any rule the page writes wins over these defaults.
+// any rule the page writes wins over these defaults. The 14px root size is
+// deliberate: it matches the reply text, so an unstyled or rem-based page
+// reads as part of the message (rem units come out 12.5% smaller than in a
+// browser tab; a page that sets its own root size keeps it).
 const BASE_CSS = ':where(html){background:transparent;color:var(--foreground,CanvasText);font-family:var(--font-sans,system-ui,sans-serif);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;overflow-wrap:break-word}'
 	+ ':where(body){margin:0}:where(code,kbd,pre,samp){font-family:var(--font-mono,ui-monospace,monospace)}'
 	+ ':where(a){color:var(--primary,LinkText)}:where(img){cursor:zoom-in}:where(a img,button img){cursor:inherit}';
@@ -313,7 +316,7 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'&&e.isTrusted
 var R=document.documentElement;R.addEventListener('mouseenter',function(){post({jsonrpc:'2.0',method:M.hover,params:{inside:true}});});
 R.addEventListener('mouseleave',function(){post({jsonrpc:'2.0',method:M.hover,params:{inside:false}});});
 if(!framed)return;var ready=false,lastV=0;
-function measure(){var r=document.documentElement,v=window.innerHeight;if(!ready||!r||!v)return;var h=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);
+function measure(){var r=document.documentElement,v=window.innerHeight;if(!ready||!r||!v)return;var h=Math.ceil((r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height)+Math.max(0,v-r.clientHeight));
 if(!h||(h===last&&v===lastV))return;last=h;lastV=v;post({jsonrpc:'2.0',method:M.sizeChanged,params:{height:h,viewport:v}});}
 var o=window.ResizeObserver?new ResizeObserver(measure):null;if(o)o.observe(document.documentElement);
 document.addEventListener('DOMContentLoaded',function(){ready=true;if(o&&document.body)o.observe(document.body);requestAnimationFrame(measure);});
@@ -383,12 +386,13 @@ const clampHeight = (height: number) => Math.min(HTML_PREVIEW_MAX_HEIGHT, Math.m
  * Decides the inline frame height from the page's size reports.
  *
  * A page that sizes itself to its viewport (100vh, height:100% on html/body,
- * min-height:100vh plus padding) grows every time its frame grows. The sizer
- * catches that with a probe: it moves the frame by PROBE_STEP and watches
- * whether the reported height moves with it. It probes on the first report
- * when that equals the frame height, and whenever the page has grown on each
- * of its last few reports. A page that follows the frame is pinned
- * at FALLBACK_HEIGHT and scrolls inside; one that does not (an animation, a
+ * min-height:100vh plus padding, calc(100vh - 16px)) moves every time its
+ * frame moves. The sizer catches that with a probe: it grows the frame by
+ * PROBE_STEP and watches whether the reported height moves with it. It probes
+ * on the first report when that equals the frame height, and when the last
+ * few reports were each either taller than their frame or moved by as much as
+ * the frame had just moved. A page that follows the probe is pinned at
+ * FALLBACK_HEIGHT and scrolls inside; one that does not (an animation, a
  * chart drawing in) goes on fitting, and needs a longer streak to be probed
  * again.
  */
@@ -396,21 +400,37 @@ export class HtmlPreviewSizer {
 	height: number;
 	mode: HtmlPreviewSizerMode;
 	private probeBase = { height: 0, viewport: 0 };
+	private previous: { height: number; viewport: number } | null = null;
 	private streak = 0;
 	private threshold = SUSPICION_STREAK;
+	/** Started from a remembered pin: the first mismatch is probed at once. */
+	private suspect = false;
 
-	constructor(initial: { height?: number; fixed?: boolean } = {}) {
+	/**
+	 * `height` reserves a remembered size and starts fitting from it. A
+	 * remembered pin (`fixed`) is never trusted as is: the page may have been
+	 * revised, so it reserves the pinned height and probes again.
+	 * `reserve` keeps a height while the page is measured from scratch.
+	 */
+	constructor(initial: { height?: number; fixed?: boolean; reserve?: number } = {}) {
 		if (initial.fixed) {
-			this.mode = 'fixed';
+			this.mode = 'measuring';
 			this.height = HTML_PREVIEW_FALLBACK_HEIGHT;
+			this.suspect = true;
+		} else if (initial.height) {
+			this.mode = 'fit';
+			this.height = clampHeight(initial.height);
 		} else {
-			this.mode = initial.height ? 'fit' : 'measuring';
-			this.height = clampHeight(initial.height ?? HTML_PREVIEW_INITIAL_HEIGHT);
+			this.mode = 'measuring';
+			this.height = clampHeight(initial.reserve ?? HTML_PREVIEW_INITIAL_HEIGHT);
 		}
 	}
 
 	/** True once the frame should be shown (it has a height worth showing). */
 	get settled(): boolean { return this.mode === 'fit' || this.mode === 'fixed'; }
+
+	/** Settled and not in the middle of a suspicious run: a size worth remembering. */
+	get steady(): boolean { return this.mode === 'fixed' || (this.mode === 'fit' && this.streak === 0); }
 
 	/**
 	 * Apply a size report. `viewport` is the frame height the page measured
@@ -422,9 +442,12 @@ export class HtmlPreviewSizer {
 		if (this.mode === 'fixed' || !Number.isFinite(raw) || raw <= 0 || viewport === 0) return 'none';
 		const height = Math.ceil(raw);
 		const measured = viewport !== undefined && Number.isFinite(viewport) && viewport > 0 ? Math.round(viewport) : this.height;
+		// Measured in a frame size that has since changed: the page measures
+		// again once the resize reaches it (the bootstrap reports on resize).
+		if (Math.abs(measured - this.height) > STALE_TOLERANCE) return 'none';
+		const previous = this.previous;
+		this.previous = { height, viewport: measured };
 		if (this.mode === 'probing') {
-			// Measured before the probe took effect: not the answer.
-			if (Math.abs(measured - this.height) > STALE_TOLERANCE) return 'none';
 			const moved = measured - this.probeBase.viewport;
 			if (moved > 0 && height - this.probeBase.height >= moved * 0.9) return this.pin();
 			this.mode = 'fit';
@@ -433,18 +456,20 @@ export class HtmlPreviewSizer {
 			return this.fit(height);
 		}
 		if (this.mode === 'measuring') {
-			if (Math.abs(height - measured) <= 1) return this.probe(height, measured);
+			if (Math.abs(height - measured) <= 1 || (this.suspect && height !== measured)) return this.probe(height, measured);
 			this.mode = 'fit';
 			return this.fit(height);
 		}
-		// Measured in a frame size that has since changed: the page measures
-		// again once the resize reaches it (the bootstrap reports on resize).
-		if (Math.abs(measured - this.height) > STALE_TOLERANCE) return 'none';
-		// Taller than the frame it was measured in, report after report, is the
-		// signature of a page that follows its frame (or of content still
-		// growing). Timing is no guide: an offscreen frame is throttled and
-		// answers slowly. The probe tells the two apart.
-		this.streak = height > measured + 1 ? this.streak + 1 : 0;
+		// Two signatures of a page that follows its frame (or of content still
+		// growing): it is taller than the frame it was measured in, or it moved
+		// by as much as the frame did since the last report (a page sized
+		// calc(100vh - N) shrinks in step with every fit). Timing is no guide:
+		// an offscreen frame is throttled and answers slowly. The probe tells
+		// a follower from content that changes on its own.
+		const frameMoved = previous ? measured - previous.viewport : 0;
+		const tracks = previous !== null && Math.abs(frameMoved) > 1
+			&& Math.abs(height - previous.height - frameMoved) <= STALE_TOLERANCE;
+		this.streak = height > measured + 1 || tracks ? this.streak + 1 : 0;
 		if (Math.abs(height - this.height) <= 1) return 'none';
 		if (this.streak >= this.threshold) return this.probe(height, measured);
 		if (height > HTML_PREVIEW_MAX_HEIGHT) return this.pin();
@@ -476,6 +501,7 @@ export class HtmlPreviewSizer {
 
 	private probe(height: number, viewport: number): HtmlPreviewSizerAction {
 		this.mode = 'probing';
+		this.suspect = false;
 		this.probeBase = { height, viewport };
 		this.height = clampHeight(Math.max(this.height, height) + HTML_PREVIEW_PROBE_STEP);
 		return 'probe';
@@ -490,9 +516,25 @@ export class HtmlPreviewSizer {
 
 // Last known layout per file and viewer, so a remounted message reserves the
 // right height at once instead of re-measuring from the loading height.
-const knownSizes = new Map<string, { height: number; fixed: boolean }>();
+export interface RememberedPreviewSize {
+	height: number;
+	fixed: boolean;
+	/** Digest of the source this size was measured for. */
+	digest: string;
+}
+const knownSizes = new Map<string, RememberedPreviewSize>();
 export function rememberedPreviewSize(key: string) { return knownSizes.get(key); }
-export function rememberPreviewSize(key: string, size: { height: number; fixed: boolean }) {
+export function forgetPreviewSize(key: string) { knownSizes.delete(key); }
+/** Cheap content fingerprint (FNV-1a over UTF-16 units plus the length). */
+export function previewDigest(source: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < source.length; i++) {
+		hash ^= source.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return `${source.length}:${(hash >>> 0).toString(36)}`;
+}
+export function rememberPreviewSize(key: string, size: RememberedPreviewSize) {
 	knownSizes.delete(key);
 	knownSizes.set(key, size);
 	if (knownSizes.size > 200) knownSizes.delete(knownSizes.keys().next().value!);
@@ -530,14 +572,22 @@ function serializeNode(node: Node): string {
  * found in the markup go after the reply. The input is already-sanitized
  * markup from the chat renderer; this only cuts it at element boundaries.
  */
-export function placeHtmlPreviews(html: string, previews: HtmlPreviewLink[]): HtmlPreviewSegment[] {
+export function placeHtmlPreviews(
+	html: string,
+	previews: HtmlPreviewLink[],
+	sanitize: (html: string) => string
+): HtmlPreviewSegment[] {
 	if (!previews.length) return [{ kind: 'html', key: 'h0', html }];
 	const segments: HtmlPreviewSegment[] = [];
 	const remaining = new Map(previews.map((preview) => [preview.path, preview]));
 	let chunk = '';
 	let index = 0;
+	// Splitting parses and re-serializes the markup, which a sanitizer's
+	// guarantees do not cover (mutation XSS lives in exactly that round
+	// trip). Each piece is sanitized again so what reaches {@html} is always
+	// fresh sanitizer output.
 	const flush = () => {
-		if (chunk) segments.push({ kind: 'html', key: `h${index++}`, html: chunk });
+		if (chunk) segments.push({ kind: 'html', key: `h${index++}`, html: sanitize(chunk) });
 		chunk = '';
 	};
 	if (typeof document !== 'undefined') {

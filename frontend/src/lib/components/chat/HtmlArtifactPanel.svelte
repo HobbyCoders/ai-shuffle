@@ -1,8 +1,14 @@
 <script lang="ts">
-	/** Side-panel view: the artifact beside the conversation, at full panel height. */
+	/**
+	 * Side-panel view: the artifact beside the conversation, at full panel
+	 * height. Esc pressed inside the page closes the panel, as it does
+	 * everywhere else in it (the page holds focus, so the panel's own key
+	 * handler never sees it).
+	 */
 	import type { Snippet } from 'svelte';
 	import HtmlArtifactViewer from './HtmlArtifactViewer.svelte';
 	import { HtmlArtifactSource } from './html-artifact-source.svelte';
+	import { htmlArtifactPanel } from '$lib/stores/html-artifact-panel.svelte';
 
 	let { href, filename, sessionId, panelActions, mobile: overlay = false }: {
 		href: string;
@@ -21,7 +27,7 @@
 <section class="artifact-panel" class:overlay aria-label={`HTML artifact: ${filename}`}>
 	<HtmlArtifactViewer {filename} source={file.source} loading={file.loading} error={file.error}
 		downloadUrl={file.downloadUrl} revision={file.revision} bind:view bind:mobile variant="panel"
-		onReload={file.reload} actions={panelActions} />
+		onReload={file.reload} onEscape={() => htmlArtifactPanel.close(sessionId)} actions={panelActions} />
 </section>
 
 <style>

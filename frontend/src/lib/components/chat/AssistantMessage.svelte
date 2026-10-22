@@ -189,7 +189,7 @@
 	// prefix/tail blocks stay as they are and a quiet placeholder holds a place.
 	const htmlPreviews = $derived(extractHtmlPreviews(content, !streaming));
 	const segments = $derived(htmlPreviews.length && !rendered.tail
-		? placeHtmlPreviews(rendered.prefix, htmlPreviews)
+		? placeHtmlPreviews(rendered.prefix, htmlPreviews, sanitizeHtml)
 		: null);
 	const pendingPreview = $derived(streaming ? streamingPreviewName(displayContent) : null);
 

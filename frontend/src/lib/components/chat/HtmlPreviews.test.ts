@@ -149,6 +149,44 @@ describe('HTML artifacts inline in the reply', () => {
 		expect(clipOf(view.container).style.height).toBe(`${HTML_PREVIEW_FALLBACK_HEIGHT}px`);
 	});
 
+	it('measures a pinned page again after a revision at the same path or a reload', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const page = uniqueHref();
+		const pinned = async (container: HTMLElement) => {
+			const frame = frameOf(container)!;
+			send(frame, size(parseInt(clipOf(container).style.height)));
+			await tick();
+			send(frame, size(parseInt(clipOf(container).style.height)));
+			await tick();
+			expect(container.querySelector('figure')!.classList.contains('fixed')).toBe(true);
+		};
+		load.mockResolvedValue('<body style="height:100vh"></body>');
+		const first = render(HtmlPreview, { href: page, filename: 'page.html', sessionId: 'chat-1' });
+		await vi.waitFor(() => expect(frameOf(first.container)).not.toBeNull());
+		await pinned(first.container);
+		first.unmount();
+
+		// The model revised the file in place: it is content-sized now.
+		load.mockResolvedValue('<p>Short and sized by its content</p>');
+		const second = render(HtmlPreview, { href: page, filename: 'page.html', sessionId: 'chat-1' });
+		await vi.waitFor(() => expect(frameOf(second.container)).not.toBeNull());
+		const figure = second.container.querySelector('figure')!;
+		expect(figure.classList.contains('fixed')).toBe(false);
+		expect(clipOf(second.container).style.height).toBe(`${HTML_PREVIEW_FALLBACK_HEIGHT}px`); // reserved
+		send(frameOf(second.container)!, size(180));
+		await tick();
+		expect(clipOf(second.container).style.height).toBe('180px');
+
+		// Reload after a pin probes again instead of staying pinned.
+		load.mockResolvedValue('<body style="height:100vh"></body>');
+		await fireEvent.click(within(second.getByRole('toolbar')).getByRole('button', { name: 'More HTML preview actions' }));
+		await fireEvent.click(second.getByRole('button', { name: 'Reload HTML preview' }));
+		await vi.waitFor(() => expect(frameOf(second.container)?.srcdoc).toContain('100vh'));
+		await pinned(second.container);
+		await fireEvent.click(second.getByRole('button', { name: 'Reload HTML preview' }));
+		await vi.waitFor(() => expect(figure.classList.contains('fixed')).toBe(false));
+	});
+
 	it('opens external links only for the focused frame with a live user activation', async () => {
 		load.mockResolvedValue('<a href="https://example.com">x</a>');
 		const open = vi.spyOn(window, 'open').mockImplementation(() => null);

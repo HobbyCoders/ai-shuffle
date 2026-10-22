@@ -9,6 +9,8 @@
 	import {
 		HtmlPreviewSizer,
 		HTML_PREVIEW_PROBE_MS,
+		forgetPreviewSize,
+		previewDigest,
 		rememberedPreviewSize,
 		rememberPreviewSize,
 		type HtmlPreviewSizerAction
@@ -23,6 +25,7 @@
 
 	const file = new HtmlArtifactSource(() => ({ href, sessionId }));
 	const sizeKey = $derived(chatFileUrl(href, sessionId));
+	const digest = $derived(file.source ? previewDigest(file.source) : '');
 
 	// ── Fit to content ──
 	let sizer = new HtmlPreviewSizer(untrack(() => rememberedPreviewSize(sizeKey)) ?? {});
@@ -42,19 +45,35 @@
 			clearTimeout(probeTimer);
 			probeTimer = setTimeout(() => sync(sizer.probeExpired()), HTML_PREVIEW_PROBE_MS);
 		}
-		if (settled && (action === 'resize' || action === 'fixed')) {
-			rememberPreviewSize(sizeKey, { height: sizer.height, fixed: sizer.mode === 'fixed' });
+		// Only a size the page has settled on: never a step of a run the sizer
+		// still suspects (a page shrinking or growing with its frame).
+		if (digest && sizer.steady && (action === 'resize' || action === 'fixed')) {
+			rememberPreviewSize(sizeKey, { height: sizer.height, fixed: sizer.mode === 'fixed', digest });
 		}
 	}
 
 	// Every new document (first load, reload, new file) is measured afresh,
-	// starting from the last size this file had, if any.
+	// starting from the last size this exact source had, if any. Reload and a
+	// changed source drop the remembered size but keep the current height
+	// reserved, so the reply does not jump while the page measures. A
+	// remembered pin is re-probed, never trusted (see HtmlPreviewSizer).
+	let lastRevision = untrack(() => file.revision);
 	$effect(() => {
-		void file.source; void file.revision;
-		const known = untrack(() => rememberedPreviewSize(sizeKey));
-		sizer = new HtmlPreviewSizer(known ?? {});
-		answered = false;
-		untrack(() => sync('none'));
+		const source = file.source;
+		const revision = file.revision;
+		untrack(() => {
+			let known = rememberedPreviewSize(sizeKey);
+			if (revision !== lastRevision || (known && source && known.digest !== digest)) {
+				forgetPreviewSize(sizeKey);
+				known = undefined;
+			}
+			lastRevision = revision;
+			// A page that was pinned starts by probing again rather than re-fitting
+			// its way up to the pin.
+			sizer = new HtmlPreviewSizer(known ?? (sizer.mode === 'fixed' ? { fixed: true } : { reserve: sizer.height }));
+			answered = false;
+			sync('none');
+		});
 		return () => { clearTimeout(probeTimer); clearTimeout(giveUpTimer); };
 	});
 

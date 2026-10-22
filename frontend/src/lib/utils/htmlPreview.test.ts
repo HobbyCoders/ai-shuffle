@@ -485,6 +485,61 @@ describe('HTML preview fit to content', () => {
 		expect(s.report(s.height + 48, s.height)).toBe('fixed');
 	});
 
+	it('pins a page that shrinks with its frame (calc(100vh - 16px)) instead of collapsing it', () => {
+		const s = sizer();
+		let viewport = HTML_PREVIEW_INITIAL_HEIGHT;
+		let action = s.report(viewport - 16, viewport);
+		let trips = 1;
+		for (; action === 'resize' && trips < 20; trips++) {
+			viewport = s.height;
+			action = s.report(viewport - 16, viewport);
+		}
+		expect(action).toBe('probe');
+		expect(trips).toBeLessThanOrEqual(4);
+		expect(s.steady).toBe(false);
+		expect(s.height).toBeGreaterThan(HTML_PREVIEW_INITIAL_HEIGHT - 16 * 4);
+		expect(s.report(s.height - 16, s.height)).toBe('fixed');
+		expect([s.mode, s.height, s.steady]).toEqual(['fixed', HTML_PREVIEW_FALLBACK_HEIGHT, true]);
+	});
+
+	it('also catches the shrinking follower from a remembered tall size', () => {
+		const s = sizer({ height: 900 });
+		let action = s.report(884, 900);
+		for (let step = 0; action === 'resize' && step < 20; step++) action = s.report(s.height - 16, s.height);
+		expect(action).toBe('probe');
+		expect(s.report(s.height - 16, s.height)).toBe('fixed');
+	});
+
+	it('keeps fitting a content page across the resize report that follows each fit', () => {
+		const s = sizer();
+		expect(s.report(500, 320)).toBe('resize');
+		expect(s.report(500, 500)).toBe('none');
+		expect(s.steady).toBe(true);
+		expect(s.report(420, 500)).toBe('resize');
+		expect(s.report(420, 420)).toBe('none');
+		expect([s.mode, s.height]).toEqual(['fit', 420]);
+	});
+
+	it('re-probes a remembered pin instead of trusting it', () => {
+		// The page still follows its frame: pinned again after one probe.
+		const legacy = sizer({ height: 610, fixed: true });
+		expect([legacy.mode, legacy.height, legacy.settled]).toEqual(['measuring', HTML_PREVIEW_FALLBACK_HEIGHT, false]);
+		expect(legacy.report(HTML_PREVIEW_FALLBACK_HEIGHT + 48, HTML_PREVIEW_FALLBACK_HEIGHT)).toBe('probe');
+		expect(legacy.report(legacy.height + 48, legacy.height)).toBe('fixed');
+		// Revised at the same path into a content-sized page: it fits.
+		const revised = sizer({ height: 610, fixed: true });
+		expect(revised.report(300, HTML_PREVIEW_FALLBACK_HEIGHT)).toBe('probe');
+		expect(revised.report(300, revised.height)).toBe('resize');
+		expect([revised.mode, revised.height]).toEqual(['fit', 300]);
+	});
+
+	it('reserves a height while measuring a page from scratch', () => {
+		const s = sizer({ reserve: 700 });
+		expect([s.mode, s.height, s.settled]).toEqual(['measuring', 700, false]);
+		expect(s.report(450, 700)).toBe('resize');
+		expect(s.height).toBe(450);
+	});
+
 	it('falls back when a page reports more than the maximum height', () => {
 		const s = sizer();
 		s.report(400);
@@ -494,7 +549,6 @@ describe('HTML preview fit to content', () => {
 
 	it('starts from a remembered size and gives up on a page that never reports', () => {
 		expect(sizer({ height: 610 })).toMatchObject({ mode: 'fit', height: 610 });
-		expect(sizer({ height: 610, fixed: true })).toMatchObject({ mode: 'fixed', height: HTML_PREVIEW_FALLBACK_HEIGHT });
 		const silent = sizer();
 		expect(silent.giveUp()).toBe('fixed');
 		expect(silent.mode).toBe('fixed');
@@ -506,10 +560,19 @@ describe('HTML preview placement in the reply', () => {
 	const a = preview('/work/a.html');
 	const b = preview('/work/b.html');
 	const routed = (path: string) => `https://worker.example/api/files/by-path?path=${encodeURIComponent(path)}&amp;session_id=s1`;
+	const same = (html: string) => html;
+
+	it('sanitizes every markup piece again after splitting', () => {
+		const sanitize = vi.fn((html: string) => `[clean]${html}`);
+		const html = `<p>See <a href="${a.href}">A</a></p><p>End</p>`;
+		const segments = placeHtmlPreviews(html, [a], sanitize);
+		expect(sanitize.mock.calls.map(([piece]) => piece)).toEqual([`<p>See <a href="${a.href}">A</a></p>`, '<p>End</p>']);
+		expect(segments.filter((s) => s.kind === 'html').every((s) => s.kind === 'html' && s.html.startsWith('[clean]'))).toBe(true);
+	});
 
 	it('puts each preview right after the top-level block that links to it', () => {
 		const html = `<p>Intro</p><p>See <a href="${routed(a.path)}">A</a> here.</p><ul><li><a href="${routed(b.path)}">B</a></li></ul><p>End</p>`;
-		const segments = placeHtmlPreviews(html, [a, b]);
+		const segments = placeHtmlPreviews(html, [a, b], same);
 		expect(segments.map((s) => s.kind === 'html' ? s.html : `[${s.preview.filename}]`)).toEqual([
 			`<p>Intro</p><p>See <a href="${routed(a.path)}">A</a> here.</p>`,
 			'[a.html]',
@@ -523,13 +586,13 @@ describe('HTML preview placement in the reply', () => {
 	it('keeps two previews linked from one paragraph in order and appends unmatched ones', () => {
 		const c = preview('/work/c.html');
 		const html = `<p><a href="${b.href}">B</a> and <a href="${a.href}">A</a></p>\n<p>tail &amp; &lt;escaped&gt;</p>`;
-		const segments = placeHtmlPreviews(html, [a, b, c]);
+		const segments = placeHtmlPreviews(html, [a, b, c], same);
 		expect(segments.map((s) => s.kind === 'html' ? 'html' : s.preview.filename)).toEqual(['html', 'b.html', 'a.html', 'html', 'c.html']);
 		expect((segments[3] as { html: string }).html).toBe('\n<p>tail &amp; &lt;escaped&gt;</p>');
 	});
 
 	it('returns the markup untouched when there is nothing to place', () => {
-		expect(placeHtmlPreviews('<p>x</p>', [])).toEqual([{ kind: 'html', key: 'h0', html: '<p>x</p>' }]);
+		expect(placeHtmlPreviews('<p>x</p>', [], same)).toEqual([{ kind: 'html', key: 'h0', html: '<p>x</p>' }]);
 	});
 
 	it('names a preview link while the reply is still streaming', () => {
