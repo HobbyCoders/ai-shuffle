@@ -120,12 +120,22 @@ def test_default_describes_what_the_chat_renders():
 def test_default_chat_instructions_describe_html_creation_and_sandbox_limits():
     text = DEFAULT_SECURITY_INSTRUCTIONS
     assert "/api/files/by-path?path=URL_ENCODED_FULL_PATH" in text
-    assert "outside code fences" in text
-    assert "embed CSS and JavaScript" in text
-    assert "2 MiB" in text
-    assert "network requests" in text
-    assert "HTML code block" in text
-    assert "screenshot" in text
+    for rule in (
+        "one self-contained .html under 2 MiB",
+        "link above outside code fences, once per file",
+        "Inline frame fits content",
+        "no outer cards, page backgrounds, vh or 100% heights",
+        "Prefer app theme CSS vars with standalone fallbacks",
+        "var(--foreground, #111)",
+        "--background, --muted-foreground, --border, --primary, --chart-1 to --chart-5",
+        "Revisions: same path, relink",
+        "No screenshot/HTML code block substitutes",
+        "Sandboxed: embed CSS and JavaScript",
+        "inline SVG/data URLs, system fonts, client-side data",
+        "No external resources, sibling files, network requests, forms, popups or storage",
+        "If dev server/backend needed, say so; give run steps",
+    ):
+        assert rule in text, rule
 
 
 # ---------------------------------------------------------------------------

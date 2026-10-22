@@ -90,6 +90,8 @@
 	import { terminalAccess } from '$lib/terminal/gating';
 	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
 	import { phonePanel } from '$lib/stores/phone-panel.svelte';
+	import { htmlArtifactPanel } from '$lib/stores/html-artifact-panel.svelte';
+	import HtmlArtifactPanel from '$lib/components/chat/HtmlArtifactPanel.svelte';
 	import { preloadWhenIdle, runWhenIdle } from '$lib/components/deck/lazy/lazy-component';
 	import {
 		featurePanelKeyForView,
@@ -352,6 +354,7 @@
 	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId)
 		: activeProject ? `draft:${JSON.stringify([activeProject, selectedWorkerTarget, activeWorktreeId])}` : null);
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
+	const activeArtifact = $derived(htmlArtifactPanel.forSession(activeTab?.sessionId));
 
 	// The composer's Terminal toggle (#1945). The worker's probe is the only
 	// gate: a viewer it refuses never sees the button.
@@ -1114,6 +1117,8 @@
 						<LazyPanel handle={BrowserSidePanel} props={{ sessionId: activeTab.sessionId, embedded: true, panelActions }} label="the live browser" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'terminal' && activeTab?.sessionId}
 						<LazyPanel handle={TerminalSidePanel} props={{ sessionId: activeTab.sessionId, panelActions, mobile: panelOverlay }} label="the terminal" fallbackActions={panelActions} />
+					{:else if activeSidePanel.active === 'artifact' && activeTab?.sessionId && activeArtifact}
+						<HtmlArtifactPanel href={activeArtifact.href} filename={activeArtifact.filename} sessionId={activeTab.sessionId} {panelActions} mobile={panelOverlay} />
 					{:else if activeSidePanel.active === 'phone'}
 						<LazyPanel handle={PhoneSidePanel} props={{ panelActions, mobile: panelOverlay }} label="the phone" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'changes' && activeProject}

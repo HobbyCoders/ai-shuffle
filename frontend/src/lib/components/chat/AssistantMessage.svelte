@@ -13,7 +13,8 @@
 	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
-	import HtmlPreviews from './HtmlPreviews.svelte';
+	import HtmlPreview from './HtmlPreview.svelte';
+	import { extractHtmlPreviews, placeHtmlPreviews, streamingPreviewName, HTML_PREVIEW_INITIAL_HEIGHT } from '$lib/utils/htmlPreview';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from '$lib/utils/message-time';
 	import { taskChecks, taskMessageKey, type TaskChecks } from '$lib/stores/task-checks';
@@ -182,6 +183,15 @@
 		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),
 		tail: routeChatFiles(unscopedRendered.tail, sessionId)
 	});
+
+	// HTML artifacts render inside the reply, right after the top-level block
+	// that links to them. Only a settled reply is split: while it streams the
+	// prefix/tail blocks stay as they are and a quiet placeholder holds a place.
+	const htmlPreviews = $derived(extractHtmlPreviews(content, !streaming));
+	const segments = $derived(htmlPreviews.length && !rendered.tail
+		? placeHtmlPreviews(rendered.prefix, htmlPreviews, sanitizeHtml)
+		: null);
+	const pendingPreview = $derived(streaming ? streamingPreviewName(displayContent) : null);
 
 	// Task-list checkboxes (#1813). The markdown renders them disabled; a
 	// settled message enables them and lays the owner's ticks, kept as account
@@ -665,9 +675,20 @@
 			>
 				<!-- use:retryImages — a reply image can 404 for a few seconds when the
 				     chat is viewed through another worker than the one running it. -->
-				{#if content}
+				{#if content && segments}
+					{#each segments as segment (segment.key)}
+						{#if segment.kind === 'html'}{@html segment.html}{:else}
+							<HtmlPreview href={segment.preview.href} filename={segment.preview.filename} {sessionId} />
+						{/if}
+					{/each}
+				{:else if content}
 					<!-- Two blocks: stable prefix (settled media stays mounted) + streaming tail -->
 					{@html rendered.prefix}{@html rendered.tail}
+					{#if pendingPreview}
+						<div class="html-artifact-pending not-prose" style:height={`${HTML_PREVIEW_INITIAL_HEIGHT}px`} aria-hidden="true">
+							<span class="pending-label">{pendingPreview}</span>
+						</div>
+					{/if}
 				{:else if streaming && !hasPartialMessages}
 					<!-- Only show placeholder dots when partial messages is disabled -->
 					<div class="flex gap-1 py-2">
@@ -678,7 +699,6 @@
 				{/if}
 			</div>
 		</div>
-		<HtmlPreviews content={_twBestContent} {streaming} {sessionId} />
 		{#if showFooter}
 			<div class="ameta" class:is-actions-only={!metadata}>
 				{#if metadata && timestamp}<time class="ameta-time" datetime={messageTimeISO(timestamp)} title={formatMessageTimeFull(timestamp)}>{formatMessageTime(timestamp)}</time>{/if}
@@ -726,6 +746,34 @@
 </div>
 
 <style>
+	/* Holds the place of an HTML artifact the streaming reply links to; the
+	   settled reply puts the page itself at its link. Matches HtmlPreview's
+	   loading surface so the hand-off does not flash. */
+	.html-artifact-pending {
+		position: relative;
+		margin: 14px 0 4px;
+		overflow: hidden;
+		border-radius: calc(var(--radius) + 2px);
+		background: color-mix(in oklch, var(--muted) 42%, transparent);
+	}
+	.html-artifact-pending::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(100deg, transparent 20%, color-mix(in oklch, var(--foreground) 5%, transparent) 50%, transparent 80%);
+		transform: translateX(-100%);
+		animation: artifact-sweep 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
+	}
+	.pending-label {
+		position: absolute;
+		left: 14px;
+		bottom: 12px;
+		font: 11px/1 var(--font-mono);
+		color: var(--subtle-foreground);
+	}
+	@keyframes artifact-sweep { to { transform: translateX(100%); } }
+	@media (prefers-reduced-motion: reduce) { .html-artifact-pending::before { animation: none; } }
+
 	/* A task item shows its checkbox in place of the list bullet (#1813). */
 	.abody :global(li:has(> input[type='checkbox'])),
 	.abody :global(li:has(> p > input[type='checkbox'])) {
