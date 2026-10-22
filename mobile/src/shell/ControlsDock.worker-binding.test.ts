@@ -101,7 +101,9 @@ describe('phone controls on a hidden Task worker (#418)', () => {
 		expect(screen.getByRole('button', { name: /^Tool access: loading/ })).toBeTruthy();
 		expect(panelAccess().getAllByRole('radio').filter(r => r.getAttribute('aria-checked') === 'true')).toHaveLength(0);
 		// Fast is neither On nor Off and cannot be flipped from a guess.
-		expect(fastSwitch()!.getAttribute('aria-checked')).toBe('mixed');
+		// A switch has no "mixed": it reports busy, and On is not claimed.
+		expect(fastSwitch()!.getAttribute('aria-checked')).toBe('false');
+		expect(fastSwitch()!.getAttribute('aria-busy')).toBe('true');
 		expect(fastSwitch()!.disabled).toBe(true);
 		expect(fastSwitch()!.getAttribute('aria-label')).toBe('Fast mode: loading');
 
@@ -110,6 +112,7 @@ describe('phone controls on a hidden Task worker (#418)', () => {
 		expect(screen.getByRole('button', { name: /^Tool access: Bypass/ })).toBeTruthy();
 		expect(panelAccess().getByRole('radio', { name: 'Bypass' }).getAttribute('aria-checked')).toBe('true');
 		expect(fastSwitch()!.getAttribute('aria-checked')).toBe('true');
+		expect(fastSwitch()!.hasAttribute('aria-busy')).toBe(false);
 		expect(fastSwitch()!.disabled).toBe(false);
 	});
 });

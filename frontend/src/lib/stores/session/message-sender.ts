@@ -189,8 +189,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		return selectedContextWindow(state);
 	}
 
-	function buildOverrides(): Record<string, string | string[] | number | boolean> | undefined {
-		const _state = getState();
+	/** `_state` is the snapshot the send's session and agent came from, so a
+	 *  switch while it waited for the socket cannot mix two sessions' settings. */
+	function buildOverrides(_state: ActiveSessionState = getState()): Record<string, string | string[] | number | boolean> | undefined {
 		const overrides: Record<string, string | string[] | number | boolean> = {};
 		if (_state.mode !== 'chat') overrides.workspace_project_ids = [...(_state.workspaceProjectIds ?? [])];
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
@@ -517,7 +518,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// landed since the send began: the server has described the queue for
 			// this window, so a local row added on top of it is a second copy that
 			// no later frame is guaranteed to replace.
-			const overrides = buildOverrides();
+			const overrides = buildOverrides(_state);
 			const retryOverrides = { ...overrides };
 			// The worker can acknowledge a newer pin before a lost reply is retried.
 			// Its revision precondition is not a new owner instruction.

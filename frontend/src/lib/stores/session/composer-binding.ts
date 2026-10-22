@@ -125,6 +125,9 @@ export function restoreComposerBinding(
 		if (cache!.bindingPicks?.profile) picks.profile = true;
 	} else if (row?.profile_id) {
 		profile = row.profile_id;
+	} else if (row && row.profile_id === null) {
+		// The session's agent was deleted (ON DELETE SET NULL): known to have
+		// none, so the chip asks for one instead of loading forever.
 	} else {
 		unhydrated.profile = true;
 	}
@@ -176,8 +179,10 @@ export function liveComposerBindingPatch(
 	let unhydrated = current.bindingUnhydrated ?? {};
 	const picks = current.bindingPicks ?? {};
 
-	if (meta.profile_id !== undefined && meta.profile_id && !picks.profile && current.profile === initial.profile) {
-		patch.profile = meta.profile_id;
+	// `null` is real too: the session's agent was deleted (ON DELETE SET NULL),
+	// so the composer shows "pick an agent" rather than loading forever.
+	if (meta.profile_id !== undefined && !picks.profile && current.profile === initial.profile) {
+		patch.profile = meta.profile_id ?? '';
 		unhydrated = withFlag(unhydrated, 'profile', false);
 	}
 	if (meta.permission_mode !== undefined && !picks.permission && current.permissionModeOverride === initial.permissionModeOverride) {

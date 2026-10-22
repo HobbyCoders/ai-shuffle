@@ -31,6 +31,21 @@ describe('voice execution context', () => {
 			assistantState.set(null);
 		}
 	});
+	it('leaves out an open chat\'s access and Fast while they are still loading (#418)', () => {
+		const state = {
+			sessionId: 'worker', modelOverride: 'opus', permissionModeOverride: null, fastMode: false,
+			bindingUnhydrated: { permission: true, fast: true },
+		} as unknown as ActiveSessionState;
+		const loading = voiceContextFor(state);
+		expect(loading).not.toHaveProperty('permission_mode');
+		expect(loading).not.toHaveProperty('fast');
+		expect(loading.model).toBe('opus');
+
+		const known = voiceContextFor({ ...state, permissionModeOverride: 'bypassPermissions', fastMode: true, bindingUnhydrated: {} });
+		expect(known).toMatchObject({ permission_mode: 'bypassPermissions', fast: true });
+		// A new compose has no session binding to keep: it always says what it shows.
+		expect(voiceContextFor({ ...state, sessionId: null })).toMatchObject({ permission_mode: null, fast: false });
+	});
 	it('deduplicates identical settings', async () => {
 		const before = update.mock.calls.length;
 		const first = persistVoiceContext('dedupe', { permission_mode: 'default' });

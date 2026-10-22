@@ -737,7 +737,7 @@
 									{/if}
 									{#if fastShown}
 										<button type="button" class="tile toggle" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
-											aria-checked={fastPending ? 'mixed' : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
+											aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
 											onclick={() => { if (!fastPending) onToggleFast?.(); }}>
 											<span class="tg-top"><Zap size={20} aria-hidden="true" /><span class="tg-state">{#if fastPending}<LoaderCircle size={14} class="mcc-spin" aria-hidden="true" />{:else}{fastEnabled ? 'On' : 'Off'}{/if}</span></span>
 											<span><span class="tg-name">Fast mode</span><small class="tg-help">Higher price</small></span>

@@ -41,6 +41,8 @@ import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
 import {
 	cacheComposerBinding,
+	COMPOSER_BINDING_FIELDS,
+	isBindingUnhydrated,
 	liveComposerBindingPatch,
 	restoreComposerBinding,
 	type LiveComposerBinding,
@@ -55,6 +57,8 @@ import {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const PERSIST_DEBOUNCE_MS = 500;
+/** Wait before the one retry of a failed `/live` that a rowless binding depends on. */
+const LIVE_BINDING_RETRY_MS = 1500;
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -863,19 +867,32 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: getState().permissionModeOverride,
 			fastMode: getState().fastMode,
 		};
-		let snap: LiveSnapshot | null;
-		try {
-			// `include_messages=false`: the SSE feed is the transcript authority, so
-			// the message list this endpoint would otherwise build (megabytes on a
-			// long session) is discarded on arrival. Asking for metadata only keeps
-			// the switch-in off the transcript read path entirely.
-			snap = await api.get<LiveSnapshot>(
-				`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0&include_messages=false&owner_fields=true`
-			);
-		} catch (e) {
-			console.warn('[ActiveSession] metadata snapshot failed:', e);
-			if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, undefined);
-			return;
+		let snap: LiveSnapshot | null = null;
+		for (let attempt = 0; ; attempt++) {
+			try {
+				// `include_messages=false`: the SSE feed is the transcript authority, so
+				// the message list this endpoint would otherwise build (megabytes on a
+				// long session) is discarded on arrival. Asking for metadata only keeps
+				// the switch-in off the transcript read path entirely.
+				snap = await api.get<LiveSnapshot>(
+					`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0&include_messages=false&owner_fields=true`
+				);
+				break;
+			} catch (e) {
+				console.warn('[ActiveSession] metadata snapshot failed:', e);
+				// This is the only source of a rowless session's agent, access and
+				// Fast (#418), which stay loading and unsendable until it answers.
+				// Retry once, while that session is still open; never guess them.
+				const stillOpen = generation === _switchGeneration && getState().sessionId === sessionId;
+				const bindingWaits = COMPOSER_BINDING_FIELDS.some(f => isBindingUnhydrated(getState(), f));
+				if (attempt === 0 && stillOpen && bindingWaits) {
+					await new Promise(resolve => setTimeout(resolve, LIVE_BINDING_RETRY_MS));
+					if (generation === _switchGeneration && getState().sessionId === sessionId) continue;
+					// Left while waiting: the next visit fetches its own.
+				}
+				if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, undefined);
+				return;
+			}
 		}
 		// The revision is server truth whether or not the session is still open,
 		// so it is observed before the generation guard. Its seq/epoch decide

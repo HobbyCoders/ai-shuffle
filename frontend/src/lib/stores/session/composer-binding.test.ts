@@ -201,6 +201,10 @@ function deferredLive() {
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
+/** How many `/live` requests went out for `sessionId`. */
+const liveCalls = (sessionId: string) => vi.mocked(api.get).mock.calls
+	.filter(([path]) => String(path).startsWith(`/sessions/${sessionId}/live`)).length;
+
 beforeEach(() => {
 	_mockSessions.current = [{ id: 'parent', profile_id: 'overseer', permission_mode: 'default', fast: false, mode: 'code', project_id: 'proj-1' }];
 	vi.mocked(api.get).mockReset();
@@ -423,6 +427,105 @@ describe('genuine local edits survive hydration (#418)', () => {
 
 		expect(getState().profile).toBe('reviewer');
 		expect(getState().bindingPicks).toEqual({ profile: true });
+		switcher.destroy();
+	});
+});
+
+// ─── Deleted agent ──────────────────────────────────────────────────────────
+
+describe('a session whose agent was deleted (#418 review)', () => {
+	it('/live reporting no agent settles on "pick an agent", not loading forever', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { ...WORKER_META, profile_id: null } } as never);
+		const { switcher, getState } = harness(parentState());
+		await switcher.switchSession('worker');
+		await flush();
+
+		expect(getState().profile).toBe('');
+		expect(getState().bindingUnhydrated).toEqual({});
+		expect(getState()).toMatchObject({ permissionModeOverride: 'bypassPermissions', fastMode: true });
+		switcher.destroy();
+	});
+
+	it('a row whose agent was deleted is known to have none', () => {
+		const restored = restoreComposerBinding(null, { profile_id: null, permission_mode: 'auto', fast: false });
+		expect(restored.profile).toBe('');
+		expect(restored.bindingUnhydrated).toEqual({});
+		// A row that does not carry the field at all still waits for /live.
+		expect(restoreComposerBinding(null, { permission_mode: 'auto', fast: false }).bindingUnhydrated).toEqual({ profile: true });
+	});
+});
+
+// ─── /live failure ──────────────────────────────────────────────────────────
+
+describe('a failed /live on a rowless worker (#418 review)', () => {
+	afterEach(() => vi.useRealTimers());
+
+	it('retries once and then fills the worker\'s binding', async () => {
+		vi.useFakeTimers();
+		vi.mocked(api.get)
+			.mockRejectedValueOnce(new Error('offline'))
+			.mockResolvedValueOnce({ session_meta: WORKER_META } as never);
+		const { switcher, getState } = harness(parentState());
+		const opening = switcher.switchSession('worker');
+		await vi.advanceTimersByTimeAsync(0);
+		expect(getState().bindingUnhydrated).toEqual(ALL_BINDING_UNHYDRATED);
+
+		await vi.advanceTimersByTimeAsync(1500);
+		await opening;
+		expect(liveCalls('worker')).toBe(2);
+		expect(getState()).toMatchObject({ profile: 'investigator', permissionModeOverride: 'bypassPermissions', fastMode: true, bindingUnhydrated: {} });
+		switcher.destroy();
+	});
+
+	it('gives up after one retry and still never guesses the binding', async () => {
+		vi.useFakeTimers();
+		vi.mocked(api.get).mockRejectedValue(new Error('offline'));
+		const { switcher, getState } = harness(parentState());
+		const opening = switcher.switchSession('worker');
+		await vi.advanceTimersByTimeAsync(5000);
+		await opening;
+		expect(liveCalls('worker')).toBe(2);
+		expect(getState().bindingUnhydrated).toEqual(ALL_BINDING_UNHYDRATED);
+		expect(getState().profile).toBe('');
+		switcher.destroy();
+	});
+
+	it('does not retry once the user has left, nor for a session its row already describes', async () => {
+		vi.useFakeTimers();
+		vi.mocked(api.get).mockRejectedValue(new Error('offline'));
+		const { switcher } = harness(parentState());
+		const opening = switcher.switchSession('worker');
+		await vi.advanceTimersByTimeAsync(0);
+		await switcher.switchSession('parent');
+		await vi.advanceTimersByTimeAsync(5000);
+		await opening;
+		expect(liveCalls('worker')).toBe(1);
+		// The parent's row carries its agent, access and Fast: nothing waits on /live.
+		expect(liveCalls('parent')).toBe(1);
+		switcher.destroy();
+	});
+});
+
+// ─── Send snapshot ──────────────────────────────────────────────────────────
+
+describe('a send that waits for the socket (#418 review)', () => {
+	it('carries the settings of the chat it was typed in, even if the view switches meanwhile', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: WORKER_META } as never);
+		const { switcher, sender, update, wsConn, lastQuery } = harness(parentState());
+		await switcher.switchSession('worker');
+		await flush();
+
+		wsConn.isConnected.mockReturnValue(false);
+		const sending = sender.sendMessage('status?');
+		// While it waits: the composer now shows another chat's settings.
+		update(s => ({ ...s, sessionId: 'parent', profile: 'overseer', permissionModeOverride: 'default', fastMode: false }));
+		wsConn.isConnected.mockReturnValue(true);
+		expect(await sending).toBe(true);
+
+		const query = lastQuery();
+		expect(query.session_id).toBe('worker');
+		expect(query.profile).toBe('investigator');
+		expect(query.overrides).toMatchObject({ permission_mode: 'bypassPermissions', fast: true });
 		switcher.destroy();
 	});
 });

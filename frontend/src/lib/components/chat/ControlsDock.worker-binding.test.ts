@@ -126,6 +126,19 @@ describe('desktop composer on a hidden Task worker (#418)', () => {
 		expect(hydrated.getAttribute('aria-pressed')).toBe('true');
 	});
 
+	it('a worker whose agent was deleted asks for one instead of loading forever', async () => {
+		renderComposer();
+		void activeSession.switchSession('worker');
+		await screen.findByRole('button', { name: 'Agent: Loading agent…' });
+		releaseLive!({ session_meta: { ...WORKER_META, profile_id: null } });
+		await waitFor(() => expect(get(activeSession).bindingUnhydrated).toEqual({}));
+		// The amber unset chip that asks for an agent, not the loading one.
+		const chip = await screen.findByRole('button', { name: 'Agent: Agent' });
+		expect(chip.classList.contains('unset')).toBe(true);
+		expect(chip.classList.contains('pending')).toBe(false);
+		expect(chip.hasAttribute('aria-busy')).toBe(false);
+	});
+
 	it('the access menu selects nothing while the worker\'s own access is loading', async () => {
 		renderComposer();
 		void activeSession.switchSession('worker');
