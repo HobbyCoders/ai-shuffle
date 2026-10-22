@@ -55,7 +55,9 @@ Installation has two 90-second attempts within a four-minute step; Browser MCP
 build/tests have a separate eight-minute step and a 420-second test deadline with
 an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
 restriction is disabled only on the disposable runner so the sandboxed editor
-fixture can launch. Production browser security settings are unchanged. Fluid's
+fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
+distro/snap wrapper over the managed browser. Production browser security
+settings are unchanged. Fluid's
 ripgrep install also has a four-minute step and two 90-second attempts; its apt
 refresh uses signed Ubuntu sources rather than optional third-party runner feeds.
 
