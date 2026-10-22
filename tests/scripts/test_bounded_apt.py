@@ -184,3 +184,8 @@ def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_na
     assert "scripts/ci/bounded_apt.py" in step["run"]
     assert step["timeout-minutes"] == "4"
     assert "continue-on-error" not in step
+    if workflow != "ci-fluid.yml":
+        assert "bounded_apt.py npx --no-install playwright-core install-deps chromium" in step["run"]
+        assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in step["run"]
+        assert "sudo env" not in step["run"]
+        assert "--with-deps" not in step["run"]
