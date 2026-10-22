@@ -274,7 +274,7 @@ def repo(mock_db, tmp_path):
 
 
 def test_checkout_producer_forks_actual_caller_tip_and_preserves_dirty_work(repo, monkeypatch):
-    monkeypatch.setattr(git_service, "fetch", lambda *a, **kw: pytest.fail("worker provisioning must not fetch"))
+    monkeypatch.setattr(git_service, "fetch", lambda *a, **kw: pytest.fail("worker provisioning must not use the long general-purpose fetch"))
     row, parent, base, tip = repo
     (parent / "code.txt").write_text("dirty user work\n")
     (parent / "user.txt").write_text("untracked user work\n")

@@ -586,6 +586,47 @@ curl -X PUT http://localhost:8000/api/v1/settings/text-generation \
   -d '{"text_generation_model": "haiku", "text_generation_effort": "low"}'
 ```
 
+### GET /api/v1/settings/commit-attribution
+
+Read the owner's commit and PR attribution policy. **Auth:** Required.
+
+```json
+{"enabled": true}
+```
+
+Attribution defaults to **on**. When enabled, agent commits end with exactly
+`Co-Authored-By: AI Shuffle <noreply@hobbycoders.com>` and PR descriptions end with
+`🤖 Generated with [AI Shuffle](https://hobbycoders.com)`. Provider and model
+co-authors are never added. When disabled, neither a co-author trailer nor a
+generated-by line is added: the commit is the user's alone.
+
+### PUT /api/v1/settings/commit-attribution
+
+Replace the policy. **Auth:** Owner only. Send a required JSON boolean `enabled`;
+missing, null, string and numeric values return `422`. The response is the same
+shape as GET.
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/commit-attribution \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+Stored as the shared `system_settings` key `commit_attribution`, replicated by
+the existing network settings sync. Each executing worker reads its local copy
+when connecting a session, including Task and subagent children. Changes apply
+on the next connection, not to an already-connected session's cached prefix;
+a peer must receive settings sync before starting a child with the new value.
+
+Native providers receive one stable system-prompt instruction. Delegated Claude
+receives `attribution.commit` and `attribution.pr` through CLI `--settings`
+(empty strings when off); `attribution.sessionUrl` is always false to prevent a
+provider session link. No duplicate attribution instruction is appended to the
+CLI prompt. Delegated settings must be a JSON object: file-path and non-object
+settings are rejected before spawn rather than passed through, since they could
+silently restore provider attribution. Existing app spawns use JSON objects.
+
 ### GET /api/v1/settings/subagent-default
 
 The model every agent runs on when another agent starts it as a subagent and the agent has no model of its own.
