@@ -132,12 +132,17 @@ def refresh(run_id, directory, output):
             or run["workflowName"] != "CI Backend" or run["event"] not in {"push", "workflow_dispatch"}):
         raise ValueError("duration refresh requires a successful main CI Backend run")
     # Download afresh: do not accept caller-supplied timing/cache authority.
+    if directory.exists() and any(directory.iterdir()):
+        raise ValueError("duration download directory must be empty")
     subprocess.run(["gh", "run", "download", run_id, "--repo", "HobbyCoders/ai-shuffle",
                     "--pattern", "backend-shard-*", "--dir", str(directory)], check=True)
     receipts, durations = [], {}
     for receipt in sorted(directory.glob("**/receipt.json")):
         receipts.append(json.loads(receipt.read_text()))
         timings = json.loads(receipt.with_name("durations.json").read_text())
+        evidence = receipts[-1]
+        if len(timings) != evidence["count"] or digest(sorted(timings)) != evidence["selected"]:
+            raise ValueError("timings do not match executed shard nodes")
         if durations.keys() & timings.keys():
             raise ValueError("duplicate timing nodes")
         durations.update(timings)
@@ -146,7 +151,8 @@ def refresh(run_id, directory, output):
              ("changes", "backend-shard", "backend-contracts", "backend-security")}
     needs["changes"]["outputs"] = {"full_backend": "true"}
     check_gate(needs, receipts, run["headSha"])
-    if len(durations) != sum(r["count"] for r in receipts):
+    if (len(durations) != sum(r["count"] for r in receipts)
+            or digest(sorted(durations)) != receipts[0]["collection"]):
         raise ValueError("timings do not cover collection")
     partition(list(durations), durations)
     output.write_text(json.dumps({"source": run, "durations": durations}, sort_keys=True, indent=2) + "\n")

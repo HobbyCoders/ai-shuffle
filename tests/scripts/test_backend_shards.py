@@ -155,3 +155,54 @@ def test_refresh_rejects_untrusted_or_failed_runs(monkeypatch, tmp_path, field, 
     monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
     with pytest.raises(ValueError, match="successful main"):
         bs.refresh("123", tmp_path / "new", tmp_path / "manifest.json")
+
+@pytest.mark.parametrize("fault", [None, "wrong-selected", "wrong-collection", "missing-shard", "missing-node", "duplicate-node"])
+def test_main_refresh_downloads_and_validates_complete_execution(monkeypatch, tmp_path, fault):
+    run = {"conclusion": "success", "headBranch": "main", "event": "workflow_dispatch",
+           "workflowName": "CI Backend", "headSha": "head", "url": "https://example.invalid/run"}
+    monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
+    nodes = [f"test_a.py::test_{i}" for i in range(8)]
+    shards = bs.partition(nodes, {})
+    destination = tmp_path / "download"
+    def download(command, check):
+        assert command[:4] == ["gh", "run", "download", "123"] and check is True
+        assert str(destination) == command[-1]
+        for index, shard in enumerate(shards, 1):
+            if fault == "missing-shard" and index == 4:
+                continue
+            folder = destination / str(index)
+            folder.mkdir(parents=True)
+            receipt = {"shard": index, "head": "head", "count": len(shard), "total": len(nodes),
+                       "collection": bs.digest(sorted(nodes)), "partition": bs.digest(shards),
+                       "selected": bs.digest(shard), "workers": 2}
+            timings = {node: 0.5 for node in shard}
+            if fault == "wrong-selected" and index == 1:
+                receipt["selected"] = "invalid"
+            if fault == "wrong-collection":
+                receipt["collection"] = "invalid"
+            if fault == "missing-node" and index == 1:
+                timings.pop(shard[0])
+            if fault == "duplicate-node" and index == 2:
+                timings = {node: 0.5 for node in shards[0]}
+                receipt["selected"] = bs.digest(sorted(timings))
+            (folder / "receipt.json").write_text(json.dumps(receipt))
+            (folder / "durations.json").write_text(json.dumps(timings))
+    monkeypatch.setattr(bs.subprocess, "run", download)
+    output = tmp_path / "manifest.json"
+    if fault:
+        with pytest.raises(ValueError):
+            bs.refresh("123", destination, output)
+        assert not output.exists()
+    else:
+        bs.refresh("123", destination, output)
+        result = json.loads(output.read_text())
+        assert result["source"] == run
+        assert set(result["durations"]) == set(nodes)
+
+
+def test_main_refresh_refuses_existing_cache_authority(monkeypatch, tmp_path):
+    run = {"conclusion": "success", "headBranch": "main", "event": "workflow_dispatch", "workflowName": "CI Backend"}
+    monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
+    (tmp_path / "cached.json").write_text("untrusted")
+    with pytest.raises(ValueError, match="directory must be empty"):
+        bs.refresh("123", tmp_path, tmp_path / "manifest.json")

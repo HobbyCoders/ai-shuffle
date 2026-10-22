@@ -219,11 +219,35 @@ async def test_sdk_lists_and_requests_saved_service_without_private_details(
 @pytest.mark.asyncio
 async def test_saved_catalogue_wait_is_bounded(broker, monkeypatch):
     import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     release = threading.Event()
-    monkeypatch.setattr(chat_vault, "catalog", lambda *args, **kwargs: release.wait(5) and [])
+    entered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    clock = [loop.time()]
+
+    def blocked_catalog(*args, **kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(chat_vault, "catalog", blocked_catalog)
     monkeypatch.setattr(chat_access, "LISTING_TIMEOUT_SECONDS", 0.05)
-    try:
-        with pytest.raises(AccessDenied, match="timed out"):
-            await asyncio.wait_for(broker.resources("chat"), 1)
-    finally:
-        release.set()
+    # If a loaded runner stalls the loop for >1s, both real-time deadlines
+    # expire together and the outer guard legitimately wins. Advance only
+    # the listing deadline after the real worker enters the blocked read.
+    # Keep the original 0.05s listing and 1s outer guard, and join our worker.
+    with ThreadPoolExecutor(max_workers=1) as executor, monkeypatch.context() as local:
+        local.setattr(chat_access, "_listing_executor", executor)
+        local.setattr(loop, "time", lambda: clock[0])
+        task = asyncio.create_task(asyncio.wait_for(broker.resources("chat"), 1))
+        try:
+            await entered.wait()
+            assert not task.done()
+            clock[0] += chat_access.LISTING_TIMEOUT_SECONDS
+            with pytest.raises(AccessDenied, match="timed out"):
+                await task
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
