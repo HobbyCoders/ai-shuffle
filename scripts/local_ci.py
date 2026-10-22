@@ -1,8 +1,8 @@
 """Run the project's checks on this machine, before code leaves it.
 
 Before a push, run affected tests and the offline secret scan. Every pull
-request also runs the full hosted suites; publication still needs a local
-attested full run on main.
+request also runs the full hosted suites; nightly publication accepts a hosted
+main-suite pass or an owner-local attested full run on main.
 
     python scripts/local_ci.py fast            # affected tests + offline scan (pre-push gate)
     python scripts/local_ci.py check           # existing changed-suite checks + dependency audit

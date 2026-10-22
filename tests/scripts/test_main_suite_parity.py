@@ -54,6 +54,8 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
         assert called["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
     for job in ["windows", "identity", "desktop"]:
         assert jobs[job]["with"] == {"main_suite": "true"}
+    for name in suite.REQUIRED:
+        assert jobs[name]["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
     step = gate["steps"][-1]
     assert step["env"] == {"RESULTS": "${{ toJSON(needs) }}"}
     assert step["run"] == "python scripts/ci/main_suite.py aggregate"
