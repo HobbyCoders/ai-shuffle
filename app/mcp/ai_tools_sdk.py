@@ -644,35 +644,100 @@ UNIFIED_TOOL_KINDS = {"generateImage": "image", "generateVideo": "video", "gener
 UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 
 
-def _create_unified_tools(worker, context=None):
-    from app.core.generation_resolver import Resolver, RunContext
+# Main's configured-model handlers stay the Settings default ("lane") for each
+# unified name: a call with no source/model, and every unattended call that
+# main's schema could express, runs exactly as before. Step 1 is additive.
+# Refusals that mean "the guard could not price/resolve this" fall back to it;
+# a cap, confirmation or chat-mode refusal never does.
+_LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "invalid_request"}
+_CONFIGURED_MODEL_ENV = {"image": "IMAGE_MODEL", "video": "VIDEO_MODEL", "audio": "AUDIO_MODEL", "3d": "MODEL3D_MODEL"}
+
+
+def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
+    """``{name: (lane, handler)}`` for main's handlers that can run here.
+
+    ``lane`` is ``"chatgpt"`` for the ChatGPT-plan image tool (#1796), which
+    needs no fal key, and ``"fal"`` for the fal.ai tools while a key is usable.
+    """
+    from app.core.provider import subscription_images as sub
+
+    subscription_image = sub.is_subscription_model(_configured_image_models(tool_env)[0])
+    lanes = {}
+    for name, legacy in legacy_tools.items():
+        if name == "generateImage" and subscription_image:
+            lanes[name] = ("chatgpt", legacy.handler)
+        elif fal_usable and name != "searchModels":
+            lanes[name] = ("fal", legacy.handler)
+    return lanes
+
+
+def _lane_label(lane: str, kind: str, tool_env: Optional[Dict[str, str]]) -> str:
+    from app.core.provider import subscription_images as sub
+
+    if lane == "chatgpt":
+        return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
+    configured = (tool_env or {}).get(_CONFIGURED_MODEL_ENV[kind]) or (
+        _configured_image_models(tool_env)[0] if kind == "image" else "")
+    return f"fal.ai {configured}" if configured else "the fal.ai default model"
+
+
+def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
+    from app.core.generation_resolver import Resolver, RunContext, normalize_source
     from app.services.generation_sources import Sources
 
     context = context or RunContext()
+    lanes = {} if context.chat_mode else dict(lanes or {})
     backend = Sources(worker, context)
     resolver = Resolver(backend)
     tools = []
     properties = {
         "prompt": {"type": "string"},
-        "source": {"type": "string", "description": "searchModels provider/account ID."},
+        "source": {"type": "string", "description": "fal|openai|xai|chatgpt|supergrok or account ID."},
         "model": {"type": "string", "description": "searchModels ID; never guess."},
         "worker": {"type": "string", "description": "Holding-worker ID from a choice."},
-        "options": {"type": "object", "description": "Declared model options only."},
+        "options": {"type": "object", "description": "Declared options only."},
         "confirmed": {"type": "boolean", "description": "Only on user-approved needs-confirmation retry."},
-        "confirmation_token": {"type": "string", "description": "Receipt for this exact request/price."},
+        "confirmation_token": {"type": "string", "description": "Receipt for this exact request."},
     }
+
+    def lane_for(name):
+        # A trusted stored/job choice outranks the Settings default.
+        return None if context.job_choice or context.remembered_choice else lanes.get(name)
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
                   "audio": {"duration": {"type": "number"}},
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
-        @tool(name, f"Generate {kind}. Omit source/model for priced choices; never choose for the user. searchModels gives IDs/schema. Unattended needs a stored choice; unknown prices refuse. Above-threshold spend needs an approved retry.", {
+        lane = lane_for(name)
+        description = f"Generate {kind}. Omit source/model for priced choices; never choose for the user. searchModels gives IDs/schema. Unattended needs a stored choice; unknown prices refuse. Above-threshold spend needs an approved retry."
+        if lane:
+            description += (f" Here, omitting source/model uses the Settings default ({_lane_label(lane[0], kind, tool_env)})"
+                            + (", as does a fal model the guard cannot price." if lane[0] == "fal" else "."))
+
+        def main_args(request):
+            """The call as main's configured-model tool took it, or None."""
+            if any(request.get(key) not in (None, {}, False) for key in ("worker", "options", "confirmed", "confirmation_token")):
+                return None
+            source = normalize_source(request.get("source"))
+            if lane[0] == "chatgpt":
+                if source not in (None, "chatgpt") or request.get("model"):
+                    return None
+                return {"prompt": request.get("prompt")}
+            if source not in (None, "fal"):
+                return None
+            return {key: request[key] for key in ("prompt", "model", *legacy) if key in request}
+
+        @tool(name, description, {
             "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
         }, annotations=_LARGE_RESULT_ANNOTATIONS)
         async def generate(args):
             from app.core.generation_resolver import result
             request = _model_arg(args)
+            fallback = main_args(request) if lane else None
+            if fallback is not None and (context.unattended or lane[0] == "chatgpt" or not request.get("model")):
+                # The Settings default (no model, or only its own source named): main's path, unchanged.
+                return await lane[1](fallback)
             options = request.get("options", {})
             if not isinstance(options, dict):
                 return _tool_result(result("refused", error="options must be an object."))
@@ -683,7 +748,13 @@ def _create_unified_tools(worker, context=None):
                         return _tool_result(result("refused", error="Conflicting top-level and declared model options."))
                     options[key] = request.pop(key)
             request["options"] = options
-            return _tool_result(await resolver.generate(kind, request, context))
+            if fallback is not None:
+                # Main ran a named fal model on this worker; keep it there.
+                request["worker"] = backend.local_worker()
+            output = await resolver.generate(kind, request, context)
+            if fallback is not None and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
+                return await lane[1](fallback)
+            return _tool_result(output)
         return generate
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
@@ -708,24 +779,47 @@ def _create_unified_tools(worker, context=None):
 
     tools.append(search_models)
 
-    @tool("runFalModel", "Run a text-input fal media model with price, confirmation and daily-cap checks. Prefer its generation tool; discover schema with searchModels first.", {
+    from app.core.provider import subscription_images as sub
+    image_restricted = any(sub.is_subscription_model(m) for m in _configured_image_models(tool_env))
+    fal_lane = lane_for("runFalModel")
+
+    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
             "confirmed": properties["confirmed"], "confirmation_token": properties["confirmation_token"],
-        }, "required": ["endpoint_id", "input", "output_type"], "additionalProperties": False,
+        }, "required": ["endpoint_id", "input"], "additionalProperties": False,
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def run_fal(args):
-        from app.core.generation_resolver import result
+        from app.core.generation_resolver import KINDS, result
         from app.services.fal_schema import schema_service
-        schema = await schema_service.get_schema(args.get("endpoint_id"), await backend.fal_key())
-        if schema is None or not isinstance(args.get("input"), dict):
-            return _tool_result(result("refused", error="A declared input schema is required."))
-        values = dict(args["input"])
-        prompt = values.pop(schema.primary_text_field, None)
-        request = {"prompt": prompt, "source": "fal", "model": args["endpoint_id"], "options": values,
+        # Main's #1796 rule: not a back door to fal images the owner did not choose.
+        refused = _fal_image_refusal(args) if image_restricted else None
+        if refused:
+            return _tool_result({"success": False, "error": refused})
+        main = {key: args[key] for key in ("endpoint_id", "input", "output_type") if key in args}
+        if fal_lane and context.unattended:
+            return await fal_lane[1](main)
+        endpoint = args.get("endpoint_id")
+        kind = args.get("output_type") or (
+            (_catalog_output_type(endpoint) or _infer_fal_output_type(endpoint)) if isinstance(endpoint, str) else None)
+        schema = await schema_service.get_schema(endpoint, await backend.fal_key()) if isinstance(endpoint, str) else None
+        values = dict(args["input"]) if isinstance(args.get("input"), dict) else None
+        prompt = values.pop(schema.primary_text_field, None) if schema and values is not None and schema.primary_text_field else None
+        if kind not in KINDS or schema is None or values is None or not isinstance(prompt, str) or not prompt.strip():
+            # Nothing to price (unknown kind, schema or a prompt-less model):
+            # main's path where it exists, otherwise a refusal.
+            if fal_lane:
+                return await fal_lane[1](main)
+            return _tool_result(result("refused", error="A declared input schema with a text prompt is required."))
+        request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        return _tool_result(await resolver.generate(args.get("output_type"), request, context))
+        if fal_lane:
+            request["worker"] = backend.local_worker()
+        output = await resolver.generate(kind, request, context)
+        if fal_lane and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
+            return await fal_lane[1](main)
+        return _tool_result(output)
 
     tools.append(run_fal)
     return tools
@@ -842,8 +936,12 @@ def create_ai_tools_server(
         if _is_tool_enabled(t.name, ai_tools_config):
             enabled_tools.append(t)
 
+    legacy_tools = {t.name: t for t in enabled_tools if t.name in UNIFIED_TOOL_NAMES}
     enabled_tools = [t for t in enabled_tools if t.name not in UNIFIED_TOOL_NAMES]
-    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context)
+    fal_usable = not fal_off and bool(_get_fal_api_key() or any(
+        (tool_env or {}).get(name) for name in fal_credential.ENV_KEYS))
+    lanes = _settings_lanes(legacy_tools, tool_env, fal_usable)
+    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context, lanes=lanes, tool_env=tool_env)
                          if _is_tool_enabled(t.name, ai_tools_config))
     if not enabled_tools:
         return None

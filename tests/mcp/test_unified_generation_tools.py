@@ -1,11 +1,12 @@
 """The real ai-tools server exposes one guarded tool per generation kind."""
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.generation_resolver import RunContext
+from app.core.generation_resolver import RunContext, UNKNOWN_PRICE
 from app.mcp import ai_tools_sdk as sdk
 from app.services.generation_sources import Sources
 from tests.core.test_generation_resolver import candidate, FakeBackend
@@ -75,3 +76,140 @@ async def test_unified_metadata_does_not_expand_first_request(monkeypatch, tmp_p
     record_property("unified_json_first_request_tokens", tokens)
     assert tokens <= FIRST_REQUEST_BUDGET
     assert tokens <= _priced_before_the_turn(previous, "hello")
+
+
+# ---- Step 1 is additive: main's configured-model path stays the Settings default ----
+
+def lane_tools(monkeypatch, entries, context, lane="fal", tool_env=None, names=("generateImage", "runFalModel")):
+    from app.services import generation_sources
+    backend = FakeBackend(entries)
+    backend.local_worker = lambda: "worker-a"
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    legacy = AsyncMock(return_value={"content": [{"type": "text", "text": '{"success": true, "lane": "settings"}'}]})
+    lanes = {name: (lane, legacy) for name in names}
+    tools = {t.name: t for t in sdk._create_unified_tools(None, context, lanes=lanes, tool_env=tool_env)}
+    return tools, backend, legacy
+
+
+INTERACTIVE = RunContext(session_id="s", unattended=False, owner=True)
+UNATTENDED = RunContext(session_id="s", unattended=True, owner=True)
+
+
+@pytest.mark.parametrize("source", [None, "fal", "Fal.ai"])
+async def test_interactive_default_runs_settings_model_not_choose(monkeypatch, source):
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate(), candidate(account="b")], INTERACTIVE)
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", **({"source": source} if source else {})}))
+    assert output == {"success": True, "lane": "settings"}
+    legacy.assert_awaited_once_with({"prompt": "tree"})
+    assert backend.calls == []
+    assert "Settings default (fal.ai fal-ai/flux-pro/v1.1-ultra)" in tools["generateImage"].description
+
+
+@pytest.mark.parametrize("args", [{"prompt": "tree"}, {"prompt": "tree", "model": "fal-ai/x"}, {"prompt": "tree", "source": "FAL"}])
+async def test_unattended_runs_keep_generation_on_the_settings_path(monkeypatch, args):
+    # Automations, worker/Task sessions, voice, hidden and API-key turns.
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate()], UNATTENDED)
+    output = payload(await tools["generateImage"].handler(args))
+    assert output["lane"] == "settings"
+    assert legacy.await_args.args[0] == {k: v for k, v in args.items() if k != "source"}
+    assert backend.calls == []
+
+
+async def test_unattended_new_parameters_still_skip_without_a_stored_choice(monkeypatch):
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate(source="supergrok")], UNATTENDED)
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "source": "supergrok"}))
+    assert output["status"] == "skipped" and output["reason"] == "no_stored_choice"
+    legacy.assert_not_awaited()
+
+
+async def test_named_fal_model_is_guarded_and_pinned_to_this_worker(monkeypatch):
+    here, peer = candidate(model="fal-ai/x"), replace(candidate(model="fal-ai/x"), worker="worker-b")
+    tools, backend, legacy = lane_tools(monkeypatch, [here, peer], INTERACTIVE)
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": "fal-ai/x"}))
+    assert output["status"] == "completed" and output["choice"]["worker"] == "worker-a"
+    legacy.assert_not_awaited()
+
+
+async def test_named_fal_model_the_guard_cannot_price_uses_the_previous_path(monkeypatch):
+    tools, backend, legacy = lane_tools(monkeypatch, [replace(candidate(model="fal-ai/x"), price=dict(UNKNOWN_PRICE))], INTERACTIVE)
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": "fal-ai/x"}))
+    assert output["lane"] == "settings"
+    legacy.assert_awaited_once_with({"prompt": "tree", "model": "fal-ai/x"})
+
+
+@pytest.mark.parametrize("why", ["daily_cap", "confirmation", "chat"])
+async def test_guard_refusals_never_fall_back(monkeypatch, why):
+    price = {"currency": "USD", "unit": "item", "amount": "0.50", "total": "0.50", "status": "estimated"}
+    entry = replace(candidate(model="fal-ai/x"), price=price) if why == "confirmation" else candidate(model="fal-ai/x")
+    context = replace(INTERACTIVE, chat_mode=True) if why == "chat" else INTERACTIVE
+    tools, backend, legacy = lane_tools(monkeypatch, [entry], context)
+    backend.cap = why != "daily_cap"
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": "fal-ai/x"}))
+    legacy.assert_not_awaited()
+    assert output["status"] in ("refused", "needs-confirmation", "completed")
+    assert not any(c[0] == "execute" for c in backend.calls) or why == "chat"
+
+
+async def test_chat_mode_has_no_settings_default(monkeypatch):
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate(), candidate(account="b")], replace(INTERACTIVE, chat_mode=True))
+    assert payload(await tools["generateImage"].handler({"prompt": "tree"}))["status"] == "choose"
+    legacy.assert_not_awaited()
+    assert "Settings default" not in tools["generateImage"].description
+
+
+@pytest.mark.parametrize("args", [{"prompt": "tree"}, {"prompt": "tree", "source": "ChatGPT"}])
+async def test_chatgpt_plan_image_default_keeps_working(monkeypatch, args):
+    env = {"IMAGE_MODEL": "chatgpt-subscription"}
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate(source="chatgpt", account="plan-a")], INTERACTIVE,
+                                        lane="chatgpt", tool_env=env, names=("generateImage",))
+    output = payload(await tools["generateImage"].handler(args))
+    assert output["lane"] == "settings"
+    legacy.assert_awaited_once_with({"prompt": "tree"})
+    assert "ChatGPT plan" in tools["generateImage"].description
+
+
+async def test_server_wires_chatgpt_plan_lane_without_fal(monkeypatch):
+    from app.core import fal_credential
+    from app.core.provider import subscription_images as sub
+    captured = []
+    monkeypatch.setattr(sdk, "patch_sdk_server", lambda server, tools: server)
+    monkeypatch.setattr(sdk, "create_tool_server", lambda **kw: captured.extend(kw["tools"]) or kw)
+    monkeypatch.setattr(fal_credential, "is_enabled", lambda: False)
+    run = AsyncMock(return_value={"content": [{"type": "text", "text": '{"success": true, "source": "chatgpt_subscription"}'}]})
+    monkeypatch.setattr(sub, "run", run)
+    sdk.create_ai_tools_server({"image_generation": True}, "unused-tools-dir", tool_env={"IMAGE_MODEL": "chatgpt-subscription"},
+                               generation_context=UNATTENDED)
+    image = next(t for t in captured if t.name == "generateImage")
+    assert payload(await image.handler({"prompt": "tree"}))["source"] == "chatgpt_subscription"
+    assert run.await_args.args[:2] == ("tree", "chatgpt-subscription")
+
+
+async def test_run_fal_model_keeps_non_text_models(monkeypatch):
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    schema = ModelSchema("fal-ai/i2v", [ParamField("prompt", is_primary_text=True), ParamField("image_url", type="file")], "prompt")
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    entry = candidate(model="fal-ai/i2v", kind="video")
+    tools, backend, legacy = lane_tools(monkeypatch, [entry], INTERACTIVE)
+    backend.fal_key = AsyncMock(return_value="key")
+    args = {"endpoint_id": "fal-ai/i2v", "input": {"prompt": "move", "image_url": "https://x/y.png"}, "output_type": "video"}
+    output = payload(await tools["runFalModel"].handler(args))
+    assert output["status"] == "completed"  # priced: same guard as the generation tools
+    assert backend.calls[0] == ("prepare", entry.account, {"size": "square", "image_url": "https://x/y.png"})
+    legacy.assert_not_awaited()
+    # Prompt-less (audio-to-audio style) or unpriceable calls take the previous path.
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=ModelSchema("fal-ai/a2a", [ParamField("audio_url", type="file")], None)))
+    main = {"endpoint_id": "fal-ai/a2a", "input": {"audio_url": "https://x/a.wav"}}
+    assert payload(await tools["runFalModel"].handler(main))["lane"] == "settings"
+    legacy.assert_awaited_once_with(main)
+
+
+async def test_run_fal_model_without_a_lane_refuses_what_it_cannot_price(monkeypatch):
+    from app.services import generation_sources
+    from app.services.fal_schema import schema_service
+    backend = FakeBackend([])
+    backend.fal_key = AsyncMock(return_value=None)
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=None))
+    tools = {t.name: t for t in sdk._create_unified_tools(None, INTERACTIVE)}
+    output = payload(await tools["runFalModel"].handler({"endpoint_id": "fal-ai/x", "input": {"prompt": "p"}}))
+    assert output["status"] == "refused"

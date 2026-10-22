@@ -43,6 +43,20 @@ async def test_confirmation_expires_and_mismatches_are_consumed(monkeypatch):
     assert not await receipts.consume(token, "first")
 
 
+async def test_expired_unused_receipts_are_removed_on_next_issue(monkeypatch):
+    import app.core.generation_confirmations as module
+    from app.db import database
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    receipts = Confirmations()
+    stale = await receipts.issue("declined")
+    clock[0] += module.TTL + 1
+    fresh = await receipts.issue("current")
+    assert database.get_system_setting(module.PREFIX + stale) is None
+    assert database.get_system_setting(module.PREFIX + fresh) is not None
+    assert await receipts.consume(fresh, "current")
+
+
 def test_durable_remote_submission_claim_is_not_replayed():
     from app.network.generation import claim
     command = "00000000-0000-0000-0000-000000000001"

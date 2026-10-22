@@ -7,16 +7,37 @@ order: 14
 # Unified generation tools
 
 `ai-tools.generateImage`, `generateVideo`, `generateAudio` and `textTo3D`
-accept `prompt`, optional `source` (provider or exact account ID), `model`,
-`worker` and `options`. `options` uses the selected model's declared input
-schema, the same schema service used by Default models. `searchModels` looks
-up sources, accounts, holding workers, models, verified status, prices and
-schemas on demand. No model catalog is added to session prompts.
+accept `prompt`, optional `source` (`fal`, `openai`, `xai`, `chatgpt`,
+`supergrok`, case-insensitive, or an exact account ID), `model`, `worker` and
+`options`. `options` uses the selected model's declared input schema, the same
+schema service used by Default models. `searchModels` looks up sources,
+accounts, holding workers, models, verified status, prices and schemas on
+demand. No model catalog is added to session prompts.
 
-The provider-bound `GenerateNativeImage` and `GenerateNativeVideo` aliases are
-not registered. Their verified native adapters are used behind the unified
-names. No Native generation Settings screen is planned. Saved defaults are
-not silently treated as remembered choices; their migration belongs to step 3.
+This first step is additive: nothing that generates on the previous release
+stops working.
+
+- **Settings default.** A call without `source`, `model`, `worker` or
+  `options` runs the Default models choice exactly as before: the configured
+  fal.ai model, or the ChatGPT-plan image model when Image generation is set to
+  it. Unattended runs (automations, worker and Task sessions, voice, hidden
+  sessions, API-key turns) also keep that path for every call the previous
+  tool schema could express. Chat mode has no Settings default.
+- **Named choices** go through the resolver below: price, confirmation and the
+  daily cap. A named fal model that cannot be priced or resolved (unknown
+  price, a model outside the text-to catalog, undeclared inputs) runs on the
+  Settings default path as before. A cap, confirmation or chat-mode refusal
+  never falls back.
+- **`runFalModel`** runs any fal endpoint again, including image-to-video and
+  audio-to-audio, with `output_type` optional. A priced call with a text prompt
+  gets the same guard; otherwise it takes the previous path. While images are
+  set to the ChatGPT plan it still refuses fal image models.
+- **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
+  registered for sessions running on a verified ChatGPT or SuperGrok account.
+- **Stored Native generation settings** decide eligibility per account. A
+  `null` group is never offered or run. Unreadable stored JSON keeps the
+  verified image default and disables video; an account with no stored row keeps
+  the provider defaults, including SuperGrok video.
 
 ## Selection contract
 
@@ -44,7 +65,8 @@ The resolver takes a trusted `RunContext`: `remembered_choice`, `job_choice`,
 agent-editable tool arguments. A job choice takes precedence over a remembered
 choice. Storage is not implemented here. With neither stored choice, an
 unattended run returns `status: "skipped"`, `reason: "no_stored_choice"` and a
-plain-language report, even if an agent supplies a source in its tool call.
+plain-language report, even if an agent supplies a source in its tool call
+(the Settings default above is the exception, unchanged from before).
 
 ## Confirmation contract
 
@@ -68,10 +90,15 @@ the user approves. The receipt is one-use, expires after 15 minutes and is bound
 to the session, prompt, kind, account, worker, model, options and quote. It
 survives rebuilding the tool server on the next turn. Changing any bound value
 requires a new confirmation. A bare `confirmed: true` does not authorize spend.
+An unattended run cannot approve its own spend: above the threshold it returns
+`status: "skipped"`, `reason: "needs_confirmation"`, with no receipt or retry.
 
 Every result has a `price` object. USD amounts are decimal strings, not floats.
 `estimated` is not an invoice. `unknown` has null amounts, never zero. An unknown
 price returns `refused` with `reason: "price_unavailable"`, even when confirmed.
+Every failed or unknown-outcome submission, local or on a peer, says "Do not
+call again without the user's go-ahead." Expired unused receipts are deleted
+when the next one is issued.
 
 ## Spending and worker protocol
 
@@ -112,11 +139,11 @@ inferred from resolution names.
 OpenAI/xAI API media routes remain unavailable: this base's Default models
 schema endpoint is fal-only, and its native API capability table declares no
 available media combinations or pricing. ChatGPT/SuperGrok image costs are not
-reported by their native adapters, so those routes still refuse; they are not
-labelled free or included in a plan. ChatGPT video and native audio/3D have no
-verified combinations. These gaps must be resolved before step 1 is complete.
-No new live provider generation was exercised for this draft.
+reported by their native adapters, so naming those accounts in the unified
+tools still refuses; they are not labelled free or included in a plan. They keep
+working through the Settings default and the native plan tools above. ChatGPT
+video and native audio/3D have no verified combinations. No new live provider
+generation was exercised for this draft.
 
 The choice-card UI, remembered-choice storage and Settings changes are separate
-steps. Editing and media-transform tools retain their existing handlers; this
-contract covers the four generation entry points and text-based `runFalModel`.
+steps. Editing and media-transform tools retain their existing handlers.

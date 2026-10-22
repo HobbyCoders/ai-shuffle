@@ -17,6 +17,11 @@ KINDS = ("image", "video", "audio", "3d")
 # Owner-tunable ceiling for an unconfirmed item OR batch; never round floats here.
 CONFIRM_ABOVE_USD = Decimal("0.10")
 UNKNOWN_PRICE = {"currency": "USD", "unit": "item", "amount": None, "total": None, "status": "unknown"}
+SOURCE_NAMES = ("fal", "openai", "xai", "chatgpt", "supergrok")
+SOURCE_ALIASES = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgpt-plan": "chatgpt", "supergrok-plan": "supergrok"}
+# Every failed or unknown-outcome submission carries this, so an unconfirmed
+# outcome is never resubmitted (and possibly paid twice) on the agent's own.
+DO_NOT_RETRY = "Do not call again without the user's go-ahead."
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,21 @@ def matches(candidate: Candidate, choice: dict) -> bool:
                for key in ("source", "account", "worker", "model"))
 
 
+def normalize_source(source):
+    """Case-insensitive source names and aliases; account IDs are kept exact."""
+    if not isinstance(source, str) or not source.strip():
+        return source or None
+    key = source.strip().casefold()
+    return SOURCE_ALIASES.get(key, key if key in SOURCE_NAMES else source.strip())
+
+
+def no_retry(output):
+    output = dict(output) if isinstance(output, dict) else {"success": False}
+    error = output.get("error") if isinstance(output.get("error"), str) else "Generation did not confirm an outcome."
+    output["error"] = error if DO_NOT_RETRY in error else error.rstrip() + " " + DO_NOT_RETRY
+    return output
+
+
 def result(status, *, price=None, **values):
     return {"status": status, "success": status in ("completed", "catalog"), "price": dict(price or UNKNOWN_PRICE), **values}
 
@@ -111,7 +131,7 @@ class Resolver:
     async def catalog(self, kind, source=None, model=None, query=None, limit=15):
         if kind not in KINDS:
             return result("refused", error="Unknown generation kind.")
-        entries = await self.backend.catalog(kind, source=source, model=model, query=query, limit=limit)
+        entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit)
         return result("catalog", options=[entry.view() for entry in entries])
 
     async def generate(self, kind: str, args: dict, context: RunContext) -> dict:
@@ -128,15 +148,13 @@ class Resolver:
         choice = stored if context.unattended or not explicit else None
         if choice is None:
             choice = {"source": args.get("source"), "model": args.get("model"), "worker": args.get("worker")}
-        source = choice.get("source") or choice.get("account")
-        aliases = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgpt-plan": "chatgpt", "supergrok-plan": "supergrok"}
-        source = aliases.get(source, source)
+        source = normalize_source(choice.get("source") or choice.get("account"))
         try:
             candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt)
             candidates = [c for c in candidates if matches(c, {k: v for k, v in choice.items() if k != "source"})
                           and (not source or source in (c.source, c.account))]
             if not candidates:
-                return result("refused", error="No matching source/account and model is available. No other source was used.")
+                return result("refused", reason="no_match", error="No matching source/account and model is available. No other source was used.")
             if context.unattended and len(candidates) != 1:
                 return result("skipped", reason="stored_choice_ambiguous", kind=kind,
                               message="Generation skipped: the stored choice does not identify one account/model binding.")
@@ -171,7 +189,7 @@ class Resolver:
                 return result("choose", kind=kind, options=views)
             candidate = candidates[0]
             if not candidate.available or (candidate.source in ("chatgpt", "supergrok") and not candidate.verified):
-                return result("refused", price=candidate.price, error=candidate.reason or "Subscription combination is not verified.")
+                return result("refused", price=candidate.price, reason="unavailable", error=candidate.reason or "Subscription combination is not verified.")
             supplied = args.get("options", {})
             if not isinstance(supplied, dict):
                 return result("refused", error="options must be an object.")
@@ -191,6 +209,11 @@ class Resolver:
                 if args.get("confirmed") is True and isinstance(token, str):
                     approved = (await self.confirmations.consume(token, fingerprint) if self.confirmations
                                 else self._confirmations.pop(token, None) == fingerprint)
+                if not approved and context.unattended:
+                    # Nobody can approve here: never hand back a usable receipt.
+                    return result("skipped", price=candidate.price, reason="needs_confirmation", kind=kind,
+                                  choice=candidate.choice(), threshold_usd=str(CONFIRM_ABOVE_USD),
+                                  message="Generation skipped: its price is above the confirmation threshold and this run is unattended.")
                 if not approved:
                     if len(self._confirmations) >= 256:
                         self._confirmations.pop(next(iter(self._confirmations)))
@@ -202,9 +225,16 @@ class Resolver:
                                   confirmation_token=token,
                                   retry={"source": candidate.account, "model": candidate.model, "worker": candidate.worker,
                                          "options": candidate.options, "confirmed": True, "confirmation_token": token})
-            if not await self.backend.reserve(candidate, context):
+            try:
+                reserved = await self.backend.reserve(candidate, context)
+            except ValueError as exc:
+                # The cap could not be checked; that is never a reason to submit elsewhere.
+                return result("refused", price=candidate.price, reason="budget_unavailable", error=str(exc))
+            if not reserved:
                 return result("refused", price=candidate.price, reason="daily_cap", error="The daily spending cap would be exceeded.")
             output = await self.backend.execute(candidate, prompt, context)
+            if not isinstance(output, dict) or not output.get("success"):
+                output = no_retry(output)
             reported = output.get("price")
             price = candidate.price
             if (candidate.source == "supergrok" and kind == "video" and isinstance(reported, dict)
@@ -215,4 +245,4 @@ class Resolver:
                           choice=candidate.choice(), result=output)
         except ValueError as exc:
             # Backends raise only safe validation messages, not upstream bodies.
-            return result("refused", error=str(exc))
+            return result("refused", reason="invalid_request", error=str(exc))

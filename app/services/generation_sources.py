@@ -13,8 +13,26 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.core.generation_resolver import Candidate, RunContext, UNKNOWN_PRICE, price_total
+from app.core.generation_resolver import Candidate, DO_NOT_RETRY, RunContext, UNKNOWN_PRICE, price_total
 from app.db.async_database import run_sync
+
+# Only these kinds have per-account stored Native generation settings.
+NATIVE_GROUPS = ("image", "video")
+
+
+async def stored_native_group(account, kind):
+    """The account's stored Native generation group for ``kind``, or None.
+
+    ``native_generation_settings.load`` applies the #377 recovery rules (an
+    unreadable row keeps the verified image default but disables video; a
+    missing row keeps provider defaults). None means disabled: never run it.
+    """
+    from app.core import native_generation_settings as native
+    try:
+        settings = await run_sync(native.load, account)
+    except ValueError:
+        return None
+    return getattr(settings, kind, None) if kind in NATIVE_GROUPS else None
 
 
 class Sources:
@@ -57,9 +75,9 @@ class Sources:
             if catalog_service.is_stale:
                 await catalog_service.refresh(await self.fal_key())
             models = catalog_service.search(output_type=kind, q=query)
-            # Only text generation endpoints belong in these four tools. The
-            # editing/transform tools keep their existing schemas and handlers.
-            models = [m for m in models if m.category.startswith("text-to-") and (not model or m.endpoint_id == model)]
+            # Discovery offers text generation endpoints only; an exactly named
+            # model (runFalModel, image-to-video, audio-to-audio...) keeps any category.
+            models = [m for m in models if (m.endpoint_id == model if model else m.category.startswith("text-to-"))]
             for m in models[:max(1, min(limit, 50))]:
                 schema = await schema_service.get_schema(m.endpoint_id, await self.fal_key())
                 options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
@@ -82,6 +100,11 @@ class Sources:
             capability = native.capabilities(provider_kind).get(kind) or {}
             combination = capability.get("verified_combination")
             if combination and capability.get("available"):
+                # The owner's stored settings decide; a disabled group is skipped.
+                stored = await stored_native_group(account, kind)
+                if stored is None:
+                    continue
+                combination = stored.model_dump()
                 if model and combination["model"] != model:
                     continue
                 price = dict(UNKNOWN_PRICE)
@@ -145,6 +168,8 @@ class Sources:
             raise ValueError("Pass the model separately, not in options.")
         values = {**options, "model": candidate.model}
         kind = "grok" if candidate.source == "supergrok" else "chatgpt"
+        if await stored_native_group(candidate.account, candidate.kind) is None:
+            raise ValueError("This kind is disabled in the account's Native generation settings.")
         try:
             if candidate.kind == "image":
                 parsed = native.NativeImageSettings.model_validate(values)
@@ -175,7 +200,7 @@ class Sources:
         except asyncio.CancelledError:
             raise
         except Exception:
-            return {"success": False, "error": "Generation did not confirm an outcome. The budget remains reserved; no fallback or automatic retry was made."}
+            return {"success": False, "error": "Generation did not confirm an outcome. The budget remains reserved; no fallback or automatic retry was made. " + DO_NOT_RETRY}
 
     @staticmethod
     def _artifact_result(output, kind, session_id):
@@ -209,6 +234,9 @@ class Sources:
         # executed on an account-holding peer. Never return a peer-local path.
         if not context.owner or not context.session_id:
             return {"success": False, "error": "A saved owner session is required for native generation."}
+        stored = await stored_native_group(candidate.account, candidate.kind)
+        if stored is None or stored.model_dump() != {"model": candidate.model, **candidate.options}:
+            return {"success": False, "error": "Native generation settings changed or disable this kind; nothing was submitted."}
         from app.core.artifact_store import store_bytes
         from app.core.native_generation_settings import NativeImageSettings, NativeVideoSettings
         from app.core.provider import native_images, native_video, subscription_images, supergrok_images

@@ -175,3 +175,31 @@ async def test_ambiguous_stored_choice_skips_instead_of_asking_unattended():
     output = await Resolver(backend).generate("image", {"prompt": "tree"}, RunContext(remembered_choice={"source": "fal"}))
     assert output["status"] == "skipped" and output["reason"] == "stored_choice_ambiguous"
     assert backend.calls == []
+
+
+async def test_unattended_run_cannot_approve_its_own_spend():
+    entry = replace(candidate(), price={**PRICE, "amount": "0.25", "total": "0.25"})
+    backend = FakeBackend([entry])
+    context = RunContext(session_id="session", remembered_choice=entry.choice())
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "confirmed": True}, context)
+    assert output["status"] == "skipped" and output["reason"] == "needs_confirmation"
+    assert "confirmation_token" not in output and "retry" not in output
+    assert not any(c[0] in ("reserve", "execute") for c in backend.calls)
+
+
+@pytest.mark.parametrize("returned", [{"success": False, "error": "Provider timed out."}, {"success": False}, None])
+async def test_failed_or_unknown_outcome_says_do_not_retry(returned):
+    from app.core.generation_resolver import DO_NOT_RETRY
+    backend = FakeBackend([candidate()])
+    backend.execute = AsyncMock(return_value=returned)
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "source": "fal"}, INTERACTIVE)
+    assert output["status"] == "failed"
+    assert output["result"]["error"].endswith(DO_NOT_RETRY)
+
+
+async def test_budget_check_failure_never_submits():
+    backend = FakeBackend([candidate()])
+    backend.reserve = AsyncMock(side_effect=ValueError("The network founder is unavailable."))
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "source": "fal"}, INTERACTIVE)
+    assert output["status"] == "refused" and output["reason"] == "budget_unavailable"
+    assert not any(c[0] == "execute" for c in backend.calls)

@@ -183,8 +183,8 @@ def test_legacy_grok_settings_are_read_compatible_and_account_local(monkeypatch)
     assert load("grok-b").image.model == "grok-imagine-image"
 
 
-@pytest.mark.parametrize("kind", ["grok", "chatgpt", "xai", "openai"])
-async def test_video_native_alias_is_replaced_by_one_unified_tool(monkeypatch, kind):
+@pytest.mark.parametrize("kind,exposed", [("grok", True), ("chatgpt", False), ("xai", False), ("openai", False)])
+async def test_video_registry_is_subscription_specific(monkeypatch, kind, exposed):
     from app.core.provider import harness_adapter as ha
     from app.core.provider.types import SessionOptions
     from app.core.session_modes import CHAT_MODE_TOOL_SURFACE, PROACTIVE_DENIED_TOOLS
@@ -194,6 +194,7 @@ async def test_video_native_alias_is_replaced_by_one_unified_tool(monkeypatch, k
     options = SessionOptions(model="unrelated-model", extra={"provider_id": "account", "session_mode": "chat"})
     adapter._options = options
     registry = await adapter._build_registry(options, native=True)
-    assert "GenerateNativeVideo" not in {s.name for s in registry.list_tools(loaded_only=False)}
+    assert ("GenerateNativeVideo" in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
+    assert "GenerateNativeVideo" in CHAT_MODE_TOOL_SURFACE
     assert "mcp__ai-tools__generateVideo" in CHAT_MODE_TOOL_SURFACE
     assert "GenerateNativeVideo" in PROACTIVE_DENIED_TOOLS

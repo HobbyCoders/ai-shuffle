@@ -186,16 +186,20 @@ async def test_chat_mode_creates_only_a_session_owned_artifact(tmp_path, mock_db
     assert not (tmp_path / "forbidden-or-absent-workspace").exists()
 
 
-@pytest.mark.parametrize("kind,mode", [("openai_responses", "code"), ("openai_responses", "chat"),
-                                       ("anthropic", "code"), ("openrouter", "code")])
-async def test_native_alias_is_not_a_selection_or_spending_bypass(kind, mode):
+@pytest.mark.parametrize("kind,mode,exposed", [("openai_responses", "code", True),
+                                               ("openai_responses", "chat", True),
+                                               ("anthropic", "code", False), ("openrouter", "code", False)])
+async def test_registry_exposure_tracks_transport_not_model_name(monkeypatch, kind, mode, exposed):
     from app.core.provider.types import SessionOptions
 
     adapter = HarnessAdapter()
     adapter._provider_kind = kind
-    registry = await adapter._build_registry(SessionOptions(model="unrelated-model-name", extra={"session_mode": mode}), native=True)
-    # The unified ai-tools handler owns all generation, across transports.
-    assert SPEC.name not in {s.name for s in registry.list_tools(loaded_only=False)}
+    from app.core.provider import harness_adapter
+    monkeypatch.setattr(harness_adapter, "_lookup_provider_row", lambda key: {"id": key, "provider_type": "chatgpt"})
+    registry = await adapter._build_registry(SessionOptions(model="unrelated-model-name", extra={"session_mode": mode, "provider_id": "chatgpt-row"}), native=True)
+    # A verified ChatGPT account on the Responses transport gets the tool;
+    # outside the turn-by-turn core it is not eagerly loaded.
+    assert (SPEC.name in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
     assert SPEC.name not in {s.name for s in registry.list_tools()}
 
 

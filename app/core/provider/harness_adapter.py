@@ -4912,8 +4912,31 @@ class HarnessAdapter(ProviderAdapter):
             from fluid.tools.builtins import register_builtins
 
             register_builtins(registry)
-            # Media generation is registered once, through ai-tools. Keeping
-            # provider-bound native aliases would bypass selection and spend gates.
+            if self._provider_kind == "openai_responses":
+                # Step 1 of unified generation is additive: the session's own
+                # ChatGPT/SuperGrok plan keeps these tools, which honour the
+                # account's stored Native generation settings (#377).
+                from app.core.native_generation_settings import capabilities, provider_kind
+                native_account = (options.extra or {}).get("provider_id")
+                native_caps = {}
+                if native_account:
+                    try:
+                        native_caps = capabilities(provider_kind(_lookup_provider_row(native_account) or {}))
+                    except ValueError:
+                        pass  # Unknown/API-key accounts are not verified native media lanes.
+                if native_caps.get("image", {}).get("available"):
+                    from app.core.provider.native_images import SPEC, make_handler
+                    registry.register_builtin(SPEC, make_handler(
+                        lambda: self._engine, self._resolve_app_session_id,
+                        chat_mode=_session_mode(options) == "chat",
+                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
+                    ))
+                if native_caps.get("video", {}).get("available"):
+                    from app.core.provider.native_video import SPEC as VIDEO_SPEC, make_handler as video_handler
+                    registry.register_builtin(VIDEO_SPEC, video_handler(
+                        lambda: self._engine, self._resolve_app_session_id,
+                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
+                    ))
             builtins_registered = True
             logger.info(
                 "[HarnessAdapter] registered fluid builtin tools for native leg",

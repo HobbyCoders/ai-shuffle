@@ -32,10 +32,15 @@ def backend(monkeypatch):
         ParamField("num_images", type="integer", default=1, minimum=1, maximum=4),
         ParamField("size", type="enum", default="square", enum=["square", "wide"])], "prompt")
     monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
-    monkeypatch.setattr(model_providers, "list_usable_model_providers", lambda: [
-        {"id": "plan-a", "provider_type": "chatgpt", "auth_token": "never-return-this"},
-        {"id": "plan-b", "provider_type": "grok"}, {"id": "api-a", "provider_type": "openai", "auth_mode": "api_key"},
-        {"id": "api-b", "provider_type": "xai", "auth_mode": "api_key"}])
+    from app.db import database
+    rows = [{"id": "plan-a", "provider_type": "chatgpt", "auth_token": "never-return-this"},
+            {"id": "plan-b", "provider_type": "grok"}, {"id": "api-a", "provider_type": "openai", "auth_mode": "api_key"},
+            {"id": "api-b", "provider_type": "xai", "auth_mode": "api_key"}]
+    monkeypatch.setattr(model_providers, "list_usable_model_providers", lambda: rows)
+    # Stored Native generation settings are read through the real load() and
+    # the isolated test DB; only the provider rows are fixtures.
+    monkeypatch.setattr(database, "get_model_provider", lambda provider_id, include_token=True: next(
+        ({k: v for k, v in r.items() if k != "auth_token"} for r in rows if r["id"] == provider_id), None))
     monkeypatch.setattr(source, "fal_price", AsyncMock(return_value=dict(PRICE)))
     return source
 
@@ -136,7 +141,7 @@ async def test_selected_chatgpt_account_produces_session_artifact(backend, monke
     entry.price = dict(PRICE)  # Fake a trusted quote; production has none yet.
     monkeypatch.setattr(backend, "catalog", AsyncMock(return_value=[entry]))
     monkeypatch.setattr(backend, "reserve", AsyncMock(return_value=True))
-    monkeypatch.setattr(database, "get_model_provider", lambda *args, **kw: {"id": "plan-a", "default_model": "text-model"})
+    monkeypatch.setattr(database, "get_model_provider", lambda *args, **kw: {"id": "plan-a", "provider_type": "chatgpt", "default_model": "text-model"})
     monkeypatch.setattr(subscription_images, "_text_model", lambda row: row["default_model"])
     open_client = AsyncMock(return_value=(object(), None))
     monkeypatch.setattr(subscription_images, "_open_client", open_client)
@@ -169,3 +174,81 @@ async def test_chat_generation_cannot_upload_arbitrary_local_file(backend, monke
     assert output["status"] == "refused"
     assert "chat uploads" in output["error"]
     backend.node.call.assert_not_awaited()
+
+
+# ---- Stored Native generation settings decide eligibility (#377 recovery) ----
+
+def store(provider_id, raw):
+    from app.db import database
+    database.set_system_setting(f"native_generation:{provider_id}", raw)
+
+
+async def test_missing_settings_row_keeps_provider_defaults_including_supergrok_video(backend):
+    video = await backend.local_catalog("video", source="plan-b")
+    assert [(e.source, e.available, e.price["total"]) for e in video] == [("supergrok", True, "0.02")]
+    assert {e.source for e in await backend.local_catalog("image") if e.available} >= {"chatgpt", "supergrok"}
+
+
+async def test_unreadable_settings_json_disables_video_but_keeps_verified_image(backend):
+    store("plan-b", "{not json")
+    assert await backend.local_catalog("video", source="plan-b") == []
+    image = await backend.local_catalog("image", source="plan-b")
+    assert [e.options for e in image] == [{"size": "1k", "quality": None, "format": "jpeg"}]
+
+
+async def test_stored_null_video_is_never_offered(backend):
+    import json
+    from app.core.native_generation_settings import capabilities
+    store("plan-b", json.dumps({"image": capabilities("grok")["image"]["verified_combination"], "video": None}))
+    assert await backend.local_catalog("video", source="plan-b") == []
+    assert await backend.local_catalog("image", source="plan-b") != []
+
+
+@pytest.mark.parametrize("raw", ["{not json", '{"image": null, "video": null}'])
+async def test_disabled_supergrok_video_never_spends_without_confirmation(backend, monkeypatch, raw):
+    # The owner disabled SuperGrok video (or recovery did): a $0.02 video,
+    # under the confirmation threshold, must still not be submitted.
+    from app.core.provider import native_video
+    submit = AsyncMock()
+    monkeypatch.setattr(native_video, "generate", submit)
+    reserve = AsyncMock(return_value=True)
+    monkeypatch.setattr(backend, "reserve", reserve)
+    store("plan-b", raw)
+    output = await Resolver(backend).generate("video", {"prompt": "tree", "source": "plan-b"}, CONTEXT)
+    assert output["status"] == "refused"
+    submit.assert_not_awaited()
+    reserve.assert_not_awaited()
+
+
+async def test_settings_disabled_after_quote_block_submission(backend, monkeypatch):
+    from app.core.provider import native_video
+    submit = AsyncMock()
+    monkeypatch.setattr(native_video, "generate", submit)
+    entry = (await backend.local_catalog("video", source="plan-b"))[0]
+    store("plan-b", '{"image": null, "video": null}')
+    output = await backend.execute_local(entry, "tree", CONTEXT)
+    assert output["success"] is False
+    submit.assert_not_awaited()
+
+
+async def test_source_names_are_case_insensitive(backend, monkeypatch):
+    monkeypatch.setattr(backend, "reserve", AsyncMock(return_value=True))
+    for source in ("FAL", "Fal.AI", "fal"):
+        output = await Resolver(backend).generate("image", {"prompt": "tree", "source": source, "model": "fake/model"},
+                                                  replace(CONTEXT, session_id=None))
+        assert output["status"] == "completed", source
+    catalog = await Resolver(backend).catalog("video", source="SuperGrok")
+    assert [o["source"] for o in catalog["options"]] == ["supergrok"]
+    # Account IDs stay exact: a differently cased ID is another account.
+    assert (await Resolver(backend).catalog("video", source="PLAN-B"))["options"] == []
+
+
+async def test_remote_unknown_outcome_keeps_do_not_retry_instruction(backend, monkeypatch):
+    from app.core.generation_resolver import DO_NOT_RETRY
+    from app.network import generation
+    async def unreachable(*args, **kw):
+        raise ValueError("The account-holding worker did not confirm the outcome. Do not automatically retry a generation submission.")
+    monkeypatch.setattr(generation, "execute", unreachable)
+    remote = Candidate("fal", "fal-ai", "worker-b", "fake/model", "image", False, price=dict(PRICE))
+    output = await backend.execute(remote, "tree", CONTEXT)
+    assert output["success"] is False and DO_NOT_RETRY in output["error"]

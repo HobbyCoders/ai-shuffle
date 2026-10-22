@@ -11,6 +11,13 @@ PREFIX = "network_generation_confirmation:"
 TTL = 15 * 60
 
 
+def _expired(value, now):
+    try:
+        return not float(json.loads(value)["expires"]) > now
+    except (ValueError, TypeError, KeyError):
+        return True
+
+
 class Confirmations:
     async def issue(self, fingerprint):
         token = secrets.token_urlsafe(24)
@@ -20,8 +27,16 @@ class Confirmations:
     @staticmethod
     def _issue(token, fingerprint):
         with get_db() as conn:
-            conn.cursor().execute("INSERT INTO system_settings (key,value) VALUES (%s,%s)",
-                                  (PREFIX + token, json.dumps({"fingerprint": fingerprint, "expires": time.time() + TTL})))
+            cursor = conn.cursor()
+            # Receipts that expired unused are removed here, so declined
+            # confirmations do not accumulate in system_settings.
+            cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s", (PREFIX + "%",))
+            now = time.time()
+            for row in cursor.fetchall():
+                if row["key"].startswith(PREFIX) and _expired(row["value"], now):
+                    cursor.execute("DELETE FROM system_settings WHERE key=%s", (row["key"],))
+            cursor.execute("INSERT INTO system_settings (key,value) VALUES (%s,%s)",
+                           (PREFIX + token, json.dumps({"fingerprint": fingerprint, "expires": now + TTL})))
 
     async def consume(self, token, fingerprint):
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
