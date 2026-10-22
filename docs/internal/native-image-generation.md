@@ -1,11 +1,16 @@
-# Native Responses image generation
+# Native generation: images and video
 
-`GenerateNativeImage` is exposed in sessions using the Responses transport. It
-uses the session's current provider client, credential and orchestrator model.
-The separate request contains the native `image_generation` tool and a matching
-`tool_choice`; it never translates that tool into a function or falls back to
-another provider. The assistant-facing function participates in the ordinary
-tool permissions and allow/deny lists.
+`GenerateNativeImage` is exposed only on the Responses transport with a bound
+account whose Image capability is available. OpenAI/xAI API-key and no-account
+(including environment-key fallback) sessions lose the tool until verified.
+Unbound direct calls are refused without sending a request. It uses the bound
+provider row and credential, not chat-model name sniffing. ChatGPT uses a separate request containing
+the native `image_generation` tool and matching `tool_choice`. SuperGrok
+subscription sessions instead use the tested xAI `/v1/images/generations`
+endpoint with `grok-imagine-image`, `n=1`, square `1k` and base64 output. No
+OpenAI-specific fields reach xAI and neither route falls back to another provider.
+The assistant-facing function participates in the ordinary tool permissions and
+allow/deny lists.
 
 This route does not require fal.ai. A failure in either route says nothing about
 the other route. The provider settings panel explains this separation. Provider
@@ -16,8 +21,24 @@ could contain credentials. Unknown account capabilities are not advertised as
 verified support.
 
 The optional `image_model` selects the exact provider-native image model; omitting
-it uses that endpoint's default. `size` and `quality` are passed through after
-shape validation, so the provider decides whether they are supported. OpenAI's
+it reads the session account's Native generation Image group. Overrides
+are validated against the verified capability table, currently only ChatGPT's
+provider-selected model/auto size/auto quality/PNG and SuperGrok's
+`grok-imagine-image`/square 1k/JPEG. SuperGrok quality is hidden/null until tested.
+OpenAI/xAI API-key accounts appear with locked, not-yet-verified options rather
+than inheriting a subscription's support. Native generation is account-scoped
+and does not change the AI Shuffle direct tools or their existing ChatGPT choice.
+Stale account/legacy settings return `stale: true` with a sanitized GET reason.
+When JSON parses, groups are validated independently: explicit null remains
+disabled, valid groups are preserved, invalid Image uses its verified default
+(or null if unavailable), and invalid Video becomes null. Unparseable JSON
+uses the verified Image default (or null if unavailable) and disables Video
+because the owner's choice is unknown. Accounts with no stored settings retain
+their provider defaults, including Video on SuperGrok. Tools use the same
+recovery without rewriting the stored row; one stale account cannot break the
+list. The settings UI is cancelled and superseded by #379 ("say what you want"
+generation). The unscoped direct `supergrok-subscription` model lane is not
+included. See the mirrored settings API reference for the GET/PUT schema. OpenAI's
 [image-tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
 documents the native tool, forced tool choice, final base64 output, and examples
 using GPT-6 Astra with GPT Image 2.5 Sunburst. These examples do not establish
@@ -25,8 +46,9 @@ support for another account, subscription endpoint or compatible provider.
 
 The stream normalizer separates progress/partial previews from final image
 results and deduplicates images repeated in the terminal response. The tool
-requests final PNG output without partial previews. Final images have bounded
-size and PNG container validation. Workspace sessions save them under
+requests final PNG output without partial previews on ChatGPT. SuperGrok's
+tested output is JPEG. Final images have bounded size and PNG/JPEG container
+validation, and MIME type/extension follow the returned bytes. Workspace sessions save them under
 `generated-images` and return a session-scoped download URL. Chat sessions store
 session-owned artifacts and never accept a filesystem destination. Both routes
 return inline image blocks through the existing durable tool-result pipeline,
@@ -37,7 +59,10 @@ and its newly created files removed; shared content-addressed artifacts are
 never deleted as cancellation cleanup. Incomplete preview images are not saved
 as final output. Ambiguous transport/server failures do not automatically replay
 a native image request, since it may already have produced a billed image. The
-existing explicit 401 credential-refresh retry remains available.
+explicit 401 credential-refresh path shares one refresh budget across a media
+operation. Only a definite 401 retries its rejected request once with the new
+credential, including polls; accepted jobs and ambiguous failures are never
+resubmitted.
 
 Provider-observed usage is recorded once for the auxiliary request, including
 observations received before cancellation. Image charges are not estimated from
@@ -45,7 +70,49 @@ the orchestrator's text-token price. Usage marks this cost as incomplete, and
 the tool/settings explain that session cost estimates exclude native image
 charges.
 
+## SuperGrok video
+
+`GenerateNativeVideo` is offered only on SuperGrok subscription sessions and
+uses the same server-side credential resolver. It sends one
+`/v1/videos/generations` submission, then polls `/v1/videos/{request_id}` at
+5-second intervals with a 180-second total deadline. Timeout/cancellation never
+resubmits a job that may still finish and incur charges. Successful MP4 output
+is downloaded from an allowlisted HTTPS media host without subscription headers
+or URL logging and saved as a session-owned artifact. The playable
+`/api/v1/artifacts/{hash}/video.mp4?session_id=...` alias delegates the existing
+artifact/session authorization, serves inline MP4 with byte-range support, and
+keeps signed holder redirects on the playable route. Timeout text explicitly
+requires the user's go-ahead before calling again. Provider-reported cost stays
+in the JSON result and structured result fields; inline ToolUseMessage playback
+and visible cost presentation remain pending in the separate frontend build.
+
+Only `grok-imagine-video-1.5-lite`, 1 s, 480p, 16:9, silent text-to-video is
+selectable. Documented but untested durations/resolutions/aspects/audio are
+locked. No ChatGPT video controls, API-key video routes, image-to-video or
+editing are offered. The tool returns provider-reported USD ticks and decimal
+cost separately from chat token pricing; this is not free/unlimited usage.
+
+The coordinated 2026-10-21 live probe submitted this verified combination once,
+polled the same job four times, and downloaded an 848×480 H.264 MP4, 83,831 bytes,
+24 fps, 25 decoded frames and no audio. The job completed in 23.643 seconds and
+reported 200,000,000 USD ticks ($0.02). That probe verified the real provider's
+producing path, not this branch's final tool wiring, running-app UI or billing
+invoice/quota debit. The branch's video integration is covered by synthetic HTTP
+boundary tests; it made no additional billed video request.
+
 ## Acceptance
+
+On 2026-10-21, two isolated Linux handler probes used the connected SuperGrok
+subscription through the production credential resolver (read-only credential
+snapshots), settings loader, xAI request path and workspace image saver. Both
+returned HTTP 200, `grok-imagine-image`, square `1k`, one 1024×1024 JPEG each.
+The initial probe returned 130,034 bytes in 5.874 seconds. The final
+account-scoped settings probe returned 131,108 bytes in 5.345 seconds. Both saved
+images decoded successfully and auxiliary image usage was recorded. Total:
+two image requests, no retries and no native Responses-tool check. These were
+real-provider handler checks, not running-app/UI or permission-card checks.
+No request for `grok-imagine-image-2.0` or `2k` was made; both remain locked.
+ChatGPT's default request shape is unchanged and was not re-run live.
 
 Regression coverage exercises the real Responses client, native loop, tool
 dispatch, saved bytes, inline event serialization/replay, credential/endpoint
