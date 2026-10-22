@@ -37,6 +37,11 @@ def fake_apt(tmp_path):
         config = pathlib.Path(os.environ["APT_CONFIG"]).read_text()
         assert 'APT::Get::Upgrade "false";' in config
         assert 'Dir::Etc::sourceparts "-";' in config
+        cache = pathlib.Path(os.environ["npm_config_cache"])
+        assert cache.parent == pathlib.Path(os.environ["APT_CONFIG"]).parent
+        cache.mkdir(exist_ok=True)
+        (cache / "root-write").touch()
+        (root / "npm-cache").write_text(str(cache))
         log = root / "events"
         with log.open("a") as stream:
             stream.write("apt\n")
@@ -105,6 +110,7 @@ def test_timeout_kills_term_resistant_lock_holder_before_repair_and_retry(fake_a
     assert result.returncode == 0, result.stdout + result.stderr
     assert (root / "events").read_text() == "apt\nrepair\napt\n"
     assert "attempt 1 failed (exit 124" in result.stdout
+    assert not Path((root / "npm-cache").read_text()).exists()
 
 
 def test_two_failures_fail_closed_without_dpkg_repair(fake_apt):

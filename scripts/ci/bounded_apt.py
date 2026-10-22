@@ -79,6 +79,10 @@ def main(args: list[str]) -> int:
         config = Path(directory) / "apt.conf"
         config.write_text(APT_OPTIONS)
         os.environ["APT_CONFIG"] = str(config)
+        # Root npx must not create root-owned entries in the runner's ~/.npm.
+        # Only dependency setup uses this disposable cache; browser downloads
+        # remain a separate, runner-owned workflow command.
+        os.environ["npm_config_cache"] = str(Path(directory) / "npm")
         return supervise(args[1:])
 
 
