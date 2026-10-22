@@ -152,6 +152,7 @@ def answer_question_and_enqueue(
             profile_id=profile_id, project_id=context.get("project_id"),
             worktree_id=context.get("worktree_id"), overrides=overrides,
             payload={**(context.get("payload") or {}), "deferred_user_record": True,
+                     "question_answer_human_input": human_input,
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
             command_id=f"question-answer-{row['id']}", _conn=conn,
         )
