@@ -175,3 +175,46 @@ def test_corpus_size_and_guidance_budget():
         if text:
             assert len(text) <= 75
             assert "\n" not in text  # one routing sentence, no repeated prompt paragraphs
+
+
+@pytest.mark.parametrize("cancel,origin,blocked", [
+    (False, "user", False), (True, "user", True), (False, "system", True),
+])
+async def test_only_delivered_user_steers_exempt_bash(cancel, origin, blocked):
+    from fluid.events.ops import Steer
+
+    registry = ToolRegistry()
+    ran = []
+    steered = False
+
+    async def record(args, ctx):
+        nonlocal steered
+        ran.append(dict(args))
+        if not steered:
+            steered = True
+            await loop.submit(Steer(text="Run `cat f`", id="intent", origin=origin))
+            # Submission is recallable and must not yet change guard intent.
+            assert loop.ctx.extra["bash_file_guard_user_text"] == "Inspect"
+            if cancel:
+                assert await loop.cancel_steer("intent")
+        return ToolOutcome(text="done")
+
+    for name in ("Bash", "Read"):
+        registry.register_builtin(ToolSpec(name=name, description=name,
+            input_schema={"type": "object"}), record)
+    provider = ScriptedProvider([
+        _tool("read-1", "Read", '{"file_path":"f"}'),
+        _tool("bash-1", "Bash", '{"command":"cat f"}'),
+        _text("finished"),
+    ])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="fixture",
+        registry=registry, permissions=PermissionEngine("never_ask"))
+    await loop.submit(UserTurn(content="Inspect"))
+    await loop.wait_turn()
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    result = next(e for e in events if isinstance(e, ToolResult) and e.name == "Bash")
+    assert result.is_error is blocked
+    assert ("Use Read" in result.output) is blocked
+    assert ran == ([{"file_path": "f"}] if blocked else
+                   [{"file_path": "f"}, {"command": "cat f"}])

@@ -1669,8 +1669,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                 op = replace(op, text=defang_harness_markers(op.text))
             if self._turn_task is not None and not self._turn_task.done():
                 self._pending_steers.append(op)
-                if op.origin == "user":
-                    self.ctx.extra["bash_file_guard_user_text"] = op.text
             else:
                 raise RuntimeError(
                     "no turn is running — send a normal message instead of a steer"
@@ -6035,6 +6033,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._pending_steers:
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
+            # Only delivered user intent may exempt a later command. A queued
+            # steer can still be recalled; peers/notices carry no user authority.
+            for _, text, sender, origin in delivered:
+                if origin == "user" and sender is None:
+                    self.ctx.extra["bash_file_guard_user_text"] = text
             self._tool_deliveries.extend(
                 SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
                 for steer_id, text, sender, origin in delivered
