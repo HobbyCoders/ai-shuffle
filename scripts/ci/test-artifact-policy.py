@@ -224,7 +224,7 @@ class ArtifactPolicyTests(unittest.TestCase):
     def test_ci_diagnostics_upload_only_on_failure(self):
         diagnostics = {
             ("android.yml", "android-ui"): "android-ui-verification-api-${{ matrix.api }}",
-            ("ci-browser-workspace.yml", "workspace"): "browser-workspace-screenshots",
+            ("ci-browser-workspace.yml", "workspace"): "browser-workspace-screenshots-${{ matrix.chrome-mode }}",
             ("container-postgres.yml", "container-postgres"): "container-postgres-${{ github.sha }}",
             ("build-branch.yml", "build"): "container-postgres-${{ github.sha }}",
         }

@@ -150,7 +150,7 @@ def test_browser_jobs_have_cold_install_budget_and_lockfile_cache(job, minutes, 
 ])
 def test_javascript_audits_use_npm_11_without_reducing_scope(step_name, directory):
     jobs = workflow("ci-frontend.yml")["jobs"]
-    job = jobs["browser-mcp" if directory == "browser-mcp" else "frontend"]
+    job = jobs[{"browser-mcp": "browser-mcp", "frontend": "contracts", "tools": "tools"}[directory]]
     step = next(step for step in job["steps"] if step.get("name") == step_name)
     assert step.get("working-directory", job.get("defaults", {}).get("run", {}).get("working-directory")) == directory
     audits = [command.strip() for command in re.split(r"\n|&&", step["run"])
@@ -192,10 +192,12 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert setup["timeout-minutes"] == "4"
     assert "if" not in setup  # OS dependencies are needed even on a cache hit.
     assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
-    assert "for attempt in 1 2; do" in setup["run"]
-    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium" in setup["run"]
-    assert 'echo "::error::Chromium dependency installation failed' in setup["run"]
-    assert setup["run"].rstrip().endswith("exit 1")
+    assert 'sudo env "PATH=$PATH" timeout --kill-after=10s 90s npx --no-install playwright-core install-deps chromium' in setup["run"]
+    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in setup["run"]
+    assert "URIs: https://archive.ubuntu.com/ubuntu/" in setup["run"]
+    assert "--allow-unauthenticated" not in setup["run"]
+    assert "trusted=yes" not in setup["run"]
+    assert "||" not in setup["run"]  # Neither install phase may fail open.
     assert tests["timeout-minutes"] == "8"
     assert "timeout --kill-after=10s 420s npm test" in tests["run"]
     assert 'exit "$result"' in tests["run"]

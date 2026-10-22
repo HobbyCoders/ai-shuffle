@@ -19,17 +19,26 @@ These workflows retain manual dispatch and also run on unfiltered
 - `ci-backend.yml`: four backend shards, parallel real PostgreSQL/boot contracts,
   unconditional security checks and the stable fail-closed `Backend tests` gate.
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment.
-- `ci-frontend.yml`: frontend, mobile, tools and browser-mcp checks.
+- `ci-frontend.yml`: four full frontend Vitest shards, production build (including
+  mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
+  tools/WebCrypto vectors and Browser MCP run in parallel. The stable
+  `JavaScript package checks` aggregate requires every branch to succeed.
 - `desktop.yml`: desktop typecheck and unit tests; packaging stays manual.
 - `desktop-source-checks.yml`: source-update protocol regressions.
-- `windows-suite.yml`: the native desktop part on PRs. The full parallel Windows
-  suite remains available by dispatch while unrelated backend portability
-  failures are repaired (Internal tracking: #381). Linux PR checks still run
-  the complete backend suite for backend/shared changes. No assertions or failure
-  behavior are weakened.
+- `windows-suite.yml`: three native desktop shards on PRs, with a fail-closed
+  `Windows desktop` aggregate. Source-update recovery cases share an isolated
+  fixture across nine duration-balanced files. Actual executed-file inventories
+  must form an exact disjoint union; the aggregate reports runtime test counts
+  and verifies the moved test-body snapshot. The full manual Windows matrix is
+  unchanged (Internal tracking: #381). Linux PR checks still run the complete
+  backend suite for backend/shared changes. No assertions or failure behavior
+  are weakened.
 - `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
 - `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
-- `ci-browser-workspace.yml`: editor and real browser-workspace integration checks.
+- `ci-browser-workspace.yml`: editor smoke plus independent `external`,
+  `panel-demand` and `direct-page-demand` real Chromium/rendered-UI cases. Each
+  retains breadcrumb and provisioned shadow-root auth-editor checks. The stable
+  `Real browser workspace` aggregate requires smoke and all three cases.
 - `container-postgres.yml`: candidate image lifecycle, isolation and install checks,
   without publishing or signing. This is broader than a small policy check but
   covers the production container path without requiring secrets.
@@ -50,12 +59,24 @@ and its README; the app still checks `docs/content` against the frontend copy.
 
 ## Hosted browser and PostgreSQL prerequisites
 
-The JavaScript package job keeps its 20-minute overall limit. Browser MCP runs
-independently on another standard runner with a 15-minute job budget, so neither
-suite can consume the other's time. Managed Chromium uses a lockfile-keyed browser
-cache, while OS dependencies are installed on every run.
-Installation has two 90-second attempts within a four-minute step; Browser MCP
-build/tests have a separate eight-minute step and a 420-second test deadline with
+The parallel JavaScript package branches retain 20-minute job limits. Each
+frontend shard proves that Vitest's configured sequencer partitions the complete
+unsharded file inventory without duplicates or omissions, including dynamic docs
+consumers. The five-minute aggregate fails on failed, cancelled, skipped or missing
+branches. Browser MCP runs independently on another standard runner with a
+15-minute job budget and feeds that aggregate. Managed Chromium uses a
+lockfile-keyed browser cache, while OS dependencies are installed on every run.
+The three workspace cases reuse the same browser-cache policy and always install
+OS prerequisites; each retains its 25-minute limit and real-browser/UI opt-ins.
+Windows desktop shards retain 60-minute limits, cache pip/npm downloads by
+requirements/lockfiles, and build independently before Node's native sharding.
+No runner shares mutable `node_modules`; mobile links the frontend install via
+`npm run deps`.
+OS prerequisites and browser downloads each have a 90-second deadline within a
+four-minute step. The OS timeout runs as root so it can reap apt children; browser
+downloads remain runner-owned and cached. OS packages use the primary signed
+Ubuntu archive instead of the hosted Azure mirror fallback. Browser MCP build/tests
+have a separate eight-minute step and a 420-second test deadline with
 an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
 restriction is disabled only on the disposable runner so the sandboxed editor
 fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
