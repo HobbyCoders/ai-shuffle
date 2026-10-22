@@ -1,8 +1,8 @@
 """Bounded Linux backstop for receipted AI Shuffle scratch, not a /tmp cleaner.
 
 Generic tmp*, probe-, cdp-, ci- and unmarked legacy directories are NEVER owned.
-Permission/scan failures fail closed. A dead owner plus a six-hour TTL is needed
-in addition to checking every process's cwd and open descriptors.
+Potentially relevant permission/scan failures fail closed. A dead owner plus a
+six-hour TTL is needed in addition to checking process cwd and open descriptors.
 """
 import asyncio
 import json
@@ -18,31 +18,68 @@ from app.core.temp_scratch import MARKER, PREFIXES, process_identity
 
 log = logging.getLogger(__name__)
 MAX_ENTRIES = 10000
+MAX_DESCRIPTORS = 100000
+_disabled_logged = False
 MAX_TREE_ENTRIES = 2048
 MAX_REMOVALS = 8
 SWEEP_SECONDS = 2.0
 
 
+def _disabled(reason):
+    global _disabled_logged
+    if not _disabled_logged:
+        log.warning("Owned scratch sweep disabled: %s", reason)
+        _disabled_logged = True
+    return None
+
+
+def _uninspectable_is_unrelated(base, proc):
+    status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
+    uids = {int(uid) for uid in status["Uid"].split()}
+    if 0 not in uids:
+        return os.getuid() not in uids
+    # Only exempt established init ancestors, not arbitrary root daemons or
+    # elevated children. Init shims predate our scratch and only reap/forward
+    # signals; they cannot have inherited its cwd/fds. Trust their fixed role
+    # not to open application scratch later. Unknown root processes fail closed.
+    name = status["Name"].strip()
+    if name not in {"tini", "docker-init"} and not (base.name == "1" and name in {"init", "systemd"}):
+        return False
+    pid = os.getpid()
+    seen = set()
+    while pid and pid not in seen and len(seen) < MAX_ENTRIES:
+        seen.add(pid)
+        try:
+            parent = dict(line.split(":", 1) for line in (proc / str(pid) / "status").read_text().splitlines() if ":" in line)
+        except (FileNotFoundError, ProcessLookupError):
+            return False  # an incomplete ancestry is not an init exemption
+        pid = int(parent["PPid"])
+        if str(pid) == base.name:
+            return True
+    return False
+
+
 def _references(proc, deadline):
     references = set()
     count = 0
-    # No /proc (or unreadable processes): do not guess that scratch is unused.
+    descriptor_count = 0
+    # No /proc or an unreadable potentially relevant process: fail closed.
     with os.scandir(proc) as processes:
         for process in processes:
             if not process.name.isdigit():
                 continue
             count += 1
             if count > MAX_ENTRIES or time.monotonic() >= deadline:
-                return None
+                return _disabled("process scan limit reached")
             base = Path(process.path)
             try:
                 links = [base / "cwd", base / "root"]
                 with os.scandir(base / "fd") as descriptors:
                     for descriptor in descriptors:
                         links.append(Path(descriptor.path))
-                        count += 1
-                        if count > MAX_ENTRIES or time.monotonic() >= deadline:
-                            return None
+                        descriptor_count += 1
+                        if descriptor_count > MAX_DESCRIPTORS or time.monotonic() >= deadline:
+                            return _disabled("descriptor scan limit reached")
                 for link in links:
                     try:
                         value = os.readlink(link)
@@ -52,6 +89,15 @@ def _references(proc, deadline):
                         references.add(value.removesuffix(" (deleted)"))
             except (FileNotFoundError, ProcessLookupError):
                 continue  # exited during observation
+            except PermissionError:
+                try:
+                    if _uninspectable_is_unrelated(base, proc):
+                        continue
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                except (OSError, ValueError, KeyError):
+                    pass
+                return _disabled("potentially relevant process is not inspectable")
     return references
 
 
@@ -59,14 +105,19 @@ def _small_stale_tree(path, cutoff, device, deadline):
     pending = [path]
     count = 0
     while pending:
+        has_head = has_objects = False
         with os.scandir(pending.pop()) as entries:
             for entry in entries:
                 count += 1
                 if count > MAX_TREE_ENTRIES or time.monotonic() >= deadline:
                     return False
                 info = entry.stat(follow_symlinks=False)
-                if entry.name == ".git":
-                    return False  # a checkout is never disposable scratch
+                if entry.name == ".git" or (entry.name in {"commondir", "gitdir"} and not stat.S_ISDIR(info.st_mode)):
+                    return False  # checkouts and separate git stores are never scratch
+                has_head |= entry.name == "HEAD" and not stat.S_ISDIR(info.st_mode)
+                has_objects |= entry.name == "objects" and stat.S_ISDIR(info.st_mode)
+                if has_head and has_objects:
+                    return False
                 if info.st_dev != device or info.st_mtime > cutoff:
                     return False
                 if stat.S_ISDIR(info.st_mode):
@@ -97,7 +148,7 @@ def sweep(root=None, *, ttl=21600, proc=Path("/proc"), now=None):
                     info = entry.stat(follow_symlinks=False)
                     marker = path / MARKER
                     marker_info = marker.lstat()
-                    if (info.st_uid != os.getuid() or info.st_mtime > cutoff
+                    if (info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_mtime > cutoff
                             or not stat.S_ISREG(marker_info.st_mode)
                             or marker_info.st_uid != os.getuid() or marker_info.st_size > 1024):
                         continue
@@ -125,7 +176,8 @@ def sweep(root=None, *, ttl=21600, proc=Path("/proc"), now=None):
                 except (OSError, ValueError, TypeError):
                     continue
     except OSError:
-        return removed  # inaccessible process metadata: fail closed
+        _disabled("process metadata is unavailable")
+        return removed
     return removed
 
 

@@ -216,9 +216,9 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
     # Remove it on failures, timeout and Ctrl-C, after _run has reaped children.
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from app.core.temp_scratch import scratch_directory
+    from app.core.temp_scratch import cleanup_on_sigterm, scratch_directory
 
-    with scratch_directory("ai-shuffle-ci-") as directory:
+    with cleanup_on_sigterm(), scratch_directory("ai-shuffle-ci-") as directory:
         scratch_env = {
             "AI_SHUFFLE_PYTEST_GATE_DIR": os.environ.get("AI_SHUFFLE_PYTEST_GATE_DIR") or tempfile.gettempdir(),
             # Independently owned pytest/browser roots must not nest beneath

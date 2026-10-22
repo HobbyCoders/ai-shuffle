@@ -16,8 +16,8 @@ pytestmark = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="Li
 
 @pytest.fixture(autouse=True)
 def visible_processes(tmp_path, monkeypatch):
-    # Real descriptors and cwd of this process; deterministic proc view excludes
-    # unrelated inaccessible processes. A production scan fails closed on those.
+    # Deterministic process view for deletion cases. A separate test below scans
+    # the real /proc, including inaccessible container init processes.
     proc = tmp_path / "proc"
     proc.mkdir()
     (proc / str(os.getpid())).symlink_to(Path("/proc") / str(os.getpid()), target_is_directory=True)
@@ -27,7 +27,7 @@ def visible_processes(tmp_path, monkeypatch):
 
 def stale(root, prefix=PREFIXES[0]):
     path = root / (prefix + "fixture")
-    path.mkdir()
+    path.mkdir(mode=0o700)
     (path / "payload").write_bytes(b"x" * 4096)
     (path / MARKER).write_text(json.dumps({"version": 1, "pid": 99999999, "start": "0",
                                           "created": 1, "uid": os.getuid()}))
@@ -195,3 +195,123 @@ def test_another_live_scratch_owner_survives(tmp_path):
         child.terminate()
         child.wait(timeout=5)
         child.stdout.close()
+
+
+def test_real_proc_scan_is_usable_or_identifies_opaque_same_uid(monkeypatch, caplog):
+    # A normal container must not fail closed merely on root init or unrelated
+    # users. Some hardened hosts additionally make the app's same-UID process
+    # non-dumpable; only that exceptional case must still fail closed.
+    opaque_same_uid = []
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            status = (process / "status").read_text().splitlines()
+            uids = next(line for line in status if line.startswith("Uid:")).split()[1:]
+            if str(os.getuid()) not in uids:
+                continue
+            try:
+                with os.scandir(process / "fd") as descriptors:
+                    for descriptor in descriptors:
+                        os.readlink(descriptor.path)
+                os.readlink(process / "cwd")
+                os.readlink(process / "root")
+            except PermissionError:
+                opaque_same_uid.append(process.name)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    monkeypatch.setattr(reaper, "_disabled_logged", False)
+    references = reaper._references(Path("/proc"), time.monotonic() + reaper.SWEEP_SECONDS)
+    if opaque_same_uid:
+        assert references is None
+        assert "potentially relevant process is not inspectable" in caplog.text
+    else:
+        assert references is not None
+        assert str(Path.cwd()) in references
+
+
+@pytest.mark.parametrize("kind, safe", [("other_uid", True), ("same_uid", False),
+                                       ("root", False), ("init", True), ("unrelated_init", False)])
+def test_unreadable_process_is_classified_per_process(tmp_path, monkeypatch, caplog, kind, safe):
+    proc = tmp_path / "classification-proc"
+    proc.mkdir()
+    target = proc / "1"
+    target.mkdir()
+    uid = os.getuid() if kind == "same_uid" else 0
+    if kind == "other_uid":
+        uid = max(os.getuid(), 1) + 1
+    name = "tini" if kind in {"init", "unrelated_init"} else "unknown"
+    (target / "status").write_text(f"Name:\t{name}\nUid:\t{uid} {uid} {uid} {uid}\nPPid:\t0\n")
+    own = proc / str(os.getpid())
+    own.mkdir()
+    parent = 1 if kind == "init" else 0
+    (own / "status").write_text(f"PPid:\t{parent}\n")
+    (own / "fd").mkdir()
+    (own / "cwd").symlink_to(tmp_path)
+    original = os.scandir
+
+    def scan(path):
+        if Path(path) == target / "fd":
+            raise PermissionError("uninspectable")
+        return original(path)
+
+    monkeypatch.setattr(reaper.os, "scandir", scan)
+    monkeypatch.setattr(reaper, "_disabled_logged", False)
+    for _ in range(2):
+        references = reaper._references(proc, time.monotonic() + 5)
+        assert (references is not None) == safe
+        if safe:
+            assert str(tmp_path) in references
+    assert sum("sweep disabled" in message for message in caplog.messages) == int(not safe)
+
+
+def test_descriptors_have_a_separate_larger_bound(tmp_path, monkeypatch):
+    proc = tmp_path / "descriptor-proc"
+    descriptors = proc / "1" / "fd"
+    descriptors.mkdir(parents=True)
+    for index in range(3):
+        (descriptors / str(index)).symlink_to(tmp_path)
+    monkeypatch.setattr(reaper, "MAX_ENTRIES", 1)
+    assert reaper._references(proc, time.monotonic() + 5) == {str(tmp_path)}
+    monkeypatch.setattr(reaper, "MAX_DESCRIPTORS", 2)
+    assert reaper._references(proc, time.monotonic() + 5) is None
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("kind", ["objects", "commondir", "gitdir"])
+def test_separate_git_directories_are_never_scratch(tmp_path, nested, kind):
+    path = stale(tmp_path)
+    store = path / "nested" / "store" if nested else path
+    store.mkdir(parents=True, exist_ok=True)
+    if kind == "objects":
+        (store / "HEAD").write_text("ref: refs/heads/main\n")
+        (store / "objects").mkdir()
+        os.utime(store / "objects", (1, 1))
+        os.utime(store / "HEAD", (1, 1))
+    else:
+        (store / kind).write_text("/outside/repository\n")
+        os.utime(store / kind, (1, 1))
+    for directory in [store, store.parent, path]:
+        os.utime(directory, (1, 1))
+    assert reaper.sweep(tmp_path, ttl=1) == 0
+    assert path.exists()
+
+
+def test_real_separate_git_store_is_preserved(tmp_path):
+    path = stale(tmp_path)
+    subprocess.run(["git", "init", "--separate-git-dir=" + str(path / "store"),
+                    str(tmp_path / "checkout")], check=True, capture_output=True)
+    for directory, _, files in os.walk(path):
+        for name in files:
+            os.utime(Path(directory) / name, (1, 1))
+        os.utime(directory, (1, 1))
+    assert reaper.sweep(tmp_path, ttl=1) == 0
+    assert subprocess.run(["git", "-C", str(tmp_path / "checkout"), "status", "--porcelain"],
+                          capture_output=True).returncode == 0
+
+
+def test_nonprivate_scratch_is_not_reaped(tmp_path):
+    path = stale(tmp_path)
+    path.chmod(0o755)
+    assert reaper.sweep(tmp_path, ttl=1) == 0
+    assert path.exists()

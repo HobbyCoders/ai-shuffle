@@ -1,6 +1,7 @@
 """Stdlib-only ownership receipt shared by checks and the app's scratch reaper."""
 import json
 import os
+import signal
 import tempfile
 import time
 from contextlib import contextmanager
@@ -16,6 +17,27 @@ def process_identity(pid, proc=Path("/proc")):
         return (proc / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[19]
     except (FileNotFoundError, ProcessLookupError):
         return None
+
+
+@contextmanager
+def cleanup_on_sigterm():
+    """Unwind cleanup on termination without replacing staged/custom handlers."""
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+
+    previous = signal.getsignal(signal.SIGTERM)
+    installed = False
+    if previous == signal.SIG_DFL:
+        try:
+            signal.signal(signal.SIGTERM, stop)
+            installed = True
+        except ValueError:  # signals can only be installed by the main thread
+            pass
+    try:
+        yield
+    finally:
+        if installed:
+            signal.signal(signal.SIGTERM, previous)
 
 
 @contextmanager

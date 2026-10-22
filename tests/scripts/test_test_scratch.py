@@ -79,3 +79,62 @@ def test_pytest_owns_and_removes_basetemp(tmp_path, parallel, failure):
     assert result.returncode == int(failure), result.stdout + result.stderr
     directory = Path(record.read_text())
     assert not directory.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGTERM cleanup")
+@pytest.mark.parametrize("runner", ["local_ci", "pytest"])
+def test_sigterm_unwinds_owned_scratch(tmp_path, runner):
+    import signal
+    import time
+
+    record = tmp_path / "ready"
+    if runner == "local_ci":
+        child_code = ("import os, pathlib, time; "
+                      f"pathlib.Path({str(record)!r}).write_text(os.environ['TMPDIR']); "
+                      "time.sleep(60)")
+        code = ("import sys; from scripts.local_ci import run; "
+                f"run([sys.executable, '-c', {child_code!r}])")
+        command = [sys.executable, "-c", code]
+    else:
+        suite = tmp_path / "test_sleep.py"
+        suite.write_text("import pathlib, time\n"
+                         "def test_sleep(pytestconfig):\n"
+                         f"    pathlib.Path({str(record)!r}).write_text(str(pathlib.Path(pytestconfig.option.basetemp).parent))\n"
+                         "    time.sleep(60)\n")
+        command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch", str(suite), "-q"]
+    child = subprocess.Popen(command, cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)},
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + 20
+        while not record.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert record.exists(), "child never reached owned scratch"
+        directory = Path(record.read_text())
+        assert directory.is_dir()
+        child.send_signal(signal.SIGTERM)
+        output, _ = child.communicate(timeout=10)
+        # Pytest reports SystemExit raised during a test as a test failure.
+        assert child.returncode == (128 + signal.SIGTERM if runner == "local_ci" else 1), output
+        if runner == "pytest":
+            assert "SystemExit: 143" in output
+        assert not directory.exists(), output
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+
+
+def test_sigterm_cleanup_preserves_staged_handler():
+    import signal
+    from app.core.temp_scratch import cleanup_on_sigterm
+    from scripts.local_ci_stages import _install_stop_signals, _restore_signals
+
+    previous = _install_stop_signals()
+    try:
+        staged = signal.getsignal(signal.SIGTERM)
+        with cleanup_on_sigterm():
+            assert signal.getsignal(signal.SIGTERM) is staged
+        assert signal.getsignal(signal.SIGTERM) is staged
+    finally:
+        _restore_signals(previous)

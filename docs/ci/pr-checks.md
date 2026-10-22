@@ -124,12 +124,21 @@ root (`AI_SHUFFLE_TEST_SCRATCH_ROOT`) rather than nesting beneath command scratc
 so Unix-domain socket paths stay short. `npm test` in browser-mcp similarly owns
 its browser/Node scratch.
 
-Normal exit, pytest's Ctrl-C handling and local-ci command failure run cleanup;
-SIGKILL and host crashes cannot run finalizers. Approved workers periodically
-sweep only allowlisted, ownership-receipted scratch older than six hours,
-skipping live owners, process cwd/open descriptors, symlinks and checkouts.
-Sweeps are bounded and fail closed if process metadata cannot be inspected;
-they do not clean generic `tmp*`, `probe-`, `cdp-`, `ci-` or legacy unmarked trees.
+Normal exit, SIGTERM, pytest's Ctrl-C handling and local-ci command failure run
+cleanup; staged local-ci stop handlers are preserved. SIGKILL and host crashes
+cannot run finalizers. Approved workers periodically sweep only private (0700),
+allowlisted, ownership-receipted scratch older than six hours, skipping live
+owners, process cwd/open descriptors, symlinks, checkouts and separate git stores.
+Set `AI_SHUFFLE_SCRATCH_REAPER=0` to disable this maintenance task.
+
+Sweeps separately bound processes (10,000), descriptors (100,000), tree entries,
+removals and elapsed time. Uninspectable unrelated non-root UIDs cannot enter
+these private trees. The only uninspectable root processes exempted are known
+init ancestors (`tini`, `docker-init`, or PID 1 `init`/`systemd`): they predate the
+scratch, cannot inherit its descriptors/cwd, and are trusted not to open it later.
+Other uninspectable root or same-user processes fail closed, logging the disabled
+sweep once per worker. These sweeps do not clean generic `tmp*`, `probe-`, `cdp-`,
+`ci-` or legacy unmarked trees.
 
 For a disposable Linux preview, build the frontend, run
 `python -m app.preview stamp`, then use
