@@ -25,7 +25,7 @@ def _run(cwd, *args, timeout=120):
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         proc = subprocess.Popen(
             command, cwd=cwd, stdout=stdout, stderr=stderr, **group,
-            env={**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"},
+            env={**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"},
         )
         try:
             proc.wait(timeout=timeout)
