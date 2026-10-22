@@ -207,6 +207,30 @@ def test_fluid_pytest_owns_scratch(tmp_path, explicit, from_fluid):
         assert not base.parent.exists()
 
 
+@pytest.mark.parametrize("missing", ["scripts", "scripts.ci"])
+def test_fluid_pytest_without_app_scripts(tmp_path, missing):
+    """A Fluid-only installation must not require the app's scratch plugin."""
+    code = (
+        "import importlib.abc, sys, pytest\n"
+        "class WithoutAppScripts(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        f"        if fullname == {missing!r}:\n"
+        "            raise ModuleNotFoundError('app scripts unavailable', name=fullname)\n"
+        "sys.meta_path.insert(0, WithoutAppScripts())\n"
+        "result = pytest.main(['tests/unit/test_workflow_proposals.py', '-o', 'addopts=',\n"
+        f"                      '--basetemp', {str(tmp_path / 'standalone-base')!r}, '-q'])\n"
+        "assert 'scripts.ci.test_scratch' not in sys.modules\n"
+        "raise SystemExit(result)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT / "fluid",
+        env={**os.environ, "PYTHONPATH": str(ROOT / "fluid")},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "21 passed" in result.stdout
+
+
 @pytest.mark.parametrize("parallel", [False, True])
 def test_explicit_basetemp_is_caller_owned(tmp_path, parallel):
     suite = tmp_path / "test_explicit.py"
