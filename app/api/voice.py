@@ -638,9 +638,14 @@ async def _provider_api_key(
             raise HTTPException(status_code=400, detail=fal_credential.OFF_MESSAGE)
         api_key = await run_sync(fal_credential.api_key)
     else:
-        from app.core.provider.fluid_credentials import _is_codex_subscription, _load_codex_access_token
+        from app.core.provider.fluid_credentials import (
+            ProviderCredentialError, _is_codex_subscription, _load_codex_access_token,
+        )
         if _is_codex_subscription(provider_row):
-            api_key, _ = await _load_codex_access_token(provider_row["id"])
+            try:
+                api_key, _ = await _load_codex_access_token(provider_row["id"])
+            except ProviderCredentialError:
+                raise HTTPException(400, "ChatGPT login is unavailable. Reconnect it in Settings > Providers; no API-key fallback is available.") from None
         else:
             api_key = await run_sync(_decrypt_auth_token, provider_row)
     if not api_key:
@@ -830,14 +835,13 @@ async def create_voice_session(
         api_user, voice_settings["voice_model"],
     )
 
-    api_key = await _provider_api_key(provider_row, api_user=api_user)
-
     model = voice_settings["voice_model"]
     if model == CODEX_MODEL:
-        from app.core.voice_dependencies import availability
-        available, reason = availability()
+        from app.core.voice_dependencies import ensure_available
+        available, reason = await ensure_available()
         if not available:
             raise HTTPException(400, reason)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
     options = voice_settings.get("voice_options", {})
@@ -1432,6 +1436,11 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         if transport_for(config["model"]) != "stream":
             raise HTTPException(400, "This voice model uses WebRTC.")
         provider = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
+        if config["model"] == CODEX_MODEL:
+            from app.core.voice_dependencies import ensure_available
+            available, reason = await ensure_available()
+            if not available:
+                raise HTTPException(400, reason)
         key = await _provider_api_key(provider, api_user=api_user)
         if resume == "1":
             # The caller already has access to this session, which is all the

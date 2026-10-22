@@ -488,7 +488,9 @@ class TestCreateVoiceSession:
         _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove")
         _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
         db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
-        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(return_value=("fake-token", None)))
+        load = AsyncMock(return_value=("fake-token", None))
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
+        monkeypatch.setattr("app.core.voice_dependencies.install", Mock(return_value=False))
         reason = "Unofficial ChatGPT voice is not available on this system."
         monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (False, reason))
         create = Mock(side_effect=AssertionError("must refuse before creating a session"))
@@ -497,6 +499,48 @@ class TestCreateVoiceSession:
         assert response.status_code == 400
         assert response.json()["detail"] == reason
         create.assert_not_called()
+        load.assert_not_awaited()
+
+    def test_removed_chatgpt_login_returns_clear_400(self, authenticated_client, mock_db, monkeypatch):
+        from unittest.mock import AsyncMock
+        from app.core.provider import fluid_credentials
+        _enable_voice(voice_model="gpt-live-1-codex", voice_voice="cove", voice_provider_id="prov-sub")
+        _make_provider("prov-sub", provider_type="chatgpt", auth_token=None, auth_mode="chatgpt")
+        db.update_model_provider("prov-sub", codex_access_token="fake-stored-token")
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (True, None))
+        monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", AsyncMock(
+            side_effect=fluid_credentials.ProviderCredentialError("synthetic-private-detail")))
+        response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet", "profile_id": "default"})
+        assert response.status_code == 400
+        assert "Reconnect" in response.json()["detail"]
+        assert "no API-key fallback" in response.json()["detail"]
+        assert "synthetic-private-detail" not in response.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resume", [None, "1"])
+    async def test_codex_audio_unavailable_refuses_before_token_or_takeover(self, mock_db, monkeypatch, resume):
+        from unittest.mock import AsyncMock, Mock
+        from app.api import voice
+        from app.core import voice_stream
+        websocket = AsyncMock()
+        monkeypatch.setattr("app.api.ws_auth.authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(voice, "_require_voice_enabled", AsyncMock(return_value={}))
+        monkeypatch.setattr(voice, "_load_voice_session", AsyncMock(return_value={"id": "unavailable"}))
+        monkeypatch.setattr(voice, "_check_voice_session_access", Mock())
+        monkeypatch.setattr(voice, "_reject_when_capped", Mock())
+        monkeypatch.setattr(voice, "session_config", Mock(return_value={"model": "gpt-live-1-codex", "provider_id": "sub"}))
+        monkeypatch.setattr(voice, "_resolve_provider_row", Mock(return_value={"id": "sub"}))
+        monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (False, "Voice libraries unavailable"))
+        monkeypatch.setattr("app.core.voice_dependencies.install", Mock(return_value=False))
+        key = AsyncMock(side_effect=AssertionError("must not load a token"))
+        takeover = AsyncMock(side_effect=AssertionError("must not replace a call"))
+        monkeypatch.setattr(voice, "_provider_api_key", key)
+        monkeypatch.setattr(voice_stream, "take_over", takeover)
+        await voice.voice_audio_socket(websocket, "unavailable", token=None, resume=resume)
+        websocket.close.assert_awaited_once_with(code=4400, reason="Voice libraries unavailable")
+        websocket.accept.assert_not_awaited()
+        key.assert_not_awaited()
+        takeover.assert_not_awaited()
 
     @pytest.mark.parametrize("pinned", [False, True])
     def test_unofficial_codex_pins_subscription_without_minting_a_client_secret(self, authenticated_client, mock_db, monkeypatch, pinned):

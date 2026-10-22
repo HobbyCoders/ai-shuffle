@@ -241,3 +241,4 @@ jobs:
         run: |
           python -m pip install pip-audit==2.10.1
           python -m pip_audit --skip-editable
+          python -m pip_audit -r requirements-voice.lock

@@ -9,7 +9,7 @@ export interface SourceRuntime {
   python: string;
   node: string;
   npm: string;
-  pythonDependencies: string;
+  pythonDependencies: string | null;
 }
 export interface BuiltSource { revision: string; pythonKey: string | null; electron: string }
 export interface BuildOptions {
@@ -79,6 +79,16 @@ export function pythonInstallSteps(): string[][] {
 /** Matches the bundled runtime's manifest.pythonDependencies when the same locks built it. */
 export function pythonDependencyKey(source: string): Promise<string> { return fingerprint(source, PYTHON_INPUTS); }
 
+async function installOptionalVoice(python: string, opts: BuildOptions): Promise<boolean> {
+  try {
+    await run(python, ['app/core/voice_dependencies.py', '--install'], opts.source, opts, python);
+    return true;
+  } catch {
+    opts.progress('Optional ChatGPT voice libraries could not be installed; a later call or build can retry.');
+    return false;
+  }
+}
+
 async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
   for (const lock of ['requirements.lock', 'requirements-native.lock']) {
     if (!(await exists(path.join(opts.source, lock)))) throw new Error(`This update has no hash-pinned ${lock}; it cannot be built safely. The running version is unchanged.`);
@@ -87,14 +97,24 @@ async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
   if (key === opts.runtime.pythonDependencies) return null;
   const target = path.join(opts.cache, 'python', key.slice(0, 24));
   if (await exists(path.join(target, '.complete'))) return key;
+  if (await exists(path.join(target, '.base-complete'))) {
+    const python = path.join(target, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+    if (await installOptionalVoice(python, opts)) await fs.writeFile(path.join(target, '.complete'), key);
+    return key; // Main dependencies remain usable even when the optional install fails.
+  }
   opts.progress('Installing updated Python dependencies. The running application is unchanged.');
   const temporary = `${target}.tmp-${randomUUID().slice(0, 8)}`;
   await fs.mkdir(path.dirname(target), { recursive: true });
   try {
     await run(opts.runtime.python, ['-m', 'venv', temporary], opts.source, opts);
     const python = path.join(temporary, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
-    for (const args of pythonInstallSteps()) await run(python, args, opts.source, opts, python);
-    await fs.writeFile(path.join(temporary, '.complete'), key);
+    let voiceInstalled = false;
+    for (const args of pythonInstallSteps()) {
+      if (args[0] === 'app/core/voice_dependencies.py') voiceInstalled = await installOptionalVoice(python, opts);
+      else await run(python, args, opts.source, opts, python);
+    }
+    await fs.writeFile(path.join(temporary, '.base-complete'), key);
+    if (voiceInstalled) await fs.writeFile(path.join(temporary, '.complete'), key);
     await fs.rename(temporary, target);
     return key;
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
@@ -138,6 +158,8 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   await fs.mkdir(opts.server, { recursive: true });
   const clean = (src: string) => !src.split(path.sep).includes('__pycache__') && !src.endsWith('.pyc');
   await fs.cp(path.join(opts.source, 'app'), path.join(opts.server, 'app'), { recursive: true, filter: clean });
+  // Explicit call starts can retry this signed, hash-pinned optional closure.
+  await fs.copyFile(path.join(opts.source, 'requirements-voice.lock'), path.join(opts.server, 'requirements-voice.lock'));
   await fs.rm(path.join(opts.server, 'app/static'), { recursive: true, force: true });
   await fs.cp(path.join(opts.source, 'frontend/build'), path.join(opts.server, 'app/static'), { recursive: true });
   await fs.cp(path.join(opts.source, 'fluid/fluid'), path.join(opts.server, 'fluid'), { recursive: true, filter: clean });

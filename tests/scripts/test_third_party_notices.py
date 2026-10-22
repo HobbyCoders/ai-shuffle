@@ -69,3 +69,14 @@ def test_generator_keeps_all_lock_versions_regardless_of_host_platform(tmp_path,
     rows, missing = notices.python_packages()
     assert [(row[0], row[1]) for row in rows] == [("example", "1.0"), ("example", "2.0")]
     assert missing == ["fluid"]
+
+def test_pyav_bundled_libraries_have_licenses_and_corresponding_source():
+    text = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    assert notices.AV_BUNDLED_LIBRARIES in text
+    for library in ("FFmpeg", "libx264", "libx265", "libmp3lame", "GnuTLS",
+                    "nettle", "GMP", "libunistring", "opencore-amr", "libvpx",
+                    "libopus", "dav1d", "SVT-AV1", "libxcb"):
+        assert library in notices.AV_BUNDLED_LIBRARIES
+    assert "GPL-2.0-or-later" in notices.AV_BUNDLED_LIBRARIES
+    assert "https://github.com/PyAV/pyav-ffmpeg" in notices.AV_BUNDLED_LIBRARIES
+    assert notices.AV_BUNDLED_LIBRARIES.rstrip() in notices.render()

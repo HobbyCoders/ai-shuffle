@@ -189,3 +189,13 @@ def test_desktop_installs_only_from_the_locks():
     contract = (ROOT / "desktop/scripts/runtime-contract.mjs").read_text()
     assert "['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml']" in contract
     assert "['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml']" in build
+
+def test_optional_voice_lock_is_audited_and_shipped_for_explicit_retry():
+    workflow = (ROOT / ".github/workflows/ci-backend.yml").read_text()
+    assert "python -m pip_audit --skip-editable" in workflow
+    assert "python -m pip_audit -r requirements-voice.lock" in workflow
+    runtime = (ROOT / "desktop/scripts/build-worker.mjs").read_text()
+    build = (ROOT / "desktop/src/main/source-build.ts").read_text()
+    assert "python.optionalVoiceInstalled === false ? null : await pythonDependencies(repoDir)" in runtime
+    assert "'requirements-native.txt', 'requirements-voice.lock', 'LICENSE'" in runtime
+    assert "await fs.copyFile(path.join(opts.source, 'requirements-voice.lock'), path.join(opts.server, 'requirements-voice.lock'))" in build

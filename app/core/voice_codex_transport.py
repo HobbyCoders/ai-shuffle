@@ -125,6 +125,8 @@ class CodexPeer:
             self.enqueue({"type": "error", "error": {"message": "Unofficial ChatGPT voice audio transport failed."}})
 
     async def open(self, client, token: str, account_id: str | None, session: dict):
+        if self.closed:
+            raise ValueError("Unofficial ChatGPT voice connection is closed.")
         self.pc, self.feed_audio, answer = self.make_peer()
         self.channel = self.pc.createDataChannel("oai-events")
 
@@ -152,12 +154,16 @@ class CodexPeer:
 
         try:
             await self.pc.setLocalDescription(await self.pc.createOffer())
+            if self.closed:
+                raise ValueError("Unofficial ChatGPT voice connection is closed.")
             headers = {"Authorization": "Bearer " + token, "originator": "codex_cli_rs", "OpenAI-Alpha": "quicksilver=v2"}
             if account_id:
                 headers["ChatGPT-Account-Id"] = account_id
             response = await client.post(CALL_URL, headers=headers,
                                          json={"sdp": self.pc.localDescription.sdp, "session": session},
                                          follow_redirects=False, timeout=20)
+            if self.closed:
+                raise ValueError("Unofficial ChatGPT voice connection is closed.")
             if response.status_code != 201:
                 raise ValueError(f"Unofficial ChatGPT voice refused call creation (HTTP {response.status_code}).")
             await self.pc.setRemoteDescription(answer(response.text))
@@ -192,8 +198,8 @@ class CodexPeer:
         return raw
 
     async def close(self):
-        if self.closed:
-            return
+        # A startup await can finish after hangup. Always close any held peer,
+        # even when another close has already marked this adapter closed.
         self.closed = True
         for task in tuple(self.audio_tasks):
             task.cancel()
