@@ -211,9 +211,10 @@ async def test_task_background_child_text_reaches_parent_wake(tmp_path) -> None:
     assert len(store._sessions) == 2
 
 
-async def test_task_sync_returns_child_text_inline(tmp_path) -> None:
+@pytest.mark.parametrize("mode", ["sync", "Sync", " sync "])
+async def test_task_sync_returns_child_text_inline(tmp_path, mode) -> None:
     provider = RoutingProvider(
-        parent=[_task_call("sync"), _text("done")],
+        parent=[_task_call(mode), _text("done")],
         child=[_text("sync child report")],
     )
     out = io.StringIO()

@@ -17,6 +17,7 @@ Ask in plain words, for example "have a reviewer check this change while you wri
 - Each subagent shows a card in the chat with its progress. **Open transcript** shows everything it did, and you can message it from there.
 - The chat's background tasks list shows what is running. You can stop any subagent from there.
 - When a subagent finishes, the chat that started it gets its report and carries on.
+- An agent can also wait for a subagent's report before it carries on, but only for a limited time (15 minutes by default). A subagent still working then keeps running in the background and reports back the same way.
 - Approval prompts from a subagent appear in the chat that started it.
 
 A subagent working on code gets its own copy of the project on its own branch, so it never edits the files you are working on. Its commits come back for you or the main agent to review.
