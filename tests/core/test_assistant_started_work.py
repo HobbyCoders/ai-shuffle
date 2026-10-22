@@ -173,6 +173,42 @@ async def test_started_chat_reports_back_once_in_the_report_shape(home):
     assert len(wakes(home_id)) == 1
 
 
+@pytest.mark.parametrize("wake_source", ["unpark", "user"])
+async def test_real_started_chat_reports_after_scheduler_wake_not_owner_input(home, wake_source):
+    from app.core.session_runtime import SessionRuntime
+    from app.core.task_registry import task_registry
+
+    home_id, root = home
+    result = json.loads((await call(home_id, "start", start_args())).text)
+    sid, first_id = result["session_id"], result["turn_id"]
+    first = turns.start_turn(first_id)
+    assert first
+    assert turns.park_turn(first_id, ["monitor"])
+    if wake_source == "unpark":
+        task_registry.start_task(sid, "monitor", "shell", "monitor", tool_use_id="monitor")
+        task_registry.mark_background_launch(sid, "monitor")
+        await turn_scheduler.on_task_terminal(sid, {
+            "task_id": "monitor", "status": "completed", "summary": "monitor finished",
+        })
+        [queued] = turns.get_queued_turns(sid)
+    else:
+        queued = turns.enqueue_turn(sid, "user", prompt="A new job", profile_id=first["profile_id"],
+                                    overrides=first["overrides"], project_id=first.get("project_id"),
+                                    worktree_id=first.get("worktree_id"))
+    resumed = turns.start_turn(queued["id"], can_resume=SessionRuntime._can_resume_parked)
+    assert resumed["id"] == first_id
+    session_events.append_events(sid, [{"type": "assistant.text_delta", "turn_id": first_id,
+                                       "payload": {"text": "Finished after the wake."}}])
+    assert turns.settle_turn(first_id, "completed")
+    await turn_scheduler.on_turn_settled(sid, first_id, "completed")
+    if wake_source == "user":
+        assert wakes(home_id) == []
+    else:
+        [report] = wakes(home_id)
+        assert "Finished after the wake." in report["prompt"]
+        assert report["payload"]["orchestration_root"] == root
+
+
 @pytest.mark.parametrize("ending", ["failed", "stopped"])
 async def test_failures_and_stops_use_the_same_path(home, monkeypatch, ending):
     home_id, _ = home
@@ -218,7 +254,10 @@ async def test_work_the_owner_types_into_the_started_chat_is_not_reported(home):
     assert len(wakes(home_id)) == 1
 
 
-async def test_report_wakes_never_grant_a_fresh_start_budget(home):
+@pytest.mark.parametrize("parked", [False, True])
+async def test_report_wakes_never_grant_a_fresh_start_budget(home, parked):
+    from app.core.session_runtime import SessionRuntime
+
     home_id, root = home
     started = [json.loads((await call(home_id, "start", start_args(f"job-{i}"))).text) for i in range(orch.MAX_STARTS)]
     assert all(item.get("created") for item in started)
@@ -230,9 +269,13 @@ async def test_report_wakes_never_grant_a_fresh_start_budget(home):
     with pytest.raises(ValueError, match="budget reached"):
         orch._queue(home_id, start_args("job-after-report"), "start")
     # The owner's next message starts a fresh budget, exactly as before.
-    turns.settle_turn(wake["id"], "completed")
+    if parked:
+        assert turns.park_turn(wake["id"], ["monitor"])
+    else:
+        turns.settle_turn(wake["id"], "completed")
     owner = turns.enqueue_turn(home_id, "user", prompt="Keep going", profile_id="assistant-agent")
-    turns.start_turn(owner["id"])
+    resumed = turns.start_turn(owner["id"], can_resume=SessionRuntime._can_resume_parked)
+    assert resumed["id"] == (wake["id"] if parked else owner["id"])
     assert orch._queue(home_id, start_args("job-after-owner"), "start")["created"]
 
 
