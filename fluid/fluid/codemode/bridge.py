@@ -209,7 +209,7 @@ class HostBridge:
         tool_input: dict[str, Any] = dict(kwargs)
         from fluid.tools.bash_file_guard import guard_input
 
-        guidance = guard_input(tool_name, tool_input, self._registry, self._ctx, self._tool_filter)
+        guidance = guard_input(tool_name, tool_input, self._registry, self._ctx, self._tool_filter, self._permissions)
         if guidance:
             # A routing correction is recoverable text, not a permission denial
             # that aborts this cell or ends the model's turn.

@@ -169,11 +169,12 @@ async def test_deferred_matching_tool_is_not_promoted_and_unavailable_tool_does_
 
 
 def test_corpus_size_and_guidance_budget():
-    assert len(CASES) >= 100
+    assert len(CASES) >= 238
     for case in CASES:
         text = refusal(case["command"], {"Read", "Grep", "Glob", "Write", "Edit"})
         if text:
             assert len(text) <= 75
+            assert "or a pipeline" in text
             assert "\n" not in text  # one routing sentence, no repeated prompt paragraphs
 
 
@@ -218,3 +219,64 @@ async def test_only_delivered_user_steers_exempt_bash(cancel, origin, blocked):
     assert ("Use Read" in result.output) is blocked
     assert ran == ([{"file_path": "f"}] if blocked else
                    [{"file_path": "f"}, {"command": "cat f"}])
+
+
+@pytest.mark.parametrize("tool,command,key", [
+    ("Read", "cat restricted/f", "file_path"),
+    ("Read", "cd restricted && cat f", "file_path"),
+    ("Grep", "grep -rn word restricted/f", "path"),
+    ("Write", "echo text > restricted/f", "file_path"),
+    ("Edit", "sed -i 's/old/new/g' restricted/f", "file_path"),
+    ("Glob", "ls -R restricted", "path"),
+])
+@pytest.mark.parametrize("denied", [False, True])
+async def test_path_permission_is_checked_on_both_native_legs(tmp_path, tool, command, key, denied):
+    from fluid.permissions.rules import Rule
+
+    registry = ToolRegistry()
+    ran = []
+
+    async def record(args, ctx):
+        ran.append(dict(args))
+        return ToolOutcome(text="done")
+
+    for name in ("Bash", tool):
+        registry.register_builtin(ToolSpec(name=name, description=name,
+            input_schema={"type": "object"}), record)
+    rule = Rule(tool=tool, decision="deny" if denied else "allow",
+        input_globs={key: str(tmp_path / "restricted") + "*"})
+    permissions = PermissionEngine("never_ask", rules=[rule])
+    ctx = ToolCtx(cwd=str(tmp_path))
+    bridge = HostBridge(registry, permissions, ctx=ctx)
+    reply = await bridge.on_host_call("Bash", {"command": command})
+    assert not reply.denied and not reply.error
+    assert bool(ran) is denied
+    assert ("Use " + tool in reply.result) is not denied
+    ran.clear()
+
+    provider = ScriptedProvider([
+        _tool("bash-1", "Bash", json.dumps({"command": command})),
+        _text("finished"),
+    ])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="fixture",
+        registry=registry, permissions=permissions, ctx=ctx)
+    await loop.submit(UserTurn(content="Inspect"))
+    await loop.wait_turn()
+    events = loop.bus.log(loop.session_id)
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    result = next(e for e in events if isinstance(e, ToolResult) and e.name == "Bash")
+    assert result.is_error is not denied
+    assert bool(ran) is denied
+
+
+def test_last_match_path_allow_is_honored_without_permission_side_effects(tmp_path):
+    from fluid.permissions.rules import Rule
+    from fluid.tools.bash_file_guard import guard_input
+
+    registry, _ = registry_with_tools()
+    rules = [Rule(tool="Read", decision="deny", input_globs={"file_path": "*"}),
+             Rule(tool="Read", decision="allow", input_globs={"file_path": str(tmp_path / "f")})]
+    permissions = PermissionEngine("never_ask", rules=rules)
+    assert guard_input("Bash", {"command": "cat f"}, registry,
+        ToolCtx(cwd=str(tmp_path)), permissions=permissions).startswith("Use Read")
+    assert permissions._streak == 0 and permissions._always_allowed == {}

@@ -1,4 +1,4 @@
-// Shared with the Python tests; keep the payload strict JSON.
+// Shared Python/TypeScript routing expectations, including every review probe.
 export default [
   {
     "command": "cat f",
@@ -18,7 +18,7 @@ export default [
   },
   {
     "command": "cat one two",
-    "tool": "Read"
+    "tool": null
   },
   {
     "command": "head f",
@@ -34,7 +34,7 @@ export default [
   },
   {
     "command": "head -c100 f",
-    "tool": "Read"
+    "tool": null
   },
   {
     "command": "head --lines=20 f",
@@ -42,7 +42,7 @@ export default [
   },
   {
     "command": "tail f",
-    "tool": "Read"
+    "tool": null
   },
   {
     "command": "tail -n +20 f",
@@ -50,7 +50,7 @@ export default [
   },
   {
     "command": "tail -c 50 f",
-    "tool": "Read"
+    "tool": null
   },
   {
     "command": "sed -n '1,20p' f",
@@ -90,7 +90,7 @@ export default [
   },
   {
     "command": "rg --hidden x src",
-    "tool": "Grep"
+    "tool": null
   },
   {
     "command": "grep -rn 'some text' src",
@@ -98,7 +98,7 @@ export default [
   },
   {
     "command": "find . -name '*.py'",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "find src -type f",
@@ -106,7 +106,7 @@ export default [
   },
   {
     "command": "find . -maxdepth 2 -print",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "ls -R",
@@ -114,11 +114,11 @@ export default [
   },
   {
     "command": "ls",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "ls -la src",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "cd src && ls -R",
@@ -130,7 +130,7 @@ export default [
   },
   {
     "command": "echo hello >> f",
-    "tool": "Write"
+    "tool": null
   },
   {
     "command": "printf '%s' hello > f",
@@ -138,7 +138,7 @@ export default [
   },
   {
     "command": "printf '%s\\n' hello >> f",
-    "tool": "Write"
+    "tool": null
   },
   {
     "command": "cat > f <<EOF\nhello\nEOF",
@@ -158,7 +158,7 @@ export default [
   },
   {
     "command": "cat old > new",
-    "tool": "Write"
+    "tool": null
   },
   {
     "command": "sed -i 's/a/b/g' f",
@@ -166,15 +166,15 @@ export default [
   },
   {
     "command": "sed -i.bak 's/a/b/' f",
-    "tool": "Edit"
+    "tool": null
   },
   {
     "command": "sed --in-place '2d' f",
-    "tool": "Edit"
+    "tool": null
   },
   {
     "command": "cd src && sed -i -e '1,2d' f",
-    "tool": "Edit"
+    "tool": null
   },
   {
     "command": "git status",
@@ -443,5 +443,513 @@ export default [
   {
     "command": "cd x && cd y && cat f",
     "tool": null
+  },
+  {
+    "command": "git log -n 5",
+    "tool": null
+  },
+  {
+    "command": "cat <<EOF | python\nprint(1)\nEOF",
+    "tool": null
+  },
+  {
+    "command": "grep foo f | wc -l",
+    "tool": null
+  },
+  {
+    "command": "find . -name '*.pyc' -exec rm {} +",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/foo/bar/g' src/*.py",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/^ *//' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a.*b/X/' f",
+    "tool": null
+  },
+  {
+    "command": "echo hi > /dev/null",
+    "tool": null
+  },
+  {
+    "command": "echo 'export X=1' >> ~/.bashrc",
+    "tool": null
+  },
+  {
+    "command": "echo line >> app.log",
+    "tool": null
+  },
+  {
+    "command": "echo KEY=val > .env",
+    "tool": "Write"
+  },
+  {
+    "command": "cat /etc/os-release",
+    "tool": "Read"
+  },
+  {
+    "command": "cat ~/.ssh/config",
+    "tool": null
+  },
+  {
+    "command": "cat /proc/cpuinfo",
+    "tool": null
+  },
+  {
+    "command": "ls /proc",
+    "tool": null
+  },
+  {
+    "command": "ls /sys/class",
+    "tool": null
+  },
+  {
+    "command": "ls /dev",
+    "tool": null
+  },
+  {
+    "command": "find /proc -maxdepth 1",
+    "tool": null
+  },
+  {
+    "command": "cat ../other-worktree/f",
+    "tool": "Read"
+  },
+  {
+    "command": "ls /tmp",
+    "tool": null
+  },
+  {
+    "command": "ls -la",
+    "tool": null
+  },
+  {
+    "command": "ls -l bin/x",
+    "tool": null
+  },
+  {
+    "command": "ls -d */",
+    "tool": null
+  },
+  {
+    "command": "ls -lah ~/.cache",
+    "tool": null
+  },
+  {
+    "command": "head -c 16 image.bin",
+    "tool": null
+  },
+  {
+    "command": "head -c 64 /usr/bin/python3",
+    "tool": null
+  },
+  {
+    "command": "tail -n 50 /var/log/syslog",
+    "tool": null
+  },
+  {
+    "command": "tail -100 app.log",
+    "tool": null
+  },
+  {
+    "command": "tail -f app.log",
+    "tool": null
+  },
+  {
+    "command": "tail -F app.log",
+    "tool": null
+  },
+  {
+    "command": "tail -n 200 big.log",
+    "tool": null
+  },
+  {
+    "command": "cat",
+    "tool": null
+  },
+  {
+    "command": "sudo cat /etc/shadow",
+    "tool": null
+  },
+  {
+    "command": "sudo -u postgres cat f",
+    "tool": null
+  },
+  {
+    "command": "cat file > copy",
+    "tool": null
+  },
+  {
+    "command": "cat a b > combined.tar.gz",
+    "tool": null
+  },
+  {
+    "command": "cat part1 part2 > full",
+    "tool": null
+  },
+  {
+    "command": "printf '\\x00\\x01' > blob.bin",
+    "tool": null
+  },
+  {
+    "command": "echo -n 'x' > f",
+    "tool": null
+  },
+  {
+    "command": "echo -e 'a\\tb' > f",
+    "tool": null
+  },
+  {
+    "command": "grep -v foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -c foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -l foo *.py",
+    "tool": null
+  },
+  {
+    "command": "grep -L foo *.py",
+    "tool": null
+  },
+  {
+    "command": "grep -o 'v[0-9]+' f",
+    "tool": null
+  },
+  {
+    "command": "grep -A 3 foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -q foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -w foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -b foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -z foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -rn TODO node_modules/pkg",
+    "tool": "Grep"
+  },
+  {
+    "command": "rg -v foo f",
+    "tool": null
+  },
+  {
+    "command": "find . -type d",
+    "tool": null
+  },
+  {
+    "command": "find . -type d -name node_modules",
+    "tool": null
+  },
+  {
+    "command": "find node_modules -name package.json",
+    "tool": null
+  },
+  {
+    "command": "find . -maxdepth 2",
+    "tool": null
+  },
+  {
+    "command": "find /",
+    "tool": null
+  },
+  {
+    "command": "find . -type l",
+    "tool": null
+  },
+  {
+    "command": "Get-Content f",
+    "tool": null
+  },
+  {
+    "command": "Select-String -Path f -Pattern x",
+    "tool": null
+  },
+  {
+    "command": "type f",
+    "tool": null
+  },
+  {
+    "command": "cat f; echo done",
+    "tool": null
+  },
+  {
+    "command": "cd /tmp && cat f",
+    "tool": "Read"
+  },
+  {
+    "command": "cd /tmp && ls -la",
+    "tool": null
+  },
+  {
+    "command": "ls -1 | head",
+    "tool": null
+  },
+  {
+    "command": "head -n 5 /etc/passwd",
+    "tool": "Read"
+  },
+  {
+    "command": "cat .git/HEAD",
+    "tool": "Read"
+  },
+  {
+    "command": "cat /run/secrets/x",
+    "tool": "Read"
+  },
+  {
+    "command": "ls ~",
+    "tool": null
+  },
+  {
+    "command": "cat -A f",
+    "tool": null
+  },
+  {
+    "command": "cat -v f",
+    "tool": null
+  },
+  {
+    "command": "tail -c 100 f.bin",
+    "tool": null
+  },
+  {
+    "command": "grep -rI foo .",
+    "tool": null
+  },
+  {
+    "command": "echo hi > /dev/stderr",
+    "tool": null
+  },
+  {
+    "command": "echo $HOME > f",
+    "tool": null
+  },
+  {
+    "command": "rg --files dir1 dir2",
+    "tool": null
+  },
+  {
+    "command": "sed -n '1,20p' f > out",
+    "tool": null
+  },
+  {
+    "command": "head --bytes=10 f",
+    "tool": null
+  },
+  {
+    "command": "tail --bytes=10 f",
+    "tool": null
+  },
+  {
+    "command": "tail -n 50 f",
+    "tool": null
+  },
+  {
+    "command": "tail --lines=50 f",
+    "tool": null
+  },
+  {
+    "command": "tail -n50 f",
+    "tool": null
+  },
+  {
+    "command": "ls -a",
+    "tool": null
+  },
+  {
+    "command": "ls -l",
+    "tool": null
+  },
+  {
+    "command": "ls -d",
+    "tool": null
+  },
+  {
+    "command": "ls -h",
+    "tool": null
+  },
+  {
+    "command": "ls -F",
+    "tool": null
+  },
+  {
+    "command": "ls -Ra",
+    "tool": null
+  },
+  {
+    "command": "ls -Rl",
+    "tool": null
+  },
+  {
+    "command": "ls -1",
+    "tool": null
+  },
+  {
+    "command": "find . -type f -print0",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a.b/x/' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a/b/' f g",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a/b/I' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i '2d' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a/&/' f",
+    "tool": null
+  },
+  {
+    "command": "cat /proc",
+    "tool": null
+  },
+  {
+    "command": "cat /sys",
+    "tool": null
+  },
+  {
+    "command": "cat /dev",
+    "tool": null
+  },
+  {
+    "command": "find /sys -type f",
+    "tool": null
+  },
+  {
+    "command": "ls -R /dev",
+    "tool": null
+  },
+  {
+    "command": "printf '\\0' > f",
+    "tool": null
+  },
+  {
+    "command": "printf '\\x41' > f",
+    "tool": null
+  },
+  {
+    "command": "echo '\\n' > f",
+    "tool": null
+  },
+  {
+    "command": "echo -e hi > f",
+    "tool": null
+  },
+  {
+    "command": "cat a b > out",
+    "tool": null
+  },
+  {
+    "command": "cat a > out",
+    "tool": null
+  },
+  {
+    "command": "cat > out",
+    "tool": null
+  },
+  {
+    "command": "echo hi >> out",
+    "tool": null
+  },
+  {
+    "command": "grep -B 3 foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -C 3 foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -m 3 foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -n -v foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -i foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -F foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -H foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -R foo f",
+    "tool": null
+  },
+  {
+    "command": "tail -n +50 f",
+    "tool": "Read"
+  },
+  {
+    "command": "tail -n+50 f",
+    "tool": "Read"
+  },
+  {
+    "command": "tail --lines=+50 f",
+    "tool": "Read"
+  },
+  {
+    "command": "head -n 50 f",
+    "tool": "Read"
+  },
+  {
+    "command": "head -n50 f",
+    "tool": "Read"
+  },
+  {
+    "command": "ls -R src",
+    "tool": "Glob"
+  },
+  {
+    "command": "find . -type f -name '*.py'",
+    "tool": "Glob"
+  },
+  {
+    "command": "sed -i 's/foo/bar/g' f",
+    "tool": "Edit"
+  },
+  {
+    "command": "printf '%s' hi > out",
+    "tool": "Write"
+  },
+  {
+    "command": "echo hi > out",
+    "tool": "Write"
   }
 ]

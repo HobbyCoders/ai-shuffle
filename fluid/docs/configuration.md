@@ -525,17 +525,29 @@ What the child CLI is given, and what it is not:
   delegated CLI also accepts it in a settings `env` block. The mod's
   `tool.call` hook runs before execution even in `bypassPermissions`; native
   JSON dispatch and code-mode host calls use the same Python gate. A recognized
-  single plain file command is refused only when its matching tool is actually
-  available: Read for cat/head/tail/sed windows, Grep for grep/rg, Glob for
-  find/ls, Write for echo/printf/cat redirection, Edit for simple sed -i.
+  single plain file command is refused only when its matching tool can express
+  it: Read for one-file cat/head/sed line windows and `tail -n +N`; Grep for
+  regex searches with only recursion/line-number options; Glob for file-only
+  `find -type f` or `ls -R`; Write for text echo/printf redirects or a cat
+  heredoc; Edit for literal substitutions in one nonglob file. Appends (`>>`),
+  tail-from-end, byte reads, metadata/directory listings, grep invert/context/
+  count/files-only modes, regex/glob edits, file copies and escaped writes
+  always pass. Bare `/proc`, `/sys`, `/dev` and their descendants pass too.
   Deferred tools are not loaded by this check. One leading `cd path &&` is
   recognized; pipelines, substitutions, compound scripts, unknown options,
-  command-output filtering and uncertain syntax pass unchanged. An exact
-  command literal in the latest user request is exempt (even an ambiguous
-  example, to avoid overruling a user-requested command). Tool outputs cannot
-  grant that exemption. A refusal is model-visible retry guidance, not
-  a turn-ending error or a security boundary. CLI introspection failures allow
-  the original command. Older CLIs without the mod have no delegated guard.
+  command-output filtering and uncertain syntax pass unchanged.
+  Native checks the replacement tool's path-scoped PermissionEngine rules;
+  if it would be denied, Bash is not refused (its own permissions still apply).
+  The CLI documents `tool.list()` as tools the model can call now, but the
+  guard does not assume it filters `--disallowedTools`: a non-executing
+  `tool.check` must also confirm allow/ask for the replacement path. Denied,
+  missing or failed introspection passes the original call. Queries are not
+  agent-scoped, so delegated subagent calls also pass unchanged.
+  An exact command literal in the latest real user request is exempt (even an
+  ambiguous example); intervening task/peer/system notices cannot grant or
+  erase it. A refusal includes a short pipeline fallback; it is retry guidance,
+  not a turn-ending error or a security boundary. Older CLIs without the mod
+  have no delegated guard.
 - With the mod loaded and a `plan_usage_sink` (an async callable taking a
   `PlanUsageReport`, as AI Shuffle passes), the mod also reports plan usage.
   On `session.measure`, which the CLI fires after each main-thread turn and

@@ -5708,7 +5708,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         spec = self.registry.get(name)
         from fluid.tools.bash_file_guard import guard_input
 
-        guidance = guard_input(name, input, self.registry, self.ctx, self._tool_wired)
+        guidance = guard_input(name, input, self.registry, self.ctx, self._tool_wired, self.permissions)
         if guidance:
             return await self._finish_tool(
                 sid, turn_id, name, tool_use_id,
