@@ -214,7 +214,8 @@ def _gate_api(main, annotations, *, published=False):
 def test_publish_edge_first_names_the_refused_gate_and_local_command(repo, monkeypatch):
     root, shas = repo
     monkeypatch.setattr(ds, "_edge_refusals", {})
-    message = ("Edge publication waits for a local full-suite pass on main. Run on a clean checkout of main:\n"
+    message = ("Edge publication waits for a hosted main-suite pass or an owner local full-suite pass on main. "
+               "Wait for main-suite or run on a clean checkout of main:\n"
                "python scripts/local_ci.py full --attest")
     run_gh, calls = _gate_api(shas["c"], [{"annotation_level": "warning", "title": ds.EDGE_REFUSAL_TITLE,
                                            "message": message}])
@@ -224,8 +225,8 @@ def test_publish_edge_first_names_the_refused_gate_and_local_command(repo, monke
         unraid, gaming = report["workers"]
         assert unraid["action"] == (
             "publish edge first (merged after the latest published build). Edge refused "
-            f"{shas['c'][:9]}: Edge publication waits for a local full-suite pass on main. "
-            "Run on a clean checkout of main: python scripts/local_ci.py full --attest")
+            f"{shas['c'][:9]}: Edge publication waits for a hosted main-suite pass or an owner local full-suite pass on main. "
+            "Wait for main-suite or run on a clean checkout of main: python scripts/local_ci.py full --attest")
         assert unraid["edge_publication_refusal"] == {
             "revision": report["origin_main"],
             "reason": message.strip().replace(":\n", ": ").replace("\n", "; "),
@@ -278,7 +279,8 @@ def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario, c
     elif scenario == "unknown":
         row["revision"] = None
     monkeypatch.setattr(ds, "collect_workers", AsyncMock(return_value=[row]))
-    reason = "Edge publication waits for a local full-suite pass on main. python scripts/local_ci.py full --attest"
+    reason = ("Edge publication waits for a hosted main-suite pass or an owner local full-suite pass on main. "
+              "python scripts/local_ci.py full --attest")
     notes = [] if scenario == "no refusal" else [{"title": ds.EDGE_REFUSAL_TITLE, "message": reason}]
     run_gh, calls = _gate_api(shas["c"], notes, published=scenario == "published")
     app = FastAPI()

@@ -34,6 +34,8 @@ def lane(tmp_path, monkeypatch):
     def api(endpoint):
         if endpoint == "branches/main":
             return {"protected": True, "commit": {"sha": git("rev-parse", "main")}}
+        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+            return {"workflow_runs": []}
         revision = endpoint.split("/")[1]
         state["hook"](revision)
         value = state["statuses"].get(revision)
@@ -160,8 +162,11 @@ def test_ancestor_needs_its_own_success(lane, status):
 
 def test_candidate_scan_is_bounded():
     calls = []
-    assert gate.newest_attested(lambda endpoint: calls.append(endpoint) or [], [str(i) for i in range(101)]) == (None, None)
-    assert len(calls) == 100
+    def api(endpoint):
+        calls.append(endpoint)
+        return [] if endpoint.startswith("commits/") else {"workflow_runs": []}
+    assert gate.newest_attested(api, [f"{i:040x}" for i in range(101)]) == (None, None)
+    assert len(calls) == 200  # one local status and one hosted lookup per revision
 
 @pytest.mark.parametrize("race", [False, True])
 def test_actual_publisher_sql_never_overwrites_a_newer_revision(tmp_path, race):
