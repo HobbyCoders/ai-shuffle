@@ -290,6 +290,10 @@ def asset_repo(tmp_path):
     env = {**os.environ, "LOCAL_CI_PYTHON": sys.executable}
     # This isolated repository supplies its own base; never inherit the caller's.
     env.pop("LOCAL_CI_BASE", None)
+    # Exercise ordinary CPython bytecode generation, even when the caller
+    # disables it or redirects caches outside the checkout.
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    env.pop("PYTHONPYCACHEPREFIX", None)
 
     def git(*args, check=True, input=None):
         return subprocess.run(["git", *args], cwd=repo, env=env, input=input,
@@ -306,6 +310,9 @@ def asset_repo(tmp_path):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)
     (repo / ".githooks/pre-push").chmod(0o755)
+    # Match the real checkout: importing the scratch helper must not make an
+    # otherwise clean fixture dirty just because Python writes its cache.
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
     # A harmless deterministic scanner rule exercises the real failure path.
     with (repo / ".gitleaks.toml").open("a", encoding="utf-8") as config:
         config.write('\n[[rules]]\nid = "local-ci-test"\ndescription = "Test sentinel"\n'
@@ -711,6 +718,8 @@ def test_fast_docs_and_unmapped_producing_path_through_real_hook(asset_repo, nam
     result = pre_push(tip)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"Affected checks passed: {suite}" in result.stdout
+    assert list((repo / "app").rglob("*.pyc")), "fixture must exercise bytecode writes"
+    assert git("status", "--porcelain").stdout == ""
     if note:
         assert note in result.stdout
     assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
