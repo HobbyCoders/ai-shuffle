@@ -651,7 +651,7 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
     assert "test-only-password" not in str(response)
     grant_id = next(iter(broker.grants))
     task = asyncio.create_task(tools["ChatRunCommand"].handler({"grant_id": grant_id, "command": "sdk"}))
-    if permission_mode != "bypassPermissions" or mode == "chat":
+    if permission_mode != "bypassPermissions":
         action = await pending(broker)
         assert commands == []
         await broker.decide("chat", action.id, True)

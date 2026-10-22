@@ -370,12 +370,20 @@ def test_permission_mode_untouched_outside_chat(mode, permission_mode):
     assert permission_mode_for_session_mode(permission_mode, mode) == expected
 
 
-@pytest.mark.parametrize("permission_mode", ["default", "plan", "bypassPermissions", "acceptEdits", None])
-def test_chat_mode_pins_the_permission_mode(permission_mode):
-    """Whatever the row/config/override chain produced, a chat turn runs on
-    ``default``: its composer has no control to undo an inherited ``plan``
-    (which the ceiling would deadlock, the plan-exit tool not being on it) and
-    ``bypassPermissions`` would switch off the callback the ceiling leans on."""
+@pytest.mark.parametrize("permission_mode", ["default", "auto", "bypassPermissions"])
+def test_chat_mode_keeps_its_offered_permission_modes(permission_mode):
+    """Issue #371 step 4: a no-project session offers Ask, Auto and Bypass, so
+    the one it was given is the one it runs in. The tool ceiling does not lean
+    on the prompt: the allow list, deny rules and the confined readers apply in
+    every mode."""
+    assert permission_mode_for_session_mode(permission_mode, "chat") == permission_mode
+
+
+@pytest.mark.parametrize("permission_mode", ["plan", "acceptEdits", "nonsense", None])
+def test_chat_mode_runs_anything_else_as_ask(permission_mode):
+    """Accept Edits is not offered without a project (nothing to edit), the
+    retired plan mode would deadlock the ceiling, and an unknown or missing
+    binding fails closed to Ask."""
     assert permission_mode_for_session_mode(permission_mode, "chat") == "default"
 
 
@@ -386,10 +394,15 @@ def test_build_options_chat_mode_overrules_an_inherited_plan_mode():
     assert options.permission_mode == "default"
 
 
-def test_build_options_chat_mode_overrules_an_inherited_bypass():
+def test_build_options_chat_mode_keeps_a_chosen_bypass():
     options = _build_for_mode(
         "chat", {"model": "opus"}, permission_mode="bypassPermissions"
     )
+    assert options.permission_mode == "bypassPermissions"
+
+
+def test_build_options_chat_mode_drops_accept_edits():
+    options = _build_for_mode("chat", {"model": "opus"}, permission_mode="acceptEdits")
     assert options.permission_mode == "default"
 
 

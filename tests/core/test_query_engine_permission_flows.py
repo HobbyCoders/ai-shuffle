@@ -254,11 +254,11 @@ _FETCH = ("WebFetch", {"url": "https://example.com"})
     (None, None, {}, _FETCH, True),
     # The retired "plan" mode normalizes to default.
     ({"permission_mode": "plan"}, None, {}, _FETCH, True),
-    # A chat session is pinned to default whatever the chain produced.
-    (None, {"mode": "chat", "permission_mode": "bypassPermissions"}, {}, _FETCH, True),
+    # A no-project session keeps the Bypass its owner chose (#371 step 4).
+    (None, {"mode": "chat", "permission_mode": "bypassPermissions"}, {}, _FETCH, False),
 ], ids=[
     "override-default", "override-acceptEdits", "override-capped-by-later-tightening",
-    "binding-bypass", "binding-default", "null-binding-uses-agent-acceptEdits", "nothing", "plan", "chat-pinned",
+    "binding-bypass", "binding-default", "null-binding-uses-agent-acceptEdits", "nothing", "plan", "chat-keeps-bypass",
 ])
 async def test_permission_mode_chain_decides_whether_a_tool_prompts(
     tmp_path, overrides, session_row, config, call, prompts,

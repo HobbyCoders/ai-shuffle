@@ -3694,6 +3694,7 @@ from app.db.sessions import (  # noqa: F401
     adopt_session_follow,
     unpin_session,
     set_session_project,
+    attach_session_project,
     set_session_branch,
     resync_session_branch,
     update_session_pr_state,

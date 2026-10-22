@@ -189,14 +189,27 @@ def storage_session_mode(mode: Any) -> Optional[str]:
     return normalized
 
 
+#: The permission modes a no-project (``chat``) session may run in: Ask, the
+#: classifier mode and Bypass (issue #371 step 4, owner decision). Accept
+#: Edits has nothing to approve there (no file-edit tool is on the ceiling) and
+#: the composer no longer offers it. Bypass and Auto only stop the prompts:
+#: the tool ceiling (allow list, deny rules, the delegated leg's PreToolUse
+#: policy) and the handle-confined reader still apply in every mode.
+CHAT_PERMISSION_MODES: frozenset[str] = frozenset({"default", "auto", "bypassPermissions"})
+
+
 def permission_mode_for_session_mode(permission_mode: Any, mode: Any) -> Any:
-    """Normalize retired settings and keep chat sessions on default permissions."""
+    """Normalize retired settings and keep chat sessions to their offered modes.
+
+    ``plan`` is retired everywhere. A chat session keeps Ask, Auto and Bypass;
+    anything else (Accept Edits, an unknown value, no value) runs as Ask.
+    """
     # Old saved sessions and clients may still send the retired mode.
     if permission_mode == "plan":
         return "default"
     if normalize_session_mode(mode) != "chat":
         return permission_mode
-    return "default"
+    return permission_mode if permission_mode in CHAT_PERMISSION_MODES else "default"
 
 
 # The one tool every mode short of Bypass puts to a person: the computer-use

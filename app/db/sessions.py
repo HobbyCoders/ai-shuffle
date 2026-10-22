@@ -1299,6 +1299,30 @@ def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow
         return row_to_dict(cursor.fetchone())
 
 
+def attach_session_project(
+    session_id: str, project_id: str, project_v2_id: Optional[str]
+) -> Optional[SessionRow]:
+    """Give a no-project session its project, once (issue #371 step 4).
+
+    One conditional write turns the row into an ordinary project session:
+    ``mode`` goes from ``'chat'`` to NULL (code) and the project columns are
+    set. The ``WHERE`` keeps it one-way and race-free: a row that already has a
+    project, or is not a no-project session, is left alone and ``None`` comes
+    back, so a second attach (or a stale tab) can never re-point a session.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET project_id = {_ph}, project_v2_id = {_ph}, mode = NULL, "
+            f"updated_at = {_ph} WHERE id = {_ph} AND mode = 'chat' "
+            f"AND project_id IS NULL AND project_v2_id IS NULL RETURNING *",
+            (project_id, project_v2_id, now, session_id),
+        )
+        return row_to_dict(cursor.fetchone())
+
+
 def set_session_branch(
     session_id: str, branch: Optional[str], project_v2_id: Optional[str] = None
 ) -> Optional[SessionRow]:
@@ -3021,6 +3045,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'sessions',
-    'create_session create_session_with_stats update_session set_session_run_binding patch_voice_session_context adopt_session adopt_session_follow unpin_session pin_session_placement set_session_project set_session_branch resync_session_branch update_session_pr_state set_session_parked_task_kind set_working_set_ref delete_session set_session_active set_session_hidden clear_session_conversation delete_session_message delete_orphan_user_turn discard_orphan_first_turn delete_session_messages_after_jsonl_uuid',
+    'create_session create_session_with_stats update_session set_session_run_binding patch_voice_session_context adopt_session adopt_session_follow unpin_session pin_session_placement set_session_project attach_session_project set_session_branch resync_session_branch update_session_pr_state set_session_parked_task_kind set_working_set_ref delete_session set_session_active set_session_hidden clear_session_conversation delete_session_message delete_orphan_user_turn discard_orphan_first_turn delete_session_messages_after_jsonl_uuid',
     scope='session',
 )
