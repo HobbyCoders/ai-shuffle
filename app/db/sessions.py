@@ -1309,18 +1309,44 @@ def attach_session_project(
     set. The ``WHERE`` keeps it one-way and race-free: a row that already has a
     project, or is not a no-project session, is left alone and ``None`` comes
     back, so a second attach (or a stale tab) can never re-point a session.
+
+    The same write puts the session back on Ask (``permission_mode =
+    'default'``). Auto and Bypass were chosen for a session that could only
+    reach the web, memory and orchestration tools; carried over, the next turn
+    would get a shell and file edits with no prompts. It is set whatever the
+    old binding was: a NULL binding falls back to the agent's own default
+    (which may be Bypass), and a stored Accept Edits ran as Ask until now.
+
+    The write holds the session row lock that turn admission takes
+    (``turns.enqueue_turn``) and raises :class:`AttachBusy`, writing nothing,
+    while the session has a turn queued or live. No turn can be admitted
+    between that check and the write.
     """
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = get_cursor(conn)
+        cursor.execute(f"SELECT id FROM sessions WHERE id = {_ph} FOR UPDATE", (session_id,))
+        if cursor.fetchone() is None:
+            return None
+        cursor.execute(
+            f"SELECT 1 FROM turns WHERE session_id = {_ph} AND state IN "
+            "('queued','running','interrupting','draining','parked') LIMIT 1",
+            (session_id,),
+        )
+        if cursor.fetchone() is not None:
+            raise AttachBusy(session_id)
         cursor.execute(
             f"UPDATE sessions SET project_id = {_ph}, project_v2_id = {_ph}, mode = NULL, "
-            f"updated_at = {_ph} WHERE id = {_ph} AND mode = 'chat' "
+            f"permission_mode = 'default', updated_at = {_ph} WHERE id = {_ph} AND mode = 'chat' "
             f"AND project_id IS NULL AND project_v2_id IS NULL RETURNING *",
             (project_id, project_v2_id, now, session_id),
         )
         return row_to_dict(cursor.fetchone())
+
+
+class AttachBusy(Exception):
+    """A turn is queued or live, so :func:`attach_session_project` wrote nothing."""
 
 
 def set_session_branch(

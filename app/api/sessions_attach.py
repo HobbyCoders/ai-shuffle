@@ -9,6 +9,16 @@ one (``attach_session_project``).
 The live client, if any, still carries the no-project tool ceiling and cwd, so
 it is closed with ``preserve_session=True``; the next turn rebuilds its
 options from the updated row and resumes the same transcript.
+
+Owner only (``require_admin``): the attach widens what the session can reach,
+so API users, non-owner paired devices and agent previews are refused. The
+same write puts the session back on Ask (see ``attach_session_project``).
+
+Busy sessions are refused, and the check is not a cached hint: this process's
+live runtime, its turn executions and the pooled client are read first, then
+the write itself re-checks queued and live turns under turn admission's
+session lock. The pooled client is released only if it is still idle right
+before the release, with no await in between.
 """
 
 import logging
@@ -17,7 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from app.api.auth import get_api_user_from_request, require_auth
+from app.api.auth import get_api_user_from_request, require_admin
 from app.api.common import require_origin_access
 from app.api.sessions_helpers import refuse_assistant_home_mutation, require_session
 from app.db import database
@@ -42,6 +52,8 @@ class AttachProjectResponse(BaseModel):
     project_id: str
     project_v2_id: Optional[str] = None
     mode: str
+    #: Always Ask: the attach resets Auto and Bypass (``attach_session_project``).
+    permission_mode: str = "default"
 
 
 def _owned_here(session: dict) -> bool:
@@ -60,22 +72,59 @@ def _owned_here(session: dict) -> bool:
     return not instance or instance in {settings.effective_instance_id, my_device}
 
 
+def _live_here(session_id: str) -> bool:
+    """Whether this process is running work on ``session_id`` right now.
+
+    In-memory only and synchronous, so a caller can act on the answer before
+    the event loop runs anything else: a turn this process executes, or a
+    pooled client that is streaming, draining or waiting on the owner.
+    """
+    from app.core import session_runtime
+    from app.core.session_pool import get_session_pool
+
+    if session_runtime.get_live_runtime(session_id) is not None:
+        return True
+    if session_id in session_runtime.active_executions().values():
+        return True
+    pool = get_session_pool()
+    state = pool.peek(session_id)
+    if state is None:
+        return False
+    return bool(
+        state.is_streaming
+        or state.idle_reader_active
+        or pool._is_awaiting_user_input(session_id)
+    )
+
+
+def _has_live_run(session_id: str) -> bool:
+    """The uncached runs/turns read; a database error counts as busy."""
+    from app.core import streaming_status
+
+    try:
+        return streaming_status._has_active_run_db(session_id)
+    except Exception:  # noqa: BLE001 — can't tell, so don't attach
+        logger.warning("Busy check failed for %s; refusing the attach", session_id, exc_info=True)
+        return True
+
+
 @router.post("/{session_id}/attach-project", response_model=AttachProjectResponse)
 async def attach_project(
     request: Request,
     session_id: str,
     body: AttachProjectRequest,
-    token: str = Depends(require_auth),
+    token: str = Depends(require_admin),
 ):
-    """Give this no-project session a project. One-way.
+    """Give this no-project session a project. One-way, owner only.
 
-    Refusals, in order: an archived chat or the assistant home (409); a
-    session that is not a no-project top-level chat (409); one owned by
-    another worker (409); one with a turn running (409); a project the caller
+    Refusals, in order: anyone but the owner (403); an archived chat or the
+    assistant home (409); a session that is not a no-project top-level chat
+    (409); one owned by another worker (409); one with a turn queued or
+    running, or whose state can't be read (409); a project the caller
     cannot reach or that has no checkout on this worker (403/404 via origin
     access). A lost race with another attach also answers 409.
     """
-    from app.core import archive_guard, streaming_status
+    from app.core import archive_guard
     from app.core.session_modes import session_mode_of
 
     session = await require_session(request, session_id)
@@ -94,7 +143,7 @@ async def attach_project(
         )
     if not _owned_here(session):
         raise HTTPException(status.HTTP_409_CONFLICT, NOT_HERE)
-    if await run_sync(streaming_status.has_active_run, session_id):
+    if _live_here(session_id) or await run_sync(_has_live_run, session_id):
         raise HTTPException(status.HTTP_409_CONFLICT, BUSY)
 
     access = await run_sync(
@@ -107,9 +156,12 @@ async def attach_project(
         raise HTTPException(status.HTTP_404_NOT_FOUND, NEEDS_LOCAL_CHECKOUT)
     project_v2_id = (access.get("project_v2") or {}).get("id")
 
-    row = await run_sync(
-        database.attach_session_project, session_id, project["id"], project_v2_id
-    )
+    try:
+        row = await run_sync(
+            database.attach_session_project, session_id, project["id"], project_v2_id
+        )
+    except database.AttachBusy:
+        raise HTTPException(status.HTTP_409_CONFLICT, BUSY) from None
     if not row:
         raise HTTPException(status.HTTP_409_CONFLICT, ALREADY_HAS_PROJECT)
 
@@ -125,9 +177,15 @@ async def attach_project(
 
     # The pooled client was built with the no-project ceiling and cwd. Close it
     # without ending the conversation; the next turn rebuilds from the row.
+    # A turn admitted after the write already built its options from the new
+    # row, and the cwd change makes it replace this client itself
+    # (``reconnect_option_names``), so a client in use is never cut off here.
+    # ``remove`` pops the entry before its first await: nothing can start on
+    # the client between this check and the release.
     try:
         from app.core.session_pool import get_session_pool
-        await get_session_pool().remove(session_id, preserve_session=True)
+        if not _live_here(session_id):
+            await get_session_pool().remove(session_id, preserve_session=True)
     except Exception:  # noqa: BLE001 — a stale client is refreshed on its next turn
         logger.warning("Could not release the live client for %s", session_id, exc_info=True)
 
@@ -136,7 +194,8 @@ async def attach_project(
         await sync_engine.broadcast_user_session_updated(
             user_id=session.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"project_id": project["id"], "project_v2_id": project_v2_id, "mode": None},
+            updates={"project_id": project["id"], "project_v2_id": project_v2_id, "mode": None,
+                     "permission_mode": "default"},
             source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — the write already committed
@@ -147,4 +206,5 @@ async def attach_project(
         project_id=project["id"],
         project_v2_id=project_v2_id,
         mode="code",
+        permission_mode=row.get("permission_mode") or "default",
     )
