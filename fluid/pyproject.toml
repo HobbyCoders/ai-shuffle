@@ -41,6 +41,8 @@ packages = ["fluid"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Make the shared scratch helper importable from Fluid's separate pytest root.
+pythonpath = [".."]
 
 [tool.uv]
 package = true

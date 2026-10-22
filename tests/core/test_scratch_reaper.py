@@ -108,6 +108,47 @@ def test_symlink_root_and_nested_links_do_not_escape(tmp_path):
     assert linked.is_symlink() and (outside / "user-file").read_text() == "keep"
 
 
+def test_sigkill_pytest_scratch_is_reaped_after_ttl(tmp_path):
+    """SIGKILL cannot unwind pytest; reap the real plugin's receipt/payload."""
+    record = tmp_path / "ready"
+    suite = tmp_path / "test_sleep.py"
+    suite.write_text(
+        "import pathlib, time\n"
+        "def test_payload(tmp_path, tmp_path_factory):\n"
+        "    (tmp_path / 'payload').write_bytes(b'x' * 1048576)\n"
+        f"    pathlib.Path({str(record)!r}).write_text(str(tmp_path_factory.getbasetemp().parent))\n"
+        "    time.sleep(60)\n"
+    )
+    root = Path(__file__).resolve().parents[2]
+    child = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch", str(suite), "-q"],
+        cwd=root, env={**os.environ, "PYTHONPATH": str(root),
+                       "AI_SHUFFLE_TEST_SCRATCH_ROOT": str(tmp_path)},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not record.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert record.exists(), "pytest child never created its basetemp"
+        path = Path(record.read_text())
+        assert path.parent == tmp_path
+        receipt = json.loads((path / MARKER).read_text())
+        assert receipt["pid"] == child.pid
+        child.kill()
+        child.communicate(timeout=10)
+        assert path.is_dir()
+        assert reaper.sweep(tmp_path, ttl=60) == 0
+        assert path.is_dir()
+        assert reaper.sweep(tmp_path, ttl=60, now=time.time() + 61) == 1
+        assert not path.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+
+
 def test_owned_context_cleans_up_on_error():
     with pytest.raises(RuntimeError), scratch_directory(PREFIXES[0]) as directory:
         assert (Path(directory) / MARKER).is_file()
@@ -252,26 +293,18 @@ def test_real_proc_scan_is_usable_or_identifies_opaque_same_uid(monkeypatch, cap
     # Normal app startup makes app/runner processes non-dumpable. Known app
     # instances and init ancestors must not disable a sweep; unknown opaque
     # same-UID processes still fail closed.
+    # Observe classification during the scan, not in an earlier /proc walk:
+    # an opaque child can exit (or exec/change dumpability) between two walks.
     opaque_same_uid = []
-    for process in Path("/proc").iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            status = (process / "status").read_text().splitlines()
-            uids = next(line for line in status if line.startswith("Uid:")).split()[1:]
-            if str(os.getuid()) not in uids:
-                continue
-            try:
-                with os.scandir(process / "fd") as descriptors:
-                    for descriptor in descriptors:
-                        os.readlink(descriptor.path)
-                os.readlink(process / "cwd")
-                os.readlink(process / "root")
-            except PermissionError:
-                if not reaper._uninspectable_is_unrelated(process, Path("/proc")):
-                    opaque_same_uid.append(process.name)
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+    classify = reaper._uninspectable_is_unrelated
+
+    def observe(base, proc, protected_prefixes=None):
+        unrelated = classify(base, proc, protected_prefixes)
+        if not unrelated:
+            opaque_same_uid.append(base.name)
+        return unrelated
+
+    monkeypatch.setattr(reaper, "_uninspectable_is_unrelated", observe)
     monkeypatch.setattr(reaper, "_disabled_logged", False)
     references = reaper._references(Path("/proc"), time.monotonic() + reaper.SWEEP_SECONDS)
     if opaque_same_uid:

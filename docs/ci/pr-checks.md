@@ -115,6 +115,9 @@ Pytest controllers allocate a unique `ai-shuffle-pytest-*` basetemp and remove
 it after fixture and xdist worker teardown, including failed runs. Workers use
 the controller's base rather than competing for a shared numbered directory.
 Retention is explicitly `none` / `0`. An explicit `--basetemp` remains caller-owned.
+Fluid's separate pytest root loads the same scratch plugin, including when tests
+are invoked from `fluid/`; it does not load the app's test fixtures. A standalone
+Fluid copy without the app's scripts falls back to pytest's normal temp handling.
 `local_ci.py` gives each child command a unique `ai-shuffle-ci-*` TMPDIR/TEMP/TMP
 and removes it after stopping failed, timed-out or interrupted children. It
 preserves the original shared xdist lock directory in
