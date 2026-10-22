@@ -20,7 +20,7 @@ def process_identity(pid, proc=Path("/proc")):
 
 
 @contextmanager
-def cleanup_on_sigterm():
+def cleanup_on_sigterm(*, handler=None):
     """Unwind cleanup on termination without replacing staged/custom handlers."""
     def stop(signum, frame):
         raise SystemExit(128 + signum)
@@ -29,7 +29,7 @@ def cleanup_on_sigterm():
     installed = False
     if previous == signal.SIG_DFL:
         try:
-            signal.signal(signal.SIGTERM, stop)
+            signal.signal(signal.SIGTERM, handler or stop)
             installed = True
         except ValueError:  # signals can only be installed by the main thread
             pass

@@ -82,12 +82,13 @@ def test_pytest_owns_and_removes_basetemp(tmp_path, parallel, failure):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGTERM cleanup")
-@pytest.mark.parametrize("runner", ["local_ci", "pytest"])
+@pytest.mark.parametrize("runner", ["local_ci", "pytest", "pytest-xdist"])
 def test_sigterm_unwinds_owned_scratch(tmp_path, runner):
     import signal
     import time
 
     record = tmp_path / "ready"
+    second = tmp_path / "second-started"
     if runner == "local_ci":
         child_code = ("import os, pathlib, time; "
                       f"pathlib.Path({str(record)!r}).write_text(os.environ['TMPDIR']); "
@@ -100,8 +101,14 @@ def test_sigterm_unwinds_owned_scratch(tmp_path, runner):
         suite.write_text("import pathlib, time\n"
                          "def test_sleep(pytestconfig):\n"
                          f"    pathlib.Path({str(record)!r}).write_text(str(pathlib.Path(pytestconfig.option.basetemp).parent))\n"
-                         "    time.sleep(60)\n")
+                         "    time.sleep(60)\n"
+                         "def test_second():\n"
+                         f"    pathlib.Path({str(second)!r}).touch()\n")
         command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch", str(suite), "-q"]
+        if runner == "pytest-xdist":
+            # Keep both tests on one worker so the second is queued, not already
+            # running independently when the controller receives SIGTERM.
+            command += ["-n", "2", "--dist", "loadscope"]
     child = subprocess.Popen(command, cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)},
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -113,10 +120,8 @@ def test_sigterm_unwinds_owned_scratch(tmp_path, runner):
         assert directory.is_dir()
         child.send_signal(signal.SIGTERM)
         output, _ = child.communicate(timeout=10)
-        # Pytest reports SystemExit raised during a test as a test failure.
-        assert child.returncode == (128 + signal.SIGTERM if runner == "local_ci" else 1), output
-        if runner == "pytest":
-            assert "SystemExit: 143" in output
+        assert child.returncode == 128 + signal.SIGTERM, output
+        assert not second.exists(), output
         assert not directory.exists(), output
     finally:
         if child.poll() is None:

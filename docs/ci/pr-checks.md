@@ -125,7 +125,9 @@ so Unix-domain socket paths stay short. `npm test` in browser-mcp similarly owns
 its browser/Node scratch.
 
 Normal exit, SIGTERM, pytest's Ctrl-C handling and local-ci command failure run
-cleanup; staged local-ci stop handlers are preserved. SIGKILL and host crashes
+cleanup. Pytest's SIGTERM handler exits the whole session with code 143 (serial
+and xdist), rather than failing one test and continuing; local-ci retains its
+SystemExit-based unwind. Staged/custom stop handlers are preserved. SIGKILL and host crashes
 cannot run finalizers. Approved workers periodically sweep only private (0700),
 allowlisted, ownership-receipted scratch older than six hours, skipping live
 owners, process cwd/open descriptors, symlinks, checkouts and separate git stores.
@@ -136,9 +138,18 @@ removals and elapsed time. Uninspectable unrelated non-root UIDs cannot enter
 these private trees. The only uninspectable root processes exempted are known
 init ancestors (`tini`, `docker-init`, or PID 1 `init`/`systemd`): they predate the
 scratch, cannot inherit its descriptors/cwd, and are trusted not to open it later.
-Other uninspectable root or same-user processes fail closed, logging the disabled
-sweep once per worker. These sweeps do not clean generic `tmp*`, `probe-`, `cdp-`,
-`ci-` or legacy unmarked trees.
+Normal app startup makes processes non-dumpable. Readable status and exact
+Python entry-point argv identify same-user `app.main` instances (including
+runners), `app.preview_process`, and the exact agent-isolation app shim; these
+do not block sweeping. Their scratch receipts name their own PID, so live-owner
+checks protect their trees, and app code does not hold a dead owner's scratch
+open. The non-dumpable `docker/container_runtime.py run` supervisor is also
+exempt only when it is an ancestor: it starts/reaps children without opening
+their scratch. Other uninspectable root or same-user processes fail closed,
+logging the disabled sweep once per worker. A process retaining scratch cwd/fds
+before switching all its UIDs to another user remains a known narrow gap.
+These sweeps do not clean generic `tmp*`, `probe-`, `cdp-`, `ci-` or legacy
+unmarked trees.
 
 For a disposable Linux preview, build the frontend, run
 `python -m app.preview stamp`, then use

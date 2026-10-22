@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -37,7 +38,10 @@ def _uninspectable_is_unrelated(base, proc):
     status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
     uids = {int(uid) for uid in status["Uid"].split()}
     if 0 not in uids:
-        return os.getuid() not in uids
+        # Retaining cwd/fds then switching every UID to another user is a known gap.
+        if os.getuid() not in uids:
+            return True
+        return _is_application_process(base, status, proc)
     # Only exempt established init ancestors, not arbitrary root daemons or
     # elevated children. Init shims predate our scratch and only reap/forward
     # signals; they cannot have inherited its cwd/fds. Trust their fixed role
@@ -45,6 +49,36 @@ def _uninspectable_is_unrelated(base, proc):
     name = status["Name"].strip()
     if name not in {"tini", "docker-init"} and not (base.name == "1" and name in {"init", "systemd"}):
         return False
+    return _is_ancestor(base, proc)
+
+
+def _is_application_process(base, status, proc):
+    # Normal startup makes app/runner processes non-dumpable. Their scratch
+    # receipts name their own PID, so the live-owner check protects it; app code
+    # does not keep another, dead owner's scratch open. The container supervisor
+    # only starts/reaps children and never opens their scratch.
+    if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", status["Name"].strip()):
+        return False
+    argv = (base / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+    if not argv or not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", Path(os.fsdecode(argv[0])).name):
+        return False
+    args = argv[1:]
+    while args and args[0] in {b"-s", b"-I", b"-E", b"-u", b"-B"}:
+        args = args[1:]
+    if args in ([b"-m", b"app.main"], [b"-m", b"app.preview_process"]):
+        return True
+    if len(args) == 2 and args[0] == b"-c":
+        from docker.agent_isolation import APP_SHIM
+        return args[1] == APP_SHIM.encode()
+    # The installed supervisor hands over to this exact script shape. Restrict
+    # this launcher exemption to our ancestry, never a similarly named sibling.
+    if len(args) == 2 and args[1] == b"run":
+        script = Path(os.fsdecode(args[0]))
+        return script.is_absolute() and script.parts[-2:] == ("docker", "container_runtime.py") and _is_ancestor(base, proc)
+    return False
+
+
+def _is_ancestor(base, proc):
     pid = os.getpid()
     seen = set()
     while pid and pid not in seen and len(seen) < MAX_ENTRIES:
@@ -52,7 +86,7 @@ def _uninspectable_is_unrelated(base, proc):
         try:
             parent = dict(line.split(":", 1) for line in (proc / str(pid) / "status").read_text().splitlines() if ":" in line)
         except (FileNotFoundError, ProcessLookupError):
-            return False  # an incomplete ancestry is not an init exemption
+            return False  # incomplete ancestry cannot establish an exemption
         pid = int(parent["PPid"])
         if str(pid) == base.name:
             return True

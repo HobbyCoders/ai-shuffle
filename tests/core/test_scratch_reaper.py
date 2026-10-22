@@ -197,10 +197,61 @@ def test_another_live_scratch_owner_survives(tmp_path):
         child.stdout.close()
 
 
+@pytest.mark.parametrize("module, exempt", [("app.main", True), ("other.main", False)])
+def test_non_dumpable_sibling(tmp_path, module, exempt):
+    package = tmp_path / module.split(".")[0]
+    package.mkdir()
+    # The stand-in runs with the real entry-point argv and real prctl hardening,
+    # and creates its receipt through the production scratch owner helper.
+    (package / "__init__.py").write_text(
+        f"__path__.append({str(Path(reaper.__file__).parents[1])!r})\n"
+        if exempt else "")
+    (package / "main.py").write_text(
+        "import ctypes, sys\n"
+        "from app.core.temp_scratch import scratch_directory\n"
+        "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0\n"
+        f"with scratch_directory('ai-shuffle-probe-', root={str(tmp_path)!r}) as directory:\n"
+        "    print(directory, flush=True)\n"
+        "    sys.stdin.read()\n")
+    child = subprocess.Popen(
+        [sys.executable, "-m", module], cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(Path(reaper.__file__).parents[2])])},
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        owned = Path(child.stdout.readline().strip())
+        assert owned.parent == tmp_path
+        base = Path("/proc") / str(child.pid)
+        try:
+            with os.scandir(base / "fd"):
+                pass
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("host permits inspection of non-dumpable siblings")
+        proc = tmp_path / "proc"
+        (proc / str(child.pid)).symlink_to(base)
+        # Even artificially aged app scratch is protected by its live receipt.
+        receipt = json.loads((owned / MARKER).read_text())
+        receipt["created"] = 1
+        (owned / MARKER).write_text(json.dumps(receipt))
+        os.utime(owned / MARKER, (1, 1))
+        os.utime(owned, (1, 1))
+        dead = stale(tmp_path)
+        references = reaper._references(proc, time.monotonic() + 5)
+        assert (references is not None) == exempt
+        assert reaper.sweep(tmp_path, ttl=1) == int(exempt)
+        assert owned.exists()
+        assert dead.exists() != exempt
+    finally:
+        child.communicate(timeout=5)
+    assert child.returncode == 0
+    assert not owned.exists()
+
+
 def test_real_proc_scan_is_usable_or_identifies_opaque_same_uid(monkeypatch, caplog):
-    # A normal container must not fail closed merely on root init or unrelated
-    # users. Some hardened hosts additionally make the app's same-UID process
-    # non-dumpable; only that exceptional case must still fail closed.
+    # Normal app startup makes app/runner processes non-dumpable. Known app
+    # instances and init ancestors must not disable a sweep; unknown opaque
+    # same-UID processes still fail closed.
     opaque_same_uid = []
     for process in Path("/proc").iterdir():
         if not process.name.isdigit():
@@ -217,7 +268,8 @@ def test_real_proc_scan_is_usable_or_identifies_opaque_same_uid(monkeypatch, cap
                 os.readlink(process / "cwd")
                 os.readlink(process / "root")
             except PermissionError:
-                opaque_same_uid.append(process.name)
+                if not reaper._uninspectable_is_unrelated(process, Path("/proc")):
+                    opaque_same_uid.append(process.name)
         except (FileNotFoundError, ProcessLookupError):
             continue
     monkeypatch.setattr(reaper, "_disabled_logged", False)
@@ -263,6 +315,48 @@ def test_unreadable_process_is_classified_per_process(tmp_path, monkeypatch, cap
         if safe:
             assert str(tmp_path) in references
     assert sum("sweep disabled" in message for message in caplog.messages) == int(not safe)
+
+
+@pytest.mark.parametrize("argv, name, ancestor, safe", [
+    (["/venv/bin/python3.12", "-m", "app.main"], "python3.12", False, True),
+    (["python", "-s", "-m", "app.main"], "python", False, True),
+    (["python", "-m", "app.preview_process"], "python", False, True),
+    (["python", "-m", "app.main.extra"], "python", False, False),
+    (["python", "-m", "other", "app.main"], "python", False, False),
+    (["python", "-c", "import app.main"], "python", False, False),
+    (["python", "-m", "app.main", "unexpected"], "python", False, False),
+    (["not-python", "-m", "app.main"], "not-python", False, False),
+    (["python", "-m", "app.main"], "unknown", False, False),
+    (["python", "/source/docker/container_runtime.py", "run"], "python", True, True),
+    (["python", "/source/docker/container_runtime.py", "run"], "python", False, False),
+    (["python", "/source/docker/container_runtime.py", "dump"], "python", True, False),
+    (["python", "/source/other/container_runtime.py", "run"], "python", True, False),
+    (["python", "docker/container_runtime.py", "run"], "python", True, False),
+])
+def test_opaque_application_entry_points(tmp_path, argv, name, ancestor, safe):
+    proc = tmp_path / "entry-point-proc"
+    target = proc / "1"
+    target.mkdir(parents=True)
+    uid = os.getuid()
+    (target / "status").write_text(f"Name:\t{name}\nUid:\t{uid} {uid} {uid} {uid}\nPPid:\t0\n")
+    (target / "cmdline").write_bytes(b"\0".join(os.fsencode(arg) for arg in argv) + b"\0")
+    own = proc / str(os.getpid())
+    own.mkdir()
+    (own / "status").write_text(f"PPid:\t{int(ancestor)}\n")
+    assert reaper._uninspectable_is_unrelated(target, proc) == safe
+
+
+def test_opaque_agent_isolation_shim_requires_exact_code(tmp_path):
+    from docker.agent_isolation import APP_SHIM
+
+    target = tmp_path / "shim-proc"
+    target.mkdir()
+    uid = os.getuid()
+    (target / "status").write_text(f"Name:\tpython\nUid:\t{uid} {uid} {uid} {uid}\n")
+    cmdline = target / "cmdline"
+    for code, safe in [(APP_SHIM, True), (APP_SHIM + "print('other code')\n", False)]:
+        cmdline.write_bytes(b"python\0-s\0-c\0" + code.encode() + b"\0")
+        assert reaper._uninspectable_is_unrelated(target, tmp_path) == safe
 
 
 def test_descriptors_have_a_separate_larger_bound(tmp_path, monkeypatch):
