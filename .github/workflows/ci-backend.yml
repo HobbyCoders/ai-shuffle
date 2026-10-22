@@ -130,7 +130,7 @@ jobs:
             reports/
             backend-results/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   backend-contracts:
     name: backend-contracts
@@ -271,7 +271,7 @@ jobs:
           name: backend-contracts
           path: reports/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   backend-security:
     name: backend-security
@@ -422,7 +422,7 @@ jobs:
           name: backend-security
           path: reports/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   backend:
     name: Backend tests
