@@ -30,6 +30,7 @@ from fluid.engine.claude_mod_usage import (
     parse_plan_usage_report,
 )
 from fluid.engine.delegated import (
+    CLAUDE_MOD_COMPACT_URL_ENV,
     CLAUDE_MOD_SOCKET_ENV,
     CLAUDE_MOD_TOKEN_ENV,
     CLAUDE_MOD_URL_ENV,
@@ -385,24 +386,28 @@ async def test_the_mod_gets_the_route_and_a_report_reaches_the_host(tmp_path) ->
         await loop.aclose()
 
 
-@pytest.mark.parametrize(("version", "claude_mod", "with_sink"), [
-    ("2.1.286", True, True),    # a CLI without mods
-    ("2.1.287", False, True),   # the off switch
-    ("2.1.287", True, False),   # no host takes reports
+@pytest.mark.parametrize(("version", "claude_mod", "with_sink", "compaction"), [
+    ("2.1.286", True, True, True),     # a CLI without mods
+    ("2.1.287", False, True, True),    # the off switch
+    ("2.1.287", True, False, False),   # no host takes reports, compaction off
 ])
 async def test_no_route_reaches_the_cli_without_mod_and_host(
-    tmp_path, version, claude_mod, with_sink,
+    tmp_path, monkeypatch, version, claude_mod, with_sink, compaction,
 ) -> None:
     async def sink(report: PlanUsageReport) -> None:
         raise AssertionError("no report expected")
 
+    # A value inherited from the host never stands in for this spawn's route.
+    monkeypatch.setenv(CLAUDE_MOD_COMPACT_URL_ENV, "http://127.0.0.1:1/claude-mod/compact")
     loop, record = _loop(
         tmp_path, version, claude_mod=claude_mod, plan_usage_sink=sink if with_sink else None,
+        claude_mod_compaction=compaction,
     )
     try:
         await _turn(loop)
         env = _spawn_env(record)
-        for name in (CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV):
+        for name in (CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
+                     CLAUDE_MOD_COMPACT_URL_ENV):
             assert name not in env
     finally:
         await loop.aclose()

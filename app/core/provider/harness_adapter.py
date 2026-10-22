@@ -663,6 +663,11 @@ class HarnessAdapter(ProviderAdapter):
             delegated_blocked = _delegated_disallowed(options)
             from app.core.usage_limits import claude_mod_usage_sink
             from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
+            from app.core import claude_compaction
+
+            # Settings > Providers > Claude > Sessions, read on the executing
+            # worker. Fixed for this connection's CLI process.
+            claude_compaction_on = await asyncio.to_thread(claude_compaction.read)
 
             # Never put Claude cloud credentials in SessionOptions.env, which
             # also feeds tools and MCPs. This private copy is for claude only.
@@ -758,7 +763,10 @@ class HarnessAdapter(ProviderAdapter):
                 # AI Shuffle's Claude Code mod (--plugin-dir on CLI 2.1.287+);
                 # FLUID_CLAUDE_MOD=false turns it off.
                 claude_mod=settings.fluid_claude_mod,
-                claude_mod_compaction=settings.fluid_claude_mod_compaction,
+                # AI Shuffle's compaction instead of the CLI's own summary
+                # (the owner's Claude compaction setting, on by default). A CLI
+                # without the mod compacts on its own, as with it off.
+                claude_mod_compaction=claude_compaction_on,
                 # The plan usage the mod reports after each turn goes into
                 # the same Claude usage store the stream's rate_limit events
                 # feed (usage panel, peer publication, broadcast).

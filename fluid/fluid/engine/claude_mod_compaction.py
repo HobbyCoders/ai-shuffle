@@ -1,4 +1,7 @@
-"""Opt-in mechanical compaction of Claude Code's handle-bearing message rows.
+"""Mechanical compaction of Claude Code's handle-bearing message rows.
+
+``DelegatedLoop(claude_mod_compaction=...)`` decides whether a loop mounts it
+(on by default); nothing here reads the environment.
 
 Only content matched to this session's stored path may be evicted. CLI-only
 attachments and previous summaries are opaque barriers, retained by handle.
@@ -14,13 +17,8 @@ from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import SessionNode
 
 COMPACT_PATH = "/claude-mod/compact"
-COMPACTION_ENV = "FLUID_CLAUDE_MOD_COMPACTION"
 MAX_COMPACT_BODY_BYTES = 8 * 1024 * 1024
 MAX_MESSAGES = 20_000
-
-
-def compaction_enabled(env: dict[str, str]) -> bool:
-    return env.get(COMPACTION_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def project(message: Message) -> dict[str, Any]:

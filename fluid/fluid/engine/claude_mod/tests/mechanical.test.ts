@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { compactionBridge } from '../hooks/mechanical.ts'
+import { compactionBridge, mounted } from '../hooks/mechanical.ts'
 
 const START = { cwd: '/work', surface: null, isInteractive: false }
 const ROWS = [
@@ -9,7 +9,7 @@ const ROWS = [
 ]
 const BUILT = [{ role: 'user' as const, text: 'Recovered through HistoryExpand("node_abc")', toolUses: [] }]
 const ENV = { FLUID_CLAUDE_MOD_URL: 'http://127.0.0.1:50123/claude-mod/usage',
-  FLUID_CLAUDE_MOD_TOKEN: 'mod-token', FLUID_CLAUDE_MOD_COMPACTION: '1' }
+  FLUID_CLAUDE_MOD_TOKEN: 'mod-token', FLUID_CLAUDE_MOD_COMPACT_URL: 'http://127.0.0.1:50123/claude-mod/compact' }
 function engine(on: On, log: () => void = () => {}) {
   const calls: unknown[] = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -31,11 +31,23 @@ describe('mechanical compaction', () => {
     expect(compactionBridge({ url: 'https://example.com/claude-mod/usage', token: 't' })).toBe(null)
   })
 
+  test('only this bridge\'s own pinned route counts as mounted', () => {
+    const tcp = { url: ENV.FLUID_CLAUDE_MOD_URL, token: 't' }
+    const unix = { url: 'http://localhost/claude-mod/usage', token: 't', socketPath: '/tmp/b.sock' }
+    expect(mounted(tcp, ENV.FLUID_CLAUDE_MOD_COMPACT_URL)).toBe(true)
+    expect(mounted(unix, 'http://localhost/claude-mod/compact')).toBe(true)
+    expect(mounted(tcp, undefined)).toBe(false)
+    expect(mounted(tcp, '')).toBe(false)
+    expect(mounted(tcp, 'http://127.0.0.1:50124/claude-mod/compact')).toBe(false)
+    expect(mounted(tcp, 'http://localhost/claude-mod/compact')).toBe(false)
+    expect(mounted(null, ENV.FLUID_CLAUDE_MOD_COMPACT_URL)).toBe(false)
+  })
+
   test('the bridge is captured before the engine can compact during session.start', async ($, on) => {
     const cleared: string[] = []
     let readyAtStart = false
     on('session.start', (_$, e) => {
-      readyAtStart = cleared.includes('FLUID_CLAUDE_MOD_TOKEN') && cleared.includes('FLUID_CLAUDE_MOD_COMPACTION')
+      readyAtStart = cleared.includes('FLUID_CLAUDE_MOD_TOKEN') && cleared.includes('FLUID_CLAUDE_MOD_COMPACT_URL')
       return { cwd: e.cwd }
     })
     on('env.set', (_$, e) => { cleared.push(e.name); return { value: undefined } })
@@ -95,10 +107,11 @@ describe('mechanical compaction', () => {
     })
   }
 
-  for (const flag of ['0', 'false', 'off', 'no', '']) {
-    test(`switch ${flag} preserves the old note-only bytes`, async ($, on) => {
+  for (const route of [undefined, '', 'http://127.0.0.1:50124/claude-mod/compact', 'http://127.0.0.1:50123/claude-mod/usage', '1']) {
+    test(`no mounted route (${route}) preserves the old note-only bytes`, async ($, on) => {
       const calls = engine(on)
-      mock.env(on, { ...ENV, FLUID_CLAUDE_MOD_COMPACTION: flag })
+      const { FLUID_CLAUDE_MOD_COMPACT_URL: _mounted, ...usageOnly } = ENV
+      mock.env(on, route === undefined ? usageOnly : { ...usageOnly, FLUID_CLAUDE_MOD_COMPACT_URL: route })
       let posts = 0
       on('http.fetch', () => { posts++; return { deny: 'unexpected post' } })
       await $.session.start(START)

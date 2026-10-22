@@ -29,6 +29,8 @@ export const LOOP_HELP =
 	'While Claude runs on your subscription, work that starts without you (automations, wake-ups, connectors, and the workers they start) counts against an hourly budget. Past it, the next turn waits for you under Waiting for you. Nothing you start yourself is held or timed, including the workers your chats start.';
 const LOOP_WORKER_LIMIT_HELP =
 	'Stops a worker that an automation, wake-up or connector started once it has run this long. Workers your own chats start have no limit. A change reaches running workers within a minute.';
+export const COMPACTION_HELP =
+	'When a Claude session’s context fills up, AI Shuffle trims older tool output and condenses older turns instead of letting Claude Code replace the conversation with a short summary. Recent work stays as it is, and the agent can still read back anything that was trimmed. Later turns send more context, so they use more tokens. Applies to Claude sessions that start after you change it. Needs Claude Code 2.1.287 or newer; an older version compacts the usual way.';
 export const FAL_BALANCE_HELP =
 	'Read with the media key itself, at most once every five minutes. Usage shows the same reading.';
 export const NATIVE_IMAGE_HELP =
@@ -50,6 +52,17 @@ export const entries: SettingEntry[] = [
 		id: 'providers.cliRemove', category: 'providers', section: 'Claude Code CLI',
 		label: 'Remove Claude Code', item: CLAUDE_PROVIDER_ITEM,
 		keywords: ['claude cli', 'uninstall', 'remove']
+	},
+	{
+		id: 'providers.claudeCompaction',
+		category: 'providers',
+		section: 'Sessions',
+		label: 'Smarter compaction',
+		hint: 'Keeps more of the conversation',
+		help: COMPACTION_HELP,
+		item: CLAUDE_PROVIDER_ITEM,
+		keywords: ['compaction', 'compact', 'context', 'summary', 'claude code', 'tokens', 'long sessions', 'history'],
+		default: true
 	},
 	{
 		id: 'providers.claudeMode',

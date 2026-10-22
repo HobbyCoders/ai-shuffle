@@ -30,6 +30,8 @@ export interface FakeWorkerState {
 	};
 	loopGuard: LoopGuardStatus;
 	cli: ClaudeCliStatus;
+	/** The owner's Claude compaction setting (on by default). */
+	compaction: boolean;
 }
 
 export const LOOP_DEFAULTS = {
@@ -101,6 +103,7 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 		},
 		loopGuard: loopGuardStatus(),
 		cli: cliStatus(),
+		compaction: true,
 		...init
 	};
 	const calls: WorkerCall[] = [];
@@ -137,6 +140,11 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 		'PUT /settings/loop-guard': (body) => {
 			state.loopGuard = { ...state.loopGuard, ...(body as object) };
 			return state.loopGuard;
+		},
+		'GET /settings/claude-compaction': () => ({ enabled: state.compaction }),
+		'PUT /settings/claude-compaction': (body) => {
+			state.compaction = (body as { enabled: boolean }).enabled;
+			return { enabled: state.compaction };
 		},
 		'GET /auth/claude/cli': () => state.cli,
 		'GET /auth/claude/cli-login': () => ({

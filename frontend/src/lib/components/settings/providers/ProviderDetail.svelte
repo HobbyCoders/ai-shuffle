@@ -21,6 +21,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
+	import ClaudeCompaction from './ClaudeCompaction.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
@@ -150,6 +151,7 @@
 			</SettingRow>
 		</RowGroup>
 		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
+		<ClaudeCompaction />
 	{/if}
 
 	<RowGroup title="Credentials" count={credsCount} id="providers-credentials">
