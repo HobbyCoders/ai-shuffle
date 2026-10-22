@@ -95,7 +95,11 @@ These transformations change the **model-facing view**, not the stored session n
 
 Compaction is mechanical: it does not need a separate model call to invent a summary. It normally protects recent turns, keeps bounded error details, and applies changes in batches to limit disruption to the cached prompt prefix. If the provider rejects an oversized request, an escalation path can reclaim more recent content and retry.
 
-This is recoverable history, not unlimited active context. Retrieval depends on the retained session store and available history tools; content truncated before storage cannot be reconstructed. History expansion is text-only, so images may need to be read again. On the delegated Claude path, the Claude CLI manages compaction instead.
+This is recoverable history, not unlimited active context. Retrieval depends on the retained session store and available history tools; content truncated before storage cannot be reconstructed. History expansion is text-only, so images may need to be read again.
+
+Claude Code still manages compaction by default. The experimental `FLUID_CLAUDE_MOD_COMPACTION=1` setting lets its mod hand main-conversation compactions to Fluid's same three mechanical stages. It requires the Claude mod and both history tools. The hook posts handle-bearing CLI rows to a session-scoped, token-authenticated loopback bridge. Exact stored-path matches can be compacted; CLI-only rows stay opaque and keep their handles. Kept rows preserve signed or image state through their original handles, while replacements carry real stored-node references. The bridge does not mutate stored history or call a model.
+
+The switch defaults to off, preserving the note-only hook. Subagents pass through unchanged. With it on, precompute is skipped; a bridge error, a ten-second timeout, an unsafe tool pair, or no safe saving calls Claude Code's original compaction with the original event. The log reports one fallback reason without transcript content. Unset the variable or set it to `0` to return to the default. The experiment makes no cache-hit or task-retention guarantee; measure those on representative work before changing the default.
 
 ### Python tool orchestration
 

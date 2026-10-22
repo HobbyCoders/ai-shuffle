@@ -9,6 +9,7 @@
 // fails is skipped and the CLI's own behaviour goes on, as without the mod.
 import type { Register } from 'claude-code'
 import { withFluidNote } from './compact.ts'
+import { compactedRows, compactionBridge } from './mechanical.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
@@ -24,12 +25,59 @@ export const register: Register = (on) => {
     return { ...answer, description: withDedicatedToolGuidance(answer.description) }
   })
 
-  // The main conversation's compactions, every trigger: the summarizer is
-  // told what AI Shuffle puts back. A subagent's compaction, the result and a
-  // skip pass through untouched; a note that cannot be built leaves the
-  // compaction as the CLI would run it.
+  // Off: the original note-only hook, unchanged. On: the main conversation
+  // compacts through Fluid, or falls back with the original event. Precompute
+  // is skipped so it cannot spend a summarizer request ahead of the threshold.
+  // Subagents always pass through untouched.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    // A sufficiently large --resume may compact before session.start itself.
+    // Capture lazily in that case; an off switch still takes the old branch.
+    if (!bridgeInitialized) {
+      try {
+        const flag = await $.env.get('FLUID_CLAUDE_MOD_COMPACTION')
+        if (['1', 'true', 'yes', 'on'].includes((flag ?? '').trim().toLowerCase())) {
+          mechanical = true
+          bridge = bridgeFrom(await $.env.get('FLUID_CLAUDE_MOD_URL'),
+            await $.env.get('FLUID_CLAUDE_MOD_TOKEN'), await $.env.get('FLUID_CLAUDE_MOD_SOCKET'))
+          bridgeInitialized = true
+          await $.env.set('FLUID_CLAUDE_MOD_URL', undefined)
+          await $.env.set('FLUID_CLAUDE_MOD_TOKEN', undefined)
+          await $.env.set('FLUID_CLAUDE_MOD_SOCKET', undefined)
+          await $.env.set('FLUID_CLAUDE_MOD_COMPACTION', undefined)
+        }
+      } catch {
+        try { await $.ui.log('Fluid compaction fallback: bridge initialization error', { to: 'debug' }) } catch { /* Best effort. */ }
+        return next(e)
+      }
+    }
+    if (mechanical) {
+      if (e.trigger === 'precompute') return { skip: 'Fluid compacts mechanically at the threshold' }
+      let reason = 'bridge unavailable'
+      try {
+        const target = compactionBridge(bridge)
+        if (target === null) throw new Error('bridge')
+        reason = 'bridge transport error'
+        const response = await Promise.race([
+          $.http.fetch(target.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${target.token}` },
+            body: JSON.stringify({ v: 1, messages: e.messages }),
+            ...(target.socketPath ? { socketPath: target.socketPath } : {}),
+          }),
+          $.clock.sleep(POST_TIMEOUT_MS).then(() => { reason = 'bridge timeout'; throw new Error('timeout') }),
+        ])
+        if (!response.ok || response.status !== 200) {
+          reason = `bridge HTTP ${response.status}`
+          throw new Error('status')
+        }
+        reason = 'invalid bridge response'
+        return { messages: compactedRows(JSON.parse(response.text), e.messages) }
+      } catch {
+        try { await $.ui.log(`Fluid compaction fallback: ${reason}`, { to: 'debug' }) } catch { /* Best effort. */ }
+        return next(e)
+      }
+    }
     let instructions = e.instructions
     try {
       instructions = withFluidNote(e.instructions)
@@ -42,23 +90,31 @@ export const register: Register = (on) => {
   // Usage reporting. The bridge is read once, then taken out of the
   // environment so the commands the model runs do not inherit its token.
   let bridge: UsageBridge | null = null
+  let mechanical = false
+  let bridgeInitialized = false
   let lastPostAt: number | null = null
   let postStartedAt: number | null = null
 
   on('session.start', async ($, e, next) => {
-    const answer = await next(e)
+    if (bridgeInitialized) return next(e)
+    // Resuming a large transcript can compact inside next(e), before init is
+    // printed. Capture the bridge first, not after that compaction has run.
     const url = await $.env.get('FLUID_CLAUDE_MOD_URL')
     const token = await $.env.get('FLUID_CLAUDE_MOD_TOKEN')
     const socketPath = await $.env.get('FLUID_CLAUDE_MOD_SOCKET')
     bridge = bridgeFrom(url, token, socketPath)
+    const compact = await $.env.get('FLUID_CLAUDE_MOD_COMPACTION')
+    mechanical = ['1', 'true', 'yes', 'on'].includes((compact ?? '').trim().toLowerCase())
+    bridgeInitialized = true
     try {
       if (url !== undefined) await $.env.set('FLUID_CLAUDE_MOD_URL', undefined)
       if (token !== undefined) await $.env.set('FLUID_CLAUDE_MOD_TOKEN', undefined)
       if (socketPath !== undefined) await $.env.set('FLUID_CLAUDE_MOD_SOCKET', undefined)
+      if (compact !== undefined) await $.env.set('FLUID_CLAUDE_MOD_COMPACTION', undefined)
     } catch {
       // Left in the environment; the report still goes out.
     }
-    return answer
+    return next(e)
   })
 
   on('session.measure', async ($, e, next) => {
