@@ -805,7 +805,9 @@
 			hasPrompt: !!finalPrompt.trim() || uploadedFiles.length > 0,
 			isUploading,
 			isCreatingWorktree: $activeSession.isCreatingWorktree,
-			hasProfile: !!$activeSession.profile,
+			// An opened chat whose agent is still loading sends without one; the
+			// backend keeps the chat's own agent (#418).
+			hasProfile: !!$activeSession.profile || (!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.profile),
 			hasAnyProfile: $profiles.length > 0,
 			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id,
 			// The project guard is a code-lane requirement; the projectless lanes

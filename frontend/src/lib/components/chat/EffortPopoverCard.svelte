@@ -33,6 +33,8 @@
 		/** Whether the picked model carries the fast service tier. */
 		fastSupported?: boolean;
 		fastEnabled?: boolean;
+		/** The chat's own Fast setting has not loaded yet (#418). */
+		fastPending?: boolean;
 		onToggleFast?: () => void;
 	}
 
@@ -45,6 +47,7 @@
 		onSelect,
 		fastSupported = false,
 		fastEnabled = false,
+		fastPending = false,
 		onToggleFast
 	}: Props = $props();
 
@@ -62,7 +65,7 @@
 	}
 </script>
 
-<div class="effort-pop-card" class:fast-active={fastSupported && fastEnabled}>
+<div class="effort-pop-card" class:fast-active={fastSupported && fastEnabled && !fastPending}>
 	<div class="pop-head">
 		<span class="pop-title">Effort</span>
 		<span class="pop-value-slot">
@@ -74,11 +77,14 @@
 			<button
 				type="button"
 				class="fast-toggle"
-				class:on={fastEnabled}
-				onclick={() => onToggleFast?.()}
-				aria-pressed={fastEnabled}
-				aria-label="Fast mode"
-				title="Fast mode: faster output at a higher price. Switching clears the prompt cache."
+				class:on={fastEnabled && !fastPending}
+				class:pending={fastPending}
+				disabled={fastPending}
+				onclick={() => { if (!fastPending) onToggleFast?.(); }}
+				aria-pressed={fastPending ? 'mixed' : fastEnabled}
+				aria-busy={fastPending || undefined}
+				aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
+				title={fastPending ? "Fast mode: loading this chat's own setting" : 'Fast mode: faster output at a higher price. Switching clears the prompt cache.'}
 			>
 				<Zap size={13} strokeWidth={2} aria-hidden="true" />
 			</button>
@@ -243,6 +249,22 @@
 		100% { transform: scale(1) rotate(0); }
 	}
 
+	/* Waiting for the chat's own value (#418): neither on nor off. */
+	.fast-toggle.pending {
+		cursor: progress;
+		color: var(--subtle-foreground, var(--muted-foreground));
+		animation: fast-pending 1.4s ease-in-out infinite;
+	}
+
+	.fast-toggle.pending:hover {
+		background: transparent;
+	}
+
+	@keyframes fast-pending {
+		0%, 100% { opacity: 0.4; }
+		50% { opacity: 0.9; }
+	}
+
 	.fast-toggle:focus-visible {
 		outline: 1px solid var(--primary);
 		outline-offset: 2px;
@@ -391,7 +413,8 @@
 	@media (prefers-reduced-motion: reduce) {
 		.pop-value,
 		.fast-active::after,
-		.fast-toggle.on :global(svg) {
+		.fast-toggle.on :global(svg),
+		.fast-toggle.pending {
 			animation: none;
 		}
 
