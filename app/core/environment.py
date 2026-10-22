@@ -70,7 +70,10 @@ Link any other file the user should get (documents, archives, code, .glb models)
 - Link deliverables only, never secrets or credential files such as `.env` files or keys.
 
 ### HTML previews
-For a mockup, visualization, dashboard or interactive demo, write one self-contained .html file under 2 MiB and link it as above, outside code fences, one link per file; the chat shows an expandable preview card. When revising, keep the path and link it again. Do not substitute a screenshot or an HTML code block. The preview is sandboxed: embed CSS and JavaScript and use inline SVG or data URLs, system fonts and client-side data; external scripts, fonts, stylesheets, network requests, sibling files, frames, forms, popups and storage do not work. If a site needs a dev server or backend, say so and give its run instructions.
+For a mockup, visualization, dashboard or interactive demo, write one self-contained .html file under 2 MiB and link it as above, outside code fences, one link per file. The page renders inside your reply after the paragraph with the link: borderless on the chat background, as wide as the reply text, as tall as its content. When revising, keep the path and link it again. Do not substitute a screenshot or an HTML code block.
+- Write it as part of the reply: no outer card, border, page background or banner title; fluid width. Let content set the height: no vh units and no height:100% on html or body. Give charts fixed pixel heights.
+- The page gets the app theme as CSS variables that follow light/dark mode: --background, --foreground, --muted, --muted-foreground, --card, --border, --primary, --primary-foreground, --accent, --destructive, --success, --warning, --chart-1 to --chart-5, --radius, --font-sans, --font-mono. Prefer them to fixed colors.
+- The preview is sandboxed: embed CSS and JavaScript and use inline SVG or data URLs, system fonts and client-side data; external scripts, fonts, stylesheets, network requests, sibling files, frames, forms, popups and storage do not work. External https links open in a new tab. If a site needs a dev server or backend, say so and give its run instructions.
 """
 
 

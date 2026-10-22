@@ -1,244 +1,370 @@
 <script lang="ts">
-	import { tick } from 'svelte';
-	import { buildHtmlPreviewDocument, loadHtmlPreview, retryHtmlPreview, HTML_PREVIEW_SANDBOX } from '$lib/utils/htmlPreview';
+	/**
+	 * An HTML artifact rendered as part of the reply: borderless on the thread
+	 * background, as wide as the text column, and as tall as its content. A
+	 * small control cluster appears on hover, focus or touch.
+	 */
+	import { tick, untrack } from 'svelte';
 	import { chatFileUrl } from '$lib/utils/chat-files';
-	import { FileCode2, Monitor, Smartphone, RotateCw, Download, Maximize2, X, ShieldCheck, LoaderCircle, CircleAlert, ArrowUpRight } from 'lucide-svelte';
+	import {
+		HtmlPreviewSizer,
+		HTML_PREVIEW_PROBE_MS,
+		rememberedPreviewSize,
+		rememberPreviewSize,
+		type HtmlPreviewSizerAction
+	} from '$lib/utils/htmlPreview';
+	import { htmlArtifactPanel } from '$lib/stores/html-artifact-panel.svelte';
+	import { Maximize2, PanelRight, Ellipsis, Code2, RotateCw, Download, X, CircleAlert } from 'lucide-svelte';
+	import HtmlArtifactFrame from './HtmlArtifactFrame.svelte';
+	import HtmlArtifactViewer from './HtmlArtifactViewer.svelte';
+	import { HtmlArtifactSource } from './html-artifact-source.svelte';
 
 	let { href, filename, sessionId }: { href: string; filename: string; sessionId?: string | null } = $props();
-	let source = $state('');
-	let loading = $state(true);
-	let error = $state('');
-	let revision = $state(0);
-	let mobile = $state(false);
-	let showSource = $state(false);
+
+	const file = new HtmlArtifactSource(() => ({ href, sessionId }));
+	const sizeKey = $derived(chatFileUrl(href, sessionId));
+
+	// ── Fit to content ──
+	let sizer = new HtmlPreviewSizer(untrack(() => rememberedPreviewSize(sizeKey)) ?? {});
+	let height = $state(sizer.height);
+	let fixed = $state(sizer.mode === 'fixed');
+	let settled = $state(sizer.settled);
+	let answered = $state(false);
+	let probeTimer: ReturnType<typeof setTimeout> | undefined;
+	let giveUpTimer: ReturnType<typeof setTimeout> | undefined;
+	const revealed = $derived(settled && answered);
+
+	function sync(action: HtmlPreviewSizerAction) {
+		height = sizer.height;
+		fixed = sizer.mode === 'fixed';
+		settled = sizer.settled;
+		if (action === 'probe') {
+			clearTimeout(probeTimer);
+			probeTimer = setTimeout(() => sync(sizer.probeExpired()), HTML_PREVIEW_PROBE_MS);
+		}
+		if (settled && (action === 'resize' || action === 'fixed')) {
+			rememberPreviewSize(sizeKey, { height: sizer.height, fixed: sizer.mode === 'fixed' });
+		}
+	}
+
+	// Every new document (first load, reload, new file) is measured afresh,
+	// starting from the last size this file had, if any.
+	$effect(() => {
+		void file.source; void file.revision;
+		const known = untrack(() => rememberedPreviewSize(sizeKey));
+		sizer = new HtmlPreviewSizer(known ?? {});
+		answered = false;
+		untrack(() => sync('none'));
+		return () => { clearTimeout(probeTimer); clearTimeout(giveUpTimer); };
+	});
+
+	function onSize(reported: number, viewport?: number) {
+		answered = true;
+		sync(sizer.report(reported, viewport));
+	}
+	let clip = $state<HTMLElement | null>(null);
+	/** Bring an #anchor inside the (non-scrolling) inline page into view. */
+	function scrollToAnchor(top: number) {
+		if (!clip) return;
+		const marker = document.createElement('span');
+		marker.style.cssText = `position:absolute;left:0;width:1px;height:1px;pointer-events:none;top:${Math.min(top, height - 1)}px`;
+		clip.append(marker);
+		marker.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+		marker.remove();
+	}
+	function onLoad() {
+		clearTimeout(giveUpTimer);
+		// A page that never reports (its bootstrap could not run) still shows.
+		giveUpTimer = setTimeout(() => { answered = true; sync(sizer.giveUp()); }, 1500);
+		if (sizer.settled) answered = true;
+	}
+
+	// ── Views ──
+	let dialog = $state<HTMLDialogElement | null>(null);
 	let expanded = $state(false);
-	let dialog: HTMLDialogElement;
-	const previewDocument = $derived(source ? buildHtmlPreviewDocument(source) : '');
-	let downloadUrl = $state('');
-	// Store-backed prop getters can track the entire session (draft/scroll included).
-	// Scalar derived values stop unchanged file/owner identities invalidating the load.
-	const previewHref = $derived(href);
-	const previewSessionId = $derived(sessionId);
+	let view = $state<'preview' | 'source'>('preview');
+	let mobile = $state(false);
+	let more = $state(false);
+	// The parent document does not always see hover over the frame, so the
+	// page reports pointer enter/leave too.
+	let pointerInside = $state(false);
+	const beside = $derived(htmlArtifactPanel.isShowing(sessionId, href));
 
-	$effect(() => {
-		if (!source) { downloadUrl = ''; return; }
-		const url = URL.createObjectURL(new Blob([source], { type: 'text/html;charset=utf-8' }));
-		downloadUrl = url;
-		return () => URL.revokeObjectURL(url);
-	});
-
-	$effect(() => {
-		const url = previewHref;
-		const owner = previewSessionId;
-		revision;
-		const controller = new AbortController();
-		loading = true;
-		error = '';
-		source = '';
-		loadHtmlPreview(url, controller.signal, owner).then((html) => {
-			if (!controller.signal.aborted) { source = html; loading = false; }
-		}).catch((reason: unknown) => {
-			if (!controller.signal.aborted) {
-				error = reason instanceof Error ? reason.message : 'Could not load this HTML file.';
-				loading = false;
-			}
-		});
-		return () => controller.abort();
-	});
-
-	async function expand() {
+	async function expand(as: 'preview' | 'source' = 'preview') {
+		view = as;
+		more = false;
 		expanded = true;
 		await tick();
-		dialog.showModal();
+		dialog?.showModal();
 	}
-	function close() { dialog.close(); expanded = false; }
+	function close() { dialog?.close(); expanded = false; }
+	function toggleBeside() {
+		if (beside) htmlArtifactPanel.close(sessionId);
+		else htmlArtifactPanel.open(sessionId, { href, filename });
+	}
 </script>
 
-{#snippet toolbar(full: boolean)}
-	<header class="preview-toolbar">
-		<div class="identity">
-			<FileCode2 size={14} strokeWidth={1.8} aria-hidden="true" />
-			<span class="filename" title={filename}>{filename}</span>
+<figure class="html-artifact not-prose" class:revealed class:fixed class:failed={!!file.error} class:hovering={pointerInside}
+	aria-label={`HTML artifact: ${filename}`}
+	onmouseleave={() => { more = false; pointerInside = false; }}
+	onfocusout={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) more = false; }}>
+	{#if file.error}
+		<div class="artifact-error" role="alert">
+			<CircleAlert size={15} strokeWidth={1.7} aria-hidden="true" />
+			<span class="error-name">{filename}</span>
+			<span class="error-text">{file.error}</span>
+			<button class="retry" onclick={file.reload}><RotateCw size={12} strokeWidth={1.8} aria-hidden="true" />Try again</button>
 		</div>
-		<div class="view-switch" role="group" aria-label="HTML view">
-			<button class="view-tab" class:active={!showSource} onclick={() => showSource = false} aria-pressed={!showSource}>Preview</button>
-			<button class="view-tab" class:active={showSource} onclick={() => showSource = true} aria-pressed={showSource}>Source</button>
-		</div>
-		<div class="viewport-switch" role="group" aria-label="Preview viewport">
-			<button class="icon-button" class:viewport-button={full} class:selected={!mobile} onclick={() => mobile = false} aria-pressed={!mobile} aria-label="Desktop" title="Desktop · available width">
-				<Monitor size={14} strokeWidth={1.8} aria-hidden="true" />
-				{#if full}<span>Desktop</span>{/if}
-			</button>
-			<button class="icon-button" class:viewport-button={full} class:selected={mobile} onclick={() => mobile = true} aria-pressed={mobile} aria-label="Mobile" title="Mobile · 375 px">
-				<Smartphone size={14} strokeWidth={1.8} aria-hidden="true" />
-				{#if full}<span>Mobile</span>{/if}
-			</button>
-		</div>
-		<div class="actions">
-			<button class="icon-button" onclick={() => { retryHtmlPreview(href, sessionId); revision++; }} disabled={loading} aria-label="Refresh HTML preview" title="Reload the file">
-				<RotateCw size={13} strokeWidth={1.8} aria-hidden="true" />
-			</button>
-			<a class="icon-button" href={downloadUrl || chatFileUrl(href, sessionId)} download={filename} aria-label="Download HTML file" title="Download HTML file">
-				<Download size={14} strokeWidth={1.8} aria-hidden="true" />
-			</a>
-			{#if full}
-				<button class="icon-button" onclick={close} aria-label="Close HTML preview" title="Close preview">
-					<X size={15} strokeWidth={1.8} aria-hidden="true" />
-				</button>
-			{:else}
-				<button class="icon-button" onclick={expand} aria-label="Expand HTML preview" title="Expand preview">
-					<Maximize2 size={14} strokeWidth={1.8} aria-hidden="true" />
-				</button>
+	{:else}
+		<div class="frame-clip" bind:this={clip} style:height={`${height}px`}>
+			{#if !revealed}
+				<div class="skeleton" role="status" aria-label={`Loading ${filename}`}>
+					<span class="sweep" aria-hidden="true"></span>
+					<span class="skeleton-label" aria-hidden="true">{filename}</span>
+				</div>
+			{/if}
+			{#if file.source}
+				{#key file.revision}
+					<HtmlArtifactFrame source={file.source} title={`HTML preview: ${filename}`}
+						display="inline" scrollable={fixed} {onSize} {onLoad}
+						onHover={(inside) => pointerInside = inside} onScrollTo={scrollToAnchor} />
+				{/key}
 			{/if}
 		</div>
-	</header>
-{/snippet}
 
-{#snippet canvas(full: boolean)}
-	<div class="canvas" class:full class:source-view={showSource} class:mobile-stage={mobile && !showSource}>
-		{#if loading}
-			<div class="notice" role="status">
-				<span class="loading-icon"><LoaderCircle size={18} strokeWidth={1.6} aria-hidden="true" /></span>
-				<span>Loading preview…</span>
-			</div>
-		{:else if error}
-			<div class="notice" role="alert">
-				<CircleAlert size={20} strokeWidth={1.5} aria-hidden="true" />
-				<p>{error}</p>
-				<button class="retry" onclick={() => { retryHtmlPreview(href, sessionId); revision++; }}><RotateCw size={12} aria-hidden="true" />Try again</button>
-			</div>
-		{:else if showSource}
-			<pre aria-label="HTML source"><code>{source}</code></pre>
-		{:else}
-			{#key revision}
-				<iframe title={`HTML preview: ${filename}`} srcdoc={previewDocument} sandbox={HTML_PREVIEW_SANDBOX}
-					referrerpolicy="no-referrer" class:mobile allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
-			{/key}
+		<div class="controls" class:open={more} role="toolbar" aria-label={`${filename} controls`}>
+			{#if more}
+				<span class="control-name" title={filename}>{filename}</span>
+				<button onclick={() => expand('source')} aria-label="View HTML source" title="View source">
+					<Code2 size={14} strokeWidth={1.8} aria-hidden="true" />
+				</button>
+				<button onclick={file.reload} disabled={file.loading} aria-label="Reload HTML preview" title="Reload the file">
+					<RotateCw size={13} strokeWidth={1.8} aria-hidden="true" />
+				</button>
+				<a href={file.downloadUrl || undefined} download={filename} aria-label="Download HTML file" title="Download HTML file" aria-disabled={!file.downloadUrl}>
+					<Download size={14} strokeWidth={1.8} aria-hidden="true" />
+				</a>
+			{/if}
+			<!-- Stays mounted while open, so it keeps focus and the cluster stays open. -->
+			<button class:on={more} onclick={() => more = !more} aria-label={more ? 'Fewer HTML preview actions' : 'More HTML preview actions'}
+				aria-expanded={more} title={more ? 'Fewer' : 'More'}>
+				<Ellipsis size={15} strokeWidth={1.8} aria-hidden="true" />
+			</button>
+			<span class="sep" aria-hidden="true"></span>
+			{#if sessionId}
+				<button class:on={beside} onclick={toggleBeside} aria-pressed={beside}
+					aria-label={beside ? 'Close side panel preview' : 'Open beside chat'} title={beside ? 'Close side panel' : 'Open beside chat'}>
+					<PanelRight size={14} strokeWidth={1.8} aria-hidden="true" />
+				</button>
+			{/if}
+			<button onclick={() => expand()} aria-label="Expand HTML preview" title="Full screen">
+				<Maximize2 size={14} strokeWidth={1.8} aria-hidden="true" />
+			</button>
+		</div>
+	{/if}
+
+	<dialog bind:this={dialog} onclose={() => expanded = false}
+		onkeydown={(event) => { if (event.key === 'Escape') event.stopPropagation(); }}
+		aria-label={`Expanded HTML preview: ${filename}`}>
+		{#if expanded}
+			<HtmlArtifactViewer {filename} source={file.source} loading={file.loading} error={file.error}
+				downloadUrl={file.downloadUrl} revision={file.revision} bind:view bind:mobile
+				onReload={file.reload} onEscape={close}>
+				{#snippet actions()}
+					<button class="close" onclick={close} aria-label="Close HTML preview" title="Close (Esc)">
+						<X size={16} strokeWidth={1.8} aria-hidden="true" />
+					</button>
+				{/snippet}
+			</HtmlArtifactViewer>
 		{/if}
-	</div>
-{/snippet}
-
-{#snippet statusline()}
-	<footer>
-		<details class="preview-info">
-			<summary title="About this preview"><ShieldCheck size={11} strokeWidth={1.7} aria-hidden="true" />Isolated preview</summary>
-			<p>Self-contained HTML with inline assets. External resources and server features are not supported.</p>
-		</details>
-		<span class="viewport-label">{showSource ? 'HTML' : mobile ? '375 px' : 'Responsive'}</span>
-	</footer>
-{/snippet}
-
-<section class="preview-shell" aria-label={`HTML artifact: ${filename}`}>
-	{@render toolbar(false)}
-	{#if !expanded}
-		{@render canvas(false)}
-		{@render statusline()}
-	{:else}
-		<button class="expanded-notice" onclick={() => dialog.focus()}>
-			<ArrowUpRight size={15} strokeWidth={1.7} aria-hidden="true" />Open in expanded view
-		</button>
-	{/if}
-</section>
-
-<dialog bind:this={dialog} onclose={() => expanded = false}
-	onkeydown={(event) => { if (event.key === 'Escape') event.stopPropagation(); }}
-	aria-label={`Expanded HTML preview: ${filename}`}>
-	{#if expanded}
-		{@render toolbar(true)}
-		{@render canvas(true)}
-		{@render statusline()}
-	{/if}
-</dialog>
+	</dialog>
+</figure>
 
 <style>
-	/* Same filename rhythm and surface tokens as the transcript's codehead;
-	   only the page canvas is framed, not another card around the message. */
-	.preview-shell {
-		container-type: inline-size;
+	.html-artifact {
+		position: relative;
+		margin: 14px 0 18px;
 		min-width: 0;
 		color: var(--foreground);
 	}
-	.preview-toolbar {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto auto auto;
-		align-items: center;
-		gap: 12px;
-		min-height: 38px;
-		padding: 0 2px 6px;
+	.html-artifact:first-child { margin-top: 4px; }
+	.html-artifact:last-child { margin-bottom: 4px; }
+
+	/* Rounded clip: invisible on a transparent page, intentional on one that
+	   paints its own full-bleed background. */
+	.frame-clip {
+		position: relative;
+		width: 100%;
+		border-radius: calc(var(--radius) + 2px);
+		overflow: hidden;
+		isolation: isolate;
 	}
-	.identity { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--subtle-foreground); }
-	.identity :global(svg) { flex: none; }
-	.filename {
-		font: 11.5px var(--font-mono);
+
+	/* ── Loading: a quiet surface the size of the page to come ── */
+	.skeleton {
+		position: absolute;
+		inset: 0;
+		overflow: hidden;
+		border-radius: inherit;
+		z-index: 1;
+		/* Opaque, over the frame: a hidden (opacity 0) frame would be throttled
+		   by the browser and stop reporting its size. */
+		background: linear-gradient(color-mix(in oklch, var(--muted) 42%, transparent), color-mix(in oklch, var(--muted) 42%, transparent)), var(--background);
+		transition: opacity .22s ease-out;
+	}
+	.sweep {
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(100deg, transparent 20%, color-mix(in oklch, var(--foreground) 5%, transparent) 50%, transparent 80%);
+		transform: translateX(-100%);
+		animation: sweep 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
+	}
+	@keyframes sweep { to { transform: translateX(100%); } }
+	.skeleton-label {
+		position: absolute;
+		left: 14px;
+		bottom: 12px;
+		font: 11px/1 var(--font-mono);
+		color: var(--subtle-foreground);
+		letter-spacing: .01em;
+	}
+
+	/* ── Controls: a glass pill, there when the reader reaches for it ── */
+	.controls {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		z-index: 2;
+		display: flex;
+		align-items: center;
+		gap: 1px;
+		max-width: calc(100% - 16px);
+		padding: 3px;
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--popover) 78%, transparent);
+		backdrop-filter: blur(14px) saturate(1.4);
+		-webkit-backdrop-filter: blur(14px) saturate(1.4);
+		box-shadow: 0 0 0 1px var(--border-strong), var(--shadow-m);
+		opacity: 0;
+		transform: translateY(-3px);
+		pointer-events: none;
+		transition: opacity .16s ease-out, transform .16s ease-out;
+	}
+	.fixed .controls { right: 18px; }
+	.html-artifact.revealed:hover .controls,
+	.html-artifact.revealed.hovering .controls,
+	.html-artifact:focus-within .controls,
+	.controls.open {
+		opacity: 1;
+		transform: none;
+		pointer-events: auto;
+	}
+	.controls button, .controls a {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		flex: none;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
 		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: color .12s ease, background-color .12s ease;
+	}
+	.controls button:hover:not(:disabled), .controls a:hover { color: var(--foreground); background: var(--accent); }
+	.controls button:active:not(:disabled) { transform: scale(.94); }
+	.controls button:focus-visible, .controls a:focus-visible, .retry:focus-visible, .close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	.controls button:disabled { opacity: .4; cursor: default; }
+	.controls a[aria-disabled='true'] { opacity: .4; pointer-events: none; }
+	.controls button.on { color: var(--primary); background: var(--primary-10); }
+	.control-name {
+		min-width: 0;
+		max-width: 22ch;
+		padding: 0 8px 0 10px;
+		font: 11px/1 var(--font-mono);
+		color: var(--muted-foreground);
+		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
-	.view-switch, .viewport-switch, .actions { display: flex; align-items: center; gap: 2px; }
-	.viewport-switch { border-left: 1px solid var(--border); padding-left: 10px; }
-	button, a {
-		font: inherit;
-		border: 0;
-		background: transparent;
-		color: var(--subtle-foreground);
-		cursor: pointer;
-		text-decoration: none;
-		transition: color .13s ease, background-color .13s ease;
-	}
-	.icon-button { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; flex: none; }
-	.icon-button:hover, .icon-button:focus-visible { color: var(--foreground); background: var(--accent); }
-	.icon-button.selected { color: var(--primary); background: var(--primary-10); }
-	button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	button:disabled { opacity: .4; cursor: wait; }
-	.view-tab { position: relative; height: 30px; padding: 0 8px; font-size: 11px; }
-	.view-tab:hover { color: var(--foreground); }
-	.view-tab.active { color: var(--foreground); }
-	.view-tab.active::after { content: ''; position: absolute; bottom: 0; left: 8px; right: 8px; height: 1px; background: var(--primary); }
-	.canvas {
-		height: 400px;
-		overflow: auto;
+	.sep { width: 1px; height: 16px; margin: 0 3px; background: var(--border-strong); flex: none; }
+
+	/* ── Error: one quiet line in the flow of the reply ── */
+	.artifact-error {
 		display: flex;
-		justify-content: center;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--code-bg);
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 6px 10px;
+		padding: 10px 12px;
+		border-radius: calc(var(--radius) + 2px);
+		background: color-mix(in oklch, var(--muted) 45%, transparent);
+		font-size: 12.5px;
+		color: var(--muted-foreground);
 	}
-	.canvas.mobile-stage { background: color-mix(in oklch, var(--muted) 35%, var(--code-bg)); }
-	iframe { display: block; flex: 0 0 auto; width: 100%; height: 100%; border: 0; background: white; color-scheme: light; }
-	iframe.mobile { width: 375px; max-width: 100%; box-shadow: 0 0 0 1px var(--border); }
-	pre { margin: 0; padding: 11px 13px 13px; width: 100%; overflow: auto; color: var(--muted-foreground); font: 12.25px/1.72 var(--font-mono); text-align: left; }
-	code { font: inherit; }
-	.notice { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 24px; font-size: 12px; color: var(--muted-foreground); text-align: center; }
-	.notice :global(svg) { color: var(--subtle-foreground); }
-	.notice p { margin: 0; max-width: 320px; }
-	.retry { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; font-size: 11px; }
-	.retry:hover { color: var(--foreground); background: var(--accent); }
-	.loading-icon { display: flex; animation: turn 1.2s linear infinite; }
-	@keyframes turn { to { transform: rotate(360deg); } }
-	footer { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 7px 2px 0; color: var(--subtle-foreground); font-size: 10px; }
-	.preview-info { min-width: 0; }
-	summary { display: flex; align-items: center; gap: 5px; width: fit-content; list-style: none; cursor: pointer; border-radius: 3px; }
-	summary::-webkit-details-marker { display: none; }
-	summary:hover, details[open] summary { color: var(--muted-foreground); }
-	.preview-info p { margin: 7px 0 0; max-width: 390px; line-height: 1.6; color: var(--muted-foreground); }
-	.viewport-label { flex: none; font-family: var(--font-mono); }
-	.expanded-notice { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 24px; border: 1px dashed var(--border); border-radius: var(--radius); font-size: 11px; }
-	dialog { container-type: inline-size; position: fixed; inset: var(--desktop-overlay-top, 0px) 0 0; margin: auto; padding: 10px 14px 12px; width: min(1440px, calc(100vw - 48px)); max-width: none; height: calc(100dvh - var(--desktop-overlay-top, 0px) - 48px); max-height: none; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); }
-	dialog[open] { display: flex; flex-direction: column; }
-	dialog::backdrop { background: rgb(0 0 0 / .7); }
-	dialog .preview-toolbar, dialog footer { flex: none; }
-	.canvas.full { flex: 1; min-height: 0; height: auto; }
-	@container (max-width: 580px) {
-		.preview-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 0 10px; padding-bottom: 6px; }
-		.identity { grid-column: 1; grid-row: 1; }
-		.actions { grid-column: 2; grid-row: 1; justify-content: end; }
-		.view-switch { grid-column: 1; grid-row: 2; margin-left: -6px; }
-		.viewport-switch { grid-column: 2; grid-row: 2; justify-content: end; border: 0; padding: 0; }
-		.icon-button { width: 30px; height: 30px; }
+	.artifact-error :global(svg) { color: var(--destructive); flex: none; }
+	.error-name { font: 500 12px var(--font-mono); color: var(--foreground); }
+	.error-text { flex: 1 1 12rem; min-width: 0; }
+	.retry {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 28px;
+		padding: 0 10px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--background);
+		box-shadow: 0 0 0 1px var(--border-strong);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12px;
+		cursor: pointer;
 	}
-	.icon-button.viewport-button { display: inline-flex; align-items: center; width: auto; gap: 6px; padding-inline: 8px; font-size: 11px; }
-	@media (pointer: coarse) { .icon-button { min-width: 36px; min-height: 36px; } .view-tab { min-height: 36px; } summary { min-height: 28px; } }
-	@media (max-width: 600px) { dialog { width: calc(100vw - 12px); height: calc(100dvh - var(--desktop-overlay-top, 0px) - 16px); padding: 6px 8px 8px; border-radius: 12px; } }
-	@media (prefers-reduced-motion: reduce) { button, a { transition: none; } .loading-icon { animation: none; } }
+	.retry:hover { background: var(--accent); }
+
+	/* ── Expanded ── */
+	dialog {
+		position: fixed;
+		inset: var(--desktop-overlay-top, 0px) 0 0;
+		margin: auto;
+		padding: 0;
+		width: min(1480px, calc(100vw - 40px));
+		max-width: none;
+		height: calc(100dvh - var(--desktop-overlay-top, 0px) - 40px);
+		max-height: none;
+		overflow: hidden;
+		border: 1px solid var(--border-strong);
+		border-radius: 14px;
+		background: var(--background);
+		color: var(--foreground);
+		box-shadow: var(--shadow-l);
+	}
+	dialog[open] { display: flex; flex-direction: column; animation: rise .2s cubic-bezier(.2, .8, .2, 1); }
+	dialog::backdrop { background: rgb(0 0 0 / .62); backdrop-filter: blur(2px); }
+	@keyframes rise { from { opacity: 0; transform: translateY(6px) scale(.995); } }
+	.close {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+	}
+	.close:hover { color: var(--foreground); background: var(--accent); }
+
+	@media (pointer: coarse) {
+		/* No hover on touch: the cluster stays, quieter, once the page shows. */
+		.html-artifact.revealed .controls { opacity: .92; transform: none; pointer-events: auto; }
+		.controls button, .controls a { width: 36px; height: 36px; }
+	}
+	@media (max-width: 600px) {
+		dialog { width: 100vw; height: calc(100dvh - var(--desktop-overlay-top, 0px)); border: 0; border-radius: 0; padding-top: env(safe-area-inset-top, 0px); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.sweep, dialog[open] { animation: none; }
+		.controls, .skeleton { transition: none; }
+	}
 </style>

@@ -1,5 +1,5 @@
 /** One active right-side tool per session (or project before a session opens). */
-export type SidePanelView = 'changes' | 'browser' | 'terminal' | 'phone';
+export type SidePanelView = 'changes' | 'browser' | 'terminal' | 'phone' | 'artifact';
 type PanelState = { active: SidePanelView | null; expanded: boolean; dismissed: boolean };
 const empty: PanelState = { active: null, expanded: false, dismissed: false };
 let panels = $state<Record<string, PanelState>>({});
