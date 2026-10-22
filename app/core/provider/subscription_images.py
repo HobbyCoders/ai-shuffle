@@ -61,6 +61,17 @@ def is_subscription_model(model_id: Optional[str]) -> bool:
     )
 
 
+def plan_images_configured() -> bool:
+    """Whether this worker's Image generation setting is the ChatGPT plan."""
+    from app.db import database
+    return is_subscription_model(database.get_system_setting("image_model") or "")
+
+
+def fal_image_refusal() -> str:
+    return ("Images are not generated with fal.ai here: image generation is set to "
+            f"{PROVIDER_NAME}. Call generateImage without a source; nothing was run.")
+
+
 def image_model_of(configured: str) -> Optional[str]:
     """The exact OpenAI image model to request, or ``None`` for OpenAI's default."""
     tail = configured[len(SUBSCRIPTION_IMAGE_MODEL) + 1:] if configured.startswith(SUBSCRIPTION_IMAGE_MODEL + "/") else ""

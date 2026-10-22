@@ -167,3 +167,23 @@ def test_fallback_to_input_suffixed_component_without_paths():
     schema = normalize_openapi("fal-ai/x", doc)
     assert schema is not None
     assert schema.primary_text_field == "text"
+
+
+def test_tool_options_use_full_declared_nested_schema():
+    import pytest
+    doc = _openapi_with_input({"prompt": {"type": "string", "minLength": 2},
+        "image_size": {"type": "object", "properties": {"width": {"type": "integer", "minimum": 64}},
+                       "required": ["width"], "additionalProperties": False}}, ["prompt"])
+    schema = normalize_openapi("fake/model", doc)
+    assert schema.validate_options({"image_size": {"width": 128}}, "tree") == {"prompt": "tree", "image_size": {"width": 128}}
+    for options in ({"image_size": {"width": True}}, {"image_size": {"width": 32}}, {"image_size": "wide"}, {"extra": True}):
+        with pytest.raises(ValueError):
+            schema.validate_options(options, "tree")
+
+
+def test_tool_schema_never_fetches_external_references():
+    import pytest
+    doc = _openapi_with_input({"prompt": {"type": "string"}, "size": {"$ref": "https://example.invalid/schema"}}, ["prompt"])
+    schema = normalize_openapi("fake/model", doc)
+    with pytest.raises(ValueError, match="External"):
+        schema.validate_options({}, "tree")

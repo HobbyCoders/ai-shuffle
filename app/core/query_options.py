@@ -1480,7 +1480,8 @@ def build_options_from_profile(
     ai_tool_names = [
         name
         for name in ai_tool_names_for_config(None, every=True)
-        if (_fal_available or name.split("__")[-1] in _subscription_only)
+        if (_fal_available or name.split("__")[-1] in _subscription_only
+            or (not api_user_id and name.split("__")[-1] in {"generateImage", "generateVideo", "generateAudio", "textTo3D", "searchModels"}))
         and tool_permitted(name, access.allowed, access.disallowed)
     ]
     if ai_tool_names:
@@ -1656,11 +1657,16 @@ def build_options_from_profile(
     # above follows the raw config plus this permitted set, so every attached
     # tool can reach its key.)
     ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
+    from app.core.generation_resolver import RunContext
+    generation_context = RunContext(session_id=session_id, unattended=not _is_interactive_run(overrides, session_row),
+                                    owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
+                                    chat_mode=session_mode == "chat")
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
         ai_tools_config=ai_tools_server_config,
         tool_env=ai_tool_env,
         session_id=session_id,
+        generation_context=generation_context,
     ) or {}
 
     if private_access_names:

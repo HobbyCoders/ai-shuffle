@@ -87,6 +87,146 @@ class ModelSchema:
     endpoint_id: str
     fields: list[ParamField] = field(default_factory=list)
     primary_text_field: Optional[str] = None
+    input_schema: Optional[dict] = None
+
+    def validate_options(self, options: dict, prompt: str) -> dict:
+        """Validate tool input against the same declared fields the picker uses.
+
+        Undeclared parameters are refused, not silently dropped. Defaults and
+        the primary text field are resolved once, before pricing and execution.
+        """
+        import math
+
+        fields = {f.name: f for f in self.fields}
+        if set(options) - fields.keys():
+            raise ValueError("Unknown model option; use the model's declared parameters.")
+        values = {f.name: f.default for f in self.fields if f.default is not None}
+        values.update(options)
+        if not self.primary_text_field:
+            raise ValueError("This model has no declared text input.")
+        if self.primary_text_field in options:
+            raise ValueError("Pass the prompt separately, not in options.")
+        values[self.primary_text_field] = prompt
+        if self.input_schema is not None:
+            # Keep nested object/array constraints and local references from
+            # the provider's OpenAPI document. Never resolve external URLs.
+            from jsonschema import Draft7Validator
+            def local_refs(value):
+                if isinstance(value, dict):
+                    if "$ref" in value and not str(value["$ref"]).startswith("#/"):
+                        raise ValueError("External model schema references are not supported.")
+                    for item in value.values():
+                        local_refs(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        local_refs(item)
+            local_refs(self.input_schema)
+            try:
+                Draft7Validator(self.input_schema).validate(values)
+            except Exception:
+                # Validation errors include the user's values and schema. Do
+                # not return those in a provider/tool error or application log.
+                raise ValueError("Model options do not match the declared input schema.") from None
+            return values
+        for name, f in fields.items():
+            if name not in values:
+                if f.required:
+                    raise ValueError(f"Missing required model option: {name}.")
+                continue
+            value = values[name]
+            valid = True
+            if f.enum is not None:
+                valid = any(type(value) is type(item) and value == item for item in f.enum)
+            elif f.type in ("string", "file"):
+                valid = isinstance(value, str)
+            elif f.type == "integer":
+                valid = type(value) is int
+            elif f.type == "number":
+                valid = type(value) in (int, float) and math.isfinite(value)
+            elif f.type == "boolean":
+                valid = type(value) is bool
+            elif f.type == "array":
+                valid = isinstance(value, list)
+            if valid and type(value) in (int, float):
+                valid = (math.isfinite(value) and (f.minimum is None or value >= f.minimum)
+                         and (f.maximum is None or value <= f.maximum))
+            if not valid:
+                raise ValueError(f"Invalid model option: {name}.")
+        return values
+
+    def pricing_quantity(self, unit: str, options: dict, prompt: str | None = None):
+        """Conservative billable units from this model's declared parameters.
+
+        No resolution-name tables or token estimates: missing dimensions,
+        duration units or text lengths leave the price unknown. Whole billing
+        units round up so a fractional block cannot under-reserve the cap.
+        """
+        from decimal import Decimal, ROUND_CEILING
+        import re
+
+        fields = {f.name: f for f in self.fields}
+        def number(value):
+            if type(value) not in (int, float, str):
+                raise ValueError("Unknown billable quantity.")
+            value = Decimal(str(value))
+            if not value.is_finite() or value <= 0:
+                raise ValueError("Unknown billable quantity.")
+            return value
+
+        count_fields = [name for name in ("num_images", "number_of_images", "num_outputs", "num_videos", "num_samples", "batch_size")
+                        if name in fields and name in options]
+        if len(count_fields) > 1:
+            raise ValueError("Ambiguous output count.")
+        count = number(options[count_fields[0]]) if count_fields else Decimal(1)
+        if count != count.to_integral_value() or count > 100:
+            raise ValueError("Invalid output count.")
+        unit = unit.strip().lower()
+        if unit in ("request", "inference"):
+            return Decimal(1), Decimal(1)
+        if unit in ("image", "video", "audio", "mesh", "3d", "generation"):
+            return Decimal(1), count
+        if unit in ("character", "characters", "1k chars", "1000 characters"):
+            if prompt is None or not prompt:
+                raise ValueError("Text length is needed for pricing.")
+            divisor = 1000 if unit in ("1k chars", "1000 characters") else 1
+            quantity = (Decimal(len(prompt)) / divisor).to_integral_value(rounding=ROUND_CEILING)
+            return quantity, count
+        if unit in ("second", "seconds", "minute", "minutes"):
+            durations = []
+            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds"):
+                if name not in fields or name not in options:
+                    continue
+                field = fields[name]
+                value = str(options[name])
+                match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", value)
+                if not match:
+                    continue
+                declaration = " ".join((name, field.title, field.description)).lower()
+                suffix = match[2]
+                if suffix:
+                    in_minutes = suffix.startswith("m")
+                elif "millisecond" in declaration:
+                    continue
+                elif "minute" in declaration:
+                    in_minutes = True
+                elif "second" in declaration or name in ("duration_sec", "seconds"):
+                    in_minutes = False
+                else:
+                    continue
+                durations.append(number(match[1]) * (60 if in_minutes else 1))
+            if len(durations) != 1:
+                raise ValueError("No unambiguous declared duration in seconds.")
+            quantity = durations[0] / (60 if unit.startswith("minute") else 1)
+            return quantity.to_integral_value(rounding=ROUND_CEILING), count
+        if unit in ("megapixel", "megapixels"):
+            dimensions = options.get("image_size") if "image_size" in fields else None
+            if dimensions is None and {"width", "height"} <= fields.keys():
+                dimensions = options
+            if not isinstance(dimensions, dict) or any(type(dimensions.get(k)) is not int for k in ("width", "height")):
+                raise ValueError("Explicit declared pixel dimensions are required.")
+            quantity = number(dimensions["width"]) * number(dimensions["height"]) / 1_000_000
+            return quantity.to_integral_value(rounding=ROUND_CEILING), count
+        raise ValueError("Unsupported declared pricing unit.")
 
     def to_dict(self) -> dict:
         return {
@@ -257,7 +397,8 @@ def normalize_openapi(endpoint_id: str, openapi: dict) -> Optional[ModelSchema]:
                 f.is_primary_text = True
                 break
 
-    return ModelSchema(endpoint_id=endpoint_id, fields=fields, primary_text_field=primary)
+    return ModelSchema(endpoint_id=endpoint_id, fields=fields, primary_text_field=primary,
+                       input_schema={**input_schema, "components": openapi.get("components", {})})
 
 
 def _extract_openapi(model_data: dict) -> Optional[dict]:

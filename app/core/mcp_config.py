@@ -357,6 +357,7 @@ def _build_mcp_servers_dict_with_ai_tools(
     ai_tools_config: Optional[Dict[str, Any]] = None,
     tool_env: Optional[Dict[str, str]] = None,
     session_id: Optional[str] = None,
+    generation_context=None,
 ) -> Optional[dict]:
     """
     Build MCP servers dict including AI content generation tools.
@@ -390,6 +391,7 @@ def _build_mcp_servers_dict_with_ai_tools(
                     ai_tools_config, str(tools_dir),
                     tool_env=tool_env,
                     tool_cwd=str(project_dir) if project_dir else str(settings.effective_workspace_dir),
+                    generation_context=generation_context,
                 )
                 if ai_server:
                     mcp_servers["ai-tools"] = ai_server

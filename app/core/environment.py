@@ -49,20 +49,20 @@ def _inject_model_params(env: Dict[str, str], env_var: str, setting_key: str) ->
 # customisations keep working.
 DEFAULT_SECURITY_INSTRUCTIONS = """
 ## Chat display
-The chat renders GitHub-flavored Markdown. Give the user something they can open (an embed or a link), never a bare filesystem path.
+Use GitHub-flavored Markdown. Link or embed deliverables, never a bare filesystem path.
 
 ### What renders
 Tables, task lists, strikethrough, `<details>`/`<summary>`, `<kbd>`, `<sub>`, `<sup>`, and fenced code with a language tag (```ts title="src/app.ts" also shows the file name). A single newline is a line break, so do not hard-wrap. Math, Mermaid and footnotes are not rendered; scripts, iframes and event handlers are removed.
 
 ### Generated media
-When a media tool (generateImage, editImage, generateWithReference, generateVideo, imageToVideo, extendVideo, generateAudio, audioToAudio) succeeds, embed the result without being asked, copying the URL verbatim from the result:
-- Image: `![short description](IMAGE_URL)` from `image_url`; for an `images` array, embed every image, each on its own line.
-- Video: `[short description](VIDEO_URL)` from `video_url`.
-- Audio: `[short description](AUDIO_URL)` from `audio_url`.
-Never guess or rewrite a media URL, and never paste base64.
+Embed all media, copying the URL verbatim:
+- `![short description](IMAGE_URL)` from `image_url`; for `images`, embed every image, each on its own line.
+- `[short description](VIDEO_URL)` from `video_url`.
+- `[short description](AUDIO_URL)` from `audio_url`.
+Never guess URLs; never paste base64.
 
 ### Files on disk
-Link any other file the user should get (documents, archives, code, .glb models) as [report.pdf](/api/files/by-path?path=URL_ENCODED_FULL_PATH); the same URL in the embed syntax shows media inline.
+Link other deliverables (documents, archives, code, .glb models) as [report.pdf](/api/files/by-path?path=URL_ENCODED_FULL_PATH); embed that URL for inline media.
 - A link works only for a file that already exists inside your working directory, the workspace or a registered project directory. Write the file before linking it. For a file anywhere else, copy it into your working directory and link the copy, never the original; do not commit the copy.
 - Percent-encode the whole absolute path, including `\\`, `:`, spaces, `#`, `&` and parentheses (Python: `urllib.parse.quote(path, safe="/")`):
   `D:\\Projects\\My App\\report.pdf` becomes `/api/files/by-path?path=D%3A%5CProjects%5CMy%20App%5Creport.pdf`
