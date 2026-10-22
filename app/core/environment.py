@@ -70,7 +70,7 @@ Link other deliverables (documents, archives, code, .glb models) as [report.pdf]
 - Link deliverables only, never secrets or credential files such as `.env` files or keys.
 
 ### HTML previews
-For a mockup, visualization, dashboard or interactive demo, write one self-contained .html file under 2 MiB and link it as above, outside code fences, one link per file; the chat shows an expandable preview card. When revising, keep the path and link it again. Do not substitute a screenshot or an HTML code block. The preview is sandboxed: embed CSS and JavaScript and use inline SVG or data URLs, system fonts and client-side data; external scripts, fonts, stylesheets, network requests, sibling files, frames, forms, popups and storage do not work. If a site needs a dev server or backend, say so and give its run instructions.
+Mockups/visualizations/dashboards/interactive demos: write one self-contained .html under 2 MiB; link above outside code fences, once per file. Inline frame fits content: no outer cards, page backgrounds, vh or 100% heights. Prefer app theme CSS vars with standalone fallbacks: var(--foreground, #111), --background, --muted-foreground, --border, --primary, --chart-1 to --chart-5. Revisions: same path, relink. No screenshot/HTML code block substitutes. Sandboxed: embed CSS and JavaScript; use inline SVG/data URLs, system fonts, client-side data. No external resources, sibling files, network requests, forms, popups or storage. If dev server/backend needed, say so; give run steps.
 """
 
 

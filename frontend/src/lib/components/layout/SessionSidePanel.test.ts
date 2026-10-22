@@ -6,7 +6,7 @@ import { registerShortcut, clearAllShortcuts, NOT_HANDLED } from '$lib/services/
 import Stub from '../deck/lazy/__fixtures__/StubPanel.svelte';
 
 afterEach(() => { cleanup(); clearAllShortcuts(); });
-function mount(active: 'browser' | 'changes' | 'phone' | 'terminal' = 'changes') {
+function mount(active: 'browser' | 'changes' | 'phone' | 'terminal' | 'artifact' = 'changes') {
 	const props = { active, expanded: false, width: 640,
 		onClose: vi.fn(), onResize: vi.fn(), onExpand: vi.fn() };
 	return { ...render(SessionSidePanel, props), props };
@@ -79,7 +79,7 @@ describe('session side panel controls', () => {
 			action: () => { if (modalOpen) modalOpen = false; else return NOT_HANDLED; },
 		});
 
-		it.each(['phone', 'browser', 'terminal'] as const)('Escape closes the %s panel when no modal is open', async (view) => {
+		it.each(['phone', 'browser', 'terminal', 'artifact'] as const)('Escape closes the %s panel when no modal is open', async (view) => {
 			modalOpen = false;
 			registerCloseModal();
 			const { props } = mount(view);
