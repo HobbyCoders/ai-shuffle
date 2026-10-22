@@ -150,8 +150,8 @@ async def test_stale_settings_image_uses_verified_default_and_video_refuses(monk
     video.assert_not_called()
 
 
-@pytest.mark.parametrize("provider_id,exposed", [(None, False), ("openai-api", False), ("xai-api", False), ("grok-a", True), ("chatgpt-a", True)])
-async def test_image_registration_requires_verified_account(monkeypatch, provider_id, exposed):
+@pytest.mark.parametrize("provider_id", [None, "openai-api", "xai-api", "grok-a", "chatgpt-a"])
+async def test_native_aliases_cannot_bypass_unified_account_and_spending_checks(monkeypatch, provider_id):
     from app.core.provider import harness_adapter as ha
     from app.core.provider.types import SessionOptions
     rows, _ = accounts(monkeypatch)
@@ -161,7 +161,8 @@ async def test_image_registration_requires_verified_account(monkeypatch, provide
     options = SessionOptions(model="unrelated", extra={"provider_id": provider_id, "session_mode": "chat"})
     adapter._options = options
     registry = await adapter._build_registry(options, native=True)
-    assert ("GenerateNativeImage" in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
+    names = {s.name for s in registry.list_tools(loaded_only=False)}
+    assert not {"GenerateNativeImage", "GenerateNativeVideo"} & names
 
 
 async def test_video_media_endpoint_is_inline_range_and_session_authorized(monkeypatch, tmp_path):

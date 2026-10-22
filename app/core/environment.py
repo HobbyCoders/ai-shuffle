@@ -62,7 +62,7 @@ Embed all media, copying the URL verbatim:
 Never guess URLs; never paste base64.
 
 ### Files on disk
-Link any other file the user should get (documents, archives, code, .glb models) as [report.pdf](/api/files/by-path?path=URL_ENCODED_FULL_PATH); the same URL in the embed syntax shows media inline.
+Link other deliverables (documents, archives, code, .glb models) as [report.pdf](/api/files/by-path?path=URL_ENCODED_FULL_PATH); embed that URL for inline media.
 - A link works only for a file that already exists inside your working directory, the workspace or a registered project directory. Write the file before linking it. For a file anywhere else, copy it into your working directory and link the copy, never the original; do not commit the copy.
 - Percent-encode the whole absolute path, including `\\`, `:`, spaces, `#`, `&` and parentheses (Python: `urllib.parse.quote(path, safe="/")`):
   `D:\\Projects\\My App\\report.pdf` becomes `/api/files/by-path?path=D%3A%5CProjects%5CMy%20App%5Creport.pdf`
