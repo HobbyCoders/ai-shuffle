@@ -14,9 +14,11 @@ The dispatcher receives ``(input, ctx)`` and must return a ``ToolOutcome`` (or
 a plain string, which is wrapped). Contract for ``input``:
   * agent   — target subagent id or unambiguous name (required)
   * prompt  — the task for the subagent (required)
-  * mode    — "sync" (default): block until the worker finishes and return its
-              report; "background": atomically detach and return a
-              ``BackgroundTaskReceipt`` (or ``ToolOutcome.background_task``).
+  * mode    — "background" (default, also when omitted): atomically detach
+              and return a ``BackgroundTaskReceipt`` (or
+              ``ToolOutcome.background_task``); "sync": block until the worker
+              finishes and return its report. A host may still detach a sync
+              request (e.g. at its own time limit) by returning a receipt.
               The host later submits ``BackgroundTaskFinished`` to the parent
               engine; Fluid persists the result and wakes the parked session.
               A host that writes the worker's report to a file should set
@@ -102,9 +104,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "your system prompt\n"
         "- **prompt**: the complete brief — objective, relevant paths and "
         "context, constraints, and the report you expect back\n"
-        "- **mode**: `sync` (default) blocks and returns the subagent's "
-        "report; `background` returns the worker session id at once and the "
-        "completion is pushed to you in a later turn\n"
+        "- **mode**: `background` (default) returns the worker session id at "
+        "once and the completion is pushed to you in a later turn; `sync` "
+        "blocks and returns the subagent's report\n"
         "- **label**: short display label for the progress UI\n"
         "\n"
         "## Tips\n"
@@ -140,7 +142,7 @@ SPEC = ToolSpec(
                 "type": "string",
                 "enum": ["sync", "background"],
                 "description": (
-                    "sync (default) waits; background returns at once. The "
+                    "background (default) returns at once; sync waits. The "
                     "host may run a target in background regardless of what "
                     "you ask — trust the receipt you get back, not the mode "
                     "you sent."
@@ -269,7 +271,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
-    if input.get("mode", "sync") == "background":
+    if input.get("mode") != "sync":
         # The spawn acknowledgement is an atomic detach boundary. Interrupting
         # the parent turn may stop consuming this tool result, but must not cancel
         # a worker the host has already started or lose its durable task id.

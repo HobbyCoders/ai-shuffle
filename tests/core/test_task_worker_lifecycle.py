@@ -577,7 +577,10 @@ class TestSyncCap:
 
         assert outcome.ok is False
         assert "did not finish within the" in outcome.error
-        assert "in the background" in outcome.error
+        # It was stopped, so nothing tells the parent it is still running or
+        # to re-dispatch it (#408).
+        assert "was stopped" in outcome.error
+        assert "re-dispatch" not in outcome.error.lower()
         assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
 
     def test_background_gets_no_hard_cap_by_default(self, mock_db):
@@ -629,6 +632,262 @@ class TestSyncCap:
 
         assert outcome.ok is False
         assert len(calls) == 1, "the 30s backoff does not fit inside the cap"
+
+
+# ===========================================================================
+# #408 — at the sync cap a live worker moves to the background
+# ===========================================================================
+
+@pytest.fixture
+def handoff_caller(mock_db):
+    """A caller session and a write-capable target, seeded BEFORE worker_env
+    stubs the session table."""
+    from app.db import database
+
+    database.create_profile("root-agent", "Root Agent", None, {"model": "opus"})
+    database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+    database.create_session(
+        session_id="s-handoff", profile_id="root-agent", title="root"
+    )
+    yield "s-handoff"
+    task_registry.clear_session("s-handoff")
+
+
+class TestSyncHandoff:
+    """The REAL sync lane (task_dispatch -> dispatch_worker) past a short cap."""
+
+    CAP = 0.3
+
+    @pytest.fixture(autouse=True)
+    def _short_cap(self, monkeypatch):
+        from app.core import config as cfg
+
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_sync_max_seconds", self.CAP, raising=False
+        )
+
+    @staticmethod
+    def _worker(progress: bool, release: "asyncio.Event", *, finish_after_move=False):
+        """A worker turn that streams progress (or nothing) and runs until
+        ``release`` is set; ``finish_after_move`` ends it on the next wait."""
+        from app.db import session_events
+
+        calls = []
+
+        async def _wait(session_id, timeout=300.0):
+            calls.append(session_id)
+            if progress and len(calls) == 1:
+                session_events.append_events(
+                    session_id, [{"type": "turn.provider_alive", "payload": {}}],
+                )
+            if finish_after_move and len(calls) > 1:
+                return True
+            await release.wait()
+            return True
+
+        return _wait
+
+    async def _dispatch(self, caller, mode="sync"):
+        args = {"agent": "helper", "prompt": "go"}
+        if mode:
+            args["mode"] = mode
+        return await asyncio.wait_for(td.dispatch_task_tool(
+            args, caller_session_id=caller, caller_profile_id="root-agent",
+        ), 10)
+
+    @staticmethod
+    async def _drain_background():
+        pending = [t for t in list(td._BACKGROUND_TASKS) if not t.done()]
+        if pending:
+            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 10)
+
+    def test_a_live_worker_moves_and_reports_once(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            payload = await self._dispatch(handoff_caller)
+
+            assert payload["ok"] is True
+            assert payload["mode"] == "background"
+            assert payload["moved_to_background"] is True
+            worker_id = payload["task_id"]
+            assert payload["worker_session_id"] == worker_id
+            assert "report_head" not in payload
+            assert "Do not re-dispatch" in payload["note"]
+            # Still running: not stopped, nobody woken yet, and armed exactly
+            # like a background dispatch (owner's lanes, spared at turn end).
+            assert worker_env.tm.interrupts == []
+            assert worker_env.wakes == []
+            assert task_registry.is_own_background_task(handoff_caller, worker_id)
+            record = sup.get_worker(handoff_caller, worker_id)
+            assert record is not None and record.background is True
+            assert task_registry.get_task(handoff_caller, worker_id)["status"] == "running"
+            assert td._PENDING_ADMISSIONS.get(worker_id) is None
+
+            release.set()
+            await self._drain_background()
+            await asyncio.sleep(0.05)
+            return worker_id
+
+        worker_id = _run(scenario())
+        assert [(sid, f["task_id"], f["status"]) for sid, f in worker_env.wakes] == [
+            (handoff_caller, worker_id, "completed")
+        ]
+        row = task_registry.get_task(handoff_caller, worker_id)
+        assert row["status"] == "completed"
+        assert row.get("reportPath"), "the woken parent can read the report"
+        assert worker_env.tm.interrupts == []
+
+    def test_a_worker_finishing_right_after_the_move_is_delivered_once(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """The cap and the finish land together: one delivery, the background
+        one, and no inline report beside it."""
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle",
+                self._worker(True, release, finish_after_move=True),
+            )
+            payload = await self._dispatch(handoff_caller)
+            await self._drain_background()
+            await asyncio.sleep(0.05)
+            return payload
+
+        payload = _run(scenario())
+        assert payload["moved_to_background"] is True
+        assert "report_head" not in payload and "report" not in payload
+        assert [f["task_id"] for _sid, f in worker_env.wakes] == [payload["task_id"]]
+
+    def test_a_stuck_worker_still_fails_at_the_cap(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """No progress by the cap: stopped, failed, and no phantom task."""
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(False, release)
+            )
+            try:
+                return await self._dispatch(handoff_caller)
+            finally:
+                release.set()
+                await self._drain_background()
+
+        payload = _run(scenario())
+        assert payload["ok"] is False
+        assert payload["mode"] == "sync"
+        assert "moved_to_background" not in payload
+        assert "did not finish within the" in payload["error"]
+        assert "re-dispatch" not in payload["error"].lower()
+        worker_id = payload["worker_session_id"]
+        assert worker_env.tm.interrupts == [(worker_id, "stop")]
+        assert worker_env.wakes == []
+        assert not task_registry.is_own_background_task(handoff_caller, worker_id)
+        assert task_registry.has_unresolved_background_launches(handoff_caller) is False
+        assert task_registry.get_task(handoff_caller, worker_id)["status"] == "error"
+
+    def test_a_sync_worker_that_finishes_in_time_reports_inline(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        from app.core import turn_manager as tm_mod
+
+        async def _quick(session_id, timeout=300.0):
+            return True
+
+        monkeypatch.setattr(tm_mod, "wait_session_idle", _quick)
+        payload = _run(self._dispatch(handoff_caller))
+        assert payload["ok"] is True and payload["mode"] == "sync"
+        assert payload["report_head"] == "the report"
+        assert "moved_to_background" not in payload
+        assert worker_env.wakes == [], "an inline report is not also a wake"
+
+    def test_the_parent_turn_ending_after_the_move_spares_the_worker(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """Turn-end teardown kills foreground workers only; a moved one is not."""
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            payload = await self._dispatch(handoff_caller)
+            torn = await sup.teardown_workers(handoff_caller)
+            release.set()
+            await self._drain_background()
+            await asyncio.sleep(0.05)
+            return payload, torn
+
+        payload, torn = _run(scenario())
+        assert torn == []
+        assert [(f["task_id"], f["status"]) for _sid, f in worker_env.wakes] == [
+            (payload["task_id"], "completed")
+        ]
+
+    def test_a_cancelled_parent_before_the_cap_still_stops_the_worker(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        """Until the move the dispatch stays tied to the parent's call."""
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            call = asyncio.ensure_future(self._dispatch(handoff_caller))
+            for _ in range(200):
+                if sup.live_workers(handoff_caller):
+                    break
+                await asyncio.sleep(0.005)
+            worker_id = sup.live_workers(handoff_caller)[0].worker_session_id
+            call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            release.set()
+            await self._drain_background()
+            return worker_id
+
+        worker_id = _run(scenario())
+        assert (worker_id, "stop") in worker_env.tm.interrupts
+        assert worker_env.wakes == []
+        assert not task_registry.is_own_background_task(handoff_caller, worker_id)
+        assert td._BACKGROUND_TASKS == set() or all(
+            t.done() for t in td._BACKGROUND_TASKS
+        )
+
+    def test_omitted_mode_dispatches_a_coding_agent_in_the_background(
+        self, handoff_caller, worker_env, monkeypatch
+    ):
+        from app.core import turn_manager as tm_mod
+
+        async def scenario():
+            release = asyncio.Event()
+            monkeypatch.setattr(
+                tm_mod, "wait_session_idle", self._worker(True, release)
+            )
+            payload = await self._dispatch(handoff_caller, mode=None)
+            release.set()
+            await self._drain_background()
+            await asyncio.sleep(0.05)
+            return payload
+
+        payload = _run(scenario())
+        assert payload["ok"] is True and payload["mode"] == "background"
+        assert "moved_to_background" not in payload
+        assert [f["task_id"] for _sid, f in worker_env.wakes] == [payload["task_id"]]
 
 
 # ===========================================================================

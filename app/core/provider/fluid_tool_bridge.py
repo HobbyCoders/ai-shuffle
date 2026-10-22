@@ -413,9 +413,11 @@ def _builtins_call_timeouts(registry: ToolRegistry) -> dict[str, Optional[float]
     ``_ADMISSION_WAIT_SECONDS`` (or the longer provider-row queue budget),
     and a retry attempt queues for admission again inside the cap. The
     registry's general bound (330 s by default) would cancel such a call
-    with ``tool_timeout`` before task_dispatch could return its own
-    worker-failed result, so Task gets the sync cap plus two admission
-    waits plus a margin for the report, or no bound when the cap is off.
+    with ``tool_timeout`` before task_dispatch could return at the cap (a
+    live worker moved to the background, or a stuck one's failure), and that
+    cancel would stop a worker still in the foreground. So Task gets the
+    sync cap plus two admission waits plus a margin for the report, or no
+    bound when the cap is off.
     The general bound still applies if it is the larger one. Monitor's
     inline wait (at most 120 s) and TaskOutput (never blocks) fit under the
     general bound and keep it.
