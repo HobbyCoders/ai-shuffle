@@ -11,7 +11,12 @@ log = logging.getLogger(__name__)
 
 
 def tracked_roles(now=None):
-    """Only today's booked or currently running rows can affect today's limits."""
+    """Coordinators and jobs among today's booked or currently running rows.
+
+    Only those rows can affect today's limits. Their rows, start markers,
+    principals and ancestry are read in bounded batches (one pass per
+    ancestry level), never one query per session.
+    """
     from app.core import assistant_limits as accounting
     from app.db.base import get_db
     start = accounting.day_window(now)[1]
@@ -21,40 +26,146 @@ def tracked_roles(now=None):
                        "UNION SELECT session_id FROM turns WHERE state IN ('running','interrupting','draining')",
                        (start,))
         ids = [row["session_id"] for row in cursor.fetchall() if row["session_id"]]
-    # Principal checks may read storage; release the connection before ancestry.
+    if not ids:
+        return {}
+    view = _Batch(ids)
     memo = {}
-    return {sid: kind for sid in ids if accounting.role(sid) is None
-            and (kind := _role(sid, memo)) in ("coordinator", "job")}
+    return {sid: kind for sid in ids if view.legacy(sid) is None
+            and (kind := _role(sid, memo, view=view)) in ("coordinator", "job")}
 
 
-def _role(session_id, memo, depth=0):
-    from app.core import assistant_limits as accounting
-    from app.core.session_orchestration import is_owner_session, _start_turn
+class _Reads:
+    """One session's role inputs, read on demand (``role``)."""
+
+    def legacy(self, session_id):
+        from app.core import assistant_limits as accounting
+        return accounting.role(session_id)
+
+    def row(self, session_id):
+        from app.db import sessions
+        return sessions.get_session(session_id)
+
+    def owner(self, row):
+        from app.core.session_orchestration import is_owner_session
+        return is_owner_session(row)
+
+    def start_payload(self, session_id):
+        from app.core.session_orchestration import _start_turn
+        return (_start_turn(session_id) or {}).get("payload") or {}
+
+
+class _Batch(_Reads):
+    """The same inputs for many sessions, preloaded with bounded queries."""
+
+    def __init__(self, ids):
+        from app.core import assistant_limits as accounting
+        from app.db.base import get_db
+        self.rows, self.starts, self.principals, self.memo = {}, {}, {}, {}
+        self.principals_ok = True
+        with get_db() as conn:
+            cursor = conn.cursor()
+            self.home = accounting._home_id(cursor)
+            cursor.execute("SELECT DISTINCT session_id FROM assistant_runs WHERE assistant_id=%s "
+                           "AND session_id IS NOT NULL", (accounting.assistant_id(),))
+            self.runs = {row["session_id"] for row in cursor.fetchall()}
+        wanted, asked = set(ids), set()
+        # One pass per ancestry level (workers' parents, StartSession senders).
+        for _ in range(_MAX_DEPTH + 1):
+            wanted -= asked
+            if not wanted:
+                break
+            asked |= wanted
+            for chunk in accounting._chunks(sorted(wanted)):
+                self._load(chunk)
+            wanted = {ancestor for sid in wanted if (ancestor := self._ancestor(sid))}
+
+    def _load(self, chunk):
+        from app.db.base import get_db, row_to_dict
+        from app.db.turns import _parse_json
+        marks = ", ".join(["%s"] * len(chunk))
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # Each row joined with its StartSession marker (earliest wins, as in _start_turn).
+            cursor.execute(
+                "SELECT s.*, t.payload AS start_payload_, t.created_at AS start_at_ "
+                "FROM sessions s LEFT JOIN turns t ON t.session_id=s.id "
+                f"AND t.command_id LIKE 'orchestration:start:%%' WHERE s.id IN ({marks})", tuple(chunk))
+            for raw in cursor.fetchall():
+                row = row_to_dict(raw)
+                payload, at = row.pop("start_payload_"), row.pop("start_at_")
+                self.rows[row["id"]] = row
+                earlier = self.starts.get(row["id"])
+                if payload is not None and (earlier is None or (at is not None and at < earlier[0])):
+                    self.starts[row["id"]] = (at, _parse_json(payload) or {})
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT * FROM mobile_tool_identity WHERE session_id IN ({marks})", tuple(chunk))
+                for raw in cursor.fetchall():
+                    record = row_to_dict(raw)
+                    self.principals[record["session_id"]] = record
+        except Exception:  # noqa: BLE001 — unreadable identities grant no role
+            log.warning("Coordination roles: could not read session principals", exc_info=True)
+            self.principals_ok = False
+
+    def _ancestor(self, session_id):
+        row = self.rows.get(session_id) or {}
+        if row.get("is_worker"):
+            return row.get("parent_session_id")
+        payload = self.start_payload(session_id)
+        return None if payload.get("orchestration_remote_origin") else payload.get("orchestration_sender")
+
+    def legacy(self, session_id):
+        # Same answer as assistant_limits.role, from the preloaded sets.
+        if not self.home:
+            return None
+        if session_id == self.home:
+            return "home"
+        return "job" if session_id in self.runs else None
+
+    def row(self, session_id):
+        return self.rows.get(session_id)
+
+    def owner(self, row):
+        if not self.principals_ok:
+            return False
+        from app.core.session_orchestration import is_owner_session
+        return is_owner_session(row, principal=self.principals.get(row["id"]), memo=self.memo)
+
+    def start_payload(self, session_id):
+        start = self.starts.get(session_id)
+        return start[1] if start and isinstance(start[1], dict) else {}
+
+
+_MAX_DEPTH = 12
+
+
+def _role(session_id, memo, depth=0, *, view=None):
     from app.core.session_modes import session_mode_of
     from app.core.config import settings
     from app.network.runners import self_device_id
-    from app.db import sessions
-    if not session_id or session_id in memo or depth >= 12:
+    view = view or _Reads()
+    if not session_id or session_id in memo or depth >= _MAX_DEPTH:
         return memo.get(session_id)
     memo[session_id] = None  # Cycles never acquire a role.
-    legacy = accounting.role(session_id)
+    legacy = view.legacy(session_id)
     if legacy:
         memo[session_id] = legacy
         return legacy
-    row = sessions.get_session(session_id)
+    row = view.row(session_id)
     if not row or row.get("api_user_id") or row.get("automation_id"):
         return None
     if (row.get("owner_device_id") != self_device_id() if row.get("owner_device_id")
             else row.get("instance_id") != settings.effective_instance_id):
         return None
     if row.get("is_worker"):
-        kind = "job" if _role(row.get("parent_session_id"), memo, depth + 1) else None
-    elif is_owner_session(row):
-        payload = (_start_turn(session_id) or {}).get("payload") or {}
+        kind = "job" if _role(row.get("parent_session_id"), memo, depth + 1, view=view) else None
+    elif view.owner(row):
+        payload = view.start_payload(session_id)
         sender = payload.get("orchestration_sender")
         if sender and not payload.get("orchestration_remote_origin"):
             # A project owner's independent project work is not a coordination job.
-            kind = "job" if _role(sender, memo, depth + 1) else None
+            kind = "job" if _role(sender, memo, depth + 1, view=view) else None
         else:
             kind = ("coordinator" if session_mode_of(row) == "chat" and not row.get("hidden")
                     and not (row.get("project_id") or row.get("project_v2_id")) else None)
@@ -97,7 +208,8 @@ def turn_refusal(session_id, source=None, *, payload=None):
         if state["limit_reached"]:
             return accounting._reached_text(state)
         if (kind == "job" and state["job_limit_enabled"]
-                and accounting._job_over_time(session_id, state["max_job_minutes"], datetime.now(timezone.utc))):
+                and accounting._job_over_time(session_id, state["max_job_minutes"], datetime.now(timezone.utc),
+                                              coordination=accounting.role(session_id) is None)):
             return (f"This background job passed its {accounting._duration(state['max_job_minutes'])} limit, so it does not "
                     "start again; only the owner can change the limit on the Assistant page under Limits.")
     except Exception:  # noqa: BLE001 — match existing accounting failure behaviour

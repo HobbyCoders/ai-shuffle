@@ -88,6 +88,10 @@ MAX_LABEL_CHARS = 160
 MAX_TOOLS = 200
 #: Ends every parent-side refusal that provably started nothing.
 NOT_DISPATCHED = "nothing was dispatched"
+#: Ends a refusal by an older peer that started nothing but must not fall back
+#: when the caller named the worker (or the project lives only there). A
+#: worker picked implicitly as the owner's default may still fall back here.
+OLDER_PEER = "update that worker before retrying"
 #: ``control.call``'s wording for a request that may have reached the peer.
 MAY_HAVE_APPLIED = "may still have been applied"
 
@@ -418,7 +422,7 @@ async def dispatch_remote(
                    and not await asyncio.to_thread(_base_checkout_path, caller_row.get("project_v2_id")))
     if target_only and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
         # Omit NOT_DISPATCHED so automatic placement cannot fall back locally.
-        return {"ok": False, "error": f"{name} cannot fork target-only projects; update that worker before retrying."}
+        return {"ok": False, "error": f"{name} cannot fork target-only projects; {OLDER_PEER}."}
     try:
         if target_only:
             state = RemoteWorkerBranch(REMOTE_DEFAULT, project_v2_id=caller_row.get("project_v2_id"),
@@ -452,7 +456,7 @@ async def dispatch_remote(
                   and not (caller_row.get("project_id") or caller_row.get("project_v2_id")))
     if chat_child and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
         await release()
-        return {"ok": False, "error": f"{name} cannot confine chat Tasks; update that worker before retrying."}
+        return {"ok": False, "error": f"{name} cannot confine chat Tasks; {OLDER_PEER}."}
     body = start_body(
         worker_session_id=worker_id, agent=profile_id, agent_name=agent_name, prompt=prompt,
         label=label, roster_name=roster_name, provider_id=provider_id, model_id=model_id,

@@ -1567,7 +1567,11 @@ async def dispatch_task_tool(
             {**args, "worker": default["device_id"]},
             caller_session_id=caller_session_id, **kwargs,
         )
-        if payload.get("ok") or NOTHING_DISPATCHED not in str(payload.get("error") or ""):
+        error = str(payload.get("error") or "")
+        from app.core.remote_task import OLDER_PEER
+        # The default was not the caller's pick: an older peer's refusal (it
+        # started nothing) runs the work here instead of failing every Task.
+        if payload.get("ok") or (NOTHING_DISPATCHED not in error and OLDER_PEER not in error):
             return payload
         refusal = str(payload["error"])
     payload = await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)

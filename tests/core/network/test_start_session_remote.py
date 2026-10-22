@@ -470,7 +470,8 @@ async def test_owner_project_runs_on_the_worker_with_the_checkout_and_reports_ba
         [turn] = agent_turns(new_id)
         assert turn["payload"]["orchestration_report_device"] == b.device_id
         assert away_mode.is_away(new_id) == assistant_home
-        assert row["permission_mode"] == "acceptEdits"
+        # A chat starter runs on Ask, so the body carries Ask, not its stored binding.
+        assert row["permission_mode"] == ("acceptEdits" if assistant_home else "default")
         # Only legacy-home work gets Away's automatic question handling.
         assert turns.start_turn(turn["id"])
         session_events.append_events(new_id, [{"type": "message.user", "turn_id": turn["id"],
@@ -545,8 +546,6 @@ async def test_assistant_project_with_no_online_checkout_is_refused(workers, mon
 async def test_ordinary_owner_remote_start_reports_back(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
     with b.active():
-        with get_db() as conn:
-            conn.cursor().execute("UPDATE sessions SET mode='chat' WHERE id='caller'")
         result = json.loads((await start(ARGS)).text)
     assert "reports back to you automatically" in result["note"]
     with a.active():
@@ -555,6 +554,18 @@ async def test_ordinary_owner_remote_start_reports_back(workers, monkeypatch, ki
         assert row["permission_mode"] == "acceptEdits"
         [turn] = agent_turns(result["session_id"])
         assert turn["payload"]["orchestration_report_device"] == b.device_id
+
+
+async def test_chat_remote_start_without_a_project_is_refused(workers, monkeypatch, kicks):
+    """Same rule as a code-capable Task: a chat must name the project."""
+    _a, b, served = network(workers, monkeypatch)
+    with b.active():
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET mode='chat' WHERE id='caller'")
+        outcome = await start(ARGS)
+        assert outcome.is_error and "must name a registered project" in outcome.text
+        assert "nothing was started" in outcome.text and receipts() == []
+    assert not any(path.endswith("/orchestration-start") for _, path in served.requests)
 
 
 # ---------------------------------------------------------------------------

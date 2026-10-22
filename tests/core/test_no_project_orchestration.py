@@ -221,7 +221,7 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     assert "# No-project coordination" in str(options.system_prompt)
 
 
-def test_new_owner_approval_marker_and_default_worker_do_not_apply_to_api(owner, monkeypatch):
+def test_owner_approval_marker_skips_api_and_default_worker_stays_legacy_only(owner, monkeypatch):
     from app.core import provider_agent_approvals, assistant_worker
     from app.network import runners
     route = provider_agent_approvals.WorkerApprovalRoute(worker_session_id="child", parent_session_id=owner["id"], label="Work")
@@ -230,7 +230,8 @@ def test_new_owner_approval_marker_and_default_worker_do_not_apply_to_api(owner,
     assert provider_agent_approvals._assistant_confirm(row["id"], {"tool_name": "Write"}, route) is None
     monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "other"}])
     monkeypatch.setattr(assistant_worker, "_choice", lambda rows: rows[0])
-    assert assistant_worker.default_for(owner["id"])["device_id"] == "other"
+    # The Assistant-page worker applies only to the legacy home and its jobs.
+    assert assistant_worker.default_for(owner["id"]) is None
     assert assistant_worker.default_for(row["id"]) is None
 
 

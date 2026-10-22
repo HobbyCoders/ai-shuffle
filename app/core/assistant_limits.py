@@ -275,11 +275,17 @@ def _remote_booked(cursor, start):
     return sum(max(0.0, float(row["cost_usd"] or 0)) for row in cursor.fetchall())
 
 
-def _measure(now=None) -> dict:
-    """Spend today plus what enforcement needs, from one connection."""
+def _measure(now=None, limits=None) -> dict:
+    """Spend today plus what enforcement needs, from one connection.
+
+    Coordination chats and their jobs only matter to a limit that is on, so
+    with both limits off only the legacy assistant's own work is measured.
+    """
     day, start, resets_at, tz_name = day_window(now)
     from app.core.orchestration_limits import tracked_roles
-    roles = tracked_roles(now)
+    limits = limits or limits_db.get(assistant_id())
+    on = limits["spend_limit_enabled"] or limits["job_limit_enabled"]
+    roles = tracked_roles(now) if on else {}
     with get_db() as conn:
         cursor = conn.cursor()
         tracked = _tracked(cursor, roles)
@@ -293,7 +299,7 @@ def _measure(now=None) -> dict:
 def status(now=None):
     """Today's spend against the owner's limits (the API and GetUsage view)."""
     limits = limits_db.get(assistant_id())
-    measured = _measure(now)
+    measured = _measure(now, limits)
     spent = measured["spent"]
     cap = limits["daily_spend_limit_usd"]
     on = limits["spend_limit_enabled"]
@@ -365,12 +371,14 @@ def _created_by_assistant(cursor, session):
     return linked is not None and created is not None and created >= linked - CREATED_BY_ASSISTANT
 
 
-def _job_over_time(session_id, minutes, now):
+def _job_over_time(session_id, minutes, now, *, coordination=False):
+    """``coordination``: a job a coordination chat started (its own StartSession
+    marker or Task parentage proves it was created for that work)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
         session = row_to_dict(cursor.fetchone())
-        if not session or not _created_by_assistant(cursor, session):
+        if not session or not (coordination or _created_by_assistant(cursor, session)):
             return False
         return _job_minutes(session, now) >= minutes
 
@@ -454,7 +462,7 @@ def plan(now=None):
     """
     now = now or datetime.now(timezone.utc)
     limits = limits_db.get(assistant_id())
-    measured = _measure(now)
+    measured = _measure(now, limits)
     state = dict(
         spend_limit_enabled=limits["spend_limit_enabled"], daily_spend_limit_usd=limits["daily_spend_limit_usd"],
         job_limit_enabled=limits["job_limit_enabled"], max_job_minutes=limits["max_job_minutes"],
@@ -481,7 +489,8 @@ def plan(now=None):
                 continue
             cursor.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
             session = row_to_dict(cursor.fetchone())
-            if (session and _created_by_assistant(cursor, session)
+            coordination_job = measured["roles"].get(sid) == "job"
+            if (session and (coordination_job or _created_by_assistant(cursor, session))
                     and _job_minutes(session, now) >= limits["max_job_minutes"]):
                 stops.append((sid, turn["id"], "job_time", session.get("title") or None))
     return state, stops

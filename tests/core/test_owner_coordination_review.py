@@ -36,8 +36,11 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
     child = json.loads(result.text)["session_id"]
     assert assistant_permissions.scope_for_session(child) is None
     assert not away_mode.assistant_work(child)
+    # A chat starter runs on Ask whatever its binding says, so its child does too.
+    expected = permission if project else "default"
+    assert database.get_session(child)["permission_mode"] == expected
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)
-    assert options.permission_mode == permission
+    assert options.permission_mode == expected
     assert not getattr(options, "aih_assistant_scope", None)
     # Task workers under an ordinary child must not acquire the legacy home's scope.
     worker = database.create_session("task-worker", "agent", is_worker=True, parent_session_id=child,
@@ -45,6 +48,149 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
     assert assistant_permissions.scope_for_session(worker["id"]) is None
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=worker["id"])
     assert options.permission_mode == permission
+
+
+def _project(owner):
+    from app.db import projects_v2, checkouts
+    from app.core.config import settings
+    registered = projects_v2.upsert_project("folder:review", name="Project")
+    checkouts.upsert_checkout(registered["id"], settings.effective_instance_id, str(owner))
+    return registered
+
+
+async def _start(starter, request_id="review", **extra):
+    result = await orch.make_handler(lambda: starter)(
+        "start", {"title": "Child", "prompt": "work", "request_id": request_id, **extra}, ToolCtx())
+    assert not result.is_error, result.text
+    return json.loads(result.text)["session_id"]
+
+
+@pytest.mark.parametrize("case", ["null_binding_bypass_agent", "stored_bypass"])
+async def test_chat_coordinator_at_ask_never_starts_a_bypass_child(owner, case):
+    """The child gets the chat's EFFECTIVE mode (Ask), not its stored binding or agent default."""
+    from app.core import query_options
+    _project(owner)
+    chat("coord", mode="chat")
+    if case == "null_binding_bypass_agent":
+        database.update_profile("agent", config={"model": "sonnet", "permission_mode": "bypassPermissions"})
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id='coord'")
+    else:
+        database.set_session_run_binding("coord", permission_mode="bypassPermissions")
+    coordinator, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id="coord")
+    assert coordinator.permission_mode == "default"
+    for child in (await _start("coord", "named", project="Project"), await _start("coord", "chat")):
+        assert database.get_session(child)["permission_mode"] == "default"
+        options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)
+        assert options.permission_mode == "default"
+
+
+@pytest.mark.parametrize("fate", ["live", "deleted", "archived", "settled"])
+async def test_approvals_route_only_to_a_live_starter(owner, fate):
+    from app.core.provider_agent_approvals import assistant_route
+    from app.db import sessions
+    _project(owner)
+    chat("starter", mode="chat")
+    child = await _start("starter", project="Project")
+    if fate == "deleted":
+        assert sessions.delete_session("starter")
+    elif fate == "archived":
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET status='archived', is_active=FALSE WHERE id='starter'")
+    elif fate == "settled":
+        database.set_session_active("starter", False)
+    route = assistant_route(child, None)
+    if fate == "live":
+        assert route is not None and route.parent_session_id == "starter"
+    else:
+        # The ordinary owner approval path; a deleted starter still owes a report.
+        assert route is None
+        assert orch.started_by_owner(child) == "starter"
+
+
+def _count_queries(monkeypatch):
+    from tests.pg_shim import ShimCursor
+    queries = []
+    execute = ShimCursor.execute
+
+    def measured(cursor, sql, params=None):
+        queries.append(sql)
+        return execute(cursor, sql, params)
+    monkeypatch.setattr(ShimCursor, "execute", measured)
+    return queries
+
+
+async def test_limit_role_scan_is_batched_at_400_sessions(owner, monkeypatch):
+    from app.core import orchestration_limits
+    from app.core.config import settings
+    from app.db import sessions
+    from tests.core.test_assistant_limits import book
+    _project(owner)
+    for i in range(400):
+        sessions.create_session(f"c{i}", "agent", title=f"c{i}", is_active=True, mode="chat")
+        book(f"c{i}", 0.01)
+    chat("coord", mode="chat")
+    child = await _start("coord", project="Project")
+    worker = database.create_session("task-worker", "agent", is_worker=True, parent_session_id=child)
+    for sid in (child, worker["id"]):
+        book(sid, 0.01)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE sessions SET instance_id=%s", (settings.effective_instance_id,))
+        # Chats started from the owner's signed-in phone carry an account label.
+        cursor.execute("UPDATE sessions SET provenance_owner='account:acct' WHERE id LIKE 'c1%%'")
+    from app.core import preference_identity
+    accounts = []
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: accounts.append(1) or "acct")
+    principals = []
+    monkeypatch.setattr(orch, "_principal", lambda sid: principals.append(sid) or None)
+    queries = _count_queries(monkeypatch)
+    roles = orchestration_limits.tracked_roles()
+    assert principals == [] and len(accounts) == 1 and len(queries) <= 12, (len(queries), queries[:20])
+    assert roles == {**{f"c{i}": "coordinator" for i in range(400)}, child: "job", worker["id"]: "job"}
+    queries.clear()
+    # The batched answer matches the single-session resolver.
+    assert all(orchestration_limits.role(sid) == kind for sid, kind in list(roles.items())[:5])
+
+
+def test_limits_off_skip_the_role_scan(owner, monkeypatch):
+    from app.core import orchestration_limits, assistant_limits, assistant_service
+    from app.db import assistant_limits as limits_db
+
+    def scan(now=None):
+        raise AssertionError("no coordination role scan while both limits are off")
+    monkeypatch.setattr(orchestration_limits, "tracked_roles", scan)
+    chat("coord", mode="chat")
+    limits_db.update(assistant_service.assistant_id(), {"spend_limit_enabled": False, "job_limit_enabled": False})
+    assert assistant_limits.status()["limit_reached"] is False
+    assert assistant_limits.plan()[1] == []
+    limits_db.update(assistant_service.assistant_id(), {"job_limit_enabled": True})
+    with pytest.raises(AssertionError, match="no coordination role scan"):
+        assistant_limits.status()
+
+
+async def test_job_time_limit_applies_to_coordination_jobs(owner):
+    from app.core import orchestration_limits, assistant_limits, assistant_service
+    from app.db import assistant_limits as limits_db, turns
+    _project(owner)
+    chat("coord", mode="chat")
+    child = await _start("coord", project="Project")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (10 * 60000, child))
+    assert orchestration_limits.role(child) == "job"
+    limits_db.update(assistant_service.assistant_id(), {"job_limit_enabled": False})
+    assert orchestration_limits.turn_refusal(child, "unpark") is None
+    limits_db.update(assistant_service.assistant_id(), {"job_limit_enabled": True, "max_job_minutes": 5})
+    assert "background job passed" in orchestration_limits.turn_refusal(child, "unpark")
+    [turn] = turns.get_queued_turns(child)
+    assert turns.start_turn(turn["id"])
+    from tests.core.test_assistant_limits import book
+    book(child, 0.01)
+    assert [(sid, reason) for sid, _tid, reason, _ in assistant_limits.plan()[1]] == [(child, "job_time")]
+    # The coordinator itself is never stopped for job time.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id='coord'", (10 * 60000,))
+    assert orchestration_limits.turn_refusal("coord", "unpark") is None
 
 
 def test_ordinary_turn_does_not_scan_other_principals(owner, monkeypatch):

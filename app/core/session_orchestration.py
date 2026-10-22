@@ -88,7 +88,7 @@ def _local_top_level(row, *, allow_settled=False):
             row.get("instance_id") == settings.effective_instance_id)
 
 
-def _as_owner_chat(owner):
+def _as_owner_chat(owner, memo=None):
     """``owner`` with the install owner's own account counted as the owner.
 
     A chat the owner starts from a signed-in phone or browser is labelled
@@ -96,14 +96,21 @@ def _as_owner_chat(owner):
     account, so the chat is the owner's chat on each of them, as the image and
     transcript checks already decide (``same_install_owner``). Without this a
     worker that mirrors such a chat refused it as a peer (#2218).
+    ``memo``: a dict shared across one batch of rows, so the owner account is
+    resolved once for the batch rather than once per row.
     """
     api_user_id, label = owner
     if api_user_id is None and label.startswith("account:"):
-        from app.core.preference_identity import local_owner_account
-        try:
-            account = local_owner_account()
-        except Exception:  # noqa: BLE001 - an unreadable owner account fails closed
-            account = None
+        if memo is not None and "account" in memo:
+            account = memo["account"]
+        else:
+            from app.core.preference_identity import local_owner_account
+            try:
+                account = local_owner_account()
+            except Exception:  # noqa: BLE001 - an unreadable owner account fails closed
+                account = None
+            if memo is not None:
+                memo["account"] = account
         if account and label == "account:" + account:
             return _OWNER_CHAT
     return owner
@@ -122,12 +129,17 @@ def _principal(session_id):
     return mobile_tool_identity.read(session_id)
 
 
-def _owner(row):
+_READ_PRINCIPAL = object()
+
+
+def _owner(row, principal=_READ_PRINCIPAL, memo=None):
     from app.db.mobile_tool_identity import mirrored
-    principal = _principal(row["id"]) or mirrored(row)
+    if principal is _READ_PRINCIPAL:
+        principal = _principal(row["id"])
+    principal = principal or mirrored(row)
     # A handed-off chat can retain only its owner label. Do not turn a foreign
     # labelled chat into an install-owner chat just because no credential is here.
-    return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")))
+    return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")), memo)
 
 
 def _legacy_home(session_id):
@@ -135,11 +147,14 @@ def _legacy_home(session_id):
     return is_primary_session(session_id)
 
 
-def is_owner_session(row_or_id):
+def is_owner_session(row_or_id, *, principal=_READ_PRINCIPAL, memo=None):
     """Owner top-level authority, independent of the legacy assistant home.
 
     Settled sessions retain ownership for report validation, never wake authority.
     API users, delegated workers and foreign paired principals fail closed.
+    ``principal``: the row's ``mobile_tool_identity`` record when a batch
+    already read it (None: there is none); omitted, it is read here.
+    ``memo``: see :func:`_as_owner_chat`.
     """
     from app.db import sessions
     try:
@@ -148,7 +163,7 @@ def is_owner_session(row_or_id):
                     and not row.get("automation_id")
                     and row.get("mode") != "voice" and not row.get("api_user_id")
                     and (not row.get("hidden") or _legacy_home(row["id"]))
-                    and _owner(row) == _OWNER_CHAT)
+                    and _owner(row, principal, memo) == _OWNER_CHAT)
     except Exception:  # noqa: BLE001 — an unreadable identity grants nothing
         return False
 
@@ -514,6 +529,29 @@ def started_by_owner(session_id):
         return None
 
 
+def approval_starter(session_id):
+    """The starter that may receive this chat's approval prompts, or None.
+
+    Unlike :func:`started_by_owner` (reports may still be owed to a deleted
+    or settled starter), a prompt is only routed to an existing, active,
+    non-archived owner session someone can see; otherwise the ordinary owner
+    approval path applies. Never raises.
+    """
+    starter = started_by_owner(session_id)
+    if not starter:
+        return None
+    try:
+        from app.db import sessions
+        row = sessions.get_session(starter)
+        if not row or not is_owner_session(row):
+            return None
+        # The persistent legacy home keeps its routing even while parked.
+        return starter if _top_level(row) or (_legacy_home(starter) and row.get("status") != "archived") else None
+    except Exception:  # noqa: BLE001 — doubt keeps the prompt on the ordinary path
+        log.debug("approval_starter failed for %s", session_id, exc_info=True)
+        return None
+
+
 def started_by_home(session_id):
     """Only legacy-home work receives the assistant scope and Away handling."""
     from app.core.assistant_service import is_primary_session
@@ -717,9 +755,16 @@ def _started_permission_mode(sender, overrides):
     what every one of its turns resolves from. A ceiling the sender's turn
     carries (a connector's) caps it. ``None`` (the sender has no binding)
     leaves the new chat unbound too, so it follows the same agent's mode.
-    """
-    from app.core.session_modes import permission_ceiling, turn_permission_mode
 
+    A chat starter always RUNS on Ask (``permission_mode_for_session_mode``),
+    whatever its stored binding or agent says, so its children start on Ask:
+    a chat must never create a session looser than itself. StartSession takes
+    no permission argument; the owner can loosen the child afterwards.
+    """
+    from app.core.session_modes import permission_ceiling, session_mode_of, turn_permission_mode
+
+    if session_mode_of(sender) == "chat":
+        return "default"
     ceiling = permission_ceiling({"_permission_ceiling": (overrides or {}).get("_permission_ceiling")},
                                  {**sender, "is_worker": False})
     if not ceiling:
@@ -1346,6 +1391,13 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         remote = placement["remote"]
     else:
         remote = _remote_worker(data.get("worker")) if action == "start" else None
+        from app.core.session_modes import session_mode_of
+        if (remote is not None and session_mode_of(sender) == "chat"
+                and not (sender.get("project_id") or sender.get("project_v2_id"))):
+            # The other worker would make a code session with a shell and no
+            # project; same rule as a code-capable Task from a chat.
+            raise ValueError("StartSession on another worker from a chat must name a registered project. "
+                             "Pass project= too (or omit worker); nothing was started.")
     # Chats the owner's assistant starts report back to it and route their
     # approvals to its conversation; every other caller is unchanged.
     assistant = action == "start" and is_owner_session(sender)
