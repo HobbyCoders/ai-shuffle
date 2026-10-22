@@ -85,7 +85,9 @@ async def test_background_receipt_notifies_session_lifecycle():
 
 
 @pytest.mark.asyncio
-async def test_background_spawn_crosses_parent_cancellation_boundary():
+@pytest.mark.parametrize("mode", [{"mode": "background"}, {}], ids=["explicit", "omitted"])
+async def test_background_spawn_crosses_parent_cancellation_boundary(mode):
+    """Background is the default: an omitted mode detaches atomically too."""
     dispatched = asyncio.Event()
     release = asyncio.Event()
     registered = asyncio.Event()
@@ -100,7 +102,7 @@ async def test_background_spawn_crosses_parent_cancellation_boundary():
 
     tracked = set()
     call = asyncio.create_task(handler(
-        {"agent": "helper", "prompt": "go", "mode": "background"},
+        {"agent": "helper", "prompt": "go", **mode},
         ToolCtx(extra={
             "task_dispatch": dispatch,
             "background_task_started": started,
@@ -115,6 +117,35 @@ async def test_background_spawn_crosses_parent_cancellation_boundary():
     await asyncio.wait_for(registered.wait(), timeout=1)
     await asyncio.sleep(0)
     assert not tracked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "Sync", " sync "])
+async def test_explicit_sync_is_cancelled_with_the_parent(mode):
+    """Only an explicit sync request stays tied to the parent's call, read the
+    way the host reads it (case and surrounding space do not matter)."""
+    dispatched = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def dispatch(input, ctx):
+        dispatched.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    tracked = set()
+    call = asyncio.create_task(handler(
+        {"agent": "helper", "prompt": "go", "mode": mode},
+        ToolCtx(extra={"task_dispatch": dispatch, "background_spawn_tasks": tracked}),
+    ))
+    await dispatched.wait()
+    assert not tracked
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert cancelled.is_set()
 
 
 def test_delegated_disallowed_tools_argv():

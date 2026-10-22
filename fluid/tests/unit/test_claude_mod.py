@@ -82,14 +82,15 @@ def test_the_mod_never_asks_for_credentials() -> None:
     )
     for call in ("$.session.authorize", "$.process", "$.fs", "$.model", "$.store"):
         assert call not in source
-    # Its one network call is the usage post to the loopback bridge, and no
-    # request it makes carries the subscription credential (``auth:``).
-    assert source.count("$.http") == 1
+    # Both posts go only to the loopback bridge; neither carries a provider
+    # credential (``auth:``).
+    assert source.count("$.http") == 2
     assert re.search(r"\$\.http\s*\.fetch\(target\.url", source)
     assert re.search(r"\bauth\s*:", source) is None
-    # It reads and clears only the three bridge variables DelegatedLoop sets.
+    # Only bridge variables and the two non-secret feature switches.
     assert set(re.findall(r"\$\.env\.(?:get|set)\('([A-Z_]+)'", source)) == {
         CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
+        "FLUID_BASH_FILE_GUARD", "FLUID_CLAUDE_MOD_COMPACTION",
     }
 
 
@@ -102,14 +103,23 @@ def test_the_summarizer_line_is_fixed_text_and_calls_nothing() -> None:
     assert "$." not in compact
     note = re.search(r"export const FLUID_SUMMARY_NOTE =\n((?:\s+'[^\n]*\n)+)", compact)
     assert note is not None and "${" not in note.group(1) and "`" not in note.group(1)
-    # Bound once, for the main conversation only, and always handed on with
-    # next(): the hook never answers or vetoes a compaction itself.
+    # The off branch is still the original note-only implementation; the
+    # opt-in branch is tested through the real CLI's mod runner.
     assert register.count("on('session.compact'") == 1
     block = register[register.index("on('session.compact'"):]
     block = block[:block.index("\n  })\n") + 5]
     assert "e.agentId !== undefined) return next(e)" in block
-    assert "skip" not in block
-    assert re.search(r"\$\.", block.replace("($, e, next)", "")) is None
+    assert "skip" not in block[block.index("    let instructions = e.instructions"):]
+    off_branch = block[block.index("    let instructions = e.instructions"):]
+    assert re.search(r"\$\.", off_branch) is None
+    assert off_branch == """    let instructions = e.instructions
+    try {
+      instructions = withFluidNote(e.instructions)
+    } catch {
+      // Unchanged.
+    }
+    return next(instructions === e.instructions ? e : { ...e, instructions })
+  })"""
 
 
 # ─── The gate and the argv ───────────────────────────────────────────────────
@@ -286,5 +296,54 @@ async def test_without_the_mod_the_spawn_is_unchanged(tmp_path, caplog, version,
         assert "--plugin-dir" not in _spawn_argv(record)
         assert loop._claude_mod_listed is None
         assert not any("AI Shuffle's mod" in r.getMessage() for r in caplog.records)
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize(("version", "enabled", "copy_fails", "exposed"), [
+    ("2.1.286", True, False, False),
+    ("2.1.287", False, False, False),
+    ("2.1.287", True, True, False),
+    ("2.1.287", True, False, True),
+])
+async def test_compaction_recall_tools_require_a_staged_mod(
+    tmp_path, monkeypatch, version, enabled, copy_fails, exposed,
+) -> None:
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("FLUID_CLAUDE_MOD", "true" if enabled else "false")
+    if copy_fails:
+        def refuse(_tmpdir):
+            raise PermissionError("read-only scratch")
+        monkeypatch.setattr(delegated_mod, "_stage_claude_mod", refuse)
+    registry = ToolRegistry()
+    loop, record = _loop(tmp_path, version, registry=registry, claude_mod_compaction=True)
+    try:
+        await _turn(loop)
+        names = {spec.name for spec in registry.list_tools(loaded_only=False)}
+        assert ("HistoryExpand" in names) is exposed
+        assert ("HistorySearch" in names) is exposed
+        argv = _spawn_argv(record)
+        assert ("--plugin-dir" in argv) is exposed
+        config = json.loads(Path(loop._mcp_config_path).read_text(encoding="utf-8"))
+        assert ("fluid_bundled" in config["mcpServers"]) is exposed
+        if exposed:
+            assert "--mcp-config" in argv
+            assert loop._claude_mod_listed is True
+            # Read the address handed to the CLI, then query the real bridge:
+            # registry membership alone misses a too-early config snapshot.
+            address = config["mcpServers"]["fluid_bundled"]["args"][-1]
+            from fluid.tools.mcp.bundled_server import _parse_address
+            tcp = _parse_address(address)
+            reader, writer = (await asyncio.open_connection(*tcp) if tcp is not None
+                              else await asyncio.open_unix_connection(address))
+            try:
+                writer.write((json.dumps({"op": "list", "token": loop._bridge_token}) + "\n").encode())
+                await writer.drain()
+                listing = json.loads(await asyncio.wait_for(reader.readline(), 5))
+                assert {"HistoryExpand", "HistorySearch"} <= {t["name"] for t in listing["tools"]}
+            finally:
+                writer.close()
+                await writer.wait_closed()
     finally:
         await loop.aclose()

@@ -1,4 +1,5 @@
 """Attribution reaches both session engines, with no provider calls."""
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,54 @@ def test_prompt_delta_is_short_and_fixed():
         block = prompt_block(enabled)
         assert block == prompt_block(enabled)
         assert estimate_tokens_of_text(block) < 80
+
+
+def test_database_read_failure_defaults_on_with_safe_warning(monkeypatch, caplog):
+    def fail(key):
+        assert key == commit_attribution.SETTING_KEY
+        raise RuntimeError("sensitive database connection details\nsecond line")
+
+    monkeypatch.setattr(database, "get_system_setting", fail)
+    with caplog.at_level(logging.WARNING, logger=commit_attribution.__name__):
+        assert commit_attribution.read() is True
+
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.levelno == logging.WARNING
+    assert "RuntimeError" in record.getMessage()
+    assert "defaulting to enabled" in record.getMessage()
+    assert "sensitive" not in caplog.text
+    assert "second line" not in caplog.text
+    assert record.exc_info is None
+    assert "\n" not in record.getMessage()
+
+
+@pytest.mark.parametrize("value", ["", "TRUE", "FALSE", "invalid\nvalue", "x" * 200 + "hidden-tail"])
+def test_malformed_setting_defaults_on_with_bounded_warning(value, caplog):
+    database.set_system_setting(commit_attribution.SETTING_KEY, value)
+    with caplog.at_level(logging.WARNING, logger=commit_attribution.__name__):
+        assert commit_attribution.read() is True
+
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert repr(value[:80]) in message
+    assert "defaulting to enabled" in message
+    assert "\n" not in message
+    if len(value) > 80:
+        assert "..." in message
+        assert value not in message
+        assert "hidden-tail" not in message
+        assert len(message) < 180
+
+
+@pytest.mark.parametrize("value, enabled", [(None, True), ("true", True), ("false", False)])
+def test_recognized_or_missing_setting_is_quiet(value, enabled, monkeypatch, caplog):
+    monkeypatch.setattr(database, "get_system_setting", lambda key: value)
+    with caplog.at_level(logging.WARNING, logger=commit_attribution.__name__):
+        assert commit_attribution.read() is enabled
+    assert not caplog.records
 
 
 def test_setting_defaults_on_and_is_network_shared():

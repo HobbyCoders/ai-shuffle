@@ -387,8 +387,13 @@ def test_mixed_roster_keeps_mode_and_names_the_targets_that_ignore_it(mock_db):
 
     mode = contract.input_schema["properties"]["mode"]
     assert mode["enum"] == ["sync", "background"]
-    assert "omit mode" in mode["description"]
+    # #408: background is the default for every agent; sync is opt-in and a
+    # sync worker at the time limit moves rather than being re-dispatched.
+    assert "Omit for background, the default for every agent" in mode["description"]
+    assert "sync for every other agent" not in mode["description"]
+    assert "never re-dispatch it" in mode["description"]
     assert "cannot take a single further step" in mode["description"]
+    assert "run in the background unless mode='sync'" in contract.description
     assert "explorer" in mode["description"]
     assert "always run in the background and ignore mode" in contract.description
 

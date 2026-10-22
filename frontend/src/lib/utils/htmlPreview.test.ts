@@ -1,16 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+	acceptHtmlPreviewMessage,
 	buildHtmlPreviewDocument,
 	extractHtmlPreviews,
+	hostContextMessage,
+	HTML_PREVIEW_FALLBACK_HEIGHT,
+	HTML_PREVIEW_INITIAL_HEIGHT,
+	HTML_PREVIEW_MAX_HEIGHT,
+	HTML_PREVIEW_METHODS,
+	HTML_PREVIEW_MIN_HEIGHT,
+	HTML_PREVIEW_PROBE_STEP,
 	HTML_PREVIEW_SANDBOX,
+	HtmlPreviewSizer,
 	loadHtmlPreview,
+	placeHtmlPreviews,
+	previewHasUserIntent,
+	readHtmlPreviewMessage,
 	retryHtmlPreview,
+	safeExternalUrl,
+	streamingPreviewName,
 	MAX_HTML_PREVIEW_BYTES
 } from './htmlPreview';
 
 const href = '/api/files/by-path?path=%2Fwork%2Fdemo.html';
 const link = `[Open demo](${href})`;
 const fetchMock = vi.fn();
+const theme = { appearance: 'dark' as const, variables: { '--background': 'oklch(0.1 0 0)', '--foreground': 'white' } };
 
 afterEach(() => {
 	retryHtmlPreview(href);
@@ -230,7 +245,50 @@ describe('HTML preview sandbox document', () => {
 		expect(srcdoc.indexOf('Content-Security-Policy')).toBeLessThan(srcdoc.indexOf('<script>'));
 		expect(doc.documentElement.lang).toBe('en');
 		expect(doc.body.className).toBe('demo');
-		expect(doc.querySelector('style')?.textContent).toContain('color: red');
+		expect([...doc.querySelectorAll('style')].at(-1)?.textContent).toContain('color: red');
+	});
+
+	it('injects CSP, theme, base styles and the bootstrap in that order, all before the page', () => {
+		const source = '<!doctype html><html><head><style>:root{--background:#000}</style></head><body><h1>Page</h1></body></html>';
+		const srcdoc = buildHtmlPreviewDocument(source, { theme });
+		const order = ['Content-Security-Policy', 'id="ais-host-theme"', 'id="ais-host-base"', 'id="ais-host-mode"', '<script>', source];
+		const positions = order.map((marker) => srcdoc.indexOf(marker));
+		expect(positions.every((position) => position >= 0)).toBe(true);
+		expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+		const doc = new DOMParser().parseFromString(srcdoc, 'text/html');
+		const styles = [...doc.querySelectorAll('style')].map((style) => style.id || 'page');
+		expect(styles).toEqual(['ais-host-theme', 'ais-host-base', 'ais-host-mode', 'page']);
+		// Zero-specificity, so the page's own :root and html rules always win.
+		expect(doc.getElementById('ais-host-theme')!.textContent).toMatch(/^:where\(:root\)\{color-scheme:dark;--background:oklch\(0\.1 0 0\);/);
+		expect(doc.getElementById('ais-host-base')!.textContent).toContain(':where(html){background:transparent');
+		expect(doc.getElementById('ais-host-mode')!.textContent).toContain('overflow-y:hidden');
+	});
+
+	it('lets full-screen views scroll and works without a theme snapshot', () => {
+		const doc = new DOMParser().parseFromString(buildHtmlPreviewDocument('<p>x</p>', { display: 'fullscreen' }), 'text/html');
+		expect(doc.getElementById('ais-host-mode')!.textContent).toBe('');
+		expect(doc.getElementById('ais-host-theme')!.textContent).toBe('');
+	});
+
+	it('cannot be broken out of by a hostile theme value', () => {
+		const srcdoc = buildHtmlPreviewDocument('<p>x</p>', {
+			theme: { appearance: 'light', variables: { '--primary': 'red;}</style><script>alert(1)</script>', 'bad name': 'x', '--ok': 'blue' } }
+		});
+		const doc = new DOMParser().parseFromString(srcdoc, 'text/html');
+		const css = doc.getElementById('ais-host-theme')!.textContent!;
+		expect(css).not.toMatch(/[<>]/);
+		expect(css).toContain('color-scheme:light;');
+		expect(css).toContain('--ok:blue;');
+		expect(css).not.toContain('bad name');
+		expect(doc.querySelectorAll('script')).toHaveLength(1);
+	});
+
+	it('builds the live theme message', () => {
+		expect(hostContextMessage(theme, true)).toEqual({
+			jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.hostContextChanged,
+			params: { theme: 'dark', styles: { variables: theme.variables }, scrollable: true }
+		});
+		expect('scrollable' in hostContextMessage(theme).params).toBe(false);
 	});
 
 	it('keeps its policy first even when source attempts to supply a permissive policy', () => {
@@ -240,3 +298,307 @@ describe('HTML preview sandbox document', () => {
 		expect(doc.querySelector('meta[name="referrer"]')?.getAttribute('content')).toBe('no-referrer');
 	});
 });
+
+describe('HTML preview frame messages', () => {
+	const size = (height: unknown) => ({ jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.sizeChanged, params: { height } });
+	const link = (url: unknown) => ({ jsonrpc: '2.0', id: 'l1', method: HTML_PREVIEW_METHODS.openLink, params: { url } });
+
+	it('reads exactly the known shapes', () => {
+		expect(readHtmlPreviewMessage(size(420.5))).toEqual({ kind: 'size', height: 420.5 });
+		expect(readHtmlPreviewMessage({ ...size(400), params: { height: 400, viewport: 320 } })).toEqual({ kind: 'size', height: 400, viewport: 320 });
+		expect(readHtmlPreviewMessage({ ...size(400), params: { height: 400, viewport: 'x' } })).toEqual({ kind: 'size', height: 400 });
+		expect(readHtmlPreviewMessage(link('https://example.com/a?b#c'))).toEqual({ kind: 'link', url: 'https://example.com/a?b#c' });
+		expect(readHtmlPreviewMessage({ jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.escape })).toEqual({ kind: 'escape' });
+		expect(readHtmlPreviewMessage({ jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.openImage, params: { src: 'data:image/png;base64,AAAA', name: ' Chart ' } }))
+			.toEqual({ kind: 'image', src: 'data:image/png;base64,AAAA', name: 'Chart' });
+	});
+
+	it('rejects malformed, unknown and unsafe requests', () => {
+		for (const data of [
+			null, 'size', 42, { method: HTML_PREVIEW_METHODS.sizeChanged, params: { height: 1 } },
+			{ jsonrpc: '2.0', method: 'ui/unknown' }, size(-1), size(Number.NaN), size('300'), size(Infinity),
+			link('javascript:alert(1)'), link('data:text/html,hi'), link('/relative'), link('https://user:pw@example.com'),
+			link('https://exa\nmple.com'), link(42), link(`https://example.com/${'a'.repeat(9000)}`),
+			{ jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.openImage, params: { src: 'https://example.com/x.png' } },
+			{ jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.openImage, params: { src: 'data:text/html,<script>' } },
+			{ jsonrpc: '2.0', method: HTML_PREVIEW_METHODS.hostContextChanged, params: {} }
+		]) {
+			expect(readHtmlPreviewMessage(data)).toBeNull();
+		}
+	});
+
+	it('accepts messages only from the frame itself, with the opaque origin', () => {
+		const frame = document.createElement('iframe');
+		document.body.append(frame);
+		const own = frame.contentWindow!;
+		const event = (source: unknown, origin: string) => ({ source, origin, data: size(300) }) as unknown as MessageEvent;
+		expect(acceptHtmlPreviewMessage(event(own, 'null'), frame)).toEqual({ kind: 'size', height: 300 });
+		expect(acceptHtmlPreviewMessage(event(window, 'null'), frame)).toBeNull();
+		expect(acceptHtmlPreviewMessage(event(null, 'null'), frame)).toBeNull();
+		expect(acceptHtmlPreviewMessage(event(own, 'https://app.example'), frame)).toBeNull();
+		expect(acceptHtmlPreviewMessage(event(own, 'null'), null)).toBeNull();
+		frame.remove();
+	});
+
+	it('gates links on frame focus and a live user activation', () => {
+		const frame = document.createElement('iframe');
+		const focused = { activeElement: frame } as unknown as Document;
+		const elsewhere = { activeElement: document.body } as unknown as Document;
+		const active = { userActivation: { isActive: true } } as unknown as Navigator;
+		const stale = { userActivation: { isActive: false } } as unknown as Navigator;
+		const unsupported = {} as Navigator;
+		expect(previewHasUserIntent(frame, focused, active)).toBe(true);
+		expect(previewHasUserIntent(frame, focused, stale)).toBe(false);
+		expect(previewHasUserIntent(frame, elsewhere, active)).toBe(false);
+		expect(previewHasUserIntent(null, focused, active)).toBe(false);
+		// Without the API, focus alone (as in browsers that predate it).
+		expect(previewHasUserIntent(frame, focused, unsupported)).toBe(true);
+	});
+
+	it('only lets http(s) URLs leave the frame', () => {
+		expect(safeExternalUrl('https://example.com')).toBe('https://example.com/');
+		expect(safeExternalUrl('HTTP://Example.com/x')).toBe('http://example.com/x');
+		for (const url of ['javascript:void(0)', 'file:///etc/passwd', 'blob:null/1', 'about:blank', 'mailto:a@b.c', 'not a url']) {
+			expect(safeExternalUrl(url)).toBeNull();
+		}
+	});
+});
+
+describe('HTML preview fit to content', () => {
+	const sizer = (initial = {}) => new HtmlPreviewSizer(initial);
+
+	it('fits the first report and keeps following content changes, clamped', () => {
+		const s = sizer();
+		expect(s.mode).toBe('measuring');
+		expect(s.height).toBe(HTML_PREVIEW_INITIAL_HEIGHT);
+		expect(s.settled).toBe(false);
+		expect(s.report(480.2)).toBe('resize');
+		expect([s.mode, s.height, s.settled]).toEqual(['fit', 481, true]);
+		expect(s.report(200)).toBe('resize');
+		expect(s.height).toBe(200);
+		expect(s.report(200.4)).toBe('none');
+		s.report(3);
+		expect(s.height).toBe(HTML_PREVIEW_MIN_HEIGHT);
+	});
+
+	it('pins a page that is exactly as tall as its frame (100vh) once a probe confirms it', () => {
+		const s = sizer();
+		expect(s.report(HTML_PREVIEW_INITIAL_HEIGHT)).toBe('probe');
+		expect(s.mode).toBe('probing');
+		expect(s.height).toBe(HTML_PREVIEW_INITIAL_HEIGHT + HTML_PREVIEW_PROBE_STEP);
+		expect(s.report(HTML_PREVIEW_INITIAL_HEIGHT + HTML_PREVIEW_PROBE_STEP)).toBe('fixed');
+		expect([s.mode, s.height]).toEqual(['fixed', HTML_PREVIEW_FALLBACK_HEIGHT]);
+		expect(s.report(9000)).toBe('none');
+	});
+
+	it('fits a page that only happens to match the loading height', () => {
+		const s = sizer();
+		expect(s.report(HTML_PREVIEW_INITIAL_HEIGHT)).toBe('probe');
+		// Content-sized pages do not report when only the frame grows.
+		expect(s.probeExpired()).toBe('resize');
+		expect([s.mode, s.height]).toEqual(['fit', HTML_PREVIEW_INITIAL_HEIGHT]);
+		expect(s.probeExpired()).toBe('none');
+	});
+
+	it('detects runaway growth from min-height:100vh plus padding and falls back', () => {
+		const s = sizer();
+		let reported = HTML_PREVIEW_INITIAL_HEIGHT + 40;
+		let action = s.report(reported);
+		let steps = 0;
+		while (action === 'resize' && steps++ < 50) {
+			reported = s.height + 40; // the page is always 40px taller than its frame
+			action = s.report(reported);
+		}
+		expect(action).toBe('probe');
+		expect(steps).toBeLessThanOrEqual(3);
+		expect(s.report(s.height + 40)).toBe('fixed');
+		expect(s.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
+	});
+
+	it('keeps fitting content that grows on its own (a chart animating in)', () => {
+		const s = sizer();
+		s.report(200);
+		const frames = [230, 262, 290, 312, 330, 344, 354, 360];
+		for (const height of frames) {
+			const action = s.report(height);
+			if (action === 'probe') {
+				// The page does not follow the probe: it keeps its own pace.
+				expect(s.report(height + 3)).toBe('resize');
+			}
+		}
+		expect(s.mode).toBe('fit');
+		expect(s.height).toBeGreaterThanOrEqual(360);
+	});
+
+	it('ignores zero heights and probe answers measured before the probe took effect', () => {
+		const s = sizer();
+		expect(s.report(0)).toBe('none');
+		expect(s.mode).toBe('measuring');
+		expect(s.report(320, 320)).toBe('probe');
+		// A lagging report measured in the old 320px frame is not the answer.
+		expect(s.report(368, 320)).toBe('none');
+		expect(s.mode).toBe('probing');
+		// Measured in the probe frame, and it moved with it: pinned.
+		expect(s.report(s.height, s.height)).toBe('fixed');
+	});
+
+	it('catches a throttled follower whose reports lag behind the frame', () => {
+		const s = sizer();
+		// min-height:100vh plus 48px of padding; each report measured in the previous frame.
+		let viewport = HTML_PREVIEW_INITIAL_HEIGHT;
+		let action = s.report(viewport + 48, viewport);
+		for (let step = 0; action === 'resize' && step < 20; step++) {
+			viewport = s.height;
+			action = s.report(viewport + 48, viewport);
+		}
+		expect(action).toBe('probe');
+		expect(s.report(s.height + 48, s.height)).toBe('fixed');
+	});
+
+	it('ignores reports measured before layout or in a frame size that has since changed', () => {
+		const s = sizer();
+		// Laid out with no viewport yet: not a measurement.
+		expect(s.report(192, 0)).toBe('none');
+		expect(s.mode).toBe('measuring');
+		expect(s.report(368, 320)).toBe('resize');
+		expect(s.height).toBe(368);
+		// Measured in the old 320px frame after the resize to 368: stale.
+		expect(s.report(240, 320)).toBe('none');
+		expect(s.height).toBe(368);
+		// A content page re-measured in the new frame keeps its fit.
+		expect(s.report(368, 368)).toBe('none');
+		expect(s.report(300, 368)).toBe('resize');
+		expect(s.height).toBe(300);
+	});
+
+	it('pins a follower even when stale reports interleave with fresh ones', () => {
+		const s = sizer();
+		let previous = HTML_PREVIEW_INITIAL_HEIGHT;
+		let action = s.report(previous + 48, previous);
+		for (let step = 0; action === 'resize' && step < 20; step++) {
+			// A late report from the frame size before last, then the fresh one.
+			expect(s.report(previous + 48, previous)).toBe('none');
+			previous = s.height;
+			action = s.report(previous + 48, previous);
+		}
+		expect(action).toBe('probe');
+		expect(s.report(s.height + 48, s.height)).toBe('fixed');
+	});
+
+	it('pins a page that shrinks with its frame (calc(100vh - 16px)) instead of collapsing it', () => {
+		const s = sizer();
+		let viewport = HTML_PREVIEW_INITIAL_HEIGHT;
+		let action = s.report(viewport - 16, viewport);
+		let trips = 1;
+		for (; action === 'resize' && trips < 20; trips++) {
+			viewport = s.height;
+			action = s.report(viewport - 16, viewport);
+		}
+		expect(action).toBe('probe');
+		expect(trips).toBeLessThanOrEqual(4);
+		expect(s.steady).toBe(false);
+		expect(s.height).toBeGreaterThan(HTML_PREVIEW_INITIAL_HEIGHT - 16 * 4);
+		expect(s.report(s.height - 16, s.height)).toBe('fixed');
+		expect([s.mode, s.height, s.steady]).toEqual(['fixed', HTML_PREVIEW_FALLBACK_HEIGHT, true]);
+	});
+
+	it('also catches the shrinking follower from a remembered tall size', () => {
+		const s = sizer({ height: 900 });
+		let action = s.report(884, 900);
+		for (let step = 0; action === 'resize' && step < 20; step++) action = s.report(s.height - 16, s.height);
+		expect(action).toBe('probe');
+		expect(s.report(s.height - 16, s.height)).toBe('fixed');
+	});
+
+	it('keeps fitting a content page across the resize report that follows each fit', () => {
+		const s = sizer();
+		expect(s.report(500, 320)).toBe('resize');
+		expect(s.report(500, 500)).toBe('none');
+		expect(s.steady).toBe(true);
+		expect(s.report(420, 500)).toBe('resize');
+		expect(s.report(420, 420)).toBe('none');
+		expect([s.mode, s.height]).toEqual(['fit', 420]);
+	});
+
+	it('re-probes a remembered pin instead of trusting it', () => {
+		// The page still follows its frame: pinned again after one probe.
+		const legacy = sizer({ height: 610, fixed: true });
+		expect([legacy.mode, legacy.height, legacy.settled]).toEqual(['measuring', HTML_PREVIEW_FALLBACK_HEIGHT, false]);
+		expect(legacy.report(HTML_PREVIEW_FALLBACK_HEIGHT + 48, HTML_PREVIEW_FALLBACK_HEIGHT)).toBe('probe');
+		expect(legacy.report(legacy.height + 48, legacy.height)).toBe('fixed');
+		// Revised at the same path into a content-sized page: it fits.
+		const revised = sizer({ height: 610, fixed: true });
+		expect(revised.report(300, HTML_PREVIEW_FALLBACK_HEIGHT)).toBe('probe');
+		expect(revised.report(300, revised.height)).toBe('resize');
+		expect([revised.mode, revised.height]).toEqual(['fit', 300]);
+	});
+
+	it('reserves a height while measuring a page from scratch', () => {
+		const s = sizer({ reserve: 700 });
+		expect([s.mode, s.height, s.settled]).toEqual(['measuring', 700, false]);
+		expect(s.report(450, 700)).toBe('resize');
+		expect(s.height).toBe(450);
+	});
+
+	it('falls back when a page reports more than the maximum height', () => {
+		const s = sizer();
+		s.report(400);
+		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500)).toBe('fixed');
+		expect(s.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
+	});
+
+	it('starts from a remembered size and gives up on a page that never reports', () => {
+		expect(sizer({ height: 610 })).toMatchObject({ mode: 'fit', height: 610 });
+		const silent = sizer();
+		expect(silent.giveUp()).toBe('fixed');
+		expect(silent.mode).toBe('fixed');
+	});
+});
+
+describe('HTML preview placement in the reply', () => {
+	const preview = (path: string) => ({ href: `/api/files/by-path?path=${encodeURIComponent(path)}`, path, filename: path.split('/').pop()! });
+	const a = preview('/work/a.html');
+	const b = preview('/work/b.html');
+	const routed = (path: string) => `https://worker.example/api/files/by-path?path=${encodeURIComponent(path)}&amp;session_id=s1`;
+	const same = (html: string) => html;
+
+	it('sanitizes every markup piece again after splitting', () => {
+		const sanitize = vi.fn((html: string) => `[clean]${html}`);
+		const html = `<p>See <a href="${a.href}">A</a></p><p>End</p>`;
+		const segments = placeHtmlPreviews(html, [a], sanitize);
+		expect(sanitize.mock.calls.map(([piece]) => piece)).toEqual([`<p>See <a href="${a.href}">A</a></p>`, '<p>End</p>']);
+		expect(segments.filter((s) => s.kind === 'html').every((s) => s.kind === 'html' && s.html.startsWith('[clean]'))).toBe(true);
+	});
+
+	it('puts each preview right after the top-level block that links to it', () => {
+		const html = `<p>Intro</p><p>See <a href="${routed(a.path)}">A</a> here.</p><ul><li><a href="${routed(b.path)}">B</a></li></ul><p>End</p>`;
+		const segments = placeHtmlPreviews(html, [a, b], same);
+		expect(segments.map((s) => s.kind === 'html' ? s.html : `[${s.preview.filename}]`)).toEqual([
+			`<p>Intro</p><p>See <a href="${routed(a.path)}">A</a> here.</p>`,
+			'[a.html]',
+			`<ul><li><a href="${routed(b.path)}">B</a></li></ul>`,
+			'[b.html]',
+			'<p>End</p>'
+		]);
+		expect(new Set(segments.map((s) => s.key)).size).toBe(segments.length);
+	});
+
+	it('keeps two previews linked from one paragraph in order and appends unmatched ones', () => {
+		const c = preview('/work/c.html');
+		const html = `<p><a href="${b.href}">B</a> and <a href="${a.href}">A</a></p>\n<p>tail &amp; &lt;escaped&gt;</p>`;
+		const segments = placeHtmlPreviews(html, [a, b, c], same);
+		expect(segments.map((s) => s.kind === 'html' ? 'html' : s.preview.filename)).toEqual(['html', 'b.html', 'a.html', 'html', 'c.html']);
+		expect((segments[3] as { html: string }).html).toBe('\n<p>tail &amp; &lt;escaped&gt;</p>');
+	});
+
+	it('returns the markup untouched when there is nothing to place', () => {
+		expect(placeHtmlPreviews('<p>x</p>', [], same)).toEqual([{ kind: 'html', key: 'h0', html: '<p>x</p>' }]);
+	});
+
+	it('names a preview link while the reply is still streaming', () => {
+		expect(streamingPreviewName('Here: [Dash](/api/files/by-path?path=%2Fwork%2Fdash%20v2.html) ok')).toBe('dash v2.html');
+		expect(streamingPreviewName('Here: [Dash](/api/files/by-path?path=%2Fwork%2Fdash.ht')).toBeNull();
+		expect(streamingPreviewName('[doc](/api/files/by-path?path=%2Fwork%2Fdoc.pdf)')).toBeNull();
+	});
+});
+

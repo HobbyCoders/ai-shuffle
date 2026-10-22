@@ -24,6 +24,11 @@ boot). The parent accepts it once, only from the worker it sent the child to,
 stores it with local Task reports and wakes the session that called Task
 (:func:`handle_task_report`).
 
+A remote child always runs in the background, even when the call asked for
+``mode="sync"`` (the receipt says so): the parent never blocks on another
+worker, so the local sync cap and its move to the background
+(``provider_agent.SyncHandoff``) never apply here.
+
 While it runs, the parent tracks the child like a local background Task
 (:func:`track_dispatch`): a ``task_registry`` record carrying the worker
 (TaskList, TaskGet, ListAgents, the running count, the park gate), a

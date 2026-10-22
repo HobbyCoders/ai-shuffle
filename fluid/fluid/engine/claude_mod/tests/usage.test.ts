@@ -80,7 +80,7 @@ describe('through the hooks', () => {
     const posts: { url: string; init: unknown }[] = []
     on('http.fetch', (_$, e) => {
       posts.push({ url: e.url, init: e.init })
-      return { status: 204, ok: true, headers: {}, text: '' }
+      return { value: { status: 204, ok: true, headers: {}, text: '' } }
     })
     await $.session.start(START)
     expect(cleared.sort()).toEqual(['FLUID_CLAUDE_MOD_TOKEN', 'FLUID_CLAUDE_MOD_URL'])
@@ -102,7 +102,7 @@ describe('through the hooks', () => {
     let posts = 0
     on('http.fetch', () => {
       posts += 1
-      return { status: 204, ok: true, headers: {}, text: '' }
+      return { value: { status: 204, ok: true, headers: {}, text: '' } }
     })
     await $.session.start(START)
     const measure = (changed: ('context' | 'rateLimits')[]) =>
@@ -129,7 +129,7 @@ describe('through the hooks', () => {
     let posts = 0
     on('http.fetch', () => {
       posts += 1
-      return { status: 204, ok: true, headers: {}, text: '' }
+      return { value: { status: 204, ok: true, headers: {}, text: '' } }
     })
     await $.session.start(START)
     await $.session.measure({ context: CONTEXT, rateLimits: LIMITS, changed: ['rateLimits'] })
@@ -158,7 +158,7 @@ describe('through the hooks', () => {
     let posts = 0
     on('http.fetch', () => {
       posts += 1
-      return { status: 204, ok: true, headers: {}, text: '' }
+      return { value: { status: 204, ok: true, headers: {}, text: '' } }
     })
     await $.session.start(START)
     const answer = await $.session.measure({ context: CONTEXT, rateLimits: [], changed: ['context'] })
