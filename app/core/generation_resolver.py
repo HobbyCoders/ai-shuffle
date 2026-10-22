@@ -134,7 +134,8 @@ class Resolver:
         entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit)
         return result("catalog", options=[entry.view() for entry in entries])
 
-    async def generate(self, kind: str, args: dict, context: RunContext) -> dict:
+    async def generate(self, kind: str, args: dict, context: RunContext, *, exclude_sources=()) -> dict:
+        """``exclude_sources``: sources the caller's policy forbids for this call."""
         if kind not in KINDS:
             return result("refused", error="Unknown generation kind.")
         prompt = args.get("prompt")
@@ -150,9 +151,14 @@ class Resolver:
             choice = {"source": args.get("source"), "model": args.get("model"), "worker": args.get("worker")}
         source = normalize_source(choice.get("source") or choice.get("account"))
         try:
-            candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt)
+            candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt,
+                                                    worker=choice.get("worker"))
             candidates = [c for c in candidates if matches(c, {k: v for k, v in choice.items() if k != "source"})
-                          and (not source or source in (c.source, c.account))]
+                          and (not source or source in (c.source, c.account)) and c.source not in exclude_sources]
+            if (explicit or stored) and any(c.available for c in candidates):
+                # An unreachable or old peer cannot make a named choice ambiguous
+                # when a usable candidate matches; it never runs either way.
+                candidates = [c for c in candidates if c.available]
             if not candidates:
                 return result("refused", reason="no_match", error="No matching source/account and model is available. No other source was used.")
             if context.unattended and len(candidates) != 1:
@@ -163,7 +169,7 @@ class Resolver:
                     last = context.last_choice
                     if not explicit and not any(matches(c, last) for c in candidates):
                         prior = await self.backend.catalog(kind, source=last.get("account") or last.get("source"), model=last.get("model"), limit=1, prompt=prompt)
-                        candidates.extend(c for c in prior if matches(c, last))
+                        candidates.extend(c for c in prior if matches(c, last) and c.source not in exclude_sources)
                     for index, candidate in enumerate(candidates):
                         if matches(candidate, last) and candidate.available and last.get("options") != candidate.options:
                             try:

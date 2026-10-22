@@ -213,3 +213,120 @@ async def test_run_fal_model_without_a_lane_refuses_what_it_cannot_price(monkeyp
     tools = {t.name: t for t in sdk._create_unified_tools(None, INTERACTIVE)}
     output = payload(await tools["runFalModel"].handler({"endpoint_id": "fal-ai/x", "input": {"prompt": "p"}}))
     assert output["status"] == "refused"
+
+
+# ---- Re-review probes (#409), kept as regressions ----
+
+PLAN_ENV = {"IMAGE_MODEL": "chatgpt-subscription"}
+
+
+@pytest.mark.parametrize("worker", ["worker-a", "worker-b"])
+@pytest.mark.parametrize("args", [{"model": "fal-ai/flux/dev"}, {"source": "fal"}, {"source": "Fal-AI", "model": "fal-ai/flux/dev"}])
+async def test_plan_image_default_never_spends_on_fal(monkeypatch, worker, args):
+    # Main refused any fal image while images are set to the ChatGPT plan (#1796),
+    # including a fal key held by a peer and a fal choose card.
+    fal = replace(candidate(model="fal-ai/flux/dev"), worker=worker)
+    tools, backend, legacy = lane_tools(monkeypatch, [fal], INTERACTIVE, lane="chatgpt", tool_env=PLAN_ENV, names=("generateImage",))
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", **args}))
+    assert output["status"] == "refused" and output["reason"] == "image_provider_restricted"
+    assert not any(c[0] in ("prepare", "reserve", "execute") for c in backend.calls)
+    legacy.assert_not_awaited()
+
+
+async def test_plan_image_default_choose_card_never_offers_fal(monkeypatch):
+    entries = [candidate(), candidate(source="supergrok", account="plan-b"), candidate(source="openai", account="api-a")]
+    tools, backend, legacy = lane_tools(monkeypatch, entries, INTERACTIVE, lane="chatgpt", tool_env=PLAN_ENV, names=("generateImage",))
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "worker": "worker-a"}))
+    assert output["status"] == "choose"
+    assert {o["source"] for o in output["options"]} == {"supergrok", "openai"}
+
+
+@pytest.mark.parametrize("configured,model", [("chatgpt-subscription", "chatgpt-subscription"),
+                                              ("chatgpt-subscription/gpt-image-1", "chatgpt-subscription/gpt-image-1"),
+                                              ("chatgpt-subscription/gpt-image-1", "gpt-image-1")])
+async def test_configured_plan_model_argument_runs_as_on_main(monkeypatch, configured, model):
+    env = {"IMAGE_MODEL": configured}
+    tools, backend, legacy = lane_tools(monkeypatch, [], INTERACTIVE, lane="chatgpt", tool_env=env, names=("generateImage",))
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": model}))
+    assert output["lane"] == "settings"
+    legacy.assert_awaited_once_with({"prompt": "tree", "model": model})
+
+
+async def test_old_peer_does_not_make_a_named_request_ambiguous(monkeypatch):
+    from app.core.generation_resolver import Candidate
+    here = candidate(model="fal-ai/x")
+    old = Candidate("unavailable", "dev-old", "dev-old", "fal-ai/x", "image", False, available=False, reason="Update that worker")
+    tools, backend, legacy = lane_tools(monkeypatch, [here, old], INTERACTIVE, names=())
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": "fal-ai/x"}))
+    assert output["status"] == "completed" and output["choice"]["worker"] == "worker-a"
+
+
+async def test_search_models_keeps_main_fal_discovery_without_pricing_everything(monkeypatch):
+    from app.services.fal_catalog import catalog_service, CatalogModel
+    from app.services import generation_sources
+    from app.services.fal_schema import schema_service
+    lyria = CatalogModel("fal-ai/lyria2", "Lyria 2", "text-to-audio", "Google music generation", output_type="audio")
+    upscaler = CatalogModel("fal-ai/clarity-upscaler", "Clarity Upscaler", "image-to-image", "upscale images", output_type="image")
+    many = [CatalogModel(f"fal-ai/img-{i}", f"Image {i}", "text-to-image", "upscale art", output_type="image") for i in range(20)]
+    monkeypatch.setattr(catalog_service, "_cache", [lyria, upscaler, *many])
+    monkeypatch.setattr(type(catalog_service), "is_stale", property(lambda self: False))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=None))
+    context = RunContext(session_id="s", unattended=False, owner=False, api_user_id="u")
+    source = generation_sources.Sources(None, context)
+    source.fal_key = AsyncMock(return_value="k")
+    source.fal_price = AsyncMock()
+    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: source)
+    monkeypatch.setattr(sdk, "_get_fal_api_key", lambda: "k")
+    tools = {t.name: t for t in sdk._create_unified_tools(None, context)}
+    music = payload(await tools["searchModels"].handler({"query": "music"}))
+    assert [m["endpoint_id"] for m in music["fal_models"]] == ["fal-ai/lyria2"]
+    upscale = payload(await tools["searchModels"].handler({"query": "upscale"}))
+    assert "fal-ai/clarity-upscaler" in [m["endpoint_id"] for m in upscale["fal_models"]]
+    assert upscale["fal_total_matches"] == 21
+    # Only the top model per kind is looked up for a quote, not all 21 matches.
+    assert schema_service.get_schema.await_count <= 4 + 4
+
+
+async def test_peer_catalog_is_skipped_when_pinned_here_and_parallel_otherwise(monkeypatch):
+    import asyncio
+    from app.network import generation, runners
+    from app.services.generation_sources import Sources
+    monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
+    source = Sources(None, RunContext(session_id="s", unattended=False, owner=True))
+    source.local_catalog = AsyncMock(return_value=[])
+    peers = AsyncMock(return_value=[])
+    monkeypatch.setattr(generation, "catalog", peers)
+    await source.catalog("image", model="fal-ai/x", worker="worker-a")
+    peers.assert_not_awaited()
+    await source.catalog("image", model="fal-ai/x", worker="worker-b")
+    source.local_catalog.assert_awaited_once()  # the pinned peer request skips local discovery
+    assert peers.await_args.kwargs["worker"] == "worker-b"
+    # Peers are asked concurrently: two slow peers cost one delay, not two.
+    monkeypatch.undo()
+    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "p1", "online": True}, {"device_id": "p2", "online": True}])
+    async def slow(worker, operation, **body):
+        await asyncio.sleep(0.2)
+        return {"candidates": []}
+    monkeypatch.setattr(generation, "request", slow)
+    started = asyncio.get_running_loop().time()
+    assert await generation.catalog("image") == []
+    assert asyncio.get_running_loop().time() - started < 0.35
+
+
+@pytest.mark.parametrize("chat_mode,serve_peer,expected", [(False, False, True), (True, False, False), (False, True, False)])
+async def test_guarded_fal_result_keeps_workspace_path_locally(monkeypatch, tmp_path, chat_mode, serve_peer, expected):
+    from app.services import generation_sources
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    media = tmp_path / "out.png"
+    media.write_bytes(b"\x89PNG....")
+    node = SimpleNamespace(call=AsyncMock(return_value={"success": True, "image_url": "https://fal/x.png", "file_path": str(media), "mime_type": "image/png"}))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=ModelSchema("fal-ai/x", [ParamField("prompt", is_primary_text=True)], "prompt")))
+    import app.core.artifact_store as store
+    monkeypatch.setattr(store, "store_bytes", lambda data, **kw: {"hash": "abc"})
+    context = RunContext(session_id="s", unattended=False, owner=True, chat_mode=chat_mode)
+    source = generation_sources.Sources(node, context, serve_peer=serve_peer)
+    source.fal_key = AsyncMock(return_value="k")
+    output = await source.execute_local(replace(candidate(model="fal-ai/x"), options={}), "tree", context)
+    assert output["image_url"].startswith("/api/v1/artifacts/abc")
+    assert (output.get("file_path") == str(media)) is expected
+    assert ("file_path" in output["outputs"][0]) is expected

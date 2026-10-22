@@ -12,7 +12,12 @@ accept `prompt`, optional `source` (`fal`, `openai`, `xai`, `chatgpt`,
 `options`. `options` uses the selected model's declared input schema, the same
 schema service used by Default models. `searchModels` looks up sources,
 accounts, holding workers, models, verified status, prices and schemas on
-demand. No model catalog is added to session prompts.
+demand. No model catalog is added to session prompts. It quotes only the top
+fal model per kind (three with `output_type`). Next to the quotes it returns
+the previous fal catalog search as `fal_models`: every category, matched on
+name, description and tags, with `endpoint_id` fields. Quote one by passing
+`source: "fal"` and its `endpoint_id` as `model`. Peers are asked in parallel
+with a 15-second limit; a request pinned to this worker does not ask them.
 
 This first step is additive: nothing that generates on the previous release
 stops working.
@@ -27,11 +32,19 @@ stops working.
   daily cap. A named fal model that cannot be priced or resolved (unknown
   price, a model outside the text-to catalog, undeclared inputs) runs on the
   Settings default path as before. A cap, confirmation or chat-mode refusal
-  never falls back.
+  never falls back. Outside chat mode, a guarded fal result run on this worker
+  also returns the workspace `file_path`, so `editImage` and `imageToVideo`
+  can chain on it.
+- **ChatGPT-plan images.** While Image generation is set to the ChatGPT plan,
+  `generateImage` keeps main's rule (#1796): no fal source or fal model, on
+  this worker or a peer, and no fal options in a choice card. The configured
+  plan model ID (or its model tail) is accepted as before.
 - **`runFalModel`** runs any fal endpoint again, including image-to-video and
   audio-to-audio, with `output_type` optional. A priced call with a text prompt
   gets the same guard; otherwise it takes the previous path. While images are
   set to the ChatGPT plan it still refuses fal image models.
+- **Old or unreachable peers** are listed as unavailable but never make a
+  named request ambiguous when a usable candidate matches.
 - **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
   registered for sessions running on a verified ChatGPT or SuperGrok account.
 - **Stored Native generation settings** decide eligibility per account. A

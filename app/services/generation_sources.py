@@ -36,10 +36,12 @@ async def stored_native_group(account, kind):
 
 
 class Sources:
-    def __init__(self, worker, context: RunContext, *, local_only=False):
+    def __init__(self, worker, context: RunContext, *, local_only=False, serve_peer=False):
         self.node = worker
         self.context = context
         self.local_only = local_only
+        # True while executing for another worker: its paths are not ours to share.
+        self.serve_peer = serve_peer
         from app.core.generation_confirmations import Confirmations
         self.confirmations = Confirmations()
 
@@ -56,11 +58,15 @@ class Sources:
             return await run_sync(fal_credential.api_key)
         return None
 
-    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
-        entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
-        if self.context.owner and not self.local_only:
+    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
+        here = self.local_worker()
+        entries = []
+        if worker in (None, here):
+            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
+        # A request pinned to this worker never waits on peers.
+        if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
-            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt))
+            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt, worker=worker))
         return entries
 
     async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
@@ -203,7 +209,7 @@ class Sources:
             return {"success": False, "error": "Generation did not confirm an outcome. The budget remains reserved; no fallback or automatic retry was made. " + DO_NOT_RETRY}
 
     @staticmethod
-    def _artifact_result(output, kind, session_id):
+    def _artifact_result(output, kind, session_id, with_paths=False):
         from pathlib import Path
         from app.core.artifact_store import store_bytes
 
@@ -215,9 +221,14 @@ class Sources:
                 raise ValueError("Generated media is unavailable or exceeds the artifact limit.")
             artifact = store_bytes(path.read_bytes(), mime=item.get("mime_type"), filename=path.name, created_by_session=session_id)
             suffix = "/video.mp4" if item.get("mime_type") == "video/mp4" else ""
-            urls.append({"url": f"/api/v1/artifacts/{artifact['hash']}{suffix}?" + urlencode({"session_id": session_id})})
+            urls.append({"url": f"/api/v1/artifacts/{artifact['hash']}{suffix}?" + urlencode({"session_id": session_id}),
+                         # Workspace paths let editImage/imageToVideo chain, as before.
+                         **({"file_path": str(path)} if with_paths else {})})
         key = {"image": "image_url", "video": "video_url", "audio": "audio_url", "3d": "output_url"}[kind]
-        return {"success": True, key: urls[0]["url"], "output_url": urls[0]["url"], "outputs": urls}
+        result = {"success": True, key: urls[0]["url"], "output_url": urls[0]["url"], "outputs": urls}
+        if with_paths:
+            result["file_path"] = urls[0]["file_path"]
+        return result
 
     async def execute_local(self, candidate, prompt, context):
         if candidate.source == "fal":
@@ -228,7 +239,8 @@ class Sources:
                 return {"success": False, "error": "fal.ai is disabled or its account is unavailable."}
             output = await self.node.call("runFalModel", {"endpoint_id": candidate.model, "input": values, "output_type": candidate.kind})
             if output.get("success") and context.session_id:
-                return await run_sync(self._artifact_result, output, candidate.kind, context.session_id)
+                return await run_sync(self._artifact_result, output, candidate.kind, context.session_id,
+                                      not context.chat_mode and not self.serve_peer)
             return output
         # Save session-owned artifacts for native routes, including requests
         # executed on an account-holding peer. Never return a peer-local path.

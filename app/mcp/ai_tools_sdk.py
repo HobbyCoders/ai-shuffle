@@ -694,11 +694,25 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         "prompt": {"type": "string"},
         "source": {"type": "string", "description": "fal|openai|xai|chatgpt|supergrok or account ID."},
         "model": {"type": "string", "description": "searchModels ID; never guess."},
-        "worker": {"type": "string", "description": "Holding-worker ID from a choice."},
+        "worker": {"type": "string", "description": "Worker ID from a choice."},
         "options": {"type": "object", "description": "Declared options only."},
-        "confirmed": {"type": "boolean", "description": "Only on user-approved needs-confirmation retry."},
+        "confirmed": {"type": "boolean", "description": "Only after the user approves."},
         "confirmation_token": {"type": "string", "description": "Receipt for this exact request."},
     }
+
+    from app.core.provider import subscription_images as sub
+    configured_image = _configured_image_models(tool_env)[0]
+    # Main's #1796 rule: while images are set to the ChatGPT plan, no image
+    # call is a back door to fal models the owner did not choose.
+    image_restricted = any(sub.is_subscription_model(m) for m in _configured_image_models(tool_env))
+
+    def plan_image_refusal(request):
+        if normalize_source(request.get("source")) == "fal":
+            return ("Images are not generated with fal.ai here: image generation is set to "
+                    f"{sub.PROVIDER_NAME}. Call generateImage without a source; nothing was run.")
+        if request.get("model") and normalize_source(request.get("source")) in (None, "chatgpt"):
+            return sub.refusal(request["model"], configured_image)
+        return None
 
     def lane_for(name):
         # A trusted stored/job choice outranks the Settings default.
@@ -710,7 +724,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
         lane = lane_for(name)
-        description = f"Generate {kind}. Omit source/model for priced choices; never choose for the user. searchModels gives IDs/schema. Unattended needs a stored choice; unknown prices refuse. Above-threshold spend needs an approved retry."
+        description = f"Generate {kind}. Omit source/model for priced choices; never pick for the user. IDs/schema: searchModels. Unattended needs a stored choice; unknown prices refuse; above-threshold spend needs an approved retry."
         if lane:
             description += (f" Here, omitting source/model uses the Settings default ({_lane_label(lane[0], kind, tool_env)})"
                             + (", as does a fal model the guard cannot price." if lane[0] == "fal" else "."))
@@ -721,9 +735,10 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                 return None
             source = normalize_source(request.get("source"))
             if lane[0] == "chatgpt":
-                if source not in (None, "chatgpt") or request.get("model"):
+                # The configured plan model (or its tail) is accepted, as on main.
+                if source not in (None, "chatgpt") or sub.refusal(request.get("model"), configured_image):
                     return None
-                return {"prompt": request.get("prompt")}
+                return {key: request[key] for key in ("prompt", "model") if request.get(key)}
             if source not in (None, "fal"):
                 return None
             return {key: request[key] for key in ("prompt", "model", *legacy) if key in request}
@@ -734,6 +749,11 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         async def generate(args):
             from app.core.generation_resolver import result
             request = _model_arg(args)
+            restricted = kind == "image" and image_restricted
+            if restricted:
+                refused = plan_image_refusal(request)
+                if refused:
+                    return _tool_result(result("refused", reason="image_provider_restricted", error=refused))
             fallback = main_args(request) if lane else None
             if fallback is not None and (context.unattended or lane[0] == "chatgpt" or not request.get("model")):
                 # The Settings default (no model, or only its own source named): main's path, unchanged.
@@ -751,7 +771,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
             if fallback is not None:
                 # Main ran a named fal model on this worker; keep it there.
                 request["worker"] = backend.local_worker()
-            output = await resolver.generate(kind, request, context)
+            output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
             if fallback is not None and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
                 return await lane[1](fallback)
             return _tool_result(output)
@@ -767,20 +787,32 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         }, "additionalProperties": False,
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def search_models(args):
+        import asyncio
         from app.core.generation_resolver import KINDS, result
-        options = []
-        for kind in [args["output_type"]] if args.get("output_type") else KINDS:
-            catalog = await resolver.catalog(kind, args.get("source"), args.get("model"), query=args.get("query"), limit=args.get("limit") or 15)
-            options.extend(catalog.get("options", []))
-        query = (args.get("query") or "").casefold()
-        options = [o for o in options if not query or query in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
         limit = max(1, min(args.get("limit") or 15, 50))
-        return _tool_result(result("catalog", options=options[:limit], total_matches=len(options)))
+        query, model = args.get("query") or "", args.get("model")
+        kinds = [args["output_type"]] if args.get("output_type") else list(KINDS)
+        source = normalize_source(args.get("source"))
+        # Quote only the top few fal models per kind: every quote is a schema
+        # and pricing fetch. The full fal catalog search follows, unpriced.
+        catalogs = await asyncio.gather(*(resolver.catalog(kind, source, model, query=query or None,
+                                                           limit=3 if len(kinds) == 1 else 1) for kind in kinds))
+        options = [o for catalog in catalogs for o in catalog.get("options", [])]
+        # fal entries already matched the catalog's full-text search.
+        needle = query.casefold()
+        options = [o for o in options if o["source"] == "fal" or not needle
+                   or needle in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
+        output = result("catalog", options=options[:limit], total_matches=len(options))
+        if source in (None, "fal") and (query or not model) and await backend.fal_key():
+            # Main's discovery, unchanged: every category, description and tag
+            # matches, endpoint_id fields. Price one with source "fal" + model.
+            fal = await _search_catalog(query, args.get("output_type"), limit)
+            output.update(fal_models=fal["models"], fal_total_matches=fal["total_matches"],
+                          hint="Quote a fal model with source \"fal\" and its endpoint_id as model, or run it with runFalModel.")
+        return _tool_result(output)
 
     tools.append(search_models)
 
-    from app.core.provider import subscription_images as sub
-    image_restricted = any(sub.is_subscription_model(m) for m in _configured_image_models(tool_env))
     fal_lane = lane_for("runFalModel")
 
     @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks. Prefer the kind's tool; get IDs/schema via searchModels.", {

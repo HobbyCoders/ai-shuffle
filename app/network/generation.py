@@ -6,6 +6,7 @@ Credentials remain on the holding worker. Paid submissions are never replayed.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from uuid import uuid4
 
@@ -17,6 +18,8 @@ from app.core.runner_capabilities import GENERATION_VERSION
 
 WIRE_VERSION = GENERATION_VERSION
 ACTION = "generation"
+# Discovery must not hold a tool call on a slow peer; submissions keep theirs.
+CATALOG_TIMEOUT = 15
 
 
 def require_version(peer):
@@ -31,7 +34,8 @@ async def request(worker, operation, **body):
         raise ValueError("The account-holding worker is unavailable. No other worker was used.")
     require_version(peer)
     try:
-        response = await control.call(worker, ACTION, {"version": WIRE_VERSION, "operation": operation, **body}, timeout=300 if operation == "execute" else 60)
+        timeout = {"execute": 300, "catalog": CATALOG_TIMEOUT}.get(operation, 60)
+        response = await control.call(worker, ACTION, {"version": WIRE_VERSION, "operation": operation, **body}, timeout=timeout)
     except control.RunnerUnreachable:
         raise ValueError("The account-holding worker did not confirm the outcome. Do not automatically retry a generation submission.") from None
     except control.ControlRefused:
@@ -41,25 +45,27 @@ async def request(worker, operation, **body):
     return response
 
 
-async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None):
-    entries = []
-    for peer in await run_sync(runners.other_workers):
-        if not peer.get("online"):
-            continue
+async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
+    """Ask online peers (or only ``worker``) in parallel, each with a short timeout."""
+    async def one(peer):
         try:
             response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
         except ValueError as exc:
             # Surface old/unreachable workers rather than silently treating their
             # accounts as absent. No account identities are advertised in presence.
-            entries.append(Candidate(source or "unavailable", source or peer["device_id"], peer["device_id"],
-                                     model or "unavailable", kind, False, available=False, reason=str(exc)))
-            continue
+            return [Candidate(source or "unavailable", source or peer["device_id"], peer["device_id"],
+                              model or "unavailable", kind, False, available=False, reason=str(exc))]
+        found = []
         for item in response.get("candidates", []):
             candidate = Candidate.from_wire(item)
             if candidate.worker != peer["device_id"] or candidate.kind != kind:
                 raise ValueError("Invalid generation catalog from the account-holding worker.")
-            entries.append(candidate)
-    return entries
+            found.append(candidate)
+        return found
+
+    peers = [p for p in await run_sync(runners.other_workers)
+             if p.get("online") and (worker is None or p.get("device_id") == worker)]
+    return [c for found in await asyncio.gather(*(one(p) for p in peers)) for c in found]
 
 
 async def prepare(candidate, options, prompt, context):
@@ -137,7 +143,7 @@ async def handle(body, from_device):
     context = RunContext(session_id=body.get("session_id"), owner=True, chat_mode=body.get("chat_mode") is True)
     worker = NodeWorker(str(settings.effective_tools_dir / "dist" / "worker.js"),
                         cwd=str(settings.effective_workspace_dir))
-    backend = Sources(worker, context, local_only=True)
+    backend = Sources(worker, context, local_only=True, serve_peer=True)
     limit = body.get("limit", 15)
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Generation catalog limit must be between 1 and 50.")
