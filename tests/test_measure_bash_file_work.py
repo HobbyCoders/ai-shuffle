@@ -13,12 +13,24 @@ def event(identifier, command="cat private-path", ts=150):
     return dict(tool_use_id=identifier, input={"command": command}, ts=ts)
 
 
+def test_recursive_searches_are_counted_as_legitimate_shell():
+    commands = ["grep -rn token .", "grep -R token .", "grep --recursive token .",
+                "find . -type f", "ls -R", "rg token src", "rg -nr X foo",
+                "rg -E latin1 foo", "echo *.py > list.txt"]
+    rows = [("s1", "delegated", event(str(i), command))
+            for i, command in enumerate(commands)]
+    categories = audit.aggregate(rows, 100, 200)["legs"]["delegated"]["categories"]
+    assert categories["legitimate shell"] == {"count": len(commands), "rate": 1}
+    assert categories["search"]["count"] == 0
+    assert categories["file-write/redirect"]["count"] == 0
+
+
 def test_counts_rates_exclusion_dedup_and_window():
     rows = [
         ("s1", "delegated", event("one")),
         ("s1", "delegated", json.dumps(event("one"))),
         ("s1", "delegated", event("two", "git status")),
-        ("s2", "native", event("one", "grep -rn token path")),
+        ("s2", "native", event("one", "grep -n token path")),
         ("excluded", "native", event("x")),
         ("s2", "native", event("old", ts=99)),
         ("s2", "native", event("future", ts=200)),

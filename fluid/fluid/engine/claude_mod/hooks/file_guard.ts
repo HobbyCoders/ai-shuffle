@@ -57,7 +57,7 @@ export function classify(input: string): FileWork | null {
     if (program === 'cat') {
       if (!heredoc || rest.length !== 2 || rest[0] !== '<<') return null
     } else if (['printf', 'echo'].includes(program)) {
-      if (i !== args.length-2 || !rest.length || rest.some(a => a.includes('\\')) || rest[0].startsWith('-')) return null
+      if (i !== args.length-2 || !rest.length || !rest.every(plainPath)) return null
     } else return null
     return work('file-write/redirect', 'Write', args[i+1])
   }
@@ -87,7 +87,9 @@ export function classify(input: string): FileWork | null {
       }
     }
   }
-  if (['grep', 'rg'].includes(program)) {
+  // Only explicit-file grep: recursive searches can see paths Grep/Glob prune.
+  // rg may recurse implicitly and its -r/-E flags mean replace/encoding.
+  if (program === 'grep') {
     const operands: string[] = []
     for (let i=0; i<args.length; i++) {
       const a = args[i]
@@ -95,23 +97,11 @@ export function classify(input: string): FileWork | null {
         i++; if (i >= args.length) return null
         operands.push(args[i])
       } else if (a.startsWith('-')) {
-        if (!/^(-[rnE]+|--(line-number|recursive)|--)$/.test(a)) return null
+        if (!/^(-[nE]+|--line-number|--)$/.test(a)) return null
       } else operands.push(a)
     }
     if (operands.length === 2) return work('search', 'Grep', operands[1])
   }
-  if (program === 'find') {
-    if (args.length < 3 || args[1] !== '-type' || args[2] !== 'f') return null
-    for (let i=3; i<args.length;) {
-      if (['-name', '-maxdepth', '-mindepth'].includes(args[i])) {
-        if (i+1 >= args.length || (args[i] !== '-name' && !/^\d+$/.test(args[i+1]))) return null
-        i += 2
-      } else if (args[i] === '-print') i++
-      else return null
-    }
-    return work('search', 'Glob', args[0])
-  }
-  if (program === 'ls' && ['-R', '-R1', '-1R'].includes(args[0]) && args.length <= 2) return work('search', 'Glob', args[1] ?? '.')
   return null
 }
 

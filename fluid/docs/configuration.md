@@ -527,12 +527,13 @@ What the child CLI is given, and what it is not:
   JSON dispatch and code-mode host calls use the same Python gate. A recognized
   single plain file command is refused only when its matching tool can express
   it: Read for one-file cat/head/sed line windows and `tail -n +N`; Grep for
-  regex searches with only recursion/line-number options; Glob for file-only
-  `find -type f` or `ls -R`; Write for text echo/printf redirects or a cat
-  heredoc; Edit for literal substitutions in one nonglob file. Appends (`>>`),
-  tail-from-end, byte reads, metadata/directory listings, grep invert/context/
-  count/files-only modes, regex/glob edits, file copies and escaped writes
-  always pass. Bare `/proc`, `/sys`, `/dev` and their descendants pass too.
+  non-recursive explicit-file searches with line-number/extended-regex options;
+  Write for unexpanded text echo/printf redirects or a cat heredoc; Edit for
+  literal substitutions in one nonglob file. All `find`, `ls`, `rg` (which may
+  recurse implicitly) and recursive grep calls pass: Grep/Glob prune paths
+  these shell programs can search. Appends (`>>`), tail-from-end, byte reads,
+  grep invert/context/count/files-only modes, regex/glob edits, file copies,
+  shell-expanded text and escaped writes always pass. Bare `/proc`, `/sys`, `/dev` and their descendants pass too.
   Deferred tools are not loaded by this check. One leading `cd path &&` is
   recognized; pipelines, substitutions, compound scripts, unknown options,
   command-output filtering and uncertain syntax pass unchanged.

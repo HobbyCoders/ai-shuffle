@@ -55,7 +55,7 @@ def test_classifier_corpus(case):
     assert refusal(case["command"], []) is None
 
 
-@pytest.mark.parametrize("tool", ["Read", "Grep", "Glob", "Write", "Edit"])
+@pytest.mark.parametrize("tool", ["Read", "Grep", "Write", "Edit"])
 def test_matching_tool_required(tool):
     case = next(c for c in CASES if c["tool"] == tool)
     assert refusal(case["command"], {"Read", "Grep", "Glob", "Write", "Edit"} - {tool}) is None
@@ -169,7 +169,7 @@ async def test_deferred_matching_tool_is_not_promoted_and_unavailable_tool_does_
 
 
 def test_corpus_size_and_guidance_budget():
-    assert len(CASES) >= 238
+    assert len(CASES) >= 353
     for case in CASES:
         text = refusal(case["command"], {"Read", "Grep", "Glob", "Write", "Edit"})
         if text:
@@ -224,10 +224,9 @@ async def test_only_delivered_user_steers_exempt_bash(cancel, origin, blocked):
 @pytest.mark.parametrize("tool,command,key", [
     ("Read", "cat restricted/f", "file_path"),
     ("Read", "cd restricted && cat f", "file_path"),
-    ("Grep", "grep -rn word restricted/f", "path"),
+    ("Grep", "grep -n word restricted/f", "path"),
     ("Write", "echo text > restricted/f", "file_path"),
     ("Edit", "sed -i 's/old/new/g' restricted/f", "file_path"),
-    ("Glob", "ls -R restricted", "path"),
 ])
 @pytest.mark.parametrize("denied", [False, True])
 async def test_path_permission_is_checked_on_both_native_legs(tmp_path, tool, command, key, denied):
@@ -267,6 +266,84 @@ async def test_path_permission_is_checked_on_both_native_legs(tmp_path, tool, co
     result = next(e for e in events if isinstance(e, ToolResult) and e.name == "Bash")
     assert result.is_error is not denied
     assert bool(ran) is denied
+
+
+
+
+@pytest.mark.parametrize("source", ["system", "agent_message", "unpark"])
+@pytest.mark.parametrize("requested", [False, True])
+async def test_native_resume_uses_original_user_source_not_notices(source, requested):
+    from fluid.events import Resume
+
+    store = MemoryStore()
+    registry, ran = registry_with_tools()
+    error = [StreamChunk("error", {"message": "fixture failure", "retriable": False})]
+    original = ScriptedProvider([_text("acknowledged"), error])
+    loop = NativeLoop(provider=original, store=store, model="fixture",
+        registry=registry, permissions=PermissionEngine("never_ask"))
+    await loop.submit(UserTurn(content="Run `cat f`" if requested else "Inspect"))
+    await loop.wait_turn()
+    sid = loop.session_id
+    await loop.submit(UserTurn(content="Inspect" if requested else "Run `cat f`", source=source))
+    await loop.wait_turn()
+    # A failed resume emits TurnStarted(source=user) for the same notice node.
+    # It must not relabel that original source on the next process restart.
+    failed_resume = NativeLoop(provider=ScriptedProvider([error]), store=store,
+        session_id=sid, model="fixture", registry=registry,
+        permissions=PermissionEngine("never_ask"))
+    await failed_resume.submit(Resume())
+    await failed_resume.wait_turn()
+
+    resumed = NativeLoop(provider=ScriptedProvider([
+        _tool("bash-resumed", "Bash", '{"command":"cat f"}'), _text("finished"),
+    ]), store=store, session_id=sid, model="fixture", registry=registry,
+        permissions=PermissionEngine("never_ask"))
+    await resumed.submit(Resume())
+    await resumed.wait_turn()
+    results = [e for e in resumed.bus.log(sid)
+               if isinstance(e, ToolResult) and e.tool_use_id == "bash-resumed"]
+    assert len(results) == 1
+    assert results[0].is_error is not requested
+    assert ("Use Read" in results[0].output) is not requested
+    assert ran == ([{"command": "cat f"}] if requested else [])
+
+
+@pytest.mark.parametrize("origin", ["user", "system"])
+async def test_native_resume_restores_only_delivered_user_steer(origin):
+    from fluid.events import Resume
+    from fluid.events.ops import Steer
+
+    registry = ToolRegistry()
+    steered = False
+
+    async def record(args, ctx):
+        nonlocal steered
+        if not steered:
+            steered = True
+            await loop.submit(Steer(text="Run `cat f`", origin=origin))
+        return ToolOutcome(text="done")
+
+    for name in ("Read", "Bash"):
+        registry.register_builtin(ToolSpec(name=name, description=name,
+            input_schema={"type": "object"}), record)
+    store = MemoryStore()
+    loop = NativeLoop(provider=ScriptedProvider([
+        _tool("read-first", "Read", '{"file_path":"f"}'),
+        [StreamChunk("error", {"message": "fixture failure", "retriable": False})],
+    ]), store=store, model="fixture", registry=registry,
+        permissions=PermissionEngine("never_ask"))
+    await loop.submit(UserTurn(content="Inspect"))
+    await loop.wait_turn()
+    sid = loop.session_id
+    resumed = NativeLoop(provider=ScriptedProvider([
+        _tool("bash-resumed", "Bash", '{"command":"cat f"}'), _text("finished"),
+    ]), store=store, session_id=sid, model="fixture", registry=registry,
+        permissions=PermissionEngine("never_ask"))
+    await resumed.submit(Resume())
+    await resumed.wait_turn()
+    result = next(e for e in resumed.bus.log(sid)
+                  if isinstance(e, ToolResult) and e.tool_use_id == "bash-resumed")
+    assert result.is_error is (origin != "user")
 
 
 def test_last_match_path_allow_is_honored_without_permission_side_effects(tmp_path):

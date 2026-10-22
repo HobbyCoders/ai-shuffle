@@ -90,8 +90,8 @@ def classify(command: str) -> FileWork | None:
             if not heredoc or len(rest) != 2 or rest[0] != "<<":
                 return None  # copying/concatenating files may be binary
         elif program in ("printf", "echo"):
-            if i != len(args)-2 or not rest or any("\\" in a for a in rest) or rest[0].startswith("-"):
-                return None  # escape processing/options cannot be a text Write
+            if i != len(args)-2 or not rest or not all(_plain_path(a) for a in rest):
+                return None  # shell expansion/escape processing is not a text Write
         else:
             return None
         return work("file-write/redirect", "Write", args[i+1])
@@ -124,9 +124,9 @@ def classify(command: str) -> FileWork | None:
                 subst = re.fullmatch(r"s/([^/\n]+)/([^/\n]*)/(g?)", args[expr])
                 if subst and not re.search(r"[.\^$*+?\[\]{}()|\\]", subst[1]) and not re.search(r"[&\\]", subst[2]):
                     return work("in-place edit", "Edit", args[-1])
-    if program in ("grep", "rg"):
-        # Common denominator: both Greps can express regex, recursion and line
-        # numbers. Do NOT route invert/context/count/files-only/byte options.
+    if program == "grep":
+        # Only non-recursive explicit-file grep. Recursive grep, all rg (which
+        # may recurse implicitly), find and ls can see paths Grep/Glob prune.
         operands = []
         i = 0
         while i < len(args):
@@ -137,34 +137,31 @@ def classify(command: str) -> FileWork | None:
                     return None
                 operands.append(args[i])
             elif a.startswith("-"):
-                if not re.fullmatch(r"-[rnE]+|--(?:line-number|recursive)|--", a):
+                if not re.fullmatch(r"-[nE]+|--line-number|--", a):
                     return None
             else:
                 operands.append(a)
             i += 1
         if len(operands) == 2:
             return work("search", "Grep", operands[1])
-    if program == "find":
-        # Glob lists files, never directories/symlinks. Require an explicit
-        # file-only walk; null delimiters and unbounded mixed walks pass.
-        if len(args) < 3 or args[1:3] != ["-type", "f"]:
-            return None
-        i = 3
-        while i < len(args):
-            if args[i] in ("-name", "-maxdepth", "-mindepth"):
-                if i+1 >= len(args):
-                    return None
-                if args[i] != "-name" and not args[i+1].isdigit():
-                    return None
-                i += 2
-            elif args[i] == "-print":
-                i += 1
-            else:
-                return None
-        return work("search", "Glob", args[0])
-    if program == "ls" and args[0] in ("-R", "-R1", "-1R") and len(args) <= 2:
-        return work("search", "Glob", args[1] if len(args) == 2 else ".")
     return None
+
+
+def resumed_user_text(nodes, sources: dict[str, str]) -> str:
+    """Latest proven user intent; stored notices/peers cannot grant or erase it."""
+    from fluid.messages import ToolResultBlock
+
+    for node in reversed(nodes):
+        if node.message.role != "user":
+            continue
+        results = [b for b in node.message.content if isinstance(b, ToolResultBlock)]
+        for result in reversed(results):
+            for steer in reversed(result.delivered_steers):
+                if steer.origin == "user" and steer.sender is None:
+                    return steer.text
+        if not results and sources.get(node.node_id) == "user":
+            return node.message.text()
+    return ""
 
 
 def explicitly_requested(command: str, user_text: str) -> bool:

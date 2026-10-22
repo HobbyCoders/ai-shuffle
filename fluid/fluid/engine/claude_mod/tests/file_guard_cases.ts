@@ -70,7 +70,7 @@ export default [
   },
   {
     "command": "grep -rn x path",
-    "tool": "Grep"
+    "tool": null
   },
   {
     "command": "grep -E x f",
@@ -86,7 +86,7 @@ export default [
   },
   {
     "command": "rg -n x path",
-    "tool": "Grep"
+    "tool": null
   },
   {
     "command": "rg --hidden x src",
@@ -94,7 +94,7 @@ export default [
   },
   {
     "command": "grep -rn 'some text' src",
-    "tool": "Grep"
+    "tool": null
   },
   {
     "command": "find . -name '*.py'",
@@ -102,7 +102,7 @@ export default [
   },
   {
     "command": "find src -type f",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "find . -maxdepth 2 -print",
@@ -110,7 +110,7 @@ export default [
   },
   {
     "command": "ls -R",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "ls",
@@ -122,7 +122,7 @@ export default [
   },
   {
     "command": "cd src && ls -R",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "echo hello > f",
@@ -646,7 +646,7 @@ export default [
   },
   {
     "command": "grep -rn TODO node_modules/pkg",
-    "tool": "Grep"
+    "tool": null
   },
   {
     "command": "rg -v foo f",
@@ -934,11 +934,11 @@ export default [
   },
   {
     "command": "ls -R src",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "find . -type f -name '*.py'",
-    "tool": "Glob"
+    "tool": null
   },
   {
     "command": "sed -i 's/foo/bar/g' f",
@@ -951,5 +951,465 @@ export default [
   {
     "command": "echo hi > out",
     "tool": "Write"
+  },
+  {
+    "command": "LC_ALL=C grep foo f",
+    "tool": null
+  },
+  {
+    "command": "sudo tee f",
+    "tool": null
+  },
+  {
+    "command": "command cat f",
+    "tool": null
+  },
+  {
+    "command": "nice cat f",
+    "tool": null
+  },
+  {
+    "command": "cat /etc/hosts",
+    "tool": "Read"
+  },
+  {
+    "command": "cat /root/.bashrc",
+    "tool": "Read"
+  },
+  {
+    "command": "cat ../../../outside.txt",
+    "tool": "Read"
+  },
+  {
+    "command": "head /tmp/myfifo",
+    "tool": "Read"
+  },
+  {
+    "command": "head -n 5 /run/foo.sock",
+    "tool": "Read"
+  },
+  {
+    "command": "cat <<< hello",
+    "tool": null
+  },
+  {
+    "command": "grep foo <<< bar",
+    "tool": null
+  },
+  {
+    "command": "cat <<< hello > f",
+    "tool": null
+  },
+  {
+    "command": "grep -r foo --include=*.py .",
+    "tool": null
+  },
+  {
+    "command": "grep -r --include='*.py' foo .",
+    "tool": null
+  },
+  {
+    "command": "grep -rn TODO .",
+    "tool": null
+  },
+  {
+    "command": "grep -rn API_KEY .",
+    "tool": null
+  },
+  {
+    "command": "grep -rn foo node_modules/react",
+    "tool": null
+  },
+  {
+    "command": "grep -rni foo .",
+    "tool": null
+  },
+  {
+    "command": "grep -rnE 'a+b' src",
+    "tool": null
+  },
+  {
+    "command": "grep -E 'x|y' f",
+    "tool": null
+  },
+  {
+    "command": "grep -- -foo f",
+    "tool": null
+  },
+  {
+    "command": "grep -e -v f",
+    "tool": "Grep"
+  },
+  {
+    "command": "grep -n -e foo -- f",
+    "tool": "Grep"
+  },
+  {
+    "command": "rg -r NEW OLD",
+    "tool": null
+  },
+  {
+    "command": "rg -nr X foo",
+    "tool": null
+  },
+  {
+    "command": "rg -E latin1 foo",
+    "tool": null
+  },
+  {
+    "command": "rg foo src",
+    "tool": null
+  },
+  {
+    "command": "rg -n foo",
+    "tool": null
+  },
+  {
+    "command": "rg --hidden foo .",
+    "tool": null
+  },
+  {
+    "command": "rg -uu foo .",
+    "tool": null
+  },
+  {
+    "command": "find . -type f -name '*.py' -newer ref",
+    "tool": null
+  },
+  {
+    "command": "find . -type f -newer ref",
+    "tool": null
+  },
+  {
+    "command": "find . -type f -name '*.log' -delete",
+    "tool": null
+  },
+  {
+    "command": "find . -type f -name x -print0",
+    "tool": null
+  },
+  {
+    "command": "find . -type f -name 'a b'",
+    "tool": null
+  },
+  {
+    "command": "find src -type f -maxdepth 2",
+    "tool": null
+  },
+  {
+    "command": "cat C:\\Users\\me\\f.txt",
+    "tool": null
+  },
+  {
+    "command": "cat 'C:\\Users\\me\\f.txt'",
+    "tool": null
+  },
+  {
+    "command": "cat C:/Users/me/f.txt",
+    "tool": "Read"
+  },
+  {
+    "command": "type f.txt",
+    "tool": null
+  },
+  {
+    "command": "Get-Content f.txt",
+    "tool": null
+  },
+  {
+    "command": "Select-String foo f.txt",
+    "tool": null
+  },
+  {
+    "command": "dir /s",
+    "tool": null
+  },
+  {
+    "command": "findstr foo f.txt",
+    "tool": null
+  },
+  {
+    "command": "echo *.py > list.txt",
+    "tool": null
+  },
+  {
+    "command": "echo ~ > home.txt",
+    "tool": null
+  },
+  {
+    "command": "echo {a,b} > f",
+    "tool": null
+  },
+  {
+    "command": "echo hello world > 'my file.txt'",
+    "tool": "Write"
+  },
+  {
+    "command": "printf '%d' 5 > n.txt",
+    "tool": "Write"
+  },
+  {
+    "command": "printf hello > f",
+    "tool": "Write"
+  },
+  {
+    "command": "echo hi > f.txt",
+    "tool": "Write"
+  },
+  {
+    "command": "echo -e 'a' > f",
+    "tool": null
+  },
+  {
+    "command": "cat 'f\"g'",
+    "tool": "Read"
+  },
+  {
+    "command": "cat \"a'b\"",
+    "tool": "Read"
+  },
+  {
+    "command": "cat 'a''b'",
+    "tool": null
+  },
+  {
+    "command": "cat a\"b\"",
+    "tool": null
+  },
+  {
+    "command": "cat \"\"",
+    "tool": null
+  },
+  {
+    "command": "cat f # comment",
+    "tool": null
+  },
+  {
+    "command": "cat f;",
+    "tool": null
+  },
+  {
+    "command": "cat - ",
+    "tool": null
+  },
+  {
+    "command": "head -n 5 data.gz",
+    "tool": "Read"
+  },
+  {
+    "command": "head -n5 f",
+    "tool": "Read"
+  },
+  {
+    "command": "head -5 f",
+    "tool": "Read"
+  },
+  {
+    "command": "head --lines=5 f",
+    "tool": "Read"
+  },
+  {
+    "command": "head -n -5 f",
+    "tool": null
+  },
+  {
+    "command": "tail -n +1 f",
+    "tool": "Read"
+  },
+  {
+    "command": "tail +5 f",
+    "tool": null
+  },
+  {
+    "command": "tail -n+5 f",
+    "tool": "Read"
+  },
+  {
+    "command": "sed -n '1,5p' f",
+    "tool": "Read"
+  },
+  {
+    "command": "sed -n 5p f g",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/foo/bar/' f",
+    "tool": "Edit"
+  },
+  {
+    "command": "sed -i 's/a b/c d/g' f",
+    "tool": "Edit"
+  },
+  {
+    "command": "sed -i '' 's/a/b/' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a/b/w out' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's/a/b/2' f",
+    "tool": null
+  },
+  {
+    "command": "sed -i 's|a|b|' f",
+    "tool": null
+  },
+  {
+    "command": "cd /proc && cat cpuinfo",
+    "tool": null
+  },
+  {
+    "command": "cd sub && cat f",
+    "tool": "Read"
+  },
+  {
+    "command": "cd sub && cd x && cat f",
+    "tool": null
+  },
+  {
+    "command": "cd ~ && cat f",
+    "tool": null
+  },
+  {
+    "command": "ls -R /",
+    "tool": null
+  },
+  {
+    "command": "ls -R node_modules",
+    "tool": null
+  },
+  {
+    "command": "cat f.txt\n",
+    "tool": "Read"
+  },
+  {
+    "command": "cat > f <<EOF\nline\nEOF",
+    "tool": "Write"
+  },
+  {
+    "command": "cat > f <<'EOF'\nfoo\\bar\nEOF",
+    "tool": "Write"
+  },
+  {
+    "command": "cat > f <<EOF\nfoo\\\nbar\nEOF",
+    "tool": "Write"
+  },
+  {
+    "command": "cat > f <<-EOF\n\tx\nEOF",
+    "tool": null
+  },
+  {
+    "command": "cat <<EOF > f\nx\nEOF\necho done",
+    "tool": null
+  },
+  {
+    "command": "cat > f << EOF\nx\nEOF",
+    "tool": "Write"
+  },
+  {
+    "command": "cat >f <<EOF\nEOF\nEOF",
+    "tool": null
+  },
+  {
+    "command": "time cat f",
+    "tool": null
+  },
+  {
+    "command": "xargs cat f",
+    "tool": null
+  },
+  {
+    "command": "! cat f",
+    "tool": null
+  },
+  {
+    "command": "exec cat f",
+    "tool": null
+  },
+  {
+    "command": "cat f 2>/dev/null",
+    "tool": null
+  },
+  {
+    "command": "cat f 2>&1",
+    "tool": null
+  },
+  {
+    "command": "cat f > /dev/stdout",
+    "tool": null
+  },
+  {
+    "command": "cat /dev/stdin",
+    "tool": null
+  },
+  {
+    "command": "cat proc/x",
+    "tool": "Read"
+  },
+  {
+    "command": "cat /procx/f",
+    "tool": "Read"
+  },
+  {
+    "command": "find . -type f -name '*.log'",
+    "tool": null
+  },
+  {
+    "command": "grep -rn runs-on .",
+    "tool": null
+  },
+  {
+    "command": "grep -R word src",
+    "tool": null
+  },
+  {
+    "command": "grep --recursive word src",
+    "tool": null
+  },
+  {
+    "command": "grep -nR word src",
+    "tool": null
+  },
+  {
+    "command": "grep -rn word build/",
+    "tool": null
+  },
+  {
+    "command": "grep -rn word .github/",
+    "tool": null
+  },
+  {
+    "command": "grep -rn word .env",
+    "tool": null
+  },
+  {
+    "command": "printf %s *.py > list.txt",
+    "tool": null
+  },
+  {
+    "command": "printf %s ~ > home.txt",
+    "tool": null
+  },
+  {
+    "command": "printf %s {a,b} > f",
+    "tool": null
+  },
+  {
+    "command": "cd repo && grep -rn word .",
+    "tool": null
+  },
+  {
+    "command": "cd repo && rg word .",
+    "tool": null
+  },
+  {
+    "command": "cd repo && find . -type f",
+    "tool": null
+  },
+  {
+    "command": "cd repo && ls -R",
+    "tool": null
   }
 ]

@@ -2440,13 +2440,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             # background wake marker, the code-mode journal entry) belongs to
             # writing a node, so none of it applies here.
             path = await self.store.load_path(sid)
-            # Recover intent on a restarted loop, never from tool-result text.
-            self.ctx.extra["bash_file_guard_user_text"] = next((
-                n.message.text() for n in reversed(path)
-                if n.message.role == "user" and not any(
-                    isinstance(b, ToolResultBlock) for b in n.message.content
-                )
-            ), "")
+            # Nodes have no author/source field. Recover it from the first
+            # TurnStarted naming each node; a later Resume must not relabel a
+            # notice/peer node as user-authored. Never infer origin from text.
+            sources: dict[str, str] = {}
+            try:
+                async for event in iter_events(self.store, sid, 0):
+                    if isinstance(event, TurnStarted) and event.node_id:
+                        sources.setdefault(event.node_id, event.source)
+            except Exception:  # unreadable provenance cannot grant an exemption
+                sources.clear()
+            from fluid.tools.bash_file_guard import resumed_user_text
+
+            self.ctx.extra["bash_file_guard_user_text"] = resumed_user_text(path, sources)
             head = path[-1] if path else None
             if (
                 head is not None and len(path) > 1
