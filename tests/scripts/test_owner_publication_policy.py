@@ -192,10 +192,12 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert setup["timeout-minutes"] == "4"
     assert "if" not in setup  # OS dependencies are needed even on a cache hit.
     assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
-    assert "for attempt in 1 2; do" in setup["run"]
-    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium" in setup["run"]
-    assert 'echo "::error::Chromium dependency installation failed' in setup["run"]
-    assert setup["run"].rstrip().endswith("exit 1")
+    assert 'sudo env "PATH=$PATH" timeout --kill-after=10s 90s npx --no-install playwright-core install-deps chromium' in setup["run"]
+    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in setup["run"]
+    assert "URIs: https://archive.ubuntu.com/ubuntu/" in setup["run"]
+    assert "--allow-unauthenticated" not in setup["run"]
+    assert "trusted=yes" not in setup["run"]
+    assert "||" not in setup["run"]  # Neither install phase may fail open.
     assert tests["timeout-minutes"] == "8"
     assert "timeout --kill-after=10s 420s npm test" in tests["run"]
     assert 'exit "$result"' in tests["run"]

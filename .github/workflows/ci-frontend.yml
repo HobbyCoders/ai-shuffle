@@ -200,16 +200,14 @@ jobs:
           # Ubuntu 24.04's AppArmor policy otherwise denies Chromium's user
           # namespace sandbox. This changes only the disposable hosted runner.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          # Keep OS dependency setup even on a browser cache hit. Bound apt and
-          # browser downloads together and retry once for transient mirrors.
-          for attempt in 1 2; do
-            if timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium; then
-              exit 0
-            fi
-            echo "::warning::Chromium dependency install attempt $attempt failed or exceeded 90s"
-          done
-          echo "::error::Chromium dependency installation failed after two bounded attempts"
-          exit 1
+          # Use the primary signed Ubuntu archive, not the hosted mirror's
+          # slow Azure fallback. Keep suites, components and Signed-By intact.
+          sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+          # Run the OS timeout as root too: a user-owned timeout cannot reap
+          # sudo's apt children, leaving a lock behind for the next command.
+          sudo env "PATH=$PATH" timeout --kill-after=10s 90s npx --no-install playwright-core install-deps chromium
+          # Browser downloads stay owned by the runner and use its cache.
+          timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
 
       - name: Browser MCP build and tests
         timeout-minutes: 8

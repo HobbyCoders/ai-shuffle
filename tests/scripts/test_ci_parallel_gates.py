@@ -113,7 +113,9 @@ def test_workspace_cases_keep_real_browser_and_ui_security_checks():
     steps = {step.get("name"): step for step in job["steps"]}
     install = steps["Install isolated Chromium"]
     assert "if" not in install
-    assert "install --with-deps chromium" in install["run"]
+    assert 'sudo env "PATH=$PATH" timeout --kill-after=10s 90s npx --no-install playwright-core install-deps chromium' in install["run"]
+    assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in install["run"]
+    assert "||" not in install["run"]
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in install["run"]
     assert "https://archive.ubuntu.com/ubuntu" in install["run"]
     assert "--allow-unauthenticated" not in install["run"]
@@ -122,6 +124,37 @@ def test_workspace_cases_keep_real_browser_and_ui_security_checks():
     assert "nested shadow auth fields" in steps["Verify shadow-root auth editor discovery and edits"]["run"]
     assert "verify-crumb-strip.mjs" in steps["Verify desktop breadcrumb strip layout"]["run"]
     assert "[$CHROME_MODE]" in steps["Verify shared browser and rendered desktop/mobile UI"]["run"]
+
+
+def test_chromium_install_phases_fail_closed_without_retrying_tests(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    for program in ["sudo", "timeout", "node"]:
+        shim = bin_dir / program
+        shim.write_text(
+            '#!/bin/sh\n'
+            'printf "%s:%s\\n" "${0##*/}" "$*" >> "$CALLS"\n'
+            'case "$*" in *install-deps*) exit "$OS_RESULT";; esac\n'
+            'if [ "${0##*/}" = timeout ]; then exit "$BROWSER_RESULT"; fi\n')
+        shim.chmod(0o755)
+    for filename, job, step_name in [
+        ("ci-frontend.yml", "browser-mcp", "Prepare sandboxed Chromium"),
+        ("ci-browser-workspace.yml", "workspace", "Install isolated Chromium"),
+    ]:
+        command = next(step["run"] for step in workflow(filename)["jobs"][job]["steps"]
+                       if step.get("name") == step_name)
+        for os_result, browser_result in [(0, 0), (9, 0), (0, 7)]:
+            calls.write_text("")
+            bash = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == "nt" else "bash"
+            result = subprocess.run([bash, "-e", "-c", command],
+                                    env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                                         "CALLS": calls.as_posix(), "OS_RESULT": str(os_result),
+                                         "BROWSER_RESULT": str(browser_result)}, capture_output=True)
+            assert result.returncode == (os_result or browser_result)
+            recorded = calls.read_text()
+            assert recorded.count("install-deps chromium") == 1
+            assert recorded.count("install chromium") == (0 if os_result else 1)
 
 
 def test_desktop_evidence_rejects_missing_duplicated_or_failed_shards(tmp_path):

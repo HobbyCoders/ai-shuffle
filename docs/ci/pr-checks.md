@@ -69,8 +69,11 @@ Windows desktop shards retain 60-minute limits, cache pip/npm downloads by
 requirements/lockfiles, and build independently before Node's native sharding.
 No runner shares mutable `node_modules`; mobile links the frontend install via
 `npm run deps`.
-Installation has two 90-second attempts within a four-minute step; Browser MCP
-build/tests have a separate eight-minute step and a 420-second test deadline with
+OS prerequisites and browser downloads each have a 90-second deadline within a
+four-minute step. The OS timeout runs as root so it can reap apt children; browser
+downloads remain runner-owned and cached. OS packages use the primary signed
+Ubuntu archive instead of the hosted Azure mirror fallback. Browser MCP build/tests
+have a separate eight-minute step and a 420-second test deadline with
 an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
 restriction is disabled only on the disposable runner so the sandboxed editor
 fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
