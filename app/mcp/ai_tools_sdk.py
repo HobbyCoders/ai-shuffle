@@ -708,8 +708,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     def plan_image_refusal(request):
         if normalize_source(request.get("source")) == "fal":
-            return ("Images are not generated with fal.ai here: image generation is set to "
-                    f"{sub.PROVIDER_NAME}. Call generateImage without a source; nothing was run.")
+            return sub.fal_image_refusal()
         if request.get("model") and normalize_source(request.get("source")) in (None, "chatgpt"):
             return sub.refusal(request["model"], configured_image)
         return None
@@ -796,13 +795,20 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         # Quote only the top few fal models per kind: every quote is a schema
         # and pricing fetch. The full fal catalog search follows, unpriced.
         catalogs = await asyncio.gather(*(resolver.catalog(kind, source, model, query=query or None,
-                                                           limit=3 if len(kinds) == 1 else 1) for kind in kinds))
-        options = [o for catalog in catalogs for o in catalog.get("options", [])]
+                                                           limit=3 if len(kinds) == 1 else 1) for kind in kinds),
+                                        return_exceptions=True)
+        failed = next((c for c in catalogs if isinstance(c, BaseException)), None)
+        if isinstance(failed, asyncio.CancelledError):
+            raise failed
+        # A failed priced lookup never costs main's fal discovery below.
+        options = [o for catalog in catalogs if isinstance(catalog, dict) for o in catalog.get("options", [])]
         # fal entries already matched the catalog's full-text search.
         needle = query.casefold()
         options = [o for o in options if o["source"] == "fal" or not needle
                    or needle in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
         output = result("catalog", options=options[:limit], total_matches=len(options))
+        if failed is not None:
+            output["priced_lookup_error"] = "Some accounts or workers could not be listed."
         if source in (None, "fal") and (query or not model) and await backend.fal_key():
             # Main's discovery, unchanged: every category, description and tag
             # matches, endpoint_id fields. Price one with source "fal" + model.

@@ -131,3 +131,43 @@ async def test_founder_receiver_records_actual_cost_without_authorizing_submissi
     result = await peer.handle({"version": peer.WIRE_VERSION, "operation": "record-overrun", "amount": "0.01"}, "account-worker")
     assert result == {"version": peer.WIRE_VERSION, "recorded": True}
     assert record == ["0.01"]
+
+
+@pytest.mark.parametrize("operation", ["catalog", "prepare", "execute"])
+async def test_holding_worker_applies_its_own_plan_image_rule(monkeypatch, operation):
+    # Worker B's Image generation is the ChatGPT plan: it never spends on a
+    # fal image its own generateImage would refuse, whoever asks.
+    from app.services import generation_sources
+    from app.mcp.node_worker import NodeWorker
+    from app.network import runners
+    from app.core.provider import subscription_images as sub
+    fal = Candidate("fal", "fal-ai", "peer-worker", "fal-ai/flux/dev", "image", False, options={}, price=PRICE)
+    monkeypatch.setattr(runners, "self_device_id", lambda: "peer-worker")
+    monkeypatch.setattr(generation_sources.Sources, "local_catalog", AsyncMock(return_value=[fal, ENTRY]))
+    execute = AsyncMock(return_value={"success": True})
+    monkeypatch.setattr(generation_sources.Sources, "execute_local", execute)
+    monkeypatch.setattr(NodeWorker, "shutdown", AsyncMock())
+    monkeypatch.setattr(peer, "reserve", AsyncMock(return_value=True))
+    monkeypatch.setattr(peer, "claim", lambda command: True)
+    monkeypatch.setattr(sub, "plan_images_configured", lambda: True)
+    body = {"version": peer.WIRE_VERSION, "operation": operation, "source": "fal-ai", "kind": "image", "model": fal.model,
+            "options": {}, "prompt": "tree", "price": PRICE, "session_id": "session", "command_id": "request"}
+    if operation == "catalog":
+        output = await peer.handle(body, "origin-worker")
+        assert [c["source"] for c in output["candidates"]] == ["chatgpt"]
+    else:
+        with pytest.raises(ValueError, match="not generated with fal.ai"):
+            await peer.handle(body, "origin-worker")
+    execute.assert_not_awaited()
+
+
+async def test_one_malformed_peer_reply_marks_only_that_peer_unavailable(monkeypatch):
+    from app.network import runners
+    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "p1", "online": True}, {"device_id": "p2", "online": True}])
+    good = asdict(replace(ENTRY, worker="p2"))
+    async def reply(worker, operation, **body):
+        return {"version": peer.WIRE_VERSION, "candidates": [{"source": "fal"}] if worker == "p1" else [good]}
+    monkeypatch.setattr(peer, "request", reply)
+    entries = await peer.catalog("image")
+    assert [(c.worker, c.available) for c in entries] == [("p1", False), ("p2", True)]
+    assert "nothing from it was used" in entries[0].reason

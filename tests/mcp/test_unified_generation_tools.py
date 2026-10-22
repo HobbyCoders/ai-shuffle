@@ -330,3 +330,55 @@ async def test_guarded_fal_result_keeps_workspace_path_locally(monkeypatch, tmp_
     assert output["image_url"].startswith("/api/v1/artifacts/abc")
     assert (output.get("file_path") == str(media)) is expected
     assert ("file_path" in output["outputs"][0]) is expected
+
+
+# ---- Final review probes (#409), kept as regressions ----
+
+async def test_malformed_peer_catalog_keeps_main_fal_discovery(monkeypatch):
+    from app.services.fal_catalog import catalog_service, CatalogModel
+    from app.services import generation_sources
+    from app.services.fal_schema import schema_service
+    from app.network import generation, runners
+    lyria = CatalogModel("fal-ai/lyria2", "Lyria 2", "text-to-audio", "Google music generation", output_type="audio")
+    monkeypatch.setattr(catalog_service, "_cache", [lyria])
+    monkeypatch.setattr(type(catalog_service), "is_stale", property(lambda self: False))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=None))
+    context = RunContext(session_id="s", unattended=False, owner=True)
+    source = generation_sources.Sources(None, context)
+    source.fal_key = AsyncMock(return_value="k")
+    source.fal_price = AsyncMock()
+    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: source)
+    monkeypatch.setattr(sdk, "_get_fal_api_key", lambda: "k")
+    monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
+    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "p1", "online": True}])
+    monkeypatch.setattr("app.db.model_providers.list_usable_model_providers", lambda: [])
+    async def bad(worker, operation, **body):
+        return {"version": 2, "candidates": [{"source": "fal"}]}
+    monkeypatch.setattr(generation, "request", bad)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, context)}
+    output = payload(await tools["searchModels"].handler({"query": "music"}))
+    assert [m["endpoint_id"] for m in output["fal_models"]] == ["fal-ai/lyria2"]
+    listed = payload(await tools["searchModels"].handler({"output_type": "audio"}))
+    assert any(o["worker"] == "p1" and not o["available"] for o in listed["options"])
+    # Even if the whole priced lookup fails, main's discovery is still returned.
+    from app.core.generation_resolver import Resolver
+    monkeypatch.setattr(Resolver, "catalog", AsyncMock(side_effect=ValueError("Invalid generation catalog")))
+    output = payload(await tools["searchModels"].handler({"query": "music"}))
+    assert [m["endpoint_id"] for m in output["fal_models"]] == ["fal-ai/lyria2"]
+    assert output["options"] == [] and output["priced_lookup_error"]
+
+
+@pytest.mark.parametrize("serve_peer,chat_mode", [(True, False), (False, True), (True, True)])
+async def test_sessionless_peer_or_chat_fal_request_returns_no_local_path(monkeypatch, tmp_path, serve_peer, chat_mode):
+    from app.services import generation_sources
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    media = tmp_path / "out.png"
+    media.write_bytes(b"x")
+    node = SimpleNamespace(call=AsyncMock(return_value={"success": True, "file_path": str(media), "mime_type": "image/png"}))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=ModelSchema("fal-ai/x", [ParamField("prompt", is_primary_text=True)], "prompt")))
+    context = RunContext(session_id=None, unattended=False, owner=True, chat_mode=chat_mode)
+    source = generation_sources.Sources(node, context, serve_peer=serve_peer)
+    source.fal_key = AsyncMock(return_value="k")
+    output = await source.execute_local(replace(candidate(model="fal-ai/x"), options={}), "tree", context)
+    assert output["success"] is False and str(tmp_path) not in json.dumps(output)
+    node.call.assert_not_awaited()  # refused before anything was submitted

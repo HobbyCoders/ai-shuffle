@@ -17,7 +17,9 @@ fal model per kind (three with `output_type`). Next to the quotes it returns
 the previous fal catalog search as `fal_models`: every category, matched on
 name, description and tags, with `endpoint_id` fields. Quote one by passing
 `source: "fal"` and its `endpoint_id` as `model`. Peers are asked in parallel
-with a 15-second limit; a request pinned to this worker does not ask them.
+with a 15-second limit; a request pinned to this worker does not ask them. A
+malformed peer reply marks only that worker unavailable, and the fal catalog
+search is returned even when the priced lookup fails.
 
 This first step is additive: nothing that generates on the previous release
 stops working.
@@ -34,11 +36,14 @@ stops working.
   Settings default path as before. A cap, confirmation or chat-mode refusal
   never falls back. Outside chat mode, a guarded fal result run on this worker
   also returns the workspace `file_path`, so `editImage` and `imageToVideo`
-  can chain on it.
+  can chain on it. A fal request from a peer or a chat with no saved session
+  is refused before submission, so no worker-local path is ever returned.
 - **ChatGPT-plan images.** While Image generation is set to the ChatGPT plan,
   `generateImage` keeps main's rule (#1796): no fal source or fal model, on
   this worker or a peer, and no fal options in a choice card. The configured
-  plan model ID (or its model tail) is accepted as before.
+  plan model ID (or its model tail) is accepted as before. A worker that holds
+  a fal key applies its own setting too: if its Image generation is the
+  ChatGPT plan, it lists no fal image models for peers and refuses to run one.
 - **`runFalModel`** runs any fal endpoint again, including image-to-video and
   audio-to-audio, with `output_type` optional. A priced call with a text prompt
   gets the same guard; otherwise it takes the previous path. While images are

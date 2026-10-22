@@ -237,6 +237,10 @@ class Sources:
             values = schema.validate_options(candidate.options, prompt)
             if not await self.fal_key():
                 return {"success": False, "error": "fal.ai is disabled or its account is unavailable."}
+            if (self.serve_peer or context.chat_mode) and not context.session_id:
+                # Only a session artifact may leave here; raw Node output holds
+                # this worker's paths. Refused before anything is submitted.
+                return {"success": False, "error": "A saved session is required for this generation; nothing was submitted."}
             output = await self.node.call("runFalModel", {"endpoint_id": candidate.model, "input": values, "output_type": candidate.kind})
             if output.get("success") and context.session_id:
                 return await run_sync(self._artifact_result, output, candidate.kind, context.session_id,

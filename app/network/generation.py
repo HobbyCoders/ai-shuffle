@@ -56,11 +56,17 @@ async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt
             return [Candidate(source or "unavailable", source or peer["device_id"], peer["device_id"],
                               model or "unavailable", kind, False, available=False, reason=str(exc))]
         found = []
-        for item in response.get("candidates", []):
-            candidate = Candidate.from_wire(item)
-            if candidate.worker != peer["device_id"] or candidate.kind != kind:
-                raise ValueError("Invalid generation catalog from the account-holding worker.")
-            found.append(candidate)
+        try:
+            for item in response.get("candidates", []):
+                candidate = Candidate.from_wire(item)
+                if candidate.worker != peer["device_id"] or candidate.kind != kind:
+                    raise ValueError("Invalid generation catalog from the account-holding worker.")
+                found.append(candidate)
+        except (ValueError, TypeError, AttributeError):
+            # One malformed reply makes that worker unavailable, not the search.
+            return [Candidate(source or "unavailable", source or peer["device_id"], peer["device_id"],
+                              model or "unavailable", kind, False, available=False,
+                              reason="Invalid generation catalog from that worker; nothing from it was used.")]
         return found
 
     peers = [p for p in await run_sync(runners.other_workers)
@@ -148,6 +154,15 @@ async def handle(body, from_device):
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Generation catalog limit must be between 1 and 50.")
     candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"), limit=limit, prompt=body.get("prompt"))
+    if kind == "image":
+        # The holding worker applies its own ChatGPT-plan image rule (#1796):
+        # it never spends on a fal image its own generateImage would refuse.
+        from app.core.provider import subscription_images as sub
+        from app.core.generation_resolver import normalize_source
+        if await run_sync(sub.plan_images_configured):
+            if operation != "catalog" and normalize_source(body.get("source")) == "fal":
+                raise ValueError(sub.fal_image_refusal())
+            candidates = [c for c in candidates if c.source != "fal"]
     if operation == "catalog":
         return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in candidates]}
     if operation not in ("prepare", "execute") or len(candidates) != 1:
