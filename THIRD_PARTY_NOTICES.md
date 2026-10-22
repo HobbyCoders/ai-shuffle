@@ -439,7 +439,7 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | devalue | 5.9.3 | MIT | https://www.npmjs.com/package/devalue/v/5.9.3 |
 | devlop | 1.1.0 | MIT | https://www.npmjs.com/package/devlop/v/1.1.0 |
 | dom-accessibility-api | 0.5.16 | MIT | https://www.npmjs.com/package/dom-accessibility-api/v/0.5.16 |
-| dompurify | 3.4.16 | (MPL-2.0 OR Apache-2.0) | https://www.npmjs.com/package/dompurify/v/3.4.16 |
+| dompurify | 3.4.17 | (MPL-2.0 OR Apache-2.0) | https://www.npmjs.com/package/dompurify/v/3.4.17 |
 | enhanced-resolve | 5.24.5 | MIT | https://www.npmjs.com/package/enhanced-resolve/v/5.24.5 |
 | entities | 6.0.1 | BSD-2-Clause | https://www.npmjs.com/package/entities/v/6.0.1 |
 | es-module-lexer | 2.1.0 | MIT | https://www.npmjs.com/package/es-module-lexer/v/2.1.0 |
