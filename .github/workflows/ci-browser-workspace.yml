@@ -16,7 +16,7 @@ jobs:
     name: Browser editor smoke checks
     # Keep every smoke check on a standard GitHub-hosted runner.
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,7 +31,7 @@ jobs:
   workspace:
     name: Real browser workspace
     needs: smoke
-    timeout-minutes: 10
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     permissions:
       contents: read

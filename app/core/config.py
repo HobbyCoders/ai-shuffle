@@ -441,6 +441,9 @@ class Settings(BaseSettings):
     # bash-first steer from reaching the model. FLUID_CLAUDE_MOD=false turns it
     # off; the CLAUDE_CODE_THRIFTY_SONIC override stays on either way.
     fluid_claude_mod: bool = True
+    # Mechanical tiers 1–3 through the mod's compaction hook. Explicit opt-in;
+    # errors fall back to Claude Code. Never enables model-written tier 4.
+    fluid_claude_mod_compaction: bool = False
     fluid_continual: bool = True
     fluid_memory_enabled: bool = True
     fluid_continual_model: Optional[str] = None

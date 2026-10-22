@@ -28,7 +28,7 @@ def test_shape_has_all_keys_and_types():
     assert isinstance(caps["docker"], bool)
     assert isinstance(caps["claude_cli_signed_in"], bool)
     assert isinstance(caps["provider_kinds"], list)
-    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 5
+    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 6
     assert caps["move_wakes"] == rc.MOVE_WAKES_VERSION == 3
     assert caps["handoff_poll"] == 1
     assert caps["move_questions"] == 1

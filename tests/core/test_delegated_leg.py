@@ -269,15 +269,19 @@ async def test_both_legs_get_the_adapters_hook_bus(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delegated_leg_sends_mod_usage_to_the_claude_usage_store(monkeypatch, tmp_path):
+@pytest.mark.parametrize("compaction", [False, True])
+async def test_delegated_leg_sends_mod_usage_to_the_claude_usage_store(monkeypatch, tmp_path, compaction):
     """The plan usage the Claude Code mod reports reaches the same store the
     stream's rate_limit events feed."""
     from app.core.usage_limits import claude_mod_usage_sink
+    from app.core.config import settings
 
+    monkeypatch.setattr(settings, "fluid_claude_mod_compaction", compaction)
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
     await ha.HarnessAdapter().connect(_preset_options(tmp_path))
     assert _KwargsLoop.captured["plan_usage_sink"] is claude_mod_usage_sink
+    assert _KwargsLoop.captured["claude_mod_compaction"] is compaction
 
 
 @pytest.mark.asyncio

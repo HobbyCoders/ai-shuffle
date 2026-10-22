@@ -83,6 +83,10 @@ from typing import TYPE_CHECKING, Any
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
+from fluid.engine.claude_mod_compaction import (
+    COMPACT_PATH, COMPACTION_ENV, MAX_COMPACT_BODY_BYTES, compact_messages, compaction_enabled,
+)
+from fluid.context.recall import HistoryRecall
 from fluid.engine.delegated_proto import (
     FORCED_CHILD_ENV,
     ControlReply,
@@ -360,9 +364,9 @@ CLAUDE_MOD_ENV = "FLUID_CLAUDE_MOD"
 # Where the mod posts the plan usage the CLI measures (``claude_mod/hooks/
 # usage.ts``, contract in ``claude_mod_usage``): the bridge's HTTP route, the
 # unix socket it goes over (unset on a loopback port), and a per-session token
-# that authorizes that route alone, never a tool call. Set in the CLI's env
-# only when the mod is loaded and a host takes the reports
-# (``plan_usage_sink``); the mod reads them once and unsets them, so the
+# that authorizes only the mod's usage and opt-in compaction routes, never a
+# tool call. Set in the CLI's env only when the mod is loaded and either route
+# is mounted; the mod reads them once and unsets them, so the
 # commands the model runs do not inherit them.
 CLAUDE_MOD_URL_ENV = "FLUID_CLAUDE_MOD_URL"
 CLAUDE_MOD_SOCKET_ENV = "FLUID_CLAUDE_MOD_SOCKET"
@@ -679,6 +683,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         permission_grants: list[str] | None = None,
         effort: str | None = None,
         settings: str | None = None,
+        commit_attribution: bool = True,
         setting_sources: tuple[str, ...] | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
@@ -687,6 +692,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ] | None = None,
         journal: Any | None = None,
         claude_mod: bool | None = None,
+        claude_mod_compaction: bool | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
@@ -700,6 +706,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.claude_cmd = claude_cmd or [claude_path]
         self.system = system
         self.append_system_prompt = append_system_prompt
+        self.commit_attribution = commit_attribution
         # Always set a mode so old CLI settings or resumed sessions cannot
         # restore the retired planning mode.
         self.permission_mode = "default" if permission_mode in (None, "plan") else permission_mode
@@ -895,6 +902,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.plan_usage_sink = plan_usage_sink
         self._mod_token = secrets.token_urlsafe(32)
         self._usage_route = False
+        self.claude_mod_compaction = (
+            compaction_enabled({**os.environ, **(env or {})})
+            if claude_mod_compaction is None else bool(claude_mod_compaction)
+        )
+        self._compaction_route = False
+        if self.claude_mod_compaction and self.registry is not None:
+            from fluid.tools.builtins import history_expand, history_search
+            for tool in (history_expand, history_search):
+                if self.registry.get(tool.SPEC.name) is None:
+                    self.registry.register_builtin(tool.SPEC, tool.handler)
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -956,6 +973,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 )
             if self.ctx.session_id is None:
                 self.ctx.session_id = self._session.session_id
+            if self.claude_mod_compaction:
+                self.ctx.extra["history_recall"] = HistoryRecall(self.store, self._session.session_id)
         return self._session
 
     @property
@@ -1134,16 +1153,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.settings = _settings_json(settings)
 
     def _settings_object(self) -> dict[str, Any] | None:
-        """The host's ``settings`` as a JSON object ({} when unset), or None
-        when it is something else (the CLI also accepts a file path)."""
+        """Host settings with owned attribution, or None for non-object input.
+
+        The CLI accepts file paths too, but those cannot enforce this policy.
+        """
         raw = getattr(self, "settings", None)
-        if not raw:
-            return {}
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw) if raw else {}
         except (TypeError, ValueError):
             return None
-        return parsed if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict):
+            return None
+        from fluid.context.attribution import cli_attribution
+
+        return {**parsed, "attribution": cli_attribution(self.commit_attribution)}
 
     async def aclose(self) -> None:
         self._peer_admission_open = False
@@ -1344,6 +1367,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self.registry is None or self._socket_server is not None:
             return
         from fluid.tools.mcp.bundled_server import (
+            JsonHttpRoute,
             serve_registry_socket,
             write_bundled_config,
         )
@@ -1355,6 +1379,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # The mod's usage reports ride the same socket as an HTTP route, so
         # the socket also runs for a session whose bridge serves no tool.
         usage_route = self.claude_mod and self.plan_usage_sink is not None
+        compaction_route = self.claude_mod and self.claude_mod_compaction
+        routes = {}
+        if usage_route:
+            routes[USAGE_PATH] = self._take_plan_usage
+        if compaction_route:
+            routes[COMPACT_PATH] = JsonHttpRoute(self._compact_mod_messages, MAX_COMPACT_BODY_BYTES)
         # Written even when it names no server: the config is what carries
         # --strict-mcp-config, and an empty one is how the child is told to
         # connect none of the user's own servers.
@@ -1364,7 +1394,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._socket_path = (
             os.path.join(tmpdir, "bundled.sock") if use_unix else "tcp:127.0.0.1:0"
         )
-        if specs or usage_route:
+        if specs or routes:
             self._socket_server = await serve_registry_socket(
                 self.registry, self._socket_path, self.ctx,
                 token=self._bridge_token,
@@ -1372,11 +1402,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 permissions=self.permissions,
                 hooks=self.hooks,
                 on_stop=self._hook_stop,
-                http_token=self._mod_token if usage_route else None,
-                http_routes={USAGE_PATH: self._take_plan_usage} if usage_route else None,
+                http_token=self._mod_token if routes else None,
+                http_routes=routes or None,
                 deferred=self.bridge_deferred,
             )
             self._usage_route = usage_route
+            self._compaction_route = compaction_route
             if not use_unix:
                 # Port 0 was an ask for *any* free port — resolve what we got so
                 # the child config names the port it can actually dial.
@@ -1505,13 +1536,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )
 
     def _claude_mod_env(self) -> dict[str, str]:
-        """Where this spawn's mod posts plan usage, or nothing.
+        """The mod-only bridge transport, when at least one route is mounted.
 
-        Nothing unless this spawn was handed the mod and the bridge serves
-        the usage route; the mod then reports nothing and the turn runs as
-        before. Called after ``_build_argv``, which decides the mod per spawn.
+        Called after ``_build_argv``, which decides the mod per spawn. With
+        compaction off the usage environment is unchanged.
         """
-        if not (getattr(self, "_claude_mod_dir", None) and getattr(self, "_usage_route", False)):
+        if not (getattr(self, "_claude_mod_dir", None) and (
+            getattr(self, "_usage_route", False) or self._compaction_route
+        )):
             return {}
         address = self._socket_path or ""
         if address.startswith("tcp:"):
@@ -1522,7 +1554,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 CLAUDE_MOD_SOCKET_ENV: address,
             }
         env[CLAUDE_MOD_TOKEN_ENV] = self._mod_token
+        if self._compaction_route:
+            env[COMPACTION_ENV] = "1"
         return env
+
+    async def _compact_mod_messages(self, body: Any) -> dict[str, Any]:
+        if (not self._compaction_route or not isinstance(body, dict)
+                or type(body.get("v")) is not int or body["v"] != 1
+                or body.get("agentId") is not None):
+            raise ValueError("invalid compaction request")
+        if self.registry is None or not all(
+            self.registry.available(name) and self._bridge_tool_permitted(name)
+            for name in ("HistoryExpand", "HistorySearch")
+        ):
+            raise ValueError("history recovery tools unavailable")
+        meta = await self._ensure_session()
+        nodes = await self.store.load_path(meta.session_id)
+        started = time.monotonic()
+        messages = compact_messages(body.get("messages"), nodes)
+        logger.info("claude mod compacted through Fluid: %d -> %d messages, %.3fs, no summarizer",
+                    len(body["messages"]), len(messages), time.monotonic() - started)
+        return {"messages": messages}
 
     async def _take_plan_usage(self, body: Any) -> None:
         """The bridge's usage route: validate the mod's report, hand it on.
@@ -1588,19 +1640,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         policy), so a settings file could set CLAUDE_CODE_THRIFTY_SONIC back
         to 1 over the spawn env. Flag settings come after user, project and
         local, so ``FORCED_CHILD_ENV`` rides here too. Serialized with sorted
-        keys and no spaces, so every spawn sends the same bytes. Settings that
-        are not a JSON object (a file path) are passed unchanged.
+        keys and no spaces, so every spawn sends the same bytes. Attribution
+        is always owned by the host. A file path or non-object is rejected:
+        passing it unchanged could silently restore provider attribution.
         """
         base = self._settings_object()
         if base is None:
-            if not getattr(self, "_settings_path_logged", False):
-                logger.info(
-                    "delegated settings are not a JSON object (a file path?); "
-                    "passing them unchanged, so the forced env reaches the "
-                    "claude CLI through its process env only",
-                )
-                self._settings_path_logged = True
-            return str(self.settings)
+            raise ValueError(
+                "delegated settings must be a JSON object, not a file path; "
+                "cannot enforce attribution otherwise"
+            )
         return _settings_json(_with_forced_env(base))
 
     def _proc_usable(self) -> bool:
@@ -2845,6 +2894,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # that beats that Usage is held (see _emit_usage_snapshot).
                 await self._ask_usage_snapshot(*mapped.opened_call)
             if mapped.message is not None and mapped.node_id is not None:
+                if self.claude_mod_compaction and isinstance(frame.get("uuid"), str):
+                    mapped.message.provider_meta["claude_uuid"] = frame["uuid"]
                 node = SessionNode(
                     node_id=mapped.node_id, parent_id=parent.node_id, message=mapped.message,
                 )

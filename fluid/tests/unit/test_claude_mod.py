@@ -82,15 +82,15 @@ def test_the_mod_never_asks_for_credentials() -> None:
     )
     for call in ("$.session.authorize", "$.process", "$.fs", "$.model", "$.store"):
         assert call not in source
-    # Its one network call is the usage post to the loopback bridge, and no
-    # request it makes carries the subscription credential (``auth:``).
-    assert source.count("$.http") == 1
+    # Both posts go only to the loopback bridge; neither carries a provider
+    # credential (``auth:``).
+    assert source.count("$.http") == 2
     assert re.search(r"\$\.http\s*\.fetch\(target\.url", source)
     assert re.search(r"\bauth\s*:", source) is None
-    # Only the bridge variables and the non-secret file-guard kill switch.
+    # Only bridge variables and the two non-secret feature switches.
     assert set(re.findall(r"\$\.env\.(?:get|set)\('([A-Z_]+)'", source)) == {
         CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
-        "FLUID_BASH_FILE_GUARD",
+        "FLUID_BASH_FILE_GUARD", "FLUID_CLAUDE_MOD_COMPACTION",
     }
 
 
@@ -103,14 +103,23 @@ def test_the_summarizer_line_is_fixed_text_and_calls_nothing() -> None:
     assert "$." not in compact
     note = re.search(r"export const FLUID_SUMMARY_NOTE =\n((?:\s+'[^\n]*\n)+)", compact)
     assert note is not None and "${" not in note.group(1) and "`" not in note.group(1)
-    # Bound once, for the main conversation only, and always handed on with
-    # next(): the hook never answers or vetoes a compaction itself.
+    # The off branch is still the original note-only implementation; the
+    # opt-in branch is tested through the real CLI's mod runner.
     assert register.count("on('session.compact'") == 1
     block = register[register.index("on('session.compact'"):]
     block = block[:block.index("\n  })\n") + 5]
     assert "e.agentId !== undefined) return next(e)" in block
-    assert "skip" not in block
-    assert re.search(r"\$\.", block.replace("($, e, next)", "")) is None
+    assert "skip" not in block[block.index("    let instructions = e.instructions"):]
+    off_branch = block[block.index("    let instructions = e.instructions"):]
+    assert re.search(r"\$\.", off_branch) is None
+    assert off_branch == """    let instructions = e.instructions
+    try {
+      instructions = withFluidNote(e.instructions)
+    } catch {
+      // Unchanged.
+    }
+    return next(instructions === e.instructions ? e : { ...e, instructions })
+  })"""
 
 
 # ─── The gate and the argv ───────────────────────────────────────────────────

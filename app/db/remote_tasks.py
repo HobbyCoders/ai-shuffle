@@ -54,13 +54,14 @@ _PARENT_DDL = """CREATE TABLE IF NOT EXISTS remote_tasks (
     stop_state TEXT,
     stop_error TEXT,
     offline_notice_at TEXT,
-    unconfirmed_start_at TEXT)"""
+    unconfirmed_start_at TEXT,
+    published_base TEXT)"""
 
 #: Columns added after the table first shipped: tracking (S7), stop (S8),
 #: the notice after a long silence (S12).
 _PARENT_ADDED = ("target_name", "last_contact_at", "unreachable_since", "target_state",
                  "stop_requested_at", "stop_reason", "stop_state", "stop_error",
-                 "offline_notice_at", "unconfirmed_start_at")
+                 "offline_notice_at", "unconfirmed_start_at", "published_base")
 
 _TARGET_DDL = """CREATE TABLE IF NOT EXISTS remote_task_children (
     worker_session_id TEXT PRIMARY KEY,
@@ -118,15 +119,16 @@ def _row(row) -> Optional[Dict[str, Any]]:
 
 def record_dispatch(*, worker_session_id: str, target_device_id: str, owner_session_id: str,
                     root_session_id: str, tool_use_id: Optional[str], mode: str, label: str,
-                    agent: str, target_name: Optional[str] = None) -> None:
+                    agent: str, target_name: Optional[str] = None,
+                    published_base: Optional[str] = None) -> None:
     with get_db() as conn:
         init_schema(conn)
         conn.cursor().execute(
             "INSERT INTO remote_tasks (worker_session_id, target_device_id, owner_session_id, "
-            "root_session_id, tool_use_id, mode, label, agent, target_name, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (worker_session_id) DO NOTHING",
+            "root_session_id, tool_use_id, mode, label, agent, target_name, created_at, published_base) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (worker_session_id) DO NOTHING",
             (worker_session_id, target_device_id, owner_session_id, root_session_id, tool_use_id,
-             mode, label, agent, target_name, utc_now_iso()))
+             mode, label, agent, target_name, utc_now_iso(), published_base))
 
 
 def forget_dispatch(worker_session_id: str) -> None:

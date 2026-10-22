@@ -22,6 +22,7 @@ import pytest
 
 import fluid.engine.delegated as delegated_mod
 from fluid.engine.delegated import DelegatedLoop
+from fluid.context.attribution import COMMIT_TRAILER, PR_LINE, cli_attribution
 from fluid.engine.delegated_proto import FORCED_CHILD_ENV
 from fluid.events import ErrorEvent, TurnComplete, UserTurn
 from fluid.events.model import Interrupted
@@ -176,13 +177,14 @@ def _settings(loop: DelegatedLoop) -> dict:
 
 def test_settings_carry_the_forced_env_when_the_host_sets_none() -> None:
     loop = DelegatedLoop(store=MemoryStore(), model="m")
-    assert _settings(loop) == {"env": FORCED_CHILD_ENV}
+    assert _settings(loop) == {"env": FORCED_CHILD_ENV, "attribution": cli_attribution(True)}
     assert _settings(loop)["env"]["CLAUDE_CODE_THRIFTY_SONIC"] == "0"
 
 
 def test_settings_keep_the_hosts_keys_and_never_invent_fast_mode() -> None:
     fast = DelegatedLoop(store=MemoryStore(), model="m", settings='{"fastMode": true}')
-    assert _settings(fast) == {"fastMode": True, "env": FORCED_CHILD_ENV}
+    assert _settings(fast) == {"fastMode": True, "env": FORCED_CHILD_ENV,
+                               "attribution": cli_attribution(True)}
     plain = DelegatedLoop(store=MemoryStore(), model="m", settings=None)
     assert "fastMode" not in _settings(plain)
 
@@ -202,15 +204,30 @@ def test_settings_are_the_same_bytes_on_every_spawn() -> None:
     first = _flag(loop._build_argv(), "--settings")
     second = _flag(loop._build_argv(), "--settings")
     assert first is not None and first.encode() == second.encode()
-    assert " " not in first  # compact, deterministic separators
+    assert first == json.dumps(json.loads(first), sort_keys=True, separators=(",", ":"))
 
 
-def test_settings_that_name_a_file_pass_unchanged(caplog) -> None:
-    loop = DelegatedLoop(store=MemoryStore(), model="m", settings="/etc/claude/settings.json")
-    caplog.set_level("INFO", logger="fluid.engine.delegated")
-    assert _flag(loop._build_argv(), "--settings") == "/etc/claude/settings.json"
-    loop._build_argv()
-    assert len([r for r in caplog.records if "not a JSON object" in r.getMessage()]) == 1
+@pytest.mark.parametrize("settings", ["/etc/claude/settings.json", "[]", "false"])
+def test_non_object_settings_cannot_bypass_attribution(settings) -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", settings=settings)
+    with pytest.raises(ValueError, match="cannot enforce attribution"):
+        loop._build_argv()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_attribution_overrides_provider_defaults_in_every_spawn(enabled) -> None:
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="m", commit_attribution=enabled,
+        settings=json.dumps({"attribution": {"commit": "provider", "pr": "provider"}}),
+    )
+    assert _settings(loop)["attribution"] == {
+        "commit": COMMIT_TRAILER if enabled else "",
+        "pr": PR_LINE if enabled else "",
+        "sessionUrl": False,
+    }
+    first = _flag(loop._build_argv(), "--settings")
+    assert first == json.dumps(json.loads(first), sort_keys=True, separators=(",", ":"))
+    assert first == _flag(loop._build_argv(), "--settings")
 
 
 async def test_run_settings_keep_the_forced_env_in_payload_argv_and_state(tmp_path) -> None:
