@@ -63,6 +63,62 @@ def live_turn(session_id, source="agent_message"):
     return turns.start_turn(turn["id"])
 
 
+def answer_job_question(session_id, human_input, launch=None):
+    """Use the durable question producer, then resume the same parked job."""
+    from app.core.session_runtime import SessionRuntime
+    from app.db import interactions
+    first = turns.enqueue_turn(session_id, "agent_message", prompt="work",
+                               profile_id="assistant-agent", payload=launch or {})
+    first = turns.start_turn(first["id"])
+    assert turns.park_turn(first["id"], ["monitor"])
+    question = interactions.create_interaction(session_id, "question", {"request_id": "continue"}, None)
+    assert interactions.answer_question_and_enqueue(
+        question, {"Continue?": "Yes"}, None, "Continue with Yes", first, human_input=human_input,
+    )
+    [answer] = turns.get_queued_turns(session_id)
+    resumed = turns.start_turn(answer["id"], can_resume=SessionRuntime._can_resume_parked)
+    assert resumed["id"] == first["id"]
+    return resumed
+
+
+@pytest.mark.parametrize("human_input", [False, True])
+@pytest.mark.parametrize("limit_kind", ["daily_limit", "job_time"])
+def test_question_answer_job_limits(assistant_fixture, human_input, limit_kind):
+    worker = job("Answering job")
+    set_limits(spend_limit_enabled=limit_kind == "daily_limit", daily_spend_limit_usd=1,
+               job_limit_enabled=limit_kind == "job_time", max_job_minutes=30)
+    book(worker, 2)
+    resumed = answer_job_question(worker, human_input)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (45 * 60000, worker))
+    refusal = limits.turn_refusal(worker, resumed["source"], payload=resumed["payload"])
+    _, planned = limits.plan()
+    if human_input:
+        assert refusal is None
+        assert planned == []
+    else:
+        assert refusal is not None
+        assert [(sid, tid, reason) for sid, tid, reason, _ in planned] == [
+            (worker, resumed["id"], limit_kind),
+        ]
+
+
+@pytest.mark.parametrize("human_input", [False, True])
+def test_remote_usage_after_answer_keeps_launch_identity_and_owner_classification(assistant_fixture, human_input):
+    worker = job("Remote answer")
+    resumed = answer_job_question(worker, human_input, {
+        "orchestration_remote_origin": "starter-device", "orchestration_report_device": "starter-device",
+    })
+    if human_input:
+        assert "orchestration_remote_origin" not in resumed["payload"]
+    with get_db() as conn:
+        cursor = conn.cursor()
+        usage = limits._job_usage(cursor, worker, "starter-device", datetime.now(timezone.utc))
+        assert limits._job_usage(cursor, worker, "other-device", datetime.now(timezone.utc)) == {"known": False}
+    assert usage["known"] is True
+    assert usage["turns"] == [{"turn_id": resumed["id"], "person": human_input}]
+
+
 def test_defaults_without_a_saved_row(assistant_fixture):
     state = limits.status()
     assert state["spend_limit_enabled"] and state["daily_spend_limit_usd"] == 20.0

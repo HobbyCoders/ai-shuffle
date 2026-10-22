@@ -108,6 +108,40 @@ def test_resumed_claim_is_idempotent_and_crash_requeues_same_input(mock_db):
     assert retried["payload"]["agent_message_reply_to"] == "parent"
 
 
+
+
+@pytest.mark.parametrize("source", ["provider_agent", "agent_message"])
+def test_parked_wake_preserves_birth_payload_not_attempt_state(mock_db, source):
+    from app.core import loop_guard
+
+    sid = "park-birth"
+    database.create_session(session_id=sid, profile_id="default")
+    identity = {
+        "loop_guard_origin": "automation",
+        "orchestration_root": "root", "orchestration_depth": 2,
+        "orchestration_sender": "parent", "orchestration_fingerprint": "start-fingerprint",
+        "orchestration_remote_origin": "parent-device", "orchestration_report_device": "parent-device",
+        "model_override": {"model": "sonnet", "source": "named_by_user"},
+    }
+    first = turns.enqueue_turn(sid, source, prompt="work", payload={
+        **identity, "upload_blob_ids": ["old-upload"], "question_request_id": "old-question",
+        "agent_message_reply_to": "parent",
+    })
+    turns.start_turn(first["id"])
+    turns.park_turn(first["id"], ["old-monitor"])
+    wake = turns.enqueue_turn(sid, "unpark", prompt="monitor completed", payload={
+        **{key: "must-not-replace-birth" for key in identity}, "wake_only": True,
+    })
+    resumed = turns.start_turn(wake["id"], can_resume=session_runtime.SessionRuntime._can_resume_parked)
+    assert resumed["id"] == first["id"]
+    assert {key: resumed["payload"].get(key) for key in identity} == identity
+    if source == "provider_agent":
+        assert loop_guard.turn_origin(resumed) == "automation"
+    assert resumed["payload"]["agent_message_reply_to"] == "parent"
+    assert resumed["payload"]["wake_only"] is True
+    assert not {"task_ids", "upload_blob_ids", "question_request_id"} & resumed["payload"].keys()
+
+
 def test_partial_usage_recovery_only_counts_current_attempt(mock_db):
     sid = "park-usage"
     database.create_session(session_id=sid, profile_id="default")

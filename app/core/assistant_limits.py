@@ -509,7 +509,8 @@ def _payload(value):
 def _started_by(payload, device_id):
     """Whether a session's first turn records ``device_id`` as the worker that started it."""
     return bool(payload) and device_id in (payload.get("task_report_device"),
-                                           payload.get("orchestration_remote_origin"))
+                                           payload.get("orchestration_remote_origin"),
+                                           payload.get("orchestration_report_device"))
 
 
 def _job_usage(cursor, session_id, from_device, now):

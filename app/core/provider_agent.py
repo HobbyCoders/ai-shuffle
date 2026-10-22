@@ -159,8 +159,9 @@ def is_worker_turn(session_id: Optional[str]) -> bool:
 
     The signal used instead is already persisted: ``dispatch_worker`` submits
     the worker's turn with ``source=WORKER_TURN_SOURCE``, and
-    ``turns.enqueue_turn`` writes ``source`` to the row. A live turn carrying
-    that source IS a worker turn, on any runner, across restarts.
+    ``turns.enqueue_turn`` writes ``source`` to the row. In-place automatic
+    wakes retain it as ``birth_source``. A live turn with that logical source
+    IS a worker turn, on any runner, across restarts.
 
     Deliberately reads the LIVE turn only (``running``/``interrupting``/
     ``draining``) rather than the session's history: a worker session a human
@@ -181,7 +182,7 @@ def is_worker_turn(session_id: Optional[str]) -> bool:
     except Exception:  # noqa: BLE001 — the in-process set is the fallback
         logger.debug("ProviderAgent: live-turn read failed for %s", session_id, exc_info=True)
         return False
-    return bool(turn) and (turn.get("source") == WORKER_TURN_SOURCE)
+    return turns_db.logical_source(turn) == WORKER_TURN_SOURCE
 
 
 def is_provider_agent_worker(session_id: Optional[str]) -> bool:
