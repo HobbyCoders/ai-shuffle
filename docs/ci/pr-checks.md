@@ -4,7 +4,8 @@ Before a push, run affected tests plus the offline secret scan. Every pull
 request, including drafts and forks, runs the hosted gates in parallel. Backend
 shards, real contracts and security all run unconditionally, regardless of paths.
 Merge requires green CI and review. Edge/nightly publication remains separate:
-the attested full run on main stays local on the publication worker.
+a hosted full-suite pass on the exact main revision or the owner's local
+attested full pass authorizes the read-only publication gate.
 
 PR workflows use only free standard GitHub-hosted `ubuntu-latest` and
 `windows-latest` runners. No larger/paid runners and no macOS PR jobs are used.
@@ -44,7 +45,7 @@ These workflows retain manual dispatch and also run on unfiltered
   covers the production container path without requiring secrets.
 
 `ci-folder-confinement.yml` stays manual because it is macOS-only; Linux folder
-confinement is already covered by CI Backend. Publication workflows are unchanged.
+confinement is already covered by CI Backend. Stable release authorization is unchanged.
 Each PR workflow groups concurrency by workflow plus PR number (or ref for manual
 runs), cancelling superseded PR runs only. Permissions are `contents: read`;
 none of these workflows references secrets or requires private checkout access.
@@ -56,6 +57,62 @@ Cloud service checks and deploy workflows live in the private
 repository. App checks do not need that checkout. When app docs/install files
 change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
 and its README; the app still checks `docs/content` against the frontend copy.
+
+## Hosted main-suite
+
+`main-suite.yml` runs once per push to `main`, or an explicit dispatch on `main`.
+A dispatch on another ref skips the suites and fails the aggregate. Superseded
+main runs may be cancelled. The root workflow calls the same checked-in reusable
+CI workflows; their PR triggers, matrices, full test selection and gates remain
+in force. No test job has signing secrets; permissions are `contents: read`,
+using only standard free hosted runners. Windows calls select the existing
+three desktop shards, not the separate stable-release portability matrix.
+
+| Local `full` stage | Hosted job / reusable workflow |
+| --- | --- |
+| backend | `backend` → CI Backend's four shards and security (scanner + scanner tests) |
+| backend-linux | `backend` → contracts (real PostgreSQL boot/schema, serial container tests) and security (real bubblewrap) |
+| fluid | `fluid` → complete isolated fluid unit suite |
+| frontend | `javascript` → four Vitest shards, production build, typechecks and contracts |
+| mobile | `javascript` → mobile tests/typecheck and frontend production postbuild |
+| tools + network vectors | `javascript` → Tools tests and WebCrypto vectors |
+| browser-mcp | `javascript` → Browser MCP build and full tests |
+| docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
+| desktop | `desktop` → existing typecheck and all unit tests |
+| android-bridge | `android-and-docs` → existing local Node download-bridge tests |
+| android-play | `android-and-docs` → all six local Python/workflow-shell test scripts |
+| workflows/policy | `policy` → artifact/cost scripts and the complete local seven-file policy set, plus parity regressions |
+| update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
+| full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |
+| android-app (SDK optional) | Explicitly not covered by the reference Linux attestation; remains separate `android.yml` Gradle/native checks |
+
+Additional existing gates are required too: Windows desktop (three shards),
+real browser workspace (three cases + smoke), container lifecycle/buyer install,
+Windows identity and desktop-source protocol checks. `Main suite` uses `always()`
+and requires every called workflow and parity job to succeed. Missing, failed,
+cancelled or skipped dependencies fail closed; the checked-in parity inventory
+also catches new local stages without a mapping. A backend test-map cache is a
+local optimization, not additional test evidence.
+
+The reference Linux full-attest log explicitly excluded Android SDK/Gradle,
+iOS/macOS native tests, Windows and container image assembly; those exclusions
+are not silently claimed as hosted parity. The hosted run adds Windows and
+container image coverage but does not replace owner-controlled stable release
+requirements. Container PostgreSQL pressure tests remain included as already
+configured by CI Backend (the local run reports these as opt-in).
+
+No ordinary stage needs private source or owner-machine material. One historical
+exception remains unchanged: the initial public-root update-reach bridge needs
+a complete private archive locally. Hosted reach refuses if that bridge is still
+needed. Once the signed nightly pointer is in public history, all ordinary reach
+checks use public Git history, signed manifests and merged-PR metadata.
+
+After a successful main run, `desktop-source.yml` starts via `workflow_run` and
+re-verifies canonical repository, main/push-or-dispatch identity, root workflow
+path/ID, exact SHA, latest run/attempt and successful aggregate through the API.
+The latest attempt number and URL are included in publication logs. Owner-local
+`local/full-suite` statuses remain accepted independently. Stable staging and
+Linux/Windows local release requirements are unchanged.
 
 ## Hosted browser and PostgreSQL prerequisites
 

@@ -4,6 +4,7 @@ name: CI fluid
 # stay isolated from the backend environment.
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:

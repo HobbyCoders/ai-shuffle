@@ -4,6 +4,7 @@ name: Container PostgreSQL
 # Release publication remains in docker-publish.yml.
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:

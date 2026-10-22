@@ -3,6 +3,7 @@ name: Desktop source update checks
 # Cloud-side checks run separately.
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read

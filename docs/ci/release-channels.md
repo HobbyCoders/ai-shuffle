@@ -232,20 +232,38 @@ The pre-canary cutover check requires Actions disabled and all runs drained in
 **all three** repositories: old private app, new public app and cloud. Enable the
 public candidate publisher only after that checkpoint as the runbook describes.
 
-The **nightly** source update is scheduled once a day at **06:00 UTC** from
-protected `main`, with an owner-only manual dispatch for retries. Pushes and
-status events do not publish. Before setting up dependencies, the workflow
+The **nightly** source update runs automatically after `main-suite` completes
+successfully on protected `main`, as well as once a day at **06:00 UTC** and by
+owner-only manual dispatch for retries. Pushes start the read-only full suite,
+not signing directly. Before setting up publication dependencies, the publisher
 compares main's revision with the published manifest and exits if unchanged.
 
-Publication requires the owner's successful `local/full-suite` commit status
-on the **exact revision being published**, posted by
-`python scripts/local_ci.py full --attest` starting on a clean current-main
-checkout. If main moves during that run, the tested first-parent ancestor can
-still publish. The schedule selects the newest successful first-parent revision
-strictly newer than the verified signed pointer, not necessarily today's tip.
-A newer attestation takes precedence even if an older suite finishes last.
-Pending/failed statuses, side-branch commits and already-published or older
-revisions cannot advance the pointer. With no eligible pass, nightly stays put.
+Publication requires either proof on the **exact revision being published**:
+
+- The owner's successful `local/full-suite` commit status, posted by
+  `python scripts/local_ci.py full --attest` from a clean current-main checkout.
+- A successful run of `.github/workflows/main-suite.yml` in this repository,
+  with successful `Main suite` aggregate. The gate checks the workflow ID and
+  exact path through GitHub's API, both repository identities, `head_sha`,
+  `head_branch: main`, and event `push` or `workflow_dispatch`. Those events
+  load the root workflow from that main revision, never PR/fork workflow code.
+  The `workflow_run` payload only triggers selection: the gate re-verifies its
+  run ID and attempt through the API before considering any publication proof.
+
+Only the newest hosted run and its **latest attempt** count; a failed, cancelled
+or in-progress rerun cannot reuse an older hosted pass. The gate queries jobs
+for that attempt, requires exactly one completed successful aggregate, and
+re-reads the run to detect a rerun race. Publication logs record the run ID,
+attempt number and attempt URL. A valid owner-local pass remains an independent
+alternative even if a hosted run fails. Manual main-suite dispatches on refs
+other than `main` cannot pass the aggregate and never authorize publication.
+
+If main moves during testing, the tested first-parent ancestor can still
+publish. Selection chooses the newest successful first-parent revision strictly
+newer than the verified signed pointer, not necessarily today's tip. A newer
+proof takes precedence even if an older suite finishes last. Pending/failed
+proofs, side-branch commits and already-published or older revisions cannot
+advance the pointer. With no eligible pass, nightly stays put.
 
 Later main changes are **not** bundled into an ancestor's archive or covered by
 its status. They wait for their own exact-revision full pass (which covers all
@@ -271,7 +289,13 @@ lane on insert, in addition to requiring a signed sequence above every prior
 sequence. A stale feed or losing concurrent writer refuses rather than moving
 backwards. Only the frozen, verified public-root cutover may bridge histories.
 Selection scans at most 100 unpublished main commits; without a pass in that
-window it fails closed and needs a fresh tip attestation. GitHub runs no tests.
+window it fails closed and needs a fresh tip full-suite pass. See
+[the hosted parity inventory](pr-checks.md#hosted-main-suite) for the exact local
+to hosted mapping. No test job receives signing secrets or a private checkout.
+The initial frozen cross-history update-reach bridge still needs the private
+archive locally; hosted checks refuse rather than omit it if that transition
+has not yet been completed. Once the signed pointer is on public history, the
+normal strict signed-pointer/merged-PR reach walk uses public material only.
 
 Stable releases still require an owner-created release tag. Existing workers
 stay on their selected channel: publication never switches, installs or restarts
@@ -621,7 +645,7 @@ a fix has shipped since, the fix stays served.
      ([hobbycoders-cloud/hub/README.md](https://github.com/HobbyCoders/hobbycoders-cloud/blob/main/hub/README.md#installer-downloads-from-r2)).
 4. **Keep nightly signing separate from stable authorization.**
    `desktop-source.yml` uses the key in `account-hub-production` only after the
-   exact-main local attestation gate. Stable publishing uses the protected
+   exact-revision owner-local or hosted-main full-suite gate. Stable publishing uses the protected
    release environment. Current stable workers reject nightly and transition
    edge manifests; very old clients that predate channel checks need upgrading.
    Changing the trust key requires an installer/image rollout, not just a hub

@@ -36,7 +36,8 @@ def workflow(name):
 
 def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggering_actor=None,
             repo=REPO, event="workflow_dispatch", ref=MAIN, sha=MAIN_SHA, run_head=MAIN_SHA,
-            open_pr_heads=(), **input_changes):
+            run_event="pull_request", run_branch="main", run_repo=REPO, run_status="completed",
+            run_conclusion="success", open_pr_heads=(), **input_changes):
     """Small evaluation harness for the checked-in, boolean Actions predicates.
 
     Values are the event context, not a separately implemented authorization rule.
@@ -60,9 +61,11 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
         github=NS(repository=repo, actor_id=actor_id, actor=actor, sha=sha,
                   triggering_actor=actor if triggering_actor is None else triggering_actor,
                   event_name=event, ref=ref, event=NS(repository=NS(private=True),
-                      workflow_run=NS(event="pull_request", conclusion="success", head_sha=run_head,
+                      workflow_run=NS(event=run_event, conclusion=run_conclusion, head_sha=run_head,
+                                      name="main-suite", status=run_status, head_branch=run_branch,
+                                      repository=NS(full_name=run_repo),
                                       pull_requests=[NS(head=NS(sha=head)) for head in open_pr_heads],
-                                      head_repository=NS(full_name=REPO)))),
+                                      head_repository=NS(full_name=run_repo)))),
         inputs=NS(**inputs),
         needs=NS(build=NS(result="success"), verify=NS(result="success"), android_build=NS(result="skipped"),
                  create_release=NS(outputs=NS(promote_latest="true"))),
@@ -121,7 +124,7 @@ def test_play_accepts_manual_release_caller_only_for_its_exact_tag(job):
 ])
 def test_pr_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands):
     config = workflow(name)
-    assert set(config["on"]) == {"pull_request", "workflow_dispatch"}
+    assert set(config["on"]) == {"pull_request", "workflow_dispatch", "workflow_call"}
     check = config["jobs"][job]
     assert check["runs-on"] == "ubuntu-latest"
     assert "continue-on-error" not in check
@@ -221,6 +224,22 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
             assert config["permissions"] == {"contents": "read"}, path.name
             assert "secrets." not in path.read_text(), path.name
     assert found == allowed
+
+
+def test_nightly_hosted_completion_is_guarded_but_stable_stays_owner_only():
+    condition = workflow("desktop-source.yml")["jobs"]["gate"]["if"]
+    assert permits(condition, event="workflow_run", run_event="push", actor_id="7")
+    assert permits(condition, event="workflow_run", run_event="workflow_dispatch", actor_id="7")
+    for changes in [
+        {"run_event": "pull_request"}, {"run_branch": "feature"}, {"run_repo": "fork/ai-shuffle"},
+        {"run_status": "in_progress"}, {"run_conclusion": "cancelled"}, {"run_conclusion": "failure"},
+        {"repo": "fork/ai-shuffle"}, {"ref": "refs/heads/feature"},
+    ]:
+        context = dict(event="workflow_run", run_event="push")
+        context.update(changes)
+        assert not permits(condition, **context)
+    assert not permits(condition, actor_id="7")  # Manual dispatch remains owner-only.
+    assert permits(condition, event="schedule")
 
 
 def test_android_signing_steps_are_owner_gated_without_gating_unsigned_ci():

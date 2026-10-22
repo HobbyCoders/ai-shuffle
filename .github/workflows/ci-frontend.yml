@@ -3,6 +3,7 @@ name: CI JavaScript
 # Full JavaScript package checks on every PR, including drafts.
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:

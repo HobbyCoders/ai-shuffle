@@ -4,6 +4,11 @@ name: Instance identity contracts
 # macOS remains dispatch-only to preserve runner capacity.
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      main_suite:
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -20,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         # Linux is covered by CI Backend; exercise the native desktop paths too.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest", "macos-latest"]') }}
+        os: ${{ fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true) && '["windows-latest"]' || '["windows-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     env:

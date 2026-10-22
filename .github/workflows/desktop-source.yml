@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
+  workflow_run:
+    workflows: [main-suite]
+    types: [completed]
+    branches: [main]
 
 # Transition step 2: workers from 0.9.6 on accept both names, so the daily
 # build is signed nightly. It is still stored in, and served from, the edge lane.
@@ -13,6 +17,7 @@ env:
 permissions:
   contents: read
   statuses: read
+  actions: read
 
 jobs:
   gate:
@@ -20,7 +25,13 @@ jobs:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' &&
       (github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor))
+       (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor) ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.status == 'completed' &&
+        github.event.workflow_run.name == 'main-suite' && github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+        github.event.workflow_run.repository.full_name == 'HobbyCoders/ai-shuffle' &&
+        github.event.workflow_run.head_repository.full_name == 'HobbyCoders/ai-shuffle'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -61,6 +72,7 @@ jobs:
     permissions:
       contents: write
       statuses: read
+      actions: read
     timeout-minutes: 10
     defaults:
       run:

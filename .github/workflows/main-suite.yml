@@ -1,0 +1,132 @@
+name: main-suite
+
+# One full hosted proof per main commit. Dispatches on any other ref fail closed.
+on:
+  push:
+    branches: [main, chore/main-hosted-suite] # Temporary branch timing probe; removed before final head.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-backend.yml
+
+  javascript:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-frontend.yml
+
+  fluid:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-fluid.yml
+
+  windows:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/windows-suite.yml
+    with:
+      main_suite: true
+
+  browser-workspace:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-browser-workspace.yml
+
+  container:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/container-postgres.yml
+
+  identity:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-instance-identity.yml
+    with:
+      main_suite: true
+
+  policy:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-artifact-policy.yml
+
+  desktop-source:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/desktop-source-checks.yml
+
+  desktop:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/desktop.yml
+    with:
+      main_suite: true
+
+  android-and-docs:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python scripts/ci/main_suite.py android-and-docs
+
+  supply-chain:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python scripts/secret_scan.py
+      # Identical report-only audit semantics to local/full (all locked packages,
+      # including source-publisher). Existing hosted audits remain blocking too.
+      - run: python scripts/dependency_audit.py
+
+  update-reach:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt && pip install -e ./fluid
+      - name: Update-reach regression tests
+        env:
+          PYTHONPATH: .:fluid
+        run: python -m pytest tests/test_update_reach.py tests/scripts/test_local_ci.py tests/scripts/test_edge_publication_gate.py -o addopts="" -q -n 2 --timeout=120
+      - name: Strict signed-publication and merged-PR update reach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/main_suite.py update-reach
+
+  main-suite:
+    name: Main suite
+    if: always()
+    needs: [backend, javascript, fluid, windows, browser-workspace, container, identity, policy, desktop-source, desktop, android-and-docs, supply-chain, update-reach]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require every full-suite dependency
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/ci/main_suite.py aggregate

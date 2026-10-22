@@ -2,6 +2,7 @@ name: CI Browser Workspace
 
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
