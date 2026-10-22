@@ -1,7 +1,8 @@
 # Where tests run
 
 Before a push, run affected tests plus the offline secret scan. Every pull
-request, including drafts and forks, runs the full hosted suites in parallel.
+request, including drafts and forks, runs the hosted gates in parallel. Backend
+shards, real contracts and security all run unconditionally, regardless of paths.
 Merge requires green CI and review. Edge/nightly publication remains separate:
 the attested full run on main stays local on the publication worker.
 
@@ -15,7 +16,8 @@ build-push actions with branch-isolated GitHub Actions layer caching.
 These workflows retain manual dispatch and also run on unfiltered
 `pull_request` events (no path filters or draft skips):
 
-- `ci-backend.yml`: backend tests, real PostgreSQL and isolation contracts.
+- `ci-backend.yml`: four backend shards, parallel real PostgreSQL/boot contracts,
+  unconditional security checks and the stable fail-closed `Backend tests` gate.
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
@@ -29,7 +31,8 @@ These workflows retain manual dispatch and also run on unfiltered
   must form an exact disjoint union; the aggregate reports runtime test counts
   and verifies the moved test-body snapshot. The full manual Windows matrix is
   unchanged (Internal tracking: #381). Linux PR checks still run the complete
-  backend suite. No assertions or failure behavior are weakened.
+  backend suite on every PR. No assertions or failure behavior
+  are weakened.
 - `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
 - `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
 - `ci-browser-workspace.yml`: editor smoke plus independent `external`,
@@ -94,8 +97,57 @@ schema helper and include the audit retention primary key. Network pruning route
 shared retention batches into the fixture's disposable schema too. Container isolation
 probes materialize lazy protected keys through application helpers before
 checking access denial. These repairs cover #389, #390 and #391; those jobs are
-required to pass, not temporary exceptions. Network migration, pool safety and
-both Python dependency audits remain mandatory steps after mobile contracts.
+required to pass, not temporary exceptions. Network migration and mobile contracts
+run in the parallel backend-contracts job for backend/shared changes. Pool safety
+and both Python dependency audits remain unconditional in backend-security.
+
+### Unconditional backend shards and contracts
+
+Every PR runs the full backend, including docs-only, frontend-only, desktop-only,
+tools-only and workflow-only changes. Backend credential-path checks and contracts
+read those trees too, and `docs/content/` is served at runtime. There is no path
+classifier, skip approval, or reduced-coverage lane.
+
+Full coverage runs four `ubuntu-latest` shards with two xdist workers apiece and
+`fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
+PostgreSQL and network migration contracts on a separate runner. Each worker
+partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
+proves exact union, no duplicates and no empty shard. Workers must agree on the
+collection and assignment. Successful controllers also verify executed node IDs,
+then upload per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
+still run with their stronger real-environment prerequisites. The legacy dispatch
+input remains accepted; shard parallelism is fixed at two workers.
+
+`backend-security` always runs the blocking-DB guard, real bubblewrap escapes,
+required root/real-account isolation, real PostgreSQL pool/transaction cases,
+Python public and voice-lock audits, pinned workflow syntax/action lint, and the
+full workflow/publication/security/docs policy regression suite. Required flags,
+Python permission hardening and 35-minute heavy-job timeouts are retained. Every
+hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
+
+The stable `Backend tests` gate uses `if: always()` and depends on all shards,
+contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
+succeed and all four successful shard receipts. Failed, cancelled, missing or
+skipped jobs, missing/duplicate receipts, inconsistent collection/partition
+digests and incomplete counts all fail closed. No classifier output can approve
+a skipped job.
+
+`tests/backend-durations.json` is versioned scheduling data, never execution
+authority. Its keys are SHA-256 hashes of node IDs: parametrized IDs can contain
+synthetic credential-scanner fixtures, which must not be republished in the
+manifest. Refresh validates the exact union of raw executed IDs before hashing;
+collection always starts from the actual tests, not the manifest. Unknown/new
+tests receive at least ten seconds or the maximum observed duration, and are
+never dropped. The initial seed is taken once from a complete
+successful PR CI run; subsequent refreshes accept only successful main CI Backend
+runs, downloading fresh artifacts rather than trusting a PR-controlled cache:
+
+```bash
+python -m scripts.ci.backend_shards --refresh RUN_ID --download-dir NEW_SCRATCH_DIR
+```
+
+Review and commit the refreshed manifest. Timing changes can rebalance the actual
+collection but cannot select away tests or satisfy the gate without execution.
 
 ## Before every push
 

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import queue
 import sys
 import threading
 import traceback
+import weakref
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,16 +27,23 @@ def _record_with_exc() -> logging.LogRecord:
 
 
 def test_queued_handler_does_not_format_tracebacks_on_the_producer():
-    handler = elh._QueuedErrorLogHandler.__new__(elh._QueuedErrorLogHandler)
-    logging.Handler.__init__(handler, level=logging.WARNING)
-    handler.queue = queue.Queue(maxsize=4)
-    handler.dropped = 0
-    with patch.object(traceback, "format_exception", side_effect=AssertionError("formatted on producer")), \
-            patch.object(elh._formatter, "formatException", side_effect=AssertionError("formatted on producer")):
-        handler.emit(_record_with_exc())
-    queued = handler.queue.get_nowait()
-    assert queued.exc_info is not None
-    assert queued.getMessage() == "failed x"
+    # Initialize every registered logging.Handler field, but leave the
+    # consumer stopped so it cannot race the producer-only queue assertions.
+    with patch.object(logging.handlers.QueueListener, "start"):
+        handler = elh._QueuedErrorLogHandler()
+    try:
+        with patch.object(traceback, "format_exception", side_effect=AssertionError("formatted on producer")), \
+                patch.object(elh._formatter, "formatException", side_effect=AssertionError("formatted on producer")):
+            handler.emit(_record_with_exc())
+        queued = handler.queue.get_nowait()
+        assert queued.exc_info is not None
+        assert queued.getMessage() == "failed x"
+    finally:
+        handler.close()
+    # The traceback can retain this handler until GC. A subsequent uvicorn
+    # dictConfig/shutdown must safely close it again, regardless of GC timing.
+    logging.shutdown([weakref.ref(handler)])
+    assert handler.listener._thread is None
 
 
 def test_listener_thread_persists_the_traceback(monkeypatch):

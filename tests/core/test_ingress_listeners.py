@@ -14,6 +14,16 @@ from websockets.sync.client import connect
 from app.serve import IngressApplication, bind_listener, configured_remote_port
 
 
+@pytest.fixture(autouse=True)
+def _isolated_preview_listener(monkeypatch):
+    # serve.run() records both globals. Restoring only the port leaks a
+    # loopback bind into later workspace-card tests on the same worker.
+    from app.core import preview_access
+
+    monkeypatch.setattr(preview_access, "_listener_port", None)
+    monkeypatch.setattr(preview_access, "_listener_host", None)
+
+
 def test_two_sockets_preserve_tcp_identity_and_share_one_lifespan():
     lifecycle = []
 

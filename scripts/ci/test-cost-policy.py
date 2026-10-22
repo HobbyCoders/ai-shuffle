@@ -139,12 +139,17 @@ class CostPolicyTests(unittest.TestCase):
         javascript = workflow("ci-frontend.yml")
         self.assertEqual(backend["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "2")
         self.assertEqual(javascript["on"]["workflow_dispatch"], "")
-        self.assertEqual(backend["jobs"]["backend"]["env"]["PYTEST_WORKERS"], "${{ inputs.runner_cpus == '4' && '4' || '2' }}")
-        for config, key, timeout in [(backend, "backend", "35"), (javascript, "frontend", "20")]:
+        shard = backend["jobs"]["backend-shard"]
+        self.assertEqual(shard["strategy"], {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}})
+        self.assertEqual(backend["jobs"]["backend"]["name"], "Backend tests")
+        self.assertEqual(backend["jobs"]["backend"]["if"], "always()")
+        for config, key, timeout in [(backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
+                                     (backend, "backend-security", "35"), (javascript, "frontend", "20")]:
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
             self.assertEqual(config["jobs"][key]["runs-on"], "ubuntu-latest")
-        command = next(step["run"] for step in backend["jobs"]["backend"]["steps"] if step.get("name") == "Run fast test subset")
-        self.assertIn('-n "$PYTEST_WORKERS"', command)
+        command = next(step["run"] for step in shard["steps"] if step.get("name") == "Run fast test subset")
+        self.assertIn('-n 2', command)
+        self.assertIn('-p scripts.ci.backend_shards', command)
 
     def test_public_app_workflows_use_standard_hosted_runners(self):
         # These workflows are moving to hobbycoders-cloud in a separate PR.
