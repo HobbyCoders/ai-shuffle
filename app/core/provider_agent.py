@@ -2301,6 +2301,7 @@ async def dispatch_worker(
     suppress_caller_wake: Optional[Callable[[str, Optional[str], int], bool]] = None,
     model_note: Optional[str] = None,
     base_commit: Optional[str] = None,
+    project_override: Optional[str] = None,
     sync_handoff: Optional[SyncHandoff] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
@@ -2467,6 +2468,20 @@ async def dispatch_worker(
             except Exception:  # noqa: BLE001 — the checks below still refuse honestly
                 logger.debug("ProviderAgent: caller branch follow failed", exc_info=True)
 
+        from app.core.session_modes import runtime_session_mode
+        if project_override is not None:
+            from app.core.session_orchestration import is_owner_session, _resolve_project, _checked_out_here
+            if not is_owner_session(parent_row):
+                raise ValueError("Only an owner top-level session may choose a subagent project.")
+            project = _resolve_project(project_override)
+            if not _checked_out_here(project["id"]):
+                raise ValueError("The named project is not checked out on this worker.")
+            parent_row = {**parent_row, "project_id": None, "project_v2_id": project["id"],
+                          "branch": None, "worktree_id": None, "worktree_branch": None, "worktree_path": None}
+        elif parent_row and runtime_session_mode(parent_row) == "chat" and not (parent_row.get("project_id") or parent_row.get("project_v2_id")):
+            from app.core.worker_checkout import _is_shared_surface, _tool_surface
+            if not _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
+                raise ValueError("Code-capable subagents must name a registered project; start a session in that project instead.")
         project_id = (parent_row or {}).get("project_id")
         # The worker runs as whoever owns its caller: an API key's worker is
         # that key's session (its tool surface, credentials and memory), held
@@ -2553,7 +2568,7 @@ async def dispatch_worker(
                 permission_mode=dispatch_mode or "default",
                 permission_ceiling=dispatch_mode or "default",
                 fast=selected_fast,
-            ))
+            ), mode="chat" if parent_row and runtime_session_mode(parent_row) == "chat" and not (project_id or project_v2_id) else None)
             # The parent's creator reads its worker as it reads the parent,
             # and other account members do not (#1877). Label only: no record.
             from app.db import mobile_tool_identity
@@ -2579,17 +2594,20 @@ async def dispatch_worker(
             api_user_id,
         )
 
-    (
-        parent_row,
-        project_id,
-        worktree_id,
-        worktree_branch,
-        worktree_path,
-        provider_tag,
-        create_error,
-        selected_effort,
-        api_user_id,
-    ) = await run_sync(_prepare_worker_blocking)
+    try:
+        (
+            parent_row,
+            project_id,
+            worktree_id,
+            worktree_branch,
+            worktree_path,
+            provider_tag,
+            create_error,
+            selected_effort,
+            api_user_id,
+        ) = await run_sync(_prepare_worker_blocking)
+    except (ValueError, PermissionError) as exc:
+        return WorkerOutcome(ok=False, session_id="", error=str(exc))
     if isinstance(create_error, _WorkerRefused):
         return WorkerOutcome(ok=False, session_id="", error=str(create_error))
     if create_error is not None:

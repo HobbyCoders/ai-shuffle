@@ -184,14 +184,17 @@ def _first_turn(session_id):
 
 
 @pytest.fixture
-def dispatch_parent(mock_db):
+def dispatch_parent(mock_db, tmp_path):
     from app.db import sessions
 
+    from app.db import database
+
+    database.create_project("task-project", "Task project", None, str(tmp_path))
     _profile("parent-agent", "default")
     _profile("worker-agent", "default")
 
     def make(binding):
-        sessions.create_session("parent", "parent-agent", title="parent", permission_mode=binding)
+        sessions.create_session("parent", "parent-agent", title="parent", permission_mode=binding, project_id="task-project")
         return "parent"
 
     return make
@@ -377,7 +380,8 @@ async def test_remote_start_session_body_carries_the_senders_current_binding(tig
     wake = await tightened_sender._enqueue_context_wake("caller", "unpark", [], ["job"], "done")
     from app.db import turns
     turns.start_turn(wake["id"])
-    remote = {"device_id": "dev-2", "device_name": "DesktopWorker"}
+    remote = {"device_id": "dev-2", "device_name": "DesktopWorker",
+              "capabilities": {"start_session_permissions": 1}}
     with patch.object(orch, "_remote_worker", return_value=remote):
         planned = orch._queue("caller", {"title": "Child", "prompt": "go", "request_id": "r2",
                                          "worker": "DesktopWorker"}, "start")

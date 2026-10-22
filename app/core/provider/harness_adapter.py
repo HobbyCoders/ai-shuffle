@@ -789,6 +789,9 @@ class HarnessAdapter(ProviderAdapter):
             native_ctx = self._with_away_hook(
                 ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
             )
+            if _session_mode(options) == "chat":
+                from app.core.coordinator_files import DENIAL
+                native_ctx.extra["tool_surface_denial"] = DENIAL
             # GetUsage is deliberately cache-only: the tool may inspect the
             # app's last observed snapshot, but a model call must never start
             # provider billing/subscription polling or touch credentials.
@@ -1365,6 +1368,8 @@ class HarnessAdapter(ProviderAdapter):
         session_mode = getattr(sdk_options, "aih_session_mode", None)
         if session_mode:
             opts.extra["session_mode"] = str(session_mode)
+        if getattr(sdk_options, "aih_owner_coordinator", False):
+            opts.extra["owner_coordinator"] = True
         proactive = getattr(sdk_options, "aih_assistant_proactive", None)
         if proactive is not None:
             opts.extra["assistant_proactive"] = proactive
@@ -5012,8 +5017,12 @@ class HarnessAdapter(ProviderAdapter):
             options.mcp_servers,
             skip_tools={"builtins": skipped_builtins},
             # Chat has neither ToolSearch nor code-mode read_tool_docs, so its
-            # permitted generation tools must be callable without discovery.
-            defer_servers=DEFERRED_SDK_SERVERS if native and _session_mode(options) != "chat" else None,
+            # permitted generation tools must be callable without discovery;
+            # elsewhere defer only what ToolSearch or code mode can still load.
+            defer_servers=(DEFERRED_SDK_SERVERS if native and _session_mode(options) != "chat" and (
+                _expects_code_mode(options) or _tool_predicate(options) is None
+                or _tool_predicate(options)("ToolSearch")
+            ) else None),
         )
         if recorded:
             logger.info(
@@ -5048,7 +5057,16 @@ class HarnessAdapter(ProviderAdapter):
             # Both runtimes execute the same handle-confined reader, even when a
             # permission policy auto-approves the call.
             name = "Read" if native else DELEGATED_READ
-            registry.register_builtin(replace(read_spec, name=name), read_attachment)
+            if options.extra.get("owner_coordinator"):
+                from app.core.coordinator_files import handler
+                from fluid.tools.builtins.glob import SPEC as glob_spec
+                from fluid.tools.builtins.grep import SPEC as grep_spec
+                for spec in (read_spec, glob_spec, grep_spec):
+                    broker_name = spec.name if native else "mcp__attachments__" + spec.name
+                    registry.register_builtin(replace(spec, name=broker_name),
+                                              handler(spec.name, self._resolve_app_session_id))
+            else:
+                registry.register_builtin(replace(read_spec, name=name), read_attachment)
             builtins_registered = True
 
         for server in inproc_servers:
@@ -5826,6 +5844,12 @@ def _delegated_tool_policy(
         denial = tool_denial(options.extra.get("app_session_id"), name, tool_input, shell_cwd)
         if denial:
             return denial
+        if _session_mode(options) == "chat" and name in {
+            "Write", "Edit", "NotebookEdit", "Bash", "PowerShell", "Monitor", "run_python",
+            "save_skill", "delete_skill", "save_plugin",
+        }:
+            from app.core.coordinator_files import DENIAL
+            return DENIAL
         if blocked and matches_any(name, blocked):
             return f"Tool '{name}' is disabled in this profile"
         if surface and not tool_permitted(name, surface, None):
@@ -5910,6 +5934,16 @@ def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
     from app.core.session_modes import CHAT_MODE_READ_TOOLS, chat_mode_read_glob
 
     glob = chat_mode_read_glob()
+    if options.extra.get("owner_coordinator"):
+        from app.core.coordinator_files import roots
+        rules = []
+        for name in ("Read", "Glob", "Grep", "mcp__attachments__Read", "mcp__attachments__Glob", "mcp__attachments__Grep"):
+            key = "file_path" if name.endswith("Read") else "path"
+            rules.append(Rule(tool=name, decision="deny"))
+            for root in roots():
+                for pattern in (root.as_posix(), root.as_posix() + "/**"):
+                    rules.append(Rule(tool=name, decision="allow", input_globs={key: pattern}))
+        return rules
     rules: list = []
     for name in sorted(CHAT_MODE_READ_TOOLS):
         rules.append(Rule(tool=name, decision="deny"))
@@ -5937,7 +5971,7 @@ def _delegated_allowed(options: SessionOptions) -> Optional[list]:
         return surface
     # Returned even when empty: DelegatedLoop reads None as "serve every
     # bridge tool", and [] as "serve none".
-    return [name for name in surface if name != "Read"]
+    return [name for name in surface if name not in {"Read", "Glob", "Grep"}]
 
 
 def _web_grants() -> tuple:
@@ -6083,10 +6117,11 @@ def _tool_allowlist(options: SessionOptions) -> Optional[list]:
     names = [str(t).strip() for t in raw if str(t).strip()]
     if options.extra.get("worker_run"):
         names = shell_companion_tools(names, options.disallowed_tools)
-    if _session_mode(options) == "chat" and "Read" in names:
-        from app.core.attachment_read import DELEGATED_READ
-        if DELEGATED_READ not in names:
-            names.append(DELEGATED_READ)
+    if _session_mode(options) == "chat":
+        for name in ("Read", "Glob", "Grep"):
+            broker = "mcp__attachments__" + name
+            if name in names and broker not in names:
+                names.append(broker)
     return names or None
 
 

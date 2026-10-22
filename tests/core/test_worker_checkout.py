@@ -273,6 +273,64 @@ def repo(mock_db, tmp_path):
     return row, parent, base, tip
 
 
+def test_no_project_owner_task_uses_named_project_checkout(repo, worker_runtime, monkeypatch):
+    from app.core import session_orchestration as orch, task_dispatch
+    from app.core import turn_manager
+    row, parent, base, _ = repo
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    database.create_profile("coordinator-agent", "Coordinator", None, {"model": "sonnet"})
+    database.create_session("coordinator", "coordinator-agent", mode="chat", is_active=True)
+    submit = turn_manager.submit_async
+    async def complete(sid, source, **kwargs):
+        worker_runtime.work[sid] = lambda cwd: commit_in(cwd)
+        return await submit(sid, source, **kwargs)
+    monkeypatch.setattr(turn_manager, "submit_async", complete)
+    outcome = asyncio.run(task_dispatch.dispatch_task_tool(
+        {"agent": "coder", "prompt": "Work", "project": row["project_v2_id"], "mode": "sync"},
+        caller_session_id="coordinator"))
+    assert outcome["ok"], outcome
+    child = database.get_session(worker_runtime[0]["session_id"])
+    assert child["project_v2_id"] == row["project_v2_id"]
+    assert child["worktree_path"] not in {str(base), str(parent)}
+    assert child["branch"] == child["worktree_branch"] == "chore/task-" + child["id"]
+    assert worker_runtime[0]["head"] == git(base, "rev-parse", "HEAD")
+    assert worker_runtime[0]["overrides"]["cwd"] == child["worktree_path"]
+
+
+def test_no_project_coding_worker_without_project_is_refused(repo, worker_runtime):
+    database.create_session("coordinator", "coder", mode="chat", is_active=True)
+    outcome = dispatch(parent="coordinator", worker="no-project-worker")
+    assert not outcome.ok and "must name a registered project" in outcome.error
+    assert worker_runtime == []
+    assert database.get_session("no-project-worker") is None
+
+
+async def test_no_project_start_session_has_own_git_panel_binding(repo, monkeypatch):
+    import json
+    from fluid.tools.registry import ToolCtx
+    from app.core import session_orchestration as orch, turn_scheduler
+    from app.db import turns
+    row, parent, base, _ = repo
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda sid: None)
+    database.create_session("coordinator", "coder", mode="chat", is_active=True)
+    first = turns.enqueue_turn("coordinator", "user", prompt="Start coding", profile_id="coder")
+    turns.start_turn(first["id"])
+    turns.settle_turn(first["id"], "completed")
+    result = await orch.make_handler(lambda: "coordinator")("start", {
+        "project": row["project_v2_id"], "title": "Work", "prompt": "Edit code", "request_id": "named-git",
+    }, ToolCtx())
+    assert not result.is_error, result.text
+    receipt = json.loads(result.text)
+    child = database.get_session(receipt["session_id"])
+    assert child["project_v2_id"] == row["project_v2_id"] and child["mode"] is None
+    assert child["branch"] == child["worktree_branch"] == receipt["checkout"]["branch"]
+    assert project_resolver.resolve_existing_cwd(child) == receipt["checkout"]["path"]
+    assert git(base, "rev-parse", "HEAD") == receipt["checkout"]["base_commit"]
+    assert child["worktree_path"] not in {str(base), str(parent)}
+
+
 def test_checkout_producer_forks_actual_caller_tip_and_preserves_dirty_work(repo, monkeypatch):
     monkeypatch.setattr(git_service, "fetch", lambda *a, **kw: pytest.fail("worker provisioning must not use the long general-purpose fetch"))
     row, parent, base, tip = repo

@@ -845,10 +845,12 @@ def link_remote_job(caller_session_id, session_id, device_id, kind, label=None):
     """Link a job started on worker ``device_id`` when the assistant (its home
     or one of its jobs) started it. Returns the link, or None for any other
     caller."""
+    from app.core.orchestration_limits import role
     home = home_for_session(caller_session_id)
-    if not home or home != get_primary_session_id():
+    if not home and role(caller_session_id) is None:
         return None
-    return store.link_remote_job(assistant_id(), session_id, device_id, kind, label)
+    return store.link_remote_job(assistant_id(), session_id, device_id, kind, label,
+                                 starter_session_id=home or caller_session_id)
 
 
 # The home's instructions. Fixed text, so it stays in the cached prompt

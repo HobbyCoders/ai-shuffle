@@ -534,7 +534,7 @@ for _connector in ("bluebubbles", "discord", "gmail", "homeassistant", "hue", "i
     TOOL_LEVELS[f"{_connector}_invoke"] = HIGH
 
 
-_PREFIXES = ("mcp__fluid_bundled__", "mcp__builtins__")
+_PREFIXES = ("mcp__fluid_bundled__", "mcp__builtins__", "mcp__attachments__")
 
 
 def canonical(name: Any) -> str:
@@ -582,11 +582,11 @@ def needs_owner(name: Any, tool_input: Any, scope: Optional[Scope], *, spec_risk
 
 
 ASK_REASON = (
-    "This needs the owner's yes. The app is asking them in the assistant's conversation; "
+    "This needs the owner's yes. The app is asking them in the starting owner's conversation; "
     "wait for their answer and do not try another way to do the same thing."
 )
 NO_OWNER_DENIAL = (
-    "Denied: this action needs the owner's yes in the assistant's conversation, and "
+    "Denied: this action needs the owner's yes in the starting conversation, and "
     "nobody can be asked from here. Tell the owner what you wanted to do."
 )
 
@@ -609,8 +609,6 @@ def home_of(session_id: Optional[str]) -> Optional[str]:
         from app.core import assistant_service
         from app.db import database
 
-        if not assistant_service.get_primary_session_id():
-            return None
         current = session_id
         for _ in range(_MAX_DEPTH):
             if not current:
@@ -618,7 +616,7 @@ def home_of(session_id: Optional[str]) -> Optional[str]:
             if assistant_service.is_primary_session(current):
                 return current
             home = _started_by_home(current)
-            if home:
+            if home and assistant_service.is_primary_session(home):
                 return home
             row = database.get_session(current)
             if not row or not row.get("is_worker"):

@@ -257,7 +257,8 @@ def test_a_local_worker_under_the_remote_child_asks_the_parent_too(workers, monk
 def test_the_assistant_home_answers_in_conversation(workers, monkeypatch, proxies, held):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
-    monkeypatch.setattr(assistant_service, "is_primary_session", lambda sid: sid == "caller")
+    from app.core import session_orchestration
+    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: None)
 
     async def say_yes(row):
         confirm = row["payload"]["assistant_confirm"]

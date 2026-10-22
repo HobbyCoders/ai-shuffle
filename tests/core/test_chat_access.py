@@ -597,12 +597,15 @@ def test_tool_surface_has_scoped_tools_not_escape_routes():
     assert "Read" not in granted
 
 
-def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner", [True, False])
+def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, monkeypatch, owner):
     from unittest.mock import patch
     import app.core.query_options as qo
     from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS
     profile = {"id": "p", "config": {"model": "sonnet", "tools_preset": "claude_code", "tool_selection_mode": "all", "setting_sources": ["user", "project", "local"]}}
     row = {"id": "chat", "mode": "chat", "project_v2_id": "stale", "branch": "wrong"}
+    if not owner:
+        row["api_user_id"] = "scoped-user"
     monkeypatch.setattr(qo, "ensure_chat_uploads_dir", lambda: tmp_path)
     with patch.object(qo.database, "get_session", return_value=row), patch.object(qo, "get_security_instructions", return_value=""), patch("app.core.project_resolver.resolve_cwd") as resolve, patch.object(qo, "_rescue_pending_checkout") as rescue:
         options, _ = qo.build_options_from_profile(profile=profile, session_id="chat", project={"id": "stale", "path": "/never"}, overrides={"cwd": "/also-never"})
@@ -615,7 +618,8 @@ def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, m
     assert "general-purpose assistant" in options.system_prompt
     from app.mcp.chat_access_sdk import GUIDANCE
     assert options.system_prompt.count(GUIDANCE) == 1
-    assert set(options.mcp_servers) == {"builtins", "chat-access"}
+    assert set(options.mcp_servers) == ({"builtins", "chat-access", "app-config"}
+                                        if owner else {"builtins", "chat-access"})
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
     assert "Bash" not in options.allowed_tools
 
@@ -1365,7 +1369,7 @@ def test_code_and_voice_options_include_private_tools_without_chat_restrictions(
     import app.core.query_options as qo
     from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS
     profile = {"id": "p", "config": {"model": "sonnet", "tools_preset": "claude_code", "tool_selection_mode": "all", "cwd": str(tmp_path)}}
-    with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode}), patch.object(qo, "get_security_instructions", return_value=""):
+    with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode, "project_id": "project"}), patch.object(qo, "get_security_instructions", return_value=""):
         options, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
     assert "chat-access" in options.mcp_servers
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
@@ -1374,7 +1378,7 @@ def test_code_and_voice_options_include_private_tools_without_chat_restrictions(
     assert "For repository development, ask the user to switch" not in str(options.system_prompt)
     assert options.tools == {"type": "preset", "preset": "claude_code"}
     profile["config"].update(tool_selection_mode="disallow", disallowed_tools=CHAT_MODE_RESOURCE_TOOLS)
-    with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode}), patch.object(qo, "get_security_instructions", return_value=""):
+    with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode, "project_id": "project"}), patch.object(qo, "get_security_instructions", return_value=""):
         denied, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
     assert "chat-access" not in denied.mcp_servers
     assert not set(CHAT_MODE_RESOURCE_TOOLS).intersection(denied.allowed_tools)

@@ -147,6 +147,103 @@ def world(workers, monkeypatch, kicks, tmp_path):  # noqa: F811 — the imported
 
 # --- the normal path ------------------------------------------------------------
 
+@pytest.mark.parametrize("fetch_fails,source_branch", [(False, None), (True, None), (False, "feature")])
+def test_remote_only_named_task_uses_target_upstream_and_leaves_main_untouched(world, monkeypatch, fetch_fails, source_branch):
+    from tests.core.network.test_remote_task_control import dispatch
+    from app.core.git_service import git_service
+
+    # Only the target has a checkout. Its default branch has a non-origin
+    # upstream; requests cannot replace that remote or its tracking settings.
+    with world.b.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE checkouts SET status='unavailable',path=%s WHERE project_id=%s",
+                              (str(world.parent / "missing"), world.project_id))
+    git(world.target, "remote", "rename", "origin", "upstream")
+    if source_branch:
+        git(world.target, "branch", source_branch)
+    local_tip = git(world.target, "rev-parse", "HEAD")
+    seed = clone(world.origin, world.origin.parent / "fresh-seed")
+    upstream_tip = commit(seed, "fresh.txt", "latest upstream work\n")
+    git(seed, "push", "origin", "HEAD:refs/heads/" + (source_branch or "main"))
+    before = (git(world.target, "status", "--porcelain"), git(world.target, "rev-parse", "HEAD"),
+              git(world.target, "symbolic-ref", "HEAD"), git(world.target, "config", "--get-regexp", r"^branch\."))
+    real_run = git_service._run_git
+    if fetch_fails:
+        from subprocess import CompletedProcess
+
+        def run(cwd, args, **kwargs):
+            if args[:1] == ["fetch"]:
+                return CompletedProcess(args, 1, "", "offline")
+            return real_run(cwd, args, **kwargs)
+
+        monkeypatch.setattr(git_service, "_run_git", run)
+    with world.b.active():
+        row = {**database.get_session("caller"), "_task_named_project": True,
+               "_task_source_branch": source_branch}
+        result = dispatch(world.a, world.b, caller_row=row, worker={
+            "device_id": world.a.device_id, "device_name": "Target",
+            "capabilities": {"remote_task": 7}})
+        assert result["ok"], result
+    child = result["worker_session_id"]
+    path = world.child_path(child)
+    assert path != world.target and git(path, "branch", "--show-current") == f"chore/task-{child}"
+    assert git(path, "rev-parse", "HEAD") == (local_tip if fetch_fails else upstream_tip)
+    assert (git(world.target, "status", "--porcelain"), git(world.target, "rev-parse", "HEAD"),
+            git(world.target, "symbolic-ref", "HEAD"), git(world.target, "config", "--get-regexp", r"^branch\.")) == before
+    world.deliver(child, text="Work finished.")
+    assert ("fetch failed" in world.wake().lower()) is fetch_fails
+
+
+@pytest.mark.parametrize("target_version", [5, 6])
+def test_remote_only_named_task_requires_new_peer_without_dispatch_or_fallback(world, target_version):
+    from tests.core.network.test_remote_task_control import dispatch
+
+    with world.b.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE checkouts SET status='unavailable',path=%s WHERE project_id=%s",
+                              (str(world.parent / "missing"), world.project_id))
+    with world.b.active():
+        row = {**database.get_session("caller"), "_task_named_project": True}
+        result = dispatch(world.a, world.b, caller_row=row, worker={
+            "device_id": world.a.device_id, "device_name": "Target",
+            "capabilities": {"remote_task": target_version}})
+        assert not result["ok"] and "update that worker" in result["error"].lower()
+    with world.a.active(), get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE is_worker=TRUE")
+        assert cursor.fetchall() == []
+
+
+def test_no_project_task_producer_creates_target_only_project_checkout(world, monkeypatch):
+    from app.core import task_dispatch
+    from app.db import mobile_tool_identity
+    from app.network import runners
+
+    for worker in (world.a, world.b):
+        with worker.active():
+            mobile_tool_identity.init_schema()
+            database.create_profile("code-helper", "Code helper", None,
+                                    {"provider_models": {"__native__": "sonnet"}})
+    with world.b.active(), get_db() as conn:
+        bind_caller(None)
+        conn.cursor().execute("UPDATE checkouts SET status='unavailable',path=%s WHERE project_id=%s",
+                              (str(world.parent / "missing"), world.project_id))
+    monkeypatch.setattr(task_dispatch, "_credential_gap", lambda _: None)
+    monkeypatch.setattr(runners, "resolve_worker", lambda *a, **kw: {
+        "device_id": world.a.device_id, "device_name": "Target", "is_self": False,
+        "online": True, "capabilities": {"remote_task": 7}})
+    with world.b.active():
+        result = asyncio.run(task_dispatch.dispatch_task_tool({
+            "agent": "code-helper", "prompt": "Work in the project.", "project": world.project_id,
+            "worker": "Target", "mode": "background"}, caller_session_id="caller"))
+        assert result["ok"], result
+    child = result["worker_session_id"]
+    path = world.child_path(child)
+    assert path != world.target
+    assert git(path, "branch", "--show-current") == f"chore/task-{child}"
+    with world.a.active():
+        row = database.get_session(child)
+        assert row["project_v2_id"] == world.project_id and row["is_worker"]
+
+
 def test_commits_are_pushed_there_and_fetched_here_without_touching_the_parent(world):
     before = world.parent_state()
     child = world.start()

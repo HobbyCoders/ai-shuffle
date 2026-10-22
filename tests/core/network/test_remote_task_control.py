@@ -150,6 +150,8 @@ def test_parent_starts_a_child_on_the_other_worker(workers, monkeypatch, kicks):
         row = database.get_session(child)
         assert row["owner_device_id"] == a.device_id and row["is_worker"] and row["hidden"]
         assert row["parent_session_id"] == "caller" and row["away_mode"]
+        # Pre-v6 senders do not opt into the no-project chat ceiling.
+        assert row["mode"] is None
         owed = remote_task.report_owed(child)
         assert owed["device_id"] == b.device_id and owed["owner_session_id"] == "caller"
         assert remote_tasks.get_child(child)["state"] == remote_tasks.RUNNING
@@ -159,6 +161,30 @@ def test_parent_starts_a_child_on_the_other_worker(workers, monkeypatch, kicks):
         assert record["tool_use_id"] == "toolu_remote" and record["completion_id"] is None
         assert all_turns(child) == []
     assert kicks == [child]
+
+
+@pytest.mark.parametrize("target_version", [5, 6, 7])
+def test_remote_none_chat_child_requires_v7_opt_in(workers, monkeypatch, kicks, target_version):
+    a, b, _ = network(workers, monkeypatch)
+    with b.active():
+        caller = {**database.get_session("caller"), "mode": "chat"}
+        result = dispatch(a, b, caller_row=caller, tool_allowlist=["Read", "Glob", "Grep"],
+                          worker={"device_id": a.device_id, "device_name": "ServerWorker",
+                                  "capabilities": {"remote_task": target_version}})
+    if target_version < 7:
+        assert not result["ok"] and "update that worker" in result["error"]
+        assert kicks == []
+    else:
+        assert result["ok"], result
+        assert result["checkout"]["mode"] == "none"
+        with a.active():
+            child = database.get_session(result["worker_session_id"])
+            assert child["mode"] == "chat"
+            from app.core.session_modes import narrow_tool_access_for_mode
+            from app.core.tool_access import ToolAccess, tool_permitted
+            tools = narrow_tool_access_for_mode(ToolAccess(None, []), child["mode"])
+            for tool in ("Bash", "Edit", "Write", "run_python"):
+                assert not tool_permitted(tool, tools.allowed, tools.disallowed)
 
 
 def test_a_target_refusal_comes_back_by_name(workers, monkeypatch, kicks):

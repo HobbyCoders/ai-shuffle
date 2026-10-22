@@ -33,10 +33,12 @@ from app.db import turns as turns_db
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _short_terminal_batch_window(monkeypatch):
+def _short_terminal_batch_window(monkeypatch, mock_db, tmp_path):
     """The real 2s terminal-batch window made every on_task_terminal test wait
     it out; keep a short (non-zero, so batching still happens) window."""
     monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 0.1)
+    from app.db import database
+    database.create_project("workspace-project", "Workspace project", None, str(tmp_path))
 
 
 @pytest.fixture(autouse=True)
@@ -778,7 +780,7 @@ def _chat_with_two_folders(session_id):
     from app.db import database
 
     database.create_profile(f"{session_id}-role", "Folder role", None, {"model": "fable"})
-    database.create_session(session_id, f"{session_id}-role", model="fable")
+    database.create_session(session_id, f"{session_id}-role", model="fable", project_id="workspace-project")
     database.set_session_run_binding(session_id, workspace_project_ids=_BOTH)
     return f"{session_id}-role"
 
@@ -2679,7 +2681,8 @@ async def test_missing_override_cwd_breaks_sibling_wake_cycle(mock_db, tmp_path,
 
     missing = tmp_path / "reclaimed-worker"
     missing.mkdir()
-    database.create_session("broken-cwd", "default")
+    database.create_project("cwd-project", "Cwd project", None, str(missing))
+    database.create_session("broken-cwd", "default", project_id="cwd-project")
     database.create_session("sibling-cwd", "default")
     task_registry.start_task("broken-cwd", "sibling-cwd", "agent", "Sibling", tool_use_id="sibling-cwd")
     task_registry.start_task("sibling-cwd", "broken-cwd", "agent", "Worker", tool_use_id="broken-cwd")

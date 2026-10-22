@@ -515,13 +515,13 @@ async def test_loop_guard_reads_a_worker_turns_origin(tmp_path):
 
 @pytest.mark.parametrize("human_input", [None, False, True])
 async def test_assistant_limit_refuses_the_turn(tmp_path, human_input):
-    from app.core import assistant_limits
+    from app.core import orchestration_limits
 
     payload = None if human_input is None else {"question_answer_human_input": human_input}
     turn_row = None if payload is None else {"id": "turn-1", "payload": payload}
     with ExitStack() as stack:
         b = engine_patches(stack, cwd=str(tmp_path))
-        gate = stack.enter_context(patch.object(assistant_limits, "turn_refusal", return_value="Limit reached"))
+        gate = stack.enter_context(patch.object(orchestration_limits, "turn_refusal", return_value="Limit reached"))
         events = await _turn(stack, turn_source="user", loop_guard_turn=turn_row)
     assert events == [{"type": "error", "message": "Limit reached", "code": "assistant_limit"}]
     assert gate.call_args.args[1] == "user"

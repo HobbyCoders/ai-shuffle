@@ -12,12 +12,13 @@ from fluid.tools.registry import ToolOutcome, ToolImage
 DELEGATED_READ = "mcp__attachments__Read"
 
 
-async def read_attachment(arguments, ctx):
+async def read_attachment(arguments, ctx, *, root=None):
+    root = root or chat_uploads_dir()
     path = Path(arguments["file_path"])
     if not path.is_absolute():
         path = chat_uploads_dir() / path
     try:
-        with open_attachment(chat_uploads_dir(), path) as stream:
+        with open_attachment(root, path) as stream:
             media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
             if media_type:
                 data = stream.read(MAX_IMAGE_BYTES + 1)

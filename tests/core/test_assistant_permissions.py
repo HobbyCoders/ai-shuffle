@@ -222,14 +222,18 @@ def test_scope_covers_the_home_its_chats_and_their_workers(assistant_fixture, mo
     assert scope["home_session_id"] == home and scope["cwd"] == ROOT and scope["roots"]
 
 
-def test_the_home_runs_in_bypass_and_an_ordinary_session_keeps_its_mode(assistant_fixture):
+def test_the_home_runs_in_bypass_and_an_ordinary_session_keeps_its_mode(assistant_fixture, tmp_path):
     from app.core.query_options import build_options_from_profile
     home = assistant_fixture["id"]
     database.set_session_run_binding(home, permission_mode="default")
     options, _ = build_options_from_profile(database.get_profile(service.AGENT_ID), session_id=home)
     assert options.permission_mode == "bypassPermissions"
     assert options.aih_assistant_scope["home_session_id"] == home
-    ordinary = database.create_session("ordinary-chat", "assistant-agent", is_active=True)
+    from app.db import projects_v2, checkouts
+    from app.core.config import settings
+    project = projects_v2.upsert_project("folder:independent", name="Independent")
+    checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(tmp_path))
+    ordinary = database.create_session("ordinary-chat", "assistant-agent", is_active=True, project_v2_id=project["id"])
     database.set_session_run_binding(ordinary["id"], permission_mode="default")
     options, _ = build_options_from_profile(database.get_profile("assistant-agent"), session_id=ordinary["id"])
     assert options.permission_mode == "default" and options.aih_assistant_scope is None

@@ -59,9 +59,10 @@ def test_query_merges_workspace_and_profile_directories():
         resolve.assert_called_once_with(["docs"], None, None)
 
 
-def test_saved_folders_restore_and_explicit_empty_override_clears_them():
+def test_saved_folders_restore_and_explicit_empty_override_clears_them(tmp_path):
     profile = db.create_profile(profile_id="restore-folders", name="Folders", description=None, config={"model": "opus"})
-    db.create_session(session_id="restore-folders", profile_id=profile["id"])
+    db.create_project("folders-project", "Folders project", None, str(tmp_path))
+    db.create_session(session_id="restore-folders", profile_id=profile["id"], project_id="folders-project")
     db.set_session_run_binding("restore-folders", workspace_project_ids=["docs"])
     with patch.object(qo, "get_security_instructions", return_value=""), patch(
         "app.core.workspace_folders.workspace_directories",

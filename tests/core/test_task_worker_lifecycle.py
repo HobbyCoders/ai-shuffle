@@ -125,7 +125,7 @@ def worker_env(monkeypatch, tmp_path):
     monkeypatch.setattr(tm_mod, "interrupt_async", async_twin(fake_tm.interrupt))
     monkeypatch.setattr(db, "update_session", lambda session_id, **kw: None)
     monkeypatch.setattr(
-        db, "get_session", lambda sid: {"id": sid, "worktree_path": str(checkout)}
+        db, "get_session", lambda sid: {"id": sid, "project_id": "task-project", "worktree_path": str(checkout)}
     )
     monkeypatch.setattr(db, "create_session", lambda **kw: {"id": kw["session_id"]})
     monkeypatch.setattr(
@@ -134,6 +134,8 @@ def worker_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
     )
+    monkeypatch.setattr(project_resolver, "resolve_project_v2",
+                        lambda row: {"id": "task-project", "path": str(checkout)})
     monkeypatch.setattr(
         pa, "final_turn_outcome",
         lambda sid: {
@@ -1639,14 +1641,15 @@ class TestWorkerDoctrine:
         assert "ONE sentence stating the result" in prompt
 
     def test_the_task_receipt_says_to_disambiguate_before_fanning_out(
-        self, mock_db, monkeypatch
+        self, mock_db, monkeypatch, tmp_path
     ):
         from app.db import database
 
         database.create_profile("root-agent", "Root Agent", None, {"model": "opus"})
         database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+        database.create_project("receipt-project", "Receipt project", None, str(tmp_path))
         database.create_session(
-            session_id="s-receipt", profile_id="root-agent", title="root"
+            session_id="s-receipt", profile_id="root-agent", title="root", project_id="receipt-project"
         )
 
         async def fake_worker(**kwargs):

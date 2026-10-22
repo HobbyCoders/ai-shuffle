@@ -91,7 +91,8 @@ def world(mock_db, monkeypatch, tmp_path):
                              models=[{"id": "grok-4.5", "label": "Grok 4.5"}])
     db.create_profile("caller", "Caller", None, {"model": "opus"})
     db.create_profile("pinned", "Pinned", None, {"provider_models": {"__native__": "opus"}})
-    db.create_session(session_id="parent", profile_id="caller", title="Parent")
+    db.create_project("task-project", "Task project", None, str(tmp_path))
+    db.create_session(session_id="parent", profile_id="caller", title="Parent", project_id="task-project")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(mo, "_APPROVED", set())
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
@@ -950,7 +951,7 @@ def chats(world, monkeypatch):
     monkeypatch.setattr(sync_engine, "broadcast_queue_updated", AsyncMock())
     db.create_profile("agent", "Agent", None, {"model": "sonnet"})
     sessions.create_session("caller", "agent", title="Caller", is_active=True, model="sonnet",
-                            permission_mode="default", effort="xhigh", context_window=1_000_000)
+                            project_id="task-project", permission_mode="default", effort="xhigh", context_window=1_000_000)
     return world
 
 

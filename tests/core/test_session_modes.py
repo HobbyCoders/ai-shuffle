@@ -16,7 +16,7 @@ import pytest
 
 from app.core.session_modes import (
     CHAT_MODE_DENIED_TOOLS,
-    CHAT_MODE_TOOL_SURFACE,
+    CHAT_MODE_BASIC_TOOL_SURFACE as CHAT_MODE_TOOL_SURFACE,
     CHAT_UPLOADS_DIRNAME,
     DEFAULT_SESSION_MODE,
     SESSION_MODES,
@@ -279,7 +279,7 @@ def _build_for_mode(mode, config, **row_extra):
     import app.core.query_options as qo
 
     row = {"id": "s-mode", "mode": mode, **row_extra}
-    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
+    with patch("app.core.session_orchestration.is_owner_session", return_value=False), patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=row
     ), patch.object(qo, "_rescue_pending_checkout", return_value=False), patch(
         "app.core.project_resolver.resolve_cwd", return_value=None

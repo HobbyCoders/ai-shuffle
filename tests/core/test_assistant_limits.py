@@ -132,7 +132,8 @@ def test_counts_home_and_everything_it_started_together(assistant_fixture):
     worker = job("Worker")
     chat = job("Started chat")
     nested = job("Nested")  # Started from a linked job: linked to the same home.
-    outsider = database.create_session("outsider", "assistant-agent", title="Not the assistant's")
+    database.create_project("ordinary-project", "Ordinary project", None, "/example/project")
+    outsider = database.create_session("outsider", "assistant-agent", title="Independent project work", project_id="ordinary-project")
     for sid, cost in ((home, 1.25), (worker, 2.0), (chat, 0.5), (nested, 0.25), (outsider["id"], 50.0)):
         book(sid, cost)
     assert limits.status()["spent_today_usd"] == pytest.approx(4.0)

@@ -811,23 +811,18 @@ def build_task_contract(
     # Documented once, here, because delegating sessions otherwise burn turns
     # rediscovering it by KeyError.
     sync_shape = (
-        "A sync result is JSON with report_head (a bounded prefix), "
-        "report_chars (the report's full length), and report_path (the whole "
-        "report on disk) — there is NO 'report' key unless the file could not "
-        "be written, in which case 'report' carries the full text and the note "
-        "says so. Read report_path with Read(offset=..., limit=...), in ONE "
-        "cell, only when report_head is insufficient; never print the whole "
-        "file. A background result carries no report at all: it returns "
-        "worker_session_id/task_id and the completion is announced later."
+        "Sync JSON: report_head (bounded prefix), report_chars (full length), "
+        "report_path (full file). NO 'report' key unless writing failed (then it "
+        "has the full text and a note). Only if report_head "
+        "is insufficient, read report_path via Read(offset=..., limit=...) in ONE cell; never "
+        "print the whole file. Background returns worker_session_id/task_id, "
+        "no report; completion arrives later."
     )
 
     limits = host_worker_limits_text()
     description = (
-        "Delegate a self-contained task to one configured subagent. The "
-        "subagent runs in an isolated session with its own prompt, memory, "
-        "and tools; it does not see the parent conversation. Use delegation "
-        "for independent or context-heavy work, not a quick lookup or single "
-        "tool call. "
+        "Delegate independent or context-heavy work, not quick lookups. The "
+        "subagent has its own session, prompt, memory and tools, not your conversation. "
         + ("Follow the system prompt's delegation and checkout rules."
            if workflow_guidance else SWARM_ROUTING)
         + (f" {limits}" if limits else "")
@@ -857,6 +852,13 @@ def build_task_contract(
     }
     from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE, EFFORT_PROPERTY
 
+    properties["project"] = {
+        "type": "string", "minLength": 1, "maxLength": 500,
+        "description": "Registered project name/id/path; needed to code from a no-project chat; gets its own checkout.",
+    }
+    properties["branch"] = {
+        "type": "string", "description": "Target-only project's source branch (default: worker's default).",
+    }
     properties["base_commit"] = {
         "type": "string",
         "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",

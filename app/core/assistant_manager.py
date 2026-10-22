@@ -203,8 +203,8 @@ class AssistantManager:
                 failed = True
             await self._maybe_retention_sweep()
             # The owner's spending and job time limits (never raises).
-            from app.core import assistant_limits
-            await assistant_limits.enforce()
+            from app.core import orchestration_limits
+            await orchestration_limits.enforce()
             self.detect_owner(DETECTION_INTERVAL_SECONDS)
             # DB outages deny new admission/tools, but must not kill this loop
             # or extend known inference deadlines. Retry with bounded backoff.

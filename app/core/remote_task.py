@@ -93,6 +93,10 @@ MAX_LABEL_CHARS = 160
 MAX_TOOLS = 200
 #: Ends every parent-side refusal that provably started nothing.
 NOT_DISPATCHED = "nothing was dispatched"
+#: Ends a refusal by an older peer that started nothing but must not fall back
+#: when the caller named the worker (or the project lives only there). A
+#: worker picked implicitly as the owner's default may still fall back here.
+OLDER_PEER = "update that worker before retrying"
 #: ``control.call``'s wording for a request that may have reached the peer.
 MAY_HAVE_APPLIED = "may still have been applied"
 
@@ -111,7 +115,7 @@ _BODY_KEYS = frozenset({
     "version", "worker_session_id", "agent", "agent_name", "prompt", "label",
     "name", "provider_id", "model", "effort", "permission_mode",
     "tool_allowlist", "mode", "origin", "depth", "checkout", "parent",
-    "context_window", "fast", "effort_explicit",
+    "context_window", "fast", "effort_explicit", "sender_version", "session_mode",
 })
 #: The ``remote_task`` capability that accepts ``context_window`` in the body.
 #: An older target refuses unknown fields, so the parent sends it only to
@@ -126,6 +130,8 @@ EFFORT_VERSION = 4
 CHORE_BRANCH_VERSION = 5
 #: The receiver fetches its own default branch and preserves unique caller work.
 FRESH_BASE_VERSION = 6
+#: v6 was released for fresh bases; target-only projects and chat opt-in use v7.
+TARGET_DEFAULT_VERSION = 7
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -241,6 +247,7 @@ def start_body(
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
     effort_explicit: Optional[bool] = None,
+    session_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The ``task-start`` body. Identifiers only; never a path or credential.
 
@@ -279,6 +286,8 @@ def start_body(
         body["fast"] = bool(fast)
     if effort_explicit is not None:
         body["effort_explicit"] = effort_explicit
+    if session_mode == "chat":
+        body.update(sender_version=TARGET_DEFAULT_VERSION, session_mode="chat")
     return body
 
 
@@ -372,7 +381,7 @@ async def dispatch_remote(
     """
     from app.core.task_registry import task_registry
     from app.core.worker_checkout import (
-        REMOTE_BRANCH, WorkerCheckoutError, publish_worker_branch, release_worker_branch,
+        REMOTE_BRANCH, REMOTE_NONE, WorkerCheckoutError, publish_worker_branch, release_worker_branch,
     )
     from app.network import control, engine
 
@@ -413,13 +422,27 @@ async def dispatch_remote(
         # its child runs at its model's default window instead.
         logger.info("remote_task: %s predates context_window; the child keeps its default window", name)
         context_window = None
+    from app.core.worker_checkout import REMOTE_DEFAULT, RemoteWorkerBranch, _base_checkout_path
+    target_only = (caller_row.get("_task_named_project")
+                   and not await asyncio.to_thread(_base_checkout_path, caller_row.get("project_v2_id")))
+    if target_only and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
+        # Omit NOT_DISPATCHED so automatic placement cannot fall back locally.
+        return {"ok": False, "error": f"{name} cannot fork target-only projects; {OLDER_PEER}."}
     try:
-        state = await asyncio.to_thread(
-            publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
-            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION,
-            fresh_base=_remote_task_version(worker) >= FRESH_BASE_VERSION)
+        if target_only:
+            state = RemoteWorkerBranch(REMOTE_DEFAULT, project_v2_id=caller_row.get("project_v2_id"),
+                                       parent_branch=caller_row.get("_task_source_branch"))
+        else:
+            state = await asyncio.to_thread(
+                publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
+                legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION,
+                fresh_base=_remote_task_version(worker) >= FRESH_BASE_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
+    if caller_row.get("_task_named_project") and state.mode == REMOTE_NONE:
+        return {"ok": False, "error": (
+            "The named project has no Git checkout on this worker to transfer. "
+            "Use StartSession(project=..., worker=...) on the project worker instead; nothing was dispatched.")}
     if state.mode == REMOTE_BRANCH and not state.pushed:
         return {"ok": False, "error": (
             f"Could not publish the worker's branch to origin for {name}: "
@@ -433,6 +456,12 @@ async def dispatch_remote(
         except Exception:  # noqa: BLE001 — the refusal stands either way
             logger.warning("remote_task: could not release %s", state.branch, exc_info=True)
 
+    from app.core.session_modes import session_mode_of
+    chat_child = (session_mode_of(caller_row) == "chat"
+                  and not (caller_row.get("project_id") or caller_row.get("project_v2_id")))
+    if chat_child and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
+        await release()
+        return {"ok": False, "error": f"{name} cannot confine chat Tasks; {OLDER_PEER}."}
     body = start_body(
         worker_session_id=worker_id, agent=profile_id, agent_name=agent_name, prompt=prompt,
         label=label, roster_name=roster_name, provider_id=provider_id, model_id=model_id,
@@ -442,6 +471,7 @@ async def dispatch_remote(
         owner_session_id=caller_session_id, tool_use_id=launch_tool_use_id,
         context_window=context_window, fast=fast,
         effort_explicit=effort_explicit if _remote_task_version(worker) >= EFFORT_VERSION else None,
+        session_mode="chat" if chat_child else None,
     )
     if stop_generation is not None and task_registry.stop_invalidated(root_session_id, stop_generation):
         await release()
@@ -597,6 +627,7 @@ class _Start:
     context_window: Optional[int] = None
     fast: Optional[bool] = None
     effort_explicit: bool = False
+    session_mode: Optional[str] = None
 
 
 def _text(body: Mapping[str, Any], key: str, limit: int) -> str:
@@ -632,6 +663,10 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         raise ValueError("The subagent request must be an object")
     if body.get("version") != WIRE_VERSION:
         raise ValueError("Unsupported subagent request version; update this worker.")
+    session_mode = body.get("session_mode")
+    if session_mode is not None and (session_mode != "chat"
+            or type(body.get("sender_version")) is not int or body["sender_version"] != TARGET_DEFAULT_VERSION):
+        raise ValueError("The chat ceiling requires an explicit version-7 sender request; update that worker.")
     unknown = set(body) - _BODY_KEYS
     if unknown:
         raise ValueError(f"Unknown subagent request fields: {', '.join(sorted(unknown))}")
@@ -701,6 +736,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         owner_session_id=_text(parent, "owner_session_id", 200),
         tool_use_id=_optional_text(parent, "tool_use_id", 200),
         fingerprint=_fingerprint(body),
+        session_mode=session_mode,
         context_window=context_window,
         fast=fast,
     )
@@ -883,6 +919,9 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         permission_mode=permission_mode, context_window=context_window,
         permission_ceiling=permission_mode, fast=fast,
     )
+    if not project_v2_id and start.session_mode == "chat":
+        # Only an explicit v6 request opts in. Old senders/legacy code keep their ceiling.
+        fields["mode"] = "chat"
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=effort,
         cwd=received.cwd, permission_mode=permission_mode, checkout=checkout,
@@ -897,6 +936,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
             "tool_use_id": start.tool_use_id,
             "mode": start.mode,
             "depth": start.depth,
+            **({"checkout_note": received.note} if received.note else {}),
         },
         FINGERPRINT_KEY: start.fingerprint,
         CHECKOUT_MODE_KEY: received.mode,
@@ -1114,6 +1154,10 @@ def _child_report(session_id: str) -> Tuple[Optional[Dict[str, Any]], List[str]]
     from app.core.provider_agent import bound_report
     from app.core.turn_recorder import _bound_subagent_result
 
+    # Keep a target-only upstream fetch failure visible in the durable report.
+    checkout_note = (report_owed(session_id) or {}).get("checkout_note")
+    if checkout_note:
+        report = checkout_note + "\n\n" + report
     # Use the SAME byte/paragraph bound before transport; the receiving recorder
     # rechecks it and preserves the flag. Never put unbounded text on the wire.
     card_result, card_result_truncated = _bound_subagent_result(report.strip())

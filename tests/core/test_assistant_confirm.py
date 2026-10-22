@@ -86,8 +86,8 @@ def test_a_background_jobs_question_names_the_job():
 
 
 def test_a_task_worker_under_the_home_is_named_in_its_question(monkeypatch):
-    from app.core import assistant_service
-    monkeypatch.setattr(assistant_service, "is_primary_session", lambda sid: sid == "home")
+    from app.core import session_orchestration
+    monkeypatch.setattr(session_orchestration, "is_owner_session", lambda sid: sid == "home")
     route = approvals.WorkerApprovalRoute(worker_session_id="w1", parent_session_id="home",
                                           label="Agents-page inventory")
     marker = approvals._assistant_confirm("home", {"tool_name": "Bash", "tool_input": {"command": "ls"}}, route)

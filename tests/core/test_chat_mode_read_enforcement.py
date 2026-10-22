@@ -299,7 +299,7 @@ def test_read_is_withheld_from_the_cli_grant_for_chat(workspace):
     assert not {"Glob", "Grep", "Bash", "Edit", "Write", "WebFetch"} & set(grants)
     # The bridge filter keeps the registry spelling and drops the CLI's Read.
     assert "Read" not in _delegated_allowed(opts)
-    assert set(CHAT_MODE_TOOL_SURFACE) - {"Read"} <= set(_delegated_allowed(opts))
+    assert set(CHAT_MODE_TOOL_SURFACE) - {"Read", "Glob", "Grep"} <= set(_delegated_allowed(opts))
     assert "Read" in (_tool_allowlist(opts) or [])
 
 

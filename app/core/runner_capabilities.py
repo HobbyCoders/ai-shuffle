@@ -23,6 +23,7 @@ Shape::
         "claude_cli_signed_in": bool,
         "provider_kinds": ["openai", ...],
         "remote_task": int,
+        "start_session_permissions": int,  # report-back independent of legacy Away
         "move_wakes": int,
         "move_questions": int,  # durable answerable cards, without live callbacks
         "handoff_poll": int,  # short HTTP requests for long Git/history transfers
@@ -175,7 +176,11 @@ def _detect_claude_cli_signed_in() -> bool:
 # ``task/<id>``.
 # Version 6 accepts checkout.base_policy="fresh-default-v1": the receiver
 # fetches its own origin/default before choosing between that tip and caller HEAD.
-REMOTE_TASK_VERSION = 6
+# Version 7 adds target-only projects and explicit sender chat-ceiling opt-in;
+# released v6 workers do not understand these fields and must refuse, not fall back.
+REMOTE_TASK_VERSION = 7
+# Remote StartSession separates report delivery from legacy assistant Away handling.
+START_SESSION_PERMISSIONS_VERSION = 1
 
 # A moved chat's pending wake-ups move with it (#1819): version 1 receivers
 # re-create the ``wakes`` a move sends. Older ones ignore them, so the owner
@@ -235,6 +240,7 @@ def detect_capabilities() -> Dict[str, Any]:
         "claude_cli_signed_in": _detect_claude_cli_signed_in(),
         "provider_kinds": _detect_provider_kinds(),
         "remote_task": REMOTE_TASK_VERSION,
+        "start_session_permissions": START_SESSION_PERMISSIONS_VERSION,
         "move_wakes": MOVE_WAKES_VERSION,
         "handoff_target_resume": 1,
         "handoff_receipt": 1,

@@ -19,7 +19,7 @@ from app.core import runner_capabilities as rc
 def test_shape_has_all_keys_and_types():
     caps = rc.detect_capabilities()
     assert set(caps.keys()) == {"os", "has_display", "computer_use", "has_chrome", "docker",
-                                "claude_cli_signed_in", "provider_kinds", "remote_task", "move_wakes",
+                                "claude_cli_signed_in", "provider_kinds", "remote_task", "move_wakes", "start_session_permissions",
                                 "terminal", "handoff_poll", "move_questions", "handoff_target_resume", "handoff_receipt", "generation"}
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
@@ -28,7 +28,8 @@ def test_shape_has_all_keys_and_types():
     assert isinstance(caps["docker"], bool)
     assert isinstance(caps["claude_cli_signed_in"], bool)
     assert isinstance(caps["provider_kinds"], list)
-    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 6
+    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 7
+    assert caps["start_session_permissions"] == rc.START_SESSION_PERMISSIONS_VERSION == 1
     assert caps["move_wakes"] == rc.MOVE_WAKES_VERSION == 3
     assert caps["handoff_poll"] == 1
     assert caps["move_questions"] == 1

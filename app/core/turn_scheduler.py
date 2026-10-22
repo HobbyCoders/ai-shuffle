@@ -1966,6 +1966,9 @@ async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) ->
     ones Task completions use.
     """
     async with _terminal_delivery_lock(session_id):
+        from app.core.session_orchestration import defer_started_report
+        if await defer_started_report(session_id, frame):
+            return
         return await _on_task_terminal_locked(session_id, frame, started_session=True)
 
 

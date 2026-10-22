@@ -126,16 +126,27 @@ def test_a_revoked_worker_reads_as_this_worker(mock_db, network, monkeypatch):
 # ─── default_for ─────────────────────────────────────────────────────────────
 
 
-def test_default_applies_to_the_home_and_its_jobs_only(assistant_fixture, network):
+def test_default_applies_to_the_home_and_its_jobs_only(assistant_fixture, network, tmp_path):
     home = assistant_fixture["id"]
     database.create_session("job-1", "assistant-agent", title="Job")
     store.link_job(service.assistant_id(), "job-1")
     database.create_session("plain", "assistant-agent", title="Ordinary chat")
+    database.create_project("proj", "Project", None, str(tmp_path))
+    database.create_session("project-chat", "assistant-agent", title="Project session", project_id="proj")
+    database.create_session("coordinator", "assistant-agent", title="Chat", mode="chat")
     assert assistant_worker.default_for(home) is None  # No choice yet.
     save("dev-unraid")
     assert assistant_worker.default_for(home)["device_id"] == "dev-unraid"
     assert assistant_worker.default_for("job-1")["device_id"] == "dev-unraid"
+    # Ordinary owner sessions (project sessions and chats) keep Tasks here.
     assert assistant_worker.default_for("plain") is None
+    assert assistant_worker.default_for("project-chat") is None
+    assert assistant_worker.default_for("coordinator") is None
+    database.create_api_user("api", "API", "hash")
+    database.create_session("api-chat", "assistant-agent", api_user_id="api")
+    database.create_session("worker-chat", "assistant-agent", is_worker=True, parent_session_id="plain")
+    assert assistant_worker.default_for("api-chat") is None
+    assert assistant_worker.default_for("worker-chat") is None
 
 
 def test_default_lookup_failure_runs_here(assistant_fixture, network, monkeypatch):
@@ -148,11 +159,12 @@ def test_default_lookup_failure_runs_here(assistant_fixture, network, monkeypatc
 
 
 @pytest.fixture()
-def callers(assistant_fixture):
+def callers(assistant_fixture, tmp_path):
+    database.create_project("task-project", "Task project", None, str(tmp_path))
     database.create_profile("helper", "Helper", None, {"model": "sonnet"})
-    database.create_session("job-1", "assistant-agent", title="Job")
+    database.create_session("job-1", "assistant-agent", title="Job", project_id="task-project")
     store.link_job(service.assistant_id(), "job-1")
-    database.create_session("plain", "assistant-agent", title="Ordinary chat")
+    database.create_session("plain", "assistant-agent", title="Ordinary chat", project_id="task-project")
     return {"home": assistant_fixture["id"], "job": "job-1", "plain": "plain"}
 
 
@@ -210,6 +222,7 @@ def test_older_default_falls_back_with_a_note(callers, network):
 
 
 def test_ordinary_chats_ignore_the_choice(callers, network, monkeypatch):
+    """A project session's Task runs here unless it names a worker."""
     save("dev-unraid")
 
     def _never(*a, **k):
@@ -274,3 +287,26 @@ def test_a_remote_failure_after_dispatch_is_not_rerun_here(callers, network, mon
                         lambda args, **kw: remote_fails(args) if args.get("worker") else real(args, **kw))
     payload, calls = dispatch(callers["home"])
     assert payload == {"ok": False, "error": "Worker failed: provider error"} and calls == []
+
+
+@pytest.mark.parametrize("refusal", [
+    "ServerWorker cannot confine chat Tasks; update that worker before retrying.",
+    "ServerWorker cannot fork target-only projects; update that worker before retrying.",
+])
+def test_an_older_default_peer_refusal_falls_back_but_a_named_worker_does_not(
+        callers, network, monkeypatch, refusal):
+    """Only the implicit default falls back; a worker the caller named refuses."""
+    save("dev-unraid")
+    monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
+    real = td._dispatch_task_tool
+
+    async def older_peer(args, **kwargs):
+        return {"ok": False, "error": refusal}
+
+    monkeypatch.setattr(td, "_dispatch_task_tool",
+                        lambda args, **kw: older_peer(args) if args.get("worker") else real(args, **kw))
+    payload, calls = dispatch(callers["home"])
+    assert payload["ok"] is True and len(calls) == 1
+    assert payload["worker_note"].startswith("Ran on this worker: ServerWorker cannot")
+    payload, calls = dispatch(callers["home"], worker="ServerWorker")
+    assert payload == {"ok": False, "error": refusal} and calls == []

@@ -59,7 +59,7 @@ When your account has more than one worker in its [worker network](/docs/feature
 ### What it needs
 
 - Both workers online and on the current release.
-- The project checked out on both workers, from the same Git remote. Both workers must be able to push to and fetch from it.
+- Normally, the project checked out on both workers from the same Git remote, with push/fetch access. A no-project owner conversation can also name a project checked out only on the target (remote Task protocol 7 or newer).
 - A sign-in on that worker for the subagent's AI provider.
 - An agent saved in the app. Agents from files or plugins run only on their own worker.
 - A chat you own. Chats started with an API key cannot use other workers.
@@ -85,11 +85,13 @@ Besides subagents, agents can coordinate with your other open chats:
 - send a message to another chat;
 - start a new, separate chat with a short brief.
 
-A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 4 new chats and 32 actions until you send a new message. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, archive and ownership checks always apply.
+A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 32 new chats and 256 actions until you send a new message. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, archive and ownership checks always apply.
 
-### Work the personal assistant starts
+### Coordinating without a project
 
-Chats the personal assistant starts report back to it when they finish. When one of them needs your approval, the assistant asks you one plain question in its conversation. Only your own reply there counts.
+An owner conversation without a project uses your selected agent and effort. It can coordinate sessions, start work in any registered project on an eligible worker, use subagents and app tools, browse the web, and use resources you grant through the access card. It can read registered project folders with Read, Glob and Grep, but cannot edit worker files, run a shell or Python kernel, or write skills or plugins. Start a session in the project for code changes; code-capable subagents must name a project and receive their own checkout there. App configuration writes still ask for your approval. API-key and non-owner conversations do not gain this surface. When a named project is checked out only on the target, Task fetches that worker's own configured upstream/default branch and creates a fresh isolated checkout without switching or changing its main checkout's tracking. An explicit source `branch` wins. If fetching fails, it uses the local source-branch tip and says so in the report. Older peers require an update; no silent local fallback occurs. Read-only remote Tasks from a no-project chat also require protocol 7 to request the chat ceiling explicitly; older senders keep their previous worker mode. StartSession on another worker from a no-project chat must also name a project. When the calling worker has a checkout, committed-branch transfer is unchanged.
+
+Chats started by an owner conversation report back automatically. If the starting conversation is settled, it stays settled: the report remains on the child chat and you receive a notification instead. Approval prompts can be answered in the starting conversation while it is open; only your own reply there counts. If it was settled, archived or deleted, prompts use the normal approval path. The existing Assistant daily spending limit covers unattended no-project coordination and the work it starts; the setting remains on the Assistant page during this transition. Turns you type yourself are not counted or refused by these job limits. The job time limit applies to each session or subagent such a conversation starts, not to the conversation itself. Independent project work started from a project conversation is unchanged. Started chats keep the starter's current permission mode; a no-project chat runs on Ask, so what it starts runs on Ask until you change it. Report-back does not grant Bypass or the legacy assistant's automatic question handling. The Assistant page's default worker still applies only to the legacy assistant and its jobs; other conversations run subagents here unless they name a worker. Remote StartSession requires the destination to advertise separate report-back permissions; older workers refuse with an update message. The legacy assistant home's existing Away handling is unchanged. Existing code-mode conversations keep their code tools during this first step.
 
 ## A subagent's chat
 

@@ -976,7 +976,10 @@ def build_options_from_profile(
             _binding_row = database.get_session(session_id)
         except Exception:  # noqa: BLE001 — a lookup failure falls back to config
             _binding_row = None
-    session_mode = session_mode_of(_binding_row)
+    from app.core.session_modes import runtime_session_mode
+    session_mode = runtime_session_mode(_binding_row)
+    from app.core.session_orchestration import is_owner_session
+    owner_coordinator = session_mode == "chat" and is_owner_session(_binding_row)
 
     # Where and how this session runs (execution mode, a worktree's base
     # branch, the runtime placement). The adapter renders it into every
@@ -1114,7 +1117,7 @@ def build_options_from_profile(
 
     # Inject app-config system prompt instructions when the picker permits the
     # app_config group and the session is an admin one.
-    if session_mode != "chat" and _app_config_permitted(config) and not api_user_id:
+    if (session_mode != "chat" or owner_coordinator) and _app_config_permitted(config) and not api_user_id:
         from app.mcp.app_config_sdk import APP_CONFIG_SYSTEM_PROMPT
         if isinstance(final_system_prompt, dict):
             current_append = final_system_prompt.get("append", "")
@@ -1173,13 +1176,22 @@ def build_options_from_profile(
     # ``session_mode`` was resolved off ``_binding_row`` with the cwd above:
     # ``session_row`` is None on a cwd-override spawn, and the mode must not
     # depend on which branch happened to fetch the row.
-    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
+    # A legacy no-project code row gets the coordination tool ceiling, not a
+    # rewritten permission binding. Explicit chat rows still run on Ask.
+    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode_of(_binding_row))
 
     # The owner's assistant (its home, the chats it starts and their Task
     # workers) runs in Bypass, whatever the row says: ordinary work goes ahead
     # and the app asks the owner for the high-risk calls itself
     # (``app.core.assistant_permissions``). Research turns keep their ceiling.
-    assistant_scope = None
+    assistant_scope = ({"session_id": session_id, "home_session_id": session_id,
+                        "roots": [], "cwd": working_dir} if owner_coordinator else None)
+    if owner_coordinator:
+        from app.core.coordinator_files import roots
+        try:
+            assistant_scope["roots"] = [str(path) for path in roots()]
+        except Exception:  # noqa: BLE001 — failed registry reads cannot grant paths
+            logger.warning("Could not resolve coordinator read roots", exc_info=True)
     if session_id and overrides.get("_assistant_proactive") is None and session_mode != "chat":
         from app.core.assistant_permissions import scope_for_session
         assistant_scope = scope_for_session(session_id, working_dir)
@@ -1379,6 +1391,15 @@ def build_options_from_profile(
     # The owner's persistent assistant home delegates by default; every other
     # session keeps the authorize-first delegation line.
     assistant_home = is_primary_session(session_id)
+    if owner_coordinator:
+        final_system_prompt = _append_system_block(final_system_prompt,
+            "# No-project coordination\n"
+            "Use StartSession(project=...) for project work. Code-capable Task subagents must name project=. "
+            "The host provisions their project checkout. You may coordinate owner sessions and use app, web "
+            "and granted access-card tools, but cannot run a worker shell, a Python kernel, Edit/Write, "
+            "or skill/plugin writes. App configuration writes require owner confirmation. "
+            "Read, Glob and Grep are read-only inside registered project roots and chat attachments. "
+            "The read-only broker resolves the current registered roots on this worker.")
     final_system_prompt = _append_system_block(
         final_system_prompt, build_role_context(session_id),
     )
@@ -1409,7 +1430,7 @@ def build_options_from_profile(
     # (``session_mode`` was resolved with the run binding above, off the same
     # row — the cwd-override spawn has no ``session_row`` but does have a
     # binding row, and both legs must agree on the lane.)
-    access = narrow_tool_access_for_mode(access, session_mode)
+    access = narrow_tool_access_for_mode(access, session_mode, owner_session=owner_coordinator)
     access = narrow_tool_access_for_proactive(access, assistant_proactive)
     allowed_tools = list(access.allowed or [])
     disallowed_tools = list(access.disallowed or [])
@@ -1755,7 +1776,8 @@ def build_options_from_profile(
     if session_mode == "chat":
         # Do not spawn project/user MCP processes just to hide their tools.
         mcp_servers_dict = {name: server for name, server in mcp_servers_dict.items()
-                            if name in {"builtins", "chat-access"}}
+                            if name in ({"builtins", "chat-access", "app-config"} if owner_coordinator
+                                        else {"builtins", "chat-access"})}
 
     # Build options with all AgentOptions fields
     options = AgentOptions(
@@ -2048,6 +2070,7 @@ def build_options_from_profile(
     # stamped (not just for chat) so a pooled client comparing old/new options
     # sees a lane CHANGE rather than an absent field on one side.
     options.aih_session_mode = session_mode
+    options.aih_owner_coordinator = owner_coordinator
 
     options.aih_tool_allowlist = intersect_tool_surfaces(
         access.allowed, _dispatch_surface

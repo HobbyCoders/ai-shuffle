@@ -145,6 +145,7 @@ def engine_patches(
     options.model = None
     options.aih_provider_id = None
     options.permission_mode = "default"
+    options.aih_owner_coordinator = False
     options.can_use_tool = None
     stack.enter_context(patch(
         "app.core.sdk_options.build_options_from_profile", return_value=(options, {}),
