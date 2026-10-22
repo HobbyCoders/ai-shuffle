@@ -159,6 +159,25 @@ async def test_a_turn_queued_after_the_busy_check_blocks_the_write(seeded, quiet
 
 
 @pytest.mark.asyncio
+async def test_a_turn_parked_on_background_work_blocks_and_says_so(seeded, quiet):
+    """A parked turn still holds the session (its background work runs on the
+    old client), but the list shows it as done: the refusal names background
+    work rather than a running turn."""
+    from app.db import turns
+    from app.db.base import get_db
+
+    turn = turns.enqueue_turn("attach-chat", "user", prompt="hi")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='parked' WHERE id=%s", (turn["id"],))
+    with pytest.raises(HTTPException) as exc:
+        await _attach("attach-chat")
+    assert exc.value.status_code == 409
+    assert exc.value.detail == attach_api.BUSY_BACKGROUND
+    assert "background work" in exc.value.detail
+    assert db.get_session("attach-chat")["project_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_client_that_starts_streaming_after_the_write_is_not_cut_off(seeded, quiet):
     """Checked again right before the release: a turn that started on the
     pooled client after the write keeps it (its own options check rebuilds the

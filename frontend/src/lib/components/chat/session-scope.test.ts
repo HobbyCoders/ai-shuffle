@@ -105,6 +105,17 @@ describe('Attach a project', () => {
 		archived: false, subagent: false, assistantHome: false
 	};
 
+	it('names background work when only that blocks the attach', () => {
+		const base: AttachState = {
+			sessionId: 's1', hasProject: false, isRemote: false, busy: false,
+			archived: false, subagent: false, assistantHome: false
+		};
+		expect(attachBlockedReason({ ...base, backgroundWork: true })).toMatch(/running or background work/);
+		// A running turn says so first.
+		expect(attachBlockedReason({ ...base, busy: true, backgroundWork: true })).toBe('Wait for this turn to finish, then attach.');
+		expect(attachBlockedReason(base)).toBeNull();
+	});
+
 	it('shows the No project pill only on a running session without a project', () => {
 		expect(noProjectPillVisible(idle)).toBe(true);
 		expect(noProjectPillVisible({ ...idle, sessionId: null })).toBe(false);

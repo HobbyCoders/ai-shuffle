@@ -1330,12 +1330,13 @@ def attach_session_project(
         if cursor.fetchone() is None:
             return None
         cursor.execute(
-            f"SELECT 1 FROM turns WHERE session_id = {_ph} AND state IN "
-            "('queued','running','interrupting','draining','parked') LIMIT 1",
+            f"SELECT DISTINCT state FROM turns WHERE session_id = {_ph} AND state IN "
+            "('queued','running','interrupting','draining','parked')",
             (session_id,),
         )
-        if cursor.fetchone() is not None:
-            raise AttachBusy(session_id)
+        states = {row["state"] for row in cursor.fetchall()}
+        if states:
+            raise AttachBusy(session_id, background_only=states == {"parked"})
         cursor.execute(
             f"UPDATE sessions SET project_id = {_ph}, project_v2_id = {_ph}, mode = NULL, "
             f"permission_mode = 'default', updated_at = {_ph} WHERE id = {_ph} AND mode = 'chat' "
@@ -1346,7 +1347,15 @@ def attach_session_project(
 
 
 class AttachBusy(Exception):
-    """A turn is queued or live, so :func:`attach_session_project` wrote nothing."""
+    """A turn is queued or live, so :func:`attach_session_project` wrote nothing.
+
+    ``background_only``: the only turn is parked on background work (a
+    sub-agent or a background shell), so the session looks done in the list.
+    """
+
+    def __init__(self, session_id: str, *, background_only: bool = False):
+        super().__init__(session_id)
+        self.background_only = background_only
 
 
 def set_session_branch(

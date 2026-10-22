@@ -40,6 +40,10 @@ router = APIRouter()
 ALREADY_HAS_PROJECT = "This session already has a project. Projects can't be changed or detached."
 NOT_HERE = "Attach the project from the worker that runs this session."
 BUSY = "Wait for this session to finish its turn, then attach the project."
+BUSY_BACKGROUND = (
+    "This session's background work is still running. "
+    "Wait for its running or background work to finish, then attach the project."
+)
 NEEDS_LOCAL_CHECKOUT = "This project isn't checked out on this worker."
 
 
@@ -160,8 +164,9 @@ async def attach_project(
         row = await run_sync(
             database.attach_session_project, session_id, project["id"], project_v2_id
         )
-    except database.AttachBusy:
-        raise HTTPException(status.HTTP_409_CONFLICT, BUSY) from None
+    except database.AttachBusy as busy:
+        detail = BUSY_BACKGROUND if busy.background_only else BUSY
+        raise HTTPException(status.HTTP_409_CONFLICT, detail) from None
     if not row:
         raise HTTPException(status.HTTP_409_CONFLICT, ALREADY_HAS_PROJECT)
 

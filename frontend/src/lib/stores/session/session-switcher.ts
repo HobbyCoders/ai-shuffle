@@ -211,6 +211,31 @@ export function reconciledSessionMode(
 	return normalizeSessionMode(row.mode);
 }
 
+/** The row fields that say whether a session has (been given) a project. */
+export interface AttachRowFields {
+	mode?: string | null;
+	project_id?: string | null;
+	project_v2_id?: string | null;
+	permission_mode?: string | null;
+}
+
+/**
+ * Whether a saved copy of a session (this tab's localStorage snapshot or its
+ * in-memory cache) predates a project being attached to it (#371). The attach
+ * also put the session back on Ask, so a saved Auto or Bypass pick is stale:
+ * restored, it would ride the next send, and a send stores its pick as the
+ * session's binding. Callers take the row's access instead.
+ */
+export function attachedSinceSaved(
+	saved: { mode?: string | null; project?: string | null; projectV2Id?: string | null } | null | undefined,
+	row: AttachRowFields | null | undefined,
+): boolean {
+	if (!saved || !row) return false;
+	if (saved.project || saved.projectV2Id) return false;
+	if (saved.mode != null && normalizeSessionMode(saved.mode) !== 'chat') return false;
+	return !!(row.project_id || row.project_v2_id) && normalizeSessionMode(row.mode) !== 'chat';
+}
+
 /**
  * The repository slice of a fresh compose, which depends on the lane it opens in.
  *
@@ -722,7 +747,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// to 'code'.
 			mode: normalizeSessionMode(row?.mode),
 			modelOverride: ephemeral?.modelOverride ?? sessionModelBinding(row),
-			permissionModeOverride: normalizePermissionMode(ephemeral?.permissionModeOverride ?? row?.permission_mode),
+			// A cache saved before a project was attached elsewhere holds a pick
+			// the attach reset to Ask; the row's access wins then (#371).
+			permissionModeOverride: normalizePermissionMode(attachedSinceSaved(ephemeral, row)
+				? (row?.permission_mode ?? 'default')
+				: (ephemeral?.permissionModeOverride ?? row?.permission_mode)),
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.

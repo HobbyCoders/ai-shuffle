@@ -91,6 +91,8 @@ export interface AttachState {
 	isRemote: boolean;
 	/** A turn is running or starting. */
 	busy: boolean;
+	/** A turn is parked on background work (a sub-agent or a background shell). */
+	backgroundWork?: boolean;
 	archived: boolean;
 	/** A subagent's own chat. */
 	subagent: boolean;
@@ -111,6 +113,7 @@ export function attachBlockedReason(state: AttachState): string | null {
 	if (!noProjectPillVisible(state)) return 'This session can’t take a project.';
 	if (state.isRemote) return 'Attach the project from the worker that runs this session.';
 	if (state.busy) return 'Wait for this turn to finish, then attach.';
+	if (state.backgroundWork) return 'Wait for this session’s running or background work to finish, then attach.';
 	return null;
 }
 

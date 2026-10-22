@@ -510,6 +510,34 @@ describe('session-switcher · authoritative binding hydration', () => {
 		switcher.destroy();
 	});
 
+	it('takes the row\'s Ask over a cached Bypass saved before a project was attached elsewhere (#371)', async () => {
+		_mockSessions.current = [{ id: 'session-B', mode: null, project_id: 'proj-1', project_v2_id: 'v2-1', permission_mode: 'default' }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		ephemeralStore.set('session-B', { project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' } as SessionEphemeral);
+		await switcher.switchSession('session-B');
+		expect(getState().mode).toBe('code');
+		expect(getState().project).toBe('proj-1');
+		expect(getState().permissionModeOverride).toBe('default');
+		switcher.destroy();
+	});
+
+	it('keeps a cached pick when no project was attached since', async () => {
+		_mockSessions.current = [
+			{ id: 'session-B', mode: 'chat', project_id: null, permission_mode: 'default' },
+			{ id: 'session-C', mode: null, project_id: 'proj-1', permission_mode: 'default' },
+		];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		// An unsent pick in a chat that is still a chat.
+		ephemeralStore.set('session-B', { project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' } as SessionEphemeral);
+		// An unsent pick in a session that always had its project.
+		ephemeralStore.set('session-C', { project: 'proj-1', projectV2Id: null, permissionModeOverride: 'acceptEdits' } as SessionEphemeral);
+		await switcher.switchSession('session-B');
+		expect(getState().permissionModeOverride).toBe('bypassPermissions');
+		await switcher.switchSession('session-C');
+		expect(getState().permissionModeOverride).toBe('acceptEdits');
+		switcher.destroy();
+	});
+
 	it('refreshes a stale restored context choice from metadata on reload', async () => {
 		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { context_window: 200_000 } });
 		const { switcher, getState } = makeSwitcher(fullState({ contextWindowChoice: '1m' }));

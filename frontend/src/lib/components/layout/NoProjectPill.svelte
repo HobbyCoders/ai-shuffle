@@ -30,6 +30,8 @@
 		hasProject: $activeSession.mode !== 'chat' || !!$activeSession.project || !!$activeSession.projectV2Id,
 		isRemote: !!(row?.is_remote ?? $activeSession.isRemote),
 		busy: !!($activeSession.isStreaming || $activeSession.optimisticStreaming),
+		// A turn parked on background work: the server refuses the attach then too.
+		backgroundWork: !!row?.parked_task_kind,
 		archived: !!(sessionId && $archivedChats.has(sessionId)),
 		subagent: !!(sessionId && $subagentChats.has(sessionId)),
 		assistantHome: assistantMode

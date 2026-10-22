@@ -33,7 +33,7 @@ import {
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode,
+	reconciledSessionMode, attachedSinceSaved, type AttachRowFields,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -1046,10 +1046,28 @@ export const activeSession = {
 	 * compose or a sessionId that is not in the list — neither has a row to
 	 * defer to, so `mode` keeps whatever it already holds.
 	 */
-	reconcileSessionMode(sessionsList: { id: string; mode?: string | null }[]): SessionMode | null {
+	reconcileSessionMode(sessionsList: ({ id: string } & AttachRowFields)[]): SessionMode | null {
 		const sessionId = _state.sessionId;
 		const mode = reconciledSessionMode(sessionId, sessionsList);
 		if (!mode) return null;
+		const row = sessionsList.find(s => s.id === sessionId);
+		// Restored from a snapshot saved while the session had no project, and
+		// a project was attached since (another tab or device, #371): take the
+		// row's project and access. The attach reset access to Ask; a saved
+		// Bypass would otherwise ride the next send and re-bind the session.
+		if (attachedSinceSaved({ mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id }, row)) {
+			const permissionMode = normalizePermissionMode(row?.permission_mode ?? 'default') ?? 'default';
+			const cached = sessionEphemeralCache.restore(sessionId!);
+			if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode });
+			_update(s => ({
+				...s, mode,
+				project: row?.project_id ?? '', projectV2Id: row?.project_v2_id ?? null,
+				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
+				permissionModeOverride: permissionMode,
+			}));
+			persistSession();
+			return mode;
+		}
 		if (mode !== _state.mode) {
 			_update(s => ({ ...s, mode }));
 		}

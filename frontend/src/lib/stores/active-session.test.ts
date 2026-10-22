@@ -239,6 +239,7 @@ describe('attaching a project (#371)', () => {
 		activeSession.current.sessionId = 'attach-me';
 		activeSession.current.mode = 'chat';
 		activeSession.current.project = '';
+		activeSession.current.projectV2Id = null;
 		activeSession.current.permissionModeOverride = 'bypassPermissions';
 	});
 	afterEach(() => { activeSession.current.sessionId = null; });
@@ -251,6 +252,26 @@ describe('attaching a project (#371)', () => {
 		expect(activeSession.current.permissionModeOverride).toBe('default');
 		// The owner's remembered pick for NEW sessions is theirs to change.
 		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+	});
+
+	it('a session restored from a snapshot saved before an attach elsewhere takes the row\'s project and Ask', () => {
+		// init() restored mode 'chat' and Bypass from this tab's snapshot; the
+		// session list then shows a project was attached from another device.
+		const mode = activeSession.reconcileSessionMode([
+			{ id: 'attach-me', mode: null, project_id: 'proj-1', project_v2_id: 'v2-1', permission_mode: 'default' }
+		]);
+		expect(mode).toBe('code');
+		expect(activeSession.current.mode).toBe('code');
+		expect(activeSession.current.project).toBe('proj-1');
+		expect(activeSession.current.projectV2Id).toBe('v2-1');
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+	});
+
+	it('leaves a restored pick alone when nothing was attached', () => {
+		activeSession.reconcileSessionMode([{ id: 'attach-me', mode: 'chat', project_id: null, permission_mode: 'default' }]);
+		expect(activeSession.current.mode).toBe('chat');
+		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
 	});
 
 	it('also resets the cached copy of a session that is no longer on screen', () => {
