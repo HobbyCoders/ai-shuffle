@@ -325,8 +325,25 @@ async def test_compaction_recall_tools_require_a_staged_mod(
         assert ("HistorySearch" in names) is exposed
         argv = _spawn_argv(record)
         assert ("--plugin-dir" in argv) is exposed
+        config = json.loads(Path(loop._mcp_config_path).read_text(encoding="utf-8"))
+        assert ("fluid_bundled" in config["mcpServers"]) is exposed
         if exposed:
             assert "--mcp-config" in argv
             assert loop._claude_mod_listed is True
+            # Read the address handed to the CLI, then query the real bridge:
+            # registry membership alone misses a too-early config snapshot.
+            address = config["mcpServers"]["fluid_bundled"]["args"][-1]
+            from fluid.tools.mcp.bundled_server import _parse_address
+            tcp = _parse_address(address)
+            reader, writer = (await asyncio.open_connection(*tcp) if tcp is not None
+                              else await asyncio.open_unix_connection(address))
+            try:
+                writer.write((json.dumps({"op": "list", "token": loop._bridge_token}) + "\n").encode())
+                await writer.drain()
+                listing = json.loads(await asyncio.wait_for(reader.readline(), 5))
+                assert {"HistoryExpand", "HistorySearch"} <= {t["name"] for t in listing["tools"]}
+            finally:
+                writer.close()
+                await writer.wait_closed()
     finally:
         await loop.aclose()
