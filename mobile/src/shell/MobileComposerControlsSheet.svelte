@@ -55,8 +55,8 @@
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortExplanation, effortKnown = true, effortDefaultValue = null,
-		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
-		showSetup = true, permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect,
+		fastSupported = false, fastEnabled = false, fastPending = false, onToggleFast, showCodeControls = true,
+		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
 		assistantMode = false, onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
 	}: Props = $props();
@@ -100,7 +100,9 @@
 	// session by construction); chat and voice run a fixed tool surface.
 	const accessShown = $derived(showCodeControls || assistantMode);
 	const accessValues = $derived(permissionOptions.map((o) => o.value));
-	const accessValue = $derived(permissionValue ?? 'default');
+	// While the chat's own access is still loading (#418) no mode is selected:
+	// showing Ask would be a guess, and stepping from a guess picks the wrong one.
+	const accessValue = $derived(permissionPending ? '' : (permissionValue ?? 'default'));
 	const accessIcons: Record<string, typeof Hand> = { default: Hand, auto: Sparkles, acceptEdits: FilePen, bypassPermissions: ShieldOff };
 	const showSetupTiles = $derived(showSetup && !assistantMode);
 	const awayShown = $derived(accessShown && !!onToggleAway);
@@ -358,7 +360,7 @@
 		} else if (d.kind === 'step') {
 			const next = d.cell === 'effort'
 				? stepValue(effortValues, effortShown, dx)
-				: stepValue(accessValues, accessValue, dx, BYPASS);
+				: permissionPending ? null : stepValue(accessValues, accessValue, dx, BYPASS);
 			const current = d.cell === 'effort' ? effortShown : accessValue;
 			preview = next && next !== current ? { cell: d.cell as Picker, value: next } : null;
 		}
@@ -512,13 +514,13 @@
 			class:locked={modelLocked}
 			data-cell="model"
 			aria-haspopup="dialog"
-			aria-label={`Model: ${modelLabel}${fastShown && fastEnabled ? ', fast mode' : ''}${modelLocked ? ', locked' : ''}`}
+			aria-label={`Model: ${modelLabel}${fastShown && fastEnabled && !fastPending ? ', fast mode' : ''}${modelLocked ? ', locked' : ''}`}
 			aria-disabled={modelLocked || undefined}
 			onclick={() => { if (!modelLocked) openPanel('model'); }}
 		>
 			<span class="qi">
 				{#if modelLocked}<Lock size={18} aria-hidden="true" />{:else}<Cpu size={20} aria-hidden="true" />{/if}
-				{#if fastShown && fastEnabled}<span class="qmini" aria-hidden="true"><Zap size={10} fill="currentColor" /></span>{/if}
+				{#if fastShown && fastEnabled && !fastPending}<span class="qmini" aria-hidden="true"><Zap size={10} fill="currentColor" /></span>{/if}
 			</span>
 			<span class="ql">{modelLabel}</span>
 		</button>
@@ -547,15 +549,15 @@
 				data-cell="access"
 				aria-haspopup="dialog"
 				aria-expanded={picker === 'access'}
-				aria-busy={permissionUpdating || undefined}
-				aria-label={`Tool access: ${ACCESS_LABEL[shownAccess] ?? shownAccess}${permissionUpdating ? ', saving' : ''}${awayOn ? ', Away mode on' : ''}`}
+				aria-busy={permissionUpdating || permissionPending || undefined}
+				aria-label={`Tool access: ${shownAccess ? (ACCESS_LABEL[shownAccess] ?? shownAccess) : 'loading'}${permissionUpdating ? ', saving' : ''}${awayOn ? ', Away mode on' : ''}`}
 				onclick={() => togglePicker('access')}
 			>
 				<span class="qi">
-					{#if permissionUpdating}<LoaderCircle size={20} class="mcc-spin" aria-hidden="true" />{:else}<AccessIcon size={20} aria-hidden="true" />{/if}
+					{#if permissionUpdating || (permissionPending && !shownAccess)}<LoaderCircle size={20} class="mcc-spin" aria-hidden="true" />{:else}<AccessIcon size={20} aria-hidden="true" />{/if}
 					{#if awayOn}<span class="qmini" data-away-badge aria-hidden="true"><Moon size={10} fill="currentColor" /></span>{/if}
 				</span>
-				<span class="ql">{ACCESS_SHORT[shownAccess] ?? shownAccess}</span>
+				<span class="ql">{shownAccess ? (ACCESS_SHORT[shownAccess] ?? shownAccess) : 'Access'}</span>
 			</button>
 		{/if}
 
@@ -734,8 +736,10 @@
 										</button>
 									{/if}
 									{#if fastShown}
-										<button type="button" class="tile toggle" role="switch" aria-label="Fast mode" aria-checked={fastEnabled} onclick={() => onToggleFast?.()}>
-											<span class="tg-top"><Zap size={20} aria-hidden="true" /><span class="tg-state">{fastEnabled ? 'On' : 'Off'}</span></span>
+										<button type="button" class="tile toggle" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
+											aria-checked={fastPending ? 'mixed' : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
+											onclick={() => { if (!fastPending) onToggleFast?.(); }}>
+											<span class="tg-top"><Zap size={20} aria-hidden="true" /><span class="tg-state">{#if fastPending}<LoaderCircle size={14} class="mcc-spin" aria-hidden="true" />{:else}{fastEnabled ? 'On' : 'Off'}{/if}</span></span>
 											<span><span class="tg-name">Fast mode</span><small class="tg-help">Higher price</small></span>
 										</button>
 									{/if}

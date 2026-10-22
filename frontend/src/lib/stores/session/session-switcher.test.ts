@@ -528,9 +528,9 @@ describe('session-switcher · authoritative binding hydration', () => {
 		];
 		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
 		// An unsent pick in a chat that is still a chat.
-		ephemeralStore.set('session-B', { project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' } as SessionEphemeral);
+		ephemeralStore.set('session-B', { project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions', bindingHydrated: { permission: true } } as SessionEphemeral);
 		// An unsent pick in a session that always had its project.
-		ephemeralStore.set('session-C', { project: 'proj-1', projectV2Id: null, permissionModeOverride: 'acceptEdits' } as SessionEphemeral);
+		ephemeralStore.set('session-C', { project: 'proj-1', projectV2Id: null, permissionModeOverride: 'acceptEdits', bindingHydrated: { permission: true } } as SessionEphemeral);
 		await switcher.switchSession('session-B');
 		expect(getState().permissionModeOverride).toBe('bypassPermissions');
 		await switcher.switchSession('session-C');

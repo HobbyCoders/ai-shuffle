@@ -42,10 +42,16 @@
 	// "No agents" and "none picked yet" look identical on the pill otherwise,
 	// and only one of them is something the user can fix by opening the menu.
 	const hasNoAgents = $derived($profiles.length === 0);
+	// An opened chat whose own agent has not arrived yet (a hidden Task worker
+	// or a deep link, #418): say so rather than show another chat's agent or
+	// the amber "pick one" prompt. A send leaves the agent out until it lands.
+	const profilePending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.profile);
 	const selectedProfileName = $derived(
-		$profiles.find(p => p.id === $activeSession.profile)?.name
-			|| (hasNoAgents ? 'No agents' : 'Agent')
+		profilePending ? 'Loading agent…'
+			: $profiles.find(p => p.id === $activeSession.profile)?.name
+				|| (hasNoAgents ? 'No agents' : 'Agent')
 	);
+	const profileUnset = $derived(!$activeSession.profile && !profilePending);
 
 	const assistant = $derived(
 		$isAdmin && $assistantState?.home_session_id && $assistantState.home_session_id === $activeSession.sessionId
@@ -109,15 +115,17 @@
 	{#if variant === 'card' && !assistant}
 	<button
 		type="button"
-		class="card-name {$activeSession.profile ? '' : 'unset'}"
+		class="card-name {profileUnset ? 'unset' : ''}"
 		class:open={showProfileDropdown}
+		class:pending={profilePending}
+		aria-busy={profilePending || undefined}
 		onclick={handleProfileClick}
 		title="Change agent"
 		aria-label="Agent: {selectedProfileName}"
 		aria-haspopup="menu"
 		aria-expanded={showProfileDropdown}
 	>
-		<span class="card-name-text">{$activeSession.profile || hasNoAgents ? selectedProfileName : 'Pick an agent'}</span>
+		<span class="card-name-text">{$activeSession.profile || hasNoAgents || profilePending ? selectedProfileName : 'Pick an agent'}</span>
 		<svg class="card-name-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 		</svg>
@@ -137,8 +145,10 @@
 	{:else}
 	<button
 		type="button"
-		class="ctx-chip context-selector-btn {$activeSession.profile ? '' : 'unset'}"
+		class="ctx-chip context-selector-btn {profileUnset ? 'unset' : ''}"
 		class:open={showProfileDropdown}
+		class:pending={profilePending}
+		aria-busy={profilePending || undefined}
 		onclick={handleProfileClick}
 		title="Change agent"
 		aria-label="Agent: {selectedProfileName}"
@@ -237,6 +247,20 @@
 	.context-selector-btn.unset:hover {
 		background: color-mix(in oklch, var(--warning) 12%, var(--muted));
 		color: var(--warning);
+	}
+
+	/* The chat's own agent is on its way (#418): quiet and breathing, not amber. */
+	.context-selector-btn.pending,
+	.card-name.pending {
+		color: var(--muted-foreground);
+	}
+	.context-selector-btn.pending .selector-text,
+	.card-name.pending .card-name-text {
+		animation: agent-pending 1.4s ease-in-out infinite;
+	}
+	@keyframes agent-pending {
+		0%, 100% { opacity: 0.5; }
+		50% { opacity: 1; }
 	}
 
 	/* The Assistant's chip: the avatar stands in for the person icon and a gear
@@ -354,6 +378,8 @@
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.card-name, .card-name-chev { transition: none; }
+		.context-selector-btn.pending .selector-text,
+		.card-name.pending .card-name-text { animation: none; }
 		.selector-dropdown { animation: none; }
 	}
 

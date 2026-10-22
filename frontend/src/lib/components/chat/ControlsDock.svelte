@@ -193,7 +193,12 @@
 	// offer it, which is what the backend runs it as.
 	const hasProject = $derived($activeSession.mode !== 'chat');
 	const accessContext = $derived({ hasProject, autoSupported: autoPermission });
-	const permissionValue = $derived(effectiveAccessMode($activeSession.permissionModeOverride, accessContext));
+	// An opened chat whose own access / Fast have not arrived yet (a hidden Task
+	// worker or a deep link, #418) shows them loading — never a made-up Ask or
+	// Fast off — and a send leaves them out until they do.
+	const permissionPending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.permission);
+	const fastPending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.fast);
+	const permissionValue = $derived(permissionPending ? null : effectiveAccessMode($activeSession.permissionModeOverride, accessContext));
 	// The assistant's home has no project by construction; see projectRulesLane.
 	const projectLane = $derived(projectRulesLane($activeSession.mode, assistantMode));
 	// Attach survives into the chat lane. Its uploads skip the project endpoint
@@ -466,10 +471,10 @@
 		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
 	);
 	const permissionLabel = $derived(
-		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
+		permissionPending ? 'Access' : permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
 	);
 	const permissionDescription = $derived(
-		permissionModes.find((m) => m.value === permissionValue)?.description ?? ''
+		permissionPending ? "loading this chat's own setting" : permissionModes.find((m) => m.value === permissionValue)?.description ?? ''
 	);
 </script>
 
@@ -498,11 +503,13 @@
 					type="button"
 					class="dock-txt"
 					class:open={openPopover === 'permission'}
+					class:binding-pending={permissionPending}
 					onclick={() => togglePopover('permission')}
 					title={`Tool access: ${permissionLabel} — ${permissionDescription}`}
 					aria-haspopup="menu"
 					aria-expanded={openPopover === 'permission'}
-					aria-label="Permission mode: {permissionLabel}{away ? ', Away mode on' : ''}"
+					aria-busy={permissionPending || undefined}
+					aria-label="Permission mode: {permissionPending ? 'loading' : permissionLabel}{away ? ', Away mode on' : ''}"
 				>{permissionLabel}{#if away}<span class="away-badge" title="Away: agent decides with recommended defaults and reports them at the end">· Away</span>{/if}</button>
 
 				{#if openPopover === 'permission'}
@@ -709,7 +716,8 @@
 						onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 						{fastSupported}
 						fastEnabled={fastMode}
-						onToggleFast={() => activeSession.setFastMode(!fastMode)}
+						{fastPending}
+						onToggleFast={() => { if (!fastPending) activeSession.setFastMode(!fastMode); }}
 					/>
 				</div>
 			{/if}
@@ -752,9 +760,11 @@
 	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}
 	{fastSupported}
 	fastEnabled={fastMode}
-	onToggleFast={() => activeSession.setFastMode(!fastMode)}
+	{fastPending}
+	onToggleFast={() => { if (!fastPending) activeSession.setFastMode(!fastMode); }}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
+	{permissionPending}
 	{permissionUpdating}
 	onPermissionSelect={selectPermission}
 	awayEnabled={away}
@@ -838,6 +848,22 @@
 	.dock-txt.open {
 		background: var(--muted);
 		color: var(--foreground);
+	}
+
+	/* The chat's own value is on its way (#418): a quiet breathing label rather
+	   than a made-up Ask. */
+	.dock-txt.binding-pending {
+		color: var(--subtle-foreground, var(--muted-foreground));
+		animation: binding-pending 1.4s ease-in-out infinite;
+	}
+
+	@keyframes binding-pending {
+		0%, 100% { opacity: 0.5; }
+		50% { opacity: 1; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.dock-txt.binding-pending { animation: none; }
 	}
 
 	.model-btn {

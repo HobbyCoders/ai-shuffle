@@ -15,6 +15,7 @@ import { feedController } from './v2/feed-controller';
 import { resolvePersistedProject } from './session-project';
 import { normalizeSessionMode } from '../sessionMode.svelte';
 import { DEFAULT_CONTEXT_WINDOW_CHOICE } from '$lib/constants/model-context';
+import { ALL_BINDING_UNHYDRATED, restoreComposerBinding } from './composer-binding';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -138,6 +139,13 @@ export function createSessionInit(deps: SessionInitDeps) {
 				effortLevelOverride: null,
 				contextWindowChoice: DEFAULT_CONTEXT_WINDOW_CHOICE,
 				contextWindowPin: undefined,
+				// Agent, access and Fast are the linked chat's own too (#418): the
+				// seed's last-used picks are not, so they wait for /live as
+				// placeholders that are neither shown as its binding nor sent.
+				profile: '',
+				fastMode: false,
+				bindingUnhydrated: { ...ALL_BINDING_UNHYDRATED },
+				bindingPicks: {},
 			}));
 			feedController.start(deepLinkSessionId);
 			void switcher.refreshSessionMetadata(deepLinkSessionId);
@@ -168,7 +176,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 				// The linked chat's project comes from its own row (/live, then the
 				// open after the first loads). A device default written here would
 				// read as a pick made during that fetch and block it.
-				update(s => ({ ...s, profile: s.profile || defaultProfile }));
+				// Its agent is the chat's own, from /live — not the device default.
+				update(s => ({ ...s, profile: s.profile || (s.bindingUnhydrated?.profile ? '' : defaultProfile) }));
 			} else if (skipRestore) {
 				update(s => ({
 					...s,
@@ -182,6 +191,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 				}));
 			} else {
 				if (persisted) {
+					// An existing session's agent, access and Fast: the snapshot's
+					// real values, else placeholders /live fills (#418). A snapshot
+					// written before that record existed may hold fabricated ones.
+					const binding = persisted.sessionId ? restoreComposerBinding(persisted, null) : null;
 					update(s => ({
 						...s,
 						sessionId: persisted.sessionId ?? null,
@@ -207,7 +220,11 @@ export function createSessionInit(deps: SessionInitDeps) {
 						// flag as true with nothing to restore.
 						isRestoringSession: !!persisted.sessionId,
 						title: persisted.title || 'New Chat',
-						profile: persisted.profile || defaultProfile,
+						profile: binding
+							? (binding.profile || (binding.bindingUnhydrated.profile ? '' : defaultProfile))
+							: (persisted.profile || defaultProfile),
+						bindingUnhydrated: binding?.bindingUnhydrated ?? {},
+						bindingPicks: binding?.bindingPicks ?? {},
 						// An unbound compose saved without a project stays without one,
 						// and so does a restored chat: the device default would read
 						// as the session's own project, hiding a later attach from
@@ -226,12 +243,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 						// onto the model the user happened to choose elsewhere.
 						modelOverride:
 							persisted.modelOverride ?? (persisted.sessionId ? null : s.modelOverride),
-						permissionModeOverride:
-							persisted.permissionModeOverride ?? (persisted.sessionId ? null : s.permissionModeOverride),
+						permissionModeOverride: binding
+							? binding.permissionModeOverride
+							: (persisted.permissionModeOverride ?? s.permissionModeOverride),
 						effortLevelOverride:
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
-						fastMode:
-							persisted.fastMode ?? (persisted.sessionId ? false : s.fastMode),
+						fastMode: binding ? binding.fastMode : (persisted.fastMode ?? s.fastMode),
 						workspaceProjectIds: persisted.workspaceProjectIds ?? [],
 						contextWindowChoice:
 							persisted.contextWindowChoice ??

@@ -56,6 +56,19 @@ describe('EffortPopoverCard', () => {
 		expect(onToggleFast).toHaveBeenCalledOnce();
 	});
 
+	it('holds the Fast toggle, neither on nor off, while the chat\'s own value loads (#418)', async () => {
+		const onToggleFast = vi.fn();
+		const view = render(EffortPopoverCard, { props: { options, value: 'high', onSelect: vi.fn(), fastSupported: true, fastEnabled: false, fastPending: true, onToggleFast } });
+		const toggle = screen.getByRole('button', { name: 'Fast mode: loading' }) as HTMLButtonElement;
+		expect(toggle.disabled).toBe(true);
+		expect(toggle.getAttribute('aria-pressed')).toBe('mixed');
+		expect(toggle.classList.contains('on')).toBe(false);
+		await fireEvent.click(toggle);
+		expect(onToggleFast).not.toHaveBeenCalled();
+		await view.rerender({ options, value: 'high', onSelect: vi.fn(), fastSupported: true, fastEnabled: true, fastPending: false, onToggleFast });
+		expect(screen.getByRole('button', { name: 'Fast mode' }).getAttribute('aria-pressed')).toBe('true');
+	});
+
 	it('renders a single supported level as a button, not a zero-range slider', async () => {
 		const onSelect = vi.fn();
 		render(EffortPopoverCard, { props: { options: [options[2]], value: null, onSelect } });

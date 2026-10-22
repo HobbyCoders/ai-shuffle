@@ -40,6 +40,12 @@ import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.
 import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
 import {
+	cacheComposerBinding,
+	liveComposerBindingPatch,
+	restoreComposerBinding,
+	type LiveComposerBinding,
+} from './composer-binding';
+import {
 	contextChoiceFromWindow,
 	DEFAULT_CONTEXT_WINDOW_CHOICE,
 	isContextWindowChoice,
@@ -81,7 +87,7 @@ interface LiveSnapshot {
 		cache_creation_tokens?: number;
 		cache_read_tokens?: number;
 	};
-	session_meta?: {
+	session_meta?: LiveComposerBinding & {
 		mode?: string | null;
 		project_id?: string | null;
 		project_v2_id?: string | null;
@@ -425,16 +431,16 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	function buildEphemeral(state: ActiveSessionState): SessionEphemeral {
 		return {
-			profile: state.profile,
 			title: state.title,
 			draft: state.draft,
 			scrollTop: state.scrollTop,
 			project: state.project,
 			projectV2Id: state.projectV2Id,
 			modelOverride: state.modelOverride,
-			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
-			fastMode: state.fastMode,
+			// Agent, access and Fast, with which of them are real values (#418).
+			...cacheComposerBinding(state),
+			permissionModeOverride: state.permissionModeOverride,
 			workspaceProjectIds: state.workspaceProjectIds ?? [],
 			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
@@ -490,12 +496,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// showing on this device (see PersistedSession).
 			mode: state.mode,
 			title: state.title,
-			profile: state.profile,
 			project: state.project,
 			projectV2Id: state.projectV2Id,
 			modelOverride: state.modelOverride,
-			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			...cacheComposerBinding(state),
+			profile: state.profile,
+			permissionModeOverride: state.permissionModeOverride,
 			fastMode: state.fastMode,
 			workspaceProjectIds: state.workspaceProjectIds ?? [],
 			contextWindowChoice: state.contextWindowChoice,
@@ -660,6 +667,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// resumes at from_seq=lastSeq instead of replaying the whole log.
 		const cachedTranscript = feedController.cachedPatch(sessionId);
 
+		// Agent, access and Fast (#418): a real cached value or unsent pick, else
+		// the row, else a placeholder marked unhydrated that /live fills. Never
+		// the leaving session's agent, and never a fabricated Ask or Fast off.
+		// A cache saved before a project was attached elsewhere holds a pick
+		// the attach reset to Ask; the row's access wins then (#371).
+		const binding = restoreComposerBinding(ephemeral, row, {
+			rowPermissionWins: attachedSinceSaved(ephemeral, row),
+		});
+
 		update(s => ({
 			...s,
 			sessionId,
@@ -711,6 +727,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// fields with the target session's real values.
 			sessionProfileId: null,
 			currentQueryProfileId: null,
+			profile: binding.profile,
+			bindingUnhydrated: binding.bindingUnhydrated,
+			bindingPicks: binding.bindingPicks,
 			totalTokensIn: 0,
 			totalTokensOut: 0,
 			totalCacheCreationTokens: 0,
@@ -747,15 +766,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// to 'code'.
 			mode: normalizeSessionMode(row?.mode),
 			modelOverride: ephemeral?.modelOverride ?? sessionModelBinding(row),
-			// A cache saved before a project was attached elsewhere holds a pick
-			// the attach reset to Ask; the row's access wins then (#371).
-			permissionModeOverride: normalizePermissionMode(attachedSinceSaved(ephemeral, row)
-				? (row?.permission_mode ?? 'default')
-				: (ephemeral?.permissionModeOverride ?? row?.permission_mode)),
+			permissionModeOverride: normalizePermissionMode(binding.permissionModeOverride),
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
-			fastMode: ephemeral?.fastMode ?? (row?.fast ?? false),
+			fastMode: binding.fastMode,
 			workspaceProjectIds: ephemeral?.workspaceProjectIds ?? row?.workspace_project_ids ?? [],
 			// Existing-chat picks are acknowledged on the worker, not unsent
 			// drafts. A cache from another tab/device cannot outrank that row.
@@ -843,6 +858,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const initialEffort = getState().effortLevelOverride;
 		const initialContextChoice = getState().contextWindowChoice;
 		const initialContextPin = getState().contextWindowPin;
+		const initialBinding = {
+			profile: getState().profile,
+			permissionModeOverride: getState().permissionModeOverride,
+			fastMode: getState().fastMode,
+		};
 		let snap: LiveSnapshot | null;
 		try {
 			// `include_messages=false`: the SSE feed is the transcript authority, so
@@ -948,6 +968,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (meta.workspace_project_ids && getState().workspaceProjectIds === initialFolders) {
 				patch.workspaceProjectIds = meta.workspace_project_ids;
 			}
+			// The session's own agent, access and Fast (#418). A hidden worker or
+			// deep link has no row, so this is where they become real. Server
+			// truth also replaces a stale cached copy, but never an unsent pick or
+			// an edit made while this request was in flight.
+			Object.assign(patch, liveComposerBindingPatch(meta, getState(), initialBinding, normalizePermissionMode));
 			if (meta.title) patch.title = meta.title;
 			if (meta.worktree_deleted !== undefined) patch.worktreeDeleted = meta.worktree_deleted;
 			if (meta.worktree_id !== undefined) patch.worktreeId = meta.worktree_id;
@@ -1079,6 +1104,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : noProjectPermission(getPersistedPermissionMode()),
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
+			// A compose has no server binding to wait for.
+			bindingUnhydrated: {},
+			bindingPicks: {},
 			workspaceProjectIds: newChatEphemeral?.workspaceProjectIds ?? [],
 			contextWindowChoice: getPersistedContextWindowChoice(),
 			contextWindowPin: undefined,
