@@ -87,9 +87,10 @@ def test_the_mod_never_asks_for_credentials() -> None:
     assert source.count("$.http") == 1
     assert re.search(r"\$\.http\s*\.fetch\(target\.url", source)
     assert re.search(r"\bauth\s*:", source) is None
-    # It reads and clears only the three bridge variables DelegatedLoop sets.
+    # Only the bridge variables and the non-secret file-guard kill switch.
     assert set(re.findall(r"\$\.env\.(?:get|set)\('([A-Z_]+)'", source)) == {
         CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
+        "FLUID_BASH_FILE_GUARD",
     }
 
 

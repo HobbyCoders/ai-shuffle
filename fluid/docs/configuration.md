@@ -519,6 +519,23 @@ What the child CLI is given, and what it is not:
   cannot load the mod still runs the turn; the init frame's plugin list says
   whether it loaded, and a steer the transcript check finds says whether the
   mod kept it from the model. `--setting-sources` does not affect the mod.
+- `FLUID_BASH_FILE_GUARD` defaults to on. Set it to `false`, `0`, `off`, `no`
+  or the empty string to disable the Bash file-work routing guard on both legs
+  (restart the session's CLI process after changing its environment). The
+  delegated CLI also accepts it in a settings `env` block. The mod's
+  `tool.call` hook runs before execution even in `bypassPermissions`; native
+  JSON dispatch and code-mode host calls use the same Python gate. A recognized
+  single plain file command is refused only when its matching tool is actually
+  available: Read for cat/head/tail/sed windows, Grep for grep/rg, Glob for
+  find/ls, Write for echo/printf/cat redirection, Edit for simple sed -i.
+  Deferred tools are not loaded by this check. One leading `cd path &&` is
+  recognized; pipelines, substitutions, compound scripts, unknown options,
+  command-output filtering and uncertain syntax pass unchanged. An exact
+  command literal in the latest user request is exempt (even an ambiguous
+  example, to avoid overruling a user-requested command). Tool outputs cannot
+  grant that exemption. A refusal is model-visible retry guidance, not
+  a turn-ending error or a security boundary. CLI introspection failures allow
+  the original command. Older CLIs without the mod have no delegated guard.
 - With the mod loaded and a `plan_usage_sink` (an async callable taking a
   `PlanUsageReport`, as AI Shuffle passes), the mod also reports plan usage.
   On `session.measure`, which the CLI fires after each main-thread turn and

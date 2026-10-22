@@ -9,10 +9,26 @@
 // fails is skipped and the CLI's own behaviour goes on, as without the mod.
 import type { Register } from 'claude-code'
 import { withFluidNote } from './compact.ts'
+import { classify, enabled, refusal } from './file_guard.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
 export const register: Register = (on) => {
+  // tool.call wraps execution, not permission prompting: bypassPermissions
+  // still comes through here. Unknown syntax or unavailable introspection
+  // passes unchanged. This is routing guidance, not a security boundary.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!enabled(await $.env.get('FLUID_BASH_FILE_GUARD')) || !classify(e.command)) return next(e)
+    const tools = (await $.tool.list()).map(t => t.name)
+    const messages = await $.session.messages(e.agentId ? { agentId: e.agentId } : {})
+    // An unreadable agent transcript cannot establish whether the user asked
+    // for the command: allow rather than overrule an explicit request.
+    if (!Array.isArray(messages)) return next(e)
+    const userText = messages.filter(m => m.role === 'user' && !m.toolResults?.length).at(-1)?.text ?? ''
+    const guidance = refusal(e.command, tools, userText)
+    return guidance ? { deny: guidance } : next(e)
+  })
+
   on('prompt.attachment', { type: 'auto_mode' }, async ($, e, next) => {
     const answer = await next(e)
     if (answer.text === null) return answer
