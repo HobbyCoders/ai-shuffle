@@ -217,13 +217,56 @@ async def test_sdk_lists_and_requests_saved_service_without_private_details(
 
 
 @pytest.mark.asyncio
-async def test_saved_catalogue_wait_is_bounded(broker, monkeypatch):
+@pytest.mark.parametrize("expire_inner", [True, False], ids=["listing-timeout", "outer-guard"])
+async def test_saved_catalogue_wait_is_bounded(broker, monkeypatch, expire_inner):
     import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
     release = threading.Event()
-    monkeypatch.setattr(chat_vault, "catalog", lambda *args, **kwargs: release.wait(5) and [])
+    entered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    listing_deadlines = []
+
+    def controlled_timeout(seconds):
+        assert seconds == chat_access.LISTING_TIMEOUT_SECONDS == 0.05
+        deadline = asyncio.timeout(None)
+        listing_deadlines.append(deadline)
+        return deadline
+
+    def blocked_catalog(*args, **kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(chat_vault, "catalog", blocked_catalog)
     monkeypatch.setattr(chat_access, "LISTING_TIMEOUT_SECONDS", 0.05)
-    try:
-        with pytest.raises(AccessDenied, match="timed out"):
-            await asyncio.wait_for(broker.resources("chat"), 1)
-    finally:
-        release.set()
+    # Control only the inner listing deadline with Timeout's public API.
+    # The loop clock and asyncio.wait_for remain real: the 1s outer guard
+    # must still fail a stuck producer even if the inner timeout regresses.
+    with ThreadPoolExecutor(max_workers=1) as executor, monkeypatch.context() as local:
+        local.setattr(chat_access, "_listing_executor", executor)
+        local.setattr(chat_access, "asyncio", SimpleNamespace(
+            **{**vars(asyncio), "timeout": controlled_timeout}))
+        task = asyncio.create_task(asyncio.wait_for(broker.resources("chat"), 1))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            assert not task.done()
+            assert len(listing_deadlines) == 2  # resources and saved metadata
+            listing_deadline = listing_deadlines[-1]
+            assert listing_deadline.when() is None
+            if expire_inner:
+                listing_deadline.reschedule(loop.time())
+                with pytest.raises(AccessDenied, match="timed out"):
+                    await task
+                assert listing_deadline.expired()
+            else:
+                # Deliberately leave the inner timer unarmed. The unmodified
+                # outer wait_for must actually interrupt this blocked read.
+                with pytest.raises(asyncio.TimeoutError):
+                    await task
+                assert not listing_deadline.expired()
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

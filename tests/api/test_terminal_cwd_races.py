@@ -1,6 +1,10 @@
 """Deterministic substitutions at the validation/spawn boundary, with real PTYs."""
 
 import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -125,25 +129,43 @@ def test_child_refuses_directory_moved_out_of_root_after_pin(ctx, tmp_path_facto
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_directory_pins_close_on_success_and_spawn_failure(tmp_path, monkeypatch, fail):
-    selected = tmp_path / "selected"
-    selected.mkdir()
-    opened = []
-    original = os.open
+def test_directory_pins_close_on_success_and_spawn_failure(tmp_path, fail):
+    # A closed descriptor number can immediately be reused by another thread,
+    # even if we record only opens from this thread. Make the exact kernel
+    # fstat assertions in a fresh process with no unrelated terminal workers.
+    script = textwrap.dedent("""
+        import os
+        from pathlib import Path
+        import sys
+        from unittest.mock import patch
+        import pytest
+        from app.core import terminals as service
 
-    def tracked(*args, **kwargs):
-        fd = original(*args, **kwargs)
-        opened.append(fd)
-        return fd
-    monkeypatch.setattr(service.os, "open", tracked)
-    try:
-        with service._pin_folder(str(selected), str(tmp_path)) as (_path, fds):
-            assert len(fds) == 2
-            if fail:
-                raise RuntimeError("spawn failed")
-    except RuntimeError:
-        assert fail
-    assert opened
-    for fd in opened:
-        with pytest.raises(OSError):
-            os.fstat(fd)
+        tmp_path = Path(sys.argv[1])
+        fail = sys.argv[2] == "True"
+        selected = tmp_path / "selected"
+        selected.mkdir()
+        opened = []
+        original = os.open
+
+        def tracked(*args, **kwargs):
+            fd = original(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        with patch.object(service.os, "open", tracked):
+            try:
+                with service._pin_folder(str(selected), str(tmp_path)) as (_path, fds):
+                    assert len(fds) == 2
+                    if fail:
+                        raise RuntimeError("spawn failed")
+            except RuntimeError:
+                assert fail
+            assert opened
+            for fd in opened:
+                with pytest.raises(OSError):
+                    os.fstat(fd)
+    """)
+    result = subprocess.run([sys.executable, "-c", script, str(tmp_path), str(fail)],
+                            cwd=Path(__file__).resolve().parents[2],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
