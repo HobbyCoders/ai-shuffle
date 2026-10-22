@@ -1167,8 +1167,6 @@ async def _await_worker_idle(
             if hard_deadline is not None:
                 wait_seconds = min(wait_seconds, hard_deadline - now)
             done, _pending = await asyncio.wait({waiter}, timeout=wait_seconds)
-            if hard_deadline is not None and loop.time() >= hard_deadline:
-                return WAIT_DEADLINE
             if done:
                 # Surface any exception the wait raised — notably the
                 # CancelledError when the parent turn is cancelled, which MUST
@@ -1187,6 +1185,9 @@ async def _await_worker_idle(
                 and not await _worker_showed_progress(feed)
             ):
                 return WAIT_NO_FIRST_FRAME
+            if wall_cap is not None:
+                await wall_cap.refresh(now)
+                hard_deadline = wall_cap.deadline()
             if hard_deadline is not None and now >= hard_deadline:
                 return WAIT_DEADLINE
     finally:
@@ -1495,6 +1496,7 @@ class _WallCap:
         provider_id: Optional[str] = None,
         origin: Optional[str] = None,
         loop_guarded: bool = False,
+        on_expire: Any = None,
     ) -> None:
         self.started = started
         self.seconds = seconds
@@ -1502,11 +1504,16 @@ class _WallCap:
         self.origin = origin
         self.loop_guarded = loop_guarded
         self._checked = started
+        self.on_expire = on_expire
 
     def deadline(self) -> Optional[float]:
         return self.started + self.seconds if self.seconds > 0 else None
 
     async def refresh(self, now: float) -> None:
+        deadline = self.deadline()
+        if self.on_expire is not None and deadline is not None and now >= deadline:
+            promote, self.on_expire = self.on_expire, None
+            await promote()
         if not self.loop_guarded or now - self._checked < LOOP_GUARD_RECHECK_SECONDS:
             return
         self._checked = now
@@ -1546,9 +1553,9 @@ def _hard_deadline_error(worker_session_id: str, seconds: float) -> str:
     """The failure text for a synchronous worker that blew its wall-clock cap."""
     return (
         f"The worker did not finish within the {seconds:.0f}s cap for a "
-        "synchronous Task, so the call was abandoned rather than blocking the "
-        "parent turn any further. Re-dispatch it in the background if the work "
-        f"genuinely takes this long. Its partial transcript is in session "
+        "synchronous Task and could not be handed off safely; the watchdog "
+        "stopped waiting and requested an interrupt. Do not re-dispatch while "
+        f"its request state is unknown. Its partial transcript is in session "
         f"{worker_session_id}."
     )
 
@@ -2233,6 +2240,7 @@ async def dispatch_worker(
     worker_session_id: Optional[str] = None,
     first_frame_seconds: Optional[float] = None,
     max_wall_seconds: Optional[float] = None,
+    on_background: Optional[Callable[[str], None]] = None,
     suppress_caller_wake: Optional[Callable[[str, Optional[str], int], bool]] = None,
     model_note: Optional[str] = None,
     base_commit: Optional[str] = None,
@@ -2745,9 +2753,28 @@ async def dispatch_worker(
         first_frame_deadline = (
             _clock + first_frame_seconds if first_frame_seconds > 0 else None
         )
+        async def move_to_background() -> None:
+            nonlocal background
+            # No progress (including a failed feed) is not a live handoff.
+            # Keep the watchdog failure path and never arm a phantom launch.
+            if supervised.torn_down or not await _worker_showed_progress(feed):
+                return
+            if not await asyncio.to_thread(_worker_still_working, worker_session_id):
+                return
+            if provider_id and rate_limit_breaker.is_tripped(provider_id):
+                return
+            background = True
+            supervised.background = True
+            task_registry.mark_background_launch(owner_session_id, launch_key)
+            _, seconds, guarded = _worker_deadlines(True, 0, None, provider_id, origin)
+            wall_cap.seconds = seconds
+            wall_cap.loop_guarded = guarded
+            on_background(worker_session_id)
+
         wall_cap = _WallCap(
             _clock, max_wall_seconds, provider_id=provider_id, origin=origin,
             loop_guarded=loop_guarded,
+            on_expire=move_to_background if on_background and not background else None,
         )
 
         wait_verdict = await _await_worker_idle(

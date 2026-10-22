@@ -102,9 +102,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "your system prompt\n"
         "- **prompt**: the complete brief — objective, relevant paths and "
         "context, constraints, and the report you expect back\n"
-        "- **mode**: `sync` (default) blocks and returns the subagent's "
-        "report; `background` returns the worker session id at once and the "
-        "completion is pushed to you in a later turn\n"
+        "- **mode**: `background` (default for every agent) returns the worker "
+        "session id at once; completion is pushed in a later turn. Only explicit "
+        "`sync` waits; at the foreground limit a live worker moves to background. "
+        "Still running means do not re-dispatch.\n"
         "- **label**: short display label for the progress UI\n"
         "\n"
         "## Tips\n"
@@ -140,10 +141,9 @@ SPEC = ToolSpec(
                 "type": "string",
                 "enum": ["sync", "background"],
                 "description": (
-                    "sync (default) waits; background returns at once. The "
-                    "host may run a target in background regardless of what "
-                    "you ask — trust the receipt you get back, not the mode "
-                    "you sent."
+                    "background is the default for every agent; only explicit "
+                    "sync waits. A live worker at the foreground cap moves to "
+                    "background; trust the receipt and do not re-dispatch."
                 ),
             },
             "label": {
@@ -240,8 +240,8 @@ async def _dispatch_and_register(
     """Dispatch, then register whatever the HOST actually detached.
 
     The decision is read off the returned receipt, never off the requested
-    ``mode``: a host may detach a sync request (ai-shuffle backgrounds its
-    read-only agent classes), and that worker must still be registered via
+    ``mode``: a host may detach a sync request at its foreground cap,
+    and that worker must still be registered via
     ``background_task_started`` so the turn parks on it instead of ending.
     """
     # The host receives the derived name so its roster and its SendMessage
@@ -269,7 +269,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
-    if input.get("mode", "sync") == "background":
+    if input.get("mode", "background") == "background":
         # The spawn acknowledgement is an atomic detach boundary. Interrupting
         # the parent turn may stop consuming this tool result, but must not cancel
         # a worker the host has already started or lose its durable task id.

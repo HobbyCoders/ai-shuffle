@@ -774,39 +774,12 @@ def build_task_contract(
             + TASK_MODEL_SETTINGS_HINT
         )
 
-    # A background-default target is dispatched in the background whatever the
-    # call says (task_dispatch._effective_task_mode). When EVERY reachable
-    # target is one, ``mode`` is not a choice at all, so it is dropped from the
-    # schema — models defeat the default simply because the key is there to
-    # pass. On a mixed roster the key has to stay
-    # for the write-capable targets; the description then names the agents that
-    # ignore it, so an ignored value is documented rather than surprising.
-    background_only_ids = [
-        target.id for target in resolved_targets if target.background_default
-    ]
-    offer_mode = not resolved_targets or len(background_only_ids) < len(
-        resolved_targets
+    offer_mode = True
+    mode_text = (
+        "Every agent defaults to background; completion is pushed to you, so do "
+        "not poll. Only explicit mode='sync' waits for the report. At the "
+        "foreground limit a live worker moves to background; do not re-dispatch."
     )
-
-    if offer_mode:
-        mode_text = (
-            "mode='sync' waits for the report. mode='background' returns a "
-            "worker session ID so the parent can continue independent work; "
-            "completion is push-based, so do not busy-poll. The mode "
-            "parameter says when to omit it."
-        )
-        if background_only_ids:
-            mode_text += (
-                " These targets always run in the background and ignore mode "
-                "entirely: " + ", ".join(background_only_ids) + "."
-            )
-    else:
-        mode_text = (
-            "Every target on this roster is a read-only research agent, so "
-            "every dispatch runs in the background and there is no mode "
-            "parameter. The worker's completion is announced to you; do not "
-            "busy-poll."
-        )
 
     # Documented once, here, because delegating sessions otherwise burn turns
     # rediscovering it by KeyError.
@@ -882,18 +855,10 @@ def build_task_contract(
     }
     if offer_mode:
         mode_description = (
-            "sync waits for the report; background returns the worker session "
-            "ID immediately. For a read-only research agent, omit mode; pass "
-            "sync only when you cannot take a single further step without the "
-            "report. Omit to take the target's default: background for "
-            "read-only research agents, sync for every other agent."
+            "Omitted: background for every agent, returning its task ID at once. "
+            "Only explicit sync waits; a live worker at the foreground limit "
+            "moves to background. Completion is pushed; do not re-dispatch."
         )
-        if background_only_ids:
-            mode_description += (
-                " Ignored for these always-background targets: "
-                + ", ".join(background_only_ids)
-                + "."
-            )
         properties["mode"] = {
             "type": "string",
             "enum": ["sync", "background"],

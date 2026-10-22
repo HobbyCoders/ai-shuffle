@@ -24,6 +24,11 @@ boot). The parent accepts it once, only from the worker it sent the child to,
 stores it with local Task reports and wakes the session that called Task
 (:func:`handle_task_report`).
 
+Cross-worker Tasks always return a background receipt, even for explicit sync:
+there is no cross-worker foreground wait to cap or abandon. Tracking and durable
+report delivery are armed at dispatch, so the same worker's completion is pushed
+once; the receipt explains the mode override. Omitted mode is background too.
+
 While it runs, the parent tracks the child like a local background Task
 (:func:`track_dispatch`): a ``task_registry`` record carrying the worker
 (TaskList, TaskGet, ListAgents, the running count, the park gate), a

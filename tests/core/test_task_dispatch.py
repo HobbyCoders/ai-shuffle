@@ -203,7 +203,7 @@ def test_sync_report_lands_in_a_file_not_the_tool_result(agents):
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         payload = asyncio.run(
-            _dispatch({"agent": "helper", "prompt": "go"}, "s-file-report")
+            _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"}, "s-file-report")
         )
 
     assert payload["ok"] is True
@@ -229,7 +229,7 @@ def test_sync_report_file_failure_falls_back_to_inline(agents, monkeypatch):
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
         payload = asyncio.run(
-            _dispatch({"agent": "helper", "prompt": "go"}, "s-report-fail")
+            _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"}, "s-report-fail")
         )
 
     assert payload["report"] == "the whole thing"
@@ -249,7 +249,7 @@ def test_sync_report_keeps_truncated_and_error_semantics(agents):
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=truncated_worker):
         payload = asyncio.run(
-            _dispatch({"agent": "helper", "prompt": "go"}, "s-report-sem")
+            _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"}, "s-report-sem")
         )
     assert payload["truncated"] is True
     assert payload["report_path"]
@@ -259,7 +259,7 @@ def test_sync_report_keeps_truncated_and_error_semantics(agents):
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=failed_worker):
         payload = asyncio.run(
-            _dispatch({"agent": "helper", "prompt": "go"}, "s-report-sem")
+            _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"}, "s-report-sem")
         )
     assert payload["ok"] is False and payload["error"] == "boom"
     assert "report_head" not in payload and "report_path" not in payload
@@ -574,8 +574,8 @@ def test_background_receipt_commands_the_park(agents):
     assert "continue useful work" not in note.lower()
 
 
-def test_ignored_mode_prefix_survives_the_receipt_rewrite(agents):
-    """The ``requested_mode_ignored`` explanation still leads the note."""
+def test_explicit_sync_research_receipt_is_not_rewritten(agents):
+    """Explicit sync is honoured even for a read-only target."""
     _mk_session(agents, "s-bg-ignored", "root-agent")
 
     async def fake_worker(**kwargs):
@@ -588,9 +588,9 @@ def test_ignored_mode_prefix_survives_the_receipt_rewrite(agents):
             "s-bg-ignored",
         ))
 
-    assert payload["requested_mode_ignored"] == "sync"
-    assert payload["note"].startswith("mode='sync' was ignored")
-    assert "End the turn now" in payload["note"]
+    assert "requested_mode_ignored" not in payload
+    assert payload["mode"] == "sync"
+    assert "report_head" in payload
 
 
 def test_background_registration_failure_is_not_returned_as_a_receipt(agents):
@@ -652,23 +652,16 @@ def test_read_only_agent_defaults_to_background(agents):
     assert payload["task_id"] == payload["worker_session_id"]
 
 
-def test_explicit_sync_cannot_beat_the_read_only_default(agents):
-    """R4: a read-only target is background even when the call says sync.
-
-    The tool schema normally hides ``mode`` for such targets, but a request can
-    still arrive from a replayed transcript or a retry built from one. It is
-    ignored — honouring it is what let a user Stop destroy a finished research
-    child's report along with its blocked parent.
-    """
+def test_explicit_sync_overrides_the_read_only_default(agents):
+    """Sync is an explicit opt-in for every target."""
     _mk_session(agents, "s-explore-sync", "root-agent")
     payload, seen = _dispatch_watching_mode(
         {"agent": "explorer", "prompt": "go", "mode": "sync"}, "s-explore-sync"
     )
-    assert payload["mode"] == "background"
-    assert payload["requested_mode_ignored"] == "sync"
-    assert "was ignored" in payload["note"]
-    assert "report_head" not in payload
-    assert seen.get("background") is True
+    assert payload["mode"] == "sync"
+    assert "requested_mode_ignored" not in payload
+    assert payload["report_head"] == "done"
+    assert seen.get("background") is False
 
 
 def test_explicit_background_on_a_read_only_target_is_not_flagged(agents):
@@ -692,34 +685,34 @@ def test_explicit_background_still_wins_for_a_write_capable_target(agents):
     assert seen.get("background") is True
 
 
-def test_explicit_sync_on_a_read_only_file_agent_is_also_ignored(agents):
+def test_explicit_sync_on_a_read_only_file_agent_is_honoured(agents):
     """The rule follows the classification, not the target's storage."""
     _mk_session(agents, "s-file-sync", "root-agent")
     payload, _ = _dispatch_watching_mode(
         {"agent": "researcher", "prompt": "go", "mode": "sync"}, "s-file-sync",
         agent_registry={"researcher": _definition(tools=("Read", "Grep", "Glob"))},
     )
-    assert payload["mode"] == "background"
-    assert payload["requested_mode_ignored"] == "sync"
+    assert payload["mode"] == "sync"
+    assert "requested_mode_ignored" not in payload
 
 
-def test_write_capable_agent_still_defaults_to_sync(agents):
+def test_write_capable_agent_still_defaults_to_background(agents):
     """An explicit surface containing Edit is not read-only."""
     _mk_session(agents, "s-editor", "root-agent")
     payload, _ = _dispatch_watching_mode(
         {"agent": "editor", "prompt": "go"}, "s-editor"
     )
-    assert payload["mode"] == "sync"
+    assert payload["mode"] == "background"
 
 
-def test_unrestricted_agent_still_defaults_to_sync(agents):
+def test_unrestricted_agent_still_defaults_to_background(agents):
     """No declared tools means "inherit everything", which may well write —
     never read-only."""
     _mk_session(agents, "s-open", "root-agent")
     payload, _ = _dispatch_watching_mode(
         {"agent": "helper", "prompt": "go"}, "s-open"
     )
-    assert payload["mode"] == "sync"
+    assert payload["mode"] == "background"
 
 
 def test_read_only_file_agent_defaults_to_background(agents):
@@ -732,13 +725,13 @@ def test_read_only_file_agent_defaults_to_background(agents):
     assert payload["mode"] == "background"
 
 
-def test_write_capable_file_agent_defaults_to_sync(agents):
+def test_write_capable_file_agent_defaults_to_background(agents):
     _mk_session(agents, "s-file-write", "root-agent")
     payload, _ = _dispatch_watching_mode(
         {"agent": "researcher", "prompt": "go"}, "s-file-write",
         agent_registry={"researcher": _definition(tools=("Read", "Write"))},
     )
-    assert payload["mode"] == "sync"
+    assert payload["mode"] == "background"
 
 
 def test_unknown_mode_is_still_rejected(agents):
