@@ -12,6 +12,10 @@ export function bridgeConfig(env = process.env): BridgeConfig | undefined {
   return { sessionId: env.AIS_SESSION_ID, token: env.AIS_PANEL_TOKEN, baseUrl: url.href };
 }
 class Superseded extends Error {}
+/** The server refused this body (or it is too large to send): resending it unchanged cannot succeed. */
+class Rejected extends Error { constructor(message: string, readonly status: number) { super(message); } }
+/** The server's request body limit (browser_control.MAX_BODY). */
+export const MAX_REPORT_BODY = 262144;
 /** Separate poll and report lanes: completion never waits for a long poll. */
 export class WorkspaceBridge {
   readonly workspace: BrowserWorkspace;
@@ -65,15 +69,23 @@ export class WorkspaceBridge {
     });
   }
   private async post(endpoint: string, data: object, timeout: number): Promise<unknown> {
+    const body = JSON.stringify({ session_id: this.config.sessionId, token: this.config.token, runtime_id: this.workspace.runtimeId, ...data });
+    if (Buffer.byteLength(body) > MAX_REPORT_BODY) throw new Rejected("workspace payload too large", 413);
     const response = await this.transport(new URL(endpoint, this.config.baseUrl), {
       method: "POST", headers: { "content-type": "application/json", origin: new URL(this.config.baseUrl).origin },
-      body: JSON.stringify({ session_id: this.config.sessionId, token: this.config.token, runtime_id: this.workspace.runtimeId, ...data }),
+      body,
       signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(timeout)]),
       redirect: "error",
     });
     if (response.status === 409) { this.stop(); throw new Superseded(); }
     if (response.status === 401 || response.status === 403) { this.stop(); throw new Error("workspace authentication rejected"); }
-    if (!response.ok) { await response.body?.cancel(); throw new Error("workspace transport unavailable"); }
+    if (!response.ok) {
+      await response.body?.cancel();
+      // Only a definite refusal of this body: too large (413), or invalid (422).
+      // Other 4xx (a proxy's 408 or 429, say) are transient and retried as-is;
+      // flush() decides whether a 422 can be blamed on a payload.
+      throw response.status === 413 || response.status === 422 ? new Rejected(`workspace payload rejected (${response.status})`, response.status) : new Error("workspace transport unavailable");
+    }
     if (response.status === 204) return null;
     const reader = response.body?.getReader();
     if (!reader) return null;
@@ -157,12 +169,17 @@ export class WorkspaceBridge {
     try {
       while (!this.abort.signal.aborted && (this.dirty || this.results.length)) {
         this.dirty = false;
-        const results = this.results.slice(0, 64);
+        const results = reportBatch(this.results);
         try {
           await this.post("report", { state: this.workspace.state(), results }, 5000);
           this.results.splice(0, results.length);
-        } catch {
+        } catch (error) {
           if (this.abort.signal.aborted) return;
+          // A copy or option list the server refuses (too long, too large) would
+          // be resent forever and hold every later result and state behind it:
+          // its viewer gets an error instead.
+          // A 422 with no payload in the batch points at the state, not a list or copy.
+          if (error instanceof Rejected && (error.status === 413 || results.some(hasPayload)) && withoutPayloads(this.results, results.length)) continue;
           this.dirty = true; await this.pause(1000);
         }
         // Coalesce mouse movement / bursts, without holding a result behind polling.
@@ -170,6 +187,31 @@ export class WorkspaceBridge {
       }
     } finally { this.reporting = false; }
   }
+}
+/**
+ * The next results to report: up to 64, but at most one that carries a
+ * payload (a copy's text or a list's options), so a single report stays well
+ * inside the server's body limit.
+ */
+export function reportBatch(results: readonly CommandResult[]): CommandResult[] {
+  const batch = results.slice(0, 64);
+  const second = batch.findIndex((r, i) => i > 0 && (r.text !== undefined || r.choices !== undefined));
+  return second > 0 ? batch.slice(0, second) : batch;
+}
+const hasPayload = (r: CommandResult): boolean => r.text !== undefined || r.choices !== undefined;
+/**
+ * Replaces the first `count` results' payloads with an error for their
+ * viewer. Returns whether there was a payload to drop.
+ */
+export function withoutPayloads(results: CommandResult[], count: number): boolean {
+  let dropped = false;
+  for (let i = 0; i < count && i < results.length; i++) {
+    const r = results[i];
+    if (!hasPayload(r)) continue;
+    results[i] = { id: r.id, ok: false, error: r.choices !== undefined ? "This list is too long to show here." : "That's too much text to copy at once." };
+    dropped = true;
+  }
+  return dropped;
 }
 export function startWorkspaceBridge(session: Session): WorkspaceBridge | undefined {
   const config = bridgeConfig();

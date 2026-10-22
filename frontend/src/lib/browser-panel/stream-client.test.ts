@@ -415,6 +415,14 @@ describe('workspace protocol', () => {
 		expect(client.send({ ...command, id: 'copy', op: 'copy' })).toBe(true);
 		latest().receive({ type: 'command-result', id: 'copy', ok: true, text: 'copied words' });
 		expect(result).toHaveBeenLastCalledWith('copy', true, undefined, 'copied words');
+		// An options lookup carries a select's (validated) options; malformed ones are dropped.
+		const choices = { selected: 0, groups: [], options: [{ label: 'France', disabled: false }] };
+		expect(client.send({ ...command, id: 'opts', op: 'options', args: { field: 'f' } })).toBe(true);
+		latest().receive({ type: 'command-result', id: 'opts', ok: true, choices });
+		expect(result).toHaveBeenLastCalledWith('opts', true, undefined, undefined, choices);
+		expect(client.send({ ...command, id: 'bad-opts', op: 'options', args: { field: 'f' } })).toBe(true);
+		latest().receive({ type: 'command-result', id: 'bad-opts', ok: true, choices: { selected: 5, groups: [], options: [] } });
+		expect(result).toHaveBeenLastCalledWith('bad-opts', true, undefined);
 		send.mockRestore();
 		warn.mockRestore();
 	});

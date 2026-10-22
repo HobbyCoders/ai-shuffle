@@ -1,5 +1,6 @@
 """Preview lease teardown owns real subprocesses, never another session's app."""
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -59,3 +60,18 @@ def test_invalid_lease_never_starts_database(ttl, owner):
     with pytest.raises(ValueError):
         supervise([], {}, database, ttl=ttl, owner_pid=owner)
     database.open.assert_not_called()
+
+
+def test_preview_teardown_does_not_kill_another_session(tmp_path):
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             start_new_session=True)
+    try:
+        database = Mock()
+        supervise([sys.executable, "-c", "import time; time.sleep(60)"],
+                  preview_environment(tmp_path, 18880, 18881), database,
+                  ttl=.2, owner_pid=os.getpid())
+        database.close.assert_called_once()
+        assert other.poll() is None
+    finally:
+        other.terminate()
+        other.wait(timeout=5)

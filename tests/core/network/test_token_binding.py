@@ -119,6 +119,27 @@ async def test_warning_limit_spans_fresh_peer_links_and_expires(monkeypatch, cap
         assert "expired-peer" not in transport._binding_warning_at
 
 
+def test_receiver_binding_refusal_names_device_and_rate_limits_warning(pair, monkeypatch, caplog):
+    server, peer, endpoints, client = pair
+    monkeypatch.setattr(tokens, "_binding_refusal_at", {}, raising=False)
+    with server.active():
+        assert post(client, request_body(client, server, peer, endpoints[0])).status_code == 200
+        for _ in range(2):
+            response = post(client, request_body(client, server, peer))
+            assert response.status_code == 403
+        warnings = [record for record in caplog.records if record.name == tokens.__name__]
+        assert len(warnings) == 1
+        assert peer.device_id in warnings[0].message
+        assert "NETWORK_TOKEN_BINDING_ENABLED=false" in warnings[0].message
+        detail = response.json()["detail"]
+        assert isinstance(detail, str) and len(detail) <= 300
+        tokens._binding_refusal_at[peer.device_id] -= 301
+        tokens._binding_refusal_at["expired-peer"] = tokens._binding_refusal_at[peer.device_id]
+        assert post(client, request_body(client, server, peer)).status_code == 403
+        assert len([record for record in caplog.records if record.name == tokens.__name__]) == 2
+        assert "expired-peer" not in tokens._binding_refusal_at
+
+
 def test_mismatch_code_discloses_no_addresses_and_requires_valid_proof(pair):
     server, peer, endpoints, client = pair
     with server.active():

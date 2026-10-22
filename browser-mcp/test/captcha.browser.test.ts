@@ -95,7 +95,7 @@ describe.skipIf(!browserPath)("withheld captcha detection", () => {
     userDataDir = mkdtempSync(join(tmpdir(), "browser-mcp-captcha-"));
     proc = spawn(
       browserPath!,
-      ["--headless=new", "--no-sandbox", "--disable-gpu", `--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`, "about:blank"],
+      ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", `--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`, "about:blank"],
       { stdio: "ignore", detached: process.platform !== "win32" },
     );
     await waitForCdp(port);

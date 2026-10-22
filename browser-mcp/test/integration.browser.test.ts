@@ -34,7 +34,7 @@ import { runUpload } from "../src/tools/upload.js";
 import { runBatch } from "../src/tools/batch.js";
 import { TOOL_MAP } from "../src/tools/index.js";
 import type { McpToolResult } from "../src/tools/result.js";
-import { WATCH_KEY } from "../src/dommutation.js";
+import { WATCH_KEY, installMutationWatcher, collectMutationStats, classifyMutations } from "../src/dommutation.js";
 import { observationRootStatus } from "../src/tools/observation_scope.js";
 import { BrowserWorkspace } from "../src/workspace.js";
 import { runWait } from "../src/tools/wait.js";
@@ -44,7 +44,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const NET_BODY_MARKER = "net-body-marker-12345";
 
 /** Small HTTP app: an HTML page that logs to the console and fetches JSON. */
-function startHttpApp(): Promise<{ server: HttpServer; url: string }> {
+function startHttpApp(): Promise<{ server: HttpServer; url: string; holdHistoryStream: () => { request: Promise<void>; release: () => void } }> {
+  // Gate the response, not a wall-clock delay: CI can take arbitrarily long to
+  // dispatch history navigation, and modern Chromium caches no-store pages.
+  let streamGate: { requested: () => void; released: Promise<void> } | undefined;
+  function holdHistoryStream() {
+    let requested!: () => void, release!: () => void;
+    const request = new Promise<void>(resolve => { requested = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    streamGate = { requested, released };
+    return { request, release: () => { streamGate = undefined; release(); } };
+  }
   const html = `<!doctype html><html><head><title>net fixture</title></head>
 <body><main><p id="out">pending</p></main>
 <script>
@@ -56,8 +66,11 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       const url = new URL(req.url, "http://fixture.test");
       if (url.pathname === "/review/history-stream") {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
-        res.write('<!doctype html><title>Streamed history</title><p>Early prose</p><script>addEventListener("unload",()=>{});window.persisted=false;addEventListener("pageshow",e=>window.persisted=e.persisted)</script>' + " ".repeat(2048));
-        setTimeout(() => res.end('<button>Late streamed button</button><p>Stream finished</p>'), 1500);
+        const gate = streamGate;
+        streamGate = undefined;
+        res.write('<!doctype html><title>Streamed history</title><p>Early prose</p><script>window.persisted=false;addEventListener("pageshow",e=>window.persisted=e.persisted)</script>' + " ".repeat(2048));
+        gate?.requested();
+        void (gate?.released ?? Promise.resolve()).then(() => res.end('<button>Late streamed button</button><p>Stream finished</p>'));
         return;
       }
       if (url.pathname === "/review/nested-parent") {
@@ -186,7 +199,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       const port = addr && typeof addr === "object" ? addr.port : 0;
-      resolve({ server, url: `http://127.0.0.1:${port}/` });
+      resolve({ server, url: `http://127.0.0.1:${port}/`, holdHistoryStream });
     });
   });
 }
@@ -194,6 +207,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function findBrowser(): string | null {
+  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
   if (process.platform === "win32") {
     for (const base of [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA]) {
       if (!base) continue;
@@ -263,6 +277,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
   let session: Session;
   let httpServer: HttpServer;
   let httpUrl: string;
+  let holdHistoryStream: Awaited<ReturnType<typeof startHttpApp>>["holdHistoryStream"];
   let uploadDir: string;
   let uploadFilePath: string;
   let cdpEndpoint: string;
@@ -275,17 +290,23 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const app = await startHttpApp();
     httpServer = app.server;
     httpUrl = app.url;
+    holdHistoryStream = app.holdHistoryStream;
     uploadDir = mkdtempSync(join(tmpdir(), "browser-mcp-up-"));
     uploadFilePath = join(uploadDir, "upload-sample.txt");
     writeFileSync(uploadFilePath, "hello upload\n");
     const port = await freePort();
     userDataDir = mkdtempSync(join(tmpdir(), "browser-mcp-it-"));
+    let startupStderr = "";
+    let startupFailure = "";
     proc = spawn(
       browserPath!,
       [
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
+        // Match the worker launcher; managed Chromium bypasses distro wrappers
+        // which add this flag automatically on small container /dev/shm mounts.
+        "--disable-dev-shm-usage",
         // Linux/Ozone only, as in docker/start-chrome.sh (#1791). Other platforms
         // ignore this flag; the fixed-screen regression is skipped there (#2292).
         "--ozone-override-screen-size=1920,1080",
@@ -293,9 +314,17 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         `--user-data-dir=${userDataDir}`,
         "about:blank",
       ],
-      { stdio: "ignore", detached: process.platform !== "win32" },
+      { stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32" },
     );
-    await waitForCdp(port);
+    proc.stderr?.on("data", (chunk) => {
+      startupStderr = (startupStderr + chunk.toString()).slice(-4096);
+    });
+    proc.on("error", (error) => { startupFailure = error.message; });
+    try {
+      await waitForCdp(port);
+    } catch (error) {
+      throw new Error(`${String(error)}; browser=${browserPath}; exit=${proc.exitCode}; ${startupFailure}; ${startupStderr}`);
+    }
     cdpEndpoint = `http://127.0.0.1:${port}`;
     manager = new BrowserManager({ endpoint: cdpEndpoint });
     session = new Session(manager);
@@ -439,16 +468,31 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }
     });
     it("FOLLOWUP non-cached history waits for a streamed document before taking refs", async () => {
+      const page = await session.ensurePage();
       await runNavigate(session, { url: httpUrl + "review/history-stream" });
       await runNavigate(session, { url: httpUrl + "review/history-b" });
-      const started = performance.now();
-      const result = await runNavigate(session, { url: "back" });
-      const page = await session.ensurePage();
-      console.info("HISTORY_STREAM", JSON.stringify({ ms: Math.round(performance.now() - started), ready: await page.evaluate(() => document.readyState) }));
-      expect(await page.evaluate(() => (window as unknown as { persisted: boolean }).persisted)).toBe(false);
-      expect(await page.evaluate(() => document.readyState)).not.toBe("loading");
-      expect((result.content[1] as { text: string }).text).toContain("Late streamed button");
-      expect(body(result).ref_count).toBeGreaterThan(0);
+      // Chromium can bfcache even no-store/unload/Web Lock pages now. Changing
+      // an HTTP-only cookie evicts a no-store document explicitly, without
+      // disabling bfcache for the separate cached-history regression above.
+      await page.context().addCookies([{ name: "history-cache-bust", value: String(performance.now()), url: httpUrl, httpOnly: true }]);
+      const gate = holdHistoryStream();
+      const snapshot = vi.spyOn(session, "snapshot");
+      const navigation = runNavigate(session, { url: "back" });
+      try {
+        await raceWithTimeout(gate.request, 5000, "history did not request the streamed document");
+        await page.waitForFunction(() => document.title === "Streamed history" && document.readyState === "loading");
+        expect(snapshot).not.toHaveBeenCalled();
+        gate.release();
+        const result = await navigation;
+        expect(await page.evaluate(() => (window as unknown as { persisted: boolean }).persisted)).toBe(false);
+        expect(await page.evaluate(() => document.readyState)).not.toBe("loading");
+        expect((result.content[1] as { text: string }).text).toContain("Late streamed button");
+        expect(body(result).ref_count).toBeGreaterThan(0);
+      } finally {
+        gate.release();
+        await navigation.catch(() => {});
+        snapshot.mockRestore();
+      }
     });
     it.each([false, true])("FOLLOWUP history readiness honors the configured navigation timeout (context: %s)", async contextDefault => {
       const originalTab = session.currentTabId()!;
@@ -456,13 +500,23 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       const page = await session.ensurePage();
       await runNavigate(session, { url: httpUrl + "review/history-stream" });
       await runNavigate(session, { url: httpUrl + "review/history-b" });
+      // Chromium can bfcache even no-store/unload/Web Lock pages now. Changing
+      // an HTTP-only cookie evicts a no-store document explicitly, without
+      // disabling bfcache for the separate cached-history regression above.
+      await page.context().addCookies([{ name: "history-cache-bust", value: String(performance.now()), url: httpUrl, httpOnly: true }]);
+      const gate = holdHistoryStream();
       const settings = contextDefault ? page.context() : page;
       settings.setDefaultNavigationTimeout(150);
-      const started = performance.now();
+      const snapshot = vi.spyOn(session, "snapshot");
       try {
+        // The server cannot finish until cleanup. This must reject rather than
+        // take refs from the early document or wait for the 30s default timeout.
         await expect(runNavigate(session, { url: "back" })).rejects.toThrow(/Timeout/);
-        expect(performance.now() - started).toBeLessThan(1000);
+        await raceWithTimeout(gate.request, 5000, "history did not request the streamed document");
+        expect(snapshot).not.toHaveBeenCalled();
       } finally {
+        gate.release();
+        snapshot.mockRestore();
         settings.setDefaultNavigationTimeout(30000);
         await session.closeTab(tab);
         await session.selectTab(originalTab);
@@ -706,9 +760,13 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.evaluate(() => {
         const root = document.getElementById("hosts")!.attachShadow({ mode: "open" });
         root.innerHTML = '<span id="clock"></span>';
-        setInterval(() => { root.querySelector("span")!.textContent = String(Date.now()); }, 100);
+        let ticks = 0;
+        // Do not put the first observed write on the 100ms sample boundary.
+        // A 60ms ticker writes within that window and gives the watcher time
+        // to prove a second sample, even when the renderer coalesces timers.
+        setInterval(() => { root.querySelector("span")!.textContent = String(++ticks); }, 60);
       });
-      await page.waitForTimeout(400);
+      await page.waitForFunction(() => Number(document.getElementById("hosts")!.shadowRoot!.querySelector("span")!.textContent) >= 2);
       const result = body(await runAct(session, { kind: "click", ref: await ref("Shadow lifecycle") }));
       expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
       expect(result.timings.dispatch_ms).toBeLessThan(450); // idle late attachment gets its first sample
@@ -750,14 +808,49 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.goto("about:blank");
     });
     it("finishes a new frame sample discovered during the initial sample wait", async () => {
-      const page = await load('<button>Sample arrival</button><iframe srcdoc="<p>Initial</p>"></iframe><div id="spawn"></div>');
-      const target = await ref("Sample arrival");
-      await page.evaluate(() => { setTimeout(() => {
-        document.getElementById("spawn")!.innerHTML = '<iframe srcdoc="<span id=c></span><script>setInterval(()=>c.textContent=String(Date.now()),100)</script>"></iframe>';
-      }, 60); });
-      const result = body(await runAct(session, { kind: "click", ref: target }));
-      expect(result).toMatchObject({ settle_capped: false, text_churn_ignored: true, dom_mutated: "minor", snapshot_stale: false });
-      await page.goto("about:blank");
+      // Test the browser-side sampling/settling algorithm with a virtual clock.
+      // A Node->CDP dispatch can itself take >60ms on a shared runner, so a
+      // timer scheduled before runAct did not guarantee arrival DURING sampling.
+      // Isolate the clock from the session and its other pages.
+      const context = await (await session.ensurePage()).context().browser()!.newContext();
+      const page = await context.newPage();
+      try {
+        await page.setContent('<iframe srcdoc="<p>Initial</p>"></iframe><div id="spawn"></div>');
+        await page.mainFrame().childFrames()[0].getByText("Initial").waitFor();
+        await page.clock.install({ time: 0 });
+        await page.clock.pauseAt(1000);
+        // Let MutationObserver microtasks run between timer ticks, rather than
+        // delivering an entire virtual second's records at the same timestamp.
+        const advance = async (ms: number) => {
+          for (let elapsed = 0; elapsed < ms; elapsed += 10) {
+            await page.clock.runFor(10);
+            await page.evaluate(() => {});
+          }
+        };
+        const sampling = page.evaluate(installMutationWatcher, WATCH_KEY);
+        await expect.poll(() => page.evaluate(key => (window as unknown as Record<string, { sampling: boolean }>)[key]?.sampling, WATCH_KEY)).toBe(true);
+        await page.clock.runFor(60);
+        await page.evaluate(() => {
+          document.getElementById("spawn")!.innerHTML = '<iframe srcdoc="<span id=c>Clock</span>"></iframe>';
+        });
+        const frame = page.mainFrame().childFrames()[1];
+        await frame.getByText("Clock", { exact: true }).waitFor();
+        // First write at 140ms (after the original 100ms sample), second at
+        // 220ms. Discovery must extend sampling; neither write is on a boundary.
+        await frame.evaluate(() => { setInterval(() => { document.getElementById("c")!.textContent = String(Date.now()); }, 80); });
+        await advance(250);
+        await raceWithTimeout(sampling, 2000, "virtual initial frame sampling did not complete");
+        // Drive the SAME collector used by Session.settle, keeping the ticker
+        // running throughout. It must settle on baseline text, not hit its cap.
+        const settling = page.evaluate(collectMutationStats, [WATCH_KEY, 300, 1500]);
+        await expect.poll(() => page.evaluate(key => (window as unknown as Record<string, { deadline: number }>)[key].deadline, WATCH_KEY)).toBeGreaterThan(0);
+        await advance(1600);
+        const stats = await raceWithTimeout(settling, 2000, "virtual settling did not complete");
+        expect(stats).toMatchObject({ settleCapped: false, textChurnIgnored: true });
+        expect(classifyMutations(stats)).toBe("minor");
+      } finally {
+        await context.close();
+      }
     });
     it.each(["top", "shadow", "frame", "mixed"])("baselines an idle %s ticker across spaced actions", async kind => {
       const top = '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>';
@@ -1355,7 +1448,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const last = page.frames().find(frame => frame.url().endsWith("text=F" + (count - 1)))!;
     await page.locator("iframe").last().scrollIntoViewIfNeeded();
     expect(await last.getByText("F" + (count - 1), { exact: true }).filter({ visible: true }).count()).toBe(1);
-    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "F" + (count - 1), match: "exact", timeout_ms: 4000 })))).toMatchObject({ matched: true });
+    // Main-text starvation is asserted above with the unchanged 2s budget.
+    // Finding the LAST child instead traverses every preceding frame (six at a
+    // time, across CDP). Allow the API's full bounded budget for 300 frames;
+    // that traversal is a correctness check, not a shared-runner benchmark.
+    expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "F" + (count - 1), match: "exact", timeout_ms: 15000 })))).toMatchObject({ matched: true });
     expect(JSON.parse(firstText(await runWait(session, { condition: "text", text: "Missing frame text", timeout_ms: 100 })))).toMatchObject({ timed_out: true });
   }, 30000);
 

@@ -1,6 +1,8 @@
 """Only marked, stale, unused scratch can be removed; no live app required."""
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -136,3 +138,60 @@ def test_process_scan_failure_is_fail_closed(tmp_path):
     path = stale(tmp_path)
     assert reaper.sweep(tmp_path, ttl=1, proc=tmp_path / "no-proc") == 0
     assert path.exists()
+
+
+def test_process_permission_failure_is_fail_closed(tmp_path, monkeypatch):
+    path = stale(tmp_path)
+
+    def denied(*args):
+        raise PermissionError("unreadable process metadata")
+
+    monkeypatch.setattr(reaper, "_references", denied)
+    assert reaper.sweep(tmp_path, ttl=1) == 0
+    assert path.exists()
+
+
+def test_nonregular_receipt_is_skipped_without_blocking(tmp_path):
+    path = stale(tmp_path)
+    marker = path / MARKER
+    marker.unlink()
+    os.mkfifo(marker)
+    os.utime(marker, (1, 1))
+    os.utime(path, (1, 1))
+    assert reaper.sweep(tmp_path, ttl=1) == 0
+    assert path.exists()
+
+
+def test_another_live_scratch_owner_survives(tmp_path):
+    # Drive the real receipt producer in a separate session-like process. Even
+    # artificially aging its entire tree must not make a live lease disposable.
+    code = (
+        "import time; from app.core.temp_scratch import scratch_directory; "
+        "from pathlib import Path\n"
+        "with scratch_directory('ai-shuffle-preview-') as directory:\n"
+        "    print(directory, flush=True)\n"
+        "    time.sleep(60)\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
+        env={**os.environ, "TMPDIR": str(tmp_path), "TEMP": str(tmp_path), "TMP": str(tmp_path)},
+    )
+    try:
+        path = Path(child.stdout.readline().strip())
+        assert path.parent == tmp_path
+        marker = path / MARKER
+        receipt = json.loads(marker.read_text())
+        assert receipt["pid"] == child.pid
+        receipt["created"] = 1
+        marker.write_text(json.dumps(receipt))
+        os.utime(marker, (1, 1))
+        os.utime(path, (1, 1))
+        # Include the other owner's /proc identity in the deterministic view.
+        (tmp_path / "proc" / str(child.pid)).symlink_to(Path("/proc") / str(child.pid))
+        assert reaper.sweep(tmp_path, ttl=1) == 0
+        assert path.exists()
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+        child.stdout.close()

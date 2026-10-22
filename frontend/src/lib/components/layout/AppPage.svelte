@@ -33,7 +33,7 @@
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { registerShortcut, NOT_HANDLED, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { getTags, type Tag } from '$lib/api/client';
 
 	// Layout components
@@ -366,6 +366,9 @@
 					else if (showSpotlight) showSpotlight = false;
 					else if (showImportModal) showImportModal = false;
 					else if (showTagManager) showTagManager = false;
+					// Nothing to close: leave Escape un-prevented so the side panel
+					// (browser, terminal, phone) can take it.
+					else return NOT_HANDLED;
 				}
 			}),
 			registerShortcut({

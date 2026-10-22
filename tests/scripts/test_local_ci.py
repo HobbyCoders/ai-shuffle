@@ -252,7 +252,7 @@ def push(monkeypatch, lines, *, head="h" * 40, clean=True, trees=None, check=0):
     monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
     monkeypatch.setattr(local_ci, "tree_of", lambda sha: (trees or {}).get(sha, "t-" + sha))
     ran = []
-    monkeypatch.setattr(local_ci, "cmd_check", lambda args: ran.append(args.command) or check)
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: ran.append(args.command) or check)
     result = local_ci.cmd_pre_push(local_ci.argparse.Namespace())
     return result, ran
 
@@ -267,8 +267,8 @@ def test_pre_push_trusts_a_recorded_tree(records, monkeypatch):
 
 
 def test_pre_push_runs_checks_for_a_clean_unrecorded_head(records, monkeypatch):
-    assert push(monkeypatch, [ref_line("h" * 40)]) == (0, ["check"])
-    assert push(monkeypatch, [ref_line("h" * 40)], check=1) == (1, ["check"])
+    assert push(monkeypatch, [ref_line("h" * 40)]) == (0, ["fast"])
+    assert push(monkeypatch, [ref_line("h" * 40)], check=1) == (1, ["fast"])
 
 
 def test_pre_push_refuses_what_it_cannot_check(records, monkeypatch):
@@ -288,6 +288,8 @@ def asset_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     env = {**os.environ, "LOCAL_CI_PYTHON": sys.executable}
+    # This isolated repository supplies its own base; never inherit the caller's.
+    env.pop("LOCAL_CI_BASE", None)
 
     def git(*args, check=True, input=None):
         return subprocess.run(["git", *args], cwd=repo, env=env, input=input,
@@ -495,6 +497,188 @@ def test_windows_known_failures_list_is_well_formed():
         path = ROOT / "fluid/tests/unit/test_x.py"
         nodeid = "tests/unit/test_x.py::TestA::test_y[1]"
     assert known.repo_id(Item()) == "fluid/tests/unit/test_x.py::TestA::test_y"
+
+
+@pytest.mark.parametrize("files,expected", [
+    (["app/core/deploy_status.py"], {"backend"}),
+    (["fluid/fluid/loop.py"], {"fluid", "backend"}),
+    (["frontend/src/lib/api.ts"], {"frontend", "mobile"}),
+    (["desktop/src/new.ts"], {"desktop"}),
+    (["frontend/src/lib/docs/search.ts"], {"frontend", "mobile"}),
+    (["scripts/local_ci.py", "scripts/ci/test-cost-policy.py"], {"workflows"}),
+    (["CONTRIBUTING.md", "docs/ci/pr-checks.md", "frontend/src/lib/docs/content/setup.md"], {"docs"}),
+])
+def test_fast_reuses_area_map_and_docs_only(files, expected):
+    assert {suite.name for suite in local_ci.affected_suites(files)} == expected
+
+
+def test_fast_unknown_area_runs_all_suites():
+    assert local_ci.affected_suites(["new-area/config.json"]) == local_ci.SUITES
+
+
+def test_fast_backend_mapping_falls_back_per_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    assert "tests/core/test_deploy_status.py" in local_ci.affected_backend_tests(
+        context(["app/core/deploy_status.py"]))
+    for unknown in ("app/core/unmapped.py", "app/core/new-schema.json"):
+        assert local_ci.affected_backend_tests(context([unknown])) == "all"
+        assert local_ci.affected_backend_tests(context([
+            "app/core/deploy_status.py", unknown])) == "all"
+
+
+def test_fast_failed_dependency_map_still_falls_back_safely(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    mapping = tmp_path / "map"
+    mapping.touch()
+    monkeypatch.setattr(local_ci, "MAP_PATH", mapping)
+    monkeypatch.setattr(local_ci.subprocess, "run", lambda *args, **kwargs:
+                        SimpleNamespace(returncode=1, stderr="unreadable map", stdout=""))
+    ctx = context(["app/core/deploy_status.py", "app/core/unmapped.py"])
+    ctx.mode = "fast"
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: ctx.files)
+    assert local_ci.affected_backend_tests(ctx) == "all"
+    assert local_ci.affected_backend_tests(context(["unknown-area/config.json"]), use_map=False) == "all"
+
+
+def test_fast_map_does_not_include_unrelated_workflow_paths(monkeypatch, tmp_path):
+    mapping = tmp_path / "map"
+    mapping.touch()
+    monkeypatch.setattr(local_ci, "MAP_PATH", mapping)
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: [
+        "app/core/deploy_status.py", "scripts/local_ci.py"])
+    monkeypatch.setattr(local_ci, "select_backend_tests",
+                        lambda ctx: pytest.fail("map CLI would include workflow changes"))
+    assert "tests/core/test_deploy_status.py" in local_ci.affected_backend_tests(
+        context(["app/core/deploy_status.py"]))
+
+
+def test_fast_reuses_recorded_backend_map(monkeypatch, tmp_path):
+    mapping = tmp_path / "map"
+    mapping.touch()
+    monkeypatch.setattr(local_ci, "MAP_PATH", mapping)
+    calls = []
+    ctx = context(["app/core/deploy_status.py"])
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: ctx.files)
+    monkeypatch.setattr(local_ci, "select_backend_tests",
+                        lambda ctx: calls.append(ctx) or ["tests/core/test_deploy_status.py"])
+    assert local_ci.affected_backend_tests(ctx) == ["tests/core/test_deploy_status.py"]
+    assert calls == [ctx]
+
+
+def test_fast_docs_producing_path_through_real_hook(asset_repo):
+    repo, git, commit, pre_push = asset_repo
+    # This test commits the gate itself; the asset fixture's sentinel rule
+    # deliberately matches its own regex, so use the production config here.
+    (repo / ".gitleaks.toml").write_bytes((ROOT / ".gitleaks.toml").read_bytes())
+    for name in ("scripts/ci/update_reach.py", "scripts/source_archive.py"):
+        destination = repo / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, destination)
+    git("add", ".")
+    git("commit", "-qm", "Gate fixture baseline")
+    git("branch", "main")
+    git("remote", "add", "test", str(repo))
+    git("config", "local-ci.base", "test/main")
+    tip = commit("docs/change.md", "Documentation change")
+    result = pre_push(tip)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Affected checks passed: docs" in result.stdout
+    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
+    # The real gate wrote the receipt, not a seeded fixture. It also scanned
+    # the outgoing commits again when that receipt was reused.
+    result = pre_push(tip)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
+    assert "Affected checks passed" not in result.stdout
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_fast_push_scan_precedes_cached_or_uncached_pass(records, monkeypatch, cached):
+    head = "h" * 40
+    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
+    monkeypatch.setattr(local_ci, "git", lambda *args: head)
+    monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
+    if cached:
+        local_ci.save_record("tree", {"mode": "fast", "base": "base",
+                                      "security_gate": local_ci.SECURITY_GATE_VERSION})
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
+    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "base")
+    calls = []
+    monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
+    assert local_ci.cmd_pre_push(local_ci.argparse.Namespace()) == 0
+    assert calls == (["scan"] if cached else ["scan", "fast"])
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_fast_scan_failure_blocks_even_a_cached_pass(records, monkeypatch, cached):
+    head = "h" * 40
+    if cached:
+        local_ci.save_record("tree", {"mode": "fast", "security_gate": local_ci.SECURITY_GATE_VERSION})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
+    monkeypatch.setattr(local_ci, "git", lambda *args: head)
+    monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
+    def fail(*args):
+        raise local_ci.Failure("scanner rejected range")
+    monkeypatch.setattr(local_ci, "scan_push", fail)
+    with pytest.raises(local_ci.Failure, match="scanner rejected"):
+        local_ci.cmd_pre_push(local_ci.argparse.Namespace())
+
+
+def test_fast_cached_pass_for_another_base_reruns_affected_checks(records, monkeypatch):
+    head = "h" * 40
+    local_ci.save_record("tree", {"mode": "fast", "base": "old-base",
+                                  "security_gate": local_ci.SECURITY_GATE_VERSION})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
+    monkeypatch.setattr(local_ci, "git", lambda *args: head)
+    monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
+    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "new-base")
+    calls = []
+    monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
+    assert local_ci.cmd_pre_push(local_ci.argparse.Namespace()) == 0
+    assert calls == ["scan", "fast"]
+
+
+def test_fast_explicit_runs_scan_on_every_invocation(monkeypatch):
+    scans = []
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: scans.append(argv))
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
+    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "base")
+    monkeypatch.setattr(local_ci, "changed_files", lambda base: ["docs/change.md"])
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: False)
+    args = local_ci.argparse.Namespace(attest=False, only=None)
+    for _ in range(2):
+        assert local_ci.cmd_fast(args) == 0
+    assert scans == [[sys.executable, "scripts/secret_scan.py"]] * 2
+
+
+@pytest.mark.parametrize("command,mode", [("check", "changed"), ("full", "full")])
+def test_existing_check_and_full_still_run_original_suites(records, monkeypatch, command, mode):
+    calls = []
+    monkeypatch.setattr(local_ci, "git", lambda *args: "head")
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: False)
+    monkeypatch.setattr(local_ci, "security_check", lambda *args, **kwargs: calls.append("security"))
+    monkeypatch.setattr(local_ci, "run_suites", lambda mode, *args: calls.append(mode) or ([], [], []))
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: pytest.fail("fast replaced existing command"))
+    assert local_ci.cmd_check(local_ci.argparse.Namespace(command=command, attest=False, only=None)) == 0
+    assert calls == ["security", mode]
+
+
+def test_fast_cannot_attest_or_limit_suites():
+    for attest, only in [(True, None), (False, ["docs"])]:
+        with pytest.raises(local_ci.Failure, match="fast does not accept"):
+            local_ci.cmd_fast(local_ci.argparse.Namespace(attest=attest, only=only))
 
 
 def test_hook_finds_the_script_and_chains():

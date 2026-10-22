@@ -6,6 +6,13 @@
  * Mac vs Windows key handling.
  */
 
+/**
+ * Return this from a shortcut's action when it had nothing to do: the key event
+ * is then left un-prevented for whoever else wants it (Escape closes a modal
+ * if one is open, else the side panel). Any other return value is ignored.
+ */
+export const NOT_HANDLED = Symbol('shortcut-not-handled');
+
 export interface KeyboardShortcut {
 	/** Unique identifier for the shortcut */
 	id: string;
@@ -21,8 +28,8 @@ export interface KeyboardShortcut {
 	alt?: boolean;
 	/** Category for grouping in help modal */
 	category: 'navigation' | 'editing' | 'chat' | 'general';
-	/** Callback when shortcut is triggered */
-	action: () => void;
+	/** Callback when shortcut is triggered; may return `NOT_HANDLED`. */
+	action: () => unknown;
 	/** Whether to prevent default browser behavior */
 	preventDefault?: boolean;
 	/** Whether shortcut should work when in input fields */
@@ -122,15 +129,13 @@ function handleKeyDown(e: KeyboardEvent): void {
 			}
 		}
 
-		// Prevent default if specified
-		if (shortcut.preventDefault !== false) {
-			e.preventDefault();
-		}
-
-		// Execute the action
+		// Execute the action, then prevent default if specified (unless the
+		// action declined with NOT_HANDLED).
 		try {
-			shortcut.action();
+			const handled = shortcut.action() !== NOT_HANDLED;
+			if (handled && shortcut.preventDefault !== false) e.preventDefault();
 		} catch (err) {
+			if (shortcut.preventDefault !== false) e.preventDefault();
 			console.error(`Error executing shortcut ${shortcut.id}:`, err);
 		}
 	}

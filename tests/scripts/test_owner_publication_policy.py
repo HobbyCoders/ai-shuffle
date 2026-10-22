@@ -119,23 +119,33 @@ def test_play_accepts_manual_release_caller_only_for_its_exact_tag(job):
     ("ci-browser-workspace.yml", "smoke",
      ["npm run build --prefix browser-mcp", "npm test --prefix browser-mcp -- test/editors.test.ts"]),
 ])
-def test_manual_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands):
+def test_pr_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands):
     config = workflow(name)
-    assert set(config["on"]) == {"workflow_dispatch"}
+    assert set(config["on"]) == {"pull_request", "workflow_dispatch"}
     check = config["jobs"][job]
-    assert check["runs-on"] == "ubuntu-24.04"
+    assert check["runs-on"] == "ubuntu-latest"
     assert "continue-on-error" not in check
     assert all("continue-on-error" not in step for step in check["steps"])
     for command in commands:
         assert any(step.get("run") == command for step in check["steps"])
 
 
-def test_nothing_publishes_or_tests_automatically_except_release_and_edge():
+def test_pr_triggers_are_only_for_read_only_secret_free_checks():
     assert set(workflow("release.yml")["on"]) == {"workflow_dispatch"}
-    # Pull requests start no workflow: tests run locally (scripts/local_ci.py).
+    allowed = {
+        "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
+        "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
+        "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
+    }
+    found = set()
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
-        assert "pull_request" not in workflow(path.name)["on"], path.name
-        assert "pull_request_target" not in workflow(path.name)["on"], path.name
+        config = workflow(path.name)
+        assert "pull_request_target" not in config["on"], path.name
+        if "pull_request" in config["on"]:
+            found.add(path.name)
+            assert config["permissions"] == {"contents": "read"}, path.name
+            assert "secrets." not in path.read_text(), path.name
+    assert found == allowed
 
 
 def test_android_signing_steps_are_owner_gated_without_gating_unsigned_ci():

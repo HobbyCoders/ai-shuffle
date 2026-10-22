@@ -96,8 +96,10 @@ def sweep(root=None, *, ttl=21600, proc=Path("/proc"), now=None):
                 try:
                     info = entry.stat(follow_symlinks=False)
                     marker = path / MARKER
+                    marker_info = marker.lstat()
                     if (info.st_uid != os.getuid() or info.st_mtime > cutoff
-                            or marker.is_symlink() or marker.stat().st_size > 1024):
+                            or not stat.S_ISREG(marker_info.st_mode)
+                            or marker_info.st_uid != os.getuid() or marker_info.st_size > 1024):
                         continue
                     receipt = json.loads(marker.read_text(encoding="utf-8"))
                     if (receipt.get("version") != 1 or receipt.get("uid") != os.getuid()

@@ -694,6 +694,26 @@ export class SourceUpdates {
           // recovery by a verified newer release. Retain it only if no new offer follows.
           stagedNotice = "The downloaded update's release information could not be verified. It is still staged; download a newer update before installing.";
         }
+        const running = this.version;
+        if (!stagedNotice && running && manifest.revision !== staged) {
+          let runningSequence: number | undefined;
+          try {
+            runningSequence = running === this.options.baseline?.revision && !this.state.active
+              ? this.options.baseline.sequence : await this.sequence(running);
+          } catch {
+            // Unknown running metadata cannot justify withdrawal. Fall through
+            // to the existing staged-offer/recovery logic below.
+          }
+          if (runningSequence !== undefined && (manifest.revision === running || manifest.sequence <= runningSequence)) {
+            // A successful current/older feed check withdraws only an unchosen,
+            // never-started download. Keep files and all migration/restore fences.
+            if (!await this.replaceable(staged)) return this.ready(staged);
+            if (this.state.staged === staged) delete this.state.staged;
+            if (this.state.pending === staged) delete this.state.pending;
+            await this.save();
+            return { kind: 'current' };
+          }
+        }
         // Prefer the waiting build over a failed newer release: returning ready intentionally
         // defers the failed-start retry offer until there is no staged build to install.
         if (manifest.revision === staged || manifest.sequence <= stagedSequence || this.state.failed?.includes(manifest.revision)) return this.ready(staged, stagedNotice);
