@@ -38,7 +38,7 @@ jobs:
         # the engine-parity tests skip without it.
         # Only Ubuntu provides ripgrep. Unrelated third-party runner feeds can
         # return 403 and must not block this signed Ubuntu package install.
-        timeout-minutes: 4
+        timeout-minutes: 13
         run: |
           if command -v rg; then exit 0; fi
           python3 scripts/ci/bounded_apt.py sh -c '

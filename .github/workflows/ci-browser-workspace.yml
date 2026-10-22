@@ -75,7 +75,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
       - name: Install isolated Chromium
-        timeout-minutes: 4
+        timeout-minutes: 13
         working-directory: browser-mcp
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

@@ -34,6 +34,9 @@ def fake_apt(tmp_path):
     executable("apt-get", r'''
         import fcntl, os, pathlib, subprocess, sys, time
         root = pathlib.Path(__file__).parent
+        config = pathlib.Path(os.environ["APT_CONFIG"]).read_text()
+        assert 'APT::Get::Upgrade "false";' in config
+        assert 'Dir::Etc::sourceparts "-";' in config
         log = root / "events"
         with log.open("a") as stream:
             stream.write("apt\n")
@@ -72,7 +75,7 @@ def fake_apt(tmp_path):
     # Exercise the unmodified supervisor, shortening only its two constants and
     # redirecting real POSIX lock probes to the fixture's lock. No sudo/root.
     helper = load_helper()
-    source = SCRIPT.read_text().replace("ATTEMPT_SECONDS = 90", "ATTEMPT_SECONDS = 1")
+    source = SCRIPT.read_text().replace("ATTEMPT_SECONDS = 300", "ATTEMPT_SECONDS = 1")
     source = source.replace("KILL_AFTER_SECONDS = 10", "KILL_AFTER_SECONDS = 0.2")
     for lock in helper.LOCKS:
         source = source.replace(lock, str(tmp_path / "lock"))
@@ -169,8 +172,25 @@ def test_elevation_includes_supervisor_and_preserves_runner_cache(monkeypatch):
     monkeypatch.setattr(helper.os, "execvp", execute)
     with pytest.raises(ExecCalled):
         helper.main(["apt-get", "update"])
-    assert helper.ATTEMPT_SECONDS == 90
+    assert helper.ATTEMPT_SECONDS == 300
     assert helper.KILL_AFTER_SECONDS == 10
+
+
+def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
+    helper = load_helper()
+    config = tmp_path / "apt.conf"
+    config.write_text(helper.APT_OPTIONS)
+    # Exercise apt itself, without root, network or modifying the database.
+    # libc6 is already part of both the Ubuntu CI and Debian-based test images.
+    result = subprocess.run(["apt-get", "--simulate", "install", "libc6"],
+                            env={**os.environ, "APT_CONFIG": str(config), "LC_ALL": "C"},
+                            text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Skipping libc6, it is already installed and upgrade is not set" in result.stdout
+    assert "0 upgraded, 0 newly installed" in result.stdout
+    assert '--allow-unauthenticated' not in helper.APT_OPTIONS
+    assert 'trusted' not in helper.APT_OPTIONS
+    assert 'Acquire::Languages "none"' in helper.APT_OPTIONS
 
 
 @pytest.mark.parametrize("workflow,job,step_name", [
@@ -182,7 +202,7 @@ def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_na
     data = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)
     step = next(step for step in data["jobs"][job]["steps"] if step.get("name") == step_name)
     assert "scripts/ci/bounded_apt.py" in step["run"]
-    assert step["timeout-minutes"] == "4"
+    assert step["timeout-minutes"] == "13"
     assert "continue-on-error" not in step
     if workflow != "ci-fluid.yml":
         assert "bounded_apt.py npx --no-install playwright-core install-deps chromium" in step["run"]

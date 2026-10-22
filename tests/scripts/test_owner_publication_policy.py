@@ -165,7 +165,7 @@ def test_fluid_ripgrep_uses_signed_ubuntu_sources_not_optional_runner_feeds():
     assert "Dir::Etc::sourcelist=sources.list.d/ubuntu.sources" in command
     assert "Dir::Etc::sourceparts=-" in command
     assert "apt-get install -y -qq ripgrep" in command
-    assert install["timeout-minutes"] == "4"
+    assert install["timeout-minutes"] == "13"
     assert "python3 scripts/ci/bounded_apt.py sh -c" in command
     assert "--allow-unauthenticated" not in command
     assert "continue-on-error" not in install
@@ -187,7 +187,7 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert cache["with"]["path"] == "~/.cache/ms-playwright"
     assert "hashFiles('browser-mcp/package-lock.json')" in cache["with"]["key"]
     assert steps.index(cache) < steps.index(setup) < steps.index(tests)
-    assert setup["timeout-minutes"] == "4"
+    assert setup["timeout-minutes"] == "13"
     assert "if" not in setup  # OS dependencies are needed even on a cache hit.
     assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
     assert "python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium" in setup["run"]

@@ -194,7 +194,7 @@ jobs:
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
 
       - name: Prepare sandboxed Chromium
-        timeout-minutes: 4
+        timeout-minutes: 13
         working-directory: browser-mcp
         run: |
           # Ubuntu 24.04's AppArmor policy otherwise denies Chromium's user
