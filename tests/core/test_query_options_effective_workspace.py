@@ -29,12 +29,13 @@ def test_no_session_no_project_defaults_to_effective_workspace(effective):
     assert str(opts.cwd) == str(effective)
 
 
-def test_orphan_owner_session_uses_chat_uploads_under_effective_workspace(effective):
-    session = {"id": "ses-1", "project_v2_id": None, "branch": None}
+@pytest.mark.parametrize("mode", [None, "chat"])
+def test_orphan_owner_session_uses_its_stored_mode_under_effective_workspace(effective, mode):
+    session = {"id": "ses-1", "project_v2_id": None, "branch": None, "mode": mode}
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
     ), patch("app.core.project_resolver.resolve_cwd", return_value=None), patch(
         "app.core.project_resolver.resolve_project_v2", return_value=None
     ):
         opts, _ = qo.build_options_from_profile(profile=query_profile(), session_id="ses-1")
-    assert str(opts.cwd) == str(effective / "chat-uploads")
+    assert str(opts.cwd) == str(effective / "chat-uploads" if mode == "chat" else effective)

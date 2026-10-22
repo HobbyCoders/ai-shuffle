@@ -363,10 +363,10 @@ def assistant_route(
         return None
     try:
         from app.core.away_mode import is_away
-        from app.core.session_orchestration import started_by_home
+        from app.core.session_orchestration import started_by_owner
         from app.db import sessions
 
-        home = started_by_home(chat)
+        home = started_by_owner(chat)
         if not home or is_away(chat):
             return None
         title = str((sessions.get_session(chat) or {}).get("title") or "").strip() or "Started chat"

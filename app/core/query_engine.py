@@ -1914,7 +1914,9 @@ async def _stream_to_websocket_impl(
     # it started (or one past its job time limit).
     from app.core import orchestration_limits
 
-    _limited = await asyncio.to_thread(orchestration_limits.turn_refusal, session_id, turn_source)
+    _limited = await asyncio.to_thread(
+        orchestration_limits.turn_refusal, session_id, turn_source, payload=(loop_guard_turn or {}).get("payload"),
+    )
     if _limited:
         logger.warning(f"[WS] Turn refused for session {session_id}: assistant limit")
         yield {"type": "error", "message": _limited, "code": "assistant_limit"}

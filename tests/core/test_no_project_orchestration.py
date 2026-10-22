@@ -35,9 +35,10 @@ async def test_owner_without_project_can_start_registered_project(owner, tmp_pat
     assert child["project_v2_id"] == project["id"]
     assert child["mode"] is None
     assert child["profile_id"] == owner["profile_id"]
-    assert orch.started_by_home(child["id"]) == owner["id"]
+    assert orch.started_by_owner(child["id"]) == owner["id"]
+    assert orch.started_by_home(child["id"]) is None
     from app.core.assistant_permissions import scope_for_session
-    assert scope_for_session(child["id"])["home_session_id"] == owner["id"]
+    assert scope_for_session(child["id"]) is None
     run(child["id"], receipt["turn_id"], "Work finished.")
     await turn_scheduler.on_turn_settled(child["id"], receipt["turn_id"], "completed")
     assert "Work finished." in wakes(owner["id"])[0]["prompt"]
@@ -165,12 +166,15 @@ async def test_existing_daily_setting_counts_coordinator_and_children_after_sett
     result = await call(owner["id"], "start", title="Work", prompt="Do work", request_id="budget")
     receipt = json.loads(result.text)
     limits_db.update(assistant_service.assistant_id(), {"spend_limit_enabled": True, "daily_spend_limit_usd": 2})
-    book(owner["id"], 1.25)
-    book(receipt["session_id"], 1)
+    from app.db.analytics import settle_turn_usage
+    from app.core.query_persistence import usage_settlement_key
+    owner_turn = turns.enqueue_turn(owner["id"], "user", prompt="Owner input", profile_id="agent")
+    assert settle_turn_usage(owner["id"], usage_settlement_key(owner["id"], owner_turn), cost_usd=1.25)
+    book(receipt["session_id"], 2.25)  # Job spend only; the owner's chat is exempt.
     database.set_session_active(owner["id"], False)
     assert assistant_limits.status()["spent_today_usd"] == pytest.approx(2.25)
     assert orchestration_limits.start_refusal(owner["id"])
-    assert orchestration_limits.turn_refusal(owner["id"], "user")
+    assert orchestration_limits.turn_refusal(owner["id"], "user") is None
     assert orchestration_limits.turn_refusal(receipt["session_id"], "unpark")
     database.create_project("independent-project", "Independent", None, "/example/project")
     independent = database.create_session("independent", "agent", project_id="independent-project")
@@ -182,9 +186,9 @@ async def test_existing_daily_setting_counts_coordinator_and_children_after_sett
     assert assistant_limits.status()["spent_today_usd"] == pytest.approx(2.25)
 
 
-def test_runtime_ceiling_for_legacy_no_project_owner_not_project_sessions(owner):
+def test_runtime_ceiling_preserves_legacy_code_until_step_four(owner):
     from app.core.session_modes import runtime_session_mode
-    assert runtime_session_mode({**owner, "mode": None}) == "chat"
+    assert runtime_session_mode({**owner, "mode": None}) == "code"
     assert runtime_session_mode({**owner, "mode": None, "project_v2_id": "project"}) == "code"
 
 
@@ -201,8 +205,11 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=owner["id"])
     assert options.effort == "high"
     assert options.aih_profile_id == "agent"
-    assert options.aih_owner_coordinator
+    assert options.aih_owner_coordinator == (mode == "chat")
     assert options.permission_mode == ("default" if mode == "chat" else permission)
+    if mode is None:
+        assert "# No-project coordination" not in str(options.system_prompt)
+        return  # Step 4, not step 1, migrates stored code sessions to chat.
     from app.core.session_modes import chat_uploads_dir
     assert str(chat_uploads_dir()) in options.aih_assistant_scope["roots"]
     assert "app-config" in options.mcp_servers

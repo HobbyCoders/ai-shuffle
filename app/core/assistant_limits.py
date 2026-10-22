@@ -201,13 +201,21 @@ def _chunks(ids):
         yield ids[index:index + _CHUNK]
 
 
-def _booked(cursor, tracked, start):
+def _booked(cursor, tracked, start, roles=None):
+    from app.db.analytics import _TURN_ID_LEN
+    roles = roles or {}
     total = 0.0
     for chunk in _chunks(tracked):
         marks = ", ".join(["%s"] * len(chunk))
-        cursor.execute(f"SELECT session_id, cost_usd, created_at FROM usage_log WHERE session_id IN ({marks}) "
-                       "AND created_at >= %s", (*chunk, start))
+        # Same primary-key settlement join as analytics: [session, turn, attempt].
+        cursor.execute(f"SELECT ul.session_id, ul.cost_usd, ul.created_at, t.source, t.payload "
+                       "FROM usage_log ul LEFT JOIN turns t ON t.session_id=ul.session_id "
+                       f"AND t.id=substr(ul.settlement_key, length(ul.session_id)+6, {_TURN_ID_LEN}) "
+                       f"WHERE ul.session_id IN ({marks}) AND ul.created_at >= %s", (*chunk, start))
         for row in cursor.fetchall():
+            kind = roles.get(row["session_id"])
+            if kind and _person_input(row["source"], row["payload"]):
+                continue
             since = tracked.get(row["session_id"])
             booked_at = _utc(row["created_at"])
             if since is not None and booked_at is not None and booked_at < since:
@@ -227,7 +235,7 @@ def _live_turns(cursor, session_ids):
     return turns
 
 
-def _in_flight(cursor, tracked, live):
+def _in_flight(cursor, tracked, live, roles=None):
     """Per-call costs of turns not booked yet (their current attempt only).
 
     Records without a ``model_call_index`` are coalesced gauges and would
@@ -235,6 +243,8 @@ def _in_flight(cursor, tracked, live):
     """
     total = 0.0
     for turn in live:
+        if turn["session_id"] in (roles or {}) and _person_input(turn.get("source"), turn.get("payload")):
+            continue
         since = max(filter(None, (_utc(turn.get("started_at")), tracked.get(turn["session_id"]))), default=None)
         cursor.execute("SELECT payload, created_at FROM session_events WHERE session_id=%s AND turn_id=%s "
                        "AND event_type='turn.usage'", (turn["session_id"], turn["id"]))
@@ -269,15 +279,15 @@ def _measure(now=None) -> dict:
     """Spend today plus what enforcement needs, from one connection."""
     day, start, resets_at, tz_name = day_window(now)
     from app.core.orchestration_limits import tracked_roles
-    roles = tracked_roles()
+    roles = tracked_roles(now)
     with get_db() as conn:
         cursor = conn.cursor()
         tracked = _tracked(cursor, roles)
         live = _live_turns(cursor, tracked) if tracked else []
-        spent = ((_booked(cursor, tracked, start) + _in_flight(cursor, tracked, live)) if tracked else 0.0)
+        spent = ((_booked(cursor, tracked, start, roles) + _in_flight(cursor, tracked, live, roles)) if tracked else 0.0)
         spent += _remote_booked(cursor, start)
     return dict(day=day, start=start, resets_at=resets_at, timezone=tz_name,
-                spent=spent, tracked=tracked, live=live)
+                spent=spent, tracked=tracked, live=live, roles=roles)
 
 
 def status(now=None):
@@ -365,7 +375,12 @@ def _job_over_time(session_id, minutes, now):
         return _job_minutes(session, now) >= minutes
 
 
-def turn_refusal(session_id, source=None):
+def _person_input(source, payload=None):
+    # Shared with orchestration admission; Away answers are not owner input (#373).
+    return source in PERSON_SOURCES and (_payload(payload) or {}).get("question_answer_human_input") is not False
+
+
+def turn_refusal(session_id, source=None, *, payload=None):
     """Why a new model turn in ``session_id`` may not start, or None.
 
     The home starts no turn at the limit, whoever asked. A job starts no
@@ -373,7 +388,7 @@ def turn_refusal(session_id, source=None):
     started in it runs.
     """
     from app.core.orchestration_limits import turn_refusal as check
-    return check(session_id, source)
+    return check(session_id, source, payload=payload)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +406,11 @@ def role_context(session_id):
     """Static text for the home's system prompt (no per-turn values)."""
     try:
         from app.core.orchestration_limits import role as coordination_role
-        return ROLE_CONTEXT if coordination_role(session_id) else ""
+        kind = coordination_role(session_id)
+        if not kind:
+            return ""
+        return ROLE_CONTEXT + (" Owner-typed turns in ordinary coordination chats are exempt; "
+                               "automated Away answers are not." if kind == "coordinator" else "")
     except Exception:  # noqa: BLE001
         logger.debug("Assistant limits: role context unavailable", exc_info=True)
         return ""
@@ -444,8 +463,7 @@ def plan(now=None):
     )
     tracked = measured["tracked"]
     stops = []
-    from app.core.orchestration_limits import tracked_roles
-    coordinators = {sid for sid, kind in tracked_roles().items() if kind == "coordinator"}
+    coordinators = {sid for sid, kind in measured["roles"].items() if kind == "coordinator"}
     with get_db() as conn:
         cursor = conn.cursor()
         home = _home_id(cursor)
@@ -455,7 +473,7 @@ def plan(now=None):
             sid = turn["session_id"]
             if limits_db.stopped(turn["id"]):
                 continue
-            person = sid not in coordinators and turn.get("source") in PERSON_SOURCES
+            person = sid != home and _person_input(turn.get("source"), turn.get("payload"))
             if state["limit_reached"] and not person:
                 stops.append((sid, turn["id"], "daily_limit", _label(cursor, sid) if sid != home else None))
                 continue
@@ -518,7 +536,8 @@ def _job_usage(cursor, session_id, from_device, now):
         "known": True,
         "cost_usd": round(cost, 6),
         "running": bool(live),
-        "turns": [{"turn_id": turn["id"], "person": turn.get("source") in PERSON_SOURCES} for turn in own],
+        "turns": [{"turn_id": turn["id"], "person": _person_input(turn.get("source"), turn.get("payload"))}
+                  for turn in own],
         "job_minutes": round(_job_minutes(session, now), 3),
     }
 

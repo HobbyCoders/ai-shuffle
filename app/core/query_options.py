@@ -1392,19 +1392,14 @@ def build_options_from_profile(
     # session keeps the authorize-first delegation line.
     assistant_home = is_primary_session(session_id)
     if owner_coordinator:
-        from app.core.coordinator_files import roots
-        try:
-            read_roots = "\n".join("- " + str(path) for path in roots()[:40])
-        except Exception:  # noqa: BLE001 — no registry lookup may widen file access
-            read_roots = "Unavailable; ask the owner to register a project."
         final_system_prompt = _append_system_block(final_system_prompt,
             "# No-project coordination\n"
             "Use StartSession(project=...) for project work. Code-capable Task subagents must name project=. "
             "The host provisions their project checkout. You may coordinate owner sessions and use app, web "
             "and granted access-card tools, but cannot run a worker shell, a Python kernel, Edit/Write, "
             "or skill/plugin writes. App configuration writes require owner confirmation. "
-            "Read, Glob and Grep are read-only inside registered project roots and chat attachments.\n"
-            "Registered read-only roots on this worker:\n" + read_roots)
+            "Read, Glob and Grep are read-only inside registered project roots and chat attachments. "
+            "The read-only broker resolves the current registered roots on this worker.")
     final_system_prompt = _append_system_block(
         final_system_prompt, build_role_context(session_id),
     )

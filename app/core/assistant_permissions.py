@@ -616,7 +616,7 @@ def home_of(session_id: Optional[str]) -> Optional[str]:
             if assistant_service.is_primary_session(current):
                 return current
             home = _started_by_home(current)
-            if home:
+            if home and assistant_service.is_primary_session(home):
                 return home
             row = database.get_session(current)
             if not row or not row.get("is_worker"):
