@@ -812,11 +812,11 @@ def build_task_contract(
     # rediscovering it by KeyError.
     sync_shape = (
         "Sync JSON: report_head (bounded prefix), report_chars (full length), "
-        "report_path (full file). There is NO 'report' key unless writing failed; "
-        "then it holds the full text and the note explains. Only if report_head "
+        "report_path (full file). NO 'report' key unless writing failed (then it "
+        "has the full text and a note). Only if report_head "
         "is insufficient, read report_path via Read(offset=..., limit=...) in ONE cell; never "
         "print the whole file. Background returns worker_session_id/task_id, "
-        "no report; completion is announced later."
+        "no report; completion arrives later."
     )
 
     limits = host_worker_limits_text()
@@ -854,10 +854,10 @@ def build_task_contract(
 
     properties["project"] = {
         "type": "string", "minLength": 1, "maxLength": 500,
-        "description": "Registered project name/id/path; required for no-project coding Tasks. The host creates its checkout.",
+        "description": "Registered project name/id/path; needed to code from a no-project chat; gets its own checkout.",
     }
     properties["branch"] = {
-        "type": "string", "description": "Source branch for a target-only project on worker; omitted: its default branch.",
+        "type": "string", "description": "Target-only project's source branch (default: worker's default).",
     }
     properties["base_commit"] = {
         "type": "string",
