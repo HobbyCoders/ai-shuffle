@@ -1,9 +1,10 @@
 """Opt-in branch UI on the existing authenticated listener, never a second worker.
 
 After building this checkout's frontend: ``python -m app.preview stamp``.
-Start the normal application with AI_SHUFFLE_PREVIEW=1 only on an isolated
-instance or after stopping that instance's existing worker. Configuration and
-credentials remain inherited; this module neither starts services nor proxies.
+On Linux, ``python -m app.preview run --port 18080`` owns an isolated app and
+throwaway PostgreSQL under a parent/TTL lease, without inheriting credentials.
+Raw AI_SHUFFLE_PREVIEW=1 remains caller-managed: use only an isolated instance,
+never start a second worker against an existing instance's data directory.
 """
 from __future__ import annotations
 
@@ -156,6 +157,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["stamp"])
-    parser.parse_args()
+    parser.add_argument("command", choices=["stamp", "run"])
+    args, rest = parser.parse_known_args()
+    if args.command == "run":
+        from app.preview_run import main
+        raise SystemExit(main(rest))
+    if rest:
+        parser.error("stamp does not take additional arguments")
     print(json.dumps(stamp_build()))

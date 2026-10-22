@@ -1362,8 +1362,11 @@ def _shuffle_facts(cwd: Path, app_port: Optional[int], preview_url: Optional[str
     lines.append(ui)
     lines.append(
         "Branch UI preview: build the frontend, run `python -m app.preview "
-        "stamp`, then start an isolated instance with AI_SHUFFLE_PREVIEW=1 on "
-        "another port (see the preview-branch skill). Never start a second "
+        "stamp`. On Linux use `python -m app.preview run --port 18080 "
+        "--ttl-seconds 3600` under Monitor: it owns the app and disposable "
+        "PostgreSQL until the task/parent ends or its TTL expires. Do not "
+        "daemonize it. Other platforms use an isolated AI_SHUFFLE_PREVIEW=1 "
+        "instance (see the preview-branch skill). Never start a second "
         "worker against the running instance's data dir."
     )
     vite = "frontend/vite.config.js" if (cwd / "frontend" / "vite.config.js").is_file() else None

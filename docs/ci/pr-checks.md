@@ -109,6 +109,60 @@ gate. All checkouts must use this gate version and the same slot override/temp
 directory to share the budget; older unsuffixed-lock gates do not coordinate
 with these slots.
 
+### Disposable test scratch and previews
+
+Pytest controllers allocate a unique `ai-shuffle-pytest-*` basetemp and remove
+it after fixture and xdist worker teardown, including failed runs. Workers use
+the controller's base rather than competing for a shared numbered directory.
+Retention is explicitly `none` / `0`. An explicit `--basetemp` remains caller-owned.
+`local_ci.py` gives each child command a unique `ai-shuffle-ci-*` TMPDIR/TEMP/TMP
+and removes it after stopping failed, timed-out or interrupted children. It
+preserves the original shared xdist lock directory in
+`AI_SHUFFLE_PYTEST_GATE_DIR`; private scratch must not create private admission
+slots. Independently owned pytest/browser scratch uses the original temporary
+root (`AI_SHUFFLE_TEST_SCRATCH_ROOT`) rather than nesting beneath command scratch,
+so Unix-domain socket paths stay short. `npm test` in browser-mcp similarly owns
+its browser/Node scratch.
+
+Normal exit, SIGTERM, pytest's Ctrl-C handling and local-ci command failure run
+cleanup. Pytest's SIGTERM handler exits the whole session with code 143 (serial
+and xdist), rather than failing one test and continuing; local-ci retains its
+SystemExit-based unwind. Staged/custom stop handlers are preserved. SIGKILL and host crashes
+cannot run finalizers. Approved workers periodically sweep only private (0700),
+allowlisted, ownership-receipted scratch older than six hours, skipping live
+owners, process cwd/open descriptors, symlinks, checkouts and separate git stores.
+Set `AI_SHUFFLE_SCRATCH_REAPER=0` to disable this maintenance task.
+
+Sweeps separately bound processes (10,000), descriptors (100,000), tree entries,
+removals and elapsed time. Uninspectable unrelated non-root UIDs cannot enter
+these private trees. The only uninspectable root processes exempted are known
+init ancestors (`tini`, `docker-init`, or PID 1 `init`/`systemd`): they predate the
+scratch, cannot inherit its descriptors/cwd, and are trusted not to open it later.
+Normal app startup makes processes non-dumpable. Readable status and exact
+Python entry-point argv identify same-user `app.main` instances (including
+runners), `app.preview_process`, and the exact agent-isolation app shim; these
+do not block sweeping other prefixes. Their own live-owner receipts protect
+scratch, but an orphaned preview app can retain a dead launcher's preview tree.
+Whenever the scan exempts an opaque `app.main` or `app.preview_process`, it skips
+all `ai-shuffle-preview-*` trees for that sweep; pytest/CI and other prefixes
+remain eligible. The non-dumpable `docker/container_runtime.py run` supervisor is also
+exempt only when it is an ancestor: it starts/reaps children without opening
+their scratch. Other uninspectable root or same-user processes fail closed,
+logging the disabled sweep once per worker. A process retaining scratch cwd/fds
+before switching all its UIDs to another user remains a known narrow gap.
+These sweeps do not clean generic `tmp*`, `probe-`, `cdp-`, `ci-` or legacy
+unmarked trees.
+
+For a disposable Linux preview, build the frontend, run
+`python -m app.preview stamp`, then use
+`python -m app.preview run --port 18080 --ttl-seconds 3600` under a Monitor task.
+It creates its own HOME, data directory and PostgreSQL without inheriting
+credentials. Keep the launcher alive: parent loss, task termination, Ctrl-C or
+TTL expiry closes the app and cluster. The TTL is capped at four hours. Raw
+`AI_SHUFFLE_PREVIEW=1 python -m app.main` remains a caller-managed instance;
+this command cannot adopt or terminate somebody else's existing preview.
+SIGKILL of the launcher still relies on Monitor's process-tree teardown.
+
 A pass on a clean checkout is recorded against the commit's tree in
 `.git/local-ci/passes.json`. A fast receipt also pins the comparison merge-base;
 pushing against a different base reruns affected checks. The offline secret scan

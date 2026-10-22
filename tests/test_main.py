@@ -275,8 +275,14 @@ class TestLifespan:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("runner_approved", [True, False])
-    async def test_loop_watchdog_lifecycle(self, runner_approved):
+    @pytest.mark.parametrize("scratch_enabled", [True, False])
+    async def test_loop_watchdog_lifecycle(self, runner_approved, scratch_enabled, monkeypatch):
         from app.main import lifespan
+
+        if scratch_enabled:
+            monkeypatch.delenv("AI_SHUFFLE_SCRATCH_REAPER", raising=False)
+        else:
+            monkeypatch.setenv("AI_SHUFFLE_SCRATCH_REAPER", "0")
 
         with patch.multiple(
                  "app.core.startup", init_core=DEFAULT,
@@ -295,12 +301,14 @@ class TestLifespan:
              patch("app.core.plugin_auto_update.start_plugin_auto_update", return_value=None), \
              patch("app.core.provider_usage.provider_usage_monitor.start"), \
              patch("app.core.provider_usage.provider_usage_monitor.stop", AsyncMock()), \
+             patch("app.core.scratch_reaper.maintain_scratch", AsyncMock()) as maintain_scratch, \
              patch("app.core.loop_watchdog.start_loop_watchdog") as start_watchdog, \
              patch("app.core.loop_watchdog.stop_loop_watchdog") as stop_watchdog:
             async with lifespan(MagicMock()):
                 start_watchdog.assert_called_once()
                 stop_watchdog.assert_not_called()
             stop_watchdog.assert_called_once()
+            assert maintain_scratch.call_count == int(runner_approved and scratch_enabled)
 
     @pytest.mark.asyncio
     async def test_failed_boot_task_does_not_interrupt_shutdown(self, caplog):

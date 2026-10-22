@@ -188,7 +188,14 @@ def test_lock_error_means_no_gate(tmp_path):
     gate.release()  # no-op, never raises
 
 
-def test_default_lock_path_is_in_system_temp():
+def test_local_ci_preserves_shared_gate_while_isolating_scratch(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_SHUFFLE_PYTEST_GATE_DIR", str(tmp_path / "shared"))
+    monkeypatch.setattr(_xdist_gate.tempfile, "gettempdir", lambda: str(tmp_path / "private"))
+    assert Path(_xdist_gate.default_lock_path()) == tmp_path / "shared" / _xdist_gate.LOCK_FILE_NAME
+
+
+def test_default_lock_path_is_in_system_temp(monkeypatch):
+    monkeypatch.delenv("AI_SHUFFLE_PYTEST_GATE_DIR", raising=False)
     import tempfile
 
     assert Path(_xdist_gate.default_lock_path()) == (

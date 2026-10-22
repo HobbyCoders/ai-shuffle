@@ -17,6 +17,7 @@ Tool naming convention: ``mcp__builtins__<toolName>``
 from __future__ import annotations
 
 import asyncio
+import sys
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -650,6 +651,7 @@ class _BackgroundTask:
         # module-level spawns with no session context.
         self.session_id = session_id
         self.lines: List[str] = []
+        self._output_bytes = 0
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.exit_code: Optional[int] = None
         self.process: Optional[asyncio.subprocess.Process] = None
@@ -661,12 +663,26 @@ class _BackgroundTask:
         self.own_process_group: bool = False
         self._reap_survivors: list[int] = []
 
+    def append_output(self, line: str) -> None:
+        # A line-count cap alone allows gigabytes of minified JSON/build output.
+        # Account for Python's Unicode storage, not just character/UTF-8 count.
+        self.lines.append(line)
+        self._output_bytes += sys.getsizeof(line)
+        drop = 0
+        while (len(self.lines) - drop > _BACKGROUND_LINE_LIMIT
+               or self._output_bytes > _BACKGROUND_OUTPUT_BYTES):
+            self._output_bytes -= sys.getsizeof(self.lines[drop])
+            drop += 1
+        if drop:
+            del self.lines[:drop]
+
     def is_running(self) -> bool:
         return self.process is not None and self.process.returncode is None
 
 
 _background_tasks: Dict[str, _BackgroundTask] = {}
-_BACKGROUND_LINE_LIMIT = 5000  # avoid unbounded growth
+_BACKGROUND_LINE_LIMIT = 5000
+_BACKGROUND_OUTPUT_BYTES = 4 * 1024 * 1024  # per task, newest output wins
 
 #: How much the output reader pulls off the pipe per read. Chunked on purpose:
 #: ``StreamReader.readline()`` raises ``ValueError`` (from
@@ -1344,10 +1360,7 @@ async def _spawn_background(
             # colour codes (which break regexes run over the output).
             # Line-at-a-time is safe: an escape sequence
             # never spans a newline.
-            task.lines.append(_strip_ansi(decoded))
-            if len(task.lines) > _BACKGROUND_LINE_LIMIT:
-                # drop oldest
-                del task.lines[: len(task.lines) - _BACKGROUND_LINE_LIMIT]
+            task.append_output(_strip_ansi(decoded))
         task.exit_code = await proc.wait()
         if session_id:
             from app.core.task_registry import task_registry

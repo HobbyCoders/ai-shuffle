@@ -62,7 +62,7 @@ _HELD_ERRNOS = {
 
 def default_lock_path() -> str:
     """Lock file shared by every checkout on this machine."""
-    return os.path.join(tempfile.gettempdir(), LOCK_FILE_NAME)
+    return os.path.join(os.environ.get("AI_SHUFFLE_PYTEST_GATE_DIR") or tempfile.gettempdir(), LOCK_FILE_NAME)
 
 
 def _cpu_count() -> int:

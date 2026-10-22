@@ -73,6 +73,12 @@ def init(root):
     git(root, "config", "commit.gpgsign", "false")
     git(root, "config", "core.hooksPath", str(root / "disabled-hooks"))
     shutil.copyfile(ROOT / ".gitleaks.toml", root / ".gitleaks.toml")
+    # The real local-CI command owns scratch through this stdlib-only helper.
+    # Hook fixtures must carry its runtime dependency, not fail before scanning.
+    for name in ("app/__init__.py", "app/core/__init__.py", "app/core/temp_scratch.py"):
+        destination = root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, destination)
 
 
 def commit(root):

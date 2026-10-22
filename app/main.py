@@ -325,6 +325,11 @@ async def lifespan(app: FastAPI):
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
+        if os.environ.get("AI_SHUFFLE_SCRATCH_REAPER") != "0":
+            from app.core.scratch_reaper import maintain_scratch
+            bg_tasks.append(asyncio.create_task(maintain_scratch(), name="scratch-maintenance"))
+        else:
+            logger.info("Owned scratch maintenance disabled by AI_SHUFFLE_SCRATCH_REAPER=0")
         from app.core.fluid_memory import maintain_memories
         bg_tasks.append(asyncio.create_task(maintain_memories(), name="memory-maintenance"))
         monitor_task = await start_resource_monitor(interval_seconds=300)

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { stopBrowser } from "./browser-process.js";
 import { BrowserManager } from "../src/browser.js";
 import { compilePolicy } from "../src/ssrf.js";
 import { Session, raceWithTimeout } from "../src/session.js";
@@ -313,7 +314,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         `--user-data-dir=${userDataDir}`,
         "about:blank",
       ],
-      { stdio: ["ignore", "ignore", "pipe"] },
+      { stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32" },
     );
     proc.stderr?.on("data", (chunk) => {
       startupStderr = (startupStderr + chunk.toString()).slice(-4096);
@@ -351,22 +352,9 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     // Wait for the browser process to actually exit before removing its profile
     // dir — SIGKILL is async and rmSync races the process releasing its files
     // (ENOTEMPTY on the still-open profile) if we don't.
-    if (proc) {
-      await new Promise<void>((resolve) => {
-        proc.once("exit", () => resolve());
-        proc.kill("SIGKILL");
-        setTimeout(resolve, 3000);
-      });
-    }
+    await stopBrowser(proc);
     if (userDataDir) {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          rmSync(userDataDir, { recursive: true, force: true });
-          break;
-        } catch {
-          await new Promise((r) => setTimeout(r, 200));
-        }
-      }
+      rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 
