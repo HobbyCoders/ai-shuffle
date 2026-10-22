@@ -65,7 +65,7 @@ describe('Access without a project', () => {
 
 describe('Runs on visibility', () => {
 	const self: Install = {
-		id: 'self', device_name: 'Unraid', base_url: null, platform: 'linux', version: null,
+		id: 'self', device_name: 'ExampleWorker', base_url: null, platform: 'linux', version: null,
 		capabilities: {}, last_seen: null, online: true, is_self: true
 	};
 
@@ -85,11 +85,11 @@ describe('Runs on visibility', () => {
 		// A network worker's row id is its device id; the runner pick stores the
 		// instance id. The same worker must still read as "here".
 		const networked: Install = {
-			...self, id: 'dev_unraid', device_id: 'dev_unraid', legacy_instance_id: 'inst-unraid'
+			...self, id: 'dev_example', device_id: 'dev_example', legacy_instance_id: 'inst-example'
 		};
-		expect(runsOnVisible({ phone: true, runsOnId: 'inst-unraid', connected: networked })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: 'dev_unraid', connected: networked })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: 'inst-gamingpc', connected: networked })).toBe(true);
+		expect(runsOnVisible({ phone: true, runsOnId: 'inst-example', connected: networked })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: 'dev_example', connected: networked })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: 'inst-workstation', connected: networked })).toBe(true);
 	});
 
 	it('shows on the phone only when it differs from the connected worker', () => {

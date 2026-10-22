@@ -39,7 +39,7 @@ beforeEach(() => {
 	resetWorkerPresence();
 	mocks.setDeviceIntent.mockReset();
 	mocks.listInstalls.mockResolvedValue({
-		installs: [install('self', 'Unraid', { is_self: true }), install('pc', 'GamingPC'), install('laptop', 'Laptop')],
+		installs: [install('self', 'ExampleWorker', { is_self: true }), install('pc', 'Workstation'), install('laptop', 'Laptop')],
 		self_instance_id: 'self'
 	});
 });
@@ -50,7 +50,7 @@ afterEach(() => {
 
 async function openMenu() {
 	render(RunsOnPicker);
-	const trigger = await screen.findByRole('button', { name: /runs on unraid/i });
+	const trigger = await screen.findByRole('button', { name: /runs on exampleworker/i });
 	await fireEvent.click(trigger);
 	await waitFor(() => expect(screen.getAllByRole('menuitemradio')).toHaveLength(3));
 	return trigger;
