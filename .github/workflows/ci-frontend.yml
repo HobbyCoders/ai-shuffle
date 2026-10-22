@@ -87,6 +87,30 @@ jobs:
         working-directory: .
         run: node tools/scripts/verify-network-vectors.mjs
 
+      # The in-app Docs panel bundles its own copy of docs/content; the backend
+      # serves docs/content itself. tests/test_buyer_docs.py checks the same
+      # thing.
+      - name: Docs copies match
+        working-directory: .
+        run: diff -r docs/content frontend/src/lib/docs/content
+
+
+  browser-mcp:
+    name: Browser MCP build and tests
+    # Run independently: frontend checks took 14m on a standard runner, while
+    # the real browser suite needs about 5m. Neither should consume the other's
+    # budget or hide a hang behind the overall JavaScript deadline.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: browser-mcp/package-lock.json
+
       - name: Install Browser MCP dependencies
         timeout-minutes: 2
         working-directory: browser-mcp
@@ -117,23 +141,16 @@ jobs:
           exit 1
 
       - name: Browser MCP build and tests
-        timeout-minutes: 6
+        timeout-minutes: 8
         working-directory: browser-mcp
         run: |
           npm run build
           export CHROMIUM_PATH="$(node -p 'require("playwright-core").chromium.executablePath()')"
-          if timeout --kill-after=10s 240s npm test; then
-            echo "Browser MCP tests completed within the 240s deadline"
+          if timeout --kill-after=10s 420s npm test; then
+            echo "Browser MCP tests completed within the 420s deadline"
           else
             result=$?
-            echo "::error::Browser MCP tests failed (exit $result; deadline 240s)"
+            echo "::error::Browser MCP tests failed (exit $result; deadline 420s)"
             exit "$result"
           fi
           npx -y npm@11 audit --audit-level=high
-
-      # The in-app Docs panel bundles its own copy of docs/content; the backend
-      # serves docs/content itself. tests/test_buyer_docs.py checks the same
-      # thing.
-      - name: Docs copies match
-        working-directory: .
-        run: diff -r docs/content frontend/src/lib/docs/content

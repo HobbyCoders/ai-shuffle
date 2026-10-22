@@ -47,16 +47,21 @@ and its README; the app still checks `docs/content` against the frontend copy.
 
 ## Hosted browser and PostgreSQL prerequisites
 
-The JavaScript job keeps its 20-minute overall limit. Managed Chromium uses a
-lockfile-keyed browser cache, while OS dependencies are installed on every run.
+The JavaScript package job keeps its 20-minute overall limit. Browser MCP runs
+independently on another standard runner with a 15-minute job budget, so neither
+suite can consume the other's time. Managed Chromium uses a lockfile-keyed browser
+cache, while OS dependencies are installed on every run.
 Installation has two 90-second attempts within a four-minute step; Browser MCP
-build/tests have a separate six-minute step and a 240-second test deadline with
+build/tests have a separate eight-minute step and a 420-second test deadline with
 an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
 restriction is disabled only on the disposable runner so the sandboxed editor
-fixture can launch. Production browser security settings are unchanged.
+fixture can launch. Production browser security settings are unchanged. Fluid's
+ripgrep install also has a four-minute step and two 90-second attempts; its apt
+refresh uses signed Ubuntu sources rather than optional third-party runner feeds.
 
 Real PostgreSQL fixtures initialize mobile-tool provenance through the production
-schema helper and include the audit retention primary key. Container isolation
+schema helper and include the audit retention primary key. Network pruning routes
+shared retention batches into the fixture's disposable schema too. Container isolation
 probes materialize lazy protected keys through application helpers before
 checking access denial. These repairs cover #389, #390 and #391; those jobs are
 required to pass, not temporary exceptions. Network migration, pool safety and

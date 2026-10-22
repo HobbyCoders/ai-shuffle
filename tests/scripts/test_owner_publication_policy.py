@@ -149,17 +149,38 @@ def test_browser_jobs_have_cold_install_budget_and_lockfile_cache(job, minutes, 
     ("Browser MCP build and tests", "browser-mcp"),
 ])
 def test_javascript_audits_use_npm_11_without_reducing_scope(step_name, directory):
-    job = workflow("ci-frontend.yml")["jobs"]["frontend"]
+    jobs = workflow("ci-frontend.yml")["jobs"]
+    job = jobs["browser-mcp" if directory == "browser-mcp" else "frontend"]
     step = next(step for step in job["steps"] if step.get("name") == step_name)
-    assert step.get("working-directory", job["defaults"]["run"]["working-directory"]) == directory
+    assert step.get("working-directory", job.get("defaults", {}).get("run", {}).get("working-directory")) == directory
     audits = [command.strip() for command in re.split(r"\n|&&", step["run"])
               if re.search(r"\baudit\b", command)]
     assert audits == ["npx -y npm@11 audit --audit-level=high"]
 
 
+def test_fluid_ripgrep_uses_signed_ubuntu_sources_not_optional_runner_feeds():
+    steps = workflow("ci-fluid.yml")["jobs"]["unit"]["steps"]
+    install = next(step for step in steps if step.get("name") == "Install ripgrep")
+    command = install["run"]
+    assert "Dir::Etc::sourcelist=sources.list.d/ubuntu.sources" in command
+    assert "Dir::Etc::sourceparts=-" in command
+    assert "sudo apt-get install -y -qq ripgrep" in command
+    assert install["timeout-minutes"] == "4"
+    assert "timeout --kill-after=10s 90s sh -c" in command
+    assert "for attempt in 1 2; do" in command
+    assert command.rstrip().endswith("exit 1")
+    assert "--allow-unauthenticated" not in command
+    assert "continue-on-error" not in install
+
+
 def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
-    job = workflow("ci-frontend.yml")["jobs"]["frontend"]
-    assert job["timeout-minutes"] == "20"
+    jobs = workflow("ci-frontend.yml")["jobs"]
+    assert jobs["frontend"]["timeout-minutes"] == "20"
+    job = jobs["browser-mcp"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == "15"
+    assert "needs" not in job and "if" not in job
+    assert "continue-on-error" not in job
     steps = job["steps"]
     setup = next(step for step in steps if step.get("name") == "Prepare sandboxed Chromium")
     cache = next(step for step in steps if step.get("name") == "Cache managed Chromium")
@@ -175,8 +196,8 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert "timeout --kill-after=10s 90s npx --no-install playwright-core install --with-deps chromium" in setup["run"]
     assert 'echo "::error::Chromium dependency installation failed' in setup["run"]
     assert setup["run"].rstrip().endswith("exit 1")
-    assert tests["timeout-minutes"] == "6"
-    assert "timeout --kill-after=10s 240s npm test" in tests["run"]
+    assert tests["timeout-minutes"] == "8"
+    assert "timeout --kill-after=10s 420s npm test" in tests["run"]
     assert 'exit "$result"' in tests["run"]
     assert "::error::Browser MCP tests failed" in tests["run"]
     assert all("continue-on-error" not in step for step in steps)
