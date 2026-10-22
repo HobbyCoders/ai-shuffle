@@ -1595,6 +1595,8 @@ def test_real_pg_update_that_crashes_after_migrating_is_rolled_back(settings_fac
     again and does not offer B automatically; the worker never stays down."""
     A, B = "a" * 40, "b" * 40
     module = runtime.load_updater()
+    # The fixture runs on the host, not the image's /usr/local/bin/python.
+    monkeypatch.setattr(module, "IMAGE_PYTHON", sys.executable)
     public, publish = _signed_release_feed(monkeypatch, module, tmp_path)
     marker = tmp_path / "started.log"
     programs = {

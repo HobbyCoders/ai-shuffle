@@ -1,11 +1,12 @@
 name: CI Browser Workspace
 
 on:
+  pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: ci-browser-workspace-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-browser-workspace-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -14,7 +15,7 @@ jobs:
   smoke:
     name: Browser editor smoke checks
     # Keep every smoke check on a standard GitHub-hosted runner.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

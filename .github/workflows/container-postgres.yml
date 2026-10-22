@@ -1,22 +1,17 @@
 name: Container PostgreSQL
 
-# Builds the production image and exercises a real container: PostgreSQL
-# bootstrap, lifecycle, the buyer Compose install and the UI through a browser.
-# That is a full image build, so it runs only by hand, where
-# Docker is not available locally
-# (`gh workflow run container-postgres.yml --ref <branch>`). Every release runs
-# the same container verification in docker-publish.yml before the image is pushed.
-#
-# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
+# Builds and verifies a candidate image on every PR without publishing it.
+# Release publication remains in docker-publish.yml.
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: container-postgres-${{ github.ref }}
-  cancel-in-progress: true
+  group: container-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   container-postgres:
