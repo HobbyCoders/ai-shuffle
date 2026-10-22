@@ -39,6 +39,32 @@ def test_voice_permission_binding_wins_over_historical_turn(monkeypatch):
     assert pa._caller_permission_mode(caller) == "default"
 
 
+@pytest.mark.parametrize("source", ["binding", "profile"])
+@pytest.mark.parametrize("session_mode, expected", [
+    ("chat", "default"),
+    ("code", "bypassPermissions"),
+    ("voice", "bypassPermissions"),
+])
+def test_caller_permission_fallback_without_live_pool(
+    monkeypatch, source, session_mode, expected,
+):
+    from app.core.session_pool import get_session_pool
+    from app.db import database
+
+    monkeypatch.setattr(get_session_pool(), "peek", lambda _: None)
+    monkeypatch.setattr(database, "get_profile", lambda _: {
+        "config": {"permission_mode": "bypassPermissions"},
+    })
+    caller = {
+        "id": "caller-without-live-state",
+        "mode": session_mode,
+        "permission_mode": "bypassPermissions" if source == "binding" else None,
+        "profile_id": "caller-profile",
+    }
+
+    assert pa._caller_permission_mode(caller) == expected
+
+
 def _provider(
     provider_id="prov-openai",
     name="My OpenAI",

@@ -923,7 +923,11 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     if not caller_row:
         return None
 
-    from app.core.session_modes import permission_ceiling, strictest_permission_mode
+    from app.core.session_modes import (
+        permission_ceiling,
+        permission_mode_for_session_mode,
+        strictest_permission_mode,
+    )
 
     mode: Optional[str] = None
     session_id = caller_row.get("id")
@@ -957,6 +961,7 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
 
     if not mode or mode == "plan":
         return None
+    mode = permission_mode_for_session_mode(mode, caller_row.get("mode"))
     if caller_row.get("is_worker") or caller_row.get("permission_ceiling"):
         latest_overrides: Dict[str, Any] = {}
         try:
