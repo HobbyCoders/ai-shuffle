@@ -525,6 +525,43 @@ def test_fast_backend_mapping_falls_back_per_path(monkeypatch, tmp_path):
             "app/core/deploy_status.py", unknown])) == "all"
 
 
+@pytest.mark.parametrize("name", [
+    "tests/new_area/test_added.py",
+    "tests/core/test_container_runtime.py",
+])
+def test_changed_backend_test_selects_itself_outside_the_fast_subset(monkeypatch, tmp_path, name):
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    path = tmp_path / name
+    path.parent.mkdir(parents=True)
+    path.write_text("def test_example(): pass\n", encoding="utf-8")
+    assert local_ci.select_by_name([name]) == [name]
+    assert local_ci.affected_backend_tests(context([name])) == [name]
+
+
+def test_changed_fluid_test_is_owned_by_fluid_not_backend(monkeypatch, tmp_path):
+    name = "fluid/tests/unit/test_delegated_spawn_contract.py"
+    monkeypatch.setattr(local_ci, "MAP_PATH", tmp_path / "absent-map")
+    assert local_ci.select_by_name([name]) == [name]
+    assert local_ci.affected_backend_tests(context([name])) == []
+    assert {suite.name for suite in local_ci.affected_suites([name])} == {"fluid"}
+    selected = local_ci.affected_backend_tests(context([
+        "tests/core/test_deploy_status.py", name,
+    ]))
+    assert selected == ["tests/core/test_deploy_status.py"]
+
+
+def test_fast_fluid_test_change_runs_only_that_file(monkeypatch):
+    name = "fluid/tests/unit/test_delegated_spawn_contract.py"
+    commands = []
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append(argv))
+    monkeypatch.setattr(local_ci, "pytest_args", lambda python: ["-q"])
+    ctx = context([name])
+    ctx.mode = "fast"
+    local_ci.fluid(ctx)
+    assert commands == [[ctx.python, "-m", "pytest", name, "-q"]]
+
+
 def test_fast_failed_dependency_map_still_falls_back_safely(monkeypatch, tmp_path):
     from types import SimpleNamespace
     mapping = tmp_path / "map"
