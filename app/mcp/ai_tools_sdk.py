@@ -653,13 +653,13 @@ def _create_unified_tools(worker, context=None):
     resolver = Resolver(backend)
     tools = []
     properties = {
-        "prompt": {"type": "string", "description": "Describe the requested result."},
-        "source": {"type": "string", "description": "Optional source (fal, openai, xai, chatgpt, supergrok) or exact account ID from searchModels."},
-        "model": {"type": "string", "description": "Optional exact model ID from searchModels. Never guess."},
-        "worker": {"type": "string", "description": "Optional holding-worker ID from a choice, to distinguish duplicate account bindings."},
-        "options": {"type": "object", "description": "Only parameters declared by the selected model's schema."},
-        "confirmed": {"type": "boolean", "description": "Set true only on an explicit user-approved retry of needs-confirmation."},
-        "confirmation_token": {"type": "string", "description": "The receipt from needs-confirmation; valid only for that exact request and price."},
+        "prompt": {"type": "string"},
+        "source": {"type": "string", "description": "searchModels provider/account ID."},
+        "model": {"type": "string", "description": "searchModels ID; never guess."},
+        "worker": {"type": "string", "description": "Holding-worker ID from a choice."},
+        "options": {"type": "object", "description": "Declared model options only."},
+        "confirmed": {"type": "boolean", "description": "Only on user-approved needs-confirmation retry."},
+        "confirmation_token": {"type": "string", "description": "Receipt for this exact request/price."},
     }
 
     def generation_tool(name, kind):
@@ -667,7 +667,7 @@ def _create_unified_tools(worker, context=None):
                   "audio": {"duration": {"type": "number"}},
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
-        @tool(name, f"Generate {kind} with a connected account.\nNaming no source/model returns priced choices; never choose on the user's behalf. Call searchModels for models and declared options. Unattended runs require a stored choice. Unknown prices are refused; expensive requests require an explicit confirmed retry.", {
+        @tool(name, f"Generate {kind}. Omit source/model for priced choices; never choose for the user. searchModels gives IDs/schema. Unattended needs a stored choice; unknown prices refuse. Above-threshold spend needs an approved retry.", {
             "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
         }, annotations=_LARGE_RESULT_ANNOTATIONS)
         async def generate(args):
@@ -688,7 +688,7 @@ def _create_unified_tools(worker, context=None):
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
 
-    @tool("searchModels", "Discover generation accounts, models, options and prices.\nReturns exact IDs, holding workers and verified status. Catalogs are fetched on demand, never added to every prompt. Unknown prices are not free and cannot be submitted.", {
+    @tool("searchModels", "On-demand accounts, exact model IDs, holding workers, schemas, prices, verified status; no prompt catalogs. Unknown prices refuse, never free.", {
         "type": "object", "properties": {
             "query": {"type": "string"}, "source": {"type": "string"}, "model": {"type": "string"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
@@ -708,7 +708,7 @@ def _create_unified_tools(worker, context=None):
 
     tools.append(search_models)
 
-    @tool("runFalModel", "Run a fal.ai model with generation guardrails.\nText-input media models only; uses the generation tools' price, confirmation and daily cap checks. Prefer the generation tool for its output kind. Discover its schema with searchModels first.", {
+    @tool("runFalModel", "Run a text-input fal media model with price, confirmation and daily-cap checks. Prefer its generation tool; discover schema with searchModels first.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
