@@ -62,6 +62,9 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
+# v2 adds founder-side reconciliation of provider-reported generation overruns.
+GENERATION_VERSION = 2
+
 
 def _detect_os() -> str:
     """Coarse OS family: windows / darwin / linux (everything else -> linux)."""
@@ -238,4 +241,5 @@ def detect_capabilities() -> Dict[str, Any]:
         "move_questions": 1,
         "handoff_poll": 1,
         "terminal": _detect_terminal(),
+        "generation": GENERATION_VERSION,
     }

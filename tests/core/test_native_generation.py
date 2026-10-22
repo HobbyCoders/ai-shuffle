@@ -138,9 +138,11 @@ async def test_video_media_url_allowlist(url):
 
 
 async def test_video_deadline_and_cancel_preserve_reported_cost(monkeypatch):
-    from app.core.provider import fluid_credentials
     accounts(monkeypatch)
-    monkeypatch.setattr(fluid_credentials, "_load_grok_access_token", AsyncMock(return_value="test-private-token"))
+    # This test's 10 ms deadline targets polling after a billed submission,
+    # not executor scheduling during account lookup. Credential resolution is
+    # exercised separately by the image/video account-boundary tests.
+    monkeypatch.setattr(supergrok_images, "resolve_credential", AsyncMock(return_value="test-private-token"))
     calls = []
     def boundary(request):
         calls.append(request)
@@ -194,4 +196,5 @@ async def test_video_registry_is_subscription_specific(monkeypatch, kind, expose
     registry = await adapter._build_registry(options, native=True)
     assert ("GenerateNativeVideo" in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
     assert "GenerateNativeVideo" in CHAT_MODE_TOOL_SURFACE
+    assert "mcp__ai-tools__generateVideo" in CHAT_MODE_TOOL_SURFACE
     assert "GenerateNativeVideo" in PROACTIVE_DENIED_TOOLS

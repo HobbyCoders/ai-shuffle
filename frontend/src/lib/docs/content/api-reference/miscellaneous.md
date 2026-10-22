@@ -673,7 +673,9 @@ The id must be a model this install can run: a Claude alias from `GET /api/v1/mo
 Native generation is separate from the AI Shuffle direct tools and does not
 change the existing ChatGPT subscription text-to-image choice. The proposed
 settings UI is cancelled and superseded by #379 ("say what you want" generation).
-These backend endpoints do not implement a settings UI.
+These backend endpoints do not implement a settings UI. The
+[unified generation tools](/docs/api-reference/generation-tools) honour each
+account's stored groups below: a disabled (`null`) group is never offered or run.
 
 - Authenticated `GET /api/v1/settings/native-generation` returns
   `{"accounts": [{"provider_id": "...", "name": "...", "provider_kind": "grok", "settings": {"image": {...}, "video": {...}}, "capabilities": {...}}]}`.

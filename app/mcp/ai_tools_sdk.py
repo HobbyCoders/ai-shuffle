@@ -612,17 +612,15 @@ TOOL_CONFIG_MAP = {
         "audio_generation", "audio_to_audio",
     ]},
     # Model discovery — enabled whenever the generic executor is (same condition)
-    "searchModels": {"config_keys": [
-        "image_generation", "image_editing", "image_reference",
-        "video_generation", "video_with_audio", "image_to_video", "video_extend",
-        "text_to_3d", "image_to_3d",
-        "audio_generation", "audio_to_audio",
-    ]},
+    "searchModels": {"config_key": "generation_catalog"},
 }
 
 
 def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
     """Check if a specific tool should be enabled based on config."""
+    if tool_name == "searchModels":
+        return bool(ai_tools_config.get("generation_catalog")) or any(
+            ai_tools_config.get(key, False) for key in TOOL_CONFIG_MAP["runFalModel"]["config_keys"])
     mapping = TOOL_CONFIG_MAP.get(tool_name)
     if not mapping:
         return False
@@ -639,6 +637,232 @@ def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
     return False
 
 
+
+# Unified entry points replace only generation, catalog and generic execution.
+# Transform/edit tools retain their existing names and handlers.
+UNIFIED_TOOL_KINDS = {"generateImage": "image", "generateVideo": "video", "generateAudio": "audio", "textTo3D": "3d"}
+UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
+
+
+# Main's configured-model handlers stay the Settings default ("lane") for each
+# unified name: a call with no source/model, and every unattended call that
+# main's schema could express, runs exactly as before. Step 1 is additive.
+# Refusals that mean "the guard could not price/resolve this" fall back to it;
+# a cap, confirmation or chat-mode refusal never does.
+_LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "invalid_request"}
+_CONFIGURED_MODEL_ENV = {"image": "IMAGE_MODEL", "video": "VIDEO_MODEL", "audio": "AUDIO_MODEL", "3d": "MODEL3D_MODEL"}
+
+
+def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
+    """``{name: (lane, handler)}`` for main's handlers that can run here.
+
+    ``lane`` is ``"chatgpt"`` for the ChatGPT-plan image tool (#1796), which
+    needs no fal key, and ``"fal"`` for the fal.ai tools while a key is usable.
+    """
+    from app.core.provider import subscription_images as sub
+
+    subscription_image = sub.is_subscription_model(_configured_image_models(tool_env)[0])
+    lanes = {}
+    for name, legacy in legacy_tools.items():
+        if name == "generateImage" and subscription_image:
+            lanes[name] = ("chatgpt", legacy.handler)
+        elif fal_usable and name != "searchModels":
+            lanes[name] = ("fal", legacy.handler)
+    return lanes
+
+
+def _lane_label(lane: str, kind: str, tool_env: Optional[Dict[str, str]]) -> str:
+    from app.core.provider import subscription_images as sub
+
+    if lane == "chatgpt":
+        return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
+    configured = (tool_env or {}).get(_CONFIGURED_MODEL_ENV[kind]) or (
+        _configured_image_models(tool_env)[0] if kind == "image" else "")
+    return f"fal.ai {configured}" if configured else "the fal.ai default model"
+
+
+def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
+    from app.core.generation_resolver import Resolver, RunContext, normalize_source
+    from app.services.generation_sources import Sources
+
+    context = context or RunContext()
+    lanes = {} if context.chat_mode else dict(lanes or {})
+    backend = Sources(worker, context)
+    resolver = Resolver(backend)
+    tools = []
+    properties = {
+        "prompt": {"type": "string"},
+        "source": {"type": "string", "description": "fal|openai|xai|chatgpt|supergrok or account ID."},
+        "model": {"type": "string", "description": "searchModels ID; never guess."},
+        "worker": {"type": "string", "description": "Worker ID from a choice."},
+        "options": {"type": "object", "description": "Declared options only."},
+        "confirmed": {"type": "boolean", "description": "Only after the user approves."},
+        "confirmation_token": {"type": "string", "description": "Receipt for this exact request."},
+    }
+
+    from app.core.provider import subscription_images as sub
+    configured_image = _configured_image_models(tool_env)[0]
+    # Main's #1796 rule: while images are set to the ChatGPT plan, no image
+    # call is a back door to fal models the owner did not choose.
+    image_restricted = any(sub.is_subscription_model(m) for m in _configured_image_models(tool_env))
+
+    def plan_image_refusal(request):
+        if normalize_source(request.get("source")) == "fal":
+            return sub.fal_image_refusal()
+        if request.get("model") and normalize_source(request.get("source")) in (None, "chatgpt"):
+            return sub.refusal(request["model"], configured_image)
+        return None
+
+    def lane_for(name):
+        # A trusted stored/job choice outranks the Settings default.
+        return None if context.job_choice or context.remembered_choice else lanes.get(name)
+
+    def generation_tool(name, kind):
+        legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
+                  "audio": {"duration": {"type": "number"}},
+                  "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
+                         "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
+        lane = lane_for(name)
+        description = f"Generate {kind}. Omit source/model for priced choices; never pick for the user. IDs/schema: searchModels. Unattended needs a stored choice; unknown prices refuse; above-threshold spend needs an approved retry."
+        if lane:
+            description += (f" Here, omitting source/model uses the Settings default ({_lane_label(lane[0], kind, tool_env)})"
+                            + (", as does a fal model the guard cannot price." if lane[0] == "fal" else "."))
+
+        def main_args(request):
+            """The call as main's configured-model tool took it, or None."""
+            if any(request.get(key) not in (None, {}, False) for key in ("worker", "options", "confirmed", "confirmation_token")):
+                return None
+            source = normalize_source(request.get("source"))
+            if lane[0] == "chatgpt":
+                # The configured plan model (or its tail) is accepted, as on main.
+                if source not in (None, "chatgpt") or sub.refusal(request.get("model"), configured_image):
+                    return None
+                return {key: request[key] for key in ("prompt", "model") if request.get(key)}
+            if source not in (None, "fal"):
+                return None
+            return {key: request[key] for key in ("prompt", "model", *legacy) if key in request}
+
+        @tool(name, description, {
+            "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
+        }, annotations=_LARGE_RESULT_ANNOTATIONS)
+        async def generate(args):
+            from app.core.generation_resolver import result
+            request = _model_arg(args)
+            restricted = kind == "image" and image_restricted
+            if restricted:
+                refused = plan_image_refusal(request)
+                if refused:
+                    return _tool_result(result("refused", reason="image_provider_restricted", error=refused))
+            fallback = main_args(request) if lane else None
+            if fallback is not None and (context.unattended or lane[0] == "chatgpt" or not request.get("model")):
+                # The Settings default (no model, or only its own source named): main's path, unchanged.
+                return await lane[1](fallback)
+            options = request.get("options", {})
+            if not isinstance(options, dict):
+                return _tool_result(result("refused", error="options must be an object."))
+            options = dict(options)
+            for key in legacy:
+                if key in request:
+                    if key in options and options[key] != request[key]:
+                        return _tool_result(result("refused", error="Conflicting top-level and declared model options."))
+                    options[key] = request.pop(key)
+            request["options"] = options
+            if fallback is not None:
+                # Main ran a named fal model on this worker; keep it there.
+                request["worker"] = backend.local_worker()
+            output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
+            if fallback is not None and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
+                return await lane[1](fallback)
+            return _tool_result(output)
+        return generate
+
+    tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
+
+    @tool("searchModels", "On-demand accounts, exact model IDs, holding workers, schemas, prices, verified status; no prompt catalogs. Unknown prices refuse, never free.", {
+        "type": "object", "properties": {
+            "query": {"type": "string"}, "source": {"type": "string"}, "model": {"type": "string"},
+            "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        }, "additionalProperties": False,
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def search_models(args):
+        import asyncio
+        from app.core.generation_resolver import KINDS, result
+        limit = max(1, min(args.get("limit") or 15, 50))
+        query, model = args.get("query") or "", args.get("model")
+        kinds = [args["output_type"]] if args.get("output_type") else list(KINDS)
+        source = normalize_source(args.get("source"))
+        # Quote only the top few fal models per kind: every quote is a schema
+        # and pricing fetch. The full fal catalog search follows, unpriced.
+        catalogs = await asyncio.gather(*(resolver.catalog(kind, source, model, query=query or None,
+                                                           limit=3 if len(kinds) == 1 else 1) for kind in kinds),
+                                        return_exceptions=True)
+        failed = next((c for c in catalogs if isinstance(c, BaseException)), None)
+        if isinstance(failed, asyncio.CancelledError):
+            raise failed
+        # A failed priced lookup never costs main's fal discovery below.
+        options = [o for catalog in catalogs if isinstance(catalog, dict) for o in catalog.get("options", [])]
+        # fal entries already matched the catalog's full-text search.
+        needle = query.casefold()
+        options = [o for o in options if o["source"] == "fal" or not needle
+                   or needle in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
+        output = result("catalog", options=options[:limit], total_matches=len(options))
+        if failed is not None:
+            output["priced_lookup_error"] = "Some accounts or workers could not be listed."
+        if source in (None, "fal") and (query or not model) and await backend.fal_key():
+            # Main's discovery, unchanged: every category, description and tag
+            # matches, endpoint_id fields. Price one with source "fal" + model.
+            fal = await _search_catalog(query, args.get("output_type"), limit)
+            output.update(fal_models=fal["models"], fal_total_matches=fal["total_matches"],
+                          hint="Quote a fal model with source \"fal\" and its endpoint_id as model, or run it with runFalModel.")
+        return _tool_result(output)
+
+    tools.append(search_models)
+
+    fal_lane = lane_for("runFalModel")
+
+    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks. Prefer the kind's tool; get IDs/schema via searchModels.", {
+        "type": "object", "properties": {
+            "endpoint_id": {"type": "string"}, "input": {"type": "object"},
+            "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
+            "confirmed": properties["confirmed"], "confirmation_token": properties["confirmation_token"],
+        }, "required": ["endpoint_id", "input"], "additionalProperties": False,
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def run_fal(args):
+        from app.core.generation_resolver import KINDS, result
+        from app.services.fal_schema import schema_service
+        # Main's #1796 rule: not a back door to fal images the owner did not choose.
+        refused = _fal_image_refusal(args) if image_restricted else None
+        if refused:
+            return _tool_result({"success": False, "error": refused})
+        main = {key: args[key] for key in ("endpoint_id", "input", "output_type") if key in args}
+        if fal_lane and context.unattended:
+            return await fal_lane[1](main)
+        endpoint = args.get("endpoint_id")
+        kind = args.get("output_type") or (
+            (_catalog_output_type(endpoint) or _infer_fal_output_type(endpoint)) if isinstance(endpoint, str) else None)
+        schema = await schema_service.get_schema(endpoint, await backend.fal_key()) if isinstance(endpoint, str) else None
+        values = dict(args["input"]) if isinstance(args.get("input"), dict) else None
+        prompt = values.pop(schema.primary_text_field, None) if schema and values is not None and schema.primary_text_field else None
+        if kind not in KINDS or schema is None or values is None or not isinstance(prompt, str) or not prompt.strip():
+            # Nothing to price (unknown kind, schema or a prompt-less model):
+            # main's path where it exists, otherwise a refusal.
+            if fal_lane:
+                return await fal_lane[1](main)
+            return _tool_result(result("refused", error="A declared input schema with a text prompt is required."))
+        request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
+                   "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
+        if fal_lane:
+            request["worker"] = backend.local_worker()
+        output = await resolver.generate(kind, request, context)
+        if fal_lane and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
+            return await fal_lane[1](main)
+        return _tool_result(output)
+
+    tools.append(run_fal)
+    return tools
+
+
 # ============================================================================
 # Server Creation
 # ============================================================================
@@ -648,6 +872,7 @@ def create_ai_tools_server(
     tools_dir: str,
     tool_env: Optional[Dict[str, str]] = None,
     tool_cwd: Optional[str] = None,
+    generation_context=None,
 ) -> Optional[Any]:
     """
     Create an SDK MCP server with AI content generation tools.
@@ -687,7 +912,7 @@ def create_ai_tools_server(
                     ai_tools_config.get("audio_to_audio", False)
 
     # Generic tool is enabled when any other tool is enabled
-    any_generic = any_image or any_video or any_3d or any_audio_gen
+    any_generic = any_image or any_video or any_3d or any_audio_gen or ai_tools_config.get("generation_catalog", False)
 
     if not any_generic:
         return None
@@ -749,6 +974,13 @@ def create_ai_tools_server(
         if _is_tool_enabled(t.name, ai_tools_config):
             enabled_tools.append(t)
 
+    legacy_tools = {t.name: t for t in enabled_tools if t.name in UNIFIED_TOOL_NAMES}
+    enabled_tools = [t for t in enabled_tools if t.name not in UNIFIED_TOOL_NAMES]
+    fal_usable = not fal_off and bool(_get_fal_api_key() or any(
+        (tool_env or {}).get(name) for name in fal_credential.ENV_KEYS))
+    lanes = _settings_lanes(legacy_tools, tool_env, fal_usable)
+    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context, lanes=lanes, tool_env=tool_env)
+                         if _is_tool_enabled(t.name, ai_tools_config))
     if not enabled_tools:
         return None
 

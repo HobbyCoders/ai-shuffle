@@ -4913,6 +4913,9 @@ class HarnessAdapter(ProviderAdapter):
 
             register_builtins(registry)
             if self._provider_kind == "openai_responses":
+                # Step 1 of unified generation is additive: the session's own
+                # ChatGPT/SuperGrok plan keeps these tools, which honour the
+                # account's stored Native generation settings (#377).
                 from app.core.native_generation_settings import capabilities, provider_kind
                 native_account = (options.extra or {}).get("provider_id")
                 native_caps = {}
@@ -5008,7 +5011,9 @@ class HarnessAdapter(ProviderAdapter):
             registry,
             options.mcp_servers,
             skip_tools={"builtins": skipped_builtins},
-            defer_servers=DEFERRED_SDK_SERVERS if native else None,
+            # Chat has neither ToolSearch nor code-mode read_tool_docs, so its
+            # permitted generation tools must be callable without discovery.
+            defer_servers=DEFERRED_SDK_SERVERS if native and _session_mode(options) != "chat" else None,
         )
         if recorded:
             logger.info(
