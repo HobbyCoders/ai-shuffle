@@ -34,6 +34,7 @@ vi.mock('./session/ws-connection', () => ({
 		hoisted.onDisconnected = config.onDisconnected;
 		hoisted.onConnected = config.onConnected;
 		return {
+			activate: vi.fn(),
 			connect: hoisted.connect,
 			reconnect: hoisted.reconnect,
 			disconnect: vi.fn(),
@@ -266,6 +267,50 @@ describe('attaching a project (#371)', () => {
 		expect(activeSession.current.projectV2Id).toBe('v2-1');
 		expect(activeSession.current.permissionModeOverride).toBe('default');
 		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+	});
+
+	it('a reload restores a chat without the device default project, so a later attach takes the row\'s project and Ask', async () => {
+		// The normal case: this device remembers a default project. Restoring
+		// the chat must not fill it in, or reconcile reads it as the session's
+		// own project, misses the attach, and keeps Bypass on the wrong project.
+		localStorage.setItem('aihub_selectedProject', 'device-default');
+		// An earlier test's New Chat may have left the skip-restore flag.
+		sessionStorage.removeItem('__aihub_skipSessionRestore');
+		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({
+			sessionId: 'attach-me', mode: 'chat', title: 'Chat', profile: 'p', project: '', projectV2Id: null,
+			permissionModeOverride: 'bypassPermissions', modelOverride: null, effortLevelOverride: null,
+		}));
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		activeSession.current.sessionId = null;
+		try {
+			await activeSession.init();
+			expect(activeSession.current).toMatchObject({
+				sessionId: 'attach-me', mode: 'chat', project: '', permissionModeOverride: 'bypassPermissions',
+			});
+
+			const mode = activeSession.reconcileSessionMode([
+				{ id: 'attach-me', mode: null, project_id: 'proj-1', project_v2_id: 'v2-1', permission_mode: 'default' }
+			]);
+			expect(mode).toBe('code');
+			expect(activeSession.current).toMatchObject({
+				mode: 'code', project: 'proj-1', projectV2Id: 'v2-1', permissionModeOverride: 'default',
+			});
+		} finally {
+			activeSession.destroy();
+			sessionStorage.removeItem('ai-shuffle-active-session');
+			localStorage.removeItem('aihub_selectedProject');
+			vi.restoreAllMocks();
+		}
+	});
+
+	it('a chat whose state holds a filled-in default project still adopts an attach', () => {
+		// Same guard in reconcile itself: in a chat, `project` is never the
+		// session's own, so it cannot hide the attach.
+		activeSession.current.project = 'device-default';
+		activeSession.reconcileSessionMode([
+			{ id: 'attach-me', mode: null, project_id: 'proj-1', project_v2_id: null, permission_mode: 'default' }
+		]);
+		expect(activeSession.current).toMatchObject({ mode: 'code', project: 'proj-1', permissionModeOverride: 'default' });
 	});
 
 	it('leaves a restored pick alone when nothing was attached', () => {

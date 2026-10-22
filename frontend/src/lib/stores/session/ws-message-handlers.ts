@@ -627,7 +627,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const cached = sessionEphemeralCache.restore(sessionId);
 				if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode });
 				const open = getState();
-				if (sessionId === open.sessionId && open.mode === 'chat' && !open.project) {
+				// A chat's `project` can only be a filled-in device default, so
+				// it must not stop the open tab adopting the attach.
+				if (sessionId === open.sessionId && open.mode === 'chat') {
 					update(s => ({
 						...s, mode: 'code', project: attachedProject, projectV2Id,
 						worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,

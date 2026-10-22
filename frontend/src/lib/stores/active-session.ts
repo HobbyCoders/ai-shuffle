@@ -1055,7 +1055,12 @@ export const activeSession = {
 		// a project was attached since (another tab or device, #371): take the
 		// row's project and access. The attach reset access to Ask; a saved
 		// Bypass would otherwise ride the next send and re-bind the session.
-		if (attachedSinceSaved({ mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id }, row)) {
+		// A chat holds no project of its own: anything in `project` there is a
+		// filled-in device default, so it must not hide the attach.
+		const saved = _state.mode === 'chat'
+			? { mode: _state.mode, project: '', projectV2Id: null }
+			: { mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id };
+		if (attachedSinceSaved(saved, row)) {
 			const permissionMode = normalizePermissionMode(row?.permission_mode ?? 'default') ?? 'default';
 			const cached = sessionEphemeralCache.restore(sessionId!);
 			if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode });

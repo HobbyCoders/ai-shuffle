@@ -208,10 +208,16 @@ export function createSessionInit(deps: SessionInitDeps) {
 						isRestoringSession: !!persisted.sessionId,
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
-						// An unbound compose saved without a project stays without one.
-						...(persisted.sessionId || persisted.project || persisted.projectV2Id
-							? resolvePersistedProject(persisted, defaultProject)
-							: { project: '', projectV2Id: null }),
+						// An unbound compose saved without a project stays without one,
+						// and so does a restored chat: the device default would read
+						// as the session's own project, hiding a later attach from
+						// reconcile (which then keeps the wrong project and a stale
+						// Bypass, #371).
+						...(persisted.sessionId && normalizeSessionMode(persisted.mode) === 'chat'
+							? { project: persisted.project ?? '', projectV2Id: persisted.projectV2Id ?? null }
+							: persisted.sessionId || persisted.project || persisted.projectV2Id
+								? resolvePersistedProject(persisted, defaultProject)
+								: { project: '', projectV2Id: null }),
 						// Run binding. A restored EXISTING session keeps whatever the
 						// record holds — null included, which lets the backend fall
 						// back to what that session actually last ran on. Only an

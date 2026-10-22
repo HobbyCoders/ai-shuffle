@@ -2037,6 +2037,19 @@ describe('ws-message-handlers', () => {
 			expect(state.permissionModeOverride).toBe('default');
 		});
 
+		it('adopts the attach even when the chat holds a filled-in device default project', () => {
+			let state = { ...chatState(), project: 'device-default' };
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: attached });
+
+			expect(state).toMatchObject({ mode: 'code', project: 'proj-1', projectV2Id: 'v2-1', permissionModeOverride: 'default' });
+		});
+
 		it('resets the cached copy of a session that is not on screen, and leaves the open one alone', () => {
 			let state = chatState();
 			sessionEphemeralCache.save('elsewhere', { ...state, sessionId: 'elsewhere' } as never);
