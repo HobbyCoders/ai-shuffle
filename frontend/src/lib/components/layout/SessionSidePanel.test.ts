@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import SessionSidePanel from './SessionSidePanel.test.svelte';
 import { createLazyComponent } from '../deck/lazy/lazy-component';
+import { registerShortcut, clearAllShortcuts, NOT_HANDLED } from '$lib/services/keyboard';
 import Stub from '../deck/lazy/__fixtures__/StubPanel.svelte';
 
-afterEach(cleanup);
-function mount(active: 'browser' | 'changes' = 'changes') {
+afterEach(() => { cleanup(); clearAllShortcuts(); });
+function mount(active: 'browser' | 'changes' | 'phone' | 'terminal' = 'changes') {
 	const props = { active, expanded: false, width: 640,
 		onClose: vi.fn(), onResize: vi.fn(), onExpand: vi.fn() };
 	return { ...render(SessionSidePanel, props), props };
@@ -66,5 +67,36 @@ describe('session side panel controls', () => {
 		expect(screen.queryByRole('button', { name: 'Expand side panel' })).toBeNull();
 		expect(screen.queryByRole('separator')).toBeNull();
 		expect(screen.getByRole('button', { name: 'Close side panel' })).toBeTruthy();
+	});
+	// AppPage registers the global Escape shortcut (`close-modal`) BEFORE the
+	// side panel mounts, and the shortcut manager's window listener is attached
+	// first. It used to preventDefault every Escape, so the panel never saw one.
+	describe('with the app\'s global Escape shortcut registered first', () => {
+		let modalOpen = false;
+		const registerCloseModal = () => registerShortcut({
+			id: 'close-modal', description: 'Close modal', key: 'Escape', category: 'general', allowInInput: true,
+			// Mirrors AppPage: close a modal if one is open, else leave Escape alone.
+			action: () => { if (modalOpen) modalOpen = false; else return NOT_HANDLED; },
+		});
+
+		it.each(['phone', 'browser', 'terminal'] as const)('Escape closes the %s panel when no modal is open', async (view) => {
+			modalOpen = false;
+			registerCloseModal();
+			const { props } = mount(view);
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(props.onClose).toHaveBeenCalledOnce();
+		});
+
+		it('with a modal open, Escape closes only the modal and the panel stays', async () => {
+			modalOpen = true;
+			registerCloseModal();
+			const { props } = mount('phone');
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(modalOpen).toBe(false);
+			expect(props.onClose).not.toHaveBeenCalled();
+			// The next Escape reaches the panel.
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(props.onClose).toHaveBeenCalledOnce();
+		});
 	});
 });

@@ -1,18 +1,17 @@
 name: Instance identity contracts
 
-# Native Windows and macOS identity checks. Linux is covered by CI Backend on
-# every PR. The macOS runner bills at ten times the Linux rate, so this is
-# manual only: run `gh workflow run ci-instance-identity.yml --ref <branch>` on
-# PRs that change instance identity in app/core/config.py.
+# Native Windows identity checks on every PR; Linux is covered by CI Backend.
+# macOS remains dispatch-only to preserve runner capacity.
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: instance-identity-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-instance-identity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   identity:
@@ -21,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         # Linux is covered by CI Backend; exercise the native desktop paths too.
-        os: [windows-latest, macos-latest]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     env:

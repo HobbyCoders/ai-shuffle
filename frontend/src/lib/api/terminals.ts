@@ -33,7 +33,52 @@ export interface TerminalWorker { id: string; name: string; platform: string; co
 
 export interface TerminalList { terminals: TerminalInfo[]; open: number; running: number; limit: number; worker: TerminalWorker }
 
-export interface TerminalTarget { kind: string; worker_id?: string; grant_id?: string; name: string; available: boolean }
+export interface TerminalTarget {
+	kind: string; worker_id?: string; grant_id?: string; name: string; available: boolean;
+	/** Peer workers only: why the worker is not usable right now (see PeerReasonCode). */
+	reason_code?: string | null;
+	reason?: string | null;
+	/** Peer workers only: the caller's approved, unused authorization. Memory only, never stored. */
+	authorization_id?: string;
+}
+
+/**
+ * Peer-terminal availability codes on a target row (docs/internal/terminals.md).
+ * `recipient_approval_required` is the one the owner can act on: request an
+ * approval, then approve it directly on the other worker.
+ */
+export type PeerReasonCode = 'peer_offline' | 'peer_terminals_disabled' | 'peer_unsupported_or_disabled' | 'not_supported'
+	| 'https_required' | 'peer_unavailable' | 'recipient_approval_required';
+
+/** The source worker's view of one request (`POST`/`GET /peer-authorizations`). */
+export interface PeerAuthorization {
+	authorization_id: string;
+	worker_id: string;
+	request_id?: string;
+	/** `pending`, `approved`, `expired`, or `unavailable` when the recipient refused up front. */
+	status: string;
+	used?: boolean;
+	expires_in?: number;
+	confirmation_code?: string;
+	source_name?: string;
+	age_seconds?: number;
+	available?: boolean;
+	reason_code?: string | null;
+	reason?: string | null;
+}
+
+/** The receiving worker's view of one request (`GET /peer-requests`). */
+export interface PeerRequest {
+	request_id: string;
+	/** The requesting (source) worker. */
+	worker_id: string;
+	status: 'pending' | 'approved' | string;
+	used: boolean;
+	expires_in: number;
+	confirmation_code: string;
+	source_name: string;
+	age_seconds: number;
+}
 
 export interface TerminalTargets {
 	worker: TerminalWorker;
@@ -47,7 +92,7 @@ export interface TerminalTargets {
 	open: number;
 }
 
-export interface CreateTerminal { target?: Pick<TerminalTarget, 'kind' | 'worker_id' | 'grant_id'>; session_id?: string | null; cwd?: string | null; shell?: string | null; cols?: number; rows?: number }
+export interface CreateTerminal { target?: Pick<TerminalTarget, 'kind' | 'worker_id' | 'grant_id' | 'authorization_id'>; session_id?: string | null; cwd?: string | null; shell?: string | null; cols?: number; rows?: number }
 
 /** A refused request. `code` is the service code, or `http_<status>` for auth and other errors. */
 export class TerminalApiError extends Error {
@@ -72,8 +117,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 	}
 	if (response.ok) return (await response.json()) as T;
 	const body = (await response.json().catch(() => null)) as { detail?: unknown; code?: unknown } | null;
-	const detail = typeof body?.detail === 'string' ? body.detail : FALLBACK[response.status] ?? `Request failed (${response.status}).`;
-	const code = typeof body?.code === 'string' ? body.code : `http_${response.status}`;
+	// Peer routes put an object in `detail`: `{code, message}` (503) or an
+	// availability `{reason_code, reason}` (409). Keep the server's words.
+	const inner = body?.detail && typeof body.detail === 'object' ? (body.detail as Record<string, unknown>) : null;
+	const text = (value: unknown) => (typeof value === 'string' && value ? value : null);
+	const detail = text(body?.detail) ?? text(inner?.message) ?? text(inner?.reason)
+		?? FALLBACK[response.status] ?? `Request failed (${response.status}).`;
+	const code = text(body?.code) ?? text(inner?.code) ?? text(inner?.reason_code) ?? `http_${response.status}`;
 	if (response.status === 401) void recheckAuthOn401();
 	throw new TerminalApiError(detail, response.status, code);
 }
@@ -94,4 +144,20 @@ export const terminalsApi = {
 			method: 'POST',
 			body: JSON.stringify({ text }),
 		}),
+
+	// ── Peer terminals: owner-approved shells on another worker ──────────
+	/** On the source: ask `workerId` for one shell. Its owner approves it there. */
+	requestPeer: (workerId: string) =>
+		request<PeerAuthorization>('/peer-authorizations', { method: 'POST', body: JSON.stringify({ worker_id: workerId }) }),
+	peerAuthorization: (id: string) => request<PeerAuthorization>(`/peer-authorizations/${encodeURIComponent(id)}`),
+	/** On the source: withdraw a request or an unused approval. */
+	revokePeerAuthorization: (id: string) =>
+		request<{ revoked?: boolean }>(`/peer-authorizations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+	/** On the recipient: requests from other workers waiting here, and live approvals. */
+	peerRequests: () => request<{ requests: PeerRequest[] }>('/peer-requests'),
+	approvePeerRequest: (id: string) =>
+		request<PeerRequest>(`/peer-requests/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+	/** On the recipient: deny a pending request, or revoke an approval and close its shell. */
+	revokePeerRequest: (id: string) =>
+		request<{ revoked: boolean }>(`/peer-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };

@@ -411,6 +411,16 @@ The pull request for the current branch.
 
 Worktrees give a session its own branch and folder. Create one with [`POST /api/v1/sessions/with-worktree`](/docs/api-reference/sessions#worktree-sessions).
 
+Safe local checkout reclaim keeps uncommitted or unpushed work, protected or busy
+branches, processes inside the checkout, and recently active checkouts. Apply must
+match the previewed `{path, head_sha}` pairs and rechecks safety before removal.
+Ignored files also keep a checkout, except for the already-handled dependency
+folders (`node_modules`, `venv`, `.venv`) and known disposable caches:
+`.pytest_cache`, `__pycache__` and `.svelte-kit` directories, plus `*.pyc` files.
+Those caches alone do not block reclaim. Ignored `dist`, `.env*`, other outputs
+and unknown content still keep the checkout; unignored files still count as
+uncommitted work.
+
 **Auth:** Required for every worktree endpoint.
 
 | Method | Path | Query | Notes |

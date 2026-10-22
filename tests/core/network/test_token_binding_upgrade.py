@@ -1,4 +1,4 @@
-"""Rolling upgrades keep paired identities and unadvertised routes usable by default."""
+"""Default-on binding, mixed-worker upgrades, advertised-address repair and rollback."""
 import json
 
 import httpx
@@ -31,9 +31,102 @@ def upgrade_pair(workers, monkeypatch):
     return server, peer, TestClient(app)
 
 
-def test_rollout_settings_default_off():
-    assert Settings.model_fields["network_token_binding_enabled"].default is False
+def test_rollout_settings_default_on_with_legacy_compatibility():
+    assert Settings.model_fields["network_token_binding_enabled"].default is True
     assert Settings.model_fields["network_require_token_binding"].default is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_enabled,server_enabled", [(False, True), (True, False), (True, True)])
+async def test_default_on_upgrade_authenticates_both_wire_versions(
+        upgrade_pair, monkeypatch, client_enabled, server_enabled):
+    server, peer, server_client = upgrade_pair
+    endpoint = "https://tunnel.example"
+    default = Settings.model_fields["network_token_binding_enabled"].default
+
+    def handler(request):
+        with monkeypatch.context() as receiver, server.active():
+            receiver.setattr(settings, "network_token_binding_enabled", default if server_enabled else False)
+            response = server_client.post(request.url.path, json=json.loads(request.content))
+        return httpx.Response(response.status_code, json=response.json())
+
+    monkeypatch.setattr(settings, "network_token_binding_enabled", default if client_enabled else False)
+    with peer.active():
+        link = transport.PeerLink(server.device_id, [endpoint])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            token, _ = await link._issue_token(client, engine.context(), endpoint)
+    with server.active():
+        assert tokens.verify_token(token) == peer.device_id
+        assert bool(store.get_member(peer.device_id)["token_binding_required"]) is (client_enabled and server_enabled)
+
+
+@pytest.mark.asyncio
+async def test_default_on_dialer_refuses_changed_address_until_owner_repairs(upgrade_pair, monkeypatch):
+    from app.api.auth import require_admin
+    server, peer, server_client = upgrade_pair
+    alias = "https://proxy.example:8443"
+    monkeypatch.setattr(settings, "network_token_binding_enabled",
+                        Settings.model_fields["network_token_binding_enabled"].default)
+    server_client.app.dependency_overrides[require_admin] = lambda: "owner"
+
+    def handler(request):
+        with server.active():
+            response = server_client.post(request.url.path, json=json.loads(request.content))
+        return httpx.Response(response.status_code, json=response.json())
+
+    async def issue():
+        with peer.active():
+            link = transport.PeerLink(server.device_id, [alias])
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                return await link._issue_token(client, engine.context(), alias)
+
+    with pytest.raises(transport.PeerEndpointNotAdvertised):
+        await issue()
+    with server.active():
+        response = server_client.put("/api/v1/network/advertised-addresses", json={"addresses": [alias]})
+        assert response.status_code == 200
+        assert alias in response.json()["advertised"]
+    token, _ = await issue()
+    with server.active():
+        assert tokens.verify_token(token) == peer.device_id
+        assert store.get_member(peer.device_id)["token_binding_required"]
+
+
+@pytest.mark.asyncio
+async def test_rolling_back_one_peer_requires_opt_out_on_its_pinned_receiver(upgrade_pair, monkeypatch):
+    server, peer, server_client = upgrade_pair
+    endpoint = "https://tunnel.example"
+    receiver_enabled = True
+
+    def handler(request):
+        with monkeypatch.context() as receiver, server.active():
+            receiver.setattr(settings, "network_token_binding_enabled", receiver_enabled)
+            response = server_client.post(request.url.path, json=json.loads(request.content))
+        return httpx.Response(response.status_code, json=response.json())
+
+    async def issue():
+        with peer.active():
+            link = transport.PeerLink(server.device_id, [endpoint])
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                return await link._issue_token(client, engine.context(), endpoint)
+
+    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    await issue()  # the real producer sends binding support and the receiver pins it
+    with server.active():
+        assert store.get_member(peer.device_id)["token_binding_required"]
+    monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+    with pytest.raises(transport.PeerError, match="Endpoint binding is required") as refused:
+        await issue()
+    detail = str(refused.value)
+    assert "Update the calling worker" in detail
+    assert "NETWORK_TOKEN_BINDING_ENABLED=false on this worker and restart" in detail
+    assert "No re-pairing needed" in detail
+    assert len(detail) <= 300  # v1.0.2 callers truncate the response detail at 300 characters
+    receiver_enabled = False
+    token, _ = await issue()
+    with server.active():
+        assert tokens.verify_token(token) == peer.device_id
+        assert store.get_member(peer.device_id)["token_binding_required"]  # never erase downgrade evidence
 
 
 @pytest.mark.asyncio

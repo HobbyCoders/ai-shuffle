@@ -597,6 +597,10 @@ def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, mo
     assert artifacts[2][0]["sha256"] in build_env["CHROME_EXECUTABLE"]
     assert tool["sha256"] in build_env["LD_LIBRARY_PATH"]
     assert "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN" not in build_env
+    # The runtime producer writes generated frontend assets beside the staged
+    # source on the data volume, never into the read-only image application.
+    built = updater.root / "versions" / B / "source" / "app/static/index.html"
+    assert built.read_text() == "built"
     assert all("x-shuffle-lease" not in request.headers for request in feed[3]
                if request.url.host == "runtimes.example")
 
@@ -737,9 +741,9 @@ def _no_inherited_update_settings(monkeypatch):
 
 @pytest.fixture
 def feed(tmp_path, monkeypatch):
-    # Model the image interpreter with a real local binary on non-container hosts.
-    if os.name == "nt":
-        monkeypatch.setattr("docker.application_updates.IMAGE_PYTHON", sys._base_executable)
+    # Model the image interpreter with a real local binary on every host.
+    # GitHub's Python is under /opt/hostedtoolcache, not /usr/local/bin.
+    monkeypatch.setattr("docker.application_updates.IMAGE_PYTHON", str(Path(sys._base_executable).resolve()))
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
     responses, requests = {}, []

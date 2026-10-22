@@ -6,9 +6,10 @@ import pytest
 
 from app.network import engine, transport
 from tests.core.network.harness import join
+from tests.core.network.test_pending_apply_budget import pending_semantics_clock  # noqa: F401
 
 
-def test_empty_probes_do_not_spend_request_budget(monkeypatch):
+def test_empty_probes_do_not_spend_request_budget(monkeypatch, pending_semantics_clock):
     streams = [(f"origin{i}", 1) for i in range(6)]
     calls, wakes = [], []
 

@@ -15,6 +15,9 @@ from tests.core.network.test_pending_apply_budget import (  # noqa: F401
 )
 
 
+pytestmark = pytest.mark.usefixtures("pending_semantics_clock")
+
+
 @contextmanager
 def query_profile(worker):
     counts = Counter()

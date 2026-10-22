@@ -36,6 +36,14 @@ describe('workspace wire validation', () => {
 		// The rest of a field is still checked as strictly as before.
 		expect(isBrowserWorkspaceState({ ...state, editors: [{ ...field('f', style), width: 0 }] })).toBe(false);
 	});
+	it('accepts select and date/time pickers with their limits, only on pickers', () => {
+		const picker = (extra: Record<string, unknown>) => ({ id: 'p', type: 'date', label: 'Day', value: '', x: 0, y: 0, width: 100, height: 20, ...extra });
+		for (const ok of [{ min: '2026-01-01', max: '2026-12-31', step: '7', focused: true }, { type: 'select', value: 'France' },
+			{ type: 'time', step: 'any' }, { type: 'datetime-local' }, { type: 'month' }, { type: 'week', focused: false }])
+			expect(isBrowserWorkspaceState({ ...state, editors: [picker(ok)] })).toBe(true);
+		for (const bad of [{ type: 'color' }, { min: 5 }, { step: 'x'.repeat(65) }, { focused: 'yes' }, { type: 'text', step: '1' }, { type: 'text', focused: true }])
+			expect(isBrowserWorkspaceState({ ...state, editors: [picker(bad)] })).toBe(false);
+	});
 	it('accepts a short plain notice and rejects anything else', () => {
 		expect(isBrowserWorkspaceState({ ...state, notice: 'This step needs your own browser.' })).toBe(true);
 		for (const notice of [3, null, 'x'.repeat(513)]) {

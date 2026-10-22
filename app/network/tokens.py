@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import secrets
 import ipaddress
+import logging
 import re
 import threading
 import time
@@ -35,6 +36,8 @@ from fastapi import HTTPException, Request, status
 from app.network import crypto, engine, membership
 from app.core.config import settings
 from app.db import network as store
+
+logger = logging.getLogger(__name__)
 
 ENDPOINT_NOT_ADVERTISED = "endpoint_not_advertised"
 TOKEN_TTL_SECONDS = 300
@@ -64,6 +67,22 @@ _lock = threading.Lock()
 _challenges: Dict[str, Tuple[float, str, str, bool]] = {}
 # (device_id, requester) pairs proven to belong to the member (a spent challenge).
 _member_addresses: "OrderedDict[Tuple[str, str], None]" = OrderedDict()
+# Only authenticated member devices reach this refusal. Prune expired entries
+# whenever a new warning is emitted, as on the dialing side of the same error.
+_binding_refusal_at: Dict[str, float] = {}
+
+
+def _warn_binding_required(device_id: str, detail: str) -> None:
+    now = time.monotonic()
+    with _lock:
+        last = _binding_refusal_at.get(device_id)
+        if last is not None and now - last < 300:
+            return
+        for expired, warned_at in list(_binding_refusal_at.items()):
+            if now - warned_at >= 300:
+                _binding_refusal_at.pop(expired, None)
+        _binding_refusal_at[device_id] = now
+    logger.warning("Refusing device %s: %s", device_id, detail)
 
 
 def at_capacity() -> bool:
@@ -331,7 +350,12 @@ def issue_token(*, device_id: str, challenge: str, signature: str,
                 })
             store.pin_token_binding(device_id, crypto.b64u_encode(member.signing_public))
         elif settings.network_require_token_binding or (store.get_member(device_id) or {}).get("token_binding_required"):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Endpoint binding is required")
+            # Old callers display only the first 300 detail characters. Keep the
+            # receiving worker's repair actionable without exposing other URLs.
+            detail = ("Endpoint binding is required. Update the calling worker, or set "
+                      "NETWORK_TOKEN_BINDING_ENABLED=false on this worker and restart. No re-pairing needed.")
+            _warn_binding_required(device_id, detail)
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
     # The member's key signed a challenge issued to this address: it keeps
     # headroom past the global ceiling from now on.
     _remember_member_address(device_id, requester)
@@ -408,4 +432,5 @@ def reset_for_tests() -> None:
     with _lock:
         _challenges.clear()
         _member_addresses.clear()
+        _binding_refusal_at.clear()
     _secret = secrets.token_bytes(32)

@@ -8,10 +8,18 @@
  * the distinct neutral state, and (just as importantly) that it stays narrow:
  * any other denial keeps the error rendering.
  */
-import { describe, it, expect, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import ToolUseMessage from './ToolUseMessage.svelte';
 import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+import { phonePanel } from '$lib/stores/phone-panel.svelte';
+import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
+const emulatorStatus = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/emulator', async (orig) => ({
+	...(await orig<typeof import('$lib/api/emulator')>()),
+	fetchEmulatorStatus: emulatorStatus,
+}));
+
 import {
 	QUESTION_DISMISS_MESSAGE,
 	QUESTION_DISMISSED_LABEL,
@@ -125,5 +133,61 @@ describe('isDismissedQuestion', () => {
 				`<tool_use_error>${QUESTION_DISMISS_MESSAGE}</tool_use_error>`
 			)
 		).toBe(true);
+	});
+});
+
+describe('ToolUseMessage — Show phone on Emulator rows', () => {
+	afterEach(() => phonePanel.reset());
+
+	async function withEmulator(answer: () => Promise<unknown>) {
+		phonePanel.reset();
+		emulatorStatus.mockReset().mockImplementation(answer);
+		await phonePanel.ensureCapability();
+	}
+	const emulatorRow = (sessionId: string, name = 'mcp__builtins__EmulatorScreenshot') =>
+		render(ToolUseMessage, { props: { name, sessionId, input: {}, result: 'ok', status: 'complete' } });
+
+	it('reopens a closed phone panel for the chat, then steps aside while it shows', async () => {
+		await withEmulator(() => Promise.resolve({}));
+		const sid = 'card-reopen';
+		phonePanel.open(sid);
+		phonePanel.close(sid);
+		emulatorRow(sid);
+		const show = screen.getByRole('button', { name: 'Show phone' });
+		await fireEvent.click(show);
+		expect(sidePanel.forScope(sessionPanelKey(sid)).active).toBe('phone');
+		expect(phonePanel.userClosedFor(sid)).toBe(false);
+		await waitFor(() => expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull());
+	});
+
+	it('hands keyboard focus to the panel it opens, since the pill unmounts', async () => {
+		await withEmulator(() => Promise.resolve({}));
+		emulatorRow('card-focus');
+		await fireEvent.click(screen.getByRole('button', { name: 'Show phone' }));
+		await waitFor(() => expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull());
+		// The panel (mounted by the main panel) claims this on mount.
+		expect(phonePanel.takeFocusRequest()).toBe(true);
+	});
+
+	it('works on the delegated leg\'s wrapped name too', async () => {
+		await withEmulator(() => Promise.resolve({}));
+		emulatorRow('card-wrapped', 'mcp__fluid_bundled__mcp__builtins__Emulator');
+		expect(screen.getByRole('button', { name: 'Show phone' })).toBeTruthy();
+	});
+
+	it('is absent on a worker without the emulator, in another worker\'s chat, and on other tools', async () => {
+		await withEmulator(() => Promise.reject({ status: 404 }));
+		emulatorRow('card-none');
+		expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull();
+		cleanup();
+
+		await withEmulator(() => Promise.resolve({}));
+		phonePanel.noteRemote('card-remote', true);
+		emulatorRow('card-remote');
+		expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull();
+		cleanup();
+
+		emulatorRow('card-bash', 'Bash');
+		expect(screen.queryByRole('button', { name: 'Show phone' })).toBeNull();
 	});
 });
