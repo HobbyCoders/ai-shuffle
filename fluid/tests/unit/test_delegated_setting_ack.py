@@ -21,6 +21,7 @@ import pytest
 import fluid.engine.delegated as delegated_mod
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import FORCED_CHILD_ENV
+from fluid.context.attribution import cli_attribution
 from fluid.events import ErrorEvent, TurnComplete, UserTurn
 from fluid.events.model import Interrupted
 from fluid.events.ops import SetModel, SetPermissionMode
@@ -82,6 +83,7 @@ async def test_acknowledged_run_settings_keep_cli_process_and_update_spawn_flags
         assert json.loads(loop.settings) == {
             "effortLevel": None, "fastMode": False,
             "env": {"SAFE_TEST": "keep", **FORCED_CHILD_ENV},
+            "attribution": cli_attribution(True),
         }
         sent = _sent(record, "apply_flag_settings")
         assert sent[0]["request"]["settings"]["effortLevel"] == "low"
@@ -108,6 +110,7 @@ async def test_unacknowledged_run_settings_do_not_record_success(tmp_path, monke
         assert json.loads(loop.settings)["fastMode"] is False
         assert loop._setting_request("apply_flag_settings")["settings"] == {
             "effortLevel": "high", "fastMode": False, "env": dict(FORCED_CHILD_ENV),
+            "attribution": cli_attribution(True),
         }
         assert len(_sent(record, "apply_flag_settings")) == 1
     finally:
