@@ -467,7 +467,9 @@ async def test_shell_file_write_is_not_blocked_by_model_prose_heuristics(tmp_pat
         provider=provider, store=MemoryStore(), model="m", registry=registry,
         permissions=PermissionEngine("never_ask"),
     )
-    await loop.submit(UserTurn(content="create the file"))
+    # The file-work guard must not overrule an explicit shell request; this
+    # test remains about model prose, not implicit routing of file writes.
+    await loop.submit(UserTurn(content=f"Run `{command}`"))
     await loop.wait_turn()
 
     assert marker.read_text().strip() == "bad"

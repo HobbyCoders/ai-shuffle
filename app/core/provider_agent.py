@@ -1527,6 +1527,68 @@ class _WallCap:
         return _hard_deadline_error(worker_session_id, self.seconds)
 
 
+class SyncHandoff:
+    """Moves a live synchronous Task dispatch to the background at its cap.
+
+    ``task_dispatch`` runs a sync Task's dispatch as its own asyncio task and
+    hands :func:`dispatch_worker` one of these. When the sync wall cap expires
+    and the worker has shown progress (a forwarded frame or provider progress),
+    the dispatch is not stopped. It carries on as a background dispatch of the
+    same worker session and task id: the launch key is armed on the owner's
+    notification lanes, the supervisor record is marked background (so the
+    parent's turn end spares it), and its terminal reaches the parent once,
+    as a normal background task notification.
+
+    The move happens inside the dispatch's own coroutine, between two waits, so
+    a worker that finishes at the same moment either completes in the
+    foreground (no move, report inline) or completes after the move (one
+    background notification), never both. ``on_move`` runs first, then
+    :meth:`future` resolves with the worker session id: the caller must check
+    :attr:`moved` before it reads the dispatch's own result.
+
+    A worker with no progress at the cap is dead or stuck: it keeps today's
+    stop-and-fail result and nothing is moved. "Progress" is any progress
+    ever seen, so a worker that streamed once and then hung does move; from
+    there it is bounded like any background worker (fluid's stream and turn
+    watchdogs, the park watchdog's settle), not by the sync cap. Nor does it
+    move when the background lane's own limit (the loop guard's) is already
+    spent: it is stopped with that limit's result instead.
+    """
+
+    def __init__(self, on_move: Optional[Callable[[str], None]] = None) -> None:
+        self.on_move = on_move
+        #: The moved worker's session id; None until the move.
+        self.worker_session_id: Optional[str] = None
+        #: The attempt's remaining sync budget when it moved (logging only;
+        #: the parent is told the configured cap).
+        self.seconds: float = 0.0
+        self._future: Optional[asyncio.Future] = None
+
+    @property
+    def moved(self) -> bool:
+        return self.worker_session_id is not None
+
+    def future(self) -> asyncio.Future:
+        if self._future is None:
+            self._future = asyncio.get_event_loop().create_future()
+        return self._future
+
+    def move(self, worker_session_id: str, seconds: float) -> None:
+        self.worker_session_id = worker_session_id
+        self.seconds = seconds
+        if self.on_move is not None:
+            try:
+                self.on_move(worker_session_id)
+            except Exception:  # noqa: BLE001 — the move itself already happened
+                logger.exception(
+                    "ProviderAgent: sync hand-off bookkeeping failed for %s",
+                    worker_session_id,
+                )
+        future = self.future()
+        if not future.done():
+            future.set_result(worker_session_id)
+
+
 def _no_first_frame_error(worker_session_id: str, seconds: float) -> str:
     """The failure text for a worker that produced no parent-visible frame.
 
@@ -1543,13 +1605,16 @@ def _no_first_frame_error(worker_session_id: str, seconds: float) -> str:
 
 
 def _hard_deadline_error(worker_session_id: str, seconds: float) -> str:
-    """The failure text for a synchronous worker that blew its wall-clock cap."""
+    """The failure text for a synchronous worker stopped at its wall-clock cap.
+
+    Only a worker that showed no progress by then reaches this on the Task
+    path (a live one moves to the background, see :class:`SyncHandoff`). It
+    has been stopped, so the text never suggests that it is still running.
+    """
     return (
         f"The worker did not finish within the {seconds:.0f}s cap for a "
-        "synchronous Task, so the call was abandoned rather than blocking the "
-        "parent turn any further. Re-dispatch it in the background if the work "
-        f"genuinely takes this long. Its partial transcript is in session "
-        f"{worker_session_id}."
+        "synchronous Task and showed no progress, so it was stopped. Its "
+        f"partial transcript is in session {worker_session_id}."
     )
 
 
@@ -2236,6 +2301,7 @@ async def dispatch_worker(
     suppress_caller_wake: Optional[Callable[[str, Optional[str], int], bool]] = None,
     model_note: Optional[str] = None,
     base_commit: Optional[str] = None,
+    sync_handoff: Optional[SyncHandoff] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -2268,6 +2334,12 @@ async def dispatch_worker(
       whose work an unattended source started (automation, wake-up, connector)
       on the Claude subscription gets the loop guard's per-worker limit instead
       when the lane sets none; a worker a person's turn started never does.
+
+    ``sync_handoff`` (synchronous Task only): at the sync cap, a worker that
+    has shown progress is moved to the background instead of being stopped
+    (:class:`SyncHandoff`). From then on this call behaves exactly like a
+    ``background=True`` dispatch, including the loop guard's per-worker limit
+    measured from the original start.
 
     Every failure path returns a :class:`WorkerOutcome` with ``ok=False``,
     ``frames_forwarded`` (0 = no parent progress) and ``killed`` (a teardown,
@@ -2624,7 +2696,9 @@ async def dispatch_worker(
     # a wake would both be noise (and the wake would target a turn that is still
     # running). Only the background mode detaches the outcome from the call, and
     # only it needs the notification lanes. The ``finally`` below fires the wake
-    # under the same condition, so the two halves cannot disagree.
+    # under the same condition, so the two halves cannot disagree. A sync
+    # dispatch moved to the background at its cap (``sync_handoff``) arms the
+    # launch at the move, before ``background`` flips for the ``finally``.
     #
     # Park-gate safety: ``_background_launches`` is
     # CUMULATIVE and is NOT pruned in ``complete_task``, but the ``_finalize``
@@ -2779,12 +2853,67 @@ async def dispatch_worker(
         settle_budget = _background_settle_seconds()
         outstanding: List[Dict[str, Any]] = []
         park_warnings = DBPollWarnings()
-        while not wait_verdict and not supervised.torn_down:
+        while not supervised.torn_down:
+            if wait_verdict:
+                # A synchronous Task's cap with a live worker: move it to the
+                # background rather than stop it (SyncHandoff). Every other
+                # verdict, and a worker with no progress, ends the wait.
+                if not (
+                    wait_verdict == WAIT_DEADLINE
+                    and not background
+                    and sync_handoff is not None
+                    and not wall_cap.loop_guarded
+                    and await _worker_showed_progress(feed)
+                    and not supervised.torn_down
+                ):
+                    break
+                # The background lane's own limit (the loop guard's, if it
+                # covers this worker), measured from the original start. Read
+                # BEFORE the flip: from the flip to ``move`` there is no
+                # await, so a parent cancelled in between still finds a
+                # foreground dispatch and nothing half-moved.
+                _ff, bg_wall_seconds, bg_guarded = await asyncio.to_thread(
+                    _worker_deadlines, True, first_frame_seconds, None,
+                    provider_id, origin,
+                )
+                if supervised.torn_down:
+                    break
+                background_cap = _WallCap(
+                    _clock, bg_wall_seconds, provider_id=provider_id,
+                    origin=origin, loop_guarded=bg_guarded,
+                )
+                background_deadline = background_cap.deadline()
+                if (
+                    background_deadline is not None
+                    and asyncio.get_event_loop().time() >= background_deadline
+                ):
+                    # The background lane's own limit (the loop guard's, set
+                    # below the sync cap) has already run out: moving would
+                    # only say "still running" and then stop it. Stop it here
+                    # with that limit's own result, still in the foreground.
+                    wall_cap = background_cap
+                    break
+                foreground_seconds = wall_cap.seconds
+                background = True
+                supervised.background = True
+                task_registry.mark_background_launch(owner_session_id, launch_key)
+                wall_cap = background_cap
+                logger.info(
+                    "ProviderAgent: worker %s still running at the %.0fs sync "
+                    "cap — moved to the background", worker_session_id,
+                    foreground_seconds,
+                )
+                sync_handoff.move(worker_session_id, foreground_seconds)
+                wait_verdict = await _await_worker_idle(
+                    worker_session_id, provider_id, feed=feed,
+                    first_frame_deadline=None, wall_cap=wall_cap,
+                )
+                continue
             await wall_cap.refresh(asyncio.get_event_loop().time())
             hard_deadline = wall_cap.deadline()
             if hard_deadline is not None and asyncio.get_event_loop().time() >= hard_deadline:
                 wait_verdict = WAIT_DEADLINE
-                break
+                continue  # the verdict block above decides: hand off or stop
             try:
                 still_working = await asyncio.to_thread(_worker_still_working, worker_session_id)
             except DB_POLL_ERRORS:

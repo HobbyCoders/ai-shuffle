@@ -9,11 +9,40 @@
 // fails is skipped and the CLI's own behaviour goes on, as without the mod.
 import type { Register } from 'claude-code'
 import { withFluidNote } from './compact.ts'
+import { classify, enabled, lastUserRequest, refusal, replacementInput } from './file_guard.ts'
 import { compactedRows, compactionBridge } from './mechanical.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
 export const register: Register = (on) => {
+  // tool.call wraps execution, not permission prompting: bypassPermissions
+  // still comes through here. Unknown syntax or unavailable introspection
+  // passes unchanged. This is routing guidance, not a security boundary.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    // tool.list/check queries are main-loop scoped. Never apply that catalog
+    // or permission verdict to an agent whose effective surface may differ.
+    if (e.agentId) return next(e)
+    let guidance: string | null = null
+    try {
+      if (!enabled(await $.env.get('FLUID_BASH_FILE_GUARD'))) return next(e)
+      const found = classify(e.command)
+      if (!found) return next(e)
+      const catalog = await $.tool.list()
+      const messages = await $.session.messages()
+      if (!Array.isArray(catalog) || !Array.isArray(messages)) return next(e)
+      guidance = refusal(e.command, catalog.map(t => t.name), lastUserRequest(messages))
+      if (!guidance) return next(e)
+      // list() alone is NOT evidence of permission. This documented dry query
+      // evaluates the current mode/rules without execution, dialogs or hooks
+      // such as PreToolUse. A missing/denied/unknown verdict fails open.
+      const verdict = await $.tool.check({ tool: found.tool, input: replacementInput(found) })
+      if (!['allow', 'ask'].includes(verdict?.decision)) return next(e)
+    } catch {
+      return next(e)
+    }
+    return { deny: guidance! }
+  })
+
   on('prompt.attachment', { type: 'auto_mode' }, async ($, e, next) => {
     const answer = await next(e)
     if (answer.text === null) return answer

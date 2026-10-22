@@ -744,7 +744,9 @@ class Settings(BaseSettings):
     # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every
     # attempt. A sync dispatch blocks the parent turn — it cannot park, cannot
     # be steered and cannot be told the worker went quiet — so unlike the
-    # background lane it gets a real ceiling.
+    # background lane it gets a real ceiling. At the cap a worker that has
+    # shown progress moves to the background (same session and task id) and
+    # reports to the parent as a background task; one with none is stopped.
     # 0 disables the cap. Override via TASK_WORKER_SYNC_MAX_SECONDS.
     task_worker_sync_max_seconds: float = 900.0
     # How many times a BACKGROUND dispatch whose worker never streamed a frame
