@@ -255,8 +255,13 @@ or in-progress rerun cannot reuse an older hosted pass. The gate queries jobs
 for that attempt, requires exactly one completed successful aggregate, and
 re-reads the run to detect a rerun race. Publication logs record the run ID,
 attempt number and attempt URL. A valid owner-local pass remains an independent
-alternative even if a hosted run fails. Manual main-suite dispatches on refs
-other than `main` cannot pass the aggregate and never authorize publication.
+alternative even if a hosted run fails. Conversely, an explicit newest owner
+`local/full-suite` **failure vetoes that revision**, even if hosted CI passed.
+Only a newer commit or a later owner success unblocks it. Off-main dispatches
+and PR runs are excluded from hosted run selection, so they cannot shadow main
+at the same SHA. Manual main-suite dispatches on refs other than `main` cannot
+pass the aggregate and never authorize publication. Repository/workflow metadata
+is fetched once per gate invocation; run/attempt/job evidence is always fresh.
 
 If main moves during testing, the tested first-parent ancestor can still
 publish. Selection chooses the newest successful first-parent revision strictly
