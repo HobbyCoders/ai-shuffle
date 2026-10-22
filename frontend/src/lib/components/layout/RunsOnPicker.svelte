@@ -11,7 +11,7 @@
 	 * open). The card owns this choice, so the project strip hides its own
 	 * runner chip.
 	 */
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { ChevronDown, Monitor, Server } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getClusterGitState, type Install } from '$lib/api/installs';
@@ -83,10 +83,75 @@
 		}))
 	]);
 
+	let menuRef = $state<HTMLDivElement | null>(null);
+
+	/** The menu's rows (workers, then Retry), in order. */
+	function menuItems(): HTMLButtonElement[] {
+		return Array.from(menuRef?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)') ?? []);
+	}
+
+	/** Roving tabindex: only the focused row is in the Tab order. */
+	function focusItem(target: HTMLButtonElement | undefined) {
+		if (!target) return;
+		for (const el of menuItems()) el.tabIndex = el === target ? 0 : -1;
+		target.focus();
+	}
+
+	async function focusOnOpen() {
+		await tick();
+		const list = menuItems();
+		focusItem(list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0]);
+	}
+
 	function toggle() {
 		open = !open;
-		if (open) void load();
+		if (open) {
+			void load();
+			void focusOnOpen();
+		}
 	}
+
+	function closeMenu(focusTrigger: boolean) {
+		open = false;
+		if (focusTrigger) wrapRef?.querySelector<HTMLButtonElement>('.runs-on')?.focus();
+	}
+
+	/** Arrow keys and Home/End move between rows; Tab leaves and closes. */
+	function onMenuKeydown(e: KeyboardEvent) {
+		const list = menuItems();
+		if (!list.length) return;
+		const at = list.indexOf(document.activeElement as HTMLButtonElement);
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			focusItem(list[(at + 1) % list.length]);
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			focusItem(list[(at - 1 + list.length) % list.length]);
+		} else if (e.key === 'Home') {
+			e.preventDefault();
+			focusItem(list[0]);
+		} else if (e.key === 'End') {
+			e.preventDefault();
+			focusItem(list[list.length - 1]);
+		} else if (e.key === 'Tab') {
+			closeMenu(false);
+		}
+	}
+
+	// Rows arrive after the open (the worker list loads): keep exactly one of
+	// them in the Tab order once they render.
+	$effect(() => {
+		void rows;
+		if (!open) return;
+		void tick().then(() => {
+			const list = menuItems();
+			// A freshly rendered button starts in the Tab order (tabIndex 0).
+			if (list.length && list.filter((el) => el.tabIndex === 0).length !== 1) {
+				const pick = list.find((el) => el === document.activeElement) ?? list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0];
+				for (const el of list) el.tabIndex = el === pick ? 0 : -1;
+			}
+		});
+	});
 
 	function select(row: WorkerMenuRow) {
 		if (row.id === LOCAL_ROW_ID) {
@@ -103,10 +168,7 @@
 		if (open && wrapRef && !wrapRef.contains(e.target as Node)) open = false;
 	}
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && open) {
-			open = false;
-			wrapRef?.querySelector<HTMLButtonElement>('.runs-on')?.focus();
-		}
+		if (e.key === 'Escape' && open) closeMenu(true);
 	}
 </script>
 
@@ -135,7 +197,7 @@
 		<ChevronDown size={12} strokeWidth={1.8} class="runs-on-chev" aria-hidden="true" />
 	</button>
 	{#if open}
-		<div class="runs-on-menu" role="menu" aria-label="Where this session runs">
+		<div class="runs-on-menu" role="menu" tabindex="-1" aria-label="Where this session runs" bind:this={menuRef} onkeydown={onMenuKeydown}>
 			<WorkerMenuList
 				items={rows}
 				role="menuitemradio"
@@ -178,6 +240,7 @@
 	.runs-on.peer .runs-on-name { color: inherit; }
 	.runs-on :global(.runs-on-chev) { color: var(--subtle-foreground); transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1); }
 	.runs-on.open :global(.runs-on-chev) { transform: rotate(180deg); }
+	.runs-on-menu:focus { outline: none; }
 	.runs-on-menu {
 		position: absolute;
 		top: calc(100% + 6px);

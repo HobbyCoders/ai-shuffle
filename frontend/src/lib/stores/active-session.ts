@@ -1101,7 +1101,13 @@ export const activeSession = {
 	 * The row is now an ordinary project session; mirror it so the composer,
 	 * git button and project controls appear without a reload.
 	 */
-	applyAttachedProject(sessionId: string, projectId: string, projectV2Id: string | null) {
+	applyAttachedProject(sessionId: string, projectId: string, projectV2Id: string | null, permissionMode = 'default') {
+		// The attach put the session back on Ask (the backend's guarded write
+		// resets Auto and Bypass). Show and send that, here and in the cached
+		// copy a later switch-back restores. The owner's remembered pick for
+		// NEW sessions is theirs and stays as it was.
+		const cached = sessionEphemeralCache.restore(sessionId);
+		if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode });
 		if (_state.sessionId !== sessionId) return;
 		_update(s => ({
 			...s,
@@ -1112,6 +1118,7 @@ export const activeSession = {
 			worktreeId: null,
 			worktreeBranch: '',
 			selectedWorktreeBranch: null,
+			permissionModeOverride: permissionMode,
 		}));
 		persistSession();
 	},

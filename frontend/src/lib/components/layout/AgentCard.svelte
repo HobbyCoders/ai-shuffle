@@ -41,9 +41,9 @@
 	const capability = $derived(projectName ? `Works in ${projectName}` : 'Starts and steers sessions anywhere');
 
 	const phone = $derived(platform.isMobile);
-	const selfId = $derived(($workerInstalls ?? []).find((i) => i.is_self)?.id ?? null);
+	const selfInstall = $derived(($workerInstalls ?? []).find((i) => i.is_self) ?? null);
 	const showRunsOn = $derived(
-		runsOnVisible({ phone, runsOnId: $activeSession.deviceIntent?.id ?? null, connectedId: selfId })
+		runsOnVisible({ phone, runsOnId: $activeSession.deviceIntent?.id ?? null, connected: selfInstall })
 	);
 	const noAgents = $derived($profilesLoaded && $profiles.length === 0);
 </script>

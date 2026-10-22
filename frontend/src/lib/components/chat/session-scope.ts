@@ -10,8 +10,11 @@
  * - Runs on: always on the desktop card; on the phone only when the session
  *   would run somewhere other than the worker the phone is connected to.
  * - Attach a project: one-way, only on an idle no-project session this worker
- *   runs.
+ *   runs, and it puts the session back on Ask.
  */
+
+import type { Install } from '$lib/api/installs';
+import { matches } from '$lib/stores/worker-presence';
 
 export interface AccessMode {
 	value: 'default' | 'auto' | 'acceptEdits' | 'bypassPermissions';
@@ -68,14 +71,16 @@ export function noProjectPermission(mode: string | null | undefined): string | n
  */
 export function runsOnVisible(opts: {
 	phone: boolean;
-	/** Install id the new session would run on; null/empty = this worker. */
+	/** Id the new session would run on (install, device or instance id); null/empty = this worker. */
 	runsOnId: string | null | undefined;
-	/** Install id of the worker this UI is connected to (null when unknown). */
-	connectedId: string | null | undefined;
+	/** The install row of the worker this UI is connected to (null when unknown). */
+	connected: Install | null | undefined;
 }): boolean {
 	if (!opts.phone) return true;
 	if (!opts.runsOnId) return false;
-	return opts.runsOnId !== opts.connectedId;
+	// The row's `id` is the device id on a network worker while a pick may name
+	// its instance id, so match on every id the row carries.
+	return !opts.connected || !matches(opts.connected, opts.runsOnId);
 }
 
 export interface AttachState {
@@ -109,10 +114,17 @@ export function attachBlockedReason(state: AttachState): string | null {
 	return null;
 }
 
+/**
+ * What the attach does to the session's access, shown with the warning.
+ * The backend resets Auto and Bypass in the same write that attaches.
+ */
+export const ATTACH_ACCESS_NOTE = 'Access returns to Ask, so the terminal and file edits ask you first.';
+
 /** The one-way warning the attach sheet shows above its confirm. */
 export function attachWarning(agentName: string | null | undefined, projectName: string | null | undefined): {
 	title: string;
 	body: string;
+	access: string;
 } {
 	const agent = agentName?.trim() || 'Your agent';
 	const project = projectName?.trim();
@@ -120,7 +132,8 @@ export function attachWarning(agentName: string | null | undefined, projectName:
 		title: 'One-way. Projects can’t be detached.',
 		body: project
 			? `${agent} keeps this conversation and gains ${project}’s checkout, git panel and file tools. To work without a project again, start a new session.`
-			: `${agent} keeps this conversation and gains the project’s checkout, git panel and file tools. To work without a project again, start a new session.`
+			: `${agent} keeps this conversation and gains the project’s checkout, git panel and file tools. To work without a project again, start a new session.`,
+		access: ATTACH_ACCESS_NOTE
 	};
 }
 

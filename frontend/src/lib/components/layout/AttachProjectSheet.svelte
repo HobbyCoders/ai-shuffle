@@ -8,7 +8,7 @@
 	 * plainly that it is one-way before the confirm. The backend holds the same
 	 * rule (POST /sessions/{id}/attach-project refuses a second attach).
 	 */
-	import { FolderClosed, GitBranch, Lock, SquareTerminal, X, Check, Loader2 } from 'lucide-svelte';
+	import { FolderClosed, GitBranch, Lock, ShieldCheck, SquareTerminal, X, Check, Loader2 } from 'lucide-svelte';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { attachProject } from '$lib/api/sessions';
@@ -42,6 +42,42 @@
 		if (!open) { picked = null; error = null; attaching = false; }
 	});
 
+	// Radiogroup keyboard model: one stop in the Tab order (the picked row, else
+	// the first one this worker can attach), and the arrow keys move the pick
+	// and the focus together. Rows on another worker can't be picked, so the
+	// arrows skip them; they stay listed with their reason.
+	let rowRefs = $state<Record<string, HTMLButtonElement | null>>({});
+	const pickable = $derived(items.filter((i) => !i.remoteOnly));
+	const tabStop = $derived(picked ?? pickable[0]?.id ?? null);
+
+	function onRadioKeydown(e: KeyboardEvent, id: string) {
+		if (!pickable.length) return;
+		const at = pickable.findIndex((i) => i.id === id);
+		let next: number;
+		switch (e.key) {
+			case 'ArrowDown':
+			case 'ArrowRight':
+				next = (at + 1) % pickable.length;
+				break;
+			case 'ArrowUp':
+			case 'ArrowLeft':
+				next = (at - 1 + pickable.length) % pickable.length;
+				break;
+			case 'Home':
+				next = 0;
+				break;
+			case 'End':
+				next = pickable.length - 1;
+				break;
+			default:
+				return;
+		}
+		e.preventDefault();
+		if (attaching) return;
+		picked = pickable[next].id;
+		rowRefs[picked]?.focus();
+	}
+
 	function portal(node: HTMLElement) {
 		document.body.appendChild(node);
 		return { destroy() { node.remove(); } };
@@ -60,8 +96,8 @@
 		error = null;
 		try {
 			const result = await attachProject(sessionId, pickedItem.project);
-			activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id);
-			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout.`, { severity: 'success' });
+			activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
+			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
 			error = getErrorMessage(e, 'Could not attach the project.');
@@ -91,14 +127,17 @@
 			<div class="proj-list" role="radiogroup" aria-label="Project">
 				{#each items as item (item.id)}
 					<button
+						bind:this={rowRefs[item.id]}
 						type="button"
 						class="proj-row"
 						class:selected={picked === item.id}
 						role="radio"
 						aria-checked={picked === item.id}
 						aria-disabled={item.remoteOnly ? 'true' : undefined}
+						tabindex={item.id === tabStop ? 0 : -1}
 						title={item.remoteOnly ? 'Not checked out on this worker' : item.name}
-						onclick={() => { if (!item.remoteOnly) picked = item.id; }}
+						onclick={() => { if (!item.remoteOnly && !attaching) picked = item.id; }}
+						onkeydown={(e) => onRadioKeydown(e, item.id)}
 					>
 						<FolderClosed size={15} strokeWidth={1.7} aria-hidden="true" />
 						<span class="proj-name">{item.name}</span>
@@ -135,6 +174,7 @@
 				<div>
 					<strong>{warning.title}</strong>
 					<p>{warning.body}</p>
+					<p class="access-note"><ShieldCheck size={13} strokeWidth={2} aria-hidden="true" />{warning.access}</p>
 				</div>
 			</div>
 
@@ -227,6 +267,8 @@
 	.one-way :global(svg) { flex: none; margin-top: 2px; }
 	.one-way strong { display: block; font-size: 13px; font-weight: 600; color: var(--foreground); }
 	.one-way p { margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: var(--muted-foreground); }
+	.one-way .access-note { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; color: var(--foreground); font-weight: 500; }
+	.one-way .access-note :global(svg) { margin-top: 2px; color: var(--muted-foreground); }
 	.blocked, .error { margin-bottom: 10px; font-size: 12.5px; }
 	.blocked { color: var(--muted-foreground); }
 	.error { color: var(--destructive); }

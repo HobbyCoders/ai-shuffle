@@ -232,6 +232,37 @@ describe('live permission selection', () => {
 });
 
 
+describe('attaching a project (#371)', () => {
+	beforeEach(() => {
+		composerPreferences.set('permissionMode', 'bypassPermissions');
+		sessionEphemeralCache.clear();
+		activeSession.current.sessionId = 'attach-me';
+		activeSession.current.mode = 'chat';
+		activeSession.current.project = '';
+		activeSession.current.permissionModeOverride = 'bypassPermissions';
+	});
+	afterEach(() => { activeSession.current.sessionId = null; });
+
+	it('shows the open session as a project session on Ask, and keeps the pick for new sessions', () => {
+		activeSession.applyAttachedProject('attach-me', 'proj-1', 'v2-1', 'default');
+		expect(activeSession.current.mode).toBe('code');
+		expect(activeSession.current.project).toBe('proj-1');
+		expect(activeSession.current.projectV2Id).toBe('v2-1');
+		expect(activeSession.current.permissionModeOverride).toBe('default');
+		// The owner's remembered pick for NEW sessions is theirs to change.
+		expect(composerPreferences.current.permissionMode).toBe('bypassPermissions');
+	});
+
+	it('also resets the cached copy of a session that is no longer on screen', () => {
+		sessionEphemeralCache.save('attach-me', { ...activeSession.current, permissionModeOverride: 'auto' });
+		activeSession.current.sessionId = 'something-else';
+		activeSession.applyAttachedProject('attach-me', 'proj-1', null);
+		expect(sessionEphemeralCache.restore('attach-me')?.permissionModeOverride).toBe('default');
+		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
+		expect(activeSession.current.project).toBe('');
+	});
+});
+
 describe('per-model effort selection', () => {
  it('remembers explicit composer picks and restores them on model switches', async () => {
   Object.assign(activeSession.current, {sessionId:null, modelOverride:'opus', effortLevelOverride:null});

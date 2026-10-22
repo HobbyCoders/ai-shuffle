@@ -15,6 +15,7 @@ import {
 	runsOnVisible,
 	type AttachState
 } from './session-scope';
+import type { Install } from '$lib/api/installs';
 
 const values = (opts: { hasProject: boolean; autoSupported: boolean }) => accessModes(opts).map((m) => m.value);
 
@@ -63,22 +64,38 @@ describe('Access without a project', () => {
 });
 
 describe('Runs on visibility', () => {
+	const self: Install = {
+		id: 'self', device_name: 'Unraid', base_url: null, platform: 'linux', version: null,
+		capabilities: {}, last_seen: null, online: true, is_self: true
+	};
+
 	it('always shows on desktop, wherever the session runs', () => {
-		expect(runsOnVisible({ phone: false, runsOnId: null, connectedId: 'self' })).toBe(true);
-		expect(runsOnVisible({ phone: false, runsOnId: 'self', connectedId: 'self' })).toBe(true);
-		expect(runsOnVisible({ phone: false, runsOnId: 'peer', connectedId: 'self' })).toBe(true);
+		expect(runsOnVisible({ phone: false, runsOnId: null, connected: self })).toBe(true);
+		expect(runsOnVisible({ phone: false, runsOnId: 'self', connected: self })).toBe(true);
+		expect(runsOnVisible({ phone: false, runsOnId: 'peer', connected: self })).toBe(true);
 	});
 
 	it('hides on the phone when the session runs on the connected worker', () => {
-		expect(runsOnVisible({ phone: true, runsOnId: null, connectedId: 'self' })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: '', connectedId: 'self' })).toBe(false);
-		expect(runsOnVisible({ phone: true, runsOnId: 'self', connectedId: 'self' })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: null, connected: self })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: '', connected: self })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: 'self', connected: self })).toBe(false);
+	});
+
+	it('matches a network worker picked by its instance id against its device-id row', () => {
+		// A network worker's row id is its device id; the runner pick stores the
+		// instance id. The same worker must still read as "here".
+		const networked: Install = {
+			...self, id: 'dev_unraid', device_id: 'dev_unraid', legacy_instance_id: 'inst-unraid'
+		};
+		expect(runsOnVisible({ phone: true, runsOnId: 'inst-unraid', connected: networked })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: 'dev_unraid', connected: networked })).toBe(false);
+		expect(runsOnVisible({ phone: true, runsOnId: 'inst-gamingpc', connected: networked })).toBe(true);
 	});
 
 	it('shows on the phone only when it differs from the connected worker', () => {
-		expect(runsOnVisible({ phone: true, runsOnId: 'peer', connectedId: 'self' })).toBe(true);
+		expect(runsOnVisible({ phone: true, runsOnId: 'peer', connected: self })).toBe(true);
 		// The connected worker is not known yet: a picked peer still shows.
-		expect(runsOnVisible({ phone: true, runsOnId: 'peer', connectedId: null })).toBe(true);
+		expect(runsOnVisible({ phone: true, runsOnId: 'peer', connected: null })).toBe(true);
 	});
 });
 
@@ -110,6 +127,11 @@ describe('Attach a project', () => {
 		expect(warning.body).toContain('Juniper keeps this conversation');
 		expect(warning.body).toContain('ai-shuffle’s checkout');
 		expect(warning.body).toContain('start a new session');
+	});
+
+	it('says the access returns to Ask, whatever the project', () => {
+		expect(attachWarning('Juniper', 'ai-shuffle').access).toMatch(/^Access returns to Ask/);
+		expect(attachWarning(null, null).access).toMatch(/^Access returns to Ask/);
 	});
 
 	it('still warns before a project is picked or when the agent has no name', () => {

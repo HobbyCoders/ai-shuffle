@@ -58,6 +58,37 @@ describe('AttachProjectSheet', () => {
 		expect(screen.getByRole('note').textContent).toContain('ai-shuffle’s checkout');
 	});
 
+	it('says plainly that access returns to Ask', () => {
+		render(AttachProjectSheet, { props: props() });
+		expect(screen.getByRole('note').textContent).toContain('Access returns to Ask');
+	});
+
+	it('is one Tab stop, and the arrow keys move the pick and the focus, skipping other workers’ projects', async () => {
+		render(AttachProjectSheet, { props: props() });
+		const radio = (name: RegExp) => screen.getByRole('radio', { name }) as HTMLButtonElement;
+		const stops = () => screen.getAllByRole('radio').filter((el) => el.tabIndex === 0);
+
+		// Nothing picked yet: the first attachable project is the only stop.
+		expect(stops()).toEqual([radio(/ai-shuffle/)]);
+
+		radio(/ai-shuffle/).focus();
+		await fireEvent.keyDown(radio(/ai-shuffle/), { key: 'ArrowDown' });
+		expect(radio(/site/).getAttribute('aria-checked')).toBe('true');
+		expect(document.activeElement).toBe(radio(/site/));
+		expect(stops()).toEqual([radio(/site/)]);
+
+		// remote-only is on another worker: the arrow wraps past it.
+		await fireEvent.keyDown(radio(/site/), { key: 'ArrowDown' });
+		expect(document.activeElement).toBe(radio(/ai-shuffle/));
+		expect(radio(/remote-only/).getAttribute('aria-checked')).toBe('false');
+
+		await fireEvent.keyDown(radio(/ai-shuffle/), { key: 'End' });
+		expect(document.activeElement).toBe(radio(/site/));
+		await fireEvent.keyDown(radio(/site/), { key: 'Home' });
+		expect(document.activeElement).toBe(radio(/ai-shuffle/));
+		expect(radio(/ai-shuffle/).getAttribute('aria-checked')).toBe('true');
+	});
+
 	it('keeps the confirm disabled until a local project is picked', async () => {
 		render(AttachProjectSheet, { props: props() });
 		const confirm = () => screen.getByRole('button', { name: /^attach/i }) as HTMLButtonElement;
@@ -82,7 +113,7 @@ describe('AttachProjectSheet', () => {
 	});
 
 	it('attaches through the API, mirrors the converted session and closes', async () => {
-		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: 'proj-local', project_v2_id: 'v2-local', mode: 'code' });
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: 'proj-local', project_v2_id: 'v2-local', mode: 'code', permission_mode: 'default' });
 		const onClose = vi.fn();
 		render(AttachProjectSheet, { props: props({ onClose }) });
 
@@ -91,7 +122,8 @@ describe('AttachProjectSheet', () => {
 
 		await waitFor(() => expect(onClose).toHaveBeenCalled());
 		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', 'proj-local');
-		expect(mocks.applyAttachedProject).toHaveBeenCalledWith('sess-1', 'proj-local', 'v2-local');
+		// The attach put the session back on Ask; the open session shows that.
+		expect(mocks.applyAttachedProject).toHaveBeenCalledWith('sess-1', 'proj-local', 'v2-local', 'default');
 		expect(mocks.notify).toHaveBeenCalled();
 	});
 
