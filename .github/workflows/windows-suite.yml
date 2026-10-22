@@ -50,17 +50,107 @@ env:
   PYTHONUTF8: '1'
 
 jobs:
-  suite:
-    name: Windows ${{ matrix.part }}
-    if: github.event_name == 'pull_request' || inputs.tests == ''
+  desktop:
+    name: Windows desktop shard (${{ matrix.shard }}/3)
+    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      # Full dispatch coverage is unchanged. PRs run the native desktop suite
-      # while unrelated backend portability failures are tracked separately.
       matrix:
-        part: ${{ fromJSON(github.event_name == 'pull_request' && '["desktop"]' || '["backend-1", "backend-2", "backend-3", "backend-4", "backend-5", "backend-6", "backend-7", "backend-8", "frontend", "desktop", "rest"]') }}
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            fluid/pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Test environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --upgrade pip
+          "$py" -m pip install -r requirements.txt -r requirements-native.txt -r requirements-dev.txt
+          "$py" -m pip install -e ./fluid
+          echo "PYTHON=$py" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Build native desktop
+        working-directory: desktop
+        shell: bash
+        run: npm ci && npm run build
+      - name: Desktop shard
+        working-directory: desktop
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          DESKTOP_INVENTORY: ${{ runner.temp }}/inventory.json
+        run: |
+          set -o pipefail
+          node --test --test-shard="$SHARD/3" --test-reporter=./test/helpers/inventory-reporter.mjs "test/**/*.test.mjs" 2>&1 | tee "$RUNNER_TEMP/desktop.tap"
+      - name: Keep shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/inventory.json
+            ${{ runner.temp }}/desktop.tap
+          retention-days: 7
+
+  desktop-gate:
+    name: Windows desktop
+    if: always() && github.event_name == 'pull_request'
+    needs: [desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every branch to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const results = JSON.parse(process.env.RESULTS);
+          const expected = ["desktop"];
+          assert.deepEqual(Object.keys(results).sort(), [...expected].sort(), 'missing branch');
+          for (const name of expected) assert.equal(results[name].result, 'success', name);
+          JS
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-desktop-*
+          path: ${{ runner.temp }}/desktop-evidence
+      - name: Prove desktop shard inventory union
+        env:
+          EVIDENCE: ${{ runner.temp }}/desktop-evidence
+        run: python tests/scripts/test_ci_parallel_gates.py --desktop-evidence "$EVIDENCE"
+
+  suite:
+    name: Windows ${{ matrix.part }}
+    if: github.event_name == 'workflow_dispatch' && inputs.tests == ''
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # Full manual release matrix is unchanged.
+      matrix:
+        part: [backend-1, backend-2, backend-3, backend-4, backend-5, backend-6, backend-7, backend-8, frontend, desktop, rest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,9 +161,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            fluid/pyproject.toml
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
       - name: Test environment
         shell: bash
         run: |
@@ -124,9 +220,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            fluid/pyproject.toml
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
       - name: Test environment
         shell: bash
         run: |
