@@ -145,7 +145,7 @@ Run all checks locally:
 ruff check app/ run_local.py
 
 # Python tests for the files you changed (see Testing below; the suite
-# needs fluid importable). scripts/local_ci.py runs the rest before a push.
+# needs fluid importable). The fast push gate runs affected tests; PR CI runs the full suites.
 PYTHONPATH=fluid pytest tests/core/test_example.py -q
 
 # Frontend type check and build
@@ -170,25 +170,28 @@ Pre-commit hooks will also run automatically on `git commit`.
 
 ### 1. Pass the local checks
 
-No CI runs on pull requests. Public-app release builds and owner-dispatched
-checks use standard GitHub-hosted Linux, Windows and macOS runners, free in
-public repositories; this does not re-enable PR or branch-push CI. Docker
-builds use the GitHub Actions layer cache rather than a paid sticky disk.
+Every pull request, including drafts and forks, runs the full hosted suites in
+parallel on free standard Linux and Windows runners. macOS checks stay manual.
+Merge only after CI is green and the change has been reviewed. Publishing is
+separate: edge/nightly still requires an attested full local run on main.
 See [where tests run](../ci/pr-checks.md) for the runner and publication policy.
-The checks run on your machine before a push:
+Before a push, run only affected tests plus the offline secret scan:
 
 ```bash
-python scripts/local_ci.py install   # once per clone: turns on the pre-push hook
-python scripts/local_ci.py           # the suites your branch's changes reach
+python scripts/local_ci.py install   # once per clone; worktrees share the hook
+python scripts/local_ci.py fast      # affected tests and offline secret scan
 ```
 
-It covers what the PR workflows used to: the backend tests the change can
-reach, fluid, the frontend, mobile, tools and browser-mcp packages (type
-checks, unit tests, builds and the contract check), docs, desktop, the
-Android app and download bridge, the workflow policy tests and the in-app update
-reach check. A pass on a clean checkout is recorded, and the pre-push hook
-reuses that test pass, but always scans outgoing commits for leaked secrets. Do not bypass the
-hook with `--no-verify`.
+The fast gate reuses the suite map for backend, fluid, frontend, mobile, tools,
+browser-mcp, docs, desktop, Android and workflow checks. Backend changes use the
+recorded dependency map or test-name/import matching; an unmapped path falls
+back to the whole area suite. Docs-only changes run docs checks, not application
+suites. Unknown top-level areas conservatively reach all local suites.
+A clean-tree pass is recorded without requiring a full local run. The hook
+always scans outgoing commits for secrets, including on cached passes. Do not
+bypass the hook with `--no-verify`. `check`, `full` and `--attest` retain their
+existing broader validation and publication behavior. Fix local failures before
+pushing, and iterate on any full-suite failures in PR CI before merge.
 
 For PR screenshots, commit images to `pr-assets` (or `pr-assets/*`) and push
 normally through the hook, from a code checkout containing the hook's scripts
@@ -346,8 +349,8 @@ $env:PYTHONPATH = "fluid"; python -m pytest tests/test_auth.py -v
 #### Running the tests
 
 The full backend suite is about 21,500 tests and takes over 15 minutes. While
-working, run only the test files that cover your change; `local_ci.py` picks
-the rest before a push:
+working, run only the test files that cover your change; `local_ci.py fast`
+picks affected tests before a push, and PR CI runs the full suites:
 
 ```bash
 PYTHONPATH=fluid pytest tests/core/test_pg_shim.py -m "not slow and not integration" -q

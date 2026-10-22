@@ -1,9 +1,11 @@
 """Run the project's checks on this machine, before code leaves it.
 
-CI does not test pull requests. This script does, on whichever worker the
-change was made, at low CPU priority so the machine stays usable.
+Before a push, run affected tests and the offline secret scan. Every pull
+request also runs the full hosted suites; publication still needs a local
+attested full run on main.
 
-    python scripts/local_ci.py                 # the suites this branch's changes reach
+    python scripts/local_ci.py fast            # affected tests + offline scan (pre-push gate)
+    python scripts/local_ci.py check           # existing changed-suite checks + dependency audit
     python scripts/local_ci.py full            # every suite, and record the backend test map
     python scripts/local_ci.py full --attest   # on main: also post local/full-suite for edge publication
     python scripts/local_ci.py full --step --attest   # the same in resumable chunks of at most 40 minutes
@@ -381,6 +383,8 @@ def select_backend_tests(ctx: Context) -> list[str] | str:
     else:
         ctx.notes.append("No backend test map on this machine yet; tests were picked by name. "
                          "`python scripts/local_ci.py full` records one.")
+    if ctx.mode == "fast":
+        return affected_backend_tests(ctx, use_map=False)
     return select_by_name(ctx.files or [])
 
 
@@ -412,13 +416,34 @@ def select_by_name(files: list[str]) -> list[str] | str:
 
 # --- suites ----------------------------------------------------------------
 
+def affected_backend_tests(ctx: Context, *, use_map: bool = True) -> list[str] | str:
+    """Reuse the dependency map, or name matching with a per-path safe fallback."""
+    if (use_map and MAP_PATH.is_file()
+            and set(changed_files(ctx.base)) <= set(ctx.files or [])):
+        # The map CLI compares the whole Git diff. When other areas were
+        # removed from this context (notably workflow changes), do not let
+        # those unrelated paths turn a targeted backend check into "all".
+        return select_backend_tests(ctx)
+    selected: set[str] = set()
+    for name in ctx.files or []:
+        if not any(fnmatch(name, pattern) for pattern in BACKEND_PATHS):
+            continue
+        matches = select_by_name([name])
+        if matches == "all" or not matches:
+            ctx.notes.append(f"No test mapping for {name}; running the backend suite.")
+            return "all"
+        selected.update(matches)
+    return sorted(selected) or "all"
+
+
 def backend(ctx: Context) -> None:
     env = python_env()
     args = pytest_args(ctx.python)
     if ctx.changed(["app/*", "scripts/scan_blocking_db.py", "tests/test_scan_blocking_db.py"]):
         run([ctx.python, "-m", "pytest", "tests/test_scan_blocking_db.py", *args], env=env)
         run([ctx.python, "scripts/scan_blocking_db.py"], env=env)
-    selection = "all" if ctx.mode == "full" else select_backend_tests(ctx)
+    selection = ("all" if ctx.mode == "full" else
+                 affected_backend_tests(ctx) if ctx.mode == "fast" else select_backend_tests(ctx))
     if selection == "all":
         targets = [*FAST_SUBSET, *sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").glob("test_*.py"))]
         extra = ["--deselect=tests/test_scan_blocking_db.py", *[f"--ignore={p}" for p in FAST_SUBSET_EXCLUDED]]
@@ -1030,6 +1055,83 @@ def cmd_check(args) -> int:
     return 0
 
 
+def documentation_path(name: str) -> bool:
+    return (name.startswith(("docs/", "frontend/src/lib/docs/content/"))
+            or name.endswith((".md", ".rst")))
+
+
+def workflow_path(name: str) -> bool:
+    suite = next(suite for suite in SUITES if suite.name == "workflows")
+    return any(fnmatch(name, pattern) for pattern in suite.paths)
+
+
+def affected_suites(files: list[str]) -> list[Suite]:
+    """Use SUITES as the area map; an unrecognised area must not silently pass."""
+    code = [name for name in files if not documentation_path(name)]
+    ctx = Context(mode="fast", base="", files=code, python="")
+    selected = [suite for suite in SUITES if ctx.changed(suite.paths)]
+    # The dedicated workflow suite already runs gate and publication regression
+    # tests. Do not turn its scripts into an unrelated backend-wide fallback.
+    backend_files = [name for name in code if any(fnmatch(name, pattern) for pattern in BACKEND_PATHS)]
+    if backend_files and all(workflow_path(name) for name in backend_files):
+        selected = [suite for suite in selected if suite.name != "backend"]
+    if any(documentation_path(name) for name in files):
+        selected += [suite for suite in SUITES if suite.name == "docs" and suite not in selected]
+    if any(not any(fnmatch(name, pattern) for suite in SUITES for pattern in suite.paths)
+           and not any(fnmatch(name, pattern) for patterns, _ in NOT_LOCAL for pattern in patterns)
+           for name in code):
+        return list(SUITES)  # unknown top-level area: conservatively check all areas
+    return selected
+
+
+def cmd_fast(args) -> int:
+    """Affected push gate, independent of full-run and attestation receipts."""
+    if args.attest or args.only:
+        raise Failure("fast does not accept --attest or --only")
+    python = choose_python()
+    # Never consult pass records before this scan, even for an unchanged tree.
+    security_check(python, audit=False)
+    remote = getattr(args, "_push_remote", None)
+    target = f"{remote}/main" if remote else resolve_base()
+    fetch_base(target)
+    base = comparison_base(target, "HEAD")
+    files = changed_files(base)
+    ctx = Context(mode="fast", base=base,
+                  files=[name for name in files if not documentation_path(name)], python=python)
+    ran, skipped = [], []
+    for suite in affected_suites(files):
+        reason = suite.unavailable()
+        if reason:
+            skipped.append(f"{suite.name}: {reason}")
+            continue
+        print(f"\n=== {suite.name}: affected push checks", flush=True)
+        if suite.name in {"frontend", "mobile"}:
+            # Area-wide fallback: unlike Vitest related, this also covers files
+            # read dynamically rather than imported. No production build on push.
+            if suite.name == "mobile":
+                npm_ready("frontend")
+                run(["npm", "run", "deps"], cwd=ROOT / "mobile")
+            node_package(suite.name, "test")(ctx)
+        else:
+            suite_ctx = ctx
+            if suite.name == "backend":
+                suite_ctx = Context(mode="fast", base=base, python=python, notes=ctx.notes,
+                                    files=[name for name in ctx.files or [] if not workflow_path(name)])
+            suite.run(suite_ctx)
+        ran.append(suite.name)
+    for patterns, note in NOT_LOCAL:
+        if any(fnmatch(name, pattern) for name in files for pattern in patterns):
+            skipped.append(note)
+    for note in skipped + ctx.notes:
+        print(f"Not covered here: {note}")
+    print(f"Affected checks passed: {', '.join(ran) or 'nothing to run'}")
+    if clean_checkout():
+        save_record(tree_of("HEAD"), {"security_gate": SECURITY_GATE_VERSION,
+                                     "mode": "fast", "base": base, "suites": ran,
+                                     "not_covered": skipped, "at": time.time()})
+    return 0
+
+
 def push_update_reach(revision: str, remote_ref: str) -> None:
     base = comparison_base(resolve_base(), revision)
     ctx = Context(mode="changed", base=base, files=None, python=choose_python())
@@ -1096,20 +1198,29 @@ def cmd_pre_push(args) -> int:
                 continue
         if not remote_ref.startswith("refs/heads/"):
             continue  # tags get the secret scan, but not the test suites
-        if records.get(tree_of(local_sha), {}).get("security_gate") == SECURITY_GATE_VERSION:
+        record = records.get(tree_of(local_sha), {})
+        current = record.get("security_gate") == SECURITY_GATE_VERSION
+        if current and record.get("mode") == "fast":
+            # A pass selected against another remote/base is not this push's
+            # affected-test pass. The history scan above is never cached.
+            target = f"{push_remote}/main" if push_remote else resolve_base()
+            fetch_base(target)
+            current = record.get("base") == comparison_base(target, local_sha)
+        if current:
             # A draft pass must not bypass newly-ready state or removed labels.
             push_update_reach(local_sha, remote_ref)
             continue
         if local_sha != head or not clean_checkout():
             print(f"pre-push: {local_sha[:9]} has no local check pass. Check out that commit with a clean "
-                  "tree and run `python scripts/local_ci.py`.", file=sys.stderr)
+                  "tree and run `python scripts/local_ci.py fast`.", file=sys.stderr)
             return 1
         print(f"pre-push: running local checks for {local_sha[:9]} before it leaves this machine.")
-        args.command, args.attest, args.only = "check", False, None
-        args._from_push = True
-        if cmd_check(args):
+        args.command, args.attest, args.only = "fast", False, None
+        args._push_remote = push_remote
+        if cmd_fast(args):
             print("pre-push: checks failed; nothing was pushed.", file=sys.stderr)
             return 1
+        push_update_reach(local_sha, remote_ref)
     return 0
 
 
@@ -1201,7 +1312,7 @@ def cmd_list(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", nargs="?", default="check", choices=["check", "full", "install", "list", "pre-push"])
+    parser.add_argument("command", nargs="?", default="check", choices=["check", "fast", "full", "install", "list", "pre-push"])
     parser.add_argument("--only", nargs="+", metavar="SUITE", help="run just these suites (not recorded as a pass)")
     parser.add_argument("--attest", action="store_true", help=f"with full on main: post {ATTEST_CONTEXT}")
     parser.add_argument("--step", action="store_true",
@@ -1226,7 +1337,7 @@ def main(argv: list[str] | None = None) -> int:
         unknown = set(args.only) - {s.name for s in SUITES}
         if unknown:
             parser.error(f"unknown suite: {', '.join(sorted(unknown))}")
-    handlers = {"check": cmd_check, "full": cmd_check, "install": cmd_install, "list": cmd_list,
+    handlers = {"check": cmd_check, "fast": cmd_fast, "full": cmd_check, "install": cmd_install, "list": cmd_list,
                 "pre-push": cmd_pre_push}
     try:
         return handlers[args.command](args)

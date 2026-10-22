@@ -184,17 +184,27 @@ export const terminals = {
 	/** Open a terminal for the chat. Returns null and sets a notice on refusal. */
 	async create(sessionId: string, options: CreateTerminal = {}): Promise<TerminalInfo | null> {
 		notices[sessionId] = null;
+		const result = await this.open(sessionId, options);
+		if ('info' in result) return result.info;
+		notices[sessionId] = result.message;
+		return null;
+	},
+
+	/**
+	 * Open a terminal and report a refusal to the caller instead of the panel
+	 * notice: the peer picker shows its own failure (the approval is spent).
+	 */
+	async open(sessionId: string, options: CreateTerminal = {}): Promise<{ info: TerminalInfo } | { code: string; message: string }> {
 		try {
 			const info = await terminalsApi.create({ session_id: chatFor(sessionId), ...options });
 			terms[info.id] = info;
 			const current = this.tabsFor(sessionId);
 			setTabs(sessionId, { ids: [...current.ids.filter((id) => id !== info.id), info.id], active: info.id, loaded: true });
 			counts = { ...counts, open: counts.open + 1 };
-			return info;
+			return { info };
 		} catch (error) {
-			notices[sessionId] = message(error);
 			if (error instanceof TerminalApiError && error.code === 'limit_reached') counts = { ...counts, open: counts.limit };
-			return null;
+			return { code: error instanceof TerminalApiError ? error.code : 'unknown', message: message(error) };
 		}
 	},
 

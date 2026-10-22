@@ -1,10 +1,15 @@
 name: Desktop source update checks
-# Manual only. Checks the app side of the source-update protocol.
-# Hub tests run separately in HobbyCoders/hobbycoders-cloud.
+# Checks the app side of the source-update protocol on every PR.
+# Cloud-side checks run separately.
 on:
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: desktop-source-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest

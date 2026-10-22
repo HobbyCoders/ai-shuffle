@@ -51,17 +51,14 @@ UPDATES = "application-updates"
 PROTECTED = ("managed-postgres.json", "database-mode.json", ".credential-keys",
              ".managed-connection", "preview-access.key", "postgres", UPDATES)
 # Image code the app (which holds the service account as its saved uid) loads.
-# The image ships these owned by appuser; an agent able to edit them could run
-# code inside the app. Root owns them while the mode is on.
+# New images ship these root-owned in every mode. protect_code also supports
+# older images; disabling isolation never gives image code back to the agent.
 CODE_TREES = ("app", "scripts")
 CODE_FILES = (".env.example", "THIRD_PARTY_NOTICES.md")
 # Passed to the app (SHUFFLE_*) so it routes agent children through the runner.
 APP_FLAG = "SHUFFLE_AGENT_ISOLATION"
 APP_ROOTS = "SHUFFLE_AGENT_ROOTS"
 EXTRA_DIRS = "AGENT_ISOLATION_EXTRA_DIRS"
-
-_TRUE = {"1", "on", "true", "yes"}
-_FALSE = {"", "0", "off", "false", "no"}
 
 
 class IsolationError(Exception):
@@ -86,10 +83,12 @@ ACTIVE = None
 
 
 def setting(environ=None):
-    """"required", "on", "off" or "invalid". Read from the container environment only:
-    the agent can edit files the app reads settings from, never this."""
-    raw = (os.environ if environ is None else environ).get(SETTING, "").strip().lower()
-    return "required" if raw == "required" else "on" if raw in _TRUE else "off" if raw in _FALSE else "invalid"
+    """Read the strict container-only policy, never agent-editable settings files."""
+    raw = (os.environ if environ is None else environ).get(SETTING, "").strip().lower() or "off"
+    raw = {"1": "on", "true": "on", "yes": "on", "0": "off", "false": "off", "no": "off"}.get(raw, raw)
+    if raw not in {"off", "on", "required"}:
+        raise IsolationError("AGENT_ISOLATION: startup refused; valid values: off, on, required")
+    return raw
 
 
 def _id(environ, name):
@@ -392,11 +391,11 @@ def protect_code(app_dir, ident, ops=None, log=print):
 
 
 def release_code(app_dir, ident, ops=None):
-    """Give the image code back to appuser, as the image and entrypoint do."""
-    ops = ops or Ops()
-    for path, info in list(_code_entries(app_dir, ops, strict=False)):
-        if info.st_uid == 0:
-            ops.lchown(path, ident.puid, ident.pgid)
+    """Keep image assets root-owned even when isolation is disabled.
+
+    Retained data is still handed back by disable(). Kept as a no-op for
+    supervisors calling the older isolation rollback interface.
+    """
 
 
 # --- The service account ---------------------------------------------------
@@ -444,9 +443,7 @@ def bootstrap(data_dir, ident, *, app_dir="/app", ops=None, log=print, run=subpr
         if required:
             raise IsolationError("required agent isolation: startup refused (no isolation identity)")
         return None
-    if setting() not in {"on", "required"}:
-        if setting() == "invalid":
-            log(f"agent isolation: ignoring {SETTING}={os.environ.get(SETTING)!r}; use required, on or off")
+    if setting() == "off":
         if needs_rollback(data_dir, ident, ops):
             disable(data_dir, ident, ops, log)
             release_code(app_dir, ident, ops)
