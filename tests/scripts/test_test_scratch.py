@@ -183,7 +183,9 @@ def test_fluid_pytest_owns_scratch(tmp_path, explicit, from_fluid):
     cwd = ROOT / "fluid" if from_fluid else ROOT
     test = ROOT / "fluid/tests/unit/test_workflow_proposals.py"
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(ROOT / "fluid")])}
-    command = [sys.executable, "-m", "pytest", "-p", "scratch_observer", str(test), "-q"]
+    # local_ci and hosted jobs clear addopts; scratch must still be configured.
+    command = [sys.executable, "-m", "pytest", "-p", "scratch_observer", str(test),
+               "-o", "addopts=", "-q"]
     requested = tmp_path / "caller-owned"
     if explicit:
         command += ["--basetemp", str(requested)]

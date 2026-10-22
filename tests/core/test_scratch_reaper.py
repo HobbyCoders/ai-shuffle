@@ -293,26 +293,18 @@ def test_real_proc_scan_is_usable_or_identifies_opaque_same_uid(monkeypatch, cap
     # Normal app startup makes app/runner processes non-dumpable. Known app
     # instances and init ancestors must not disable a sweep; unknown opaque
     # same-UID processes still fail closed.
+    # Observe classification during the scan, not in an earlier /proc walk:
+    # an opaque child can exit (or exec/change dumpability) between two walks.
     opaque_same_uid = []
-    for process in Path("/proc").iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            status = (process / "status").read_text().splitlines()
-            uids = next(line for line in status if line.startswith("Uid:")).split()[1:]
-            if str(os.getuid()) not in uids:
-                continue
-            try:
-                with os.scandir(process / "fd") as descriptors:
-                    for descriptor in descriptors:
-                        os.readlink(descriptor.path)
-                os.readlink(process / "cwd")
-                os.readlink(process / "root")
-            except PermissionError:
-                if not reaper._uninspectable_is_unrelated(process, Path("/proc")):
-                    opaque_same_uid.append(process.name)
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+    classify = reaper._uninspectable_is_unrelated
+
+    def observe(base, proc, protected_prefixes=None):
+        unrelated = classify(base, proc, protected_prefixes)
+        if not unrelated:
+            opaque_same_uid.append(base.name)
+        return unrelated
+
+    monkeypatch.setattr(reaper, "_uninspectable_is_unrelated", observe)
     monkeypatch.setattr(reaper, "_disabled_logged", False)
     references = reaper._references(Path("/proc"), time.monotonic() + reaper.SWEEP_SECONDS)
     if opaque_same_uid:
