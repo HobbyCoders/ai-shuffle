@@ -181,6 +181,29 @@ def dispatch(args):
 
 # --- end to end: the parent dispatches, the target starts the child ---------
 
+@pytest.mark.parametrize("peer_version", [5, remote_task.FRESH_BASE_VERSION])
+def test_dispatch_negotiates_fresh_base_with_real_receiver(world, monkeypatch, peer_version):
+    # A long-running caller with no unique commits, behind an un-fetched origin.
+    git(world.parent, "switch", "-c", "behind", "HEAD~1")
+    caller = git(world.parent, "rev-parse", "HEAD")
+    seed = world.tmp / "seed"
+    fresh = commit(seed, "new-main.txt", "fresh main work")
+    git(seed, "push", "origin", "main")
+    peer = {**UNRAID, "capabilities": {**UNRAID["capabilities"], "remote_task": peer_version}}
+    monkeypatch.setattr(runners, "directory", lambda: {"runners": [SELF, peer]})
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({"mode": "background"})
+    assert result["ok"], result
+    [(_, _, body)] = calls
+    modern = peer_version >= remote_task.FRESH_BASE_VERSION
+    assert ("base_policy" in body["checkout"]) == modern
+    child = database.get_session(result["worker_session_id"])
+    assert git(child["worktree_path"], "rev-parse", "HEAD") == (fresh if modern else caller)
+    assert git(world.parent, "rev-parse", "HEAD") == caller
+    assert git(world.parent, "branch", "--show-current") == "behind"
+
+
 @pytest.mark.parametrize("receiver_has_model", [True, False])
 def test_spoken_model_task_is_checked_again_on_receiver(world, monkeypatch, receiver_has_model):
     from app.db import turns, remote_tasks

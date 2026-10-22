@@ -273,8 +273,8 @@ def _branch_plan(
 
     * ``create_new_branch=True`` — the caller is intentionally minting a fresh
       branch (new-session compose): create it from ``base_branch`` (its own tip;
-      ``add_worktree`` prefers ``origin/{base}`` internally). No fetch, no
-      recovery — the branch is new by construction.
+      ``add_worktree`` prefers ``origin/{base}`` internally). Fetch the base
+      with a short, best-effort deadline; never recover an unrelated branch.
     * otherwise reuse ``worktree_manager.resolve_rebound_branch_plan`` so lazy
       materialization stays in lockstep with the cross-device rebind path:
         - branch exists locally → check it out → ``(False, None)``
@@ -285,7 +285,10 @@ def _branch_plan(
           fabricating an empty branch off the base HEAD (the pre-fix bug).
     """
     if create_new_branch:
-        return True, base_branch
+        from app.core.git_fork_base import fetch_base
+
+        fetched_branch, fetched = fetch_base(base_dir, base_branch)
+        return True, (base_branch or fetched_branch) if fetched else base_branch
     try:
         return resolve_rebound_branch_plan(
             git_service, base_dir, branch, project_id=project_id, runner_id=runner_id,
@@ -707,6 +710,7 @@ def _ensure_branch_checkout(
         branch=branch,
         new_branch=new_branch,
         base_branch=plan_base,
+        fetch_base=not create_new_branch,
     )
     if not success:
         logger.warning(
@@ -1608,15 +1612,18 @@ def ensure_checkout(
             register_unregistered_worktrees(project_id, runner_id, base)
         return base
     try:
-        path = _ensure_branch_checkout(
-            project_v2_row,
-            project_id,
-            runner_id,
-            branch,
-            base_branch=base_branch,
-            create_new_branch=create_new_branch,
-            provision_runtime=provision_runtime,
-        )
+        from app.core.worker_checkout import _project_lock
+
+        with _project_lock(project_id):
+            path = _ensure_branch_checkout(
+                project_v2_row,
+                project_id,
+                runner_id,
+                branch,
+                base_branch=base_branch,
+                create_new_branch=create_new_branch,
+                provision_runtime=provision_runtime,
+            )
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
         return None

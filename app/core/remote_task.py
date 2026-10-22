@@ -119,6 +119,8 @@ EFFORT_VERSION = 4
 #: The ``remote_task`` capability that expects ``chore/task-<id>``; an older
 #: target is sent the ``task/<id>`` name it checks for.
 CHORE_BRANCH_VERSION = 5
+#: The receiver fetches its own default branch and preserves unique caller work.
+FRESH_BASE_VERSION = 6
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -409,7 +411,8 @@ async def dispatch_remote(
     try:
         state = await asyncio.to_thread(
             publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
-            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
+            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION,
+            fresh_base=_remote_task_version(worker) >= FRESH_BASE_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
     if state.mode == REMOTE_BRANCH and not state.pushed:
