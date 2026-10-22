@@ -3,7 +3,7 @@ name: main-suite
 # One full hosted proof per main commit. Dispatches on any other ref fail closed.
 on:
   push:
-    branches: [main]
+    branches: [main, chore/main-hosted-suite] # Temporary branch timing probe; removed before final head.
   workflow_dispatch:
 
 permissions:
