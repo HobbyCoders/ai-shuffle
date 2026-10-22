@@ -2440,6 +2440,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             # background wake marker, the code-mode journal entry) belongs to
             # writing a node, so none of it applies here.
             path = await self.store.load_path(sid)
+            # Nodes have no author/source field. Recover it from the first
+            # TurnStarted naming each node; a later Resume must not relabel a
+            # notice/peer node as user-authored. Never infer origin from text.
+            sources: dict[str, str] = {}
+            try:
+                async for event in iter_events(self.store, sid, 0):
+                    if isinstance(event, TurnStarted) and event.node_id:
+                        sources.setdefault(event.node_id, event.source)
+            except Exception:  # unreadable provenance cannot grant an exemption
+                sources.clear()
+            from fluid.tools.bash_file_guard import resumed_user_text
+
+            self.ctx.extra["bash_file_guard_user_text"] = resumed_user_text(path, sources)
             head = path[-1] if path else None
             if (
                 head is not None and len(path) > 1
@@ -2505,6 +2518,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         )
         prompt_text = op.content if isinstance(op.content, str) else _plain_text(content)
+        self.ctx.extra["bash_file_guard_user_text"] = prompt_text if op.source == "user" else ""
         reminder = self._deferred_catalog_reminder()
         if reminder is not None:
             content.append(Text(reminder))
@@ -5699,6 +5713,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 input=input,
             )
         spec = self.registry.get(name)
+        from fluid.tools.bash_file_guard import guard_input
+
+        guidance = guard_input(name, input, self.registry, self.ctx, self._tool_wired, self.permissions)
+        if guidance:
+            return await self._finish_tool(
+                sid, turn_id, name, tool_use_id,
+                ToolOutcome(text=guidance, is_error=True), input=input,
+            )
 
         # PreToolUse hook: deny short-circuits with an in-context error result;
         # modify replaces the input before permissions/dispatch see it; a
@@ -6018,6 +6040,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._pending_steers:
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
+            # Only delivered user intent may exempt a later command. A queued
+            # steer can still be recalled; peers/notices carry no user authority.
+            for _, text, sender, origin in delivered:
+                if origin == "user" and sender is None:
+                    self.ctx.extra["bash_file_guard_user_text"] = text
             self._tool_deliveries.extend(
                 SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
                 for steer_id, text, sender, origin in delivered

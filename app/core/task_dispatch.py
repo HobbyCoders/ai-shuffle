@@ -14,8 +14,10 @@ This module adds:
 * optional per-provider admission (``settings.task_worker_max_per_provider``,
   0 = off), a concurrency policy rather than a quota;
 * liveness: no first frame by ``settings.task_worker_first_frame_seconds``
-  stops the worker; a sync worker also has the hard cap
-  ``settings.task_worker_sync_max_seconds``. Watchdog stops are not retried;
+  stops the worker; a sync dispatch also has the hard cap
+  ``settings.task_worker_sync_max_seconds``, at which a worker that has shown
+  progress moves to the background (same session and task id) and one that
+  has not is stopped. Watchdog stops are not retried;
   transport failures retry once; capacity refusals back off;
 * pool admission (:func:`_reserve_admission`): a delegated worker must fit the
   pool's subprocess cap, a native one the resource guards plus
@@ -27,10 +29,11 @@ This module adds:
 * modes: ``sync`` returns ``report_path``, ``report_chars`` and a bounded
   ``report_head``; ``background`` returns a ``BackgroundTaskReceipt`` with the
   worker session id and announces completion. Both write the report under the
-  canonical global project root's ``task-reports/`` (:func:`write_task_report`). read-only
-  targets (no file-writing tools) always go background, even when a call names
-  a ``mode`` (:func:`_effective_task_mode`), and ``build_task_contract`` omits
-  ``mode`` when every target is read-only. Others default to ``sync``.
+  canonical global project root's ``task-reports/`` (:func:`write_task_report`).
+  A call that names no ``mode`` runs in the background; ``sync`` is opt-in.
+  Read-only targets (no file-writing tools) always go background, even when a
+  call names ``sync`` (:func:`_effective_task_mode`), and
+  ``build_task_contract`` omits ``mode`` when every target is read-only.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
@@ -83,6 +86,15 @@ _CHAIN_LIMIT = 12
 
 #: Background dispatch tasks, kept referenced so asyncio never GCs them.
 _BACKGROUND_TASKS: set = set()
+
+
+def _retrieve_result(task: asyncio.Task) -> None:
+    """Log a detached dispatch's unexpected exception instead of losing it."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("task_dispatch: detached dispatch failed", exc_info=exc)
 
 #: How much of a sync worker's report rides the tool result itself. The whole
 #: report always lands in the report file; this head is the "did it work and
@@ -800,6 +812,7 @@ async def _dispatch_worker_with_retries(
     dispatcher: Callable[..., Any],
     overall_deadline: Optional[float] = None,
     stop_generation: Optional[int] = None,
+    sync_handoff: Any = None,
 ):
     """Run one Task dispatch, re-dispatching a worker that never started.
 
@@ -816,6 +829,10 @@ async def _dispatch_worker_with_retries(
     sequence — the synchronous lane's hard cap, which must bound the retries
     too or a "capacity, retrying" loop becomes exactly the unbounded block it
     was added to prevent.
+
+    ``sync_handoff`` (:class:`app.core.provider_agent.SyncHandoff`, sync lane
+    only) reaches every attempt; once an attempt has moved to the background
+    its outcome is final and nothing is re-dispatched.
     """
     from app.core import provider_agent
     from app.core.config import settings
@@ -885,11 +902,16 @@ async def _dispatch_worker_with_retries(
             outcome = await dispatcher(
                 background=background,
                 suppress_caller_wake=_will_retry if background else None,
+                **({"sync_handoff": sync_handoff} if sync_handoff is not None else {}),
                 **attempt_kwargs,
             )
         finally:
             _release_admission(worker_id)
 
+        if sync_handoff is not None and sync_handoff.moved:
+            # Settled as a background dispatch: its terminal already went to
+            # the parent's notification lanes, and the work ran.
+            return outcome
         if stopped():
             return cancelled_outcome(worker_id)
 
@@ -1126,39 +1148,37 @@ def _stored_agent_tools(agent_id: str) -> Optional[List[str]]:
     return list(tools) if isinstance(tools, (list, tuple)) else None
 
 
-def _default_task_mode(declared_tools: Optional[List[str]], agent_label: str) -> str:
-    """The mode a Task call takes when it names none.
+def _always_background(declared_tools: Optional[List[str]], agent_label: str) -> bool:
+    """Whether this target runs in the background whatever the call says.
 
-    Read-only research agents default to
-    ``background``. A research child produces a report its parent reads when it
-    gets to it; blocking the parent on one turns a fan-out into a queue, which
-    is exactly what made research children serialize their parents before. Any
-    agent that can write defaults to ``sync``, where the parent normally does
-    need the result in hand before it continues.
-
-    For a read-only target this is not merely a default: see
-    :func:`_effective_task_mode`, which refuses to let an explicit ``mode``
-    override it.
+    A read-only research agent does. A research child produces a report its
+    parent reads when it gets to it; blocking the parent on one turns a
+    fan-out into a queue, which is exactly what made research children
+    serialize their parents before. See :func:`_effective_task_mode`.
     """
     from app.core.builtin_subagents import is_read_only_tool_surface
 
     if is_read_only_tool_surface(declared_tools):
         logger.debug(
             "task_dispatch: %r declares a read-only tool surface %r; "
-            "defaulting to background",
+            "always background",
             agent_label,
             declared_tools,
         )
-        return "background"
-    return "sync"
+        return True
+    return False
 
 
 def _effective_task_mode(
-    requested_mode: str, default_mode: str, agent_label: str
+    requested_mode: str, always_background: bool, agent_label: str
 ) -> Tuple[str, Optional[str]]:
     """``(mode, ignored_request)`` for one dispatch.
 
-    A background-default target is background, full stop. The tool schema
+    A call that names no mode runs in the background, for every agent: a sync
+    dispatch blocks the parent turn, which then cannot answer the owner or be
+    steered, so blocking is opt-in (``mode="sync"``).
+
+    An always-background target is background, full stop. The tool schema
     normally hides ``mode`` for such targets so a model cannot ask for anything
     else, but a request can still arrive — an old transcript replayed, a retry
     built from one, a mixed roster where the key stays in the schema for the
@@ -1167,10 +1187,9 @@ def _effective_task_mode(
     finished research child's report down with it. So it is ignored, loudly,
     and the caller is told in the payload rather than left guessing.
 
-    Every other target keeps the old contract: an explicit ``mode`` wins.
+    Every other target: an explicit ``mode`` wins.
     """
-    overridden = requested_mode and requested_mode != default_mode
-    if default_mode == "background" and overridden:
+    if always_background and requested_mode and requested_mode != "background":
         logger.info(
             "task_dispatch: ignoring mode=%r for read-only target %r; "
             "research children always dispatch in the background",
@@ -1178,7 +1197,7 @@ def _effective_task_mode(
             agent_label,
         )
         return "background", requested_mode
-    return (requested_mode or default_mode), None
+    return (requested_mode or "background"), None
 
 
 def _caller_provider_id(
@@ -1887,7 +1906,7 @@ async def _dispatch_task_tool(
 
     mode, ignored_mode = _effective_task_mode(
         requested_mode,
-        _default_task_mode(declared_tools, str(result_agent)),
+        _always_background(declared_tools, str(result_agent)),
         str(result_agent),
     )
 
@@ -2107,11 +2126,39 @@ async def _dispatch_task_tool(
     # and cannot be told the worker went quiet, so a provider connection that
     # never opens would hold it until a human intervenes. So this lane gets
     # a hard wall-clock cap across every attempt (``dispatch_worker`` also
-    # applies the first-frame watchdog, which normally fires long before it),
-    # and it returns a worker-failed result the parent can act on.
+    # applies the first-frame watchdog, which normally fires long before it).
+    # At the cap a worker that has shown progress is NOT stopped: the same
+    # worker session and task id carry on as a background dispatch
+    # (``provider_agent.SyncHandoff``) and the parent is told it moved. Only a
+    # dead or stuck worker gets the worker-failed result.
+    #
+    # The dispatch runs as its own task so this call can return at the move
+    # while the worker continues. Until then it is tied to this call: a
+    # cancelled parent turn cancels it, exactly as when it ran inline.
     sync_cap = _sync_cap_seconds()
-    try:
-        outcome = await _dispatch_worker_with_retries(
+    job: Optional[asyncio.Task] = None
+
+    def _moved_to_background(moved_worker_id: str) -> None:
+        # Runs inside the dispatch at the move, before this call returns:
+        # from here on the job is held and stopped like a background one.
+        _release_admission(worker_id)
+        _release_admission(moved_worker_id)
+        if job is None:  # pragma: no cover — the job runs only once created
+            return
+        from app.core.swarm import register_job
+
+        register_job(moved_worker_id, job, caller_session_id)
+        _BACKGROUND_TASKS.add(job)
+        job.add_done_callback(_BACKGROUND_TASKS.discard)
+        job.add_done_callback(_retrieve_result)
+        task_registry.supervise_until_stop(root_session_id, job)
+
+    handoff = (
+        provider_agent.SyncHandoff(on_move=_moved_to_background)
+        if sync_cap > 0 else None
+    )
+    job = asyncio.create_task(
+        _dispatch_worker_with_retries(
             kwargs=kwargs,
             background=False,
             lane=lane,
@@ -2122,12 +2169,53 @@ async def _dispatch_task_tool(
                 time.monotonic() + sync_cap if sync_cap > 0 else None
             ),
             stop_generation=stop_generation,
+            sync_handoff=handoff,
         )
+    )
+    try:
+        waiters: set = {job}
+        if handoff is not None:
+            waiters.add(handoff.future())
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            if handoff is None or not handoff.moved:
+                # Still a foreground dispatch: the parent turn's cancellation
+                # stops the worker, and this call ends once it has.
+                job.cancel()
+                await asyncio.wait({job})
+            raise
     finally:
         # A sync worker holds its slot for as long as it runs, and the pool is
         # what counts that; the reservation only ever covered the gap before it
         # connected (and is dropped by the pool check anyway once it has).
         _release_admission(worker_id)
+    if handoff is not None and handoff.moved:
+        # Checked BEFORE the job's own result: a worker that finished right
+        # after the move reports through the background notification only.
+        moved_id = handoff.worker_session_id
+        moved_payload: Dict[str, Any] = {
+            "ok": True,
+            "mode": "background",
+            "moved_to_background": True,
+            "agent": result_agent,
+            "model": model_id,
+            **_model_receipt(effective_provider_id, model_override_record),
+            "task_id": moved_id,
+            "worker_session_id": moved_id,
+            "description": label,
+            "note": (
+                "Still running: moved to the background at the "
+                f"{sync_cap:.0f}s limit for a synchronous Task. Do not "
+                "re-dispatch it or redo its work; you will be woken with its "
+                "report when it completes. End the turn now unless you have "
+                "genuinely disjoint work."
+            ),
+        }
+        if queued_seconds >= 1.0:
+            moved_payload["queued_seconds"] = round(queued_seconds, 1)
+        return moved_payload
+    outcome = job.result()
     payload: Dict[str, Any] = {
         "ok": outcome.ok,
         "mode": "sync",

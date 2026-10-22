@@ -774,8 +774,9 @@ def build_task_contract(
             + TASK_MODEL_SETTINGS_HINT
         )
 
-    # A background-default target is dispatched in the background whatever the
-    # call says (task_dispatch._effective_task_mode). When EVERY reachable
+    # Every dispatch defaults to background; a background-default (read-only)
+    # target is dispatched in the background whatever the call says
+    # (task_dispatch._effective_task_mode). When EVERY reachable
     # target is one, ``mode`` is not a choice at all, so it is dropped from the
     # schema — models defeat the default simply because the key is there to
     # pass. On a mixed roster the key has to stay
@@ -790,10 +791,9 @@ def build_task_contract(
 
     if offer_mode:
         mode_text = (
-            "mode='sync' waits for the report. mode='background' returns a "
-            "worker session ID so the parent can continue independent work; "
-            "completion is push-based, so do not busy-poll. The mode "
-            "parameter says when to omit it."
+            "Dispatches run in the background unless mode='sync' (which waits "
+            "for the report): the result is a worker session ID and "
+            "completion is push-based, so do not busy-poll."
         )
         if background_only_ids:
             mode_text += (
@@ -884,11 +884,11 @@ def build_task_contract(
     }
     if offer_mode:
         mode_description = (
-            "sync waits for the report; background returns the worker session "
-            "ID immediately. For a read-only research agent, omit mode; pass "
-            "sync only when you cannot take a single further step without the "
-            "report. Omit to take the target's default: background for "
-            "read-only research agents, sync for every other agent."
+            "Omit for background, the default for every agent: returns the "
+            "worker session ID immediately. Pass sync only when you cannot "
+            "take a single further step without the report; it blocks this "
+            "turn until the report or the time limit, where a still-running "
+            "worker moves to the background (never re-dispatch it)."
         )
         if background_only_ids:
             mode_description += (

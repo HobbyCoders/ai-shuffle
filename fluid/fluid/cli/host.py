@@ -35,7 +35,8 @@ Two worker kinds, one lifecycle:
   ``~/.fluid/agents``) supplies the system prompt, the tool restriction, and
   an optional model override; otherwise a generic subagent prompt is used.
   ``mode="sync"`` runs the child inline and returns its final text;
-  ``mode="background"`` returns a receipt and submits the final text later.
+  ``mode="background"`` (the default) returns a receipt and submits the final
+  text later.
 
 Workers are asyncio tasks owned by the host, not by the parent turn: the
 parent's ``TurnComplete`` or an ``Interrupt`` never cancels them. They end on
@@ -539,7 +540,7 @@ class CliHost:
         worker.engine = child
         self.workers[worker.task_id] = worker
 
-        if input.get("mode", "sync") == "background":
+        if str(input.get("mode") or "").strip().lower() != "sync":
             worker.task = asyncio.create_task(
                 self._run_child_detached(worker, child, UserTurn(content=prompt)),
                 name=f"fluid-task-{worker.task_id}",
