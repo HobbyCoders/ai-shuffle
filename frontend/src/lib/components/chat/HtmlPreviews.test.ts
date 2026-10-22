@@ -187,6 +187,45 @@ describe('HTML artifacts inline in the reply', () => {
 		await vi.waitFor(() => expect(figure.classList.contains('fixed')).toBe(false));
 	});
 
+	it('remembers the height a page grows to, not the size it first reported', async () => {
+		const page = uniqueHref();
+		load.mockResolvedValue('<p>Chart drawing in</p>');
+		const first = render(HtmlPreview, { href: page, filename: 'grow.html', sessionId: 'chat-1' });
+		await waitFor(() => expect(frameOf(first.container)).not.toBeNull());
+		const frame = frameOf(first.container)!;
+		send(frame, size(200));
+		await tick();
+		send(frame, size(600)); // the chart drew in: one growth step, still under suspicion
+		await tick();
+		send(frame, size(600)); // measured again in its new frame: settled
+		await tick();
+		expect(clipOf(first.container).style.height).toBe('600px');
+		first.unmount();
+
+		const again = render(HtmlPreview, { href: page, filename: 'grow.html', sessionId: 'chat-1' });
+		await waitFor(() => expect(frameOf(again.container)).not.toBeNull());
+		expect(clipOf(again.container).style.height).toBe('600px');
+	});
+
+	it('does not remember heights from the middle of a page following its frame', async () => {
+		const page = uniqueHref();
+		load.mockResolvedValue('<body style="min-height:100vh;padding:24px"></body>');
+		const first = render(HtmlPreview, { href: page, filename: 'follow.html', sessionId: 'chat-1' });
+		await waitFor(() => expect(frameOf(first.container)).not.toBeNull());
+		const frame = frameOf(first.container)!;
+		// Two follower steps: always 48px taller than its frame, never steady.
+		send(frame, size(HTML_PREVIEW_INITIAL_HEIGHT + 48));
+		await tick();
+		send(frame, size(parseInt(clipOf(first.container).style.height) + 48));
+		await tick();
+		first.unmount();
+
+		const again = render(HtmlPreview, { href: page, filename: 'follow.html', sessionId: 'chat-1' });
+		await waitFor(() => expect(frameOf(again.container)).not.toBeNull());
+		// Nothing was remembered: it measures from the loading height again.
+		expect(clipOf(again.container).style.height).toBe(`${HTML_PREVIEW_INITIAL_HEIGHT}px`);
+	});
+
 	it('opens external links only for the focused frame with a live user activation', async () => {
 		load.mockResolvedValue('<a href="https://example.com">x</a>');
 		const open = vi.spyOn(window, 'open').mockImplementation(() => null);

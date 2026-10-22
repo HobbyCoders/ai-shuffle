@@ -46,9 +46,20 @@
 			probeTimer = setTimeout(() => sync(sizer.probeExpired()), HTML_PREVIEW_PROBE_MS);
 		}
 		// Only a size the page has settled on: never a step of a run the sizer
-		// still suspects (a page shrinking or growing with its frame).
-		if (digest && sizer.steady && (action === 'resize' || action === 'fixed')) {
-			rememberPreviewSize(sizeKey, { height: sizer.height, fixed: sizer.mode === 'fixed', digest });
+		// still suspects (a page shrinking or growing with its frame). A growth
+		// step is never steady itself; the report that confirms it (the page
+		// measured in its new frame) usually changes nothing, so this runs after
+		// every report, not only after a resize.
+		if (digest && sizer.steady) {
+			const next = { height: sizer.height, fixed: sizer.mode === 'fixed', digest };
+			const saved = rememberedPreviewSize(sizeKey);
+			if (!saved || saved.height !== next.height || saved.fixed !== next.fixed || saved.digest !== next.digest) {
+				rememberPreviewSize(sizeKey, next);
+			}
+		} else if (digest && sizer.settled && !sizer.steady) {
+			// The first fit of a page that turns out to follow its frame looked
+			// steady when it was saved; drop it once the run is suspected.
+			forgetPreviewSize(sizeKey);
 		}
 	}
 
