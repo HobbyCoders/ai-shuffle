@@ -19,10 +19,10 @@ def process_identity(pid, proc=Path("/proc")):
 
 
 @contextmanager
-def scratch_directory(prefix):
+def scratch_directory(prefix, *, root=None):
     if prefix not in PREFIXES:
         raise ValueError("Scratch prefix is not allowlisted")
-    with tempfile.TemporaryDirectory(prefix=prefix) as directory:
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as directory:
         if os.name == "posix" and Path("/proc/self/stat").exists():
             receipt = {"version": 1, "pid": os.getpid(), "start": process_identity(os.getpid()),
                        "created": time.time(), "uid": os.getuid()}

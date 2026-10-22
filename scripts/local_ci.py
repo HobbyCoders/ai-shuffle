@@ -221,6 +221,9 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
     with scratch_directory("ai-shuffle-ci-") as directory:
         scratch_env = {
             "AI_SHUFFLE_PYTEST_GATE_DIR": os.environ.get("AI_SHUFFLE_PYTEST_GATE_DIR") or tempfile.gettempdir(),
+            # Independently owned pytest/browser roots must not nest beneath
+            # this command's TMPDIR: AF_UNIX sockets have a short path limit.
+            "AI_SHUFFLE_TEST_SCRATCH_ROOT": os.environ.get("AI_SHUFFLE_TEST_SCRATCH_ROOT") or tempfile.gettempdir(),
             **(env or {}), **dict.fromkeys(("TMPDIR", "TEMP", "TMP"), directory),
         }
         _run(argv, cwd=cwd, env=scratch_env, timeout=timeout, retry=retry)

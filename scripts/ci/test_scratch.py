@@ -4,6 +4,7 @@ A user-supplied --basetemp remains user-owned. SIGKILL cannot run finalizers;
 normal failures, collection errors and pytest's Ctrl-C path do run them.
 """
 from contextlib import ExitStack
+import os
 
 import pytest
 
@@ -16,7 +17,8 @@ def pytest_configure(config):
         return
     stack = ExitStack()
     config.add_cleanup(stack.close)
-    directory = stack.enter_context(scratch_directory("ai-shuffle-pytest-"))
+    directory = stack.enter_context(scratch_directory(
+        "ai-shuffle-pytest-", root=os.environ.get("AI_SHUFFLE_TEST_SCRATCH_ROOT")))
     # Keep ownership alive through all fixture/worker finalizers.
     config._shuffle_scratch = stack
     config.option.basetemp = directory + "/pytest"

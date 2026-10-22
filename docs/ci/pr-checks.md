@@ -112,7 +112,10 @@ Retention is explicitly `none` / `0`. An explicit `--basetemp` remains caller-ow
 and removes it after stopping failed, timed-out or interrupted children. It
 preserves the original shared xdist lock directory in
 `AI_SHUFFLE_PYTEST_GATE_DIR`; private scratch must not create private admission
-slots. `npm test` in browser-mcp similarly owns its browser/Node scratch.
+slots. Independently owned pytest/browser scratch uses the original temporary
+root (`AI_SHUFFLE_TEST_SCRATCH_ROOT`) rather than nesting beneath command scratch,
+so Unix-domain socket paths stay short. `npm test` in browser-mcp similarly owns
+its browser/Node scratch.
 
 Normal exit, pytest's Ctrl-C handling and local-ci command failure run cleanup;
 SIGKILL and host crashes cannot run finalizers. Approved workers periodically

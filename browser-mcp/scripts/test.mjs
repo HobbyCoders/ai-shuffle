@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const directory = mkdtempSync(join(tmpdir(), 'ai-shuffle-browser-'));
+const directory = mkdtempSync(join(process.env.AI_SHUFFLE_TEST_SCRATCH_ROOT || tmpdir(), 'ai-shuffle-browser-'));
 let child;
 let interrupted;
 function signal(name) {

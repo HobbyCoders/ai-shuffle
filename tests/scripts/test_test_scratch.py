@@ -40,6 +40,27 @@ def test_local_ci_removes_child_scratch(tmp_path, failure):
         shutil.rmtree(directory, ignore_errors=True)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Unix socket path limit")
+def test_local_ci_pytest_scratch_does_not_nest_socket_paths(tmp_path):
+    suite = tmp_path / "test_child_socket.py"
+    record = tmp_path / "socket-path"
+    suite.write_text(
+        "import socket, pathlib\n"
+        "def test_real_no_unix_socket_reaches_a_host_listener(tmp_path):\n"
+        "    folder = tmp_path / 'grant'\n"
+        "    folder.mkdir()\n"
+        "    path = folder / 'stream.sock'\n"
+        "    with socket.socket(socket.AF_UNIX) as stream:\n"
+        "        stream.bind(str(path))\n"
+        f"    pathlib.Path({str(record)!r}).write_text(str(path))\n"
+    )
+    local_ci.run([sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
+                  str(suite), "-n", "2", "-q"], env={"PYTHONPATH": str(ROOT)}, timeout=60)
+    path = Path(record.read_text())
+    assert "ai-shuffle-ci-" not in str(path)
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("parallel", [False, True])
 @pytest.mark.parametrize("failure", [False, True])
 def test_pytest_owns_and_removes_basetemp(tmp_path, parallel, failure):
