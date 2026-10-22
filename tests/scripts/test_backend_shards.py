@@ -15,6 +15,44 @@ from scripts.ci import backend_shards as bs
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_hashed_manifest_keeps_exact_weights_and_unknown_nodes():
+    nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
+    measured = {node: float(i + 1) for i, node in enumerate(nodes)}
+    manifest = {"format": bs.MANIFEST_FORMAT, "durations": bs.hashed_durations(measured)}
+    assert not any(node in json.dumps(manifest) for node in nodes)
+    assert all(len(key) == 64 for key in manifest["durations"])
+    assert bs.manifest_weights(nodes, manifest) == measured
+    assert bs.partition(nodes, bs.manifest_weights(nodes, manifest)) == bs.partition(nodes, measured)
+    new = nodes + ["test_new.py::test_unknown"]
+    weights = bs.manifest_weights(new, manifest)
+    assert weights[new[-1]] == 12.0
+    assert sorted(node for shard in bs.partition(new, weights) for node in shard) == sorted(new)
+    assert bs.manifest_weights(new, {"format": bs.MANIFEST_FORMAT, "durations": {}}) == dict.fromkeys(new, 10.0)
+
+
+@pytest.mark.parametrize("manifest", [
+    {"durations": {}}, {"format": "unknown", "durations": {}},
+    {"format": bs.MANIFEST_FORMAT, "durations": {"raw-node-id": 1}},
+    {"format": bs.MANIFEST_FORMAT, "durations": {"z" * 64: 1}},
+])
+def test_malformed_manifest_fails_closed(manifest):
+    with pytest.raises(ValueError):
+        bs.manifest_weights(list("abcd"), manifest)
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "3", True])
+def test_invalid_stale_manifest_weight_is_not_ignored(value):
+    manifest = {"format": bs.MANIFEST_FORMAT, "durations": {bs.node_hash("stale-node"): value}}
+    with pytest.raises(ValueError, match="invalid duration"):
+        bs.manifest_weights(list("abcd"), manifest)
+
+
+def test_hash_collision_cannot_overwrite_a_duration(monkeypatch):
+    monkeypatch.setattr(bs, "node_hash", lambda node: "a" * 64)
+    with pytest.raises(ValueError, match="hash collision"):
+        bs.hashed_durations({"node-a": 1, "node-b": 2})
+
+
 def test_deterministic_duration_balancing_and_exact_union():
     nodes = [f"tests/test_a.py::test_{i}" for i in range(100)]
     durations = {node: float(i + 1) for i, node in enumerate(nodes)}
@@ -68,7 +106,10 @@ def test_actual_xdist_collection_producing_path(tmp_path):
     fixture = tmp_path / "test_fixture.py"
     fixture.write_text("import pytest\n@pytest.mark.parametrize('value', range(12))\ndef test_value(value):\n    assert value >= 0\n")
     manifest = tmp_path / "durations.json"
-    manifest.write_text(json.dumps({"durations": {}}))
+    nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
+    durations = {node: float(i + 1) for i, node in enumerate(nodes)}
+    expected = bs.partition(nodes, durations)
+    manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": bs.hashed_durations(durations)}))
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
     # This test is run serially locally: no nested workers beyond the shared
     # machine-wide two-worker limit. Hosted policy tests also run it serially.
@@ -83,7 +124,8 @@ def test_actual_xdist_collection_producing_path(tmp_path):
             cwd=tmp_path, env=env, text=True, capture_output=True, timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
         receipt = json.loads((output / "receipt.json").read_text())
-        assert receipt["count"] == 3
+        assert receipt["count"] == len(expected[index - 1])
+        assert receipt["selected"] == bs.digest(expected[index - 1])
         assert receipt["total"] == 12
         assert receipt["workers"] == 2
         assert receipt["head"] == "integration-head"
@@ -197,7 +239,9 @@ def test_main_refresh_downloads_and_validates_complete_execution(monkeypatch, tm
         bs.refresh("123", destination, output)
         result = json.loads(output.read_text())
         assert result["source"] == run
-        assert set(result["durations"]) == set(nodes)
+        assert result["format"] == bs.MANIFEST_FORMAT
+        assert result["durations"] == bs.hashed_durations({node: 0.5 for node in nodes})
+        assert not (set(result["durations"]) & set(nodes))
 
 
 def test_main_refresh_refuses_existing_cache_authority(monkeypatch, tmp_path):

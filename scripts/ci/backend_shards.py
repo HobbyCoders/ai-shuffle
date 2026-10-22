@@ -19,14 +19,45 @@ import subprocess
 import pytest
 
 MANIFEST = Path(__file__).resolve().parents[2] / "tests/backend-durations.json"
+MANIFEST_FORMAT = "sha256-nodeid-v1"
+
+
+def validate_durations(durations):
+    if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or v < 0
+           for v in durations.values()):
+        raise ValueError("invalid duration")
+
+
+def node_hash(node):
+    return hashlib.sha256(node.encode("utf-8")).hexdigest()
+
+
+def hashed_durations(durations):
+    # Parametrized node IDs can contain synthetic secret-scanner fixtures. Do
+    # not republish those strings in versioned scheduling data.
+    validate_durations(durations)
+    hashed = {node_hash(node): seconds for node, seconds in durations.items()}
+    if len(hashed) != len(durations):
+        raise ValueError("duration node hash collision")
+    return hashed
+
+
+def manifest_weights(nodeids, manifest):
+    if manifest.get("format") != MANIFEST_FORMAT:
+        raise ValueError("unsupported duration manifest format")
+    durations = manifest["durations"]
+    if any(not isinstance(key, str) or len(key) != 64 or
+           any(char not in "0123456789abcdef" for char in key) for key in durations):
+        raise ValueError("invalid duration node hash")
+    validate_durations(durations)
+    unknown = max(10.0, max(durations.values(), default=0))
+    return {node: durations.get(node_hash(node), unknown) for node in nodeids}
 
 
 def partition(nodeids, durations, count=4):
     if count < 1 or len(nodeids) < count or len(set(nodeids)) != len(nodeids):
         raise ValueError("duplicate collection or insufficient tests for nonempty shards")
-    if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or v < 0
-           for v in durations.values()):
-        raise ValueError("invalid duration")
+    validate_durations(durations)
     unknown = max(10.0, max(durations.values(), default=0))
     ordered = sorted(nodeids, key=lambda node: (-durations.get(node, unknown), node))
     shards, loads = [[] for _ in range(count)], [0.0] * count
@@ -74,7 +105,7 @@ class ShardRun:
     def pytest_collection_modifyitems(self, session, config, items):
         nodes = [item.nodeid for item in items]
         manifest = json.loads(Path(config.getoption("backend_durations")).read_text())
-        shards = partition(nodes, manifest["durations"])
+        shards = partition(nodes, manifest_weights(nodes, manifest))
         index = config.getoption("backend_shard") - 1
         selected = set(shards[index])
         self.evidence = {
@@ -155,7 +186,8 @@ def refresh(run_id, directory, output):
             or digest(sorted(durations)) != receipts[0]["collection"]):
         raise ValueError("timings do not cover collection")
     partition(list(durations), durations)
-    output.write_text(json.dumps({"source": run, "durations": durations}, sort_keys=True, indent=2) + "\n")
+    output.write_text(json.dumps({"format": MANIFEST_FORMAT, "source": run,
+                                  "durations": hashed_durations(durations)}, sort_keys=True, indent=2) + "\n")
 
 
 if __name__ == "__main__":

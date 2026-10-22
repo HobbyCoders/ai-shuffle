@@ -119,8 +119,12 @@ unknown classifier output, missing/duplicate shard receipts, inconsistent
 collection/partition digests and incomplete counts all fail closed.
 
 `tests/backend-durations.json` is versioned scheduling data, never execution
-authority. Unknown/new tests receive at least ten seconds or the maximum observed
-duration, and are never dropped. The initial seed is taken once from a complete
+authority. Its keys are SHA-256 hashes of node IDs: parametrized IDs can contain
+synthetic credential-scanner fixtures, which must not be republished in the
+manifest. Refresh validates the exact union of raw executed IDs before hashing;
+collection always starts from the actual tests, not the manifest. Unknown/new
+tests receive at least ten seconds or the maximum observed duration, and are
+never dropped. The initial seed is taken once from a complete
 successful PR CI run; subsequent refreshes accept only successful main CI Backend
 runs, downloading fresh artifacts rather than trusting a PR-controlled cache:
 
