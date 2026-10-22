@@ -224,8 +224,8 @@ Accepted nightly Docker candidates have a separate explicit promotion lane:
 `python3 scripts/release/promote_image.py --digest sha256:HEX --tags nightly`.
 Run it only after that digest's canary acceptance, from a clean checkout of the
 current public main. It verifies the pulled image's revision/tree/sequence and
-requires the existing owner-authored successful exact-main full-suite status on
-protected main. It rechecks main after the image pull and reads the nightly alias
+requires an owner-authored local full-suite status or verified hosted main-suite
+success on the exact protected-main revision, using the same read-only gate. It rechecks main after the image pull and reads the nightly alias
 back. Missing/stale/failed evidence refuses promotion; this lane never moves
 `latest`, major or minor aliases, and mixed nightly/stable requests are rejected.
 The pre-canary cutover check requires Actions disabled and all runs drained in

@@ -52,7 +52,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
         assert called["on"]["pull_request"] == ""
         assert called["permissions"] == {"contents": "read"}
         assert called["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
-    for job in ["windows", "identity", "desktop"]:
+    for job in ["windows", "identity", "desktop", "policy"]:
         assert jobs[job]["with"] == {"main_suite": "true"}
     for name in suite.REQUIRED:
         assert jobs[name]["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
@@ -91,6 +91,21 @@ def test_parity_jobs_reuse_local_commands_and_strict_reach(monkeypatch):
     for name in ["owner_publication_policy", "edge_publication_gate", "local_ci", "local_ci_preflight",
                  "local_ci_stages", "security_gate", "cloud_split", "main_suite_parity"]:
         assert f"tests/scripts/test_{name}.py" in commands
+
+
+def test_policy_pr_and_manual_selection_and_dependencies_are_unchanged():
+    config = workflow("ci-artifact-policy.yml")
+    assert config["on"]["workflow_call"]["inputs"]["main_suite"]["default"] == "false"
+    steps = config["jobs"]["policy"]["steps"]
+    ordinary = [step["run"] for step in steps if step.get("if") == "inputs.main_suite != true"]
+    assert ordinary == [
+        "python -m pip install PyYAML==6.0.3 pytest==9.1.1 httpx==0.27.2 cryptography==50.0.1",
+        'python -m pytest -q -o addopts="" --confcutdir=tests/scripts '
+        "tests/scripts/test_owner_publication_policy.py tests/scripts/test_edge_publication_gate.py",
+    ]
+    expanded = [step["run"] for step in steps if step.get("if") == "inputs.main_suite == true"]
+    assert expanded[0] == "pip install -r requirements.txt -r requirements-dev.txt && pip install -e ./fluid"
+    assert "tests/scripts/test_main_suite_parity.py" in expanded[1]
 
 
 def test_complete_main_suite_aggregate_accepts():

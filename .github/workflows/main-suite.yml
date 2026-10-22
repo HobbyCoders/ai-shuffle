@@ -49,6 +49,8 @@ jobs:
   policy:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     uses: ./.github/workflows/ci-artifact-policy.yml
+    with:
+      main_suite: true
 
   desktop-source:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
