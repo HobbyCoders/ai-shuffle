@@ -37,6 +37,7 @@ import { pendingQueue } from './pending-queue';
 import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
+import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
 import {
 	contextChoiceFromWindow,
@@ -208,6 +209,31 @@ export function reconciledSessionMode(
 	const row = sessions.find(s => s.id === sessionId);
 	if (!row) return null;
 	return normalizeSessionMode(row.mode);
+}
+
+/** The row fields that say whether a session has (been given) a project. */
+export interface AttachRowFields {
+	mode?: string | null;
+	project_id?: string | null;
+	project_v2_id?: string | null;
+	permission_mode?: string | null;
+}
+
+/**
+ * Whether a saved copy of a session (this tab's localStorage snapshot or its
+ * in-memory cache) predates a project being attached to it (#371). The attach
+ * also put the session back on Ask, so a saved Auto or Bypass pick is stale:
+ * restored, it would ride the next send, and a send stores its pick as the
+ * session's binding. Callers take the row's access instead.
+ */
+export function attachedSinceSaved(
+	saved: { mode?: string | null; project?: string | null; projectV2Id?: string | null } | null | undefined,
+	row: AttachRowFields | null | undefined,
+): boolean {
+	if (!saved || !row) return false;
+	if (saved.project || saved.projectV2Id) return false;
+	if (saved.mode != null && normalizeSessionMode(saved.mode) !== 'chat') return false;
+	return !!(row.project_id || row.project_v2_id) && normalizeSessionMode(row.mode) !== 'chat';
 }
 
 /**
@@ -721,7 +747,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// to 'code'.
 			mode: normalizeSessionMode(row?.mode),
 			modelOverride: ephemeral?.modelOverride ?? sessionModelBinding(row),
-			permissionModeOverride: normalizePermissionMode(ephemeral?.permissionModeOverride ?? row?.permission_mode),
+			// A cache saved before a project was attached elsewhere holds a pick
+			// the attach reset to Ask; the row's access wins then (#371).
+			permissionModeOverride: normalizePermissionMode(attachedSinceSaved(ephemeral, row)
+				? (row?.permission_mode ?? 'default')
+				: (ephemeral?.permissionModeOverride ?? row?.permission_mode)),
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
@@ -995,11 +1025,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const savedDraft = newChatEphemeral && (hasComposerDraft(newChatEphemeral.draft) || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
 			? newChatEphemeral : null;
 
-		// A new session is created into whichever lane the sidepanel is showing.
-		// Voice is a call on a conversation, never a new-conversation lane: an
-		// opened historical voice session hands its new chat to the chat lane.
-		if (appMode.current === 'voice') appMode.set('chat');
-		const mode = appMode.current;
+		// A new session starts without a project (#371 step 4): the project is
+		// optional and added on the new-session screen, which switches the
+		// compose to a project session. Only a kept draft that was typed for a
+		// project reopens with it.
+		const mode: SessionMode = savedDraft && (savedDraft.project || savedDraft.projectV2Id) ? 'code' : 'chat';
 
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
@@ -1044,16 +1074,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// A fresh compose restores the complete last-used run binding. Existing
 			// sessions still restore their own row/cache values in switchSession().
 			modelOverride: getPersistedModel(),
-			// ...except the permission mode outside the code lane. Only the code
-			// composer renders the tool-access control, so a chat or voice session
-			// that inherited the last code-lane pick would be stuck with it for
-			// life: reopening it restores 'chat' from the row, which keeps the
-			// control hidden. Inheriting 'plan' would be a deadlock (the plan-exit
-			// tool is not on the chat ceiling, so the turn could never leave plan
-			// mode) and inheriting 'bypassPermissions' would loosen a lane whose
-			// whole premise is a hard ceiling. null means "no session binding",
-			// so the backend settles it — and pins it for chat besides.
-			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : null,
+			// Without a project the composer offers Ask, Auto and Bypass, so the
+			// last pick carries over except Accept Edits (nothing to edit).
+			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : noProjectPermission(getPersistedPermissionMode()),
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
 			workspaceProjectIds: newChatEphemeral?.workspaceProjectIds ?? [],
@@ -1095,7 +1118,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		if (savedDraft) update(s => ({...s,
 			profile:savedDraft.profile ?? s.profile,
 			modelOverride:savedDraft.modelOverride, effortLevelOverride:savedDraft.effortLevelOverride,
-			permissionModeOverride:mode === 'chat' ? null : normalizePermissionMode(savedDraft.permissionModeOverride),
+			permissionModeOverride:mode === 'chat' ? noProjectPermission(normalizePermissionMode(savedDraft.permissionModeOverride)) : normalizePermissionMode(savedDraft.permissionModeOverride),
 			fastMode:savedDraft.fastMode ?? false,
 			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
 			...(mode === 'chat' ? {} : {

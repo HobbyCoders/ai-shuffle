@@ -756,10 +756,11 @@ def _started_permission_mode(sender, overrides):
     carries (a connector's) caps it. ``None`` (the sender has no binding)
     leaves the new chat unbound too, so it follows the same agent's mode.
 
-    A chat starter always RUNS on Ask (``permission_mode_for_session_mode``),
-    whatever its stored binding or agent says, so its children start on Ask:
-    a chat must never create a session looser than itself. StartSession takes
-    no permission argument; the owner can loosen the child afterwards.
+    A no-project (chat) starter's children always start on Ask, even when the
+    owner has put the starter itself in Auto or Bypass (#371 step 4): its
+    children get full project tools, which the starter's own ceiling never
+    had. StartSession takes no permission argument; the owner can loosen the
+    child afterwards.
     """
     from app.core.session_modes import permission_ceiling, session_mode_of, turn_permission_mode
 

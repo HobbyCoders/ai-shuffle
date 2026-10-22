@@ -66,8 +66,9 @@ async def _start(starter, request_id="review", **extra):
 
 
 @pytest.mark.parametrize("case", ["null_binding_bypass_agent", "stored_bypass"])
-async def test_chat_coordinator_at_ask_never_starts_a_bypass_child(owner, case):
-    """The child gets the chat's EFFECTIVE mode (Ask), not its stored binding or agent default."""
+async def test_chat_coordinator_in_bypass_never_starts_a_bypass_child(owner, case):
+    """A no-project coordinator may itself run in Bypass (#371 step 4), but the
+    sessions it starts are created on Ask, never its binding or agent default."""
     from app.core import query_options
     _project(owner)
     chat("coord", mode="chat")
@@ -78,7 +79,7 @@ async def test_chat_coordinator_at_ask_never_starts_a_bypass_child(owner, case):
     else:
         database.set_session_run_binding("coord", permission_mode="bypassPermissions")
     coordinator, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id="coord")
-    assert coordinator.permission_mode == "default"
+    assert coordinator.permission_mode == "bypassPermissions"
     for child in (await _start("coord", "named", project="Project"), await _start("coord", "chat")):
         assert database.get_session(child)["permission_mode"] == "default"
         options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)

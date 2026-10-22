@@ -6,7 +6,7 @@
 	 * Centered hero with clickable workspace name dropdown.
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
-	import { ChevronDown, FolderClosed } from 'lucide-svelte';
+	import { ChevronDown, FolderClosed, FolderPlus } from 'lucide-svelte';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
 	import { appData, clusterProjects, profiles, profilesLoaded, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
@@ -22,9 +22,14 @@
 		selectedProject: string | null;
 		selectedProjectV2Id?: string | null;
 		onSelectProject: (projectId: string, projectV2Id?: string | null) => void;
+		/**
+		 * `add`: the new-session screen's quiet "+ Add a project · Optional"
+		 * row (#371 step 4) instead of the "Let's build" hero. Same picker.
+		 */
+		variant?: 'hero' | 'add';
 	}
 
-	let { selectedProject, selectedProjectV2Id = null, onSelectProject }: Props = $props();
+	let { selectedProject, selectedProjectV2Id = null, onSelectProject, variant = 'hero' }: Props = $props();
 
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
@@ -153,6 +158,40 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={closeOnEscape} />
 
+{#if variant === 'add'}
+<div class="add-project-row">
+	<div class="picker-container add-variant" bind:this={dropdownRef}>
+		<button
+			type="button"
+			class="add-project"
+			aria-expanded={showDropdown}
+			aria-controls={pickerId}
+			aria-describedby="{pickerId}-hint"
+			onclick={toggleDropdown}
+		>
+			<FolderPlus size={16} strokeWidth={1.7} class="add-project-icon" aria-hidden="true" />
+			<span>Add a project</span>
+		</button>
+		{#if showDropdown}
+			<div id={pickerId} class="picker-dropdown" use:mobilePopup>
+				<GroupedSelector
+					bind:this={groupedSelector}
+					items={pickerItems}
+					entityType="projects"
+					selectedId={selectedId}
+					onSelect={handleSelect}
+					label="Add a project"
+					addLabel="Add Project"
+					onAdd={openAddModal}
+					emptyMessage="No projects yet"
+					itemIcon={FolderClosed}
+				/>
+			</div>
+		{/if}
+	</div>
+	<span class="add-project-hint" id="{pickerId}-hint"><b>Optional</b> · adds checkout, branch and git</span>
+</div>
+{:else}
 <div class="workspace-selector">
 	<!-- Logo / Icon -->
 	<div class="logo-mark">
@@ -212,6 +251,7 @@
 		</button>
 	{/if}
 </div>
+{/if}
 
 <!-- Add Project Modal -->
 <AddProjectModal
@@ -338,9 +378,65 @@
 		animation: none;
 	}
 
+	/* ===== "Add a project" row (variant="add") ===== */
+	.add-project-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding-left: 2px;
+		animation: add-row-in 420ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
+	}
+	.add-project {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		height: 34px;
+		padding: 0 11px 0 9px;
+		border: 1px solid transparent;
+		border-radius: calc(var(--radius, 10px) * 0.9);
+		background: transparent;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
+	}
+	.add-project :global(.add-project-icon) {
+		color: var(--subtle-foreground);
+		transition: color 150ms ease, transform 250ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	.add-project:hover,
+	.add-project[aria-expanded='true'] {
+		color: var(--foreground);
+		background: var(--hover-overlay);
+		border-color: var(--border);
+	}
+	.add-project:hover :global(.add-project-icon),
+	.add-project[aria-expanded='true'] :global(.add-project-icon) {
+		color: var(--primary);
+		transform: rotate(-6deg) scale(1.06);
+	}
+	.add-project:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.add-project-hint { font-size: 12px; color: var(--subtle-foreground); }
+	.add-project-hint b { font-weight: 550; color: var(--muted-foreground); }
+	/* Below the composer: the list opens downward from the row's left edge. */
+	.add-variant .picker-dropdown {
+		left: 0;
+		transform: none;
+		animation-name: add-dropdown-in;
+	}
+	@keyframes add-dropdown-in {
+		from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+		to { opacity: 1; transform: none; }
+	}
+	@keyframes add-row-in { from { opacity: 0; transform: translateY(6px); } }
+
 	@media (prefers-reduced-motion: reduce) {
 		.picker-dropdown {
 			animation: none;
 		}
+		.add-project-row { animation: none; }
+		.add-project, .add-project :global(.add-project-icon) { transition: none; }
 	}
 </style>

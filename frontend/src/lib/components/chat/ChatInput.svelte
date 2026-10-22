@@ -81,9 +81,16 @@
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
+		/**
+		 * The new-session screen leads with the agent card (#371 step 4): it
+		 * carries the agent, "Runs on" and the call, and the project strip
+		 * sits below the box. The chip row above the box and the dock's call
+		 * button would repeat them, so they step aside.
+		 */
+		agentCard?: boolean;
 	}
 
-	let { compact = false, assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { compact = false, assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, agentCard = false }: Props = $props();
 	// ChatView remounts the editor when its account changes. Teardown and
 	// already queued callbacks must not write the previous account's text.
 	const ownerEpoch = sessionOwnerEpoch();
@@ -128,9 +135,13 @@
 		const row = $sessions.find((session) => session.id === $activeSession.sessionId);
 		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId, $activeSession.sessionId ? $handoffPending[$activeSession.sessionId] : null));
 	});
+	// The new-session screen addresses the agent on its card by name.
+	const agentName = $derived($profiles.find(profile => profile.id === $activeSession.profile)?.name?.trim() || null);
 	const composerPlaceholder = $derived(
 		moveWait ??
-			(assistantMode ? 'What can I do for you?' : composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
+			(assistantMode ? 'What can I do for you?'
+				: agentCard && agentName ? `What should ${agentName} do?`
+				: composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
 	);
 
 	// Voice passes local file references to its worker rather than uploading
@@ -527,8 +538,9 @@
 	// Wrong-project nudge: a new chat's draft names another registered project
 	// (and not the selected one). Offer a one-click switch before sending.
 	let dismissedMismatch = $state<string | null>(null);
+	// Without a project the nudge offers to add the one the draft names.
 	const projectMismatch = $derived(
-		!$activeSession.sessionId && $activeSession.mode !== 'chat' && plainTextValue.length >= 8
+		!$activeSession.sessionId && !assistantMode && plainTextValue.length >= 8
 			? detectProjectMismatch(plainTextValue, appData.current.projects, $activeSession.project)
 			: null
 	);
@@ -1335,8 +1347,10 @@
 		{#if projectMismatch && dismissedMismatch !== projectMismatch.id}
 			<Banner
 				severity="info"
-				message={`This looks like it's about ${projectMismatch.name}. Start it there instead?`}
-				action={{ label: `Switch to ${projectMismatch.name}`, onClick: () => activeSession.setProject(projectMismatch.id) }}
+				message={$activeSession.project
+					? `This looks like it's about ${projectMismatch.name}. Start it there instead?`
+					: `This looks like it's about ${projectMismatch.name}. Add it as this session's project?`}
+				action={{ label: $activeSession.project ? `Switch to ${projectMismatch.name}` : `Add ${projectMismatch.name} as project`, onClick: () => activeSession.setProject(projectMismatch.id) }}
 				dismissible
 				onDismiss={() => (dismissedMismatch = projectMismatch?.id ?? null)}
 			/>
@@ -1389,8 +1403,9 @@
 			<!-- The phone shell carries these selectors in its controls panel; a
 			     second, hidden copy would share their dropdown state. -->
 			{#if !mobileViewport}
-			{#if !assistantMode}
-				<!-- The assistant picks project, branch and runner itself. -->
+			{#if !assistantMode && !agentCard}
+				<!-- The assistant picks project, branch and runner itself. The
+				     new-session screen's agent card and project strip carry them. -->
 				<div class="context-pill-row"><ContextPillBar /></div>
 			{/if}
 			{/if}
@@ -1533,7 +1548,7 @@
 					inertToolbar={toolbarPointerBlocked}
 					onAttachClick={triggerFileUpload}
 					voiceActions={mobileViewport ? undefined : voiceActions}
-					callAction={mobileViewport ? caller : undefined}
+					callAction={mobileViewport && !agentCard ? caller : undefined}
 					onSheetOpenChange={(open) => {
 						mobileControlsOpen = open;
 						if (open) keepMobileComposerExpanded();
@@ -1579,7 +1594,8 @@
 
 {#snippet voiceActions()}
 	{@render recorder()}
-	{@render caller()}
+	<!-- The new-session agent card carries the call as "Talk to <agent>". -->
+	{#if !agentCard}{@render caller()}{/if}
 {/snippet}
 
 <style>

@@ -58,9 +58,14 @@
 	interface Props {
 		/** Render the selectors as stacked, full-width controls inside the mobile sheet. */
 		sheetMode?: boolean;
+		/**
+		 * The new-session project strip (#371 step 4): project, branch and
+		 * worktree only. The agent card above owns the agent and "Runs on".
+		 */
+		strip?: boolean;
 	}
 
-	let { sheetMode = false }: Props = $props();
+	let { sheetMode = false, strip = false }: Props = $props();
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ??
@@ -491,14 +496,18 @@
 	{/if}
 {/snippet}
 
-<div class="context-pill-bar" class:sheet-mode={sheetMode} role="toolbar" aria-label="Session context">
+<div class="context-pill-bar" class:sheet-mode={sheetMode} class:strip role="toolbar" aria-label={strip ? 'Project' : 'Session context'}>
+	{#if !strip}
 	<ProfileSelector {sheetMode} />
+	{/if}
 	{#if $activeSession.mode !== 'chat'}
+	{#if !strip}
 	<span class="ctx-sep" aria-hidden="true"></span>
+	{/if}
 
 	{#if isEmptyState}
 		{#if $activeSession.project || $activeSession.projectV2Id}
-			<ExecutionModeBar {sheetMode}>
+			<ExecutionModeBar {sheetMode} hideRunner={strip}>
 				{#snippet between()}
 					{@render repoChip()}
 					{#if showEmptyStateBranch}

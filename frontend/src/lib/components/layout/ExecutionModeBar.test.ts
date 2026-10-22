@@ -85,7 +85,7 @@ afterEach(() => {
 afterAll(() => vi.unstubAllGlobals());
 
 beforeEach(() => {
-	Object.assign(activeSession.current, { sessionId: null, project: 'repo', projectV2Id: null, messages: [] });
+	Object.assign(activeSession.current, { sessionId: null, mode: 'code', project: 'repo', projectV2Id: null, messages: [] });
 	composerPreferences.set('project', {projectId:'repo',projectV2Id:null});
 	mocks.git.set({ projectId: 'repo', worktreeId: null, sessionId: null, hydrated: true, status: { is_git_repo: true } });
 	activeSession.setDeviceIntent(null);

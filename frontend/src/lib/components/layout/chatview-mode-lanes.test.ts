@@ -35,20 +35,21 @@ const stripComments = (source: string) =>
 
 const codeOnly = stripComments(chatView);
 
-describe('ChatView — lane heroes', () => {
-	it('reads the lane off the active session, not a separate switcher store', () => {
-		expect(codeOnly).toMatch(/const surfaceMode = \$derived\(\$activeSession\.mode\)/);
+describe('ChatView — the new-session hero (#371 step 4)', () => {
+	it('opens a new session on the agent card, with no lane heroes', () => {
+		expect(codeOnly).toMatch(/<AgentCard\s*\/>/);
+		expect(codeOnly).not.toMatch(/ChatModeHero|surfaceMode/);
 	});
 
-	it('mounts a hero per new-conversation lane', () => {
-		expect(codeOnly).toMatch(/<ChatModeHero\s*\/>/);
-		expect(codeOnly).toMatch(/<WorkspaceSelector/);
+	it('puts the optional project under the composer, only on the new-session screen', () => {
+		expect(codeOnly).toMatch(/\{#if showAgentCard && !archivedSessionId\}\s*<div class="project-slot-wrap">\s*<ProjectSlot \/>/);
+		expect(codeOnly).toContain("const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !primaryAssistant && !unavailable)");
+		expect(codeOnly).toContain('agentCard={showAgentCard}');
 	});
 
 	it('never offers a standalone new voice session', () => {
-		// Voice is a call on the current conversation; a voice surface reads as chat.
+		// Voice is a call on the current conversation (the card's Talk button).
 		expect(codeOnly).not.toMatch(/VoiceModeHero|startNewVoiceSession/);
-		expect(codeOnly).toContain("{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}");
 	});
 
 	it('personalizes only the designated home before the ordinary cleared-session hero', () => {
@@ -61,11 +62,11 @@ describe('ChatView — lane heroes', () => {
 		expect(cleared).toBeGreaterThan(primary);
 	});
 
-	it('keeps the cleared-session hero ahead of the lane branches', () => {
+	it('keeps the cleared-session hero ahead of the agent card', () => {
 		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
-		const chatLane = codeOnly.indexOf("{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}");
+		const card = codeOnly.indexOf('<AgentCard');
 		expect(cleared).toBeGreaterThan(-1);
-		expect(chatLane).toBeGreaterThan(cleared);
+		expect(card).toBeGreaterThan(cleared);
 	});
 });
 
@@ -119,22 +120,5 @@ describe('ChatView — chat.open timing', () => {
 		expect(effect?.[0]).toContain("finishJourneyAfterPaint('chat.open', settledChatId)");
 		expect(effect?.[0]).not.toContain('$activeSession');
 		expect(codeOnly).toMatch(/const settledChatId = \$derived\.by\(/);
-	});
-});
-
-describe('ChatModeHero — projectless by construction', () => {
-	const hero = src('ChatModeHero.svelte');
-
-	it('offers no workspace picker', () => {
-		expect(stripComments(hero)).not.toMatch(/GroupedSelector|WorkspaceSelector|onSelectProject/);
-	});
-
-	it('describes web, attachments, and explicitly requested private access', () => {
-		const content = stripComments(hero).toLowerCase().replace(/\s+/g, ' ');
-		expect(content).toContain('search the web');
-		expect(content).toContain('attachments');
-		expect(content).toContain('ask for temporary access');
-		expect(content).toContain('folder or ssh machine through a private card');
-		expect(content).toContain('no repository or worktree is attached');
 	});
 });

@@ -173,10 +173,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 				update(s => ({
 					...s,
 					profile: s.profile || defaultProfile,
-					...resolvePersistedProject(
+					// A new session starts without a project (#371 step 4);
+					// only a compose that already picked one keeps it.
+					...(s.mode === 'chat' ? {} : resolvePersistedProject(
 						{ project: s.project, projectV2Id: s.projectV2Id },
 						defaultProject,
-					),
+					)),
 				}));
 			} else {
 				if (persisted) {
@@ -192,10 +194,11 @@ export function createSessionInit(deps: SessionInitDeps) {
 						// The snapshot is the lane that session was actually open
 						// in; +page's reconcile re-reads the row once the session
 						// list lands and corrects a stale snapshot. An unbound
-						// compose keeps `appMode`'s pick — there, it IS the truth.
+						// compose is a project session only when it was saved
+						// with the project the user picked (#371 step 4).
 						mode: persisted.sessionId
 							? normalizeSessionMode(persisted.mode)
-							: s.mode,
+							: (persisted.project || persisted.projectV2Id ? 'code' : 'chat'),
 						// Adopting a sessionId whose history hasn't rendered yet opens
 						// the restore-race window: the UI shows "New Chat" while sends
 						// would land in the old session. Mark it until onConnected's
@@ -205,7 +208,16 @@ export function createSessionInit(deps: SessionInitDeps) {
 						isRestoringSession: !!persisted.sessionId,
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
-						...resolvePersistedProject(persisted, defaultProject),
+						// An unbound compose saved without a project stays without one,
+						// and so does a restored chat: the device default would read
+						// as the session's own project, hiding a later attach from
+						// reconcile (which then keeps the wrong project and a stale
+						// Bypass, #371).
+						...(persisted.sessionId && normalizeSessionMode(persisted.mode) === 'chat'
+							? { project: persisted.project ?? '', projectV2Id: persisted.projectV2Id ?? null }
+							: persisted.sessionId || persisted.project || persisted.projectV2Id
+								? resolvePersistedProject(persisted, defaultProject)
+								: { project: '', projectV2Id: null }),
 						// Run binding. A restored EXISTING session keeps whatever the
 						// record holds — null included, which lets the backend fall
 						// back to what that session actually last ran on. Only an
@@ -250,7 +262,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 						void switcher.refreshSessionMetadata(persisted.sessionId);
 					}
 				} else {
-					update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
+					// No saved compose: a new session starts without a project.
+					update(s => ({ ...s, profile: defaultProfile, ...(s.mode === 'chat' ? {} : { project: defaultProject }) }));
 				}
 			}
 

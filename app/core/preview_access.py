@@ -348,6 +348,10 @@ def mutation_allowed(path: str, method: str) -> bool:
         path.rstrip("/").endswith("/forget") or path.rstrip("/").endswith("/git/worktrees/reclaim")
     ):
         return False
+    # Attaching a project gives a no-project chat a shell and file edits
+    # (issue #371). Owner only, even when the browser is also the owner.
+    if path.startswith("/api/v1/sessions/") and path.rstrip("/").endswith("/attach-project"):
+        return False
     return not path.startswith(MUTATION_DENY_PREFIXES)
 
 

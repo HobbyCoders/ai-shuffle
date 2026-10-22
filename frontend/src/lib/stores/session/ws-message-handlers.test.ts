@@ -9,7 +9,7 @@
  * notifications, error banners).
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createMessageHandlers,
 	SESSION_LIST_RELOAD_DEBOUNCE_MS,
@@ -61,6 +61,7 @@ import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { get } from 'svelte/store';
 import { rateLimit } from '../rate-limit';
+import { sessionEphemeralCache } from '../session-cache';
 import { _resetProseQuestions, proseQuestionSessions, observeSessionRows,
 	rememberLeavingProseQuestion } from './prose-questions';
 
@@ -2011,6 +2012,72 @@ describe('ws-message-handlers', () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+	});
+
+	describe('user_session_updated handler (project attached elsewhere, #371)', () => {
+		const attached = { project_id: 'proj-1', project_v2_id: 'v2-1', mode: null, permission_mode: 'default' };
+		const chatState = () => ({ ...mockState(), mode: 'chat' as const, project: '', permissionModeOverride: 'bypassPermissions' });
+
+		afterEach(() => sessionEphemeralCache.clear());
+
+		it('shows the open session as a project session on Ask, so its next send is not Bypass', () => {
+			let state = chatState();
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: attached });
+
+			expect(state.mode).toBe('code');
+			expect(state.project).toBe('proj-1');
+			expect(state.projectV2Id).toBe('v2-1');
+			expect(state.permissionModeOverride).toBe('default');
+		});
+
+		it('adopts the attach even when the chat holds a filled-in device default project', () => {
+			let state = { ...chatState(), project: 'device-default' };
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: attached });
+
+			expect(state).toMatchObject({ mode: 'code', project: 'proj-1', projectV2Id: 'v2-1', permissionModeOverride: 'default' });
+		});
+
+		it('resets the cached copy of a session that is not on screen, and leaves the open one alone', () => {
+			let state = chatState();
+			sessionEphemeralCache.save('elsewhere', { ...state, sessionId: 'elsewhere' } as never);
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: attached });
+
+			expect(sessionEphemeralCache.restore('elsewhere')?.permissionModeOverride).toBe('default');
+			expect(state.permissionModeOverride).toBe('bypassPermissions');
+			expect(state.mode).toBe('chat');
+		});
+
+		it('ignores ordinary row updates that carry no attach', () => {
+			let state = chatState();
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: { title: 'Renamed' } });
+
+			expect(state.mode).toBe('chat');
+			expect(state.permissionModeOverride).toBe('bypassPermissions');
 		});
 	});
 

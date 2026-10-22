@@ -33,12 +33,15 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 	};
 });
 
-// The dock reads its lane off `$activeSession.mode`, and `newChat()` is what
-// stamps the sidepanel's lane onto a fresh compose surface — so it is also how
-// a test puts the dock in one. Every test starts (and leaves) the code lane.
+// The dock reads its lane off `$activeSession.mode`. A new session starts
+// without a project ('chat', #371 step 4) and picking a project makes it a
+// project session ('code') — so that is how a test puts the dock in either.
+// Every test starts (and leaves) with a project picked.
 function setLane(mode: Exclude<SessionMode, 'voice'>) {
 	appMode.set(mode);
 	activeSession.newChat();
+	if (mode === 'code') activeSession.setProject('proj-dock', null);
+	expect(get(activeSession).mode).toBe(mode);
 }
 
 // A new conversation never starts in voice; the voice lane exists only for a
@@ -426,13 +429,20 @@ describe('ControlsDock split controls', () => {
 		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
 	});
 
-	it('drops the tool-access control in the chat lane but keeps attach', () => {
+	it('offers Ask and Bypass but not Accept Edits without a project, and keeps attach', async () => {
 		setLane('chat');
 		const { container } = renderDock({ voiceActions });
 
-		// A chat session's tool surface is fixed server-side, so there is nothing
-		// for a permission menu to grant.
-		expect(screen.queryByRole('button', { name: /^permission mode:/i })).toBeNull();
+		// Without a project there is no checkout to edit, so Accept Edits has
+		// nothing to approve; Ask and Bypass stay (Auto needs a model with it).
+		await fireEvent.click(screen.getByRole('button', { name: /^permission mode:/i }));
+		const menu = screen.getByRole('menu', { name: /tool access/i });
+		const items = [...menu.querySelectorAll('[role="menuitemradio"]')].map((el) => el.textContent ?? '');
+		expect(items).toHaveLength(2);
+		expect(items.some((t) => /ask/i.test(t))).toBe(true);
+		expect(items.some((t) => /bypass/i.test(t))).toBe(true);
+		expect(items.some((t) => /accept/i.test(t))).toBe(false);
+		await fireEvent.keyDown(window, { key: 'Escape' });
 		// Attach survives: chat uploads land in the workspace's shared
 		// chat-uploads dir, and the chat ceiling carries a Read scoped to it.
 		const attach = screen.getByRole('button', { name: /attach file/i });
@@ -505,18 +515,28 @@ describe('ControlsDock split controls', () => {
 		});
 	});
 
-	it('does not wedge the dock when the lane flips with the access menu open', async () => {
+	it('does not wedge the dock when the project is cleared with the access menu open', async () => {
 		renderDock();
 		await fireEvent.click(screen.getByRole('button', { name: /^permission mode:/i }));
 		expect(screen.getByRole('menu', { name: /tool access/i })).toBeTruthy();
 
-		setLane('chat');
+		activeSession.clearProject();
 		await tick();
+		expect(get(activeSession).mode).toBe('chat');
 
-		expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull();
-		// The stranded popover would otherwise keep `openPopover` pinned to a
-		// trigger that no longer exists, and no outside click could clear it.
+		// Accept Edits leaves the menu; the dock still opens one popover at a time.
+		expect(screen.queryByRole('menuitemradio', { name: /accept/i })).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: /^effort:/i }));
+		expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull();
 		expect(screen.getByRole('dialog', { name: /reasoning effort/i })).toBeTruthy();
+	});
+
+	it('moves an Accept Edits pick to Ask when the project is cleared', async () => {
+		await activeSession.setPermissionModeOverride('acceptEdits');
+		renderDock();
+		activeSession.clearProject();
+		await tick();
+		expect(get(activeSession).permissionModeOverride ?? 'default').not.toBe('acceptEdits');
+		expect(screen.getByRole('button', { name: /^permission mode:/i }).getAttribute('aria-label')).toMatch(/ask/i);
 	});
 });

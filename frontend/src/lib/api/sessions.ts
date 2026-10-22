@@ -493,6 +493,26 @@ export async function stopSessionTask(
 	);
 }
 
+export interface AttachProjectResponse {
+	session_id: string;
+	project_id: string;
+	project_v2_id: string | null;
+	mode: 'code';
+	/** Always Ask: attaching resets Auto and Bypass, since the session gains a shell and file edits. */
+	permission_mode: 'default';
+}
+
+/**
+ * Give a running no-project session its project (#371 step 4). One-way: the
+ * session becomes an ordinary project session in the project's main checkout,
+ * and its access returns to Ask. Owner only.
+ */
+export async function attachProject(sessionId: string, projectId: string): Promise<AttachProjectResponse> {
+	return api.post<AttachProjectResponse>(`/sessions/${encodeURIComponent(sessionId)}/attach-project`, {
+		project_id: projectId
+	});
+}
+
 /**
  * Interrupt another chat's running turn (the assistant's background-work
  * Stop for a chat it started). Rejects when nothing is running there.

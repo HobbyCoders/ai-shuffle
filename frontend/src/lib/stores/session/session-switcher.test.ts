@@ -510,6 +510,34 @@ describe('session-switcher · authoritative binding hydration', () => {
 		switcher.destroy();
 	});
 
+	it('takes the row\'s Ask over a cached Bypass saved before a project was attached elsewhere (#371)', async () => {
+		_mockSessions.current = [{ id: 'session-B', mode: null, project_id: 'proj-1', project_v2_id: 'v2-1', permission_mode: 'default' }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		ephemeralStore.set('session-B', { project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' } as SessionEphemeral);
+		await switcher.switchSession('session-B');
+		expect(getState().mode).toBe('code');
+		expect(getState().project).toBe('proj-1');
+		expect(getState().permissionModeOverride).toBe('default');
+		switcher.destroy();
+	});
+
+	it('keeps a cached pick when no project was attached since', async () => {
+		_mockSessions.current = [
+			{ id: 'session-B', mode: 'chat', project_id: null, permission_mode: 'default' },
+			{ id: 'session-C', mode: null, project_id: 'proj-1', permission_mode: 'default' },
+		];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		// An unsent pick in a chat that is still a chat.
+		ephemeralStore.set('session-B', { project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' } as SessionEphemeral);
+		// An unsent pick in a session that always had its project.
+		ephemeralStore.set('session-C', { project: 'proj-1', projectV2Id: null, permissionModeOverride: 'acceptEdits' } as SessionEphemeral);
+		await switcher.switchSession('session-B');
+		expect(getState().permissionModeOverride).toBe('bypassPermissions');
+		await switcher.switchSession('session-C');
+		expect(getState().permissionModeOverride).toBe('acceptEdits');
+		switcher.destroy();
+	});
+
 	it('refreshes a stale restored context choice from metadata on reload', async () => {
 		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { context_window: 200_000 } });
 		const { switcher, getState } = makeSwitcher(fullState({ contextWindowChoice: '1m' }));
@@ -936,7 +964,9 @@ describe('session run binding on switch', () => {
 		await switcher.switchSession('legacy');
 		expect(getState().permissionModeOverride).toBeNull();
 		switcher.newChat();
-		expect(getState().permissionModeOverride).toBe(mode);
+		// A new session starts without a project (#371 step 4), where Accept
+		// Edits is not offered: it starts on Ask instead.
+		expect(getState().permissionModeOverride).toBe(mode === 'acceptEdits' ? 'default' : mode);
 		switcher.destroy();
 	});
 
@@ -1320,14 +1350,16 @@ describe('session mode lanes', () => {
 		expect(getState().mode).toBe('voice');
 	});
 
-	it('opens a new chat in the lane the sidepanel is showing', () => {
-		appMode.set('chat');
-		const { switcher, getState } = makeSwitcher(fullState());
+	it.each(['code', 'chat'] as const)('opens a new session without a project whatever lane was shown (%s)', (lane) => {
+		// #371 step 4: one kind of session; the project is optional and starts empty.
+		appMode.set(lane);
+		const { switcher, getState } = makeSwitcher(fullState({ mode: lane }));
 
 		switcher.newChat();
 		switcher.destroy();
 
 		expect(getState().mode).toBe('chat');
+		expect(getState().project).toBe('');
 	});
 
 	it.each([true, false])('never starts a new conversation in the voice lane (persisted=%s)', (persist) => {
@@ -1340,7 +1372,6 @@ describe('session mode lanes', () => {
 		switcher.destroy();
 
 		expect(getState().mode).toBe('chat');
-		expect(appMode.current).toBe('chat');
 	});
 
 	it('starts the projectless lanes with no repo, so no worktree can be cut', () => {
@@ -1371,31 +1402,42 @@ describe('session mode lanes', () => {
 		expect(s.worktreeId).toBeNull();
 	});
 
-	it('still restores the remembered project and worktree intent in code mode', () => {
+	it('does not pre-fill the remembered project; a kept draft typed for one keeps it', () => {
 		vi.spyOn(git, 'current', 'get').mockReturnValue({projectId:'proj-A', hydrated:true, stale:false, status:{is_git_repo:true}} as typeof git.current);
 		composerPreferences.rememberWorktreeIntent({projectId:'proj-A',projectV2Id:null}, 'worktree');
 		localStorage.setItem('aihub_selectedProject', 'proj-A');
-		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A' }));
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState({ project: 'proj-A' }));
 
+		const kept = ephemeralStore.get('__new_chat__');
 		switcher.newChat();
 		switcher.destroy();
+		expect(getState().mode).toBe('chat');
+		expect(getState().project).toBe('');
 
-		expect(getState().project).toBe('proj-A');
-		expect(getState().worktreeIntent).toBe('worktree');
+		// A draft typed for proj-A and left on the new-session screen while
+		// another session was opened (the leave saved it under '__new_chat__').
+		const second = makeSwitcher(fullState({ project: 'proj-A' }));
+		second.ephemeralStore.set('__new_chat__', { ...(kept ?? {}), draft: 'fix the login page', project: 'proj-A', projectV2Id: null, worktreeIntent: 'worktree' } as SessionEphemeral);
+		second.switcher.newChat();
+		second.switcher.destroy();
+
+		expect(second.getState().mode).toBe('code');
+		expect(second.getState().project).toBe('proj-A');
+		expect(second.getState().worktreeIntent).toBe('worktree');
 	});
 
-	it('does not carry a code-lane permission mode into chat', () => {
-		// The chat and voice composers render no tool-access control, so an
-		// inherited 'plan' would be unchangeable for the life of the session —
-		// and undischargeable, the plan-exit tool not being on the chat ceiling.
-		localStorage.setItem('aihub_lastPermissionMode', 'plan');
-		appMode.set('chat');
+	it.each([
+		['plan', 'default'], ['acceptEdits', 'default'], ['bypassPermissions', 'bypassPermissions'], ['auto', 'auto'],
+	])('a new session without a project keeps %s as %s', (last, expected) => {
+		// No project: Ask, Auto and Bypass carry over; Accept Edits has nothing
+		// to approve and the retired plan mode runs as Ask.
+		localStorage.setItem('aihub_lastPermissionMode', last);
 		const { switcher, getState } = makeSwitcher(fullState());
 
 		switcher.newChat();
 		switcher.destroy();
 
-		expect(getState().permissionModeOverride).toBeNull();
+		expect(getState().permissionModeOverride).toBe(expected);
 	});
 
 	it.each(['code'] as const)('restores project, worktree and permission for %s compose', (mode) => {

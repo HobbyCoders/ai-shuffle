@@ -111,10 +111,13 @@ async def test_idle_http_update_round_trips_real_session_binding(mock_db, monkey
     assert api.database.create_session("another-session", "default")["permission_mode"] is None
 
 
-async def test_chat_ceiling_cannot_be_widened(live, monkeypatch):
+async def test_chat_session_takes_bypass_but_not_accept_edits(live, monkeypatch):
+    """#371 step 4: a no-project session offers Ask, Auto and Bypass. Accept
+    Edits has nothing to approve there and is saved as Ask."""
     state, save = live
     monkeypatch.setattr(api.control, "_require_owned", lambda sid: {"id": sid, "mode": "chat"})
-    assert await api.apply_permission_mode(SID, "bypassPermissions") == {"permission_mode": "default"}
+    assert await api.apply_permission_mode(SID, "bypassPermissions") == {"permission_mode": "bypassPermissions"}
+    assert await api.apply_permission_mode(SID, "acceptEdits") == {"permission_mode": "default"}
 
 
 @pytest.mark.parametrize("mode", ["plan", "bogus", "", None])

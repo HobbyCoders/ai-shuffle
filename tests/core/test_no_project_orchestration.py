@@ -206,7 +206,8 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     assert options.effort == "high"
     assert options.aih_profile_id == "agent"
     assert options.aih_owner_coordinator == (mode == "chat")
-    assert options.permission_mode == ("default" if mode == "chat" else permission)
+    # A no-project session keeps Ask and Bypass; Accept Edits runs as Ask.
+    assert options.permission_mode == ("default" if mode == "chat" and permission == "acceptEdits" else permission)
     if mode is None:
         assert "# No-project coordination" not in str(options.system_prompt)
         return  # Step 4, not step 1, migrates stored code sessions to chat.

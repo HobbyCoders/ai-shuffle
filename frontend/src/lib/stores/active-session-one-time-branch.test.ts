@@ -61,6 +61,16 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 /**
+ * A new session starts without a project (#371 step 4); the user adds it on
+ * the new-session screen, which re-reads that project's checkout defaults —
+ * the same path the one-time branch choice rides on.
+ */
+function newProjectChat() {
+	activeSession.newChat();
+	activeSession.setProject(PROJECT, null);
+}
+
+/**
  * ExecutionModeBar stages both a branch the New branch modal just created and a
  * branch picked from the list with these same calls.
  */
@@ -85,7 +95,7 @@ describe('one-time branch choice (#1528)', () => {
 		expect(composerPreferences.current.checkout).toBeNull();
 		expect(composerPreferences.worktreeForProject({projectId:PROJECT,projectV2Id:null}).checkout).toBeNull();
 
-		activeSession.newChat();
+		newProjectChat();
 		// Auto from the default base: the picked branch's base was part of the spent choice.
 		expect(activeSession.current).toMatchObject({ sessionId: null, project: PROJECT, worktreeIntent: 'worktree',
 			worktreeBranch: '', worktreeBaseBranch: 'main', worktreeId: null, worktreeCreateNewBranch: false });
@@ -98,7 +108,7 @@ describe('one-time branch choice (#1528)', () => {
 		const pending = activeSession.createWorktree();
 		expect(activeSession.current.isCreatingWorktree).toBe(true);
 
-		activeSession.newChat();
+		newProjectChat();
 		expect(activeSession.current).toMatchObject({ sessionId: null, worktreeBranch: '', isCreatingWorktree: false });
 		// The choice is still remembered (the create may yet fail), only spoken for.
 		expect(composerPreferences.current.checkout?.branch).toBe(BRANCH);
@@ -110,7 +120,7 @@ describe('one-time branch choice (#1528)', () => {
 		expect(composerPreferences.current.checkout).toBeNull();
 		// The new compose was never bound to session C.
 		expect(activeSession.current).toMatchObject({ sessionId: null, worktreeBranch: '' });
-		activeSession.newChat();
+		newProjectChat();
 		expect(activeSession.current.worktreeBranch).toBe('');
 	});
 
@@ -123,7 +133,7 @@ describe('one-time branch choice (#1528)', () => {
 		expect(composerPreferences.current.checkout?.branch).toBe(BRANCH);
 
 		Object.assign(activeSession.current, { worktreeBranch: '', draft: '' });
-		activeSession.newChat();
+		newProjectChat();
 		expect(activeSession.current.worktreeBranch).toBe(BRANCH);
 	});
 
@@ -132,12 +142,12 @@ describe('one-time branch choice (#1528)', () => {
 		const first = deferred();
 		post.mockReturnValueOnce(first.promise);
 		const pending = activeSession.createWorktree();
-		activeSession.newChat();
+		newProjectChat();
 		first.reject({ status: 500, detail: 'worktree add failed' });
 		await pending;
 		expect(composerPreferences.checkoutClaimed).toBe(false);
 		expect(composerPreferences.current.checkout?.branch).toBe(BRANCH);
-		activeSession.newChat();
+		newProjectChat();
 		expect(activeSession.current.worktreeBranch).toBe(BRANCH);
 	});
 
@@ -146,7 +156,7 @@ describe('one-time branch choice (#1528)', () => {
 		const first = deferred();
 		post.mockReturnValueOnce(first.promise);
 		const pending = activeSession.createWorktree();
-		activeSession.newChat();
+		newProjectChat();
 		stagePick('live/next-task');
 		first.resolve(created('session-c'));
 		await pending;
@@ -157,7 +167,7 @@ describe('one-time branch choice (#1528)', () => {
 	it('does not remember an Auto base branch across New Chats (unchanged)', () => {
 		activeSession.setWorktreeBaseBranch('develop');
 		expect(composerPreferences.current.checkout).toBeNull();
-		activeSession.newChat();
+		newProjectChat();
 		expect(activeSession.current).toMatchObject({ worktreeBranch: '', worktreeBaseBranch: 'main' });
 	});
 });

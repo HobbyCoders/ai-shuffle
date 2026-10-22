@@ -83,8 +83,13 @@ export function watchWorkerPresence(): () => void {
 	};
 }
 
-/** Whether an install row stands for the given owner id (install, device or legacy instance id). */
-function matches(install: Install, id: string): boolean {
+/**
+ * Whether an install row stands for the given owner id (install, device or
+ * legacy instance id). A network worker's row `id` is its device id, while a
+ * picked runner or a session row may carry its instance id: compare through
+ * this, never with `===` on `id`.
+ */
+export function matches(install: Install, id: string): boolean {
 	return install.id === id || install.device_id === id || install.legacy_instance_id === id;
 }
 
