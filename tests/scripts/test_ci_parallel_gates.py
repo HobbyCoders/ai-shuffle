@@ -113,7 +113,7 @@ def test_workspace_cases_keep_real_browser_and_ui_security_checks():
     steps = {step.get("name"): step for step in job["steps"]}
     install = steps["Install isolated Chromium"]
     assert "if" not in install
-    assert 'sudo env "PATH=$PATH" timeout --kill-after=10s 90s npx --no-install playwright-core install-deps chromium' in install["run"]
+    assert "python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium" in install["run"]
     assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in install["run"]
     assert "||" not in install["run"]
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in install["run"]
@@ -130,7 +130,9 @@ def test_chromium_install_phases_fail_closed_without_retrying_tests(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls"
-    for program in ["sudo", "timeout", "node"]:
+    # The shared supervisor's retry/cleanup is exercised in test_bounded_apt;
+    # here simulate its final status and ensure download/tests never fail open.
+    for program in ["sudo", "python3", "timeout", "node"]:
         shim = bin_dir / program
         shim.write_text(
             '#!/bin/sh\n'

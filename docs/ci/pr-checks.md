@@ -72,18 +72,35 @@ Windows desktop shards retain 60-minute limits, cache pip/npm downloads by
 requirements/lockfiles, and build independently before Node's native sharding.
 No runner shares mutable `node_modules`; mobile links the frontend install via
 `npm run deps`.
-OS prerequisites and browser downloads each have a 90-second deadline within a
-four-minute step. The OS timeout runs as root so it can reap apt children; browser
-downloads remain runner-owned and cached. OS packages use the primary signed
-Ubuntu archive instead of the hosted Azure mirror fallback. Browser MCP build/tests
+OS prerequisites have at most two 300-second attempts; browser downloads retain
+their single 90-second deadline. Prerequisite steps allow 13 minutes for both
+attempts, termination grace and browser download; overall job and test deadlines
+are unchanged. This increases only the package-install budget, not test or security
+limits: sampled completed installs took 24–31 seconds, but slow mirrors exceeded
+both old 90-second attempts. At the observed approximately 150 kB/s transfer rate,
+25.9 MB alone needs nearly three minutes, before index refresh and configuration.
+The OS timeout runs as root so it can reap apt children; browser downloads remain
+runner-owned and cached. OS packages use the primary signed Ubuntu archive
+instead of the hosted Azure mirror fallback. Browser MCP build/tests
 have a separate eight-minute step and a 420-second test deadline with
 an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
 restriction is disabled only on the disposable runner so the sandboxed editor
 fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
 distro/snap wrapper over the managed browser. Production browser security
 settings are unchanged. Fluid's
-ripgrep install also has a four-minute step and two 90-second attempts; its apt
-refresh uses signed Ubuntu sources rather than optional third-party runner feeds.
+ripgrep install uses the same bounded policy. These installs, every
+browser-workspace matrix case, and backend security's missing-bubblewrap install
+share `scripts/ci/bounded_apt.py`. Root npm writes use a disposable temporary cache,
+never the runner's `~/.npm`. Its apt config
+installs only missing packages (`--no-upgrade` semantics), reusing runner-image
+libraries rather than downloading newer candidates, and refreshes only signed
+Ubuntu indexes without translations. apt still verifies and installs missing
+packages normally; no system directories or package databases are cached.
+Its elevated supervisor kills the entire attempt's process group (including root
+apt children) with a ten-second termination grace and logs elapsed install times.
+Lock waiting and `dpkg --configure -a` after an interrupted attempt are included
+in the next attempt's 300-second budget, not added to it. Both failures still fail
+the step; lock files are never deleted.
 
 Frame visibility consumes any already-computed `IntersectionObserver` records
 before its 250 ms watchdog disconnects the observer: a due timer may run before

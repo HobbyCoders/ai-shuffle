@@ -75,16 +75,16 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
       - name: Install isolated Chromium
-        timeout-minutes: 4
+        timeout-minutes: 13
         working-directory: browser-mcp
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           # Use the primary signed Ubuntu archive, not the hosted mirror's
           # slow Azure fallback. Keep suites, components and Signed-By intact.
           sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
-          # Run the OS timeout as root too: a user-owned timeout cannot reap
-          # sudo's apt children, leaving a lock behind for the next command.
-          sudo env "PATH=$PATH" timeout --kill-after=10s 90s npx --no-install playwright-core install-deps chromium
+          # Bound root OS dependencies, clean up the whole tree, and repair dpkg
+          # after an interrupted attempt before the one permitted retry.
+          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium
           # Browser downloads stay owned by the runner and use its cache.
           timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
