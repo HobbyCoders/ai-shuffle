@@ -174,8 +174,11 @@ async def test_producing_stream_frames_through_loop_route_and_history_tools(monk
 
 
 async def request(address, body, token='mod-token', path=COMPACT_PATH):
-    port = int(address.rsplit(':', 1)[1])
-    reader, writer = await asyncio.open_connection('127.0.0.1', port)
+    if address.startswith('tcp:'):
+        host, _, port = address[4:].rpartition(':')
+        reader, writer = await asyncio.open_connection(host, int(port))
+    else:
+        reader, writer = await asyncio.open_unix_connection(address)
     raw = json.dumps(body).encode()
     auth = '' if token is None else f'Authorization: Bearer {token}\r\n'
     writer.write((f'POST {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\nContent-Length: {len(raw)}\r\n\r\n').encode() + raw)
