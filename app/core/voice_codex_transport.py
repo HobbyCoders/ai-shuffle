@@ -167,6 +167,8 @@ class CodexPeer:
             if response.status_code != 201:
                 raise ValueError(f"Unofficial ChatGPT voice refused call creation (HTTP {response.status_code}).")
             await self.pc.setRemoteDescription(answer(response.text))
+            if self.closed:
+                raise ValueError("Unofficial ChatGPT voice connection is closed.")
         except BaseException:
             await self.close()
             raise

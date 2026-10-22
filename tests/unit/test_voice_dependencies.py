@@ -7,6 +7,11 @@ import pytest
 from app.core import voice_dependencies as deps
 
 
+@pytest.fixture(autouse=True)
+def reset_install_cooldown(monkeypatch):
+    monkeypatch.setattr(deps, "_INSTALL_RETRY_AT", None, raising=False)
+
+
 @pytest.mark.parametrize("failure", [ImportError("private-path"), OSError("private-path")])
 def test_native_import_failure_is_sanitized(monkeypatch, failure):
     monkeypatch.setattr(deps, "platform_reason", lambda: None)
@@ -81,20 +86,41 @@ def test_pip_success_is_complete_only_after_native_imports_work(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_failed_optional_install_is_retryable_on_next_call(monkeypatch):
+@pytest.mark.parametrize("failure", ["pip", "native_probe"])
+async def test_failed_optional_install_waits_ten_minutes_before_retry(monkeypatch, failure):
     monkeypatch.setattr(deps, "platform_reason", lambda: None)
     state = {"ready": False, "attempts": 0}
+    clock = Mock(return_value=1000.0)
     monkeypatch.setattr(deps, "availability", lambda: (state["ready"], None if state["ready"] else deps.UNAVAILABLE))
 
-    def install(root):
-        state["attempts"] += 1
-        state["ready"] = state["attempts"] == 2
-        return state["ready"]
+    def run(args, **kwargs):
+        if args[1:3] == ["-m", "pip"]:
+            state["attempts"] += 1
+            failed = failure == "pip" and state["attempts"] == 1
+        else:
+            state["ready"] = state["attempts"] == 2
+            failed = not state["ready"]
+        return Mock(returncode=int(failed), stdout="private-pip-output", stderr="private-path")
 
-    monkeypatch.setattr(deps, "install", install)
-    assert await deps.ensure_available() == (False, deps.UNAVAILABLE)
-    assert await deps.ensure_available() == (True, None)
-    assert await deps.ensure_available() == (True, None)
+    pip = Mock(side_effect=run)
+    monkeypatch.setattr(deps.subprocess, "run", pip)
+    available, reason = await deps.ensure_available(clock=clock)
+    assert available is False
+    assert "will be retried" in reason
+    assert "10-minute" in reason
+    assert len(reason.encode("utf-8")) <= 123  # Keep the whole reason in a WebSocket close frame.
+    assert "private" not in reason
+    assert state["attempts"] == 1
+    calls_after_failure = pip.call_count
+
+    assert await deps.ensure_available(clock=clock) == (False, reason)
+    clock.return_value = 1599.0
+    assert await deps.ensure_available(clock=clock) == (False, reason)
+    assert pip.call_count == calls_after_failure
+
+    clock.return_value = 1600.0
+    assert await deps.ensure_available(clock=clock) == (True, None)
+    assert await deps.ensure_available(clock=clock) == (True, None)
     assert state["attempts"] == 2
 
 

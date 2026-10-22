@@ -497,7 +497,7 @@ class TestCreateVoiceSession:
         monkeypatch.setattr(db, "create_session", create)
         response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "profile_id":"default"})
         assert response.status_code == 400
-        assert response.json()["detail"] == reason
+        assert response.json()["detail"] == reason + " Install will be retried on Start after a 10-minute cool-down."
         create.assert_not_called()
         load.assert_not_awaited()
 
@@ -537,7 +537,10 @@ class TestCreateVoiceSession:
         monkeypatch.setattr(voice, "_provider_api_key", key)
         monkeypatch.setattr(voice_stream, "take_over", takeover)
         await voice.voice_audio_socket(websocket, "unavailable", token=None, resume=resume)
-        websocket.close.assert_awaited_once_with(code=4400, reason="Voice libraries unavailable")
+        websocket.close.assert_awaited_once_with(code=4400, reason=(
+            "Unofficial ChatGPT voice is not available on this system. "
+            "Install will be retried on Start after a 10-minute cool-down."
+        ))
         websocket.accept.assert_not_awaited()
         key.assert_not_awaited()
         takeover.assert_not_awaited()

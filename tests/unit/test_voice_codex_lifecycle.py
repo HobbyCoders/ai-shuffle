@@ -97,7 +97,8 @@ async def test_close_while_loading_token_never_opens_peer(monkeypatch, action):
     await asyncio.wait_for(entered.wait(), 1)
     await hang_up(call, action)
     release.set()
-    await task
+    with pytest.raises(ValueError, match="could not start"):
+        await task
     call.upstream.make_peer.assert_not_called()
     assert call.api_key == ""
 
@@ -123,4 +124,46 @@ async def test_close_during_post_leaves_no_open_connection(monkeypatch, action):
         await task
     await call.upstream.close()
     assert pc.closed
+    assert call.upstream.closed
+
+
+@pytest.mark.asyncio
+async def test_closed_call_start_raises_before_loading_credentials(monkeypatch):
+    from app.core.provider import fluid_credentials
+    load = AsyncMock(side_effect=AssertionError("closed call must not load credentials"))
+    monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
+    call, pc = make_call(monkeypatch)
+    await voice_stream.stop(call.session_id)
+    with pytest.raises(ValueError, match="closed"):
+        await call.start_live([])
+    load.assert_not_awaited()
+    call.upstream.make_peer.assert_not_called()
+    assert call.api_key == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["hangup", "resume"])
+async def test_close_during_remote_description_closes_late_connection(monkeypatch, action):
+    call, pc = make_call(monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def set_remote(answer):
+        entered.set()
+        await release.wait()
+        # Model a native connect completing after the first close returned.
+        pc.closed = False
+
+    pc.setRemoteDescription = set_remote
+    pc.close = AsyncMock(wraps=pc.close)
+    client = AsyncMock()
+    client.post.return_value = type("Response", (), {"status_code": 201, "text": "synthetic-answer"})()
+    task = asyncio.create_task(call.upstream.open(client, "fake-token", None, {}))
+    await asyncio.wait_for(entered.wait(), 1)
+    await hang_up(call, action)
+    assert pc.closed
+    release.set()
+    with pytest.raises(ValueError, match="closed"):
+        await task
+    assert pc.closed
+    assert pc.close.await_count >= 2
     assert call.upstream.closed

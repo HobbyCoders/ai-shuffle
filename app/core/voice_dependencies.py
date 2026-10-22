@@ -15,7 +15,10 @@ import threading
 import time
 
 _INSTALL_LOCK = threading.Lock()
+_INSTALL_RETRY_AT = None
+_INSTALL_COOLDOWN_SECONDS = 10 * 60
 UNAVAILABLE = "Unofficial ChatGPT voice is not available on this system."
+_INSTALL_RETRY_REASON = UNAVAILABLE + " Install will be retried on Start after a 10-minute cool-down."
 
 
 def platform_reason():
@@ -54,24 +57,41 @@ def availability():
     return True, None
 
 
-async def ensure_available():
+async def ensure_available(*, clock=None):
     """Retry missing optional libraries only on an authorized call start, not GETs.
 
     Serialize attempts without queueing more installers behind a slow download.
-    A failed attempt is not cached: the next explicit call can try again.
+    After failure, refuse immediately for ten minutes before allowing a retry.
     """
     available, reason = availability()
     if available or platform_reason():
         return available, reason
+    clock = clock or time.monotonic
+
+    def cooling_down():
+        retry_at = _INSTALL_RETRY_AT
+        return retry_at is not None and clock() < retry_at
+
+    if cooling_down():
+        return False, _INSTALL_RETRY_REASON
 
     def retry():
+        global _INSTALL_RETRY_AT
         if not _INSTALL_LOCK.acquire(blocking=False):
             return availability()
         try:
+            # Another caller may have completed an attempt before this thread ran.
+            if cooling_down():
+                return False, _INSTALL_RETRY_REASON
             if not availability()[0]:
                 install(Path(__file__).resolve().parents[2])
                 importlib.invalidate_caches()
-            return availability()
+            result = availability()
+            if result[0]:
+                _INSTALL_RETRY_AT = None
+                return result
+            _INSTALL_RETRY_AT = clock() + _INSTALL_COOLDOWN_SECONDS
+            return False, _INSTALL_RETRY_REASON
         finally:
             _INSTALL_LOCK.release()
 

@@ -26,7 +26,7 @@ class CodexVoiceStream(VoiceStream):
     async def start_live(self, history):
         if self.closed:
             self.api_key = ""
-            return
+            raise ValueError("Unofficial ChatGPT voice connection is closed.")
         from app.core.voice_dependencies import availability
         available, reason = availability()
         if not available:
@@ -43,7 +43,7 @@ class CodexVoiceStream(VoiceStream):
         token, account = await _load_codex_access_token(self.config["provider_id"])
         try:
             if self.closed:
-                return
+                raise ValueError("Unofficial ChatGPT voice connection is closed.")
             async with asyncio.timeout(20):
                 await self.upstream.open(get_http_client(), token, account, session)
                 pending = []
