@@ -36,7 +36,23 @@ jobs:
       - name: Install ripgrep
         # Glob and Grep use rg when it is on PATH (as in the Docker image);
         # the engine-parity tests skip without it.
-        run: command -v rg || (sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep)
+        # Only Ubuntu provides ripgrep. Unrelated third-party runner feeds can
+        # return 403 and must not block this signed Ubuntu package install.
+        timeout-minutes: 4
+        run: |
+          if command -v rg; then exit 0; fi
+          for attempt in 1 2; do
+            if timeout --kill-after=10s 90s sh -c '
+              sudo apt-get update -qq \
+                -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources \
+                -o Dir::Etc::sourceparts=- &&
+              sudo apt-get install -y -qq ripgrep'; then
+              exit 0
+            fi
+            echo "::warning::ripgrep installation attempt $attempt failed or exceeded 90s"
+          done
+          echo "::error::ripgrep installation failed after two bounded attempts"
+          exit 1
 
       - name: Run the unit suite
         # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);

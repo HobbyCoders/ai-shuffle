@@ -113,8 +113,8 @@ def test_maintenance_commits_later_steps_after_missing_table(pg):
     base, _, _ = pg
     with base.get_db() as conn:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE audit_log (created_at timestamptz)")
-        cur.execute("INSERT INTO audit_log VALUES (NOW() - INTERVAL '8 days')")
+        cur.execute("CREATE TABLE audit_log (id TEXT PRIMARY KEY, created_at timestamptz)")
+        cur.execute("INSERT INTO audit_log (id, created_at) VALUES ('old-audit', NOW() - INTERVAL '8 days')")
     result = run_database_maintenance(skip_vacuum=True)
     assert result["cleaned_sync_log"].startswith("error:")
     assert result["cleaned_audit_log"] == 1

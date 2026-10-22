@@ -21,6 +21,8 @@ import { compilePolicy } from "../src/ssrf.js";
 import { EGRESS_REFUSED_NET_ERRORS, RETRYABLE_NET_ERRORS } from "../src/loopback.js";
 
 function findBrowser(): string | null {
+  // CI installs a managed browser; never prefer a distro/snap wrapper over it.
+  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
   if (process.platform === "win32") {
     for (const base of [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA]) {
       if (!base) continue;
@@ -158,12 +160,16 @@ describe.skipIf(!browserPath)("egress proxy with a real Chromium", () => {
       throw new Error("ENOTFOUND");
     };
     userDataDir = mkdtempSync(join(tmpdir(), "browser-egress-it-"));
+    let startupStderr = "";
+    let startupFailure = "";
     launched = await launchBehindProxy(
       [
         browserPath!,
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
+        // Match the other CDP fixtures on small container /dev/shm mounts.
+        "--disable-dev-shm-usage",
         "--disable-background-networking",
         `--remote-debugging-port=${cdpPort}`,
         `--user-data-dir=${userDataDir}`,
@@ -174,11 +180,19 @@ describe.skipIf(!browserPath)("egress proxy with a real Chromium", () => {
       {
         policy: compilePolicy({ BROWSER_SSRF_ALLOW: "127.0.0.1/32", CHROME_CDP_PORT: String(cdpPort) } as NodeJS.ProcessEnv),
         resolver,
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "pipe"],
         log: (line) => refusals.push(line),
       },
     );
-    await waitForCdp(cdpPort);
+    launched.child.stderr?.on("data", chunk => {
+      startupStderr = (startupStderr + chunk.toString()).slice(-4096);
+    });
+    launched.child.on("error", error => { startupFailure = error.message; });
+    try {
+      await waitForCdp(cdpPort);
+    } catch (error) {
+      throw new Error(`${String(error)}; browser=${browserPath}; exit=${launched.child.exitCode}; ${startupFailure}; ${startupStderr}`);
+    }
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
     page = await (browser.contexts()[0] ?? (await browser.newContext())).newPage();
   }, 40000);

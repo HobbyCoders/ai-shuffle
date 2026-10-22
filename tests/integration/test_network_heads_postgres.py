@@ -19,7 +19,7 @@ def pg(tmp_path, monkeypatch):
     assert params.get("host") in {"localhost", "127.0.0.1"}
     params.update(host="127.0.0.1", hostaddr="127.0.0.1", connect_timeout=5, sslmode="disable")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    from app.db import network as store
+    from app.db import network as store, retention
 
     schema = "head_test_" + uuid4().hex
     with closing(psycopg2.connect(**params)) as conn, conn:
@@ -36,6 +36,9 @@ def pg(tmp_path, monkeypatch):
             conn.close()
 
     monkeypatch.setattr(store, "get_db", connect)
+    # Batched pruning owns its connections in the shared retention helper.
+    # Keep those batches in this fixture's disposable schema too.
+    monkeypatch.setattr(retention, "get_db", connect)
     with connect() as conn:
         store.create_schema(conn.cursor())
     try:

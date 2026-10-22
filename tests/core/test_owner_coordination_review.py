@@ -11,7 +11,10 @@ from tests.core.test_session_orchestration import chat
 
 @pytest.fixture
 def owner(mock_db, monkeypatch, tmp_path):
-    from app.core import query_options, config
+    from app.core import query_options, config, turn_scheduler
+    # These tests inspect durable queue/permission/accounting state, not provider
+    # inference. A real kick starts work in a thread and races the SQL counter.
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
@@ -132,6 +135,9 @@ async def test_limit_role_scan_is_batched_at_400_sessions(owner, monkeypatch):
         book(f"c{i}", 0.01)
     chat("coord", mode="chat")
     child = await _start("coord", project="Project")
+    from app.db import turns
+    [queued] = turns.get_queued_turns(child)
+    assert queued["state"] == "queued"  # Real producer, without provider execution.
     worker = database.create_session("task-worker", "agent", is_worker=True, parent_session_id=child)
     for sid in (child, worker["id"]):
         book(sid, 0.01)

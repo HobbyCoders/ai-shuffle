@@ -45,6 +45,37 @@ repository. App checks do not need that checkout. When app docs/install files
 change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
 and its README; the app still checks `docs/content` against the frontend copy.
 
+## Hosted browser and PostgreSQL prerequisites
+
+The JavaScript package job keeps its 20-minute overall limit. Browser MCP runs
+independently on another standard runner with a 15-minute job budget, so neither
+suite can consume the other's time. Managed Chromium uses a lockfile-keyed browser
+cache, while OS dependencies are installed on every run.
+Installation has two 90-second attempts within a four-minute step; Browser MCP
+build/tests have a separate eight-minute step and a 420-second test deadline with
+an explicit error on failure. Ubuntu's AppArmor unprivileged-user-namespace
+restriction is disabled only on the disposable runner so the sandboxed editor
+fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
+distro/snap wrapper over the managed browser. Production browser security
+settings are unchanged. Fluid's
+ripgrep install also has a four-minute step and two 90-second attempts; its apt
+refresh uses signed Ubuntu sources rather than optional third-party runner feeds.
+
+Frame visibility consumes any already-computed `IntersectionObserver` records
+before its 250 ms watchdog disconnects the observer: a due timer may run before
+the separate notification task on a busy page. The deadline and geometric
+visibility checks are unchanged; no rendering result still fails closed and is
+reported as a skipped frame, not readable text. Real-browser regressions retain
+closed-shadow clipping assertions and cover delayed delivery and missing records.
+
+Real PostgreSQL fixtures initialize mobile-tool provenance through the production
+schema helper and include the audit retention primary key. Network pruning routes
+shared retention batches into the fixture's disposable schema too. Container isolation
+probes materialize lazy protected keys through application helpers before
+checking access denial. These repairs cover #389, #390 and #391; those jobs are
+required to pass, not temporary exceptions. Network migration, pool safety and
+both Python dependency audits remain mandatory steps after mobile contracts.
+
 ## Before every push
 
 ```bash

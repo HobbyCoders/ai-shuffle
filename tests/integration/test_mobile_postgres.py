@@ -51,7 +51,7 @@ def pg(monkeypatch, tmp_path):
 
     # Even if invoked outside the dedicated workflow, do not read any .env.
     monkeypatch.setattr(DotEnvSettingsSource, "_read_env_files", lambda self: {})
-    from app.db import mobile, mobile_hub as hub, mobile_tools as queue, pairing
+    from app.db import mobile, mobile_hub as hub, mobile_tools as queue, mobile_tool_identity as identity, pairing
     from app.core import config
 
     # Isolate the filesystem as well as SQL, but do NOT pin/warm the identity:
@@ -94,6 +94,7 @@ def pg(monkeypatch, tmp_path):
     monkeypatch.setattr(mobile, "get_db", transaction)
     monkeypatch.setattr(queue, "get_db", transaction)
     monkeypatch.setattr(pairing, "get_db", transaction)
+    monkeypatch.setattr(identity, "get_db", transaction)
     with transaction() as conn:
         c = conn.cursor()
         c.execute("SELECT current_database() AS db, current_user AS usr, "
@@ -104,6 +105,7 @@ def pg(monkeypatch, tmp_path):
         # No IF NOT EXISTS: a collision must fail, never adopt existing data.
         c.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         c.execute("""
+            CREATE TABLE sessions (id TEXT PRIMARY KEY);
             CREATE TABLE system_settings (
                 key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
             CREATE TABLE paired_clients (
@@ -137,6 +139,8 @@ def pg(monkeypatch, tmp_path):
         """)
         hub.create_schema(c)
     queue.init_schema()
+    # Normal app startup creates provenance too; cookie rotation updates it.
+    identity.init_schema()
 
     def rows(table):
         with transaction() as conn:
