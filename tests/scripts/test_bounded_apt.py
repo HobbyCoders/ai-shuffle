@@ -203,6 +203,7 @@ def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
     ("ci-frontend.yml", "browser-mcp", "Prepare sandboxed Chromium"),
     ("ci-fluid.yml", "unit", "Install ripgrep"),
     ("ci-browser-workspace.yml", "workspace", "Install isolated Chromium"),
+    ("ci-backend.yml", "backend-security", "Isolated folder shell escape tests (real bubblewrap)"),
 ])
 def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_name):
     data = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)
@@ -210,7 +211,7 @@ def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_na
     assert "scripts/ci/bounded_apt.py" in step["run"]
     assert step["timeout-minutes"] == "13"
     assert "continue-on-error" not in step
-    if workflow != "ci-fluid.yml":
+    if workflow in ("ci-frontend.yml", "ci-browser-workspace.yml"):
         assert "bounded_apt.py npx --no-install playwright-core install-deps chromium" in step["run"]
         assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in step["run"]
         assert "sudo env" not in step["run"]

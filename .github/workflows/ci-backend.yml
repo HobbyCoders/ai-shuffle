@@ -307,6 +307,7 @@ jobs:
           python scripts/scan_blocking_db.py
 
       - name: Isolated folder shell escape tests (real bubblewrap)
+        timeout-minutes: 13
         # The only run of tests/core/test_chat_shell.py: the fast subset
         # ignores it, since without bubblewrap it could run only the tests
         # that do not need the sandbox, and this step runs all of them.
@@ -318,7 +319,9 @@ jobs:
           CHAT_SHELL_REQUIRE_SANDBOX: '1'
           PYTHONPATH: .:fluid
         run: |
-          sudo apt-get install -y -qq --no-install-recommends bubblewrap >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends bubblewrap)
+          if ! command -v bwrap; then
+            python3 scripts/ci/bounded_apt.py sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends bubblewrap'
+          fi
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
           bwrap --version
           python -m pytest --durations=50 --junitxml=reports/security-6-1.xml tests/core/test_chat_shell.py -o addopts="" -q -rs -p no:cacheprovider --timeout=120

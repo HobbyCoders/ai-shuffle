@@ -88,8 +88,10 @@ restriction is disabled only on the disposable runner so the sandboxed editor
 fixture can launch. CDP fixtures honor `CHROMIUM_PATH` instead of preferring a
 distro/snap wrapper over the managed browser. Production browser security
 settings are unchanged. Fluid's
-ripgrep install uses the same bounded policy. These installs and every
-browser-workspace matrix case share `scripts/ci/bounded_apt.py`. Its apt config
+ripgrep install uses the same bounded policy. These installs, every
+browser-workspace matrix case, and backend security's missing-bubblewrap install
+share `scripts/ci/bounded_apt.py`. Root npm writes use a disposable temporary cache,
+never the runner's `~/.npm`. Its apt config
 installs only missing packages (`--no-upgrade` semantics), reusing runner-image
 libraries rather than downloading newer candidates, and refreshes only signed
 Ubuntu indexes without translations. apt still verifies and installs missing
