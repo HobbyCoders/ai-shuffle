@@ -758,6 +758,7 @@ class HarnessAdapter(ProviderAdapter):
                 # AI Shuffle's Claude Code mod (--plugin-dir on CLI 2.1.287+);
                 # FLUID_CLAUDE_MOD=false turns it off.
                 claude_mod=settings.fluid_claude_mod,
+                claude_mod_compaction=settings.fluid_claude_mod_compaction,
                 # The plan usage the mod reports after each turn goes into
                 # the same Claude usage store the stream's rate_limit events
                 # feed (usage panel, peer publication, broadcast).

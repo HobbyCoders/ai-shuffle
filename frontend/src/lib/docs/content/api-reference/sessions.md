@@ -479,7 +479,7 @@ The chosen window must fall within the model's range: from its Standard window (
 
 ### POST /api/v1/sessions/{session_id}/compact
 
-Compact the chat's context now. This sends the chat a `/compact` turn. A Claude Code chat runs Claude Code's own `/compact`. Any other chat runs the app's compaction: older tool results are trimmed and older turns are summarized, the newest work is kept as it is, and a summarized turn can still be read back with `HistoryExpand`. The chat shows **Context Compacted** when it worked, or **Compaction failed** with the reason.
+Compact the chat's context now. This sends the chat a `/compact` turn. By default, a Claude Code chat runs Claude Code's own `/compact`. With `FLUID_CLAUDE_MOD_COMPACTION=1` and the Claude Code mod enabled, Fluid instead trims older tool results, digests older turns, and folds older digests without a summarizer request. The setting defaults to off. Subagents still use Claude Code's compaction; bridge errors, timeouts, or invalid responses fall back to it. `HistorySearch` and `HistoryExpand` retrieve evicted content from that chat's stored history. Any other chat runs the app's compaction: older tool results are trimmed and older turns are summarized, the newest work is kept as it is, and a summarized turn can still be read back with `HistoryExpand`. The chat shows **Context Compacted** when it worked, or **Compaction failed** with the reason.
 
 Successful manual and automatic compactions leave durable transcript entries with their timestamp, trigger and available token counts (and configured window when known). Reloading preserves earlier compaction entries even when older conversation turns are summarized. Summary text stays in recoverable history rather than the default visible row.
 
