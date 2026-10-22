@@ -585,6 +585,11 @@ class HarnessAdapter(ProviderAdapter):
 
         fluid_session_id = options.session_id or options.resume_session_id
         system, append_system = _system_parts(options.system_prompt)
+        from app.core import commit_attribution
+
+        # Read on the executing worker, including remote Task/subagent children.
+        # Fixed for this connection, never inserted into the per-turn context.
+        attribution_enabled = await asyncio.to_thread(commit_attribution.read)
         permissions = self._build_permissions(options)
         # Which worker this is, once per connect: a session moved to another
         # worker reconnects there and renders that worker's name.
@@ -703,6 +708,7 @@ class HarnessAdapter(ProviderAdapter):
                 # --effort. Validated app-side to the CLI's vocabulary.
                 effort=_valid_effort(getattr(options, "effort", None)),
                 setting_sources=_fluid_setting_sources(options),
+                commit_attribution=attribution_enabled,
                 # Per-session fast mode → the CLI's ``fastMode`` setting,
                 # handed over as a --settings JSON blob. Only sent when the user
                 # turned it on: an explicit ``{"fastMode": false}`` would be the
@@ -1043,6 +1049,7 @@ class HarnessAdapter(ProviderAdapter):
             self._prompt_inputs = {
                 "system": system,
                 "append_system": append_system,
+                "commit_attribution": attribution_enabled,
                 "code_mode": codemode is not None,
                 "codemode": codemode,
                 # The session's real tool registry: the name set the prompt's
@@ -1063,6 +1070,8 @@ class HarnessAdapter(ProviderAdapter):
                    if k not in ("system", "append_system")},
             )
             request_extra = await asyncio.to_thread(_native_request_extra, kind, options)
+            from fluid.context.attribution import prompt_block
+
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=store,
@@ -1115,7 +1124,10 @@ class HarnessAdapter(ProviderAdapter):
                 system=(
                     compiled_prompt.text
                     if compiled_prompt is not None
-                    else (system if system is not None else append_system)
+                    else "\n\n".join(part for part in (
+                        system if system is not None else append_system,
+                        prompt_block(attribution_enabled),
+                    ) if part)
                 ),
                 # The same compilation's labeled sections — what lets fluid's
                 # get_context_usage() price Memory files / Skills as their own
@@ -4504,6 +4516,7 @@ class HarnessAdapter(ProviderAdapter):
         code_mode: bool = False,
         codemode: Any = None,
         native: bool = True,
+        commit_attribution: bool = True,
         registry: Any = None,
         wired: Optional[frozenset] = None,
         workspace_card: Optional[str] = None,
@@ -4662,6 +4675,14 @@ class HarnessAdapter(ProviderAdapter):
                     insert_at, PromptSection(kind="environment", text=workspace_card)
                 )
             sections.append(PromptSection(kind="extra", text=PEER_MESSAGE_BLOCK))
+            if native:
+                from fluid.context.attribution import prompt_block
+
+                # Claude's CLI renders attribution from --settings instead:
+                # don't duplicate its instruction in delegated prompt shapes.
+                sections.append(PromptSection(
+                    kind="extra", text=prompt_block(commit_attribution)
+                ))
             if native:
                 # Mid-turn steering, native leg only. A steer arrives INSIDE a
                 # tool result — the one channel the base prompt teaches the

@@ -3277,7 +3277,11 @@ async def test_native_leg_compiler_failure_degrades_sections_to_none(
         )
     )
     assert _CapturingLoop.captured["system_sections"] is None
-    assert _CapturingLoop.captured["system"] == "I am the configured agent prompt."
+    from fluid.context.attribution import prompt_block
+
+    assert _CapturingLoop.captured["system"] == (
+        "I am the configured agent prompt.\n\n" + prompt_block(True)
+    )
 
 
 @pytest.mark.asyncio

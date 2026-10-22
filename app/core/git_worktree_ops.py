@@ -183,10 +183,11 @@ class GitWorktreeMixin:
     """Mixin providing worktree operations for GitService."""
 
     def add_worktree(self, main_dir: str, path: str, branch: str, new_branch: bool = False,
-                     base_branch: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+                     base_branch: Optional[str] = None, *, fetch_base: bool = True) -> Tuple[bool, Optional[str]]:
         """Add a worktree; serialised per repository (see repo_worktree_lock)."""
         with repo_worktree_lock(main_dir):
-            return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch, base_branch=base_branch)
+            return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
+                                               base_branch=base_branch, fetch_base=fetch_base)
 
     def remove_worktree(self, main_dir: str, path: str, force: bool = False) -> bool:
         """Remove a worktree; serialised per repository (see repo_worktree_lock)."""
@@ -290,7 +291,9 @@ class GitWorktreeMixin:
         path: str,
         branch: str,
         new_branch: bool = False,
-        base_branch: Optional[str] = None
+        base_branch: Optional[str] = None,
+        *,
+        fetch_base: bool = True,
     ) -> Tuple[bool, Optional[str]]:
         """
         Add a new worktree.
@@ -308,7 +311,7 @@ class GitWorktreeMixin:
         try:
             # When creating a new branch from a base branch, fetch latest from origin first
             # This ensures the new branch includes all remote commits
-            if new_branch and base_branch:
+            if new_branch and base_branch and fetch_base:
                 logger.debug(f"Fetching latest from origin before creating branch from {base_branch}")
                 self.fetch(main_dir, "origin")
 

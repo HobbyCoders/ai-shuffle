@@ -130,6 +130,33 @@ def test_pr_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands)
         assert any(step.get("run") == command for step in check["steps"])
 
 
+@pytest.mark.parametrize("job,minutes,lockfiles", [
+    ("smoke", 15, ["browser-mcp/package-lock.json"]),
+    ("workspace", 25, ["frontend/package-lock.json", "browser-mcp/package-lock.json"]),
+])
+def test_browser_jobs_have_cold_install_budget_and_lockfile_cache(job, minutes, lockfiles):
+    check = workflow("ci-browser-workspace.yml")["jobs"][job]
+    assert check["timeout-minutes"] == str(minutes)
+    setup_node = next(step for step in check["steps"]
+                      if step.get("uses", "").startswith("actions/setup-node@"))
+    assert setup_node["with"]["cache"] == "npm"
+    assert setup_node["with"]["cache-dependency-path"].splitlines() == lockfiles
+
+
+@pytest.mark.parametrize("step_name,directory", [
+    ("Frontend tests and contract consistency", "frontend"),
+    ("Build AI tools from source", "tools"),
+    ("Browser MCP build and tests", "browser-mcp"),
+])
+def test_javascript_audits_use_npm_11_without_reducing_scope(step_name, directory):
+    job = workflow("ci-frontend.yml")["jobs"]["frontend"]
+    step = next(step for step in job["steps"] if step.get("name") == step_name)
+    assert step.get("working-directory", job["defaults"]["run"]["working-directory"]) == directory
+    audits = [command.strip() for command in re.split(r"\n|&&", step["run"])
+              if re.search(r"\baudit\b", command)]
+    assert audits == ["npx -y npm@11 audit --audit-level=high"]
+
+
 def test_pr_triggers_are_only_for_read_only_secret_free_checks():
     assert set(workflow("release.yml")["on"]) == {"workflow_dispatch"}
     allowed = {

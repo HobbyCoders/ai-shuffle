@@ -683,6 +683,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         permission_grants: list[str] | None = None,
         effort: str | None = None,
         settings: str | None = None,
+        commit_attribution: bool = True,
         setting_sources: tuple[str, ...] | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
@@ -705,6 +706,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.claude_cmd = claude_cmd or [claude_path]
         self.system = system
         self.append_system_prompt = append_system_prompt
+        self.commit_attribution = commit_attribution
         # Always set a mode so old CLI settings or resumed sessions cannot
         # restore the retired planning mode.
         self.permission_mode = "default" if permission_mode in (None, "plan") else permission_mode
@@ -1151,16 +1153,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.settings = _settings_json(settings)
 
     def _settings_object(self) -> dict[str, Any] | None:
-        """The host's ``settings`` as a JSON object ({} when unset), or None
-        when it is something else (the CLI also accepts a file path)."""
+        """Host settings with owned attribution, or None for non-object input.
+
+        The CLI accepts file paths too, but those cannot enforce this policy.
+        """
         raw = getattr(self, "settings", None)
-        if not raw:
-            return {}
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw) if raw else {}
         except (TypeError, ValueError):
             return None
-        return parsed if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict):
+            return None
+        from fluid.context.attribution import cli_attribution
+
+        return {**parsed, "attribution": cli_attribution(self.commit_attribution)}
 
     async def aclose(self) -> None:
         self._peer_admission_open = False
@@ -1634,19 +1640,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         policy), so a settings file could set CLAUDE_CODE_THRIFTY_SONIC back
         to 1 over the spawn env. Flag settings come after user, project and
         local, so ``FORCED_CHILD_ENV`` rides here too. Serialized with sorted
-        keys and no spaces, so every spawn sends the same bytes. Settings that
-        are not a JSON object (a file path) are passed unchanged.
+        keys and no spaces, so every spawn sends the same bytes. Attribution
+        is always owned by the host. A file path or non-object is rejected:
+        passing it unchanged could silently restore provider attribution.
         """
         base = self._settings_object()
         if base is None:
-            if not getattr(self, "_settings_path_logged", False):
-                logger.info(
-                    "delegated settings are not a JSON object (a file path?); "
-                    "passing them unchanged, so the forced env reaches the "
-                    "claude CLI through its process env only",
-                )
-                self._settings_path_logged = True
-            return str(self.settings)
+            raise ValueError(
+                "delegated settings must be a JSON object, not a file path; "
+                "cannot enforce attribution otherwise"
+            )
         return _settings_json(_with_forced_env(base))
 
     def _proc_usable(self) -> bool:
