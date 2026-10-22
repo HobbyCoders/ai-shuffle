@@ -108,6 +108,7 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/connectors",
     "/api/v1/computer-use",
     "/api/v1/chat-access",
+    "/api/v1/voice",
 )
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: The listener the agent browser uses (see :mod:`app.serve`). The browser is
@@ -388,7 +389,7 @@ def cookie_token(cookies) -> Optional[str]:
 
 
 def enforce_limits(request) -> None:
-    """A valid preview cookie restricts *all* HTTP authentication paths.
+    """A valid preview cookie restricts all HTTP and voice WebSocket auth paths.
 
     This is not authentication: transport checks still apply when a preview
     cookie is used to admit a request. Even a separately authenticated owner,
@@ -404,7 +405,11 @@ def enforce_limits(request) -> None:
         logger.debug("preview access: restriction check unavailable", exc_info=True)
         raise HTTPException(503, "Preview access could not be checked. Try again later.") from exc
     request.state.preview_grant = found
-    if found is not None and not mutation_allowed(request.url.path, request.method):
+    # WebSockets have no HTTP method: never treat an audio upgrade as a safe GET.
+    method = "WEBSOCKET" if request.scope.get("type") == "websocket" else request.method
+    if found is not None and not mutation_allowed(request.url.path, method):
+        if request.url.path.startswith("/api/v1/voice"):
+            raise HTTPException(403, "Voice calls are not available in preview access")
         raise HTTPException(403, "Agent previews cannot change ownership, credentials or settings.")
 
 
