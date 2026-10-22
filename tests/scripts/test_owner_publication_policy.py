@@ -150,7 +150,7 @@ def test_browser_jobs_have_cold_install_budget_and_lockfile_cache(job, minutes, 
 ])
 def test_javascript_audits_use_npm_11_without_reducing_scope(step_name, directory):
     jobs = workflow("ci-frontend.yml")["jobs"]
-    job = jobs["browser-mcp" if directory == "browser-mcp" else "frontend"]
+    job = jobs[{"browser-mcp": "browser-mcp", "frontend": "contracts", "tools": "tools"}[directory]]
     step = next(step for step in job["steps"] if step.get("name") == step_name)
     assert step.get("working-directory", job.get("defaults", {}).get("run", {}).get("working-directory")) == directory
     audits = [command.strip() for command in re.split(r"\n|&&", step["run"])

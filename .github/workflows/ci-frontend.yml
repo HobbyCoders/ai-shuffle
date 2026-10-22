@@ -16,84 +16,155 @@ concurrency:
 
 jobs:
   frontend:
-    name: JavaScript package checks
-    # Cap well below the 6-hour default.
-    timeout-minutes: 20
-    # Standard public Linux runner; no paid runner-size selection.
+    name: Frontend tests (${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
-      # Official setup actions use the GitHub Actions dependency cache.
-      - name: Set up Node 22
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: |
-            frontend/package-lock.json
-            tools/package-lock.json
-            browser-mcp/package-lock.json
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx svelte-kit sync
+      - name: Prove frontend shard file union
+        run: |
+          node --input-type=module <<'JS'
+          import { createVitest } from 'vitest/node';
+          import { appendFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          // `vitest list --filesOnly` ignores --shard. Use the configured
+          // sequencer that `vitest run --shard` actually calls, not a replica.
+          const ctx = await createVitest('test', { run: true });
+          let all, shards;
+          try {
+            const specs = await ctx.globTestSpecifications();
+            all = specs.map(s => s.moduleId);
+            shards = [];
+            for (const index of [1, 2, 3, 4]) {
+              ctx.config.shard = { index, count: 4 };
+              const sequencer = new ctx.config.sequence.sequencer(ctx);
+              shards.push((await sequencer.shard([...specs])).map(s => s.moduleId));
+            }
+          } finally {
+            await ctx.close();
+          }
+          const union = shards.flat();
+          assert.ok(all.length > 0 && shards.every(s => s.length > 0));
+          assert.equal(new Set(union).size, union.length, 'duplicate shard file');
+          assert.deepEqual([...union].sort(), [...all].sort(), 'missing or extra shard file');
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Frontend file union: ${shards.map(s => s.length).join(' + ')} = ${all.length}; exact, disjoint unsharded inventory.\n`);
+          JS
+      - run: npx vitest run --shard=${{ matrix.shard }}/4
 
-      # mobile/ has no lockfile of its own: it links ../frontend/node_modules.
-      - name: Install dependencies
-        run: npm ci
-
-      # postbuild also builds mobile/ into build/mobile
-      # (scripts/build-mobile-ui.mjs), which runs mobile's own postbuild check.
-      - name: Build
-        run: npm run build
-
-      - name: Svelte type-check
-        run: npx svelte-check --tsconfig ./tsconfig.json
-
+  contracts:
+    name: JavaScript contracts, docs and frontend audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx svelte-kit sync
       - name: Frontend tests and contract consistency
         run: |
-          npm test
           npm run contract:check
           npx -y npm@11 audit --audit-level=high
-
-      # mobile/ is the phone UI every worker serves at /mobile/; the Android
-      # and iOS apps load it from the paired worker (the APK keeps one copy
-      # only for its offline demo). It compiles the same frontend/src/lib with
-      # its own shell, so a frontend change can break its type check, tests or
-      # build `npm run deps` links mobile/node_modules to the
-      # frontend/node_modules installed above; it is a no-op when the frontend
-      # build already linked it.
-      - name: Link mobile dependencies
-        working-directory: mobile
-        run: npm run deps
-
-      - name: Mobile Svelte type-check
-        working-directory: mobile
-        run: npm run check
-
-      - name: Mobile tests
-        working-directory: mobile
-        run: npm test
-
-      - name: Build AI tools from source
-        working-directory: tools
-        run: npm ci --ignore-scripts && npm test && npx -y npm@11 audit --audit-level=high
-
-      # The worker network's crypto vectors must verify with WebCrypto, the API
-      # the account hub and the mobile app use (tests/core/network/vectors.json
-      # is also checked by the Python suite).
-      - name: Verify worker-network crypto vectors with WebCrypto
-        working-directory: .
-        run: node tools/scripts/verify-network-vectors.mjs
-
-      # The in-app Docs panel bundles its own copy of docs/content; the backend
-      # serves docs/content itself. tests/test_buyer_docs.py checks the same
-      # thing.
       - name: Docs copies match
         working-directory: .
         run: diff -r docs/content frontend/src/lib/docs/content
 
+  build:
+    name: Frontend and mobile production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx svelte-kit sync
+      # Frontend postbuild links dependencies and builds mobile, including its postbuild.
+      - run: npm run build
+
+  typechecks:
+    name: Frontend and mobile typechecks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx svelte-kit sync
+      - run: npx svelte-check --tsconfig ./tsconfig.json
+      - run: npm run deps
+        working-directory: mobile
+      - run: npm run check
+        working-directory: mobile
+
+  mobile:
+    name: Mobile tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx svelte-kit sync
+      - run: npm run deps && npx svelte-kit sync && npm test
+        working-directory: mobile
+
+  tools:
+    name: Tools tests and WebCrypto vectors
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/package-lock.json
+      - name: Build AI tools from source
+        working-directory: tools
+        run: npm ci --ignore-scripts && npm test && npx -y npm@11 audit --audit-level=high
+      - name: Verify worker-network crypto vectors with WebCrypto
+        run: node tools/scripts/verify-network-vectors.mjs
 
   browser-mcp:
     name: Browser MCP build and tests
@@ -154,3 +225,22 @@ jobs:
             exit "$result"
           fi
           npx -y npm@11 audit --audit-level=high
+
+  javascript:
+    name: JavaScript package checks
+    if: always()
+    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every branch to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const results = JSON.parse(process.env.RESULTS);
+          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp"];
+          assert.deepEqual(Object.keys(results).sort(), [...expected].sort(), 'missing branch');
+          for (const name of expected) assert.equal(results[name].result, 'success', name);
+          JS

@@ -29,8 +29,11 @@ jobs:
       - run: npm test --prefix browser-mcp -- test/editors.test.ts
 
   workspace:
-    name: Real browser workspace
-    needs: smoke
+    name: Browser workspace (${{ matrix.chrome-mode }})
+    strategy:
+      fail-fast: false
+      matrix:
+        chrome-mode: [external, panel-demand, direct-page-demand]
     timeout-minutes: 25
     runs-on: ubuntu-latest
     permissions:
@@ -46,6 +49,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            fluid/pyproject.toml
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -63,10 +69,17 @@ jobs:
           npm ci --prefix frontend
           npm ci --ignore-scripts --prefix browser-mcp
           npm run build --prefix browser-mcp
+      - name: Cache managed Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
       - name: Install isolated Chromium
+        timeout-minutes: 4
         working-directory: browser-mcp
         run: |
-          npx --no-install playwright-core install --with-deps chromium
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          timeout --kill-after=10s 180s npx --no-install playwright-core install --with-deps chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
       - name: Verify shadow-root auth editor discovery and edits
         working-directory: browser-mcp
@@ -79,12 +92,16 @@ jobs:
           for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:5249/tests/crumb-strip.html && break; sleep 1; done
           node tests/verify-crumb-strip.mjs || { cat /tmp/crumb-strip-vite.log; exit 1; }
       - name: Verify shared browser and rendered desktop/mobile UI
-        run: python -m pytest tests/test_browser_workspace_integration.py -o addopts="" -q -s --timeout=240
+        env:
+          CHROME_MODE: ${{ matrix.chrome-mode }}
+        run: |
+          python -m pytest "tests/test_browser_workspace_integration.py::test_real_mcp_and_two_viewers_share_tabs_control_and_viewport[$CHROME_MODE]" -o addopts="" -q -s --timeout=240
+          echo "Real Chromium + rendered UI: $CHROME_MODE passed (1/3 cases)." >> "$GITHUB_STEP_SUMMARY"
       - name: Upload browser verification screenshots
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-workspace-screenshots
+          name: browser-workspace-screenshots-${{ matrix.chrome-mode }}
           path: |
             /tmp/browser-workspace-live-*.png
             /tmp/browser-workspace-*.png
@@ -92,4 +109,23 @@ jobs:
             /tmp/provider-login-*.png
           if-no-files-found: ignore
           retention-days: 3
+
+  browser-workspace:
+    name: Real browser workspace
+    if: always()
+    needs: [smoke, workspace]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every branch to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const results = JSON.parse(process.env.RESULTS);
+          const expected = ["smoke", "workspace"];
+          assert.deepEqual(Object.keys(results).sort(), [...expected].sort(), 'missing branch');
+          for (const name of expected) assert.equal(results[name].result, 'success', name);
+          JS
 
