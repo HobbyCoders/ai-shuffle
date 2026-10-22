@@ -17,8 +17,9 @@ PR_CHECKS = {
 }
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
-    "desktop-source.yml": {"schedule", "workflow_dispatch"},
-    **{name: {"pull_request", "workflow_dispatch"} for name in PR_CHECKS},
+    "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
+    "main-suite.yml": {"push", "workflow_dispatch"},
+    **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
              "check_run", "check_suite", "issue_comment", "pull_request_review"}
@@ -68,7 +69,7 @@ class CostPolicyTests(unittest.TestCase):
                     runner = job.get("runs-on")
                     if runner == "${{ matrix.os }}":
                         self.assertEqual(job["strategy"]["matrix"]["os"],
-                            "${{ fromJSON(github.event_name == 'pull_request' && "
+                            "${{ fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true) && "
                             "'[\"windows-latest\"]' || '[\"windows-latest\", \"macos-latest\"]') }}")
                     else:
                         self.assertIn(runner, {"ubuntu-latest", "windows-latest"})
@@ -87,7 +88,7 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_edge_publication_waits_for_the_owner_local_pass(self):
         config = workflow("desktop-source.yml")
-        self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch"})
+        self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch", "workflow_run"})
         gate = config["jobs"]["gate"]
         for clause in ("github.event_name == 'schedule'", "github.ref == 'refs/heads/main'",
                        "github.actor_id == '76577322'", "github.triggering_actor == github.actor"):
@@ -112,7 +113,8 @@ class CostPolicyTests(unittest.TestCase):
             newer: [status("success", "7"), status("pending", publication.OWNER_ID)],
             ancestor: [status("success", publication.OWNER_ID)],
         }
-        api = lambda endpoint: statuses[endpoint.split("/")[1]]
+        api = lambda endpoint: ({"workflow_runs": []} if endpoint.startswith("actions/")
+                                else statuses[endpoint.split("/")[1]])
         self.assertEqual(publication.newest_attested(api, [newer, ancestor])[0], ancestor)
         statuses[ancestor] = [status("failure", publication.OWNER_ID)]
         self.assertIsNone(publication.newest_attested(api, [newer, ancestor])[0])
@@ -173,7 +175,7 @@ class CostPolicyTests(unittest.TestCase):
                         if isinstance(matrix, list):
                             self.assertLessEqual(set(matrix), allowed)
                         else:
-                            self.assertIn("fromJSON(github.event_name == 'pull_request'", matrix)
+                            self.assertIn("fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true)", matrix)
                     else:
                         self.assertIn(runner, allowed)
 

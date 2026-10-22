@@ -37,7 +37,183 @@ class FakeGitHub:
         if endpoint.startswith(f"commits/{REVISION}/statuses"):
             page = int(endpoint.rsplit("page=", 1)[1])
             return self.statuses[(page - 1) * 100:page * 100]
+        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+            return {"workflow_runs": []}
         raise AssertionError(endpoint)
+
+
+class HostedGitHub(FakeGitHub):
+    def __init__(self, *, changes=None, aggregate="success", attempt=2, run_ids=(41,), jobs=None,
+                 reread_changes=None, **kwargs):
+        super().__init__(**kwargs)
+        self.run_ids = run_ids
+        self.run = {
+            "id": 41, "workflow_id": 7, "path": gate.MAIN_SUITE_PATH,
+            "head_sha": REVISION, "head_branch": "main", "event": "push",
+            "status": "completed", "conclusion": "success", "run_attempt": attempt,
+            "repository": {"id": 42, "full_name": gate.REPOSITORY},
+            "head_repository": {"id": 42, "full_name": gate.REPOSITORY},
+        }
+        self.run.update(changes or {})
+        self.jobs = jobs if jobs is not None else [
+            {"name": gate.MAIN_SUITE_AGGREGATE, "status": "completed", "conclusion": aggregate}]
+        self.reads = 0
+        self.reread_changes = reread_changes or {}
+
+    def __call__(self, endpoint):
+        if endpoint.startswith("actions/") or endpoint == "":
+            self.calls.append(endpoint)
+            if endpoint == "":
+                return {"id": 42, "full_name": gate.REPOSITORY}
+            if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+                return {"workflow_runs": [{**self.run, "id": value} for value in self.run_ids]}
+            if endpoint == "actions/workflows/main-suite.yml":
+                return {"id": 7, "path": gate.MAIN_SUITE_PATH}
+            if "/jobs?" in endpoint:
+                assert f"/attempts/{self.run['run_attempt']}/" in endpoint
+                page = int(endpoint.rsplit("page=", 1)[1])
+                return {"jobs": self.jobs[(page - 1) * 100:page * 100]}
+            if endpoint.startswith("actions/runs/"):
+                assert endpoint == f"actions/runs/{max(self.run_ids)}"
+                self.reads += 1
+                return {**self.run, **(self.reread_changes if self.reads > 1 else {})}
+            raise AssertionError(endpoint)
+        return super().__call__(endpoint)
+
+
+def test_off_main_dispatch_or_pr_at_same_sha_cannot_shadow_main():
+    api = HostedGitHub()
+    def listing(endpoint):
+        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+            assert "branch=main&" in endpoint
+            return {"workflow_runs": [
+                {**api.run, "id": 99, "head_branch": "feature", "event": "workflow_dispatch"},
+                {**api.run, "id": 98, "event": "pull_request"}, api.run,
+            ]}
+        return api(endpoint)
+    assert gate.exact_main_readiness(listing, REVISION)[0]
+    assert "actions/runs/99" not in api.calls and "actions/runs/98" not in api.calls
+
+
+def test_backlog_fetches_metadata_once_but_keeps_run_evidence_fresh():
+    api = HostedGitHub()
+    def backlog(endpoint):
+        if endpoint.startswith(f"commits/{OTHER}/statuses?"):
+            return []
+        if endpoint.startswith("actions/workflows/main-suite.yml/runs?") and f"head_sha={OTHER}" in endpoint:
+            return {"workflow_runs": [{**api.run, "id": 40}]}
+        if endpoint == "actions/runs/40":
+            return {**api.run, "id": 40, "head_sha": OTHER, "conclusion": "failure"}
+        return api(endpoint)
+    assert gate.newest_attested(backlog, [OTHER, REVISION])[0] == REVISION
+    assert api.calls.count("") == 1
+    assert api.calls.count("actions/workflows/main-suite.yml") == 1
+    assert api.calls.count("actions/runs/41") == 2
+
+
+def test_readiness_rechecks_runs_without_refetching_metadata(monkeypatch):
+    api = HostedGitHub()
+    monkeypatch.setattr(gate, "main_history", lambda api, **kw: [REVISION, OTHER])
+    monkeypatch.setattr(gate, "published_edge_revision", lambda: OTHER)
+    assert gate.publication_readiness(api, REVISION, published=OTHER)[0]
+    assert api.calls.count("") == 1
+    assert api.calls.count("actions/workflows/main-suite.yml") == 1
+    assert api.calls.count("actions/runs/41") == 4
+    assert api.calls.count("actions/runs/41/attempts/2/jobs?per_page=100&page=1") == 2
+
+
+def test_hosted_success_on_exact_main_accepts_and_records_attempt():
+    api = HostedGitHub()
+    ready, reason = gate.exact_main_readiness(api, REVISION)
+    assert ready, reason
+    assert "run 41, attempt 2" in reason
+    assert "/actions/runs/41/attempts/2" in reason
+    assert "actions/runs/41/attempts/2/jobs?per_page=100&page=1" in api.calls
+
+
+@pytest.mark.parametrize("changes", [
+    {"path": ".github/workflows/other.yml"},
+    {"path": gate.MAIN_SUITE_PATH + "@refs/heads/feature"},
+    {"workflow_id": 8}, {"head_sha": OTHER},
+    {"head_branch": "feature"}, {"event": "pull_request"}, {"event": "pull_request_target"},
+    {"repository": {"id": 43, "full_name": gate.REPOSITORY}},
+    {"head_repository": {"id": 43, "full_name": "fork/ai-shuffle"}},
+    {"head_repository": {"id": 42, "full_name": "fork/ai-shuffle"}},
+    {"head_repository": None},
+    {"status": "in_progress"}, {"conclusion": "failure"}, {"conclusion": "cancelled"},
+    {"run_attempt": 0}, {"run_attempt": None}, {"run_attempt": True},
+])
+def test_hosted_wrong_origin_revision_or_unfinished_run_refuses(changes):
+    assert not gate.exact_main_readiness(HostedGitHub(changes=changes), REVISION)[0]
+
+
+@pytest.mark.parametrize("aggregate", ["failure", "cancelled", "skipped", None])
+def test_hosted_failed_cancelled_or_missing_aggregate_refuses(aggregate):
+    assert not gate.exact_main_readiness(HostedGitHub(aggregate=aggregate), REVISION)[0]
+
+
+@pytest.mark.parametrize("jobs", [[], [
+    {"name": gate.MAIN_SUITE_AGGREGATE, "status": "in_progress", "conclusion": "success"}
+], [{"name": gate.MAIN_SUITE_AGGREGATE, "status": "completed", "conclusion": "success"}] * 2])
+def test_hosted_requires_exactly_one_completed_aggregate(jobs):
+    assert not gate.exact_main_readiness(HostedGitHub(jobs=jobs), REVISION)[0]
+
+
+def test_hosted_missing_run_refuses():
+    assert not gate.exact_main_readiness(HostedGitHub(run_ids=()), REVISION)[0]
+
+
+def test_hosted_manual_dispatch_on_main_accepts():
+    assert gate.exact_main_readiness(HostedGitHub(changes={"event": "workflow_dispatch"}), REVISION)[0]
+
+
+def test_hosted_newest_run_wins_not_first_older_success():
+    api = HostedGitHub(run_ids=(40, 41), changes={"conclusion": "failure"})
+    assert not gate.exact_main_readiness(api, REVISION)[0]
+    assert "actions/runs/40" not in api.calls
+
+
+@pytest.mark.parametrize("changes", [{"run_attempt": 3}, {"conclusion": "cancelled"}, {"status": "in_progress"}])
+def test_hosted_rerun_during_verification_refuses(changes):
+    assert not gate.exact_main_readiness(HostedGitHub(reread_changes=changes), REVISION)[0]
+
+
+def test_hosted_aggregate_can_be_on_later_jobs_page():
+    jobs = [{"name": "other", "conclusion": "success"}] * 100
+    jobs += [{"name": gate.MAIN_SUITE_AGGREGATE, "status": "completed", "conclusion": "success"}]
+    assert gate.exact_main_readiness(HostedGitHub(jobs=jobs), REVISION)[0]
+
+
+def test_successful_local_pass_needs_no_hosted_api():
+    api = HostedGitHub(statuses=[status()], changes={"conclusion": "failure"})
+    assert gate.exact_main_readiness(api, REVISION)[0]
+    assert not any(call.startswith("actions/") for call in api.calls)
+
+
+@pytest.mark.parametrize("statuses", [
+    [status(state="failure")], [status(state="error")],
+    [status(state="pending"), status(state="failure")],
+    [status(state="pending"), status(state="error")],
+    [status(state="pending")] * 100 + [status(state="failure")],
+    [status(state="failure"), status()],
+])
+def test_hosted_cannot_override_sticky_owner_failure_or_error(statuses):
+    api = HostedGitHub(statuses=statuses)
+    assert not gate.exact_main_readiness(api, REVISION)[0]
+    assert not any(call.startswith("actions/") for call in api.calls)
+
+
+@pytest.mark.parametrize("statuses", [
+    [status(), status(state="failure")],
+    [status(state="pending"), status(), status(state="failure")],
+])
+def test_later_owner_success_clears_failure_even_during_pending_retry(statuses):
+    assert gate.exact_main_readiness(HostedGitHub(statuses=statuses), REVISION)[0]
+
+
+@pytest.mark.parametrize("statuses", [[], [status(state="pending")]])
+def test_hosted_accepts_without_terminal_owner_outcome(statuses):
+    assert gate.exact_main_readiness(HostedGitHub(statuses=statuses), REVISION)[0]
 
 
 def test_owner_success_on_current_main_publishes():
@@ -108,16 +284,18 @@ def status_event(**changes):
 @pytest.mark.parametrize("kind", ["schedule", "workflow_dispatch"])
 @pytest.mark.parametrize("passed", [False, True])
 def test_trigger_cannot_add_workflow_requirements(kind, passed):
-    # #2202: dispatching suites used to turn a same-tree PR into a combined
-    # tree and demand more Actions runs. Only the local attestation counts now,
-    # regardless of what triggered publication; no PR/tree/run reads are needed.
+    # Local evidence remains sufficient regardless of the publication trigger;
+    # only a missing/unsuccessful local status needs hosted workflow lookups.
     assert gate.event_allowed(env(GITHUB_EVENT_NAME=kind), status_event())
     api = FakeGitHub([status()] if passed else [])
     ready, reason = gate.exact_main_readiness(api, REVISION)
     assert ready is passed
     if not passed:
         assert gate.COMMAND in reason
-    assert set(api.calls) == {"branches/main", f"commits/{REVISION}/statuses?per_page=100&page=1"}
+    expected = {"branches/main", f"commits/{REVISION}/statuses?per_page=100&page=1"}
+    if not passed:
+        expected.add(f"actions/workflows/main-suite.yml/runs?branch=main&head_sha={REVISION}&per_page=100")
+    assert set(api.calls) == expected
 
 
 def test_event_predicate():
@@ -149,6 +327,53 @@ def test_entrypoint_writes_output_and_annotates_refusal(statuses, ready, monkeyp
     printed = capsys.readouterr().out
     assert ("::warning title=Edge publication refused::" in printed) is (not ready)
     assert summary.read_text(encoding="utf-8")
+
+
+def hosted_event(**changes):
+    run = {"id": 41, "name": gate.MAIN_SUITE_NAME, "status": "completed", "conclusion": "success",
+           "head_branch": "main", "head_sha": REVISION, "event": "push", "run_attempt": 2,
+           "repository": {"full_name": gate.REPOSITORY},
+           "head_repository": {"full_name": gate.REPOSITORY}}
+    run.update(changes)
+    return {"workflow_run": run}
+
+
+@pytest.mark.parametrize("changes", [
+    {"name": "other"}, {"status": "in_progress"}, {"conclusion": "failure"},
+    {"conclusion": "cancelled"}, {"head_branch": "feature"}, {"event": "pull_request"},
+    {"repository": {"full_name": "fork/ai-shuffle"}},
+    {"head_repository": {"full_name": "fork/ai-shuffle"}}, {"id": True}, {"id": 0},
+])
+def test_workflow_run_payload_guards(changes):
+    assert gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_run"), hosted_event())
+    assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_run"), hosted_event(**changes))
+
+
+@pytest.mark.parametrize("valid,changes", [
+    (True, {}), (False, {"run_attempt": 1}), (False, {"id": 40}),
+    (False, {"head_sha": OTHER}), (False, {"head_sha": "invalid"}),
+])
+def test_workflow_run_entrypoint_reverifies_api_even_with_local_pass(valid, changes, monkeypatch, tmp_path):
+    event_path, output = tmp_path / "event.json", tmp_path / "out"
+    event_path.write_text(json.dumps(hosted_event(**changes)))
+    for key, value in env(GITHUB_EVENT_NAME="workflow_run", GITHUB_EVENT_PATH=str(event_path),
+                          GITHUB_OUTPUT=str(output)).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    api = HostedGitHub(statuses=[status()])
+    monkeypatch.setattr(gate, "GitHub", lambda: api)
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: REVISION + "\n")
+    monkeypatch.setattr(gate, "main_history", lambda api, **kw: [REVISION, OTHER])
+    monkeypatch.setattr(gate, "published_edge_revision", lambda: OTHER)
+    if valid:
+        gate.main(["--select"])
+        assert output.read_text() == f"ready=true\nrevision={REVISION}\n"
+        assert "actions/runs/41/attempts/2/jobs?per_page=100&page=1" in api.calls
+    else:
+        with pytest.raises(ValueError, match="Triggering hosted"):
+            gate.main(["--select"])
+        assert not output.exists()
 
 
 def test_entrypoint_refuses_unauthorized_events(monkeypatch, tmp_path):
@@ -197,7 +422,9 @@ def test_workflow_wiring_matches_the_gate():
     condition = config["jobs"]["gate"]["if"]
     assert "github.event_name == 'schedule'" in condition
     assert f"github.actor_id == '{gate.OWNER_ID}'" in condition
-    assert set(config["on"]) == {"schedule", "workflow_dispatch"}
+    assert set(config["on"]) == {"schedule", "workflow_dispatch", "workflow_run"}
+    assert config["on"]["workflow_run"] == {
+        "workflows": [gate.MAIN_SUITE_NAME], "types": ["completed"], "branches": ["main"]}
     assert config["on"]["schedule"] == [{"cron": "0 6 * * *"}]
     assert config["env"]["SOURCE_CHANNEL"] == "nightly"
     steps = config["jobs"]["gate"]["steps"]

@@ -5,6 +5,7 @@ run-name: "${{ github.workflow }} (4 shards, 2 workers each)"
 # Cross-tree contracts and credential-path checks make path-based skips unsafe.
 on:
   pull_request:
+  workflow_call:
   workflow_dispatch:
     inputs:
       runner_cpus:

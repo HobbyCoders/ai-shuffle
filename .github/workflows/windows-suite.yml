@@ -31,6 +31,11 @@ name: Windows full suite
 
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      main_suite:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tests:
@@ -52,7 +57,7 @@ env:
 jobs:
   desktop:
     name: Windows desktop shard (${{ matrix.shard }}/3)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || inputs.main_suite == true
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -111,7 +116,7 @@ jobs:
 
   desktop-gate:
     name: Windows desktop
-    if: always() && github.event_name == 'pull_request'
+    if: always() && (github.event_name == 'pull_request' || inputs.main_suite == true)
     needs: [desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -143,7 +148,7 @@ jobs:
 
   suite:
     name: Windows ${{ matrix.part }}
-    if: github.event_name == 'workflow_dispatch' && inputs.tests == ''
+    if: github.event_name == 'workflow_dispatch' && inputs.tests == '' && inputs.main_suite != true
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:

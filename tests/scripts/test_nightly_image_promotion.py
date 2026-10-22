@@ -29,8 +29,23 @@ def lane(monkeypatch):
             state["branches"] += 1
             moved = scenario == "superseded" or (scenario == "moved_during" and state["branches"] > 1)
             return {"protected": scenario != "unprotected", "commit": {"sha": "c" * 40 if moved else REVISION}}
+        if route.startswith("actions/workflows/main-suite.yml/runs?"):
+            return {"workflow_runs": [{"id": 41, "head_branch": "main", "event": "push"}]
+                    if scenario == "hosted" else []}
+        if route == "":
+            return {"id": 42, "full_name": gate.REPOSITORY}
+        if route == "actions/workflows/main-suite.yml":
+            return {"id": 7, "path": gate.MAIN_SUITE_PATH}
+        if route == "actions/runs/41":
+            return {"id": 41, "workflow_id": 7, "path": gate.MAIN_SUITE_PATH,
+                    "head_sha": REVISION, "head_branch": "main", "event": "push", "run_attempt": 1,
+                    "status": "completed", "conclusion": "success",
+                    "repository": {"id": 42, "full_name": gate.REPOSITORY},
+                    "head_repository": {"id": 42, "full_name": gate.REPOSITORY}}
+        if route.startswith("actions/runs/41/attempts/1/jobs?"):
+            return {"jobs": [{"name": gate.MAIN_SUITE_AGGREGATE, "status": "completed", "conclusion": "success"}]}
         assert route.startswith(f"commits/{REVISION}/statuses?")
-        if scenario == "missing":
+        if scenario in ("missing", "hosted"):
             return []
         return [{"context": gate.CONTEXT, "state": "failure" if scenario == "failed" else "success",
                  "creator": {"id": "wrong-owner" if scenario == "wrong_owner" else gate.OWNER_ID}}]
@@ -53,7 +68,9 @@ def lane(monkeypatch):
     return state
 
 
-def test_accepted_nightly_requires_no_final_tag_and_only_moves_nightly(lane):
+@pytest.mark.parametrize("evidence", ["success", "hosted"])
+def test_accepted_nightly_requires_no_final_tag_and_only_moves_nightly(lane, evidence):
+    lane["scenario"] = evidence
     promote_image.promote(Path.cwd(), DIGEST, ["nightly"])
     assert lane["verified"] == [DIGEST]
     assert lane["branches"] == 2  # Existing gate rechecks current main after status lookup.

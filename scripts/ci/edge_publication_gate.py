@@ -1,11 +1,11 @@
-"""Authorize edge publication from an owner's local full-suite pass on main.
+"""Authorize edge publication from a full-suite pass on protected main.
 
-CI does not test code. A worker runs every suite on the exact main revision
-(``python scripts/local_ci.py full --attest``) and posts the commit status
-``local/full-suite``. Edge publication waits for that status, created by the
-owner's account, in state success, on the first-parent history of protected main.
-Only the newest attested unpublished revision is eligible; later untested changes
-wait for their own exact-revision attestation. One pass covers its ancestors.
+Accept either the owner's successful ``local/full-suite`` commit status or a
+successful hosted main-suite run on the exact main revision. Hosted evidence
+must come from this repository's main workflow, including its aggregate job.
+Only the newest attested unpublished first-parent revision is eligible; later
+untested changes wait for their own exact-revision evidence. One pass covers
+its ancestors. Stable release requirements are unchanged.
 
 Run only from a checkout of protected main. This script reads GitHub
 metadata; it does not receive signing or Cloudflare keys.
@@ -23,7 +23,10 @@ OWNER_ID = "76577322"
 CONTEXT = "local/full-suite"
 REFUSAL_TITLE = "Edge publication refused"
 # app/core/deploy_status.py shows this refusal, with the command, to the owner.
-MAIN_SUITE_REFUSAL = "Edge publication waits for a local full-suite pass on main"
+MAIN_SUITE_REFUSAL = "Edge publication waits for a hosted main-suite pass or an owner local full-suite pass on main"
+MAIN_SUITE_PATH = ".github/workflows/main-suite.yml"
+MAIN_SUITE_NAME = "main-suite"
+MAIN_SUITE_AGGREGATE = "Main suite"
 COMMAND = "python scripts/local_ci.py full --attest"
 
 
@@ -33,7 +36,8 @@ class GitHub:
 
     def __call__(self, endpoint):
         raw = subprocess.check_output(
-            ["gh", "api", f"repos/{self.repository}/{endpoint}"], text=True, encoding="utf-8", timeout=20
+            ["gh", "api", f"repos/{self.repository}" + (f"/{endpoint}" if endpoint else "")],
+            text=True, encoding="utf-8", timeout=20
         )
         return json.loads(raw)
 
@@ -203,8 +207,12 @@ def update_reach_readiness(revision, *, api=None, base=None, root=None, reposito
         return False, f"Update reach refused: could not verify published edge/merged PR evidence ({type(error).__name__})."
 
 
-def owner_status(api, revision):
-    """The newest local/full-suite status the owner posted on ``revision``, or None."""
+def owner_status(api, revision, *, terminal=False):
+    """Newest owner local/full-suite status, optionally ignoring pending retries.
+
+    The default preserves merge/stable callers' latest-status semantics. Nightly
+    uses the newest terminal outcome so pending cannot erase an owner veto.
+    """
     for page in range(1, 11):
         statuses = api(f"commits/{revision}/statuses?per_page=100&page={page}")
         if not isinstance(statuses, list):
@@ -212,11 +220,100 @@ def owner_status(api, revision):
         # GitHub lists statuses newest first.
         for status in statuses:
             if (status.get("context") == CONTEXT
-                    and str((status.get("creator") or {}).get("id")) == OWNER_ID):
+                    and str((status.get("creator") or {}).get("id")) == OWNER_ID
+                    and (not terminal or status.get("state") in ("success", "failure", "error"))):
                 return status
         if len(statuses) < 100:
             return None
     raise ValueError("Too many statuses; refusing partial evidence")
+
+
+def hosted_status(api, revision, *, metadata=None):
+    """Verify the latest hosted run and its latest attempt, never a stale pass.
+
+    A main push/dispatch in the canonical repository loads the root workflow
+    from that main revision (unlike pull_request_target or a fork). Bind both
+    the workflow ID and API path; a lookalike name/check status is not evidence.
+    Job queries are scoped to the attempt, and a second read detects a re-run
+    started while we were verifying. A failed latest run/attempt cannot fall
+    back to an older hosted success; the independent owner status still works.
+    """
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
+        return None
+    listing = api(f"actions/workflows/main-suite.yml/runs?branch=main&head_sha={revision}&per_page=100")
+    runs = listing.get("workflow_runs")
+    if not isinstance(runs, list):
+        raise ValueError("Unexpected GitHub workflow runs response")
+    eligible = [run for run in runs if run.get("head_branch") == "main"
+                and run.get("event") in ("push", "workflow_dispatch")]
+    if not eligible:
+        if len(runs) >= 100:
+            raise ValueError("Too many unrelated runs; refusing partial evidence")
+        return None
+    # Ignore off-main dispatches/PRs even at main's SHA: they cannot shadow the
+    # real main run. IDs increase when runs are created, never on re-runs.
+    run_id = max(run["id"] for run in eligible)
+    run = api(f"actions/runs/{run_id}")
+    # Shared only within this gate invocation, across trigger/selection/rechecks
+    # and every backlog revision. Never cache statuses, runs or jobs.
+    if metadata is None:
+        metadata = {}
+    if "identity" not in metadata:
+        metadata["identity"] = (api(""), api("actions/workflows/main-suite.yml"))
+    repository, workflow = metadata["identity"]
+    repository_id = repository.get("id")
+    if (not repository_id or repository.get("full_name") != REPOSITORY
+            or workflow.get("path") != MAIN_SUITE_PATH
+            or not workflow.get("id") or run.get("workflow_id") != workflow["id"]
+            or run.get("id") != run_id or run.get("path") != MAIN_SUITE_PATH
+            or run.get("head_sha") != revision or run.get("head_branch") != "main"
+            or run.get("event") not in ("push", "workflow_dispatch")
+            or run.get("status") != "completed" or run.get("conclusion") != "success"):
+        return None
+    for field in ("repository", "head_repository"):
+        source = run.get(field) or {}
+        if source.get("id") != repository_id or source.get("full_name") != REPOSITORY:
+            return None
+    attempt = run.get("run_attempt")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        return None
+    aggregates = []
+    for page in range(1, 11):
+        listing = api(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page={page}")
+        jobs = listing.get("jobs")
+        if not isinstance(jobs, list):
+            raise ValueError("Unexpected GitHub jobs response")
+        aggregates.extend(job for job in jobs if job.get("name") == MAIN_SUITE_AGGREGATE)
+        if len(jobs) < 100:
+            break
+    else:
+        raise ValueError("Too many jobs; refusing partial evidence")
+    if (len(aggregates) != 1 or aggregates[0].get("status") != "completed"
+            or aggregates[0].get("conclusion") != "success"):
+        return None
+    if api(f"actions/runs/{run_id}") != run:
+        return None
+    return {"state": "success", "context": MAIN_SUITE_NAME, "run_id": run_id, "run_attempt": attempt,
+            "description": f"Hosted main-suite run {run_id}, attempt {attempt}",
+            "target_url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}"}
+
+
+def suite_status(api, revision, *, metadata=None):
+    status = owner_status(api, revision, terminal=True)
+    if status:
+        if status.get("state") in ("failure", "error"):
+            # An explicit owner failure is a veto on this exact revision. A
+            # newer commit or a later owner success, not hosted CI, clears it.
+            return None
+        if status.get("state") == "success":
+            return status
+    return hosted_status(api, revision, metadata=metadata)
+
+
+def suite_description(status, revision):
+    if status.get("context") == MAIN_SUITE_NAME:
+        return f"{status['description']} passed on {revision[:9]}: {status['target_url']}"
+    return f"Local full suite passed on {revision[:9]}: {status.get('description', '')}"
 
 
 def exact_main_readiness(api, revision):
@@ -225,16 +322,13 @@ def exact_main_readiness(api, revision):
         return False, "main is not protected; refusing publication"
     if branch["commit"]["sha"] != revision:
         return False, "main moved; a superseded revision cannot publish"
-    status = owner_status(api, revision)
+    status = suite_status(api, revision)
     if status is None:
-        return False, f"{MAIN_SUITE_REFUSAL}. Run on a clean checkout of main:\n{COMMAND}"
-    if status.get("state") != "success":
-        detail = status.get("description") or status.get("state")
-        return False, f"{MAIN_SUITE_REFUSAL}. Latest pass is {status.get('state')}: {detail}\n{COMMAND}"
+        return False, f"{MAIN_SUITE_REFUSAL}. Wait for main-suite or run on a clean checkout of main:\n{COMMAND}"
     # Recheck after the API reads. The publisher also checks main before writing its pointer.
     if api("branches/main")["commit"]["sha"] != revision:
         return False, "main moved during verification; skipping superseded revision"
-    return True, f"Local full suite passed on {revision[:9]}: {status.get('description', '')}"
+    return True, suite_description(status, revision)
 
 
 def main_history(api, *, root=None):
@@ -264,17 +358,21 @@ def unpublished_history(history, published, *, root=None):
     raise ValueError("Published revision is not on main or the frozen cutover baseline")
 
 
-def newest_attested(api, history):
+def newest_attested(api, history, *, metadata=None):
     # Bound API cost and fail closed, never silently choose a candidate after an
     # unchecked newer commit. A large backlog needs a fresh tip attestation.
+    if metadata is None:
+        metadata = {}
     for revision in history[:100]:
-        status = owner_status(api, revision)
-        if status and status.get("state") == "success":
+        status = suite_status(api, revision, metadata=metadata)
+        if status:
             return revision, status
     return None, None
 
 
-def publication_readiness(api, revision, *, published=None, root=None):
+def publication_readiness(api, revision, *, published=None, root=None, metadata=None):
+    if metadata is None:
+        metadata = {}
     published = published if published is not None else published_edge_revision()
     # Repeat the complete decision: main or a newer attestation may change while
     # statuses are read. The writer repeats this and CASes the actual D1 pointer.
@@ -285,14 +383,14 @@ def publication_readiness(api, revision, *, published=None, root=None):
         candidates = unpublished_history(history, published, root=root)
         if revision not in candidates:
             return False, "Revision is already published or older than the published revision"
-        newest, status = newest_attested(api, candidates)
+        newest, status = newest_attested(api, candidates, metadata=metadata)
         if newest != revision:
             if newest:
                 return False, f"Newer attested revision {newest[:9]} takes precedence"
             return False, f"{MAIN_SUITE_REFUSAL}. Run on a clean checkout of main:\n{COMMAND}"
     if published_edge_revision() != published:
         return False, "Published pointer moved during verification; retry selection"
-    return True, f"Local full suite passed on {revision[:9]}: {status.get('description', '')}"
+    return True, suite_description(status, revision)
 
 
 def warning_annotation(reason):
@@ -310,6 +408,14 @@ def event_allowed(env, event):
     if kind == "workflow_dispatch":
         return (env.get("GITHUB_ACTOR_ID") == OWNER_ID and bool(env.get("GITHUB_ACTOR"))
                 and env.get("GITHUB_TRIGGERING_ACTOR") == env["GITHUB_ACTOR"])
+    if kind == "workflow_run":
+        run = event.get("workflow_run") or {}
+        return (run.get("name") == MAIN_SUITE_NAME and run.get("status") == "completed"
+                and run.get("conclusion") == "success" and run.get("head_branch") == "main"
+                and run.get("event") in ("push", "workflow_dispatch")
+                and (run.get("repository") or {}).get("full_name") == REPOSITORY
+                and (run.get("head_repository") or {}).get("full_name") == REPOSITORY
+                and type(run.get("id")) is int and run["id"] > 0)
     return False
 
 
@@ -359,10 +465,19 @@ def main(argv=None):
     if checkout != revision:
         raise ValueError("Checkout does not match the exact source revision")
     api = GitHub()
+    metadata = {}
+    if env.get("GITHUB_EVENT_NAME") == "workflow_run":
+        # The payload is only a trigger, never authorization. Re-read the exact
+        # latest run/attempt even when an independent local pass also exists.
+        trigger = event["workflow_run"]
+        evidence = hosted_status(api, trigger.get("head_sha"), metadata=metadata)
+        if (not evidence or evidence["run_id"] != trigger["id"]
+                or evidence["run_attempt"] != trigger.get("run_attempt")):
+            raise ValueError("Triggering hosted main-suite run could not be verified")
     published = published_edge_revision()
     if args.select:
-        revision, _ = newest_attested(api, unpublished_history(main_history(api, root=args.source_root), published, root=args.source_root))
-    ready, reason = (publication_readiness(api, revision, published=published, root=args.source_root) if revision else
+        revision, _ = newest_attested(api, unpublished_history(main_history(api, root=args.source_root), published, root=args.source_root), metadata=metadata)
+    ready, reason = (publication_readiness(api, revision, published=published, root=args.source_root, metadata=metadata) if revision else
                      (False, f"{MAIN_SUITE_REFUSAL}. {COMMAND}"))
     result = {"ready": ready, "revision": revision or "", "published": published, "reason": reason}
     if args.json:

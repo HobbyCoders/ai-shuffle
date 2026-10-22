@@ -67,11 +67,11 @@ def promote_nightly(root, digest):
         raise ValueError("Nightly promotion requires the exact public main checkout")
     # A release label or SHA tag alone cannot establish the candidate's source.
     verify_image(root, digest)
-    # Reuse the exact owner/status/current-protected-main gate, not a new notion
-    # of green. Recheck after the image pull, immediately before moving nightly.
+    # Reuse the owner-local/hosted-suite/current-protected-main gate, not a new
+    # notion of green. Recheck after the image pull, before moving nightly.
     ready, _ = gate.exact_main_readiness(gate.GitHub(), revision)
     if not ready:
-        raise ValueError("Nightly promotion requires a successful owner exact-main attestation")
+        raise ValueError("Nightly promotion requires an owner-local full-suite pass or verified hosted main-suite pass on exact main")
     move_aliases(digest, ["nightly"])
 
 

@@ -26,7 +26,7 @@ def test_the_workflow_runs_every_part_without_cancelling_the_others():
     suite = workflow()["jobs"]["suite"]
     assert suite["strategy"]["matrix"]["part"] == windows_parts.parts()
     assert suite["strategy"]["fail-fast"] == "false"
-    assert suite["if"] == "github.event_name == 'workflow_dispatch' && inputs.tests == ''"
+    assert suite["if"] == "github.event_name == 'workflow_dispatch' && inputs.tests == '' && inputs.main_suite != true"
     command = next(step["run"] for step in suite["steps"] if step.get("name") == "Suite part")
     assert 'scripts/ci/windows_parts.py "$PART"' in command
 

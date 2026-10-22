@@ -4,6 +4,11 @@ name: Desktop CI
 # Packaging and runtime assembly remain manual; releases live in release.yml.
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      main_suite:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       upload_preview:
@@ -50,7 +55,7 @@ jobs:
   package:
     name: Package Windows shell
     timeout-minutes: 15
-    if: github.event_name == 'workflow_dispatch' && inputs.verify_stable_installer != true
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_stable_installer != true && inputs.main_suite != true
     needs: check
     runs-on: windows-latest
     defaults:
@@ -115,7 +120,7 @@ jobs:
 
   windows-preview:
     name: Windows preview installer and fresh database
-    if: github.event_name == 'workflow_dispatch' && inputs.verify_stable_installer != true
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_stable_installer != true && inputs.main_suite != true
     needs: check
     runs-on: windows-latest
     timeout-minutes: 35
