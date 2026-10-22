@@ -140,15 +140,13 @@ def report_owed(worker_session_id: Optional[str]) -> Optional[Dict[str, Any]]:
     if not worker_session_id:
         return None
     try:
-        from app.core.provider_agent import WORKER_TURN_SOURCE
         from app.db.base import get_db, parse_jsonb
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT payload FROM turns WHERE session_id = %s AND source = %s "
-                "ORDER BY created_at ASC LIMIT 1",
-                (worker_session_id, WORKER_TURN_SOURCE),
+                "SELECT payload FROM turns WHERE session_id = %s AND command_id = %s",
+                (worker_session_id, COMMAND_PREFIX + worker_session_id),
             )
             row = cursor.fetchone()
         payload = parse_jsonb(row["payload"]) if row else None
@@ -724,7 +722,6 @@ def _existing(start: _Start, from_device: str) -> Optional[Dict[str, Any]]:
     A retry of the same request (a timeout on the parent) reads the same child
     back; anything else using the id is refused.
     """
-    from app.core.provider_agent import WORKER_TURN_SOURCE
     from app.db import database, turns
     from app.db.base import get_db
 
@@ -733,9 +730,8 @@ def _existing(start: _Start, from_device: str) -> Optional[Dict[str, Any]]:
         return None
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s AND source=%s",
-                       (start.worker_session_id, COMMAND_PREFIX + start.worker_session_id,
-                        WORKER_TURN_SOURCE))
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s",
+                       (start.worker_session_id, COMMAND_PREFIX + start.worker_session_id))
         turn = turns._row(cursor.fetchone())
     payload = (turn or {}).get("payload") or {}
     if turn is None or payload.get(REPORT_DEVICE_KEY) != from_device:
