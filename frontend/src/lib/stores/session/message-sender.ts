@@ -25,6 +25,7 @@ import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { effortToSend } from '../assistant';
+import { sendableComposerBinding } from './composer-binding';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -188,8 +189,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		return selectedContextWindow(state);
 	}
 
-	function buildOverrides(): Record<string, string | string[] | number | boolean> | undefined {
-		const _state = getState();
+	/** `_state` is the snapshot the send's session and agent came from, so a
+	 *  switch while it waited for the socket cannot mix two sessions' settings. */
+	function buildOverrides(_state: ActiveSessionState = getState()): Record<string, string | string[] | number | boolean> | undefined {
 		const overrides: Record<string, string | string[] | number | boolean> = {};
 		if (_state.mode !== 'chat') overrides.workspace_project_ids = [...(_state.workspaceProjectIds ?? [])];
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
@@ -200,14 +202,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const shown = getDefaultModel();
 			if (shown && shown !== getServerDefaultModel()) overrides.model = shown;
 		}
-		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
+		// Agent, access and Fast still waiting for this session's own binding
+		// are left out: the backend then keeps the row's value (#418).
+		const binding = sendableComposerBinding(_state);
+		if (binding.permissionMode) overrides.permission_mode = binding.permissionMode;
 		const effort = effortToSend(_state.sessionId, _state.effortLevelOverride);
 		if (effort) overrides.effort = effort;
 		// Always an explicit boolean. Omitting the key when fast mode is OFF made
 		// the backend fall back to the session row, which still held the earlier
 		// `true` — so turning fast mode off never reached the CLI. `false` is a
-		// real pick and has to travel.
-		overrides.fast = _state.fastMode;
+		// real pick and has to travel; an unhydrated placeholder is not one.
+		if (binding.fast !== undefined) overrides.fast = binding.fast;
 		const contextWindow = contextWindowOverride(_state);
 		if (contextWindow != null) {
 			overrides.context_window = contextWindow;
@@ -218,6 +223,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 		}
 		return Object.keys(overrides).length > 0 ? overrides : undefined;
+	}
+
+	/** A sent agent / Fast pick is now the session's stored binding, so a
+	 *  later /live answer may describe it again (#418). */
+	function spendBindingPicks(sessionId: string | null) {
+		if (!sessionId) return;
+		update(s => s.sessionId === sessionId && Object.keys(s.bindingPicks ?? {}).length > 0
+			? { ...s, bindingPicks: {} } : s);
 	}
 
 	// ─── Wait for WS connection ─────────────────────────────────────
@@ -447,7 +460,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const newTitle = isFirstMessage
 				? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
 				: _state.title;
-			const queryProfileId = _state.profile;
+			// Undefined while an existing session's agent is still loading: the
+			// backend resolves an omitted agent to the session's own (#418).
+			const queryProfileId = sendableComposerBinding(_state).profile;
 
 			// Sending during a live turn is a plain `query`: the turn keeps running
 			// and the backend decides when the model sees the new prompt (mid-turn
@@ -503,13 +518,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// landed since the send began: the server has described the queue for
 			// this window, so a local row added on top of it is a second copy that
 			// no later frame is guaranteed to replace.
-			const overrides = buildOverrides();
+			const overrides = buildOverrides(_state);
 			const retryOverrides = { ...overrides };
 			// The worker can acknowledge a newer pin before a lost reply is retried.
 			// Its revision precondition is not a new owner instruction.
 			delete retryOverrides.context_window_base;
 			const clientMessageId = options?.compactFirst
-				? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: _state.profile,
+				? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: queryProfileId,
 					project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
 				: newLocalPendingId();
 			const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
@@ -535,7 +550,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					...OPTIMISTIC_STREAMING_ON,
 					error: null,
 					title: newTitle,
-					currentQueryProfileId: queryProfileId,
+					currentQueryProfileId: queryProfileId ?? null,
 				}));
 			} else if (optimisticQueuedId) {
 				pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
@@ -574,7 +589,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						...OPTIMISTIC_STREAMING_ON,
 						error: null,
 						title: newTitle,
-						currentQueryProfileId: queryProfileId,
+						currentQueryProfileId: queryProfileId ?? null,
 					};
 				});
 			}
@@ -585,7 +600,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				client_message_id: clientMessageId,
 				prompt,
 				session_id: _state.sessionId,
-				profile: _state.profile,
+				profile: queryProfileId,
 				project: _state.project || undefined,
 				project_v2_id: remoteOnly ? _state.projectV2Id : undefined,
 				worktree_id: _state.worktreeId || undefined,
@@ -612,6 +627,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
 					}
 					clearCompactRetry(_state.sessionId!);
+					spendBindingPicks(_state.sessionId);
 				} catch (error) {
 					// Remove only our optimistic echo, never a newer session's draft
 					// or an authoritative queue snapshot that arrived in the meantime.
@@ -646,6 +662,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				return false;
 			}
 			clearCompactRetry(_state.sessionId!);
+			spendBindingPicks(_state.sessionId);
 			// The pick is spent: the session now exists and its row carries the
 			// ownership, so follow-up sends must not re-assert a target. (Left
 			// intact on a failed send so a retry still goes to the chosen device.)

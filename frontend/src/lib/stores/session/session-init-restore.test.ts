@@ -111,10 +111,12 @@ describe('session-init · deep link replaces the restored chat (#1923 follow-up)
 		expect(getState().isRestoringSession).toBe(true);
 	});
 
-	it('fills the profile but leaves the project for the linked chat\'s own row', async () => {
+	it('leaves the agent and the project for the linked chat\'s own row (#418)', async () => {
 		const { init, getState } = makeInit(null);
 		await init({ deepLinkSessionId: 'chat-b' });
-		expect(getState().profile).toBe('profile-1');
+		// The device default agent is not this chat's: /live fills it.
+		expect(getState().profile).toBe('');
+		expect(getState().bindingUnhydrated).toEqual({ profile: true, permission: true, fast: true });
 		// A device default here would block /live's project as an in-flight pick.
 		expect(getState().project).toBe('');
 	});
@@ -314,11 +316,33 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 			permissionModeOverride: null,
 			effortLevelOverride: null,
 			fastMode: true,
+			bindingHydrated: { profile: true, permission: true, fast: true },
 		});
 
 		await init();
 
 		expect(getState().fastMode).toBe(true);
+		expect(getState().bindingUnhydrated).toEqual({});
+	});
+
+	it('does not trust a snapshot written before the binding record (#418)', async () => {
+		// Such a snapshot may hold a worker's fabricated Ask / Fast off and the
+		// previous chat's agent. They wait for /live instead of being sent.
+		const { init, getState } = makeInit({
+			sessionId: 'legacy-worker',
+			title: 'Worker',
+			profile: 'overseer',
+			project: 'proj-1',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+			fastMode: false,
+		});
+
+		await init();
+
+		expect(getState().profile).toBe('');
+		expect(getState().bindingUnhydrated).toEqual({ profile: true, permission: true, fast: true });
 	});
 
 	it('clears fast mode for a restored session that never stored one', async () => {

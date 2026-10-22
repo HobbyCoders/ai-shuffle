@@ -32,6 +32,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
+import { markBindingHydrated } from './composer-binding';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -625,7 +626,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const permissionMode = typeof updates.permission_mode === 'string' ? updates.permission_mode : 'default';
 				const projectV2Id = typeof updates.project_v2_id === 'string' ? updates.project_v2_id : null;
 				const cached = sessionEphemeralCache.restore(sessionId);
-				if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode });
+				if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
 				const open = getState();
 				// A chat's `project` can only be a filled-in device default, so
 				// it must not stop the open tab adopting the attach.
@@ -633,7 +634,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					update(s => ({
 						...s, mode: 'code', project: attachedProject, projectV2Id,
 						worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
-						permissionModeOverride: permissionMode,
+						permissionModeOverride: permissionMode, ...markBindingHydrated(s, 'permission'),
 					}));
 					onPersistSession();
 				}

@@ -1,4 +1,4 @@
-// The opt-in bridge response is untrusted until its handles, roles and tool
+// The compaction bridge response is untrusted until its handles, roles and tool
 // pairs validate. A rejected response never changes the event passed to next.
 import type { UsageBridge } from './usage.ts'
 
@@ -55,4 +55,12 @@ export function compactionBridge(bridge: UsageBridge | null): UsageBridge | null
   // The base URL has already passed usage.ts's loopback-only check. Pin the
   // path rather than allowing the request body to choose another bridge use.
   return { ...bridge, url: bridge.url.replace(/\/claude-mod\/usage$/, '/claude-mod/compact') }
+}
+
+/** Whether this spawn's bridge mounted the compaction route. DelegatedLoop
+ * names the route in FLUID_CLAUDE_MOD_COMPACT_URL only when it mounts it, and
+ * the name must be this bridge's own pinned route, so a stale or foreign value
+ * leaves the mod on the note-only hook. A handshake, not a switch. */
+export function mounted(bridge: UsageBridge | null, route: string | undefined): boolean {
+  return route !== undefined && route !== '' && compactionBridge(bridge)?.url === route
 }

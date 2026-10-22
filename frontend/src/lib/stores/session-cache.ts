@@ -8,6 +8,7 @@
 
 import type { DeviceIntent, ExecutionMode } from './types';
 import type { ContextWindowChoice } from '$lib/constants/model-context';
+import type { ComposerBindingFlags } from './session/composer-binding';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,11 @@ export interface SessionEphemeral {
 	effortLevelOverride: string | null;
 	/** Fast service tier — part of the run binding, cached like the rest of it. */
 	fastMode?: boolean;
+	/** Which of profile / access / Fast this entry holds as real values (#418).
+	 *  An entry without it predates the rule and is not trusted for them. */
+	bindingHydrated?: ComposerBindingFlags;
+	/** Which of them were changed locally and not sent yet. */
+	bindingPicks?: ComposerBindingFlags;
 	workspaceProjectIds?: string[];
 	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent: ExecutionMode;

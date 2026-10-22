@@ -10,7 +10,7 @@
 import type { Register } from 'claude-code'
 import { withFluidNote } from './compact.ts'
 import { classify, enabled, lastUserRequest, refusal, replacementInput } from './file_guard.ts'
-import { compactedRows, compactionBridge } from './mechanical.ts'
+import { compactedRows, compactionBridge, mounted } from './mechanical.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
@@ -54,26 +54,27 @@ export const register: Register = (on) => {
     return { ...answer, description: withDedicatedToolGuidance(answer.description) }
   })
 
-  // Off: the original note-only hook, unchanged. On: the main conversation
-  // compacts through Fluid, or falls back with the original event. Precompute
-  // is skipped so it cannot spend a summarizer request ahead of the threshold.
-  // Subagents always pass through untouched.
+  // Not mounted: the original note-only hook, unchanged. Mounted: the main
+  // conversation compacts through Fluid, or falls back with the original
+  // event. Precompute is skipped so it cannot spend a summarizer request ahead
+  // of the threshold. Subagents always pass through untouched.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     // A sufficiently large --resume may compact before session.start itself.
-    // Capture lazily in that case; an off switch still takes the old branch.
+    // Capture lazily in that case; no compaction route still takes the old branch.
     if (!bridgeInitialized) {
       try {
-        const flag = await $.env.get('FLUID_CLAUDE_MOD_COMPACTION')
-        if (['1', 'true', 'yes', 'on'].includes((flag ?? '').trim().toLowerCase())) {
+        const route = await $.env.get('FLUID_CLAUDE_MOD_COMPACT_URL')
+        const found = bridgeFrom(await $.env.get('FLUID_CLAUDE_MOD_URL'),
+          await $.env.get('FLUID_CLAUDE_MOD_TOKEN'), await $.env.get('FLUID_CLAUDE_MOD_SOCKET'))
+        if (mounted(found, route)) {
           mechanical = true
-          bridge = bridgeFrom(await $.env.get('FLUID_CLAUDE_MOD_URL'),
-            await $.env.get('FLUID_CLAUDE_MOD_TOKEN'), await $.env.get('FLUID_CLAUDE_MOD_SOCKET'))
+          bridge = found
           bridgeInitialized = true
           await $.env.set('FLUID_CLAUDE_MOD_URL', undefined)
           await $.env.set('FLUID_CLAUDE_MOD_TOKEN', undefined)
           await $.env.set('FLUID_CLAUDE_MOD_SOCKET', undefined)
-          await $.env.set('FLUID_CLAUDE_MOD_COMPACTION', undefined)
+          await $.env.set('FLUID_CLAUDE_MOD_COMPACT_URL', undefined)
         }
       } catch {
         try { await $.ui.log('Fluid compaction fallback: bridge initialization error', { to: 'debug' }) } catch { /* Best effort. */ }
@@ -132,14 +133,14 @@ export const register: Register = (on) => {
     const token = await $.env.get('FLUID_CLAUDE_MOD_TOKEN')
     const socketPath = await $.env.get('FLUID_CLAUDE_MOD_SOCKET')
     bridge = bridgeFrom(url, token, socketPath)
-    const compact = await $.env.get('FLUID_CLAUDE_MOD_COMPACTION')
-    mechanical = ['1', 'true', 'yes', 'on'].includes((compact ?? '').trim().toLowerCase())
+    const route = await $.env.get('FLUID_CLAUDE_MOD_COMPACT_URL')
+    mechanical = mounted(bridge, route)
     bridgeInitialized = true
     try {
       if (url !== undefined) await $.env.set('FLUID_CLAUDE_MOD_URL', undefined)
       if (token !== undefined) await $.env.set('FLUID_CLAUDE_MOD_TOKEN', undefined)
       if (socketPath !== undefined) await $.env.set('FLUID_CLAUDE_MOD_SOCKET', undefined)
-      if (compact !== undefined) await $.env.set('FLUID_CLAUDE_MOD_COMPACTION', undefined)
+      if (route !== undefined) await $.env.set('FLUID_CLAUDE_MOD_COMPACT_URL', undefined)
     } catch {
       // Left in the environment; the report still goes out.
     }

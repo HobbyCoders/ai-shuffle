@@ -1235,6 +1235,38 @@ async def update_commit_attribution(
 
 
 # ============================================================================
+# Claude compaction
+# ============================================================================
+
+class ClaudeCompactionResponse(BaseModel):
+    enabled: bool
+
+
+class ClaudeCompactionUpdateRequest(BaseModel):
+    enabled: StrictBool
+
+
+@router.get("/claude-compaction", response_model=ClaudeCompactionResponse)
+async def get_claude_compaction(token: str = Depends(require_auth)):
+    """Whether Claude sessions compact through AI Shuffle (on by default)."""
+    from app.core import claude_compaction
+
+    return ClaudeCompactionResponse(enabled=await run_sync(claude_compaction.read))
+
+
+@router.put("/claude-compaction", response_model=ClaudeCompactionResponse)
+async def update_claude_compaction(
+    request: ClaudeCompactionUpdateRequest,
+    token: str = Depends(require_admin),
+):
+    """Save the network-shared setting. Applies at the next Claude session start."""
+    from app.core import claude_compaction
+
+    await run_sync(claude_compaction.write, request.enabled)
+    return ClaudeCompactionResponse(enabled=request.enabled)
+
+
+# ============================================================================
 # Subagent default (#1827)
 # ============================================================================
 

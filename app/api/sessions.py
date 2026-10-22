@@ -1253,6 +1253,13 @@ async def get_live_session(
         "provider_id": session.get("provider_id"),
         "effort": session.get("effort"),
         "context_window": session.get("context_window"),
+        # The rest of the composer binding (#418). A hidden Task worker has no
+        # sidebar row, so without these the composer showed the previous chat's
+        # agent, Ask and Fast off, and the next owner message sent them. The
+        # session row carries them for every caller that may read it.
+        "profile_id": session.get("profile_id"),
+        "permission_mode": session.get("permission_mode"),
+        "fast": bool(session.get("fast")),
         # An archived chat opens read-only (no composer) until restored (#1822).
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.

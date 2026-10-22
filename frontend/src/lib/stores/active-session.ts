@@ -42,6 +42,7 @@ import { createSessionInit, setSkipRestore, bumpInitGeneration } from './session
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
+import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } from './session/composer-binding';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
@@ -208,6 +209,12 @@ export interface ActiveSessionState {
 	 *  a cleared prompt cache whenever it flips. Only offered on models that
 	 *  support it (`isFastModeCapable`); false everywhere else. */
 	fastMode: boolean;
+	/** Agent / access / Fast fields that still hold a placeholder until the
+	 *  session's own binding arrives from `/live` (#418). Shown as loading and
+	 *  never sent. See session/composer-binding.ts. */
+	bindingUnhydrated?: ComposerBindingFlags;
+	/** Agent / access / Fast fields changed locally and not sent yet. */
+	bindingPicks?: ComposerBindingFlags;
 	/** Additional projects for this chat only. The main project remains its cwd. */
 	workspaceProjectIds?: string[];
 	/** Semantic 1M vs model-family standard-window choice for eligible GPT/Claude models. */
@@ -315,6 +322,10 @@ export interface PersistedSession {
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
 	fastMode?: boolean;
+	/** Which of profile / access / Fast this snapshot holds as real values.
+	 *  Absent on snapshots written before #418, which are not trusted for them. */
+	bindingHydrated?: ComposerBindingFlags;
+	bindingPicks?: ComposerBindingFlags;
 	workspaceProjectIds?: string[];
 	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent?: ExecutionMode;
@@ -379,6 +390,8 @@ function defaultState(): ActiveSessionState {
 		permissionModeOverride: getPersistedPermissionMode(),
 		effortLevelOverride: getPersistedEffort(),
 		fastMode: getPersistedFastMode(),
+		bindingUnhydrated: {},
+		bindingPicks: {},
 		workspaceProjectIds: [],
 		contextWindowChoice: getPersistedContextWindowChoice(),
 		pendingPermissions: [],
@@ -811,7 +824,10 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				appData.mergeSessionPatch(sessionId, { context_window: saved.context_window });
 			}
 			const cached = sessionEphemeralCache.restore(sessionId);
-			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, [stateKey]: selected });
+			if (cached) sessionEphemeralCache.save(sessionId, {
+				...cached, [stateKey]: selected,
+				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
+			});
 		} catch (error) {
 			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
 				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${error instanceof Error ? error.message : String(error)}`,
@@ -837,6 +853,8 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
 	_update(s => ({
 		...s, [stateKey]: selected,
+		// An acknowledged (or new-compose) Fast pick is a real value (#418).
+		...(field === 'fast' ? markBindingHydrated(s, 'fast') : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
 	}));
 	persistSession();
@@ -992,7 +1010,7 @@ export const activeSession = {
 	// ── Profile & Project ───────────────────────────────────────────
 
 	setProfile(profileId: string) {
-		_update(s => ({ ...s, profile: profileId }));
+		_update(s => ({ ...s, profile: profileId, ...markBindingPicked(s, 'profile') }));
 		composerPreferences.set('profile', profileId);
 		persistSession();
 	},
@@ -1063,12 +1081,13 @@ export const activeSession = {
 		if (attachedSinceSaved(saved, row)) {
 			const permissionMode = normalizePermissionMode(row?.permission_mode ?? 'default') ?? 'default';
 			const cached = sessionEphemeralCache.restore(sessionId!);
-			if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode });
+			if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
 			_update(s => ({
 				...s, mode,
 				project: row?.project_id ?? '', projectV2Id: row?.project_v2_id ?? null,
 				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
 				permissionModeOverride: permissionMode,
+				...markBindingHydrated(s, 'permission'),
 			}));
 			persistSession();
 			return mode;
@@ -1130,7 +1149,7 @@ export const activeSession = {
 		// copy a later switch-back restores. The owner's remembered pick for
 		// NEW sessions is theirs and stays as it was.
 		const cached = sessionEphemeralCache.restore(sessionId);
-		if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode });
+		if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
 		if (_state.sessionId !== sessionId) return;
 		_update(s => ({
 			...s,
@@ -1142,6 +1161,7 @@ export const activeSession = {
 			worktreeBranch: '',
 			selectedWorktreeBranch: null,
 			permissionModeOverride: permissionMode,
+			...markBindingHydrated(s, 'permission'),
 		}));
 		persistSession();
 	},
@@ -1166,7 +1186,20 @@ export const activeSession = {
 	// also update the running engine without interrupting its turn. Picks outlive
 	// this tab and become defaults for the NEXT new chat, including Bypass.
 
-	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode: fastModeForModel(model, s.fastMode) })); setPersistedRunBinding('model', model); persistSession(); },
+	setModelOverride(model: string | null) {
+		_update(s => {
+			const fastMode = fastModeForModel(model, s.fastMode);
+			// A model with no tier, or one with the owner's own pick, decides Fast
+			// for the (unsent) model switch. Otherwise the session's value stands,
+			// placeholder included (#418).
+			const implied = !isFastModeCapable(model || getDefaultModel()) || composerPreferences.fastForModel(model) != null;
+			return {
+				...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode,
+				...(implied && (fastMode !== s.fastMode || s.bindingUnhydrated?.fast) ? markBindingPicked(s, 'fast') : {}),
+			};
+		});
+		setPersistedRunBinding('model', model); persistSession();
+	},
 	async setPermissionModeOverride(mode: string | null) {
 		mode = normalizePermissionMode(mode);
 		const generation = ++permissionSelectionGeneration;
@@ -1179,14 +1212,14 @@ export const activeSession = {
 			if (sessionOwnerEpoch() !== ownerEpoch) return;
 			mode = saved.permission_mode;
 			const cached = sessionEphemeralCache.restore(sessionId);
-			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: mode });
+			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, permissionModeOverride: mode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
 		}
 		// Remember acknowledged choices even after navigation, but never overwrite
 		// a newer explicit pick or apply the reply to a different open session.
 		if (generation !== permissionSelectionGeneration) return;
 		setPersistedRunBinding('permissionMode', mode);
 		if (_state.sessionId !== sessionId) return;
-		_update(s => ({ ...s, permissionModeOverride: mode }));
+		_update(s => ({ ...s, permissionModeOverride: mode, ...markBindingHydrated(s, 'permission') }));
 		persistSession();
 	},
 	setEffortLevelOverride(level: string | null, remember = true) { return setLiveRunSetting('effort', level, remember); },

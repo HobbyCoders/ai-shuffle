@@ -279,6 +279,8 @@ describe('attaching a project (#371)', () => {
 		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({
 			sessionId: 'attach-me', mode: 'chat', title: 'Chat', profile: 'p', project: '', projectV2Id: null,
 			permissionModeOverride: 'bypassPermissions', modelOverride: null, effortLevelOverride: null,
+			// Written by a build that records which binding fields are real (#418).
+			bindingHydrated: { profile: true, permission: true, fast: true },
 		}));
 		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
 		activeSession.current.sessionId = null;

@@ -2006,8 +2006,10 @@ async def test_argv_carries_strict_mcp_config_with_the_written_config(tmp_path) 
     finally:
         await loop.aclose()
 
+    # No tool and no mod route (the compaction route is on by default).
     empty = DelegatedLoop(
         store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(), registry=ToolRegistry(),
+        claude_mod_compaction=False,
     )
     try:
         await empty._start_bundled_server()

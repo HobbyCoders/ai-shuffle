@@ -1421,13 +1421,16 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
     the session's leftover audio connection instead of being refused."""
     from app.api.ws_auth import authenticate_websocket
     from app.api.ws_key_watch import watch_api_key
-    from app.core import voice_stream
+    from app.core import preview_access, voice_stream
 
-    authenticated, api_user = await authenticate_websocket(websocket, token)
-    if not authenticated:
-        await websocket.close(code=4001, reason="Unauthorized")
-        return
     try:
+        # Apply the cookie ceiling before even an independent owner can join,
+        # resume/take over a call, or resolve any provider credentials.
+        preview_access.enforce_limits(websocket)
+        authenticated, api_user = await authenticate_websocket(websocket, token)
+        if not authenticated:
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
         settings = await _require_voice_enabled()
         row = await _load_voice_session(session_id, check_eligible=True)
         _check_voice_session_access(api_user, row)

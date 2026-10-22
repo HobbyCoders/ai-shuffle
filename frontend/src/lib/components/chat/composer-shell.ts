@@ -117,6 +117,8 @@ export interface ComposerSheetProps {
 	onEffortSelect: (value: string) => void;
 	fastSupported?: boolean;
 	fastEnabled?: boolean;
+	/** The chat's own Fast setting has not loaded yet (#418): show it loading and hold the toggle. */
+	fastPending?: boolean;
 	onToggleFast?: () => void;
 	showCodeControls?: boolean;
 	/** Agent, workspace, branch and runner selectors (off in the assistant's home). */
@@ -125,6 +127,8 @@ export interface ComposerSheetProps {
 	showEffort?: boolean;
 	permissionOptions: ComposerControlOption[];
 	permissionValue: string | null;
+	/** The chat's own tool access has not loaded yet (#418): show it loading, never as Ask. */
+	permissionPending?: boolean;
 	/** The session write is pending; keep the saved choice visible until it succeeds. */
 	permissionUpdating?: boolean;
 	onPermissionSelect: (value: string) => void;

@@ -7,12 +7,12 @@ import json
 import pytest
 
 from fluid.engine.claude_mod_compaction import (
-    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, compact_messages, compaction_enabled,
+    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, compact_messages,
 )
 from fluid.context.compaction import CompactionConfig
 from fluid.context.recall import expand_ref
 from fluid.context.trim import TrimConfig
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import CLAUDE_MOD_COMPACT_URL_ENV, DelegatedLoop
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.store.base import MemoryStore, SessionNode, new_id
 from fluid.tools.mcp.bundled_server import JsonHttpRoute, serve_registry_socket
@@ -44,9 +44,53 @@ def config(**kw):
     return CompactionConfig(trim=TrimConfig(keep_recent_tool_results=2), **kw)
 
 
-@pytest.mark.parametrize('value,expected', [(None, False), ('', False), ('false', False), ('typo', False), ('1', True), ('true', True), (' On ', True)])
-def test_switch_is_explicit_opt_in(value, expected):
-    assert compaction_enabled({} if value is None else {'FLUID_CLAUDE_MOD_COMPACTION': value}) is expected
+def test_on_by_default_and_the_host_decides():
+    assert DelegatedLoop(store=MemoryStore(), model='m').claude_mod_compaction is True
+    assert DelegatedLoop(store=MemoryStore(), model='m', claude_mod_compaction=False).claude_mod_compaction is False
+
+
+class _Recording(dict):
+    """An environment that remembers every name looked up in it."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.read = set()
+
+    def get(self, key, default=None):
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self.read.add(key)
+        return super().__contains__(key)
+
+
+@pytest.mark.parametrize('chosen', [True, False])
+async def test_no_environment_variable_decides_compaction(monkeypatch, chosen):
+    import os
+    # Every compaction-looking name set to the opposite of the host's choice.
+    env = _Recording({**os.environ, **{
+        name: ('0' if chosen else '1')
+        for name in ('FLUID_COMPACTION', 'CLAUDE_MOD_COMPACTION', 'FLUID_CLAUDE_COMPACTION')
+    }})
+    monkeypatch.setattr(os, 'environ', env)
+    loop = DelegatedLoop(store=MemoryStore(), model='m', registry=ToolRegistry(),
+                         env={'FLUID_COMPACTION': '0' if chosen else '1'},
+                         claude_mod_compaction=chosen)
+    await loop._ensure_session()
+    await loop._start_bundled_server()
+    loop._claude_mod_dir = 'staged'
+    try:
+        assert loop.claude_mod_compaction is chosen
+        assert loop._compaction_route is chosen
+        assert (CLAUDE_MOD_COMPACT_URL_ENV in loop._claude_mod_env()) is chosen
+        assert not [name for name in env.read if 'COMPACT' in name.upper()]
+    finally:
+        await loop.aclose()
 
 
 def test_handles_originals_pairs_and_recovery():
@@ -124,10 +168,9 @@ def test_unknown_history_does_not_create_a_fake_recall_path():
         compact_messages(rows, [])
 
 
-async def test_producing_stream_frames_through_loop_route_and_history_tools(monkeypatch):
+async def test_producing_stream_frames_through_loop_route_and_history_tools():
     from fluid.tools.builtins.history_expand import handler as expand
     from fluid.tools.builtins.history_search import handler as search
-    monkeypatch.setenv('FLUID_CLAUDE_MOD_COMPACTION', '1')
     registry = ToolRegistry()
     register_builtins(registry)
     store = MemoryStore()
@@ -158,7 +201,8 @@ async def test_producing_stream_frames_through_loop_route_and_history_tools(monk
     loop._claude_mod_dir = 'staged'
     try:
         env = loop._claude_mod_env()
-        assert env['FLUID_CLAUDE_MOD_COMPACTION'] == '1'
+        assert env[CLAUDE_MOD_COMPACT_URL_ENV].endswith(COMPACT_PATH)
+        assert env[CLAUDE_MOD_COMPACT_URL_ENV].removesuffix(COMPACT_PATH) == env['FLUID_CLAUDE_MOD_URL'].removesuffix('/claude-mod/usage')
         status, body = await request(loop._socket_path, {'v': 1, 'messages': rows}, token=loop._mod_token)
         assert status == 200
         assert 'HistoryExpand' in json.dumps(body)
@@ -276,14 +320,13 @@ async def test_parallel_frames_compact_as_paired_built_groups():
     assert len(json.dumps(output)) < len(json.dumps(rows))
 
 
-async def test_loop_off_does_not_expose_route_and_on_injects_recall(monkeypatch):
-    monkeypatch.delenv('FLUID_CLAUDE_MOD_COMPACTION', raising=False)
-    loop = DelegatedLoop(store=MemoryStore(), model='m', registry=ToolRegistry())
+async def test_loop_off_does_not_expose_route_and_on_injects_recall():
+    loop = DelegatedLoop(store=MemoryStore(), model='m', registry=ToolRegistry(),
+                         claude_mod_compaction=False)
     await loop._ensure_session()
     await loop._start_bundled_server()
     assert not loop._compaction_route
     await loop.aclose()
-    monkeypatch.setenv('FLUID_CLAUDE_MOD_COMPACTION', 'true')
     loop = DelegatedLoop(store=MemoryStore(), model='m', registry=ToolRegistry())
     await loop._ensure_session()
     await loop._start_bundled_server()

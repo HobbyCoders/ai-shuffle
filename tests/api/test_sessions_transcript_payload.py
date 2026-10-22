@@ -588,6 +588,44 @@ class TestLiveEndpointPayload:
         meta = self._live(api_client, "?include_messages=false", {"away_mode": away}).json()["session_meta"]
         assert meta["away_mode"] is away
 
+    @pytest.mark.parametrize("query", ["", "?include_messages=false"])
+    def test_snapshot_carries_the_worker_composer_binding(self, api_client, query):
+        # #418: a hidden Task worker has no sidebar row, so /live is the only
+        # place its composer can learn the agent, access and Fast it runs on.
+        meta = self._live(api_client, query, {
+            "profile_id": "investigator",
+            "permission_mode": "bypassPermissions",
+            "fast": True,
+            "hidden": True,
+            "is_worker": True,
+        }).json()["session_meta"]
+        assert meta["profile_id"] == "investigator"
+        assert meta["permission_mode"] == "bypassPermissions"
+        assert meta["fast"] is True
+        assert meta["is_worker"] is True
+
+    def test_unset_binding_is_reported_as_the_backend_defaults(self, api_client):
+        # A row that never stored Fast or access runs with Fast off and Ask.
+        meta = self._live(api_client, "?include_messages=false", {
+            "permission_mode": None, "fast": None,
+        }).json()["session_meta"]
+        assert meta["profile_id"] == "default"
+        assert meta["permission_mode"] is None
+        assert meta["fast"] is False
+
+    def test_binding_stays_behind_the_transcript_gate(self, api_client):
+        from fastapi import HTTPException
+
+        async def denied(_request, _session):
+            raise HTTPException(status_code=403, detail="no")
+
+        with patch("app.api.sessions_helpers.check_transcript_access", side_effect=denied):
+            response = self._live(api_client, "?include_messages=false", {
+                "permission_mode": "bypassPermissions", "fast": True,
+            })
+        assert response.status_code == 403
+        assert "session_meta" not in response.json()
+
     def test_owner_fields_are_opt_in(self, api_client):
         def annotate(rows):
             for row in rows:

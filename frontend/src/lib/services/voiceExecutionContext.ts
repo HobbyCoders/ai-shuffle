@@ -4,6 +4,7 @@ import { selectedContextWindow } from '$lib/stores/session/context-window';
 import { getDefaultModel } from '$lib/constants/models';
 import { get } from 'svelte/store';
 import { assistantState, isAssistantHome } from '$lib/stores/assistant';
+import { isBindingUnhydrated } from '$lib/stores/session/composer-binding';
 
 const writes = new Map<string, { key: string; done: Promise<void> }>();
 
@@ -13,9 +14,12 @@ export function voiceContextFor(state: ActiveSessionState): VoiceExecutionContex
 		model,
 		// The assistant's home carries no effort at all (see effortToSend).
 		...(isAssistantHome(state.sessionId, get(assistantState)) ? {} : { effort: state.effortLevelOverride || null }),
-		permission_mode: state.permissionModeOverride || null,
+		// An existing session's access and Fast still loading are placeholders
+		// (#418): leave the key out so the call keeps the session's own value.
+		// `null` is not "unknown" here — it explicitly clears to inherit.
+		...(state.sessionId && isBindingUnhydrated(state, 'permission') ? {} : { permission_mode: state.permissionModeOverride || null }),
 		context_window: selectedContextWindow(state) ?? null,
-		fast: state.fastMode
+		...(state.sessionId && isBindingUnhydrated(state, 'fast') ? {} : { fast: state.fastMode })
 	};
 }
 
