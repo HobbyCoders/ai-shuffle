@@ -618,6 +618,8 @@ the existing network settings sync. Each executing worker reads its local copy
 when connecting a session, including Task and subagent children. Changes apply
 on the next connection, not to an already-connected session's cached prefix;
 a peer must receive settings sync before starting a child with the new value.
+A remote peer worker only honours this setting if its build includes the
+attribution feature; older peers keep their previous attribution behaviour.
 
 Native providers receive one stable system-prompt instruction. Delegated Claude
 receives `attribution.commit` and `attribution.pr` through CLI `--settings`
