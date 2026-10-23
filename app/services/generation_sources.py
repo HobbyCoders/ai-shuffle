@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.core.generation_resolver import Candidate, DO_NOT_RETRY, RunContext, UNKNOWN_PRICE, price_total
+from app.core.generation_resolver import Candidate, DO_NOT_RETRY, INCLUDED_PRICE, RunContext, UNKNOWN_PRICE, price_total
 from app.db.async_database import run_sync
 
 # Only these kinds have per-account stored Native generation settings.
@@ -113,7 +113,8 @@ class Sources:
                 combination = stored.model_dump()
                 if model and combination["model"] != model:
                     continue
-                price = dict(UNKNOWN_PRICE)
+                # Plan images carry no per-item charge on the verified route.
+                price = dict(INCLUDED_PRICE) if kind == "image" and name in ("chatgpt", "supergrok") else dict(UNKNOWN_PRICE)
                 if name == "supergrok" and kind == "video":
                     from app.core.provider.native_video import estimate_price
                     price = estimate_price(native.NativeVideoSettings(**combination))

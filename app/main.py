@@ -672,6 +672,8 @@ app.include_router(plugins.router)
 app.include_router(notes.router)
 app.include_router(hooks.router)
 app.include_router(generation.router)
+from app.api import generation_choices as generation_choices_api
+app.include_router(generation_choices_api.router)
 app.include_router(project_agents.router)
 app.include_router(project_plugins.router)
 app.include_router(project_memory.router)

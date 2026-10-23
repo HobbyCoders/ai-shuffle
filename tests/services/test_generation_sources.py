@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app.core.generation_resolver import Candidate, Resolver, RunContext, UNKNOWN_PRICE
+from app.core.generation_resolver import Candidate, INCLUDED_PRICE, Resolver, RunContext, UNKNOWN_PRICE
 from app.services.generation_sources import Sources
 from app.services.fal_schema import ModelSchema, ParamField
 
@@ -52,7 +52,10 @@ async def test_catalog_does_not_serialize_credentials_and_uses_verified_table(ba
     chatgpt = next(e for e in entries if e.source == "chatgpt")
     assert chatgpt.options == {"size": "auto", "quality": "auto", "format": "png"}
     assert chatgpt.verified
-    assert chatgpt.price == UNKNOWN_PRICE
+    # Plan images have no per-item charge: a known zero, never an unknown price.
+    assert chatgpt.price == INCLUDED_PRICE
+    assert next(e for e in entries if e.source == "supergrok").price == INCLUDED_PRICE
+    assert all(e.price == UNKNOWN_PRICE for e in entries if e.source in ("openai", "xai"))
     api = (await backend.local_catalog("image", source="api-a"))[0]
     assert not api.available and not api.verified
 
@@ -122,9 +125,26 @@ async def test_flat_fal_prices_count_canonical_options_and_unknown_is_not_zero(b
     assert await backend.fal_price("fake/model", {}) == UNKNOWN_PRICE
 
 
+async def test_plan_image_is_included_and_reserves_nothing(backend, monkeypatch):
+    from decimal import Decimal
+    from app.network import generation
+    reserve = AsyncMock(return_value=True)
+    monkeypatch.setattr(generation, "reserve", reserve)
+    execute = AsyncMock(return_value={"success": True, "image_url": "/a"})
+    monkeypatch.setattr(backend, "execute_local", execute)
+    output = await Resolver(backend).generate("image", {"prompt": "tree", "source": "plan-a"}, CONTEXT)
+    assert output["status"] == "completed" and output["price"] == INCLUDED_PRICE
+    reserve.assert_awaited_once_with(Decimal("0"))
+    execute.assert_awaited_once()
+
+
 async def test_unpriced_plan_is_not_submitted_even_when_confirmed(backend, monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr(backend, "execute", execute)
+    original = backend.local_catalog
+    async def unpriced(*args, **kw):
+        return [replace(c, price=dict(UNKNOWN_PRICE)) for c in await original(*args, **kw)]
+    monkeypatch.setattr(backend, "local_catalog", unpriced)
     output = await Resolver(backend).generate("image", {"prompt": "tree", "source": "plan-a", "confirmed": True}, CONTEXT)
     assert output["reason"] == "price_unavailable"
     execute.assert_not_awaited()
