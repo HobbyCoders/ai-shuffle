@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def source_inventory():
     inventory = {}
     for path in (ROOT / "desktop/test").glob("source-updates*.test.mjs"):
-        chunks = re.split(r"(?=^test\()", path.read_text(), flags=re.M)[1:]
+        chunks = re.split(r"(?=^test\()", path.read_text(encoding="utf-8"), flags=re.M)[1:]
         for chunk in chunks:
             name = re.match(r"test\((.*?),\s*(?:async|\()", chunk)[1]
             assert name not in inventory, name
@@ -23,15 +23,15 @@ def source_inventory():
 
 
 def test_source_update_cases_and_assertions_are_preserved():
-    expected = json.loads((Path(__file__).with_name("source-updates-inventory.json")).read_text())
+    expected = json.loads((Path(__file__).with_name("source-updates-inventory.json")).read_text(encoding="utf-8"))
     assert source_inventory() == expected
-    helper = (ROOT / "desktop/test/helpers/source-updates-fixture.mjs").read_text()
+    helper = (ROOT / "desktop/test/helpers/source-updates-fixture.mjs").read_text(encoding="utf-8")
     assert "fs.mkdtemp(" in helper and "t.after(()=>fs.rm(" in helper
 
 
 def workflow(name):
     import yaml
-    return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
+    return yaml.load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
 def test_gates_fail_closed_for_failed_cancelled_skipped_and_missing_branches():
@@ -148,7 +148,9 @@ def test_chromium_install_phases_fail_closed_without_retrying_tests(tmp_path):
                        if step.get("name") == step_name)
         for os_result, browser_result in [(0, 0), (9, 0), (0, 7)]:
             calls.write_text("")
-            bash = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == "nt" else "bash"
+            # Git's usr/bin/bash.exe, not the bin/bash.exe launcher: the launcher
+            # puts /usr/bin ahead of PATH, so its real timeout beat the shim.
+            bash = str(Path(os.environ["ProgramFiles"]) / "Git/usr/bin/bash.exe") if os.name == "nt" else "bash"
             result = subprocess.run([bash, "-e", "-c", command],
                                     env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                                          "CALLS": calls.as_posix(), "OS_RESULT": str(os_result),
