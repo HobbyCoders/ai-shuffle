@@ -201,11 +201,87 @@ async def test_run_fal_model_keeps_non_text_models(monkeypatch):
     assert output["status"] == "completed"  # priced: same guard as the generation tools
     assert backend.calls[0] == ("prepare", entry.account, {"size": "square", "image_url": "https://x/y.png"})
     legacy.assert_not_awaited()
-    # Prompt-less (audio-to-audio style) or unpriceable calls take the previous path.
-    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=ModelSchema("fal-ai/a2a", [ParamField("audio_url", type="file")], None)))
-    main = {"endpoint_id": "fal-ai/a2a", "input": {"audio_url": "https://x/a.wav"}}
-    assert payload(await tools["runFalModel"].handler(main))["lane"] == "settings"
-    legacy.assert_awaited_once_with(main)
+
+
+@pytest.mark.parametrize("unattended", [False, True])
+@pytest.mark.parametrize("invalid", ["promptless", "missing_schema", "unknown_kind", "invalid_input"])
+async def test_run_fal_model_unsupported_inputs_never_use_the_raw_handler(monkeypatch, unattended, invalid):
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    schema = ModelSchema("fal-ai/x", [ParamField("prompt", is_primary_text=True)], "prompt")
+    args = {"endpoint_id": "fal-ai/x", "input": {"prompt": "p"}, "output_type": "image"}
+    if invalid == "promptless":
+        schema = ModelSchema("fal-ai/x", [ParamField("audio_url", type="file")], None)
+        args["input"] = {"audio_url": "https://x/a.wav"}
+    elif invalid == "missing_schema":
+        schema = None
+    elif invalid == "unknown_kind":
+        args["output_type"] = "unknown"
+    else:
+        args["input"] = None
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    tools, backend, legacy = lane_tools(monkeypatch, [], replace(INTERACTIVE, unattended=unattended))
+    backend.fal_key = AsyncMock(return_value="key")
+    output = payload(await tools["runFalModel"].handler(args))
+    assert output["status"] == ("skipped" if unattended else "refused")
+    assert output["reason"] == "invalid_request"
+    assert "Nothing was submitted" in output["message"]
+    legacy.assert_not_awaited()
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+async def test_run_fal_model_unattended_without_a_choice_skips_and_reports(monkeypatch, unreadable):
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    schema = ModelSchema("fal-ai/x", [ParamField("prompt", is_primary_text=True)], "prompt")
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate(model="fal-ai/x")],
+                                        replace(UNATTENDED, choices_unreadable=unreadable))
+    backend.fal_key = AsyncMock(return_value="key")
+    output = payload(await tools["runFalModel"].handler({"endpoint_id": "fal-ai/x", "input": {"prompt": "p"}, "output_type": "image"}))
+    assert output["status"] == "skipped"
+    assert output["reason"] == ("choices_unreadable" if unreadable else "no_stored_choice")
+    assert output["message"]
+    legacy.assert_not_awaited()
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("unattended", [False, True])
+@pytest.mark.parametrize("reason", ["price_unavailable", "no_match", "unavailable", "invalid_request", "daily_cap", "needs_confirmation", None])
+async def test_run_fal_model_always_uses_the_spending_guard(monkeypatch, unattended, reason):
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    schema = ModelSchema("fal-ai/x", [ParamField("prompt", is_primary_text=True)], "prompt")
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    entry = candidate(model="fal-ai/x")
+    if reason == "price_unavailable":
+        entry = replace(entry, price=dict(UNKNOWN_PRICE))
+    elif reason == "unavailable":
+        entry = replace(entry, available=False, reason="Unavailable")
+    elif reason == "needs_confirmation":
+        entry = replace(entry, price={**entry.price, "amount": "1", "total": "1"})
+    context = replace(INTERACTIVE, unattended=unattended, job_choice=entry.choice() if unattended else None)
+    tools, backend, legacy = lane_tools(monkeypatch, [] if reason == "no_match" else [entry], context)
+    backend.fal_key = AsyncMock(return_value="key")
+    backend.cap = reason != "daily_cap"
+    if reason == "invalid_request":
+        backend.prepare = AsyncMock(side_effect=ValueError("Invalid model options"))
+    output = payload(await tools["runFalModel"].handler({"endpoint_id": "fal-ai/x", "input": {"prompt": "p"}, "output_type": "image"}))
+    legacy.assert_not_awaited()
+    if reason is None:
+        assert output["status"] == "completed"
+        assert output["price"] == entry.price
+        assert [c[0] for c in backend.calls] == ["prepare", "reserve", "execute"]
+    else:
+        assert not any(c[0] == "execute" for c in backend.calls)
+        if reason == "needs_confirmation" and not unattended:
+            assert output["status"] == "needs-confirmation"
+            assert output["confirmation_token"]
+        else:
+            assert output["status"] == ("skipped" if unattended else "refused")
+            assert output["reason"] == reason
+            if unattended:
+                assert output["message"]
+        if reason != "daily_cap":
+            assert not any(c[0] == "reserve" for c in backend.calls)
 
 
 async def test_run_fal_model_without_a_lane_refuses_what_it_cannot_price(monkeypatch):

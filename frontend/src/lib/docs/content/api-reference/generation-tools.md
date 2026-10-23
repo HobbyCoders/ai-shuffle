@@ -21,11 +21,9 @@ with a 15-second limit; a request pinned to this worker does not ask them. A
 malformed peer reply marks only that worker unavailable, and the fal catalog
 search is returned even when the priced lookup fails.
 
-Every call to the four generation tools that can spend money goes through the
-guard below: a known price, confirmation above the threshold and the daily cap.
-Nothing unpriced runs unasked through them. `runFalModel` is the exception for
-now: unattended or unpriceable calls still take its previous handler (see
-below).
+Every call to the four generation tools or `runFalModel` that can spend money
+goes through the guard below: a known price, confirmation above the threshold
+and the daily cap. Nothing unpriced is submitted, including unattended calls.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -59,11 +57,15 @@ below).
   plan model ID (or its model tail) is accepted as before. A worker that holds
   a fal key applies its own setting too: if its Image generation is the
   ChatGPT plan, it lists no fal image models for peers and refuses to run one.
-- **`runFalModel`** runs any fal endpoint again, including image-to-video and
-  audio-to-audio, with `output_type` optional. An interactive priced call with
-  a text prompt gets the same guard. Unattended calls, and calls the guard
-  cannot price or resolve, take the previous path without a known price. While images are
-  set to the ChatGPT plan it still refuses fal image models.
+- **`runFalModel`** runs fal endpoints with a declared text prompt, including
+  image-to-video, through the same guard. `output_type` is optional when the
+  kind can be inferred. An unattended call needs a remembered or job-stored
+  choice and must pass pricing, confirmation and daily-cap checks; otherwise
+  it skips and reports why. Interactive calls the guard cannot price or resolve
+  are refused, never sent to the previous handler. Missing schemas, unknown
+  output types and prompt-less models (such as audio-to-audio) are refused
+  interactively or skipped unattended. While images are set to the ChatGPT
+  plan it still refuses fal image models.
 - **Old or unreachable peers** are listed as unavailable but never make a
   named request ambiguous when a usable candidate matches.
 - **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
