@@ -153,6 +153,7 @@ from fluid.store.base import (
     replay_source,
 )
 from fluid.tools.mcp.bundled_server import STREAM_LINE_LIMIT
+from fluid.tools.job_object import assign_kill_on_close_job, close_job
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 if TYPE_CHECKING:
@@ -956,6 +957,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._session: SessionMeta | None = None
         self._session_id = session_id
         self._proc: asyncio.subprocess.Process | None = None
+        # Windows kill-on-close job holding the CLI's whole process tree.
+        self._proc_job: int | None = None
         self._req_counter = 0
         self._interrupted = asyncio.Event()
         # Set (and replaced by a fresh one) on every Interrupt: a wait that
@@ -1358,9 +1361,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         it. On POSIX that group is ended as soon as the CLI is gone (#436).
         """
         proc, self._proc = self._proc, None
+        job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
         if proc is None:
+            close_job(job)
             return
+        try:
+            await self._end_process(proc, grace)
+        finally:
+            # Windows: whatever the CLI started, orphans included, ends here.
+            close_job(job)
+
+    async def _end_process(self, proc: asyncio.subprocess.Process, grace: float) -> None:
         if proc.returncode is not None:
             await _end_process_group(proc.pid)
             return
@@ -1760,6 +1772,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             limit=STREAM_LINE_LIMIT,
             **spawn_kwargs,
         )
+        # Windows has no process group to end once the CLI is gone, and
+        # ``taskkill /T`` cannot reach an orphaned grandchild. A kill-on-close
+        # job holds the whole tree; _stop_process closes it (#436). A previous
+        # CLI that exited on its own is replaced here, so its job ends now.
+        close_job(self._proc_job)
+        self._proc_job = assign_kill_on_close_job(self._proc.pid)
         self._stdout_backlog.clear()
         self.cli_hooks_registered = False
         # A new CLI: no wake of the old one to wait for, and the model and
