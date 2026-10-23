@@ -167,7 +167,18 @@ class Resolver:
 
     async def _saved_options_valid(self, candidate, choice) -> bool:
         try:
-            await self.backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, _NEUTRAL_PROMPT)
+            if candidate.source == "fal" and candidate.schema:
+                from app.services.fal_schema import ModelSchema, ParamField
+                # Saved settings are a partial input, not a generation request.
+                # Reuse field validation without requiring per-call media or
+                # injecting defaults for fields the remembered options omit.
+                saved = choice.get("options") or {}
+                schema = ModelSchema(candidate.model, fields=[
+                    ParamField(**f) for f in candidate.schema["fields"] if f["name"] in saved
+                ], primary_text_field=candidate.schema.get("primary_text_field"))
+                schema.validate_options(saved, _NEUTRAL_PROMPT)
+            else:
+                await self.backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, _NEUTRAL_PROMPT)
         except ValueError:
             return False
         return True
