@@ -39,7 +39,7 @@ export async function verifyProviderLogin(browser, fixtureUrl, viewport) {
     const usage = page.getByRole('region', { name: 'Manual balance (fallback only)', exact: true });
     await usage.getByRole('heading', { name: 'Manual balance (fallback only)', exact: true }).waitFor();
     assert.match(await usage.innerText(), /This is not a provider reading/);
-    await page.getByRole('region', { name: 'OpenAI Platform balance (unofficial)', exact: true }).waitFor();
+    await page.getByRole('region', { name: 'OpenAI Platform balance', exact: true }).waitFor();
     // The guidance lives in the row's help tip; showing it is local only.
     const help = usage.getByRole('button', { name: 'About Balance', exact: true });
     await help.focus();
