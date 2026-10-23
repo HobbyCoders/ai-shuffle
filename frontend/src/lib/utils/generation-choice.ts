@@ -91,6 +91,8 @@ export interface ChooseResult {
 	options: GenerationOption[];
 	prompt: string;
 	rememberedUnavailable: boolean;
+	/** The remembered choice has no known price, so it did not run unasked. */
+	rememberedUnpriced: boolean;
 }
 
 export interface RememberedResult {
@@ -155,7 +157,8 @@ export function chooseResult(message: Pick<ChatMessage, 'type' | 'toolName' | 't
 		tool: displayToolName(message.toolName!),
 		options,
 		prompt,
-		rememberedUnavailable: result.remembered_unavailable === true
+		rememberedUnavailable: result.remembered_unavailable === true,
+		rememberedUnpriced: result.remembered_unpriced === true
 	};
 }
 

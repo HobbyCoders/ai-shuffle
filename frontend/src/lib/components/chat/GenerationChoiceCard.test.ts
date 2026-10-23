@@ -195,13 +195,38 @@ describe('GenerationChoiceCard', () => {
 		expect(mocks.del).toHaveBeenCalledWith('/generation/choices/image');
 	});
 
-	it('keeps a one-off pick out of memory when the box is unticked', async () => {
+	it('ticks "use this every time" only for an option that costs nothing, until the box is touched', async () => {
 		card();
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Use this every time for images/ }));
+		const box = () => screen.getByRole('checkbox', { name: /Use this every time for images/ }) as HTMLInputElement;
+		const radios = screen.getAllByRole('radio');
+		expect(box().checked).toBe(false); // fal.ai, priced
+		await fireEvent.click(radios[1]);
+		expect(box().checked).toBe(true); // SuperGrok, included in the plan
+		await fireEvent.click(radios[0]);
+		expect(box().checked).toBe(false);
+		// Once the user sets it, changing the option keeps their setting.
+		await fireEvent.click(box());
+		expect(box().checked).toBe(true);
+		await fireEvent.click(radios[1]);
+		await fireEvent.click(radios[0]);
+		expect(box().checked).toBe(true);
+	});
+
+	it('keeps a priced pick out of memory by default', async () => {
+		card();
 		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
 		await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
 		expect(mocks.put.mock.calls[0][1]).toMatchObject({ remember: false });
 		expect(mocks.send.mock.calls[0][0]).not.toContain('saved');
+	});
+
+	it('keeps an included pick out of memory when the box is unticked', async () => {
+		card();
+		await fireEvent.click(screen.getAllByRole('radio')[1]);
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Use this every time for images/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+		expect(mocks.put.mock.calls[0][1]).toMatchObject({ remember: false });
 	});
 
 	it('cannot run a choice whose options cannot be priced', async () => {
@@ -231,6 +256,11 @@ describe('GenerationChoiceCard', () => {
 	it('says when the remembered choice is unavailable', () => {
 		card({ rememberedUnavailable: true });
 		expect(screen.getByText(/remembered choice for images is not available/)).toBeTruthy();
+	});
+
+	it('says when the remembered choice has no known price', () => {
+		card({ rememberedUnavailable: false, rememberedUnpriced: true });
+		expect(screen.getByText(/remembered choice for images has no known price right now, so it did not run/)).toBeTruthy();
 	});
 
 	it('remembers a pick from Settings without replying in a chat', async () => {

@@ -746,10 +746,14 @@ def _is_interactive_run(
 def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
     """Remembered generation choices of the account behind this run.
 
-    Read only when a generation tool is attached. Reading also migrates the
-    saved Settings media defaults once (app.core.generation_choices).
+    Read only when one of the four generation tools (image, video, audio, 3D)
+    is attached; a searchModels-only or transform-only session neither reads
+    nor migrates. Reading also migrates the saved Settings media defaults once
+    (app.core.generation_choices).
     """
-    if not any((ai_tools_config or {}).values()):
+    from app.mcp.ai_tools_sdk import UNIFIED_TOOL_KINDS, _is_tool_enabled
+
+    if not any(_is_tool_enabled(name, ai_tools_config or {}) for name in UNIFIED_TOOL_KINDS):
         return {"remembered": {}, "last": {}, "migrated": False}
     from app.core import generation_choices
 

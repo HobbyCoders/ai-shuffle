@@ -118,6 +118,49 @@ async def test_missing_remembered_choice_asks_again_interactively_without_spendi
     assert backend.calls == []
 
 
+async def test_unpriced_remembered_choice_is_never_submitted():
+    unpriced = replace(candidate(), price=dict(UNKNOWN_PRICE))
+    priced = candidate(account="account-b", model="model-b")
+    remembered = {"image": {**unpriced.choice(), "origin": "migrated"}}
+    backend = FakeBackend([unpriced, priced])
+    # Interactive: the card again, so the user re-picks a priced option.
+    output = await Resolver(backend).generate("image", {"prompt": "make it"}, replace(INTERACTIVE, remembered_choices=remembered))
+    assert output["status"] == "choose" and output["remembered_unpriced"] is True
+    assert {o["account"] for o in output["options"]} == {"account-a", "account-b"}
+    # Unattended: skipped and reported, pointing at Settings.
+    output = await Resolver(backend).generate("image", {"prompt": "make it"},
+                                              replace(INTERACTIVE, unattended=True, remembered_choices=remembered))
+    assert output["status"] == "skipped" and output["reason"] == "stored_choice_unpriced"
+    assert "no known price" in output["message"] and "Settings > Default models" in output["message"]
+    assert output["choice"]["account"] == "account-a"
+    assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
+    # Naming it explicitly still refuses truthfully, as any unpriced request does.
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "source": "account-a", "model": "model-a"},
+                                              replace(INTERACTIVE, remembered_choices=remembered))
+    assert output["status"] == "refused" and output["reason"] == "price_unavailable"
+
+
+async def test_unusable_remembered_choice_asks_again_interactively():
+    class Strict(FakeBackend):
+        async def prepare(self, c, options, prompt):
+            if options.get("steps") == 99:
+                raise ValueError("steps is out of range")
+            return await super().prepare(c, options, prompt)
+
+    offline = replace(candidate(), available=False, reason="Worker offline")
+    other = candidate(account="account-b", model="model-b")
+    for entries, remembered in (([offline, other], offline.choice()),
+                                ([candidate(), other], {**candidate().choice(), "options": {"steps": 99}})):
+        backend = Strict(entries)
+        output = await Resolver(backend).generate("image", {"prompt": "make it"},
+                                                  replace(INTERACTIVE, remembered_choices={"image": remembered}))
+        assert output["status"] == "choose" and output["remembered_unavailable"] is True
+        output = await Resolver(backend).generate("image", {"prompt": "make it"},
+                                                  replace(INTERACTIVE, unattended=True, remembered_choices={"image": remembered}))
+        assert output["status"] == "refused"
+        assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
+
+
 async def test_remembered_choices_are_per_kind():
     a, b = candidate(), candidate(account="account-b", model="model-b")
     video = candidate(account="account-v", model="model-v", kind="video")

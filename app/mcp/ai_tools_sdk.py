@@ -644,11 +644,19 @@ UNIFIED_TOOL_KINDS = {"generateImage": "image", "generateVideo": "video", "gener
 UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 
 
-# Main's configured-model handlers stay the Settings default ("lane") for each
-# unified name: a call with no source/model, and every unattended call that
-# main's schema could express, runs exactly as before. Step 1 is additive.
-# Refusals that mean "the guard could not price/resolve this" fall back to it;
-# a cap, confirmation or chat-mode refusal never does.
+# How a unified generation call runs (#379):
+# - A remembered choice (an account preference, including one migrated from a
+#   saved Settings default) always goes through the resolver's guard. If the
+#   guard cannot price or run it, an interactive run shows the choice card and
+#   an unattended run skips the step and reports it. Main's unguarded fal
+#   handler never runs a remembered choice: every refusal reason would have
+#   submitted a fal job with no known price, so no fallback is safe there.
+# - A "lane" is main's configured-model handler, kept only where nothing is
+#   remembered: the ChatGPT-plan image tool (#1796), and a saved fal default
+#   that could not be migrated (account preferences unreadable). A call with
+#   no source/model on such a lane runs main's handler as main did, and a
+#   named fal model the guard cannot price/resolve falls back to it. A cap,
+#   confirmation or chat-mode refusal never falls back.
 _LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "invalid_request"}
 _CONFIGURED_MODEL_ENV = {"image": "IMAGE_MODEL", "video": "VIDEO_MODEL", "audio": "AUDIO_MODEL", "3d": "MODEL3D_MODEL"}
 
@@ -694,16 +702,12 @@ def _lane_label(lane: str, kind: str, tool_env: Optional[Dict[str, str]]) -> str
     return f"fal.ai {configured}" if configured else "the fal.ai default model"
 
 
-def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None, legacy_handlers=None):
-    """``legacy_handlers``: main's fal handlers by name. A remembered choice
-    migrated from the Settings default runs through them when the guard cannot
-    price or resolve it, exactly as that saved default ran before."""
+def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     from app.core.generation_resolver import Resolver, RunContext, normalize_source
     from app.services.generation_sources import Sources
 
     context = context or RunContext()
     lanes = {} if context.chat_mode else dict(lanes or {})
-    legacy_handlers = {} if context.chat_mode else dict(legacy_handlers or {})
     backend = Sources(worker, context)
     resolver = Resolver(backend)
     tools = []
@@ -735,16 +739,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None, le
         kind = UNIFIED_TOOL_KINDS.get(name)
         remembered = context.remembered_for(kind) if kind else context.remembered_choice
         return None if context.job_choice or remembered else lanes.get(name)
-
-    def migrated_fallback(kind):
-        """Main's handler for a remembered choice that is the migrated Settings default."""
-        remembered = None if context.job_choice else context.remembered_for(kind)
-        name = next(n for n, k in UNIFIED_TOOL_KINDS.items() if k == kind)
-        if (not remembered or remembered.get("origin") != "migrated" or name not in legacy_handlers
-                or normalize_source(remembered.get("source")) != "fal"
-                or remembered.get("model") != (tool_env or {}).get(_CONFIGURED_MODEL_ENV[kind])):
-            return None
-        return legacy_handlers[name]
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
@@ -802,11 +796,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None, le
             output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
             if fallback is not None and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
                 return await lane[1](fallback)
-            migrated = migrated_fallback(kind)
-            if (migrated and not request.get("source") and not request.get("model") and output.get("status") == "refused"
-                    and output.get("reason") in _LANE_FALLBACK_REASONS):
-                # The saved Settings default this choice came from ran unguarded on main.
-                return await migrated({key: args[key] for key in ("prompt", *legacy) if key in args})
             return _tool_result(output)
         return generate
 
@@ -1014,9 +1003,7 @@ def create_ai_tools_server(
         (tool_env or {}).get(name) for name in fal_credential.ENV_KEYS))
     migrated = bool(getattr(generation_context, "legacy_migrated", False))
     lanes = _settings_lanes(legacy_tools, tool_env, fal_usable, migrated)
-    legacy_handlers = {name: t.handler for name, t in legacy_tools.items() if name in UNIFIED_TOOL_KINDS} if fal_usable else {}
-    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context, lanes=lanes, tool_env=tool_env,
-                                                          legacy_handlers=legacy_handlers)
+    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context, lanes=lanes, tool_env=tool_env)
                          if _is_tool_enabled(t.name, ai_tools_config))
     if not enabled_tools:
         return None

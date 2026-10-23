@@ -445,24 +445,28 @@ async def test_remembered_choice_is_reused_without_asking(monkeypatch, unattende
     legacy.assert_not_awaited()
 
 
-@pytest.mark.parametrize("origin,expected", [("migrated", "legacy"), ("card", "refused")])
-async def test_migrated_settings_choice_keeps_running_when_the_guard_cannot_price_it(monkeypatch, origin, expected):
+@pytest.mark.parametrize("origin", ["migrated", "card"])
+@pytest.mark.parametrize("unattended", [True, False])
+async def test_unpriced_remembered_choice_never_runs_unguarded(monkeypatch, origin, unattended):
+    # A migrated Settings default gets no unguarded fal fallback: the saved
+    # model has no known price, so main's handler would spend an unknown amount.
     from app.services import generation_sources
     entry = replace(candidate(model="fal-ai/x"), price=dict(UNKNOWN_PRICE))
-    backend = FakeBackend([entry])
+    backend = FakeBackend([entry, candidate(account="account-b", model="model-b")])
     monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
     remembered = {"source": "fal", "account": entry.account, "model": "fal-ai/x", "options": {}, "origin": origin}
-    context = replace(UNATTENDED, remembered_choices={"image": remembered}, legacy_migrated=True)
-    handler = AsyncMock(return_value={"content": [{"type": "text", "text": '{"success": true, "lane": "settings"}'}]})
-    tools = {t.name: t for t in sdk._create_unified_tools(None, context, lanes={}, tool_env={"IMAGE_MODEL": "fal-ai/x"},
-                                                          legacy_handlers={"generateImage": handler})}
+    context = replace(UNATTENDED, unattended=unattended, remembered_choices={"image": remembered}, legacy_migrated=True)
+    legacy = _legacy("generateImage", "runFalModel")
+    lanes = sdk._settings_lanes(legacy, {"IMAGE_MODEL": "fal-ai/x"}, True, migrated=True)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, context, lanes=lanes, tool_env={"IMAGE_MODEL": "fal-ai/x"})}
     output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
-    if expected == "legacy":
-        assert output["lane"] == "settings"
-        handler.assert_awaited_once_with({"prompt": "tree"})
+    if unattended:
+        assert output["status"] == "skipped" and output["reason"] == "stored_choice_unpriced"
+        assert "Settings > Default models" in output["message"]
     else:
-        assert output["status"] == "refused" and output["reason"] == "price_unavailable"
-        handler.assert_not_awaited()
+        assert output["status"] == "choose" and output["remembered_unpriced"] is True
+    legacy["generateImage"].handler.assert_not_awaited()
+    assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
 
 
 async def test_server_passes_the_migration_flag_to_the_lanes(monkeypatch):

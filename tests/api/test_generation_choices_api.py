@@ -68,6 +68,24 @@ def test_preview_cookie_cannot_write_choices(mock_db, monkeypatch):
     assert response.status_code == 403
 
 
+@pytest.mark.parametrize("preview", [False, True])
+def test_preview_cookie_lists_choices_without_running_the_migration(mock_db, monkeypatch, preview):
+    from app.core import generation_choices, preview_access
+    from app.network import runners
+    monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
+    monkeypatch.setattr(api, "request_preference_identity", lambda request: IDENTITY)
+    monkeypatch.setattr(preview_access, "grant", lambda request: {"session": "s"} if preview else None)
+    migrations = []
+    monkeypatch.setattr(generation_choices, "migrate", lambda identity: migrations.append(identity))
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_auth] = lambda: "token"
+    with TestClient(app) as client:
+        response = client.get("/api/v1/generation/choices")
+    assert response.status_code == 200 and response.json()["remembered"] == {}
+    assert migrations == ([] if preview else [IDENTITY])
+
+
 class QuoteBackend(FakeBackend):
     async def catalog(self, kind, **kw):
         self.calls.append(("catalog", kw.get("source"), kw.get("model"), kw.get("worker")))

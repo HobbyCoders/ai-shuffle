@@ -27,6 +27,8 @@ SOURCE_ALIASES = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgp
 DO_NOT_RETRY = "Do not call again without the user's go-ahead."
 REMEMBERED_MESSAGE = ("Used the user's remembered choice. They can change it from this result in the chat, "
                       "in Settings > Default models, or by naming another source or model.")
+UNPRICED_SKIP_MESSAGE = ("Generation skipped: the user's saved choice has no known price right now, and nothing unpriced "
+                         "runs unattended. They can pick a priced option again in Settings > Default models.")
 # The chat shows a ``choose`` result as a choice card; the pick arrives as the
 # user's next message. Listing the options again in prose would duplicate it.
 CHOOSE_MESSAGE = ("The user sees these options as a choice card and can remember a pick. "
@@ -169,6 +171,19 @@ class Resolver:
             return result("skipped", reason="no_stored_choice", kind=kind,
                           message="Generation skipped: this unattended run has no remembered or job-stored choice.")
         explicit = bool(args.get("source") or args.get("model"))
+        # The remembered choice is running unasked (nothing named in the call).
+        unasked = from_memory and not explicit
+
+        async def reoffer(flag):
+            # A remembered choice that cannot run is not a refusal in an
+            # interactive run: offer the choices again, without it, and say why.
+            from dataclasses import replace as _replace
+            rest = {k: v for k, v in (context.remembered_choices or {}).items() if k != kind}
+            output = await self.generate(kind, args, _replace(context, remembered_choice=None, remembered_choices=rest),
+                                         exclude_sources=exclude_sources)
+            output[flag] = True
+            return output
+
         choice = stored if context.unattended or not explicit else None
         if choice is None:
             choice = {"source": args.get("source"), "model": args.get("model"), "worker": args.get("worker")}
@@ -183,15 +198,8 @@ class Resolver:
                 # when a usable candidate matches; it never runs either way.
                 candidates = [c for c in candidates if c.available]
             if not candidates:
-                if from_memory and not explicit and not context.unattended:
-                    # A remembered account or model that is gone is not a refusal
-                    # in an interactive run: offer the choices again instead.
-                    from dataclasses import replace as _replace
-                    rest = {k: v for k, v in (context.remembered_choices or {}).items() if k != kind}
-                    output = await self.generate(kind, args, _replace(context, remembered_choice=None, remembered_choices=rest),
-                                                 exclude_sources=exclude_sources)
-                    output["remembered_unavailable"] = True
-                    return output
+                if unasked and not context.unattended:
+                    return await reoffer("remembered_unavailable")
                 return result("refused", reason="no_match", error="No matching source/account and model is available. No other source was used.")
             if context.unattended and len(candidates) != 1:
                 return result("skipped", reason="stored_choice_ambiguous", kind=kind,
@@ -227,13 +235,27 @@ class Resolver:
                 return result("choose", kind=kind, options=views, message=CHOOSE_MESSAGE)
             candidate = candidates[0]
             if not candidate.available or (candidate.source in ("chatgpt", "supergrok") and not candidate.verified):
+                if unasked and not context.unattended:
+                    return await reoffer("remembered_unavailable")
                 return result("refused", price=candidate.price, reason="unavailable", error=candidate.reason or "Subscription combination is not verified.")
             supplied = args.get("options", {})
             if not isinstance(supplied, dict):
                 return result("refused", error="options must be an object.")
             options = {**candidate.options, **(choice.get("options") or {}), **supplied}
-            candidate = await self.backend.prepare(candidate, options, prompt)
+            try:
+                candidate = await self.backend.prepare(candidate, options, prompt)
+            except ValueError:
+                # Saved options the model no longer declares.
+                if unasked and not context.unattended:
+                    return await reoffer("remembered_unavailable")
+                raise
             total = price_total(candidate.price)
+            if total is None and unasked:
+                # Nothing unpriced is ever submitted, a saved choice included.
+                if context.unattended:
+                    return result("skipped", price=candidate.price, reason="stored_choice_unpriced", kind=kind,
+                                  choice=candidate.choice(), message=UNPRICED_SKIP_MESSAGE)
+                return await reoffer("remembered_unpriced")
             if total is None:
                 return result("refused", price=candidate.price, reason="price_unavailable",
                               error="A reliable price is unavailable; generation was not submitted.", choice=candidate.choice())

@@ -32,15 +32,18 @@ Nothing that generates on the previous release stops working.
   video, audio or 3D generation in the previous Default models page is copied
   into the account's remembered choices once, with its saved options. Until
   that migration has run for the account, the saved model keeps running on the
-  previous configured-model path. A migrated choice the guard cannot price
-  still runs on that path, as before. The built-in fal default is not a
-  choice: with nothing saved, the user is asked. The ChatGPT-plan image setting
+  previous configured-model path. Once migrated it is an ordinary remembered
+  choice and always goes through the guard below; it never falls back to the
+  previous unguarded path, because every such fallback would submit a fal job
+  with no known price. The built-in fal default is not a choice: with nothing
+  saved, the user is asked. The ChatGPT-plan image setting
   stays a provider rule and is not migrated. Chat mode has no Settings default.
 - **Named choices** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
-  daily cap. A named fal model that cannot be priced or resolved (unknown
-  price, a model outside the text-to catalog, undeclared inputs) runs on the
-  Settings default path as before. A cap, confirmation or chat-mode refusal
-  never falls back. Outside chat mode, a guarded fal result run on this worker
+  daily cap. While an unmigrated saved Settings default is still in effect
+  (account preferences could not be read), a named fal model that cannot be
+  priced or resolved (unknown price, a model outside the text-to catalog,
+  undeclared inputs) runs on that Settings default path as before. A cap,
+  confirmation or chat-mode refusal never falls back. Outside chat mode, a guarded fal result run on this worker
   also returns the workspace `file_path`, so `editImage` and `imageToVideo`
   can chain on it. A fal request from a peer or a chat with no saved session
   is refused before submission, so no worker-local path is ever returned.
@@ -87,8 +90,14 @@ at most four defaults. IDs below are placeholders, not selectable models.
 
 The `choose` result also carries a `message` telling the agent the user sees
 a card and to wait for the reply. When the remembered choice is no longer
-available, an interactive run returns `choose` with
-`remembered_unavailable: true` instead of refusing.
+available (its account or model is gone, its worker is unreachable, or its
+saved options are no longer declared), an interactive run returns `choose`
+with `remembered_unavailable: true` instead of refusing. When it has no known
+price, an interactive run returns `choose` with `remembered_unpriced: true`,
+so the user re-picks a priced option. An unattended run never submits an
+unpriced remembered choice: it returns `status: "skipped"`,
+`reason: "stored_choice_unpriced"` and a report saying the saved choice has no
+known price and can be picked again in Settings > Default models.
 
 The resolver takes a trusted `RunContext`: `remembered_choice`, `job_choice`,
 `last_choice`, their per-kind maps `remembered_choices` and `last_choices`,
@@ -193,11 +202,14 @@ inferred from resolution names.
 OpenAI/xAI API media routes remain unavailable: this base's Default models
 schema endpoint is fal-only, and its native API capability table declares no
 available media combinations or pricing. ChatGPT/SuperGrok image costs are not
-reported by their native adapters. Their verified image route carries no
-per-item charge, so it is priced `status: "included"` with a zero amount and
-runs without confirmation; it is never used as a substitute for an unknown
-price. They also keep working through the Settings default and the native plan
-tools above. ChatGPT
+reported by their native adapters. Their verified image route runs on the
+account's ChatGPT or SuperGrok subscription login and carries no per-item
+charge, so it is priced `status: "included"` with a zero amount. It runs
+without confirmation and is not counted toward the daily cap: it adds USD 0
+to the day's spending (only a day already past the cap refuses it, like every
+other generation). An included price is never used as a substitute for an
+unknown price. They also keep working through the Settings default and the
+native plan tools above. ChatGPT
 video and native audio/3D have no verified combinations. No new live provider
 generation was exercised for this draft.
 

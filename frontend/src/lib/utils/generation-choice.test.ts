@@ -72,6 +72,8 @@ describe('generation choice results', () => {
 
 	it('flags the remembered choice being unavailable', () => {
 		expect(chooseResult(row('generateImage', { ...choose, remembered_unavailable: true }))?.rememberedUnavailable).toBe(true);
+		expect(chooseResult(row('generateImage', { ...choose, remembered_unpriced: true }))?.rememberedUnpriced).toBe(true);
+		expect(chooseResult(row('generateImage', choose))?.rememberedUnpriced).toBe(false);
 	});
 
 	it('reads a result that used the remembered choice', () => {

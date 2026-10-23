@@ -44,6 +44,7 @@
 		toolId?: string;
 		variant?: 'chat' | 'settings';
 		rememberedUnavailable?: boolean;
+		rememberedUnpriced?: boolean;
 		/** Tests and Settings: override the transcript-derived answer. */
 		answeredBy?: string | null;
 		/** Settings: called after a pick is saved. */
@@ -58,6 +59,7 @@
 		toolId = '',
 		variant = 'chat',
 		rememberedUnavailable = false,
+		rememberedUnpriced = false,
 		answeredBy = undefined,
 		onsaved
 	}: Props = $props();
@@ -88,7 +90,11 @@
 	let quoteError = $state<string | null>(null);
 	let quoting = $state(false);
 	let advancedOpen = $state(false);
-	let remember = $state(true);
+	// "Use this every time" starts ticked only when the selected option costs
+	// nothing (free or included in a plan). Until the box is touched, changing
+	// the selected option re-applies that default.
+	let rememberTouched = $state(false);
+	let rememberPick = $state(false);
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
 	let picked = $state<{ index: number; remembered: boolean } | null>(null);
@@ -101,6 +107,7 @@
 	const label = $derived(KIND_LABEL[kind]);
 	const Icon = $derived(KIND_ICON[kind]);
 	const remembered = $derived(generationChoices.remembered[kind]);
+	const remember = $derived(rememberTouched ? rememberPick : currentPrice.total === 0);
 
 	// Which option a reply picked (it carries the exact model and account).
 	const repliedIndex = $derived.by(() => {
@@ -375,7 +382,11 @@
 	</header>
 
 	{#if !collapsed}
-		{#if rememberedUnavailable}
+		{#if rememberedUnpriced}
+			<p class="gcc-note warn" role="status">
+				<TriangleAlert aria-hidden="true" />Your remembered choice for {label.plural} has no known price right now, so it did not run. Pick another one.
+			</p>
+		{:else if rememberedUnavailable}
 			<p class="gcc-note warn" role="status">
 				<TriangleAlert aria-hidden="true" />Your remembered choice for {label.plural} is not available right now. Pick another one.
 			</p>
@@ -532,7 +543,15 @@
 		<footer class="gcc-foot">
 			{#if variant === 'chat'}
 				<label class="gcc-remember">
-					<input type="checkbox" bind:checked={remember} disabled={settled} />
+					<input
+						type="checkbox"
+						checked={remember}
+						disabled={settled}
+						onchange={(event) => {
+							rememberTouched = true;
+							rememberPick = event.currentTarget.checked;
+						}}
+					/>
 					<span>Use this every time for {label.plural}</span>
 				</label>
 			{/if}

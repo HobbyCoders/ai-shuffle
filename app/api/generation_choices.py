@@ -70,9 +70,17 @@ def _here() -> str:
 
 @router.get("/choices")
 async def list_choices(request: Request, token: str = Depends(require_auth)) -> dict:
-    """Remembered and last picks per kind, after the one-time Settings migration."""
+    """Remembered and last picks per kind, after the one-time Settings migration.
+
+    The migration writes and broadcasts preferences, so an agent-preview cookie
+    only reads (the same rule as ``require_preference_write``).
+    """
+    from app.core import preview_access
+
+    read_only = preview_access.grant(request) is not None
+
     def load():
-        return {**generation_choices.load(_identity(request)), "worker": _here(),
+        return {**generation_choices.load(_identity(request), run_migration=not read_only), "worker": _here(),
                 "kinds": list(generation_choices.KINDS)}
     return await run_sync(load)
 

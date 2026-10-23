@@ -113,6 +113,10 @@ def test_query_options_reads_choices_only_with_generation_tools(monkeypatch):
     monkeypatch.setattr(choices, "for_session", lambda row: calls.append(row) or {"remembered": {}, "last": {}, "migrated": True})
     assert query_options._generation_choices({}, {"id": "s"}, None)["migrated"] is False
     assert query_options._generation_choices({"image_generation": False}, {"id": "s"}, None)["migrated"] is False
+    # Catalog search or a transform tool alone is not a generation tool.
+    assert query_options._generation_choices({"generation_catalog": True, "image_editing": True}, {"id": "s"}, None)["migrated"] is False
     assert calls == []
+    assert query_options._generation_choices({"video_with_audio": True}, {"id": "s"}, None)["migrated"] is True
+    calls.clear()
     assert query_options._generation_choices({"image_generation": True}, {"id": "s"}, "user-b")["migrated"] is True
     assert calls == [{"id": "s", "api_user_id": "user-b"}]

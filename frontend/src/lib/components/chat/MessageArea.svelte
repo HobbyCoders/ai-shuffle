@@ -2256,6 +2256,7 @@
 				prompt={choose.prompt}
 				toolId={message.toolId}
 				rememberedUnavailable={choose.rememberedUnavailable}
+				rememberedUnpriced={choose.rememberedUnpriced}
 			/>
 		{:else}
 			{@const saved = rememberedResult(message)}
