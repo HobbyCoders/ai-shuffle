@@ -559,7 +559,9 @@ class Settings(BaseSettings):
     # realistic idle working set (the chat you are in, the one you just left,
     # and a running automation or two). It is NOT a concurrency limit: busy
     # sessions are never evicted, so any number can run at once and the pool
-    # grows past this while they do. Only real resource pressure (the memory /
+    # grows past this while they do. Once one of them goes idle with this many
+    # more recently used subprocess sessions ahead of it, it is closed after
+    # the pool's 60 s activity floor rather than the cold timeout. Only real resource pressure (the memory /
     # process guards below) refuses new work. Raise it on a big box via
     # SDK_SESSION_POOL_SIZE to keep more idle sessions warm.
     #
