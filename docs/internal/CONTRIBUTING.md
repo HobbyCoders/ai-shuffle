@@ -145,7 +145,7 @@ Run all checks locally:
 ruff check app/ run_local.py
 
 # Python tests for the files you changed (see Testing below; the suite
-# needs fluid importable). The fast push gate runs affected tests; PR CI runs the full suites.
+# needs fluid importable). The push gate runs no tests; PR CI runs the full suites.
 PYTHONPATH=fluid pytest tests/core/test_example.py -q
 
 # Frontend type check and build
@@ -170,44 +170,37 @@ Pre-commit hooks will also run automatically on `git commit`.
 
 ### 1. Pass the local checks
 
-Every pull request, including drafts and forks, runs the full hosted suites in
-parallel on free standard Linux and Windows runners. macOS checks stay manual.
+Every pull request, including drafts and forks, runs hosted PR checks in parallel
+on free standard Linux and Windows runners: the full Linux suites and native
+Windows desktop tests. Desktop packaging, preview installers and macOS checks
+stay manual.
 Merge only after CI is green and the change has been reviewed. Publishing is
-separate: edge/nightly still requires an attested full local run on main.
+separate: edge/nightly requires a hosted main-suite pass or the owner's attested
+full local run on the exact main revision.
 See [where tests run](../ci/pr-checks.md) for the runner and publication policy.
-Before a push, run only affected tests plus the offline secret scan:
+Tests run on GitHub CI, not in the push gate. Install the hook once per clone:
 
 ```bash
 python scripts/local_ci.py install   # once per clone; worktrees share the hook
-python scripts/local_ci.py fast      # affected tests and offline secret scan
 ```
 
-The fast gate reuses the suite map for backend, fluid, frontend, mobile, tools,
-browser-mcp, docs, desktop, Android and workflow checks. Backend changes use the
-recorded dependency map or test-name/import matching; an unmapped path falls
-back to the whole area suite. Docs-only changes run docs checks, not application
-suites. Unknown top-level areas conservatively reach all local suites.
-A clean-tree pass is recorded without requiring a full local run. The hook
-always scans outgoing commits for secrets, including on cached passes. Do not
-bypass the hook with `--no-verify`. `check`, `full` and `--attest` retain their
-existing broader validation and publication behavior. Fix local failures before
-pushing, and iterate on any full-suite failures in PR CI before merge.
+The hook is the local push gate. It runs the offline secret scan on every
+outgoing commit of every pushed ref, with no cache, then for branch pushes a
+whole-working-tree scan and the live update-reach check. It runs no test
+suites and consults no pass record. Do not bypass the hook with `--no-verify`.
+Iterate on any failures reported by PR CI before merge. `fast` (affected tests),
+`check`, `full` and `--attest` stay available as explicit commands with their
+existing behavior; the push gate does not run or require them.
 
 For PR screenshots, commit images to `pr-assets` (or `pr-assets/*`) and push
 normally through the hook, from a code checkout containing the hook's scripts
-(for example, `git push origin pr-assets:pr-assets`). The hook accepts the range
-without a local test-pass record only when every touched path is an image
-(lowercase `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`) or the root `README.md`,
-after the secret scan passes. Only regular files qualify, not symlinks or
-submodules; `README.md` cannot be a directory. For a new branch it checks the
-whole history and tip tree; for an existing branch it checks every outgoing
-commit and the remote-to-local tip difference, including rewinds and files
-later deleted or renamed. Other files still require the usual local checks. GitHub Contents
-API uploads are not allowed: they bypass the hook and its secret scan.
+(for example, `git push origin pr-assets:pr-assets`). Every outgoing commit is
+secret-scanned like any other push. GitHub Contents API uploads are not
+allowed: they bypass the hook and its secret scan.
 
-The run ends by listing what this machine could not cover (Windows when not
-on a Windows worker, Mac-only checks, the container image). Mention those in
-the PR description. See [docs/ci/pr-checks.md](../ci/pr-checks.md) for edge
+An explicit `check` or `full` run ends by listing what this machine could not
+cover (Windows when not on a Windows worker, Mac-only checks, the container
+image). See [docs/ci/pr-checks.md](../ci/pr-checks.md) for edge
 publication and the checks a stable release waits for.
 
 Ruff and pre-commit stay part of contributor validation. Coverage reporting is
@@ -349,8 +342,8 @@ $env:PYTHONPATH = "fluid"; python -m pytest tests/test_auth.py -v
 #### Running the tests
 
 The full backend suite is about 21,500 tests and takes over 15 minutes. While
-working, run only the test files that cover your change; `local_ci.py fast`
-picks affected tests before a push, and PR CI runs the full suites:
+working, run only the test files that cover your change; PR CI runs the full
+suites on every pull request:
 
 ```bash
 PYTHONPATH=fluid pytest tests/core/test_pg_shim.py -m "not slow and not integration" -q
@@ -375,8 +368,8 @@ python -m pytest fluid/tests/unit -q
 ```
 
 `local_ci.py` runs it when `fluid/` changes. Run it on Linux as well as
-Windows when the change is platform-specific; `ci-fluid.yml` is a manual
-Linux run for when no Linux worker is available.
+Windows when the change is platform-specific; `ci-fluid.yml` runs the full
+Linux fluid unit suite on every PR and also supports manual dispatch.
 
 ### Android Tests
 

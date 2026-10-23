@@ -1,7 +1,8 @@
 name: Android CI
 
-# Android app (android/); cloud services live in hobbycoders-cloud. Manual
-# or called by a release; pull requests run no CI (scripts/local_ci.py). Chat loads the phone UI from the paired worker's
+# Android app (android/); cloud services live in hobbycoders-cloud. This workflow
+# is manual or called by a release; PRs run the other hosted checks.
+# Chat loads the phone UI from the paired worker's
 # /mobile/ (app/mobile_ui.py), so mobile/ and frontend/ changes ship with a
 # worker update and are covered by frontend CI, not an emulator run. The APK
 # bundles mobile/ only as the offline demo. Signed sideload builds require

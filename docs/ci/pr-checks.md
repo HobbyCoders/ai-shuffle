@@ -1,7 +1,8 @@
 # Where tests run
 
-Before a push, run affected tests plus the offline secret scan. Every pull
-request, including drafts and forks, runs the hosted gates in parallel. Backend
+Tests run on GitHub CI. The local push gate is the offline secret scan (plus the
+update-reach check); it runs no test suites. Every pull request, including drafts
+and forks, runs the hosted gates in parallel. Backend
 shards, real contracts and security all run unconditionally, regardless of paths.
 Merge requires green CI and review. Edge/nightly publication remains separate:
 a hosted full-suite pass on the exact main revision or the owner's local
@@ -230,26 +231,59 @@ collection but cannot select away tests or satisfy the gate without execution.
 
 ```bash
 python scripts/local_ci.py install   # once per clone: turns on the pre-push hook
-python scripts/local_ci.py fast      # affected tests + offline secret scan
-python scripts/local_ci.py list      # what each suite runs, and when
+python scripts/local_ci.py list      # what each optional local suite runs, and when
 ```
 
-`fast` compares against the remote main merge-base (the push remote when called
-by the hook, otherwise the configured public comparison ref). It reuses the
-existing `SUITES` area map. Backend files use the recorded dependency map when
-available, otherwise per-file test-name/import matching. Changed test files
-select themselves, and helper modules under `tests/` select their importers
-(including relative and bare imports) and matching test filenames. Fluid source
-and non-Python files run the Fluid suite; Fluid Python modules also select
-matching backend tests. An unmapped path adds no extra local tests and prints
+The pre-push hook is the local push gate and runs no test suites: every PR runs
+them on GitHub CI (the workflows above). For every pushed ref, in order:
+
+1. The offline secret scan of every outgoing commit (see
+   [local security checks](#local-security-checks)). It runs first, on every
+   push, with no cache; a finding refuses the push. Tags and pr-assets refs get
+   it like any branch; deletions need no scan.
+2. For branch pushes, an offline scan of the whole working tree (tracked plus
+   non-ignored untracked files), as `check` and `full` run.
+3. For branch pushes, the live update-reach check: a ready PR missing an owner
+   acceptance label is refused; drafts are advisory. PR CI does not run this
+   check, so it stays local. Its base is refreshed first from the push remote's
+   main; URL pushes and push remotes without a usable main fall back to the
+   configured comparison ref.
+
+No pass record can skip or replace any of these steps. Together they take about
+20 seconds of CPU on a full checkout.
+
+The suites the hook used to select locally run in full on every PR:
+
+| Former push-gate suite | PR CI job |
+| --- | --- |
+| backend | CI Backend's four shards (`tests/api` … `tests/scripts`, `tests/test_*.py`) |
+| backend-linux | CI Backend contracts and security (real PostgreSQL, container contracts, bubblewrap) |
+| fluid | `ci-fluid.yml` |
+| frontend, mobile, tools, browser-mcp | `ci-frontend.yml` (Vitest shards, typechecks, mobile, tools, Browser MCP) |
+| docs | `ci-frontend.yml` contracts/docs and `ci-artifact-policy.yml` (`main_suite.py android-and-docs`) |
+| desktop | `desktop.yml` |
+| android-play, android-bridge | `ci-artifact-policy.yml` (`main_suite.py android-and-docs`) |
+| workflows | `ci-artifact-policy.yml` policy scripts, CI Backend shards and security policy step (`tests/scripts`) |
+| update-reach regressions | CI Backend shards (`tests/test_update_reach.py`); the verdict itself stays in the push gate |
+
+`android-app` (Gradle unit tests) never ran without a local Android SDK and stays
+a manual check (`android.yml`), as before.
+
+`fast` stays available as an optional, explicit command (affected tests plus
+the offline scan). It compares against the configured public comparison ref's
+merge-base and reuses the existing `SUITES` area map. Backend files use the
+recorded dependency map when available, otherwise per-file test-name/import
+matching. Changed test files select themselves, and helper modules under
+`tests/` select their importers (including relative and bare imports) and
+matching test filenames. Fluid source and non-Python files run the Fluid suite;
+Fluid Python modules also select matching backend tests. An unmapped path adds
+no extra local tests and prints
 `No local test mapping for X; covered by the full suite on PR CI`. Unknown
 top-level paths use the same note rather than running all local suites.
 Requirements, `pytest.ini`, and backend `conftest.py` changes still select the
 whole backend area. Other areas run their unit suites; frontend and mobile use
 all area tests for dynamic source-reading coverage, without a production build.
-Docs paths and Markdown/reStructuredText files run docs checks only. Secret
-scanning and update-reach checks are unchanged; full hosted PR CI remains
-required before merge (apart from the documented baseline failures below).
+Docs paths and Markdown/reStructuredText files run docs checks only.
 
 `check` remains the existing changed-suite check with dependency audits, and
 `full` still runs every local suite and records the backend dependency map.
@@ -347,23 +381,18 @@ TTL expiry closes the app and cluster. The TTL is capped at four hours. Raw
 this command cannot adopt or terminate somebody else's existing preview.
 SIGKILL of the launcher still relies on Monitor's process-tree teardown.
 
-A pass on a clean checkout is recorded against the commit's tree in
-`.git/local-ci/passes.json`. A fast receipt also pins the comparison merge-base;
-pushing against a different base reruns affected checks. The offline secret scan
-is unconditional and has no cache. The pre-push hook (`.githooks/pre-push`, which
-`install` copies into the directory git runs hooks from, next to AI Shuffle's
-managed hooks; an older `pre-push` there is kept as `pre-push.user` and still
-runs afterwards; `install` also saves a Python that has pytest and PyYAML
-in git config `local-ci.python`, which the hook and later runs use) lets a
-recorded commit through after the offline outgoing-commit secret scan. For an unrecorded commit that is the clean
-`HEAD`, it runs the checks and pushes only if they pass. Anything else (a
-commit other than `HEAD`, or uncommitted changes) is refused, because the
-checks would not test what is being pushed. Never skip the hook with
-`--no-verify`.
+A `check` or `full` pass on a clean checkout is recorded against the commit's
+tree in `.git/local-ci/passes.json`; the push gate never reads it. The pre-push
+hook (`.githooks/pre-push`, which `install` copies into the directory git runs
+hooks from, next to AI Shuffle's managed hooks; an older `pre-push` there is kept
+as `pre-push.user` and still runs afterwards; `install` also saves a Python that
+has pytest and PyYAML in git config `local-ci.python`, which the hook and later
+runs use) accepts any pushed commit, including one other than `HEAD` or from a
+checkout with uncommitted changes, once the steps above pass. Never skip the
+hook with `--no-verify`.
 
-Agents run `local_ci.py fast` through the Monitor tool before pushing, so the
-hook finds a recorded affected-test pass. A full local pass is not required.
-The secret scan still runs on every invocation and every outgoing push.
+Agents push directly; no local test run is required before a push. The secret
+scan still runs on every outgoing push.
 The installed hook is shared across worktrees and delegates to each branch's
 own script; older branches retain their old gate until updated. Do not reinstall
 the shared hook as part of a branch change.
@@ -532,8 +561,8 @@ trigger this gate, and it does not by itself require a launcher version bump.
 
 Every `check` (including `--only`) and `full` first scans the whole working tree
 (tracked files plus non-ignored untracked files) for leaked credentials. The
-pre-push hook also scans the changed blobs in **every outgoing commit**, before
-consulting its cached test pass. A token added and removed in separate commits
+pre-push hook first scans the changed blobs in **every outgoing commit**, then
+the whole working tree for branch pushes; no pass record can skip either. A token added and removed in separate commits
 still blocks the push. Existing refs use the remote tip through the pushed tip.
 New branches and tags exclude commits already on the local `main` tracking ref of
 the remote being pushed to (`public/main` for `git push public ...`). If that ref

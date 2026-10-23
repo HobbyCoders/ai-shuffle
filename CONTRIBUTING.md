@@ -14,9 +14,9 @@ Contributions use the [Developer Certificate of Origin 1.1](https://developercer
 
 ## Run checks locally
 
-Before every push, run only the affected tests plus the offline secret scan. Every pull request, including drafts and fork contributions, runs the full hosted suites in parallel. Merge requires green CI and review.
+Tests run on GitHub CI. Every pull request, including drafts and fork contributions, runs the hosted PR checks in parallel: the full Linux suites and native Windows desktop tests. Desktop packaging, preview installers and macOS checks remain manual; see [where tests run](docs/ci/pr-checks.md) for the exact matrix. Merge requires green CI and review.
 
-Once per clone, run `python scripts/local_ci.py install` to install the pre-push hook. It selects a Python with pytest and PyYAML; pass `--python PATH` if you need to choose one. Worktrees share that hook.
+Once per clone, run `python scripts/local_ci.py install` to install the pre-push hook. The hook is the local push gate: it runs the offline secret scan on every outgoing commit and on the working tree, plus the update-reach check for branch pushes. It runs no test suites. It selects a Python with pytest and PyYAML; pass `--python PATH` if you need to choose one. Worktrees share that hook.
 
 While working, run only the tests covering your change:
 
@@ -28,15 +28,9 @@ In Windows PowerShell, set `$env:PYTHONPATH="fluid"` first, then run the same `p
 
 For frontend work, run `npm ci` and `npx svelte-kit sync` in `frontend/` once per checkout, then run a targeted test (`npx vitest run <file>`) or the type check (`npx svelte-check --tsconfig ./tsconfig.json`) rather than a full build. Do not copy dependencies or credential files from another checkout.
 
-Before a push, commit your changes and run:
+Then commit and push. The hook scans every outgoing commit for credentials, with no cache, and refuses the push if it finds one. Never bypass it with `--no-verify`. Fix any failures reported by PR CI before review and merge.
 
-```sh
-python scripts/local_ci.py fast
-```
-
-It maps changes against the remote main merge-base to affected tests, falling back to the whole area suite when a mapping is unknown. Docs-only changes run docs checks. It records a pass for a clean committed tree; the hook always scans outgoing commits, even with a cached pass. Never bypass it with `--no-verify`. Read its “Not covered here” lines and repeat them in your pull request. Fix local failures before pushing, then fix any full-suite failures reported by CI before review and merge.
-
-`check`, `full` and `full --step --attest` remain available for broader local validation. Before edge/nightly publication, maintainers still run the attested full suite locally on main; PR CI does not replace that publication gate. See [where tests run](docs/ci/pr-checks.md).
+`fast` (affected tests), `check`, `full` and `full --step --attest` remain available for optional local validation; the push gate does not run or require them. Edge/nightly publication separately needs a hosted main-suite pass or the owner's attested local full run on the exact main revision. See [where tests run](docs/ci/pr-checks.md).
 
 ## Open a draft pull request
 
