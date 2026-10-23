@@ -779,7 +779,7 @@ export class SourceUpdates {
       if (this.options.build) built = await this.options.build(source, stage, manifest.revision, message);
       else {
         const native = await prepareNativeRuntime(source, this.options.root, this.options.bootstrapNode, message);
-        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), runtime: native.runtime, revision: manifest.revision, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
+        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), sharedCache: path.join(this.options.root, 'dependencies'), runtime: native.runtime, revision: manifest.revision, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
       }
       await fs.writeFile(path.join(stage, 'build.json'), JSON.stringify(built));
       await fs.writeFile(path.join(stage, 'release.json'), signed);

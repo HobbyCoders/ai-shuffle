@@ -17,15 +17,21 @@ export interface BuildOptions {
   server: string;
   cache: string;
   runtime: SourceRuntime;
+  /**
+   * Runtime-independent cache root (updates/dependencies). npm dependency caches
+   * live here, keyed by the Node/npm build and the package files, so a new
+   * native runtime with the same Node keeps them. Without it they stay in `cache`.
+   */
+  sharedCache?: string;
   revision: string;
   log: string;
   progress: (message: string) => void;
 }
 
 async function exists(file: string): Promise<boolean> { try { await fs.access(file); return true; } catch { return false; } }
-async function fingerprint(root: string, names: string[]): Promise<string> {
+async function fingerprint(root: string, names: string[], text = (_name: string, content: string) => content): Promise<string> {
   const hash = createHash('sha256');
-  for (const name of names) hash.update(name + '\0' + (await fs.readFile(path.join(root, name), 'utf8')).replace(/\r\n/g, '\n') + '\0');
+  for (const name of names) hash.update(name + '\0' + text(name, (await fs.readFile(path.join(root, name), 'utf8')).replace(/\r\n/g, '\n')) + '\0');
   return hash.digest('hex');
 }
 export function buildEnvironment(node: string, python: string): NodeJS.ProcessEnv {
@@ -85,8 +91,27 @@ export function pythonInstallSteps(): string[][] {
   ];
 }
 
+/**
+ * The part of a Python input that decides the environment. Fluid's test-runner
+ * settings ([tool.pytest*] tables in fluid/pyproject.toml) do not change what
+ * pip installs, so they are left out. Any other table, including one this rule
+ * does not know, still counts. A file with a multi-line string counts whole, so
+ * text inside a string can never hide a table. desktop/scripts/runtime-contract.mjs
+ * applies the same rule.
+ */
+export function pythonInputText(name: string, text: string): string {
+  if (name !== 'fluid/pyproject.toml' || text.includes('"""') || text.includes("'''")) return text;
+  let skip = false;
+  return text.split('\n').filter(line => {
+    if (/^\s*\[/.test(line)) skip = /^\s*\[\s*tool\.pytest(\.[A-Za-z0-9_-]+)*\s*\]\s*(#.*)?$/.test(line);
+    return !skip;
+  }).join('\n');
+}
+
 /** Matches the bundled runtime's manifest.pythonDependencies when the same locks built it. */
-export function pythonDependencyKey(source: string): Promise<string> { return fingerprint(source, PYTHON_INPUTS); }
+export function pythonDependencyKey(source: string): Promise<string> { return fingerprint(source, PYTHON_INPUTS, pythonInputText); }
+/** The key runtimes built before pythonInputText recorded: every input file whole. */
+function legacyPythonDependencyKey(source: string): Promise<string> { return fingerprint(source, PYTHON_INPUTS); }
 
 async function installOptionalVoice(python: string, opts: BuildOptions): Promise<boolean> {
   try {
@@ -103,7 +128,8 @@ async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
     if (!(await exists(path.join(opts.source, lock)))) throw new Error(`This update has no hash-pinned ${lock}; it cannot be built safely. The running version is unchanged.`);
   }
   const key = await pythonDependencyKey(opts.source);
-  if (key === opts.runtime.pythonDependencies) return null;
+  // Either key is a hash of these very inputs, so a match means the runtime was installed from them.
+  if (key === opts.runtime.pythonDependencies || await legacyPythonDependencyKey(opts.source) === opts.runtime.pythonDependencies) return null;
   const target = path.join(opts.cache, 'python', key.slice(0, 24));
   if (await exists(path.join(target, '.complete'))) return key;
   if (await exists(path.join(target, '.base-complete'))) {
@@ -129,10 +155,34 @@ async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }
 
-async function nodePackage(name: string, opts: BuildOptions, python: string): Promise<string> {
+/**
+ * The build of Node and npm that `npm ci` runs with: version, platform, arch,
+ * native module ABI and the bundled npm's version. null if it cannot be read,
+ * which keeps that build's npm caches inside its runtime's cache.
+ */
+async function nodeIdentity(opts: BuildOptions): Promise<string | null> {
+  try {
+    const npm = JSON.parse(await fs.readFile(path.resolve(path.dirname(opts.runtime.npm), '..', 'package.json'), 'utf8')).version;
+    const node = await new Promise<string>((resolve, reject) => {
+      const child = spawn(opts.runtime.node, ['-p', '[process.version, process.platform, process.arch, process.versions.modules].join(" ")'],
+        { env: buildEnvironment(opts.runtime.node, opts.runtime.python), windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: 60_000 });
+      let output = '';
+      child.stdout!.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.once('error', reject);
+      child.once('exit', code => code === 0 && output.trim() ? resolve(output.trim()) : reject(new Error('node identity unavailable')));
+    });
+    if (typeof npm !== 'string' || !npm) return null;
+    return `${node} npm ${npm}`;
+  } catch { return null; }
+}
+
+async function nodePackage(name: string, opts: BuildOptions, python: string, identity: string | null): Promise<string> {
   const source = path.join(opts.source, name);
-  const key = await fingerprint(source, ['package.json', 'package-lock.json']);
-  const cache = path.join(opts.cache, 'node', name, key.slice(0, 24));
+  const files = await fingerprint(source, ['package.json', 'package-lock.json']);
+  // A shared cache is used only for a known Node/npm build; the key covers it and the package files.
+  const shared = opts.sharedCache && identity;
+  const key = shared ? createHash('sha256').update(`node-dependencies-1\0${identity}\0${files}`).digest('hex') : files;
+  const cache = path.join(shared ? opts.sharedCache! : opts.cache, 'node', name, key.slice(0, 24));
   if (!(await exists(path.join(cache, '.complete')))) {
     opts.progress(`Installing ${name} dependencies. They will be reused for later updates.`);
     const temporary = `${cache}.tmp-${randomUUID().slice(0, 8)}`;
@@ -156,7 +206,8 @@ export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
   const pythonKey = await pythonRuntime(opts);
   const python = pythonKey ? path.join(opts.cache, 'python', pythonKey.slice(0, 24), process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') : opts.runtime.python;
   const dependencies = new Map<string, string>();
-  for (const name of ['frontend', 'tools', 'browser-mcp', 'desktop']) dependencies.set(name, await nodePackage(name, opts, python));
+  const identity = opts.sharedCache ? await nodeIdentity(opts) : null;
+  for (const name of ['frontend', 'tools', 'browser-mcp', 'desktop']) dependencies.set(name, await nodePackage(name, opts, python, identity));
   const electronPackage = path.join(dependencies.get('desktop')!, 'electron');
   const electron = path.join(electronPackage, 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
   if (!(await exists(electron))) {
