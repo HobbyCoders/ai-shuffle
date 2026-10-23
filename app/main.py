@@ -355,6 +355,9 @@ async def lifespan(app: FastAPI):
         from app.core.resource_monitor import reconcile_orphans_once
         orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
 
+    from app.core.fsmonitor_cleanup import cleanup_once as cleanup_fsmonitor_once
+    bg_tasks.append(asyncio.create_task(cleanup_fsmonitor_once(), name="fsmonitor-cleanup"))
+
     if settings.api_docs_enabled:
         logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)

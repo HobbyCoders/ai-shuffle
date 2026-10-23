@@ -321,6 +321,14 @@
           "how": "In a disposable account/chat with fal configured, remember an image-to-video or edit model with a required image input and valid saved settings (including an object-valued image_size where supported). Invoke generation without naming a source/model, first omitting the image input and then passing a wrong-type image input. Inspect the structured tool results; do not retry with valid media or submit a paid generation. Restore the disposable preferences and archive the chat.",
           "pass_when": "Both calls return refused with reason invalid_request and the original input-validation error, not a choice card or remembered_unavailable. No reservation or provider submission occurs.",
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
+        },
+        {
+          "id": "harness-basics.13",
+          "check": "One-time cleanup of leftover Git fsmonitor daemons",
+          "kind": "owner",
+          "how": "On a disposable Windows install with a fresh data directory, register a temporary Git project and create app worktrees. Set repo-local core.fsmonitor=true and run git status in each checkout to start real daemons. Start the candidate install normally. Inspect local config, daemon process/IPC state and the single cleanup summary. Then deliberately re-enable the setting and restart only the disposable install. Repeat on macOS when available; never restart a production worker or modify its repositories.",
+          "pass_when": "First startup stays responsive, removes only the literal repo-local true setting and stops the root/worktree daemons. Global settings and custom hook values remain unchanged. The persistent per-install completion marker prevents cleanup from overriding a deliberate re-enable on the second boot. An interrupted cleanup retries outstanding stops next boot.",
+          "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         }
       ]
     }
