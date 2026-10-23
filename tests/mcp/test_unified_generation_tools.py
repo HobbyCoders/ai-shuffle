@@ -386,3 +386,95 @@ async def test_sessionless_peer_or_chat_fal_request_returns_no_local_path(monkey
     output = await source.execute_local(replace(candidate(model="fal-ai/x"), options={}), "tree", context)
     assert output["success"] is False and str(tmp_path) not in json.dumps(output)
     node.call.assert_not_awaited()  # refused before anything was submitted
+
+
+# ---- Steps 2-3 (#379): remembered choices replace the implicit Settings default ----
+
+def _legacy(*names):
+    return {name: SimpleNamespace(handler=AsyncMock(name=name)) for name in names}
+
+
+def test_builtin_fal_default_is_never_a_lane_and_migration_retires_saved_ones():
+    legacy = _legacy("generateImage", "generateVideo", "runFalModel", "searchModels")
+    lanes = sdk._settings_lanes(legacy, {}, True)
+    assert set(lanes) == {"runFalModel"}  # the built-in fal default no longer answers for the user
+    saved = {"IMAGE_MODEL": "fal-ai/flux/dev"}
+    assert set(sdk._settings_lanes(legacy, saved, True)) == {"generateImage", "runFalModel"}
+    assert set(sdk._settings_lanes(legacy, saved, True, migrated=True)) == {"runFalModel"}
+    assert set(sdk._settings_lanes(legacy, saved, False)) == set()
+    # The ChatGPT-plan image setting is a provider rule (#1796), never migrated away.
+    plan = sdk._settings_lanes(legacy, {"IMAGE_MODEL": "chatgpt-subscription"}, False, migrated=True)
+    assert plan == {"generateImage": ("chatgpt", legacy["generateImage"].handler)}
+
+
+async def test_unspecified_interactive_request_without_a_saved_setting_shows_the_card(monkeypatch):
+    from app.services import generation_sources
+    backend = FakeBackend([candidate(), candidate(account="b")])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    lanes = sdk._settings_lanes(_legacy("generateImage", "runFalModel"), {}, True)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, INTERACTIVE, lanes=lanes, tool_env={})}
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    assert output["status"] == "choose" and "choice card" in output["message"]
+    assert backend.calls == []
+
+
+async def test_unattended_request_without_a_remembered_choice_skips_and_reports(monkeypatch):
+    from app.services import generation_sources
+    backend = FakeBackend([candidate()])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    lanes = sdk._settings_lanes(_legacy("generateImage", "runFalModel"), {}, True)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, UNATTENDED, lanes=lanes, tool_env={})}
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    assert output["status"] == "skipped" and output["reason"] == "no_stored_choice"
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("unattended", [False, True])
+async def test_remembered_choice_is_reused_without_asking(monkeypatch, unattended):
+    from app.services import generation_sources
+    a, b = candidate(), candidate(account="account-b", model="model-b")
+    backend = FakeBackend([a, b])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    context = replace(INTERACTIVE, unattended=unattended, remembered_choices={"image": {**b.choice(), "origin": "card"}})
+    legacy = AsyncMock()
+    tools = {t.name: t for t in sdk._create_unified_tools(None, context, lanes={"generateImage": ("fal", legacy)},
+                                                          tool_env={"IMAGE_MODEL": "model-a"})}
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    assert output["status"] == "completed" and output["remembered"] is True
+    assert output["choice"]["account"] == "account-b"
+    legacy.assert_not_awaited()
+
+
+@pytest.mark.parametrize("origin,expected", [("migrated", "legacy"), ("card", "refused")])
+async def test_migrated_settings_choice_keeps_running_when_the_guard_cannot_price_it(monkeypatch, origin, expected):
+    from app.services import generation_sources
+    entry = replace(candidate(model="fal-ai/x"), price=dict(UNKNOWN_PRICE))
+    backend = FakeBackend([entry])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    remembered = {"source": "fal", "account": entry.account, "model": "fal-ai/x", "options": {}, "origin": origin}
+    context = replace(UNATTENDED, remembered_choices={"image": remembered}, legacy_migrated=True)
+    handler = AsyncMock(return_value={"content": [{"type": "text", "text": '{"success": true, "lane": "settings"}'}]})
+    tools = {t.name: t for t in sdk._create_unified_tools(None, context, lanes={}, tool_env={"IMAGE_MODEL": "fal-ai/x"},
+                                                          legacy_handlers={"generateImage": handler})}
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    if expected == "legacy":
+        assert output["lane"] == "settings"
+        handler.assert_awaited_once_with({"prompt": "tree"})
+    else:
+        assert output["status"] == "refused" and output["reason"] == "price_unavailable"
+        handler.assert_not_awaited()
+
+
+async def test_server_passes_the_migration_flag_to_the_lanes(monkeypatch):
+    from app.core import fal_credential
+    captured = []
+    monkeypatch.setattr(sdk, "patch_sdk_server", lambda server, tools: server)
+    monkeypatch.setattr(sdk, "create_tool_server", lambda **kw: captured.extend(kw["tools"]) or kw)
+    monkeypatch.setattr(fal_credential, "is_enabled", lambda: True)
+    monkeypatch.setattr(sdk, "_get_fal_api_key", lambda: "key")
+    seen = []
+    original = sdk._settings_lanes
+    monkeypatch.setattr(sdk, "_settings_lanes", lambda *a: seen.append(a[3]) or original(*a))
+    sdk.create_ai_tools_server({"image_generation": True}, "unused-tools-dir", tool_env={"IMAGE_MODEL": "fal-ai/x"},
+                               generation_context=replace(INTERACTIVE, legacy_migrated=True))
+    assert seen == [True]

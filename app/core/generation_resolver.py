@@ -17,11 +17,20 @@ KINDS = ("image", "video", "audio", "3d")
 # Owner-tunable ceiling for an unconfirmed item OR batch; never round floats here.
 CONFIRM_ABOVE_USD = Decimal("0.10")
 UNKNOWN_PRICE = {"currency": "USD", "unit": "item", "amount": None, "total": None, "status": "unknown"}
+# A verified subscription route with no per-item charge (ChatGPT/SuperGrok plan
+# images). It is a known zero, never a substitute for an unknown price.
+INCLUDED_PRICE = {"currency": "USD", "unit": "item", "amount": "0", "total": "0", "status": "included"}
 SOURCE_NAMES = ("fal", "openai", "xai", "chatgpt", "supergrok")
 SOURCE_ALIASES = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgpt-plan": "chatgpt", "supergrok-plan": "supergrok"}
 # Every failed or unknown-outcome submission carries this, so an unconfirmed
 # outcome is never resubmitted (and possibly paid twice) on the agent's own.
 DO_NOT_RETRY = "Do not call again without the user's go-ahead."
+REMEMBERED_MESSAGE = ("Used the user's remembered choice. They can change it from this result in the chat, "
+                      "in Settings > Default models, or by naming another source or model.")
+# The chat shows a ``choose`` result as a choice card; the pick arrives as the
+# user's next message. Listing the options again in prose would duplicate it.
+CHOOSE_MESSAGE = ("The user sees these options as a choice card and can remember a pick. "
+                  "Do not list them again or pick for them; wait for their reply.")
 
 
 @dataclass(frozen=True)
@@ -34,6 +43,18 @@ class RunContext:
     remembered_choice: dict | None = None
     job_choice: dict | None = None
     last_choice: dict | None = None
+    # Per-kind account preferences (app.core.generation_choices). The single
+    # fields above take precedence for callers that bind one kind.
+    remembered_choices: dict | None = None
+    last_choices: dict | None = None
+    # The saved Settings media defaults were migrated into remembered choices.
+    legacy_migrated: bool = False
+
+    def remembered_for(self, kind):
+        return self.remembered_choice or (self.remembered_choices or {}).get(kind)
+
+    def last_for(self, kind):
+        return self.last_choice or (self.last_choices or {}).get(kind)
 
 
 @dataclass
@@ -86,7 +107,7 @@ def price_total(price: dict) -> Decimal | None:
     if not isinstance(price, dict):
         return None
     try:
-        if price.get("currency") != "USD" or price.get("status") not in ("estimated", "quoted"):
+        if price.get("currency") != "USD" or price.get("status") not in ("estimated", "quoted", "included"):
             return None
         amount, total = Decimal(str(price["amount"])), Decimal(str(price["total"]))
         if not amount.is_finite() or not total.is_finite() or amount < 0 or total < amount:
@@ -141,7 +162,9 @@ class Resolver:
         prompt = args.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
             return result("refused", error="A nonempty prompt of at most 32000 characters is required.")
-        stored = context.job_choice or context.remembered_choice
+        remembered = context.remembered_for(kind)
+        stored = context.job_choice or remembered
+        from_memory = bool(remembered) and not context.job_choice
         if context.unattended and not stored:
             return result("skipped", reason="no_stored_choice", kind=kind,
                           message="Generation skipped: this unattended run has no remembered or job-stored choice.")
@@ -160,13 +183,22 @@ class Resolver:
                 # when a usable candidate matches; it never runs either way.
                 candidates = [c for c in candidates if c.available]
             if not candidates:
+                if from_memory and not explicit and not context.unattended:
+                    # A remembered account or model that is gone is not a refusal
+                    # in an interactive run: offer the choices again instead.
+                    from dataclasses import replace as _replace
+                    rest = {k: v for k, v in (context.remembered_choices or {}).items() if k != kind}
+                    output = await self.generate(kind, args, _replace(context, remembered_choice=None, remembered_choices=rest),
+                                                 exclude_sources=exclude_sources)
+                    output["remembered_unavailable"] = True
+                    return output
                 return result("refused", reason="no_match", error="No matching source/account and model is available. No other source was used.")
             if context.unattended and len(candidates) != 1:
                 return result("skipped", reason="stored_choice_ambiguous", kind=kind,
                               message="Generation skipped: the stored choice does not identify one account/model binding.")
             if (not stored and not explicit) or len(candidates) != 1:
-                if context.last_choice:
-                    last = context.last_choice
+                last = context.last_for(kind)
+                if last:
                     if not explicit and not any(matches(c, last) for c in candidates):
                         prior = await self.backend.catalog(kind, source=last.get("account") or last.get("source"), model=last.get("model"), limit=1, prompt=prompt)
                         candidates.extend(c for c in prior if matches(c, last) and c.source not in exclude_sources)
@@ -192,7 +224,7 @@ class Resolver:
                 views = [c.view() for c in candidates[:4]]
                 if last and views and matches(candidates[0], last):
                     views[0]["label"] = "Same as last time"
-                return result("choose", kind=kind, options=views)
+                return result("choose", kind=kind, options=views, message=CHOOSE_MESSAGE)
             candidate = candidates[0]
             if not candidate.available or (candidate.source in ("chatgpt", "supergrok") and not candidate.verified):
                 return result("refused", price=candidate.price, reason="unavailable", error=candidate.reason or "Subscription combination is not verified.")
@@ -228,6 +260,7 @@ class Resolver:
                         self._confirmations[token] = fingerprint
                     return result("needs-confirmation", price=candidate.price, kind=kind,
                                   choice=candidate.choice(), threshold_usd=str(CONFIRM_ABOVE_USD),
+                                  **({"remembered": True} if from_memory and not explicit else {}),
                                   confirmation_token=token,
                                   retry={"source": candidate.account, "model": candidate.model, "worker": candidate.worker,
                                          "options": candidate.options, "confirmed": True, "confirmation_token": token})
@@ -248,7 +281,8 @@ class Resolver:
                     and price_total({**reported, "status": "estimated"}) is not None):
                 price = reported
             return result("completed" if output.get("success") else "failed", price=price,
-                          choice=candidate.choice(), result=output)
+                          choice=candidate.choice(), result=output,
+                          **({"remembered": True, "message": REMEMBERED_MESSAGE} if from_memory and not explicit else {}))
         except ValueError as exc:
             # Backends raise only safe validation messages, not upstream bodies.
             return result("refused", reason="invalid_request", error=str(exc))

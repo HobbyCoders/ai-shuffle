@@ -653,11 +653,19 @@ _LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "inval
 _CONFIGURED_MODEL_ENV = {"image": "IMAGE_MODEL", "video": "VIDEO_MODEL", "audio": "AUDIO_MODEL", "3d": "MODEL3D_MODEL"}
 
 
-def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
+def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool,
+                    migrated: bool = False) -> dict:
     """``{name: (lane, handler)}`` for main's handlers that can run here.
 
     ``lane`` is ``"chatgpt"`` for the ChatGPT-plan image tool (#1796), which
     needs no fal key, and ``"fal"`` for the fal.ai tools while a key is usable.
+
+    A generation kind keeps its fal lane only while the owner explicitly saved
+    a model for it in Settings and that default has not yet been migrated into
+    a remembered choice (``app.core.generation_choices``). The built-in fal
+    default is never a lane: a request that names nothing asks the user
+    (interactive) or is skipped and reported (unattended), never guessed.
+    ``runFalModel`` names its endpoint, so its lane stays while fal is usable.
     """
     from app.core.provider import subscription_images as sub
 
@@ -666,7 +674,12 @@ def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_
     for name, legacy in legacy_tools.items():
         if name == "generateImage" and subscription_image:
             lanes[name] = ("chatgpt", legacy.handler)
-        elif fal_usable and name != "searchModels":
+        elif not fal_usable or name == "searchModels":
+            continue
+        elif name in UNIFIED_TOOL_KINDS:
+            if not migrated and (tool_env or {}).get(_CONFIGURED_MODEL_ENV[UNIFIED_TOOL_KINDS[name]]):
+                lanes[name] = ("fal", legacy.handler)
+        else:
             lanes[name] = ("fal", legacy.handler)
     return lanes
 
@@ -681,12 +694,16 @@ def _lane_label(lane: str, kind: str, tool_env: Optional[Dict[str, str]]) -> str
     return f"fal.ai {configured}" if configured else "the fal.ai default model"
 
 
-def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
+def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None, legacy_handlers=None):
+    """``legacy_handlers``: main's fal handlers by name. A remembered choice
+    migrated from the Settings default runs through them when the guard cannot
+    price or resolve it, exactly as that saved default ran before."""
     from app.core.generation_resolver import Resolver, RunContext, normalize_source
     from app.services.generation_sources import Sources
 
     context = context or RunContext()
     lanes = {} if context.chat_mode else dict(lanes or {})
+    legacy_handlers = {} if context.chat_mode else dict(legacy_handlers or {})
     backend = Sources(worker, context)
     resolver = Resolver(backend)
     tools = []
@@ -715,7 +732,19 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     def lane_for(name):
         # A trusted stored/job choice outranks the Settings default.
-        return None if context.job_choice or context.remembered_choice else lanes.get(name)
+        kind = UNIFIED_TOOL_KINDS.get(name)
+        remembered = context.remembered_for(kind) if kind else context.remembered_choice
+        return None if context.job_choice or remembered else lanes.get(name)
+
+    def migrated_fallback(kind):
+        """Main's handler for a remembered choice that is the migrated Settings default."""
+        remembered = None if context.job_choice else context.remembered_for(kind)
+        name = next(n for n, k in UNIFIED_TOOL_KINDS.items() if k == kind)
+        if (not remembered or remembered.get("origin") != "migrated" or name not in legacy_handlers
+                or normalize_source(remembered.get("source")) != "fal"
+                or remembered.get("model") != (tool_env or {}).get(_CONFIGURED_MODEL_ENV[kind])):
+            return None
+        return legacy_handlers[name]
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
@@ -773,6 +802,11 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
             output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
             if fallback is not None and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
                 return await lane[1](fallback)
+            migrated = migrated_fallback(kind)
+            if (migrated and not request.get("source") and not request.get("model") and output.get("status") == "refused"
+                    and output.get("reason") in _LANE_FALLBACK_REASONS):
+                # The saved Settings default this choice came from ran unguarded on main.
+                return await migrated({key: args[key] for key in ("prompt", *legacy) if key in args})
             return _tool_result(output)
         return generate
 
@@ -978,8 +1012,11 @@ def create_ai_tools_server(
     enabled_tools = [t for t in enabled_tools if t.name not in UNIFIED_TOOL_NAMES]
     fal_usable = not fal_off and bool(_get_fal_api_key() or any(
         (tool_env or {}).get(name) for name in fal_credential.ENV_KEYS))
-    lanes = _settings_lanes(legacy_tools, tool_env, fal_usable)
-    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context, lanes=lanes, tool_env=tool_env)
+    migrated = bool(getattr(generation_context, "legacy_migrated", False))
+    lanes = _settings_lanes(legacy_tools, tool_env, fal_usable, migrated)
+    legacy_handlers = {name: t.handler for name, t in legacy_tools.items() if name in UNIFIED_TOOL_KINDS} if fal_usable else {}
+    enabled_tools.extend(t for t in _create_unified_tools(worker, generation_context, lanes=lanes, tool_env=tool_env,
+                                                          legacy_handlers=legacy_handlers)
                          if _is_tool_enabled(t.name, ai_tools_config))
     if not enabled_tools:
         return None

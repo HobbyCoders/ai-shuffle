@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.generation_resolver import Candidate, Resolver, RunContext, UNKNOWN_PRICE
+from app.core.generation_resolver import CHOOSE_MESSAGE, Candidate, INCLUDED_PRICE, Resolver, RunContext, UNKNOWN_PRICE
 
 
 PRICE = {"currency": "USD", "unit": "item", "amount": "0.05", "total": "0.05", "status": "estimated"}
@@ -55,7 +55,7 @@ async def test_unspecified_choose_contract_and_last_first():
     backend = FakeBackend([a, b])
     output = await Resolver(backend).generate("image", {"prompt": "make it"}, replace(INTERACTIVE, last_choice=b.choice()))
     assert output == {"status": "choose", "success": False, "price": UNKNOWN_PRICE, "kind": "image",
-                      "options": [{**b.view(), "label": "Same as last time"}, a.view()]}
+                      "options": [{**b.view(), "label": "Same as last time"}, a.view()], "message": CHOOSE_MESSAGE}
     assert backend.calls == []
 
 
@@ -101,9 +101,58 @@ async def test_job_choice_wins_and_unattended_never_guesses_from_tool_args():
 
 
 async def test_missing_stored_source_refuses_instead_of_fallback():
-    context = replace(INTERACTIVE, remembered_choice={"account": "missing"})
-    output = await Resolver(FakeBackend([candidate()])).generate("image", {"prompt": "make it"}, context)
-    assert output["status"] == "refused"
+    backend = FakeBackend([candidate()])
+    for context in (replace(INTERACTIVE, unattended=True, remembered_choice={"account": "missing"}),
+                    replace(INTERACTIVE, job_choice={"account": "missing"})):
+        output = await Resolver(backend).generate("image", {"prompt": "make it"}, context)
+        assert output["status"] == "refused"
+    assert backend.calls == []
+
+
+async def test_missing_remembered_choice_asks_again_interactively_without_spending():
+    backend = FakeBackend([candidate()])
+    context = replace(INTERACTIVE, remembered_choices={"image": {"account": "missing", "model": "gone"}})
+    output = await Resolver(backend).generate("image", {"prompt": "make it"}, context)
+    assert output["status"] == "choose" and output["remembered_unavailable"] is True
+    assert [o["account"] for o in output["options"]] == ["account-a"]
+    assert backend.calls == []
+
+
+async def test_remembered_choices_are_per_kind():
+    a, b = candidate(), candidate(account="account-b", model="model-b")
+    video = candidate(account="account-v", model="model-v", kind="video")
+    backend = FakeBackend([a, b, video])
+    context = replace(INTERACTIVE, remembered_choices={"video": video.choice()}, last_choices={"image": b.choice()})
+    image = await Resolver(backend).generate("image", {"prompt": "make it"}, context)
+    assert image["status"] == "choose" and image["options"][0]["label"] == "Same as last time"
+    assert image["options"][0]["account"] == "account-b"
+    output = await Resolver(backend).generate("video", {"prompt": "make it"}, context)
+    assert output["status"] == "completed" and output["choice"]["account"] == "account-v"
+    assert output["remembered"] is True and "Settings" in output["message"]
+
+
+async def test_named_request_outranks_remembered_choice_interactively():
+    a, b = candidate(), candidate(account="account-b", model="model-b")
+    context = replace(INTERACTIVE, remembered_choices={"image": a.choice()})
+    output = await Resolver(FakeBackend([a, b])).generate("image", {"prompt": "make it", "source": "account-b"}, context)
+    assert output["choice"]["account"] == "account-b" and "remembered" not in output
+
+
+async def test_remembered_options_apply_and_a_used_choice_is_reported():
+    a = candidate()
+    backend = FakeBackend([a])
+    context = replace(INTERACTIVE, remembered_choices={"image": {**a.choice(), "options": {"size": "wide"}, "origin": "card"}})
+    output = await Resolver(backend).generate("image", {"prompt": "make it"}, context)
+    assert output["status"] == "completed" and output["remembered"] is True
+    assert ("prepare", "account-a", {"size": "wide"}) in backend.calls
+
+
+async def test_included_plan_price_runs_without_confirmation():
+    entry = replace(candidate(source="supergrok", account="grok-1"), price=dict(INCLUDED_PRICE))
+    backend = FakeBackend([entry])
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "source": "supergrok"}, INTERACTIVE)
+    assert output["status"] == "completed" and output["price"]["status"] == "included"
+    assert [c[0] for c in backend.calls] == ["prepare", "reserve", "execute"]
 
 
 async def test_expensive_contract_confirmed_retry_and_no_replay():
