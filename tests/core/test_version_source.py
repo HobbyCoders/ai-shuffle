@@ -52,3 +52,25 @@ def test_app_version_env_sets_settings_version(monkeypatch, raw, expected):
 
     monkeypatch.setenv("APP_VERSION", raw)
     assert Settings().version == expected
+
+
+async def test_desktop_source_update_version_reaches_health(monkeypatch):
+    """A desktop worker on a signed nightly reports the manifest version (#365).
+
+    desktop/src/main/worker.ts (buildWorkerEnv) passes the verified release's
+    version as APP_VERSION; without it the worker reports app.__version__.
+    """
+    from app.api import system
+    from app.core.config import Settings
+
+    monkeypatch.setattr(system.auth_service, "is_setup_required", lambda: False)
+    desktop = {"LOCAL_MODE": "true", "SHUFFLE_DESKTOP": "1"}
+    for name, value in desktop.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("APP_VERSION", raising=False)
+    monkeypatch.setattr(system, "settings", Settings())
+    assert (await system.health_check())["version"] == __version__
+
+    monkeypatch.setenv("APP_VERSION", "1.0.2-dev.337+ga48a61d")
+    monkeypatch.setattr(system, "settings", Settings())
+    assert (await system.health_check())["version"] == "1.0.2-dev.337+ga48a61d"

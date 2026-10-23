@@ -120,6 +120,23 @@ test('buildWorkerEnv defaults glibc arenas only on Linux and preserves user over
 	}
 });
 
+test('buildWorkerEnv reports the signed source release version and never an inherited one (#365)', () => {
+	const runtime = { mode: 'bundled', root: '/runtime', python: '/runtime/python/bin/python3', serverDir: '/app/server', nodeBinDir: null };
+	const baseEnv = { PATH: '/bin', APP_VERSION: '9.9.9', app_version: '9.9.9', VERSION: '8.8.8', Version: '8.8.8', APP_VERSION_NOTE: 'kept' };
+	for (const platform of ['win32', 'linux', 'darwin']) {
+		const source = buildWorkerEnv({ runtime, port: 8000, platform, baseEnv, appVersion: '1.0.2-dev.337+ga48a61d' });
+		assert.equal(source.APP_VERSION, '1.0.2-dev.337+ga48a61d', platform);
+		// The installer's built-in build sets none: the backend falls back to app.__version__.
+		const baseline = buildWorkerEnv({ runtime, port: 8000, platform, baseEnv });
+		assert.equal(baseline.APP_VERSION, undefined, platform);
+		for (const env of [source, baseline]) {
+			for (const key of ['app_version', 'VERSION', 'Version']) assert.equal(env[key], undefined, `${platform}: inherited ${key} must not set the worker version`);
+			assert.equal(env.APP_VERSION_NOTE, 'kept', 'only the exact version variables are dropped');
+		}
+	}
+	assert.equal(baseEnv.APP_VERSION, '9.9.9', 'must not mutate the parent environment');
+});
+
 test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settings case-insensitively', async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));
 	try {

@@ -168,6 +168,24 @@ test('Windows source restart shows the release window and a failed relaunch clos
   assert.equal(f.splashes[0].closed, true);
 });
 
+test('a source update starts its worker with its verified release version; the built-in build and an unreadable release set none (#365)', async () => {
+  const R = 'b'.repeat(40);
+  const application = { revision: R, resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' };
+  const requested = [];
+  const updates = (release) => ({ options: { root: '/isolated/no-root' }, release, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} });
+  const source = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', application, host: { executable: 'C:/AI Shuffle.exe' },
+    updates: updates(async (revision) => { requested.push(revision); return { format: 2, revision, sequence: 337, version: '1.0.2-dev.337+ga48a61d' }; }) } });
+  assert.equal(source.worker.state.phase, 'ready');
+  assert.equal(source.worker.options.appVersion, '1.0.2-dev.337+ga48a61d');
+  assert.ok(requested.length && requested.every(revision => revision === R), 'the version is read from the running revision\'s signed release');
+  // release() verifies release.json again; a failure starts the worker on the fallback version.
+  const unverified = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', application, updates: updates(async () => { throw Error('Invalid source manifest signature'); }) } });
+  assert.equal(unverified.worker.state.phase, 'ready');
+  assert.equal('appVersion' in unverified.worker.options, false);
+  const builtIn = await launch({ platform: 'win32' });
+  assert.equal('appVersion' in builtIn.worker.options, false);
+});
+
 for (const launcher of [undefined, '3', 'unknown', '4', '5', '6', '7']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false, async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const f = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', updates, application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } }, env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
