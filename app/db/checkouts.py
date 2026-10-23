@@ -29,6 +29,46 @@ from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
 
+# A base checkout whose project the owner deleted on this runner. It is out of
+# the project catalog, but the row (and the folder) stay so a chat still bound
+# to the project keeps opening there. Nothing re-activates it implicitly: an
+# ``active`` upsert keeps it removed, and only re-adding the project
+# (``restore_removed_base_checkouts``) brings it back.
+REMOVED_STATUS = "removed"
+
+_BASE = "(branch IS NULL OR branch = '')"
+_ACTIVE = "(status IS NULL OR status = '' OR status = 'active')"
+
+
+def retire_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str]) -> int:
+    """Mark the active base checkouts of ``project_id`` on ``runner_ids`` removed.
+
+    Runs on the caller's cursor so the retirement commits with the deletion it
+    belongs to. Branch checkouts are untouched; no row is deleted.
+    """
+    if not runner_ids:
+        return 0
+    placeholders = ", ".join(["%s"] * len(runner_ids))
+    cursor.execute(
+        f"UPDATE checkouts SET status = %s, updated_at = NOW() "
+        f"WHERE project_id = %s AND runner_id IN ({placeholders}) AND {_BASE} AND {_ACTIVE}",
+        (REMOVED_STATUS, project_id, *runner_ids),
+    )
+    return cursor.rowcount or 0
+
+
+def restore_removed_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str]) -> int:
+    """Re-activate base checkouts :func:`retire_base_checkouts` removed."""
+    if not runner_ids:
+        return 0
+    placeholders = ", ".join(["%s"] * len(runner_ids))
+    cursor.execute(
+        f"UPDATE checkouts SET status = 'active', updated_at = NOW() "
+        f"WHERE project_id = %s AND runner_id IN ({placeholders}) AND {_BASE} AND status = %s",
+        (project_id, *runner_ids, REMOVED_STATUS),
+    )
+    return cursor.rowcount or 0
+
 
 def checkout_id_for(project_id: str, runner_id: str, path: str) -> str:
     """Deterministic ``checkouts.id`` for a (project, runner, path) triple —
@@ -66,8 +106,10 @@ def upsert_checkout(
     On an existing row the working-tree fields are refreshed, but a ``None``
     argument leaves the stored value intact (``COALESCE``) so a partial upsert
     never clobbers a previously-recorded ``branch``/``head_sha``/``dirty``.
-    ``status`` (which always has a value) and ``updated_at`` are always set.
-    Returns the resulting row.
+    ``status`` (which always has a value) and ``updated_at`` are always set,
+    except that an ``active`` upsert leaves a :data:`REMOVED_STATUS` row
+    removed: refreshing a deleted project's folder metadata must not put it
+    back in the project catalog. Returns the resulting row.
 
     ``path`` MUST be absolute: the V2 resolver treats ``checkouts.path`` as
     absolute and cannot resolve a relative one. Reject a relative path here so
@@ -89,10 +131,11 @@ def upsert_checkout(
             "branch = COALESCE(EXCLUDED.branch, checkouts.branch), "
             "head_sha = COALESCE(EXCLUDED.head_sha, checkouts.head_sha), "
             "dirty = COALESCE(EXCLUDED.dirty, checkouts.dirty), "
-            "status = EXCLUDED.status, "
+            "status = CASE WHEN checkouts.status = %s AND EXCLUDED.status = 'active' "
+            "THEN checkouts.status ELSE EXCLUDED.status END, "
             "updated_at = NOW() "
             "RETURNING *",
-            (checkout_id, project_id, runner_id, path, branch, head_sha, dirty, status),
+            (checkout_id, project_id, runner_id, path, branch, head_sha, dirty, status, REMOVED_STATUS),
         )
         row = _row(cursor.fetchone())
     if row is None:  # INSERT/UPSERT ... RETURNING always yields the row

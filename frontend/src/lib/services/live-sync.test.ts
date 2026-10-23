@@ -10,7 +10,7 @@ vi.mock('./resource-sync', async (importOriginal) => {
  m.clear.mockImplementation(sync.clear.bind(sync));
  return { ...actual, resourceSync: { subscribe: vi.fn(sync.subscribe.bind(sync)), invalidate: m.invalidate, clear: m.clear } };
 });
-vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),resetForAccountChange:vi.fn()}}));
+vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),dropMissingProject:vi.fn(),resetForAccountChange:vi.fn()}}));
 vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadProjectCatalog:m.loadProjectCatalog,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
 vi.mock('$lib/constants/models',()=>({hydrateModelRegistry:vi.fn().mockResolvedValue(true)}));
@@ -190,6 +190,9 @@ describe('root authenticated live-sync lifecycle',()=>{
   const subscription=vi.mocked(resourceSync.subscribe).mock.calls.filter(([names])=>names.includes('projects')).at(-1);
   await subscription?.[1]();
   expect(m.loadProjectCatalog).toHaveBeenCalledOnce();expect(m.loadSessions).toHaveBeenCalledOnce();
+  // A deleted project is dropped from a new session only after the catalog reloads.
+  expect(activeSession.dropMissingProject).toHaveBeenCalledOnce();
+  expect(vi.mocked(m.loadProjectCatalog).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.dropMissingProject).mock.invocationCallOrder[0]);
  });
  it('lets the first catalog refresh join a boot load that started after sync_ready',async()=>{
   // The full first refresh (VITE_PERF_STARTUP_DEDUPE=0 or a reconnect).

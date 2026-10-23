@@ -105,6 +105,55 @@ def get_all_projects() -> List[ProjectRow]:
         return [_parse_project_row(row) for row in rows_to_list(cursor.fetchall())]
 
 
+def _catalog_origin(project: Dict[str, Any]) -> str:
+    """The origin a legacy row is catalogued under (``project_resolver``'s key)."""
+    return project.get("link_group_id") or ("local:" + str(project.get("id")))
+
+
+def _catalog_runners(project: Dict[str, Any]) -> List[str]:
+    """The runner ids this worker's base checkouts of ``project`` are keyed by."""
+    return sorted({settings.effective_instance_id, project.get("instance_id") or ""})
+
+
+def _catalog_project_v2_id(cursor, origin: str) -> Optional[str]:
+    cursor.execute("SELECT id FROM projects_v2 WHERE origin = %s", (origin,))
+    row = cursor.fetchone()
+    return row["id"] if row else None
+
+
+def _retire_from_catalog(cursor, project: Dict[str, Any]) -> None:
+    """Take a deleted project's base checkout out of the project catalog.
+
+    ``GET /cluster/projects`` lists every ``projects_v2`` with an active base
+    checkout, so without this a deleted project stayed in every selector as one
+    available on this worker (#434). The identity and the checkout row are kept,
+    only marked removed, so a chat still bound to the project keeps opening in
+    its folder. Another local clone of the same origin keeps it listed.
+    """
+    from app.db.checkouts import retire_base_checkouts
+
+    origin = _catalog_origin(project)
+    cursor.execute(
+        "SELECT 1 FROM projects WHERE id <> %s AND link_group_id = %s "
+        "AND (instance_id = %s OR instance_id IS NULL) LIMIT 1",
+        (project["id"], origin, settings.effective_instance_id),
+    )
+    if cursor.fetchone() is not None:
+        return
+    project_v2_id = _catalog_project_v2_id(cursor, origin)
+    if project_v2_id:
+        retire_base_checkouts(cursor, project_v2_id, _catalog_runners(project))
+
+
+def _restore_to_catalog(cursor, project: Dict[str, Any]) -> None:
+    """Re-adding a deleted project brings its retired base checkout back."""
+    from app.db.checkouts import restore_removed_base_checkouts
+
+    project_v2_id = _catalog_project_v2_id(cursor, _catalog_origin(project))
+    if project_v2_id:
+        restore_removed_base_checkouts(cursor, project_v2_id, _catalog_runners(project))
+
+
 def create_project(
     project_id: str,
     name: str,
@@ -122,6 +171,7 @@ def create_project(
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id, now, now)
         )
+        _restore_to_catalog(cursor, {"id": project_id, "instance_id": instance_id})
     return get_project(project_id)
 
 
@@ -179,6 +229,13 @@ def set_project_link_group(project_id: str, link_group_id: Optional[str]) -> Opt
             "UPDATE projects SET link_group_id = %s, updated_at = %s WHERE id = %s",
             (link_group_id, datetime.now(timezone.utc).isoformat(), project_id),
         )
+        if link_group_id and cursor.rowcount:
+            # A re-added clone of a deleted project regains its origin here,
+            # once its remote is read: bring that checkout back too.
+            cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s", (project_id,))
+            project = row_to_dict(cursor.fetchone())
+            if project:
+                _restore_to_catalog(cursor, project)
     return get_project(project_id)
 
 
@@ -222,6 +279,10 @@ def delete_project(project_id: str) -> bool:
     """Delete a project and all associated sessions (sessions are cwd-dependent)"""
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s", (project_id,))
+        project = row_to_dict(cursor.fetchone())
+        if project:
+            _retire_from_catalog(cursor, project)
         # First delete all sessions associated with this project
         cursor.execute("DELETE FROM sessions WHERE project_id = %s", (project_id,))
         # Then delete the project

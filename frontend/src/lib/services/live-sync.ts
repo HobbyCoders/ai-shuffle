@@ -87,6 +87,7 @@ export function startLiveSync() {
   resourceSync.subscribe(['projects'], async () => {
    await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions()]);
    activeSession.applyComposerDefaults();
+   activeSession.dropMissingProject();
   }),
   resourceSync.subscribe(['agents'], async () => {
    await appData.loadProfiles();

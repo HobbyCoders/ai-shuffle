@@ -527,6 +527,11 @@ def _chat_access_changed_handler():
     return handle_changed
 
 
+def _projects_changed_handler():
+    from app.network.project_catalog import handle_changed
+    return handle_changed
+
+
 def _terminal_handler():
     from app.network.terminal_relay import handle
     return handle
@@ -570,6 +575,7 @@ _LAZY_HANDLERS = {
     "project-git": _project_git_handler,
     "git-state": _git_state_handler,
     "git-catalog": _git_catalog_handler,
+    "projects-changed": _projects_changed_handler,
     "git-op": _git_op_handler,
 }
 

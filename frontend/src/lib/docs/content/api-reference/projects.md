@@ -54,7 +54,7 @@ Update a project.
 
 ### DELETE /api/v1/projects/{project_id}
 
-Delete a project from the database (does not delete files).
+Delete a project from the database (does not delete files). Its chats are deleted with it, and it leaves `GET /api/v1/cluster/projects` on this device. Another device's copy of the same repository stays listed.
 
 **Auth:** Owner only
 

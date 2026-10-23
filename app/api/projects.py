@@ -308,7 +308,9 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
             settings_dict=settings_dict
         )
 
-    return await run_sync(_create)
+    created = await run_sync(_create)
+    _announce_catalog_change()
+    return created
 
 
 @router.put("/{project_id}", response_model=Project)
@@ -375,6 +377,16 @@ async def delete_project(project_id: str, token: str = Depends(require_admin)):
         database.delete_project(project_id)
 
     await run_sync(_delete)
+    _announce_catalog_change()
+
+
+def _announce_catalog_change() -> None:
+    """Peers list this worker's projects too: tell their selectors (#434)."""
+    try:
+        from app.network.project_catalog import announce_soon
+        announce_soon()
+    except Exception:  # noqa: BLE001 - the change itself already committed
+        logger.debug("Project catalog announcement failed", exc_info=True)
 
 
 def _project_with_meta(project_id: str) -> dict:
