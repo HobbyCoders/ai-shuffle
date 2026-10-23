@@ -1,6 +1,7 @@
 """Regression probes from review: reclamation must never stop or erase new work."""
 import asyncio
 import json
+import os
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -173,19 +174,33 @@ def test_known_ignored_caches_do_not_block_reclaim(repository, name):
     assert not path.exists()
 
 
-def test_symlinked_cache_is_kept_without_touching_target(repository, tmp_path):
+@pytest.mark.parametrize("kind", ["symlink", "junction"])
+def test_symlinked_cache_is_kept_without_touching_target(repository, tmp_path, kind):
+    if kind == "junction" and os.name != "nt":
+        pytest.skip("directory junctions exist only on Windows")
     repo, path = merged(repository)
     target = tmp_path / "cache-target"
     target.mkdir()
     valuable = target / "valuable"
     valuable.write_text("keep")
     link = path / ".pytest_cache"
-    link.symlink_to(target, target_is_directory=True)
+    if kind == "junction":
+        # The directory link Windows checkouts carry (node_modules); it needs
+        # no symlink privilege, so it runs on every Windows host.
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:
+            # WinError 1314: no symlink privilege (no Developer Mode or admin).
+            pytest.skip("this Windows account cannot create symlinks; the junction case covers it")
     excludes = repo / ".git" / "info" / "exclude"
     excludes.write_text(excludes.read_text() + "\n.pytest_cache\n")
     assert reclaim()["items"][0]["decision"] == "keep"
     assert reclaim(dry_run=False)["reclaimed"] == 0
-    assert link.is_symlink()
+    assert link.is_junction() if kind == "junction" else link.is_symlink()
     assert valuable.read_text() == "keep"
 
 
