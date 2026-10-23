@@ -166,3 +166,80 @@ async def test_failed_stop_returns_for_retry_without_cancelling_execution():
             await task
 
 
+@pytest.mark.parametrize("blocked_stage", ["stop", "flush"])
+async def test_shutdown_budget_includes_stop_and_flush(monkeypatch, blocked_stage):
+    release = asyncio.Event()
+    calls = []
+
+    async def block(*args, **kwargs):
+        calls.append(asyncio.current_task())
+        await release.wait()
+
+    monkeypatch.setattr(desktop_lifecycle, "SHUTDOWN_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: {"busy"})
+    with patch.object(desktop_lifecycle, "stop_session_work", new=block if blocked_stage == "stop" else AsyncMock()), \
+         patch("app.core.task_persistence.flush", new=block if blocked_stage == "flush" else AsyncMock()):
+        try:
+            await asyncio.wait_for(desktop_lifecycle.stop_running_sessions(), 0.5)
+            assert calls and not calls[0].done()
+            assert calls[0].cancelling() == 0
+        finally:
+            release.set()
+            await asyncio.gather(*calls)
+
+
+async def test_shutdown_execution_wait_uses_budget_left_after_stop(monkeypatch):
+    execution = asyncio.create_task(asyncio.Event().wait())
+
+    async def slow_stop(*args, **kwargs):
+        await asyncio.sleep(0.04)
+
+    monkeypatch.setattr(desktop_lifecycle, "SHUTDOWN_SETTLE_SECONDS", 0.06)
+    with patch.object(desktop_lifecycle, "active_session_ids", return_value={"busy"}), \
+         patch.object(session_runtime, "active_executions", return_value={execution: "busy"}), \
+         patch.object(desktop_lifecycle, "stop_session_work", new=slow_stop), \
+         patch("app.core.task_persistence.flush", new=AsyncMock()), \
+         patch.object(desktop_lifecycle.asyncio, "wait", wraps=asyncio.wait) as wait:
+        try:
+            await asyncio.wait_for(desktop_lifecycle.stop_running_sessions(), 0.5)
+            execution_wait = next(call for call in wait.call_args_list if call.args[0] == {execution})
+            assert 0 <= execution_wait.kwargs["timeout"] < 0.03
+            assert not execution.done()
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+
+
+async def test_force_stop_runs_all_tasks_and_turns_under_one_deadline(mock_db, monkeypatch):
+    from app.core.task_registry import TaskRegistry
+
+    registry = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", registry)
+    monkeypatch.setattr("app.core.remote_task.report_owed", lambda sid: None)
+    for i in range(12):
+        registry.start_task(f"s{i % 2}", f"task{i}", "shell", "work")
+    release = asyncio.Event()
+    calls, started = [], []
+
+    async def block(*args, **kwargs):
+        calls.append(asyncio.current_task())
+        started.append(args)
+        await release.wait()
+        return []
+
+    with patch.object(session_runtime, "force_end_executions", new=block), \
+         patch("app.core.query_session_lifecycle.stop_session_task", new=block):
+        try:
+            assert await asyncio.wait_for(desktop_lifecycle.force_stop_sessions(
+                {"s0", "s1"}, source="worker_update", grace=0.05), 0.5) == ["s0", "s1"]
+            assert len(started) == 13  # turn force-end and every task start concurrently
+            assert all(call.cancelling() == 0 for call in calls)
+            assert not registry.active_session_ids()
+            for i in range(12):
+                task = registry.get_task(f"s{i % 2}", f"task{i}")
+                assert (task["status"], task["reason"]) == ("killed", "worker_update")
+        finally:
+            release.set()
+            await asyncio.gather(*calls)
+
+
