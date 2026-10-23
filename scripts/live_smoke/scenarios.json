@@ -321,6 +321,14 @@
           "how": "In a disposable account/chat with fal configured, remember an image-to-video or edit model with a required image input and valid saved settings (including an object-valued image_size where supported). Invoke generation without naming a source/model, first omitting the image input and then passing a wrong-type image input. Inspect the structured tool results; do not retry with valid media or submit a paid generation. Restore the disposable preferences and archive the chat.",
           "pass_when": "Both calls return refused with reason invalid_request and the original input-validation error, not a choice card or remembered_unavailable. No reservation or provider submission occurs.",
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
+        },
+        {
+          "id": "harness-basics.10",
+          "check": "Git read timeout containment and invalidation single-flight",
+          "kind": "owner",
+          "how": "On candidate Linux and Windows workers, use a disposable checkout and an isolated GitService probe (never replace the worker's Git executable). Put a fake git redirector on only the probe's PATH that spawns a hung child and grandchild inheriting stdout/stderr. Start concurrent status requests, invalidate while the first read is blocked, then release it or let its deadline expire. Record read start/end times and all probe descendant PIDs. Repeat against real Git after editing a tracked file. Remove only the disposable probe artifacts.",
+          "pass_when": "Hung reads and every waiter return within their deadlines plus the documented cleanup grace; no live probe descendants remain. Reads of one checkout never overlap, repeated invalidations coalesce into one follow-up for the latest state, and the real-Git follow-up reports the edited file. Other worker requests remain responsive. Missing Windows evidence is not a pass.",
+          "past_bug": "#436: a Git for Windows redirector timeout left its pipe-holding child alive and shared status waiters blocked; invalidation launched overlapping reads of the same checkout."
         }
       ]
     }
