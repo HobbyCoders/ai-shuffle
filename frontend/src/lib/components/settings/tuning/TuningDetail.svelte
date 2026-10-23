@@ -30,6 +30,7 @@
 		contextControl,
 		effortLabel,
 		effortSaved,
+		effortStartRoute,
 		effortText,
 		effortState,
 		fastRoutes,
@@ -92,8 +93,15 @@
 		const measured = effort.initial
 			? ` Until you pick one, a new chat starts at ${effortLabel(effort.initial)}: a benchmarked choice for this route, kept only because it measured better.`
 			: '';
+		// Unpicked, routes can start differently: say which one the shown start is.
+		const starts = new Set(perRoute.filter(({ route }) => route.effort.known && route.effort.options.length).map((p) => p.effort));
+		const start = effortStartRoute(model);
+		const startName = start.groupSubtext ? `${start.group} (${start.groupSubtext})` : start.group;
+		const startNote = effort.initial && !saved.effortSaved && starts.size > 1
+			? ` That measured start is on ${startName}; Routes shows where each route starts.`
+			: '';
 		const fitted = multi ? ' A level a route does not offer runs at its nearest level there; see Routes.' : '';
-		return `${auto}${measured} Changing effort in a chat on this model saves the same choice.${fitted}`;
+		return `${auto}${measured}${startNote} Changing effort in a chat on this model saves the same choice.${fitted}`;
 	});
 
 	const fastHelp = $derived(

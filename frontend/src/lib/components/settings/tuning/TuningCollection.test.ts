@@ -190,6 +190,36 @@ describe('effort', () => {
 		expect(screen.getByText('Saved for new chats')).toBeTruthy();
 	});
 
+	it('shows the measured start when the OpenAI key route lists before ChatGPT', async () => {
+		// Provider rows list newest first: an OpenAI key added after ChatGPT comes first.
+		const [codex, oai, ...rest] = registry.providers;
+		worker = fakeWorker({ rows }, {
+			'GET /models': () => ({ ...registry, providers: [oai, codex, ...rest] }),
+			'POST /model-providers/refresh-capabilities': () => ({ refreshed: [], failed: [] })
+		});
+		vi.stubGlobal('fetch', worker.fetch);
+		await open('gpt-6.1-sol');
+		const model = collectTuningModels().find((m) => m.key === 'gpt-6.1-sol')!;
+		expect(model.routes.map((r) => r.value)).toEqual(['prov:oai:gpt-6.1-sol', 'prov:codex:gpt-6.1-sol']);
+
+		// What a new chat on ChatGPT starts with, not the key route's Auto.
+		expect(combo('Effort').value).toBe('high');
+		expect(screen.getByText('Starts at High, measured')).toBeTruthy();
+		const list = screen.getByRole('region', { name: 'Models' });
+		expect(within(list).getByText(/Effort High/)).toBeTruthy();
+		expect(within(list).queryByText('Changed')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'About Effort' }));
+		expect(screen.getByRole('tooltip').textContent).toContain('That measured start is on OpenAI (PRO)');
+
+		// Reset returns to that same start.
+		await fireEvent.change(combo('Effort'), { target: { value: 'low' } });
+		await flush();
+		await fireEvent.click(screen.getByRole('button', { name: /Reset Effort/i }));
+		await flush();
+		expect(lastSave()).toEqual(['composer.modelEffort.gpt-6.1-sol', 'high']);
+		expect(within(list).queryByText('Changed')).toBeNull();
+	});
+
 	it('shows what each route runs when a level is not offered everywhere', async () => {
 		await open('gpt-6.1-sol');
 		await fireEvent.change(combo('Effort'), { target: { value: 'ultra' } });

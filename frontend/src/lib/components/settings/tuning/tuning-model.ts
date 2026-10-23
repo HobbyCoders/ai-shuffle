@@ -129,6 +129,21 @@ export function effortText(state: EffortState, value: string | null): string {
 }
 
 /**
+ * The route whose start the page shows for a never-picked model: the first
+ * with a measured initial level, else the first that offers effort, else the
+ * first. Provider rows list newest first, so an OpenAI key added after
+ * ChatGPT sits ahead of it while only ChatGPT carries the measured start.
+ */
+export function effortStartRoute(model: TuningModel): TuningRoute {
+	const r = model.routes;
+	return (
+		r.find((x) => x.effort.known && x.effort.initialValue != null) ??
+		r.find((x) => x.effort.known && x.effort.options.length) ??
+		r[0]
+	);
+}
+
+/**
  * What the Effort control offers: every level any route offers, in the
  * vocabulary's order. With routes that disagree, the composer fits the
  * saved level per route; `routeEffort` says what each one runs.
@@ -140,8 +155,8 @@ export function effortState(model: TuningModel): EffortState {
 	const offered = new Set(known.flatMap((c) => c.options.map((o) => o.value)));
 	if (!offered.size) return { kind: 'fixed', reason: known[0].explanation ?? 'This model has no effort setting.' };
 	const options = EFFORT_OPTIONS.filter((o) => offered.has(o.value)).map((o) => ({ value: o.value, label: o.label }));
-	const first = known.find((c) => c.options.length) ?? known[0];
-	return { kind: 'adjustable', options, vendorDefault: first.defaultValue, initial: first.initialValue };
+	const start = effortStartRoute(model).effort;
+	return { kind: 'adjustable', options, vendorDefault: start.defaultValue, initial: start.initialValue };
 }
 
 /** True when this account has its own effort record for the model (Auto counts). */
@@ -152,11 +167,12 @@ export function effortSaved(model: TuningModel): boolean {
 /**
  * The level the Effort control shows: the saved record as stored, else what a
  * never-picked model starts with (`composerPreferences.effortForModel`: an
- * older family record, the measured initial pick, or Auto).
+ * older family record, the measured initial pick, or Auto) on the route
+ * `effortStartRoute` picks, the same one `effortState.initial` reads.
  */
 export function selectedEffort(model: TuningModel): string | null {
 	if (effortSaved(model)) return composerPreferences.current.modelEfforts[model.key] ?? null;
-	return composerPreferences.effortForModel(model.routes[0].value);
+	return composerPreferences.effortForModel(effortStartRoute(model).value);
 }
 
 /** What a new chat on one route starts with, fitted to that route's levels like the composer does. */
