@@ -82,13 +82,28 @@ def test_a_retry_is_a_new_numbered_card_and_an_expired_one_keeps_its_place(monke
         _requested("perm-a", "git push", "Release"),
         ("interaction.expired", {"interaction_id": "i-perm-a", "request_id": "perm-a", "reason": "ttl"}),
         _requested("perm-a2", "git push", "Release"),
-        ("interaction.expired", {"interaction_id": "i-perm-a2", "request_id": "perm-a2", "reason": "cancelled"}),
+        _answered("perm-a2", "deny"),
         _requested("perm-a3", "git push", "Release"),
     ])
     assert [_shape(m) for m in messages] == [
         ("card", "perm-a", "expired", 1),
-        ("card", "perm-a2", "cancelled", 2),
+        ("card", "perm-a2", "declined", 2),
         ("card", "perm-a3", "pending", 3),
+    ]
+
+
+def test_repeating_an_approved_or_cancelled_request_is_not_asked_again(monkeypatch):
+    messages = _fold(monkeypatch, [
+        _requested("perm-a", "git push", "Release"),
+        _answered("perm-a", "allow"),
+        _requested("perm-a2", "git push", "Release"),  # the job runs it again
+        ("interaction.expired", {"interaction_id": "i-perm-a2", "request_id": "perm-a2", "reason": "cancelled"}),
+        _requested("perm-a3", "git push", "Release"),
+    ])
+    assert [_shape(m) for m in messages] == [
+        ("card", "perm-a", "approved", 1),
+        ("card", "perm-a2", "cancelled", 1),
+        ("card", "perm-a3", "pending", 1),
     ]
 
 

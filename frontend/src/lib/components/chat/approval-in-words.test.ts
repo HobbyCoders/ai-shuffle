@@ -192,6 +192,23 @@ describe('approvals asked in words', () => {
 		expect(statusOf(cardFor(view.container, 'perm-1'))).toBe('Expired');
 	});
 
+	it('does not mark a repeat of an approved request as asked again', () => {
+		seq = 0;
+		const state = reduceAll([
+			requested('perm-1', 'git push', 'Release'),
+			answered('perm-1', 'allow'),
+			requested('perm-2', 'git push', 'Release')
+		]);
+		const view = render(ApprovalTranscript, {
+			messages: state.messages,
+			pendingPermissions: [pending('perm-2', 'git push', 'Release')]
+		});
+		expect(cardFor(view.container, 'perm-2').textContent).not.toContain('Asked again');
+		expect(state.messages.map((m: ChatMessage) => m.systemData?.attempt)).toEqual([1, 1]);
+		expect(statusOf(cardFor(view.container, 'perm-1'))).toBe('Authorized');
+		expect(statusOf(cardFor(view.container, 'perm-2'))).toBe('Waiting for you');
+	});
+
 	it('renders the same live and after a reload', async () => {
 		seq = 0;
 		const events = [

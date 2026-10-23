@@ -1307,6 +1307,8 @@ def attach_event_positions(messages: list[dict], session_id: str) -> None:
 # request id, settled in place. Mirrors the frontend reducer's projection
 # (frontend/src/lib/utils/assistant-confirm.ts) so a reload reads the same (#483).
 APPROVAL_CARD_SUBTYPE = "assistant_confirm_request"
+# Earlier outcomes that make a same-question card a retry ("Asked again").
+RETRIED_APPROVAL_STATUSES = frozenset({"declined", "expired"})
 
 
 def _approval_card_id(request_id: Any) -> Optional[str]:
@@ -1325,8 +1327,11 @@ def _approval_card(event: dict, earlier: list[dict]) -> Optional[dict]:
         return " ".join(value.split()) if isinstance(value, str) else ""
 
     question = clean(confirm.get("question")) or f"May I use {request.get('tool_name') or 'a tool'}? Yes or no."
+    # Only a repeat of a request the owner declined or that expired is "asked
+    # again"; running an approved action a second time is a new first ask.
     attempt = 1 + sum(1 for m in earlier if m.get("systemSubtype") == APPROVAL_CARD_SUBTYPE
-                      and (m.get("systemData") or {}).get("question") == question)
+                      and (m.get("systemData") or {}).get("question") == question
+                      and (m.get("systemData") or {}).get("status") in RETRIED_APPROVAL_STATUSES)
     data: dict = {"request_id": event["request_id"], "question": question}
     for key in ("action", "asker", "chat_session_id"):
         if clean(confirm.get(key)):

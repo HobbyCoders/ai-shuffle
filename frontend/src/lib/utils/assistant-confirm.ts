@@ -1,10 +1,13 @@
 /**
- * Assistant mode asks for approval in words, not with a dialog.
+ * Approvals an owner chat asks in words, not with a dialog.
  *
- * A pending permission request in the assistant's home renders as the
- * assistant's own short question, and the owner answers in the message box
- * ("yes" / "no"). Deciding what the reply means is the backend's job; this only
- * turns the request the view already holds into one plain sentence.
+ * A permission request marked `assistant_confirm` is projected as one card in
+ * the transcript, keyed by its request id, at the point it was raised, and
+ * settled in place (authorized, declined, expired, cancelled). The owner
+ * answers in the message box ("yes" / "no"); deciding what the reply means is
+ * the backend's job. The card projection here must match the backend's REST
+ * fold (`_approval_card` in app/api/sessions_helpers.py) so live, replay and
+ * reload read the same transcript.
  */
 import type { PermissionRequest } from '$lib/api/client';
 import type { ChatMessage } from '$lib/stores/types';
@@ -98,7 +101,7 @@ export interface ApprovalCardData {
 	asker?: string;
 	chat_session_id?: string;
 	status: ApprovalStatus;
-	/** 1 for a first ask; 2+ when an earlier card asked the same thing. */
+	/** 1 for a first ask; 2+ when earlier cards asking the same thing were declined or expired. */
 	attempt: number;
 }
 
@@ -126,11 +129,15 @@ export function approvalCardData(message: Pick<ChatMessage, 'systemData'>): Appr
 	return data as unknown as ApprovalCardData;
 }
 
+/** Earlier outcomes that make a same-question card a retry ("Asked again"). */
+const RETRIED_STATUSES: ReadonlySet<ApprovalStatus> = new Set(['declined', 'expired']);
+
 /**
  * The card for a durable `interaction.requested` event, or null when the
  * request is not asked in words. `earlier` is the transcript so far: a card
- * that asks what an earlier card already asked is numbered, so a retry never
- * looks like the request it replaces.
+ * that repeats an earlier request which was declined or expired is numbered,
+ * so a retry never looks like the request it replaces. Running an approved
+ * action again is a new first ask.
  */
 export function approvalCardFromRequest(
 	requestId: string,
@@ -147,7 +154,9 @@ export function approvalCardFromRequest(
 		});
 	let attempt = 1;
 	for (const message of earlier) {
-		if (isApprovalCard(message) && approvalCardData(message)?.question === question) attempt++;
+		if (!isApprovalCard(message)) continue;
+		const card = approvalCardData(message);
+		if (card?.question === question && RETRIED_STATUSES.has(card.status)) attempt++;
 	}
 	return {
 		request_id: requestId,

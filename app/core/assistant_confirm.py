@@ -3,8 +3,9 @@
 When an owner chat, a Task worker under it, or a chat it started with
 StartSession needs the owner's decision, the ordinary permission prompt is
 raised on that owner chat (``provider_agent_approvals``) and marked
-``assistant_confirm``. The client shows it as one plain question instead of
-an approval card. (The name is historical: it began in the retired personal
+``assistant_confirm``. The client shows it as an approval card in the
+transcript with no buttons; the owner answers by replying in the chat. (The
+name is historical: it began in the retired personal
 assistant's conversation and now applies to every owner chat, #371.)
 
 The app decides, not the model:
