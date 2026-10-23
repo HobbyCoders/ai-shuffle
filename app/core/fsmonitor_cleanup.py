@@ -43,7 +43,7 @@ def _git(path: str, *args: str, deadline: float, cancelled: threading.Event):
 def _cleanup(cancelled: threading.Event) -> None:
     if sys.platform not in {"win32", "darwin"}:
         return
-    fixed = stopped = failures = 0
+    fixed = stopped = failures = stop_failures = 0
     complete = skipped = False
     deadline = time.monotonic() + TOTAL_TIMEOUT
     try:
@@ -55,16 +55,26 @@ def _cleanup(cancelled: threading.Event) -> None:
         pending = set(json.loads(state or "[]"))
 
         def stop_pending():
-            nonlocal stopped
+            nonlocal stopped, stop_failures
             for worktree in sorted(pending.copy()):
-                code, message = _git(worktree, "fsmonitor--daemon", "stop",
-                                     deadline=deadline, cancelled=cancelled)
-                if "not running" not in message.lower():
-                    if code != 0:
-                        raise RuntimeError("daemon stop failed")
-                    stopped += 1
+                if cancelled.is_set() or time.monotonic() >= deadline:
+                    raise TimeoutError("fsmonitor cleanup interrupted")
+                try:
+                    if (Path(worktree) / ".git").exists():
+                        code, message = _git(worktree, "fsmonitor--daemon", "stop",
+                                             deadline=deadline, cancelled=cancelled)
+                        if "not running" not in message.lower():
+                            if code != 0:
+                                raise RuntimeError("daemon stop failed")
+                            stopped += 1
+                except TimeoutError:
+                    raise  # Preserve outstanding paths when the total budget expires.
+                except (OSError, subprocess.SubprocessError, RuntimeError):
+                    # A broken checkout must not block all later repos/boots.
+                    # Include skipped failures in the single summary below.
+                    stop_failures += 1
                 pending.remove(worktree)
-            database.set_system_setting(key, json.dumps(sorted(pending)))
+                database.set_system_setting(key, json.dumps(sorted(pending)))
 
         # A previous boot may have exited after unsetting but before all stops.
         if pending:
@@ -94,9 +104,18 @@ def _cleanup(cancelled: threading.Event) -> None:
                     code, listing = run("worktree", "list", "--porcelain", "-z")
                     if code != 0:
                         raise RuntimeError("worktree listing failed")
-                    paths = {os.path.normcase(os.path.abspath(p)) for p in
-                             [path, *(field[9:] for field in listing.split("\0")
-                                      if field.startswith("worktree "))]}
+                    paths = {path}
+                    for record in listing.split("\0\0"):
+                        fields = record.split("\0")
+                        for field in fields:
+                            if not field.startswith("worktree "):
+                                continue
+                            listed = os.path.normcase(os.path.abspath(field[9:]))
+                            if (any(f == "prunable" or f.startswith("prunable ") for f in fields)
+                                    or not (Path(listed) / ".git").exists()):
+                                seen.add(listed)
+                            else:
+                                paths.add(listed)
                     # Journal before unsetting so interruption cannot strand a
                     # daemon whose repo no longer has a discoverable true value.
                     pending.update(paths)
@@ -119,7 +138,7 @@ def _cleanup(cancelled: threading.Event) -> None:
     finally:
         if not skipped:
             logger.info("Fsmonitor cleanup: repos fixed=%d, daemons stopped=%d, failures=%d, complete=%s",
-                        fixed, stopped, failures, complete)
+                        fixed, stopped, failures + stop_failures, complete)
 
 
 async def cleanup_once() -> None:

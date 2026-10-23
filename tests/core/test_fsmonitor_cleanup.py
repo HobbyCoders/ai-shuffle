@@ -130,7 +130,7 @@ def test_canonical_local_checkouts_not_remote_ones(install, stops, tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["error", "timeout", "not-running"])
-def test_failed_stops_are_retried_after_unset(install, tmp_path, monkeypatch, failure):
+def test_per_path_stop_failures_are_skipped_after_unset(install, tmp_path, monkeypatch, failure, caplog):
     repo = init_repo(tmp_path / "repo")
     register(repo)
     git(repo, "config", "--local", "core.fsmonitor", "true")
@@ -146,17 +146,90 @@ def test_failed_stops_are_retried_after_unset(install, tmp_path, monkeypatch, fa
         return real_git(path, *args, **kwargs)
 
     monkeypatch.setattr(cleanup, "_git", run)
-    cleanup._cleanup(threading.Event())
-    state = database.get_system_setting(install)
-    if failure == "not-running":
-        assert state == "1"
-    else:
-        assert json.loads(state) == [os.path.normcase(os.path.abspath(repo))]
-        assert git(repo, "config", "--local", "--get", "core.fsmonitor", check=False) == ""
-        monkeypatch.setattr(cleanup, "_git", lambda *a, **kw: (0, ""))
+    with caplog.at_level(logging.INFO, logger=cleanup.__name__):
         cleanup._cleanup(threading.Event())
-        assert database.get_system_setting(install) == "1"
+    assert database.get_system_setting(install) == "1"
+    assert git(repo, "config", "--local", "--get", "core.fsmonitor", check=False) == ""
     assert len(calls) == 1
+    assert f"failures={int(failure != 'not-running')}, complete=True" in caplog.text
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_stale_worktree_does_not_block_completion(install, stops, tmp_path, missing):
+    import shutil
+
+    repo = init_repo(tmp_path / "repo")
+    register(repo)
+    stale = tmp_path / "stale"
+    git(repo, "worktree", "add", "-q", "-b", "stale", str(stale))
+    if missing:
+        shutil.rmtree(stale)  # Only the disposable checkout created by this test.
+    else:
+        (stale / ".git").unlink()  # Existing directory, now listed as prunable.
+    listing = git(repo, "worktree", "list", "--porcelain")
+    assert "prunable" in listing
+    git(repo, "config", "--local", "core.fsmonitor", "true")
+    cleanup._cleanup(threading.Event())
+    assert stops == [repo]
+    assert database.get_system_setting(install) == "1"
+
+
+def test_missing_persisted_pending_path_does_not_block_other_repos(install, stops, tmp_path):
+    database.set_system_setting(install, json.dumps([str(tmp_path / "gone")]))
+    repo = init_repo(tmp_path / "repo")
+    register(repo)
+    git(repo, "config", "--local", "core.fsmonitor", "true")
+    cleanup._cleanup(threading.Event())
+    assert stops == [repo]
+    assert database.get_system_setting(install) == "1"
+
+
+def test_stop_progress_is_persisted_before_next_path(install, tmp_path, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    register(repo)
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "-b", "wt", str(worktree))
+    git(repo, "config", "--local", "core.fsmonitor", "true")
+    real_git = cleanup._git
+    cancelled = threading.Event()
+    calls = []
+
+    def run(path, *args, **kwargs):
+        if args == ("fsmonitor--daemon", "stop"):
+            calls.append(Path(path))
+            if len(calls) == 1:
+                cancelled.set()  # Simulate shutdown just after the first stop.
+            return 0, ""
+        return real_git(path, *args, **kwargs)
+
+    monkeypatch.setattr(cleanup, "_git", run)
+    cleanup._cleanup(cancelled)
+    assert calls == [repo]
+    assert json.loads(database.get_system_setting(install)) == [os.path.normcase(os.path.abspath(worktree))]
+    cleanup._cleanup(threading.Event())
+    assert calls == [repo, worktree]
+    assert database.get_system_setting(install) == "1"
+
+
+def test_failed_path_does_not_block_other_worktrees(install, tmp_path, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    register(repo)
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "-b", "wt", str(worktree))
+    git(repo, "config", "--local", "core.fsmonitor", "true")
+    real_git = cleanup._git
+    calls = []
+
+    def run(path, *args, **kwargs):
+        if args == ("fsmonitor--daemon", "stop"):
+            calls.append(Path(path))
+            return (1, "unavailable") if Path(path) == repo else (0, "")
+        return real_git(path, *args, **kwargs)
+
+    monkeypatch.setattr(cleanup, "_git", run)
+    cleanup._cleanup(threading.Event())
+    assert calls == [repo, worktree]
+    assert database.get_system_setting(install) == "1"
 
 
 def test_registry_worktree_survives_missing_root(install, stops, tmp_path, monkeypatch):
