@@ -1,8 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <circle class="shape" cx="17" cy="17" r="7" />
-  <circle class="shape" cx="47" cy="17" r="7" />
-  <circle class="shape" cx="32" cy="35" r="20" />
-  <ellipse class="ring" cx="32" cy="43" rx="8" ry="6" />
-  <path class="eyes" d="M25 30v3m14-3v3" />
-  <path class="eyes" d="M30 41h4" />
+  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
+  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
+  <circle class="shape" cx="21" cy="19" r="7.5"/>
+  <circle class="shape" cx="49" cy="19" r="7.5"/>
+  <circle cx="21" cy="19" r="3.2" fill="currentColor" fill-opacity=".55"/>
+  <circle cx="49" cy="19" r="3.2" fill="currentColor" fill-opacity=".55"/>
+  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
+  <circle class="eyes" cx="28" cy="35" r="1.6"/>
+  <circle class="eyes" cx="42" cy="35" r="1.6"/>
+  <ellipse class="ring" cx="35" cy="48" rx="10" ry="7.5"/>
+  <ellipse class="eyes" cx="35" cy="45.5" rx="1.8" ry=".8"/>
+  <path class="smile" d="M35 47v2.5m-3.5.5q3.5 2.5 7 0"/>
 </svg>

@@ -1,7 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <path class="shape" d="M12 12q8 2 12 8h16q4-6 12-8v28c0 11-9 16-20 16S12 51 12 40Z" />
-  <circle class="ring" cx="25" cy="31" r="7" />
-  <circle class="ring" cx="39" cy="31" r="7" />
-  <path class="eyes" d="M25 31v.5m14-.5v.5" />
-  <path class="mark" d="m29 40 3 5 3-5Z" />
+  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
+  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
+  <path class="shape" d="M17 31V12l11 6Z"/>
+  <path class="shape" d="M53 31V12l-11 6Z"/>
+  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
+  <circle class="ring" cx="28.5" cy="34" r="7"/>
+  <circle class="ring" cx="41.5" cy="34" r="7"/>
+  <circle class="eyes" cx="28.5" cy="34" r="1.6"/>
+  <circle class="eyes" cx="41.5" cy="34" r="1.6"/>
+  <path class="mark" d="M32 42h6l-3 5Z"/>
+  <path d="M27 53l3 2.5 3-2.5m4 0 3 2.5 3-2.5" stroke="currentColor" stroke-opacity=".6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

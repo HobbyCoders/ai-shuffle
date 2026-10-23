@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
+  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
+  <path class="mark" d="M16 25q2-13 19-14 13 0 18 8l7-3-4 9Z"/>
+  <path d="M56 16q2-8 7-11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
+  <path class="mark" stroke-opacity="0" d="M17 25h36v4H17Z"/>
+  <circle class="eyes" cx="29" cy="37" r="1.6"/>
+  <circle class="eyes" cx="41" cy="37" r="1.6"/>
+  <path class="smile" d="M30 46q5 3 10-1"/>
+  <path class="smile" d="M26 32l4.5-1m9 1 4.5-1"/>
+</svg>

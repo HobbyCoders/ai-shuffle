@@ -26,7 +26,8 @@ from app.db.base import get_db, row_to_dict, column_exists
 # fails if it drifts from the manifest.
 AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
                   "owl", "fox", "cat", "bear", "ghost", "cloud",
-                  "moon", "sun", "bolt", "gem", "drop")
+                  "moon", "sun", "bolt", "gem", "drop",
+                  "king", "queen", "jack", "joker")
 # Background research tuning. Owners never set these: this is the one place
 # they live, and every run is admitted under exactly these values:
 #   max_runs_per_day     12    research runs in any rolling 24 hours

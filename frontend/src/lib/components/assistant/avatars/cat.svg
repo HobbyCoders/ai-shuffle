@@ -1,6 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <path class="shape" d="m13 13 11 9h16l11-9v25c0 10-8 15-19 15s-19-5-19-15Z" />
-  <path d="M6 37h11M6 44l11-3m41-4H47m11 7-11-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-  <path class="eyes" d="M25 31v3m14-3v3" />
-  <path class="smile" d="M29 41q3 3 6 0" />
+  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
+  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
+  <path class="shape" d="M18 27 19 8q1-2 3-1l9 10Z"/>
+  <path class="shape" d="M52 27 51 8q-1-2-3-1l-9 10Z"/>
+  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
+  <circle class="eyes" cx="29" cy="37" r="1.6"/>
+  <circle class="eyes" cx="41" cy="37" r="1.6"/>
+  <path class="mark" d="M33 43h4l-2 2.5Z"/>
+  <path class="smile" d="M31 48q2 2 4 0 2 2 4 0"/>
+  <path class="smile" d="M24 45 9 43m15 5-14 3m36-6 15-2m-15 5 14 3"/>
 </svg>

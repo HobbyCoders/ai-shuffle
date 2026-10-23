@@ -19,7 +19,10 @@ def test_backend_allowlist_is_the_manifest():
     # The frontend reads avatars.json directly; the backend ships without the
     # frontend sources, so its copy is held to the manifest here.
     assert tuple(manifest()) == store.AVATAR_PRESETS
-    assert len(set(manifest())) == len(manifest()) == 16
+    assert len(set(manifest())) == len(manifest()) == 20
+    # Saved agents keep their avatar: the original sixteen ids never go away.
+    assert manifest()[:16] == ["robot", "spark", "orbit", "sprout", "pixel", "owl", "fox", "cat",
+                               "bear", "ghost", "cloud", "moon", "sun", "bolt", "gem", "drop"]
     assert all(re.fullmatch(r"[a-z]+", avatar) for avatar in manifest())
 
 
