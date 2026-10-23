@@ -265,7 +265,12 @@ async def test_policy_off_refuses_every_peer_route_but_still_allows_revocation(w
 # Authorization lifetime and binding
 # ---------------------------------------------------------------------------
 
-def test_pending_request_expires_after_two_minutes(wired, clock):
+@pytest.mark.parametrize("start", [None, 199.476812733])
+def test_pending_request_expires_after_two_minutes(wired, clock, start):
+    # 199.476812733: a fresh CI runner's monotonic clock, where (t + 120) - t
+    # is 119.99999999999997 and a truncated expires_in read 119.
+    if start is not None:
+        clock[0] = start
     tc = owner(wired.ctx)
     pending = _request(tc)
     assert pending["expires_in"] == relay.PENDING_SECONDS
