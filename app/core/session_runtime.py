@@ -3613,9 +3613,10 @@ async def force_end_executions(session_ids: Set[str], *, grace: float) -> List[s
     """End this process's executions for ``session_ids`` that a Stop did not end.
 
     For an application update only: the process is about to restart. Cancels
-    each pump and waits up to ``grace``. Survivors are durably aborted before
-    cancelling execute() and no longer count as running work. Allow a final
-    ``grace`` for cancellation cleanup; the caller caps the whole force-stop
+    each pump and waits up to ``grace``. Owned turns are durably aborted before
+    cancelling execute(); pre-claim executions leave the row untouched. Neither
+    counts as local running work afterwards. Allow a final ``grace`` for
+    cancellation cleanup; the caller caps the whole force-stop
     phase, and process exit ends any survivors. Returns the forced session ids.
     """
     tasks = {task: sid for task, sid in active_executions().items() if sid in session_ids}
@@ -3630,15 +3631,17 @@ async def force_end_executions(session_ids: Set[str], *, grace: float) -> List[s
     async def abort_before_cancel(task):
         runtime = _execution_runtimes.get(task)
         if runtime is not None:
-            # Cancelling execute() can bypass _finalize entirely. Own the
-            # guarded terminal transition (and its callback) before cancelling;
-            # a later finalize then sees a racer-settled row and cannot fire twice.
-            settled = await asyncio.to_thread(
-                turns_db.settle_turn, runtime.turn_id, "aborted", "worker_update",
-                run_id=runtime._run_id,
-            )
-            # The row is now terminal (or no longer ours). Do not let slow
-            # settlement hooks or cancellation cleanup keep refusing the update.
+            # Cancelling execute() can bypass _finalize entirely. Only settle
+            # with an owned run: before claim, another worker may have started
+            # this same queued turn, and run_id=None would remove the DB guard.
+            settled = None
+            if runtime._run_id is not None:
+                settled = await asyncio.to_thread(
+                    turns_db.settle_turn, runtime.turn_id, "aborted", "worker_update",
+                    run_id=runtime._run_id,
+                )
+            # The owned row is terminal (or no longer ours); a pre-claim task
+            # owns no row. Slow hooks/cleanup must not block this local update.
             _mark_ended(task, runtime.session_id, "force-stopped for an application update")
             if settled is not None:
                 await _fire_on_turn_settled(runtime.session_id, runtime.turn_id, "aborted")

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core import desktop_lifecycle, session_runtime
+from app.db import runs as runs_db
 from app.db import turns as turns_db
 from tests.core.test_session_runtime import _interrupt_env, _runtime_env, _wedged_pump
 
@@ -133,6 +134,8 @@ async def test_an_execution_that_outlives_its_turn_no_longer_counts_as_running(m
 
 async def test_force_end_cancels_a_stuck_execution_and_stops_counting_it(mock_db):
     turn = turns_db.enqueue_turn("child", "provider_agent", prompt="score")
+    run = runs_db.claim_run("child", "local", 60)
+    turns_db.start_turn(turn["id"], run["id"], "local")
     release = asyncio.Event()
     cancelled = []
 
@@ -146,7 +149,7 @@ async def test_force_end_cancels_a_stuck_execution_and_stops_counting_it(mock_db
     task = asyncio.create_task(stuck())
     session_runtime._executions[task] = "child"
     session_runtime._execution_runtimes[task] = SimpleNamespace(
-        session_id="child", turn_id=turn["id"], _run_id=None,
+        session_id="child", turn_id=turn["id"], _run_id=run["id"],
         _cancel_pump=lambda: cancelled.append("pump"))
     try:
         assert await session_runtime.force_end_executions({"child", "other"}, grace=0.05) == ["child"]
@@ -229,3 +232,42 @@ async def test_force_cancel_settles_real_turn_before_execute_cancellation(mock_d
             env["scheduler"].assert_not_called()
         else:
             env["scheduler"].assert_called_once_with("forced", turn["id"], "aborted")
+
+
+@pytest.mark.parametrize("foreign_owned", [False, True])
+async def test_force_cancel_preclaim_execution_does_not_settle_shared_turn(mock_db, monkeypatch, foreign_owned):
+    turn = turns_db.enqueue_turn("preclaim", "user", prompt="work")
+    claiming = asyncio.Event()
+    to_thread = asyncio.to_thread
+
+    async def hold_local_claim(func, *args, **kwargs):
+        if func is runs_db.claim_run:
+            claiming.set()
+            await asyncio.Event().wait()
+        return await to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(session_runtime.asyncio, "to_thread", hold_local_claim)
+    with _runtime_env(pump=_wedged_pump(asyncio.Event())) as env:
+        execution = asyncio.create_task(session_runtime.execute(turn))
+        try:
+            await asyncio.wait_for(claiming.wait(), 2)
+            runtime = session_runtime._execution_runtimes[execution]
+            assert runtime._run_id is None
+            if foreign_owned:
+                foreign = runs_db.claim_run("preclaim", "foreign", 60)
+                turns_db.start_turn(turn["id"], foreign["id"], "foreign")
+            before = turns_db.get_turn(turn["id"])
+            assert await session_runtime.force_end_executions({"preclaim"}, grace=0.01) == ["preclaim"]
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(execution, 2)
+            after = turns_db.get_turn(turn["id"])
+            assert after == before
+            assert after["state"] == ("running" if foreign_owned else "queued")
+            if foreign_owned:
+                assert runs_db.get_active_run("preclaim")["id"] == foreign["id"]
+            env["scheduler"].assert_not_called()
+            env["recorder"].start.assert_not_awaited()
+            assert session_runtime.active_executions() == {}
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)

@@ -1080,10 +1080,12 @@ def test_stop_then_restart_force_stops_a_turn_that_never_unwinds(setup, monkeypa
 
         task = asyncio.ensure_future(stuck())
         session_runtime._executions[task] = "child"
-        from app.db import turns
+        from app.db import runs, turns
         turn = turns.enqueue_turn("child", "provider_agent", prompt="score")
+        run = runs.claim_run("child", "local", 60)
+        turns.start_turn(turn["id"], run["id"], "local")
         session_runtime._execution_runtimes[task] = SimpleNamespace(
-            session_id="child", turn_id=turn["id"], _run_id=None,
+            session_id="child", turn_id=turn["id"], _run_id=run["id"],
             _cancel_pump=lambda: pumps.append(True))
         try:
             refused = (await fleet.dispatch("install"))["results"][-1]
