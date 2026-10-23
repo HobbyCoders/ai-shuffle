@@ -682,7 +682,7 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | vary | 1.1.2 | MIT | https://www.npmjs.com/package/vary/v/1.1.2 |
 | which | 2.0.2 | ISC | https://www.npmjs.com/package/which/v/2.0.2 |
 | wrappy | 1.0.2 | ISC | https://www.npmjs.com/package/wrappy/v/1.0.2 |
-| zod | 3.25.76 | MIT | https://www.npmjs.com/package/zod/v/3.25.76 |
+| zod | 4.6.7 | MIT | https://www.npmjs.com/package/zod/v/4.6.7 |
 | zod-to-json-schema | 3.25.2 | ISC | https://www.npmjs.com/package/zod-to-json-schema/v/3.25.2 |
 
 ## npm packages: tools/
