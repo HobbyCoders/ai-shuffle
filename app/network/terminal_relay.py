@@ -44,7 +44,7 @@ def availability():
     from app.core import terminals
     if not peer_targets_enabled():
         return {"available": False, "reason_code": "peer_terminals_disabled",
-                "reason": "Enable peer terminals in owner policy on both workers."}
+                "reason": "Turn on peer terminals in owner policy on both workers."}
     if not terminals.supported():
         return {"available": False, "reason_code": "not_supported", "reason": "No usable PTY or shell on this worker."}
     return {"available": False, "reason_code": "recipient_approval_required",
@@ -120,6 +120,9 @@ def _public_approval(key, approval):
 
 
 def recipient_requests():
+    # With the owner policy off nothing here can be approved, so list nothing.
+    if not peer_targets_enabled():
+        return []
     now = time.monotonic()
     return [_public_approval(key, value) for key, value in _approvals.items() if value["expires"] > now]
 

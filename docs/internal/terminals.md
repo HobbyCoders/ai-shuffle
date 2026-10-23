@@ -7,8 +7,9 @@ authorization). Tests: `tests/core/test_terminals.py`,
 `tests/api/test_terminals_api.py`.
 
 Terminals support local Unix PTYs and Windows ConPTY and explicitly selected
-private-access SSH machine grants. **The peer-terminal backend is available;
-the terminal-panel UI integration is pending.** Persisted `network_peer_terminals`
+private-access SSH machine grants. **Peer terminals ship with backend and
+terminal-panel UI (#349, #353); a real two-worker HTTPS acceptance run is still
+outstanding (#196).** Persisted `network_peer_terminals`
 owner policy still defaults to `false` and must be enabled on both workers through
 `GET`/`PUT /api/v1/settings/owner-policy`. Legacy env values are adopted once only
 when no saved key exists; later env edits do not override saved policy. It does not authorize
@@ -35,9 +36,15 @@ All routes below require the existing terminal owner authentication and
 same-origin checks. Agent previews, API keys, passwordless local access,
 non-owner paired devices and peer device tokens are refused.
 
-Peer terminal UI is not shipped; this is a backend integration contract, not
-an available user feature. Keep the peer-terminal setting off until UI and
-real two-worker HTTPS acceptance are complete.
+The terminal panel implements this contract (user guide:
+`docs/content/features/terminals.md`). With `network_peer_terminals` off
+locally, `/targets` lists no peer rows, a new request returns 409
+`peer_terminals_disabled`, opens return 400 `target_unavailable`,
+`GET /peer-requests` returns an empty list, approval returns 403, and a status
+poll returns 403 and drops the source lease. Revocation routes keep working.
+The recipient refuses requests and opens under its own policy regardless of
+what the source sends. Refusal-matrix and lifetime coverage:
+`tests/api/test_peer_terminal_refusals.py`.
 
 1. On source A, `GET /api/v1/terminals/targets` includes known peer workers only
    when peer terminals are enabled locally. Default-off discovery returns no

@@ -56,13 +56,47 @@ Revoking or expiring an SSH grant ends its SSH connection. After an SSH shell
 exits, choose its target again to open a new one. SSH terminals accept
 single-line paste only, without pressing Enter.
 
-Peer-worker terminals are not available: they need owner authorization verified
-independently by the receiving worker. The persisted `network_peer_terminals`
-owner policy is off by default; changing it does not replace recipient approval.
-For one release, an explicit legacy environment value is imported only if there
-is no saved policy. There is no UI for this policy yet; it is exposed through
-`GET`/`PUT /api/v1/settings/owner-policy`. Enrolled
-workers alone cannot authorize terminals, and peer targets are not offered.
+### A terminal on another worker
+
+You can open a shell on another worker in your network. You approve each shell
+on the worker that will run it.
+
+**Turn it on.** Peer terminals are off by default. There is no switch in
+Settings yet. Signed in as the owner, send `PUT /api/v1/settings/owner-policy`
+with `{"network_peer_terminals": true}`; `GET` on the same path shows the
+current value. The setting is shared across your worker network, and both
+workers need it on: the one you open from and the one that runs the shell. For
+one release, an old `NETWORK_PEER_TERMINALS` environment value is imported once
+if no saved setting exists. After that, only the saved setting counts.
+
+**Open one.**
+
+1. On the worker you are using, choose **+ → Target**, pick the other worker
+   and choose **Request approval**. A six-character code appears.
+2. On the other worker, open the Terminal panel or the Terminal page. Under
+   **Terminal requests from other workers**, check that the code matches, tick
+   the box that says so and choose **Approve one shell**. A banner on that
+   worker points you to waiting requests.
+3. Back on the first worker, choose **Open terminal**. You can name a folder;
+   it is checked on the other worker.
+
+One approval opens one shell. A request that isn't approved within two
+minutes expires. An approved shell lasts at most ten minutes and closes after
+30 seconds without traffic. Closing the tab, **Revoke** on either worker,
+signing out on either worker, removing a worker from the network or restarting
+either worker ends the shell. To open another, request a new approval.
+Restart is not offered for a shell on another worker.
+
+**What is refused.**
+
+- Anyone who cannot open a local terminal (see [Who can use terminals](#who-can-use-terminals)).
+  The approval itself needs the owner signed in on the receiving worker; the
+  first worker cannot approve on its behalf, and being a member of the network
+  is not enough.
+- A worker that is offline, runs an older version, has no shell, or has no
+  HTTPS route. The picker shows the reason. Plain HTTP is never used.
+- Every request while the setting is off on either worker. Revoking still works.
+- An approval used for a different worker, or used a second time.
 
 ## Pasting
 
