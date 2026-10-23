@@ -3,7 +3,10 @@
 A daemon OS thread pings the asyncio loop once a second. If its callback is
 unanswered for LOOP_STALL_THRESHOLD_S (default 10 s), it captures every
 thread's stack, marking the event-loop thread. A continuing stall gets one
-more dump at 45 s; recovery is logged with the stall duration.
+more dump at 45 s; recovery includes the duration and a bounded thread/task
+census. Successful loop ticks are persisted every five seconds in the instance
+log directory, exclusively from the watchdog thread. An unclean restart reports
+the last tick, not a claimed stall duration (the process end time is unknown).
 
 Unlike resource_monitor's coroutine-based lag metric, this captures the
 blocking frame while the loop is stuck. The raw dump goes to file_logging's
@@ -14,6 +17,8 @@ so a loop holding a logging handler lock cannot prevent the durable dump.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import logging
 import math
 import os
@@ -21,6 +26,8 @@ import sys
 import threading
 import time
 import traceback
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -32,6 +39,8 @@ DEFAULT_SECOND_THRESHOLD_S = 45.0
 # FREEZE_DUMP_REARM_S, fires after FREEZE_DUMP_TIMEOUT_S without a re-arm.
 FREEZE_DUMP_TIMEOUT_S = 30.0
 FREEZE_DUMP_REARM_S = 5.0
+HEARTBEAT_INTERVAL_S = 5.0
+RECOVERY_THREAD_LIMIT = 5
 
 
 def _threshold_from_env() -> float:
@@ -76,6 +85,13 @@ class LoopStallWatchdog:
         self._stalled = False
         self._stall_started_at: float = 0.0
         self._second_dumped = False
+        self._last_tick: Optional[float] = None
+        self._recovery_task_count = 0
+        self._heartbeat_path: Optional[Path] = None
+        self._heartbeat_written_tick: Optional[float] = None
+        self._heartbeat_last_write = float("-inf")
+        self._heartbeat_failed = False
+        self._pending_heartbeat_warning: Optional[functools.partial] = None
         # Observability for tests / the resource monitor.
         self.stall_count = 0
         self.dump_count = 0
@@ -120,6 +136,15 @@ class LoopStallWatchdog:
         """Runs on the loop thread: the loop got around to our callback."""
         with self._lock:
             self._pending_since = None
+            self._last_tick = time.time()
+            if self._stalled:
+                # Inspect asyncio only on its owning loop; publish the count
+                # with the pong so the watchdog cannot log an older census.
+                self._recovery_task_count = len(asyncio.all_tasks(self._loop))
+            warning = self._pending_heartbeat_warning
+            self._pending_heartbeat_warning = None
+        if warning is not None:
+            warning()  # Logging happens only on the loop's existing ping callback.
 
     def _send_ping(self, now: float) -> None:
         with self._lock:
@@ -135,10 +160,101 @@ class LoopStallWatchdog:
             self._stop.set()
 
     def _run(self) -> None:
-        while not self._stop.wait(self.ping_interval_s):
-            now = time.monotonic()
-            self._check(now)
-            self._send_ping(now)
+        self._boot_heartbeat()
+        try:
+            while not self._stop.wait(self.ping_interval_s):
+                now = time.monotonic()
+                self._check(now)
+                self._write_heartbeat(now)
+                self._send_ping(now)
+        finally:
+            self._write_heartbeat(time.monotonic(), stopped_at=time.time())
+
+    def _heartbeat_warning(self, message: str, *args: object, exc_info: bool = False) -> None:
+        # No logging or extra wakeup here: call_soon_threadsafe itself may log
+        # synchronously in asyncio debug mode if its wakeup socket is full.
+        # Keep only the latest notice; the existing loop-side pong drains it.
+        warning = functools.partial(
+            self._log.warning, message, *args,
+            exc_info=sys.exc_info() if exc_info else None,
+        )
+        with self._lock:
+            self._pending_heartbeat_warning = warning
+
+    def _boot_heartbeat(self) -> None:
+        """All heartbeat filesystem work, including boot inspection, is off-loop."""
+        from app.core.file_logging import get_log_dir
+
+        try:
+            self._heartbeat_path = get_log_dir() / "loop-heartbeat.json"
+            self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                previous = json.loads(self._heartbeat_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return
+            tick = float(previous["last_tick"])
+            stopped_at = previous.get("stopped_at")
+            # A clean shutdown gives an end time. SIGKILL cannot: age at boot
+            # is only an upper bound, and can include time the app was off.
+            end = float(stopped_at) if stopped_at is not None else time.time()
+            if not math.isfinite(tick) or not math.isfinite(end):
+                raise ValueError("non-finite heartbeat")
+            if end - tick > self.threshold_s + HEARTBEAT_INTERVAL_S:
+                self._heartbeat_warning(
+                    "previous run stopped ticking at %s (%s)",
+                    datetime.fromtimestamp(tick, UTC).isoformat(),
+                    "before shutdown" if stopped_at is not None
+                    else "unclean exit; process end time unknown, age at boot includes downtime",
+                )
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            self._heartbeat_warning("Could not read previous loop heartbeat", exc_info=True)
+
+    def _write_heartbeat(self, now: float, *, stopped_at: Optional[float] = None) -> None:
+        path = self._heartbeat_path
+        with self._lock:
+            tick = self._last_tick
+        if path is None or tick is None:
+            return
+        if stopped_at is None and (
+            now - self._heartbeat_last_write < HEARTBEAT_INTERVAL_S
+            or tick == self._heartbeat_written_tick
+        ):
+            return
+        self._heartbeat_last_write = now
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump({"last_tick": tick, "stopped_at": stopped_at}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._heartbeat_written_tick = tick
+        except OSError:
+            if not self._heartbeat_failed:
+                self._heartbeat_failed = True
+                self._heartbeat_warning("Could not persist loop heartbeat", exc_info=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass  # A failed cleanup must not stop stall detection.
+
+    def _recovery_context(self) -> str:
+        threads = threading.enumerate()
+        frames = sys._current_frames()
+        threads.sort(key=lambda thread: (thread.ident != self._loop_thread_id, thread.name))
+        summaries = []
+        for thread in threads[:RECOVERY_THREAD_LIMIT]:
+            frame = frames.get(thread.ident)
+            location = (
+                f"{Path(frame.f_code.co_filename).name[:80]}:"
+                f"{frame.f_lineno}:{frame.f_code.co_name[:80]}"
+                if frame is not None else "no Python frame"
+            )
+            summaries.append(f"{thread.name[:60]}={location}")
+        return (
+            f"threads={len(threads)} thread_frames=[{'; '.join(summaries)}] "
+            f"asyncio_tasks={self._recovery_task_count}"
+        )
 
     def _check(self, now: float) -> None:
         with self._lock:
@@ -154,8 +270,8 @@ class LoopStallWatchdog:
                     self._stalled = False
                     self.last_stall_seconds = duration
                 self._log.error(
-                    "Event loop stall ended after %.1fs (threshold %.1fs)",
-                    duration, self.threshold_s,
+                    "Event loop stall ended after %.1fs (threshold %.1fs); %s",
+                    duration, self.threshold_s, self._recovery_context(),
                 )
             return
 
