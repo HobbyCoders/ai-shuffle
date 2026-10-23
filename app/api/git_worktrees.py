@@ -468,7 +468,7 @@ async def _load_worktree_statuses(
                 active_paths.add(get_worktree_working_dir(wt))
             except (ValueError, TypeError):
                 pass  # the status reader reports invalid bindings
-    checkout_events.update(project_id, active_paths)
+    checkout_events.update(active_paths)
     now = time.monotonic()
     with _status_lock:
         state = _worktree_status_cache.get(project_id)

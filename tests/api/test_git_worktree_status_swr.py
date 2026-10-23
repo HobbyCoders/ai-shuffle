@@ -202,7 +202,7 @@ def test_100_historical_and_three_active_scale_from_cold(git, monkeypatch):
         assert set(git.reads) == {"/wt/100", "/wt/101", "/wt/102"}
         assert len(git.reads) == 3
         assert all(row["status_checked_at"] is None for row in rows[:100])
-        gw.checkout_events.update.assert_called_with("p1", {"/wt/100", "/wt/101", "/wt/102"})
+        gw.checkout_events.update.assert_called_with({"/wt/100", "/wt/101", "/wt/102"})
         _make_stale()
         git.reads.clear()
 
@@ -500,19 +500,76 @@ def test_checkout_watches_prune_history_share_and_expire(tmp_path, monkeypatch):
     monkeypatch.setattr(ce, "watch", fake_watch)
     events = ce.CheckoutEvents(MagicMock())
     try:
-        events.update("p1", {str(root)})
+        events.update({str(root)})
         assert registered.wait(5)
         entry = events._watches[str(root)]
-        events.update("p2", {str(root)})
-        events.update("p1", set())
+        events.update({str(root)})
+        events.update(set())
         assert events._watches[str(root)] is entry
         assert not entry.stop.is_set()
-        # A disappearing client stops owning its checkout after the lease.
+        # Omission never cancels a live lease; only expiry releases the path.
         with events._lock:
-            entry.owners["p2"] = time.monotonic() - 1
+            entry.expires = time.monotonic() - 1
         assert not events._live(entry)
-        events.update("p2", set())
         assert stopped.wait(5)
+        entry.thread.join(timeout=5)
         assert not events._watches
+    finally:
+        events.close()
+
+
+
+def test_same_project_requests_keep_independent_focus_leases(git, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.core import checkout_events as ce
+
+    roots = [tmp_path / name for name in ("focus-a", "focus-b")]
+    for root in roots:
+        root.mkdir()
+    registered = {str(root): threading.Event() for root in roots}
+    now = [100.0]
+    monkeypatch.setattr(ce, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def fake_watch(*paths, stop_event, **kwargs):
+        registered[paths[0]].set()
+        stop_event.wait(5)
+        return
+        yield
+
+    monkeypatch.setattr(ce, "watch", fake_watch)
+    events = ce.CheckoutEvents(git.invalidate_status_cache)
+    monkeypatch.setattr(gw, "checkout_events", events)
+    rows = [_wt(i, updated_at=_old()) for i in range(2)]
+    for row, root in zip(rows, roots):
+        row["worktree_path"] = str(root)
+    try:
+        # Two clients of the SAME project focus different checkouts. A third
+        # request has no focus at all; none may revoke another client's lease.
+        _load(rows, focus="wt-0", project="shared")
+        _settle("shared")
+        assert registered[str(roots[0])].wait(5)
+        first = events._watches[str(roots[0])]
+        _load(rows, focus="wt-1", project="shared")
+        _settle("shared")
+        assert registered[str(roots[1])].wait(5)
+        second = events._watches[str(roots[1])]
+        _load(rows, project="shared")
+        assert events._watches[str(roots[0])] is first
+        assert events._watches[str(roots[1])] is second
+        assert not first.stop.is_set() and not second.stop.is_set()
+
+        # Renew A but not B. Both survive until B's own deadline, and expiry
+        # must not stop the independently renewed A or recreate its watch.
+        now[0] += ce._LEASE_SECONDS / 2
+        _load(rows, focus="wt-0", project="shared")
+        assert events._watches[str(roots[0])] is first
+        now[0] = second.expires - 0.01
+        assert events._live(first) and events._live(second)
+        now[0] = second.expires + 0.01
+        assert events._live(first)
+        assert not events._live(second)
+        second.thread.join(timeout=5)
+        assert set(events._watches) == {str(roots[0])}
+        assert not first.stop.is_set()
     finally:
         events.close()

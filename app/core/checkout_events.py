@@ -1,8 +1,8 @@
 """Short-lived, debounced file watches for checkouts visible as active in the UI.
 
 Use watchfiles (already supplied by uvicorn[standard]), not a git/filesystem scan
-of every historical checkout. Leases stop watches when polling clients leave;
-updates immediately release checkouts that are no longer active. No app lifecycle
+of every historical checkout. Each request renews only the paths it needs;
+independent path leases stop watches when no client renews them. No app lifecycle
 hook or permanent background executor is needed.
 """
 
@@ -35,7 +35,7 @@ def _directories(root: str) -> list[str]:
 
 @dataclass
 class _CheckoutWatch:
-    owners: dict[str, float] = field(default_factory=dict)
+    expires: float = 0.0
     stop: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
 
@@ -46,35 +46,39 @@ class CheckoutEvents:
         self._lock = threading.Lock()
         self._watches: dict[str, _CheckoutWatch] = {}
 
-    def update(self, owner: str, paths: set[str]) -> None:
-        """Replace a project's active set; share a watch across overlapping clients."""
+    def update(self, paths: set[str]) -> None:
+        """Renew independent path leases without cancelling another client's set.
+
+        HTTP polls have no reliable client identity. An omitted path may still be
+        focused elsewhere, so only expiry (not another request) releases it.
+        One watch is shared by all requests for a path, bounded to paths renewed
+        within the lease window rather than all checkouts ever seen.
+        """
         paths = {os.path.abspath(path) for path in paths}
-        expires = time.monotonic() + _LEASE_SECONDS
+        now = time.monotonic()
         with self._lock:
             for path, entry in list(self._watches.items()):
-                if path not in paths:
-                    entry.owners.pop(owner, None)
-                if not entry.owners:
+                if path not in paths and entry.expires <= now:
                     entry.stop.set()
                     del self._watches[path]
             for path in paths:
                 entry = self._watches.get(path)
-                if entry is None:
-                    entry = self._watches[path] = _CheckoutWatch()
-                    entry.owners[owner] = expires
+                if entry is None or entry.stop.is_set():
+                    entry = self._watches[path] = _CheckoutWatch(expires=now + _LEASE_SECONDS)
                     entry.thread = threading.Thread(
                         target=self._run, args=(path, entry),
                         name="checkout-events", daemon=True,
                     )
                     entry.thread.start()
                 else:
-                    entry.owners[owner] = expires
+                    entry.expires = now + _LEASE_SECONDS
 
     def _live(self, entry: _CheckoutWatch) -> bool:
         with self._lock:
-            now = time.monotonic()
-            entry.owners = {key: until for key, until in entry.owners.items() if until > now}
-            return bool(entry.owners) and not entry.stop.is_set()
+            if entry.expires <= time.monotonic():
+                # Prevent a renewal from reviving a thread already exiting.
+                entry.stop.set()
+            return not entry.stop.is_set()
 
     def _run(self, path: str, entry: _CheckoutWatch) -> None:
         try:
