@@ -1433,6 +1433,14 @@ Create a prompt template.
 
 Health check (no auth).
 
+### GET /health/live
+
+Liveness probe (no auth). Returns `{"status": "alive"}` straight from the server's event loop, without touching the database. It fails only when the server process has stopped responding. The Docker container restarts AI Shuffle when this probe fails for about 5 minutes in a row. `/api/v1/health/live` is the same probe.
+
+### GET /health/ready
+
+Readiness probe (no auth). Returns 200 with `status: "ready"` when the database answers, and 503 with `status: "not_ready"` and a `reasons` list when it does not. The database check uses its own connection, so it does not wait behind other work. A server that is busy with many agents can briefly fail this probe. Docker may then show the container as unhealthy, but AI Shuffle is not restarted for it. `/api/v1/health/ready` is the same probe.
+
 ### GET /api/v1/version
 
 Get API and Claude Code versions.

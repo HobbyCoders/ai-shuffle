@@ -8,6 +8,8 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -92,9 +94,9 @@ async def _readiness_report() -> tuple[bool, dict]:
     reasons: list[str] = []
     checks: dict = {}
 
-    # 1) Database: SELECT 1 in a short-lived connection.
+    # 1) Database: SELECT 1 on readiness's own connection and thread.
     try:
-        await asyncio.to_thread(_probe_db)
+        await _readiness_probe.run()
         checks["database"] = "ok"
     except Exception:  # noqa: BLE001 — a probe must never 500
         checks["database"] = "error"
@@ -131,13 +133,86 @@ async def _readiness_report() -> tuple[bool, dict]:
     return ready, body
 
 
+# Readiness owns one PostgreSQL connection and one thread (#436). Through the
+# shared default executor and the shared pool, a worker busy with many agents
+# failed its probe whenever those were saturated, and the supervisor killed it.
+READINESS_DB_TIMEOUT_S = 4.0
+
+
+class _ReadinessProbe:
+    """Single-flight ``SELECT 1`` on a dedicated thread and connection.
+
+    Concurrent probes share the one in flight, so a hung query can never queue
+    up threads or connections; each caller waits at most
+    READINESS_DB_TIMEOUT_S and then reports the database as unreachable.
+    """
+
+    def __init__(self) -> None:
+        self._executor = None
+        self._inflight = None
+        self._lock = threading.Lock()
+        self._conn = None  # touched only on the executor thread
+
+    def _submit(self):
+        with self._lock:
+            if self._inflight is None or self._inflight.done():
+                if self._executor is None:
+                    self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readiness-db")
+                # Late-bound so tests can patch _probe_db.
+                self._inflight = self._executor.submit(lambda: _probe_db())
+            return self._inflight
+
+    async def run(self) -> None:
+        future = asyncio.wrap_future(self._submit())
+        await asyncio.wait_for(asyncio.shield(future), timeout=READINESS_DB_TIMEOUT_S)
+
+    def select_one(self) -> None:
+        """Blocking; runs on the readiness thread only."""
+        import psycopg2
+
+        if self._conn is None or self._conn.closed:
+            params = {**settings.get_database_connection(), "connect_timeout": 3,
+                      "application_name": "ai-shuffle-readiness"}
+            self._conn = psycopg2.connect(**params)
+            self._conn.autocommit = True
+        try:
+            with self._conn.cursor() as cursor:
+                cursor.execute("SET statement_timeout = 3000")
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+        except Exception:
+            conn, self._conn = self._conn, None
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — reconnect on the next probe
+                pass
+            raise
+
+
+_readiness_probe = _ReadinessProbe()
+
+
 def _probe_db() -> None:
-    """Run ``SELECT 1`` against a pooled connection (blocking; call via to_thread)."""
-    from app.db.base import get_db
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        cursor.fetchone()
+    """Run ``SELECT 1`` on the readiness connection (blocking; readiness thread only)."""
+    _readiness_probe.select_one()
+
+
+@router.get("/health/live")
+async def liveness_check():
+    """Liveness probe (no auth): answered by the event loop alone.
+
+    No database, executor, pool or lock is involved, so it fails only when the
+    loop (or the whole interpreter) has stopped running. The container
+    supervisor restarts the app on sustained liveness failure; a busy app that
+    answers this but not ``/health/ready`` is left running.
+    """
+    return {"status": "alive"}
+
+
+@router.get("/api/v1/health/live")
+async def api_liveness_check():
+    """API-prefixed alias for the liveness probe."""
+    return await liveness_check()
 
 
 @router.get("/health/ready")
@@ -147,8 +222,9 @@ async def readiness_check():
     200 with a small JSON body when the DB answers; 503 with ``reasons`` when
     it does not. A full session pool never makes it fail: the container
     healthcheck probes this route, and busy is not unhealthy. Distinct from
-    ``/health`` (liveness): a live process can still be *not ready* (DB down),
-    and orchestrators must not route traffic to it.
+    ``/health/live`` (liveness): a live process can still be *not ready* (DB
+    down), and orchestrators must not route traffic to it. The database check
+    uses its own connection and thread, never the shared pool or executor.
     """
     ready, body = await _readiness_report()
     if not ready:

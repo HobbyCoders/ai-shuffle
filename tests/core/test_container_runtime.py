@@ -285,14 +285,155 @@ def test_readiness_monitor_counts_consecutive_failures_only():
     assert [monitor.check() for _ in range(5)] == [False] * 5, "before the first success the startup allowance applies"
     answers[:] = [False]
     assert monitor.check() is True
-    monitor = runtime.ReadinessMonitor("http://127.0.0.1:8000/health/ready", probe=lambda url: answers.pop(0), failures=4, startup_failures=6)
+    # An application without /health/live (404) keeps the readiness limit.
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:8000/health/ready", probe=lambda url: answers.pop(0),
+                                       live_probe=lambda url: None, failures=4, startup_failures=6)
     answers[:] = [True, False, False, False, True, False, False, False, False]
     assert [monitor.check() for _ in range(8)] == [False] * 8
     assert monitor.failures == 3
     assert monitor.check() is True
     assert monitor.failures == 4
-    assert runtime.READY_PROBE_FAILURES * runtime.READY_PROBE_INTERVAL == 120, "an unhealthy worker is restarted after two minutes"
     assert runtime.READY_PROBE_STARTUP_FAILURES >= runtime.READY_PROBE_FAILURES
+
+
+def test_busy_but_live_app_is_never_restarted_and_a_frozen_one_is():
+    # #436: readiness failed while the app was busy and it was killed with
+    # every agent. After the first ready answer only liveness restarts it.
+    live = []
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:8000/health/ready", probe=lambda url: False,
+                                       live_probe=lambda url: live.append(url) or True, failures=4, live_failures=3)
+    monitor.record(True)
+    assert not any(monitor.check() for _ in range(200)), "not ready but live: reported, never restarted"
+    assert monitor.failures == 200 and monitor.live_failures == 0
+    assert live[0] == "http://127.0.0.1:8000/health/live"
+
+    answers = iter([False, False, True, False, False, False])
+    monitor.live_probe = lambda url: next(answers)
+    assert [monitor.check() for _ in range(6)] == [False, False, False, False, False, True]
+    assert monitor.live_failures == 3, "only consecutive liveness failures count"
+    assert runtime.LIVE_PROBE_FAILURES * runtime.READY_PROBE_INTERVAL == 300, "a frozen worker is restarted after five minutes"
+    assert runtime.FREEZE_CAPTURE_AT < runtime.LIVE_PROBE_FAILURES
+
+
+def test_probe_live_distinguishes_missing_endpoint_from_failure():
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response({"/a/health/live": 200, "/b/health/live": 404}.get(self.path, 503))
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        assert runtime.probe_live(base + "/a/health/live", timeout=2) is True
+        assert runtime.probe_live(base + "/b/health/live", timeout=2) is None
+        assert runtime.probe_live(base + "/c/health/live", timeout=2) is False
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert runtime.probe_live(base + "/a/health/live", timeout=0.5) is False
+
+
+def test_watch_leaves_a_busy_app_running_and_restarts_a_frozen_one_after_capture(monkeypatch, capsys):
+    monkeypatch.setattr(runtime, "READY_PROBE_INTERVAL", 0)
+    captured = []
+    monkeypatch.setattr(runtime, "capture_freeze", lambda process: captured.append(process))
+    app, replacement = Mock(), Mock()
+    app.poll.return_value = replacement.poll.return_value = None
+    ready = iter([True] + [False] * 8)
+    live = iter([True] * 4 + [False] * 4)
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:1/health/ready", probe=lambda _: next(ready),
+                                       live_probe=lambda _: next(live), failures=2, live_failures=4)
+    replaced = []
+    def relaunch(current):
+        replaced.append(current)
+        runtime.STOP.set()
+        return replacement
+    try:
+        assert runtime.watch(app, Mock(process=None), None, monitor, relaunch=relaunch) == 0
+    finally:
+        runtime.STOP.clear()
+    assert replaced == [app], "restarted once, after four liveness failures, not after two readiness failures"
+    assert captured == [app, app], "diagnostics at the second liveness failure and before the stop"
+    err = capsys.readouterr().err
+    assert "not ready for 2 probes in a row but still live; leaving it running" in err
+    assert "liveness probe failed 4 times in a row; capturing diagnostics before stopping it" in err
+    assert "liveness probe failed 4 times in a row; restarting the application" in err
+
+
+def test_log_lines_carry_a_utc_timestamp(capsys):
+    import re
+    runtime.log("hello")
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ container runtime: hello\n", capsys.readouterr().err)
+
+
+def _fake_proc(root, pid, *, caught_mask="0000000000000200"):
+    process = root / str(pid)
+    (process / "task").mkdir(parents=True)
+    (process / "status").write_text(f"Name:\tpython\nSigCgt:\t{caught_mask}\n")
+    for tid, (state, wchan, utime) in {pid: ("S", "do_epoll_wait", 100), pid + 1: ("D", "btrfs_sync_file", 250)}.items():
+        task = process / "task" / str(tid)
+        task.mkdir()
+        (task / "stat").write_text(f"{tid} (py thread) {state} 1 1 1 0 -1 0 0 0 0 0 {utime} 50 0 0 20 0 2 0\n")
+        (task / "wchan").write_text(wchan)
+    return process
+
+
+def test_capture_freeze_signals_only_a_registered_handler_and_logs_thread_states(monkeypatch, tmp_path, capsys):
+    import signal
+    monkeypatch.setattr(runtime, "_PROC", tmp_path)
+    monkeypatch.setattr(runtime, "_thread_cpu", {})
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: None)
+    monkeypatch.setattr(runtime.os, "sysconf", lambda name: 100, raising=False)
+    sent = []
+    monkeypatch.setattr(runtime.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    process = Mock(pid=4321)
+    process.poll.return_value = None
+    _fake_proc(tmp_path, 4321)  # bit 9 = SIGUSR1 (10) caught
+    runtime.capture_freeze(process)
+    assert sent == [(4321, signal.SIGUSR1)]
+    err = capsys.readouterr().err
+    assert "thread 4321 (py thread) state=S wchan=do_epoll_wait cpu=1.50s" in err
+    assert "thread 4322 (py thread) state=D wchan=btrfs_sync_file cpu=3.00s" in err
+    stat = tmp_path / "4321" / "task" / "4322" / "stat"
+    stat.write_text(stat.read_text().replace(" 250 50 ", " 750 50 "))
+    runtime.capture_freeze(process)
+    assert "cpu=8.00s (+5.00s since the last capture)" in capsys.readouterr().err
+
+    # SIGUSR1 terminates an app that never registered it: not sent.
+    sent.clear()
+    (tmp_path / "4321" / "status").write_text("Name:\tpython\nSigCgt:\t0000000000004002\n")
+    runtime.capture_freeze(process)
+    assert sent == []
+    assert "has no SIGUSR1 stack-dump handler" in capsys.readouterr().err
+
+    # Exited or mock processes are skipped outright.
+    process.poll.return_value = 0
+    runtime.capture_freeze(process)
+    runtime.capture_freeze(Mock())
+    assert sent == []
+
+
+def test_capture_freeze_runs_py_spy_only_when_installed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(runtime, "_PROC", tmp_path)
+    monkeypatch.setattr(runtime.os, "kill", lambda pid, sig: None)
+    process = Mock(pid=77)
+    process.poll.return_value = None
+    _fake_proc(tmp_path, 77)
+    calls = []
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: "/usr/bin/py-spy" if name == "py-spy" else None)
+    monkeypatch.setattr(runtime.subprocess, "run", lambda args, **kwargs: calls.append(args) or Mock(
+        stdout="Thread 77 (active): \"MainThread\"\n", stderr=""))
+    runtime.capture_freeze(process)
+    assert calls == [["/usr/bin/py-spy", "dump", "--native", "--pid", "77"]]
+    assert 'py-spy: Thread 77 (active): "MainThread"' in capsys.readouterr().err
 
 
 def test_probe_ready_uses_status_and_never_raises():
