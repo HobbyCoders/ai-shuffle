@@ -596,13 +596,14 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | accepts | 2.0.0 | MIT | https://www.npmjs.com/package/accepts/v/2.0.0 |
 | ajv | 8.20.0 | MIT | https://www.npmjs.com/package/ajv/v/8.20.0 |
 | ajv-formats | 3.0.1 | MIT | https://www.npmjs.com/package/ajv-formats/v/3.0.1 |
-| body-parser | 2.3.0 | MIT | https://www.npmjs.com/package/body-parser/v/2.3.0 |
+| body-parser | 2.4.0 | MIT | https://www.npmjs.com/package/body-parser/v/2.4.0 |
 | bytes | 3.1.2 | MIT | https://www.npmjs.com/package/bytes/v/3.1.2 |
 | call-bind-apply-helpers | 1.0.2 | MIT | https://www.npmjs.com/package/call-bind-apply-helpers/v/1.0.2 |
 | call-bound | 1.0.4 | MIT | https://www.npmjs.com/package/call-bound/v/1.0.4 |
 | content-disposition | 1.1.0 | MIT | https://www.npmjs.com/package/content-disposition/v/1.1.0 |
 | content-type | 1.0.5 | MIT | https://www.npmjs.com/package/content-type/v/1.0.5 |
 | content-type | 2.0.0 | MIT | https://www.npmjs.com/package/content-type/v/2.0.0 |
+| content-type | 2.1.0 | MIT | https://www.npmjs.com/package/content-type/v/2.1.0 |
 | cookie | 0.7.2 | MIT | https://www.npmjs.com/package/cookie/v/0.7.2 |
 | cookie-signature | 1.2.2 | MIT | https://www.npmjs.com/package/cookie-signature/v/1.2.2 |
 | cors | 2.8.6 | MIT | https://www.npmjs.com/package/cors/v/2.8.6 |
@@ -660,7 +661,7 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | pkce-challenge | 5.0.1 | MIT | https://www.npmjs.com/package/pkce-challenge/v/5.0.1 |
 | playwright-core | 1.61.1 | Apache-2.0 | https://www.npmjs.com/package/playwright-core/v/1.61.1 |
 | proxy-addr | 2.0.8 | MIT | https://www.npmjs.com/package/proxy-addr/v/2.0.8 |
-| qs | 6.16.0 | BSD-3-Clause | https://www.npmjs.com/package/qs/v/6.16.0 |
+| qs | 6.16.1 | BSD-3-Clause | https://www.npmjs.com/package/qs/v/6.16.1 |
 | range-parser | 1.3.0 | MIT | https://www.npmjs.com/package/range-parser/v/1.3.0 |
 | raw-body | 3.0.2 | MIT | https://www.npmjs.com/package/raw-body/v/3.0.2 |
 | require-from-string | 2.0.2 | MIT | https://www.npmjs.com/package/require-from-string/v/2.0.2 |
