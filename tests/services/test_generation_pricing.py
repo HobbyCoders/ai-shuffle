@@ -113,8 +113,11 @@ async def test_named_model_is_not_ambiguous_with_unavailable_api_accounts(backen
     backend.node.call.assert_awaited_once()
 
 
-async def test_openai_xai_and_subscription_images_still_refuse_truthfully(backend):
-    for source in ("api-a", "api-b", "plan-a", "plan-b"):
+async def test_openai_and_xai_api_images_still_refuse_truthfully(backend):
+    # Plan images (ChatGPT/SuperGrok) are priced "included" on the verified
+    # route and run (#379); test_generation_sources covers that path and the
+    # refusal when a plan route has no known price.
+    for source in ("api-a", "api-b"):
         result = await Resolver(backend).generate("image", {"prompt": "tree", "source": source, "confirmed": True}, CONTEXT)
         assert result["status"] == "refused"
         assert result["price"] == UNKNOWN_PRICE

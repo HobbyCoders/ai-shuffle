@@ -35,3 +35,18 @@ export const TEXT_ICON: SettingsIcon = Text;
 export const DICTATION_ICON: SettingsIcon = Mic;
 export const VOICE_CALL_ICON: SettingsIcon = Phone;
 export const CATALOG_ICON: SettingsIcon = Library;
+
+/** Remembered generation choices, by kind (Settings item `gen-<kind>`). */
+export const GENERATION_ICONS: Record<'image' | 'video' | 'audio' | '3d', SettingsIcon> = {
+	image: Image,
+	video: Film,
+	audio: Music,
+	'3d': Box
+};
+
+export const GENERATION_NAMES: Record<'image' | 'video' | 'audio' | '3d', string> = {
+	image: 'Images',
+	video: 'Video',
+	audio: 'Audio and sound',
+	'3d': '3D models'
+};

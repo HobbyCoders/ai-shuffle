@@ -21,20 +21,35 @@ with a 15-second limit; a request pinned to this worker does not ask them. A
 malformed peer reply marks only that worker unavailable, and the fal catalog
 search is returned even when the priced lookup fails.
 
-This first step is additive: nothing that generates on the previous release
-stops working.
+Every call to the four generation tools that can spend money goes through the
+guard below: a known price, confirmation above the threshold and the daily cap.
+Nothing unpriced runs unasked through them. `runFalModel` is the exception for
+now: unattended or unpriceable calls still take its previous handler (see
+below).
 
-- **Settings default.** A call without `source`, `model`, `worker` or
-  `options` runs the Default models choice exactly as before: the configured
-  fal.ai model, or the ChatGPT-plan image model when Image generation is set to
-  it. Unattended runs (automations, worker and Task sessions, voice, hidden
-  sessions, API-key turns) also keep that path for every call the previous
-  tool schema could express. Chat mode has no Settings default.
-- **Named choices** go through the resolver below: price, confirmation and the
-  daily cap. A named fal model that cannot be priced or resolved (unknown
-  price, a model outside the text-to catalog, undeclared inputs) runs on the
-  Settings default path as before. A cap, confirmation or chat-mode refusal
-  never falls back. Outside chat mode, a guarded fal result run on this worker
+- **Remembered choices.** A call without `source` or `model` uses the
+  account's remembered choice for that kind (see below) without asking, in
+  interactive and unattended runs alike. With none, an interactive run returns
+  `choose` and the chat shows a choice card; an unattended run is skipped and
+  reported, never guessed.
+- **Saved Settings defaults.** A fal.ai model explicitly saved for image,
+  video, audio or 3D generation in the previous Default models page is copied
+  into the account's remembered choices once, with its saved options, before
+  the run starts. It is then an ordinary remembered choice and always goes
+  through the guard below. The previous unguarded fal path is never used for
+  these four tools, because it would submit a fal job with no known price,
+  cap or confirmation.
+- **Saved choices that cannot be read.** If the account's choices cannot be
+  read (database, account service or identity failure), nothing saved is
+  assumed and nothing runs unasked. An unattended run returns
+  `status: "skipped"`, `reason: "choices_unreadable"` with a report; an
+  interactive run returns `choose` with `choices_unreadable: true`. A named,
+  priced request still runs through the guard. The built-in fal default is not a choice: with nothing
+  saved, the user is asked. The ChatGPT-plan image setting
+  stays a provider rule and is not migrated. Chat mode has no Settings default.
+- **Named choices** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
+  daily cap. A named model the guard cannot price or resolve is refused, never
+  run on another path. Outside chat mode, a guarded fal result run on this worker
   also returns the workspace `file_path`, so `editImage` and `imageToVideo`
   can chain on it. A fal request from a peer or a chat with no saved session
   is refused before submission, so no worker-local path is ever returned.
@@ -45,8 +60,9 @@ stops working.
   a fal key applies its own setting too: if its Image generation is the
   ChatGPT plan, it lists no fal image models for peers and refuses to run one.
 - **`runFalModel`** runs any fal endpoint again, including image-to-video and
-  audio-to-audio, with `output_type` optional. A priced call with a text prompt
-  gets the same guard; otherwise it takes the previous path. While images are
+  audio-to-audio, with `output_type` optional. An interactive priced call with
+  a text prompt gets the same guard. Unattended calls, and calls the guard
+  cannot price or resolve, take the previous path without a known price. While images are
   set to the ChatGPT plan it still refuses fal image models.
 - **Old or unreachable peers** are listed as unavailable but never make a
   named request ambiguous when a usable candidate matches.
@@ -74,17 +90,53 @@ at most four defaults. IDs below are placeholders, not selectable models.
   "options": [
     {"source": "fal", "account": "account-b", "worker": "worker-a", "model": "model-b", "options": {"size": "square"}, "kind": "image", "verified": true, "price": {"currency": "USD", "unit": "item", "amount": "0.05", "total": "0.05", "status": "estimated"}, "quick_settings": {"size": "square"}, "schema": null, "available": true, "reason": null, "label": "Same as last time"},
     {"source": "fal", "account": "account-a", "worker": "worker-a", "model": "model-a", "options": {"size": "square"}, "kind": "image", "verified": true, "price": {"currency": "USD", "unit": "item", "amount": "0.05", "total": "0.05", "status": "estimated"}, "quick_settings": {"size": "square"}, "schema": null, "available": true, "reason": null}
-  ]
+  ],
+  "message": "The user sees these options as a choice card and can remember a pick. Do not list them again or pick for them; wait for their reply."
 }
 ```
 
+The `choose` result also carries a `message` telling the agent the user sees
+a card and to wait for the reply. When the remembered choice is no longer
+available (its account or model is gone, its worker is unreachable, or its
+saved options are no longer declared), an interactive run returns `choose`
+with `remembered_unavailable: true` instead of refusing. That happens only when the
+saved options themselves no longer fit; options or a prompt supplied in the
+call that the model rejects are refused with `reason: "invalid_request"`. When it has no known
+price, an interactive run returns `choose` with `remembered_unpriced: true`,
+so the user re-picks a priced option. An unattended run never submits an
+unpriced remembered choice: it returns `status: "skipped"`,
+`reason: "stored_choice_unpriced"` and a report saying the saved choice has no
+known price and can be picked again in Settings > Default models.
+
 The resolver takes a trusted `RunContext`: `remembered_choice`, `job_choice`,
-`last_choice`, session identity and whether this is unattended. These are not
-agent-editable tool arguments. A job choice takes precedence over a remembered
-choice. Storage is not implemented here. With neither stored choice, an
-unattended run returns `status: "skipped"`, `reason: "no_stored_choice"` and a
-plain-language report, even if an agent supplies a source in its tool call
-(the Settings default above is the exception, unchanged from before).
+`last_choice`, their per-kind maps `remembered_choices` and `last_choices`,
+session identity and whether this is unattended. These are not agent-editable
+tool arguments. A job choice takes precedence over a remembered choice. With
+neither stored choice, an unattended run returns `status: "skipped"`,
+`reason: "no_stored_choice"` and a plain-language report, even if an agent
+supplies a source in its tool call. A result that ran the remembered choice has
+`remembered: true`.
+
+## Remembered choices
+
+Choices are account preferences, in the same store as other per-account
+preferences:
+
+- `generation.choice.<kind>` (`image`, `video`, `audio`, `3d`): the remembered
+  pick, `{source, account, worker, model, options, origin}`. `origin` is
+  `card`, `settings` or `migrated`.
+- `generation.lastChoice.<kind>`: the latest pick from a card, offered first as
+  "Same as last time" but never run without asking.
+- `generation.choicesMigrated`: set once the saved Settings defaults were
+  copied. A remembered choice is never overwritten by the migration.
+
+`GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
+saves a pick (`remember: false` records only the last choice);
+`DELETE /api/v1/generation/choices/{kind}` asks again next time.
+`GET /api/v1/generation/options/{kind}` lists priced options across accounts
+and `POST /api/v1/generation/quote` validates options against the model's
+declared schema and prices them, with nothing reserved or submitted. Settings,
+Default models shows and changes the remembered choice per kind.
 
 ## Confirmation contract
 
@@ -158,11 +210,16 @@ inferred from resolution names.
 OpenAI/xAI API media routes remain unavailable: this base's Default models
 schema endpoint is fal-only, and its native API capability table declares no
 available media combinations or pricing. ChatGPT/SuperGrok image costs are not
-reported by their native adapters, so naming those accounts in the unified
-tools still refuses; they are not labelled free or included in a plan. They keep
-working through the Settings default and the native plan tools above. ChatGPT
+reported by their native adapters. Their verified image route runs on the
+account's ChatGPT or SuperGrok subscription login and carries no per-item
+charge, so it is priced `status: "included"` with a zero amount. It runs
+without confirmation and is not counted toward the daily cap: it adds USD 0
+to the day's spending (only a day already past the cap refuses it, like every
+other generation). An included price is never used as a substitute for an
+unknown price. They also keep working through the Settings default and the
+native plan tools above. ChatGPT
 video and native audio/3D have no verified combinations. No new live provider
 generation was exercised for this draft.
 
-The choice-card UI, remembered-choice storage and Settings changes are separate
-steps. Editing and media-transform tools retain their existing handlers.
+Editing and media-transform tools retain their existing handlers and their
+pinned model from the catalog.

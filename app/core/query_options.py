@@ -743,6 +743,26 @@ def _is_interactive_run(
     return (row.get("mode") or "") != "voice"
 
 
+def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
+    """Remembered generation choices of the account behind this run.
+
+    Read only when one of the four generation tools (image, video, audio, 3D)
+    is attached; a searchModels-only or transform-only session neither reads
+    nor migrates. Reading also migrates the saved Settings media defaults once
+    (app.core.generation_choices).
+    """
+    from app.mcp.ai_tools_sdk import UNIFIED_TOOL_KINDS, _is_tool_enabled
+
+    if not any(_is_tool_enabled(name, ai_tools_config or {}) for name in UNIFIED_TOOL_KINDS):
+        return {"remembered": {}, "last": {}, "migrated": False}
+    from app.core import generation_choices
+
+    caller = dict(session_row or {})
+    if api_user_id:
+        caller["api_user_id"] = api_user_id
+    return generation_choices.for_session(caller)
+
+
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
 REMOVED_PROVIDER_MESSAGE = (
     "The AI provider this chat was using has been removed. "
@@ -1619,9 +1639,12 @@ def build_options_from_profile(
     # tool can reach its key.)
     ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
     from app.core.generation_resolver import RunContext
+    choices = _generation_choices(ai_tools_server_config, session_row, api_user_id)
     generation_context = RunContext(session_id=session_id, unattended=not _is_interactive_run(overrides, session_row),
                                     owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
-                                    chat_mode=session_mode == "chat")
+                                    chat_mode=session_mode == "chat",
+                                    remembered_choices=choices["remembered"], last_choices=choices["last"],
+                                    choices_unreadable=bool(choices.get("unreadable")))
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
         ai_tools_config=ai_tools_server_config,

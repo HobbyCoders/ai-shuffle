@@ -7,18 +7,20 @@ const mocks = vi.hoisted(() => ({
 	patch: vi.fn(),
 	put: vi.fn(),
 	post: vi.fn(),
+	del: vi.fn(),
 	invalidate: vi.fn(),
 	loadVoice: vi.fn(),
 	saveVoice: vi.fn()
 }));
 vi.mock('$lib/api/client', () => ({
-	api: { get: mocks.get, patch: mocks.patch, put: mocks.put, post: mocks.post },
+	api: { get: mocks.get, patch: mocks.patch, put: mocks.put, post: mocks.post, delete: mocks.del },
 	getErrorMessage: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 }));
 vi.mock('$lib/services/sttStream', () => ({ invalidateSttCapability: mocks.invalidate }));
 vi.mock('$lib/api/voice', async (importOriginal) => ({ ...await importOriginal<typeof import('$lib/api/voice')>(), loadVoiceSettings: mocks.loadVoice, saveVoiceSettings: mocks.saveVoice }));
 
 import { catalogStore } from '$lib/stores/catalog';
+import { generationChoices } from '$lib/stores/generation-choices.svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 import ModelsCollection from './ModelsCollection.svelte';
@@ -38,13 +40,24 @@ const catalog = [
 	model('fal-ai/flux-pro/v1.1-ultra', { display_name: 'FLUX1.1 [pro] ultra' }),
 	model('fal-ai/hidream', { display_name: 'HiDream', description: 'Sharp photoreal images', tags: ['photo'] }),
 	model('fal-ai/ltx-2', { display_name: 'LTX-2', category: 'text-to-video', tool_type: 'video_generation', output_type: 'video' }),
-	model('fal-ai/birefnet', { display_name: 'BiRefNet', category: 'image-to-image', tool_type: 'generic', tags: ['Lofi'] })
+	model('fal-ai/birefnet', { display_name: 'BiRefNet', category: 'image-to-image', tool_type: 'generic', tags: ['Lofi'] }),
+	model('fal-ai/edit-pro', { display_name: 'Edit Pro', category: 'image-to-image', tool_type: 'image_editing' })
 ];
 const categories = [
 	{ category: 'text-to-image', count: 2, tool_type: 'image_generation' },
 	{ category: 'text-to-video', count: 1, tool_type: 'video_generation' },
-	{ category: 'image-to-image', count: 1, tool_type: 'generic' }
+	{ category: 'image-to-image', count: 2, tool_type: 'generic' }
 ];
+const SUPERGROK = { source: 'supergrok', account: 'grok-1', worker: 'worker-a', model: 'grok-imagine-image', options: { size: '1k' } };
+const OPTIONS = [
+	{ source: 'fal', account: 'fal-ai', worker: 'worker-a', model: 'fal-ai/flux/dev', kind: 'image', verified: false,
+		options: { image_size: 'square' }, price: { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' },
+		quick_settings: { image_size: 'square' }, schema: { fields: [{ name: 'prompt', type: 'string', is_primary_text: true },
+			{ name: 'image_size', type: 'enum', enum: ['square', 'landscape_16_9'], default: 'square' }] }, available: true, reason: null },
+	{ ...SUPERGROK, kind: 'image', verified: true, price: { currency: 'USD', unit: 'item', amount: '0', total: '0', status: 'included' },
+		quick_settings: { size: '1k' }, schema: null, available: true, reason: null }
+];
+let remembered: Record<string, unknown>;
 let integrations: Record<string, unknown>;
 let textGen: { text_generation_model: string; text_generation_effort: string };
 const voiceSettings = {
@@ -77,17 +90,25 @@ beforeEach(async () => {
 		claude_auth_mode: 'subscription'
 	};
 	textGen = { text_generation_model: 'sonnet', text_generation_effort: 'low' };
+	remembered = { video: { source: 'fal', account: 'fal-ai', worker: 'worker-a', model: 'fal-ai/ltx-2', options: {}, origin: 'migrated' } };
+	generationChoices.remembered = {};
+	generationChoices.last = {};
+	integrations.image_edit_model = 'fal-ai/edit-pro';
 	mocks.get.mockImplementation(async (url: string) => {
+		if (url === '/generation/choices') return { remembered, last: {}, migrated: true, worker: 'worker-a' };
+		if (url.startsWith('/generation/options/')) return { kind: 'image', options: OPTIONS };
 		if (url === '/settings/integrations') return integrations;
 		if (url === '/settings/text-generation') return textGen;
-		if (url === '/catalog/categories') return { categories, total_models: 4 };
-		if (url.startsWith('/catalog/models')) return { models: catalog, total: 4, catalog_size: 4 };
+		if (url === '/catalog/categories') return { categories, total_models: 5 };
+		if (url.startsWith('/catalog/models')) return { models: catalog, total: 5, catalog_size: 5 };
 		if (url.startsWith('/settings/integrations/model-params')) return { params: {} };
 		if (url.startsWith('/catalog/schema')) return { found: false, endpoint_id: '' };
 		return {};
 	});
 	mocks.patch.mockResolvedValue({ success: true });
-	mocks.put.mockImplementation(async (_url: string, body: Record<string, string>) => ({ ...textGen, ...body }));
+	mocks.put.mockImplementation(async (url: string, body: Record<string, unknown>) =>
+		url.startsWith('/generation/choices/') ? { choice: { ...(body.choice as object), origin: body.origin } } : { ...textGen, ...body });
+	mocks.del.mockResolvedValue({ forgotten: true });
 	mocks.loadVoice.mockResolvedValue(voiceSettings);
 	mocks.saveVoice.mockImplementation(async (patch: Record<string, unknown>) => ({ ...voiceSettings, ...patch }));
 	await catalogStore.load(true);
@@ -102,34 +123,70 @@ async function open(name: string) {
 }
 
 describe('ModelsCollection', () => {
-	it('lists every task by group with its model, and a hollow dot only when none is chosen', async () => {
+	it('lists remembered generation choices, app tasks and the catalog, with no per-tool media defaults', async () => {
 		render(ModelsCollection);
-		expect(screen.getByText('13 tasks')).toBeTruthy();
+		expect(screen.getByText('8 tasks')).toBeTruthy();
 		const labels = [...document.querySelectorAll('.st-lg > span:first-child')].map((e) => e.textContent);
-		expect(labels).toEqual(['Text', 'Image', 'Video', '3D', 'Audio', 'Catalog']);
+		expect(labels).toEqual(['Generation', 'App tasks', 'Catalog']);
+		await waitFor(() => expect(item('Video').textContent).toContain('fal.ai · LTX 2'));
+		expect(item('Images').textContent).toContain('Asks each time');
+		expect(item('Images').querySelector('.st-dot.off')).toBeTruthy();
+		expect(item('Video').querySelector('.st-dot.off')).toBeNull();
 		await waitFor(() => expect(item('Text tasks').textContent).toContain('Sonnet, low effort'));
-		expect(item('Text to image').textContent).toContain('Flux Pro Ultra');
 		await waitFor(() => expect(item('Dictation').textContent).toContain('GPT-4o Transcribe'));
+		expect(item('Read aloud').textContent).toContain('Kokoro');
 		expect(item('Voice calls').textContent).toContain('gpt-live-1');
-		expect(item('Voice calls').textContent).not.toContain('fixed');
-		expect(item('All fal.ai models').textContent).toContain('4 models');
-		const a2a = item('Audio to audio');
-		expect(a2a.textContent).toContain('No model chosen');
-		expect(a2a.querySelector('.st-dot.off')).toBeTruthy();
-		expect(document.querySelectorAll('[data-settings-list] .st-dot.off')).toHaveLength(1);
+		expect(item('All fal.ai models').textContent).toContain('5 models');
+		for (const removed of ['Text to image', 'Image editing', 'Text to video', 'Image to video', 'Text to 3D', 'Speech to text', 'Audio to audio']) {
+			expect(screen.queryByRole('button', { name: new RegExp(`^${removed}`) })).toBeNull();
+		}
 	});
 
-	it('filters tasks by name, model and group', async () => {
+	it('filters by name, choice and group', async () => {
 		render(ModelsCollection);
-		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'speech' } });
-		const names = [...document.querySelectorAll('[data-settings-item]')].map((e) => e.getAttribute('data-settings-item'));
-		expect(names).toEqual(['tts', 'stt']);
+		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'generation' } });
+		const names = () => [...document.querySelectorAll('[data-settings-item]')].map((e) => e.getAttribute('data-settings-item'));
+		expect(names()).toEqual(['gen-image', 'gen-video', 'gen-audio', 'gen-3d']);
+		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'aloud' } });
+		expect(names()).toEqual(['tts']);
 	});
 
-	it('reaches the text-to-speech voice in two clicks and saves it', async () => {
-		await open('Text to speech');
+	it('redirects the removed media tool items', () => {
+		settingsNav.go({ category: 'models', item: 't2i' });
+		expect(settingsNav.selectedItem('models')).toBe('gen-image');
+		settingsNav.go({ category: 'models', item: 'i2v' });
+		expect(settingsNav.selectedItem('models')).toBe('catalog');
+	});
+
+	it('picks and remembers a source for a kind with the choice card', async () => {
+		await open('Images');
 		const detail = screen.getByRole('region', { name: 'Details' });
-		expect(within(detail).getByRole('heading', { level: 2, name: 'Text to speech' })).toBeTruthy();
+		expect(within(detail).getByRole('heading', { level: 2, name: 'Images' })).toBeTruthy();
+		expect(within(detail).getAllByText('Asks each time').length).toBeGreaterThan(0);
+		const grok = await within(detail).findByRole('radio', { name: /SuperGrok/ });
+		await fireEvent.click(grok);
+		expect(grok.getAttribute('aria-checked')).toBe('true');
+		expect(within(grok).getByText('Included')).toBeTruthy();
+		await fireEvent.click(within(detail).getByRole('button', { name: /Remember this/ }));
+		await waitFor(() => expect(mocks.put).toHaveBeenCalledWith('/generation/choices/image', {
+			choice: SUPERGROK, remember: true, origin: 'settings'
+		}));
+		await waitFor(() => expect(item('Images').textContent).toContain('SuperGrok · Grok Imagine Image'));
+	});
+
+	it('shows a migrated choice and clears it so the agent asks again', async () => {
+		await open('Video');
+		const detail = screen.getByRole('region', { name: 'Details' });
+		expect(await within(detail).findByText(/Brought over from your earlier Default models setting/)).toBeTruthy();
+		await fireEvent.click(within(detail).getByRole('button', { name: 'Ask every time' }));
+		expect(mocks.del).toHaveBeenCalledWith('/generation/choices/video');
+		await waitFor(() => expect(item('Video').textContent).toContain('Asks each time'));
+	});
+
+	it('reaches the read-aloud voice in two clicks and saves it', async () => {
+		await open('Read aloud');
+		const detail = screen.getByRole('region', { name: 'Details' });
+		expect(within(detail).getByRole('heading', { level: 2, name: 'Read aloud' })).toBeTruthy();
 		const voice = within(detail).getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement;
 		expect(voice.value).toBe('af_heart');
 		expect(voice.selectedOptions[0].textContent).toBe('Heart (female)');
@@ -140,8 +197,8 @@ describe('ModelsCollection', () => {
 		expect(detail.querySelector('[data-setting-anchor="models.ttsVoice"]')).toBeTruthy();
 	});
 
-	it('changes a model from the Model tab and resets its options', async () => {
-		await open('Text to speech');
+	it('changes the read-aloud model from the Model tab and resets its options', async () => {
+		await open('Read aloud');
 		await fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
 		const minimax = screen.getByRole('button', { name: /MiniMax Speech 2\.8 HD/ });
 		await fireEvent.click(minimax);
@@ -149,32 +206,13 @@ describe('ModelsCollection', () => {
 		expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/audio/tts', { model: 'fal-ai/minimax/speech-2.8-hd' });
 		expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/model-params', { key: 'tts_model', params: {} });
 		expect(mocks.patch).toHaveBeenLastCalledWith('/settings/integrations/tts', { voice: 'Wise_Woman' });
-		await waitFor(() => expect(item('Text to speech').textContent).toContain('MiniMax Speech 2.8 HD'));
+		await waitFor(() => expect(item('Read aloud').textContent).toContain('MiniMax Speech 2.8 HD'));
 	});
 
-	it('offers catalog models under the recommended ones and links the full catalog', async () => {
-		await open('Text to image');
-		await fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-		expect(screen.getByRole('heading', { name: /Recommended/ })).toBeTruthy();
-		expect(screen.getByRole('heading', { name: /More from fal\.ai/ })).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: /HiDream/ }));
-		await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/image/model', { model: 'fal-ai/hidream' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Full catalog' }));
-		expect(settingsNav.selectedItem('models')).toBe('catalog');
-	});
-
-	it('asks for a model when a tool has none', async () => {
-		await open('Audio to audio');
-		expect(screen.getAllByText('No model chosen').length).toBeGreaterThan(0);
-		await fireEvent.click(screen.getByRole('button', { name: 'Choose model' }));
-		expect(screen.getByRole('tab', { name: 'Model' }).getAttribute('aria-selected')).toBe('true');
-	});
-
-	it('warns on a tool when fal.ai is off', async () => {
+	it('warns on read aloud when fal.ai is off', async () => {
 		integrations = { ...integrations, fal_enabled: false };
-		await open('Text to image');
+		await open('Read aloud');
 		expect(await screen.findByText('fal.ai is off, so this tool cannot run.')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'fal.ai media key' })).toBeTruthy();
 	});
 
 	it('saves the text model effort and warns when Claude is off', async () => {
@@ -220,14 +258,14 @@ describe('CatalogDetail', () => {
 
 	it('filters by category chip (toggling it off again) and by search across name, description, id and tags', async () => {
 		await open('All fal.ai models');
-		expect(rows()).toHaveLength(4);
+		expect(rows()).toHaveLength(5);
 		const video = screen.getByRole('button', { name: /Text → Video 1/ });
-		expect(screen.getByRole('button', { name: /^All 4/ }).getAttribute('aria-pressed')).toBe('true');
+		expect(screen.getByRole('button', { name: /^All 5/ }).getAttribute('aria-pressed')).toBe('true');
 		await fireEvent.click(video);
 		expect(video.getAttribute('aria-pressed')).toBe('true');
 		expect(rows()).toEqual(['fal-ai/ltx-2']);
 		await fireEvent.click(video);
-		expect(rows()).toHaveLength(4);
+		expect(rows()).toHaveLength(5);
 		const search = screen.getByRole('searchbox', { name: 'Search catalog' });
 		for (const [q, expected] of [
 			['photoreal', ['fal-ai/hidream']],
@@ -240,24 +278,31 @@ describe('CatalogDetail', () => {
 		await fireEvent.input(search, { target: { value: 'nothing-like-this' } });
 		expect(screen.getByText(/No models match/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
-		expect(rows()).toHaveLength(4);
+		expect(rows()).toHaveLength(5);
 	});
 
-	it('marks defaults, greys out models no tool uses, and sets a pick as its tool default', async () => {
+	it('marks remembered and pinned models, greys out models no tool uses, and remembers a generation pick', async () => {
 		await open('All fal.ai models');
-		const ultra = document.querySelector<HTMLElement>('[data-model-id="fal-ai/flux-pro/v1.1-ultra"]')!;
-		expect(ultra.getAttribute('aria-pressed')).toBe('true');
-		expect(ultra.textContent).toContain('Default');
+		const ltx = document.querySelector<HTMLElement>('[data-model-id="fal-ai/ltx-2"]')!;
+		await waitFor(() => expect(ltx.getAttribute('aria-pressed')).toBe('true'));
+		expect(ltx.textContent).toContain('Remembered');
+		const edit = document.querySelector<HTMLElement>('[data-model-id="fal-ai/edit-pro"]')!;
+		expect(edit.getAttribute('aria-pressed')).toBe('true');
+		expect(edit.textContent).toContain('Pinned');
 		const generic = document.querySelector<HTMLElement>('[data-model-id="fal-ai/birefnet"]')!;
 		expect(generic.getAttribute('aria-disabled')).toBe('true');
 		expect(generic.textContent).toContain('No tool uses this');
 		await fireEvent.click(generic);
 		expect(mocks.patch).not.toHaveBeenCalled();
-		const ltx = document.querySelector<HTMLElement>('[data-model-id="fal-ai/ltx-2"]')!;
-		await fireEvent.click(ltx);
-		await waitFor(() => expect(ltx.getAttribute('aria-pressed')).toBe('true'));
-		expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/video/model', { model: 'fal-ai/ltx-2' });
-		expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/model-params', { key: 'video_model', params: {} });
+		const hidream = document.querySelector<HTMLElement>('[data-model-id="fal-ai/hidream"]')!;
+		await fireEvent.click(hidream);
+		await waitFor(() => expect(hidream.getAttribute('aria-pressed')).toBe('true'));
+		expect(mocks.put).toHaveBeenCalledWith('/generation/choices/image', {
+			choice: { source: 'fal', account: 'fal-ai', worker: 'worker-a', model: 'fal-ai/hidream', options: {} },
+			remember: true,
+			origin: 'settings'
+		});
+		expect(mocks.patch).not.toHaveBeenCalledWith('/settings/integrations/image/model', expect.anything());
 	});
 
 	it('refreshes from fal.ai', async () => {
@@ -280,7 +325,7 @@ describe('CatalogDetail', () => {
 		mocks.get.mockImplementation(get);
 		await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 		await waitFor(() => expect(screen.queryByText('catalog offline')).toBeNull());
-		expect(rows()).toHaveLength(4);
+		expect(rows()).toHaveLength(5);
 	});
 });
 

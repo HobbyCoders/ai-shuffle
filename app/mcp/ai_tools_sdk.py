@@ -644,20 +644,34 @@ UNIFIED_TOOL_KINDS = {"generateImage": "image", "generateVideo": "video", "gener
 UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 
 
-# Main's configured-model handlers stay the Settings default ("lane") for each
-# unified name: a call with no source/model, and every unattended call that
-# main's schema could express, runs exactly as before. Step 1 is additive.
-# Refusals that mean "the guard could not price/resolve this" fall back to it;
-# a cap, confirmation or chat-mode refusal never does.
+# How a unified generation call runs (#379):
+# - Every call to the four generation tools (image, video, audio, 3D) goes
+#   through the resolver's guard: price, confirmation, daily cap. (runFalModel
+#   does not yet: see the last point.) A remembered choice (an account preference, one
+#   migrated from a saved Settings default included) runs unasked; one the
+#   guard cannot price or run shows the choice card (interactive) or is
+#   skipped and reported (unattended). When the account's choices cannot be
+#   read, nothing runs unasked either: unattended skips, interactive asks.
+# - Main's fal handlers are never a lane for the four generation tools. A
+#   saved fal default is migrated into a remembered choice before the run,
+#   and an unreadable or unmigrated state must not fall back to an unguarded
+#   fal job with no known price, cap or confirmation.
+# - The only generation lane left is the ChatGPT-plan image tool (#1796): it
+#   runs on the subscription login and spends no per-item money.
+# - Exception, until a follow-up fixes it: ``runFalModel`` keeps main's raw fal
+#   handler. Unattended calls go straight to it, and interactive calls fall
+#   back to it when the guard refuses with "could not price/resolve this"
+#   (the reasons below), so those can spend without a known price. A cap,
+#   confirmation or chat-mode refusal never falls back.
 _LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "invalid_request"}
-_CONFIGURED_MODEL_ENV = {"image": "IMAGE_MODEL", "video": "VIDEO_MODEL", "audio": "AUDIO_MODEL", "3d": "MODEL3D_MODEL"}
 
 
 def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
     """``{name: (lane, handler)}`` for main's handlers that can run here.
 
-    ``lane`` is ``"chatgpt"`` for the ChatGPT-plan image tool (#1796), which
-    needs no fal key, and ``"fal"`` for the fal.ai tools while a key is usable.
+    ``"chatgpt"`` is the ChatGPT-plan image tool (#1796), which needs no fal
+    key. ``"fal"`` is ``runFalModel`` while a key is usable. The four unified
+    generation tools never get a fal lane (see above).
     """
     from app.core.provider import subscription_images as sub
 
@@ -666,19 +680,15 @@ def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_
     for name, legacy in legacy_tools.items():
         if name == "generateImage" and subscription_image:
             lanes[name] = ("chatgpt", legacy.handler)
-        elif fal_usable and name != "searchModels":
+        elif fal_usable and name not in UNIFIED_TOOL_KINDS and name != "searchModels":
             lanes[name] = ("fal", legacy.handler)
     return lanes
 
 
-def _lane_label(lane: str, kind: str, tool_env: Optional[Dict[str, str]]) -> str:
+def _lane_label(tool_env: Optional[Dict[str, str]]) -> str:
     from app.core.provider import subscription_images as sub
 
-    if lane == "chatgpt":
-        return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
-    configured = (tool_env or {}).get(_CONFIGURED_MODEL_ENV[kind]) or (
-        _configured_image_models(tool_env)[0] if kind == "image" else "")
-    return f"fal.ai {configured}" if configured else "the fal.ai default model"
+    return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
 
 
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
@@ -715,7 +725,11 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     def lane_for(name):
         # A trusted stored/job choice outranks the Settings default.
-        return None if context.job_choice or context.remembered_choice else lanes.get(name)
+        kind = UNIFIED_TOOL_KINDS.get(name)
+        remembered = context.remembered_for(kind) if kind else context.remembered_choice
+        lane = None if context.job_choice or remembered else lanes.get(name)
+        # Main's fal handlers are never a generation tool's lane (see above).
+        return None if kind and lane and lane[0] != "chatgpt" else lane
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
@@ -723,24 +737,20 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
         lane = lane_for(name)
-        description = f"Generate {kind}. Omit source/model for priced choices; never pick for the user. IDs/schema: searchModels. Unattended needs a stored choice; unknown prices refuse; above-threshold spend needs an approved retry."
+        description = (f"Generate {kind}. No source/model: the user's saved choice, else they pick; never pick for them. "
+                       "IDs/schema: searchModels. Unknown prices never run (unattended skips, interactive asks); "
+                       "above-threshold spend needs an approved retry.")
         if lane:
-            description += (f" Here, omitting source/model uses the Settings default ({_lane_label(lane[0], kind, tool_env)})"
-                            + (", as does a fal model the guard cannot price." if lane[0] == "fal" else "."))
+            description += f" Here, omitting source/model uses the Settings default ({_lane_label(tool_env)})."
 
         def main_args(request):
-            """The call as main's configured-model tool took it, or None."""
+            """The call as main's ChatGPT-plan image tool took it, or None."""
             if any(request.get(key) not in (None, {}, False) for key in ("worker", "options", "confirmed", "confirmation_token")):
                 return None
-            source = normalize_source(request.get("source"))
-            if lane[0] == "chatgpt":
-                # The configured plan model (or its tail) is accepted, as on main.
-                if source not in (None, "chatgpt") or sub.refusal(request.get("model"), configured_image):
-                    return None
-                return {key: request[key] for key in ("prompt", "model") if request.get(key)}
-            if source not in (None, "fal"):
+            # The configured plan model (or its tail) is accepted, as on main.
+            if normalize_source(request.get("source")) not in (None, "chatgpt") or sub.refusal(request.get("model"), configured_image):
                 return None
-            return {key: request[key] for key in ("prompt", "model", *legacy) if key in request}
+            return {key: request[key] for key in ("prompt", "model") if request.get(key)}
 
         @tool(name, description, {
             "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
@@ -754,8 +764,8 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                 if refused:
                     return _tool_result(result("refused", reason="image_provider_restricted", error=refused))
             fallback = main_args(request) if lane else None
-            if fallback is not None and (context.unattended or lane[0] == "chatgpt" or not request.get("model")):
-                # The Settings default (no model, or only its own source named): main's path, unchanged.
+            if fallback is not None:
+                # The ChatGPT-plan image setting: main's path, unchanged.
                 return await lane[1](fallback)
             options = request.get("options", {})
             if not isinstance(options, dict):
@@ -767,12 +777,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                         return _tool_result(result("refused", error="Conflicting top-level and declared model options."))
                     options[key] = request.pop(key)
             request["options"] = options
-            if fallback is not None:
-                # Main ran a named fal model on this worker; keep it there.
-                request["worker"] = backend.local_worker()
             output = await resolver.generate(kind, request, context, exclude_sources=("fal",) if restricted else ())
-            if fallback is not None and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
-                return await lane[1](fallback)
             return _tool_result(output)
         return generate
 
@@ -821,7 +826,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     fal_lane = lane_for("runFalModel")
 
-    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks. Prefer the kind's tool; get IDs/schema via searchModels.", {
+    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks, but unattended or unpriceable calls still use the previous handler. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
