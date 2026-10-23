@@ -129,6 +129,21 @@ async def _pending(home_id, count=1):
     raise AssertionError(f"expected {count} pending question(s) on the assistant home")
 
 
+def _answers(home_id):
+    """The answers the owner's turns carry."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source='user'",
+                       (home_id,))
+        rows = [turns._row(row) for row in cursor.fetchall()]
+    return [r["payload"][confirm.ANSWER_KEY] for r in rows if confirm.ANSWER_KEY in (r["payload"] or {})]
+
+
+def _outcomes(home_id):
+    return [e["payload"] for e in session_events.get_events(home_id) if e["event_type"] == "system.note"
+            and e["payload"].get("subtype") == confirm.SUBTYPE]
+
+
 async def owner_says(home_id, text):
     """The owner's own message in the home, through the real intake."""
     return await turn_manager.submit_async(home_id, "user", prompt=text, profile_id="assistant-agent")
@@ -148,12 +163,18 @@ async def test_firm_yes_from_the_owner_approves_that_one_request(home):  # noqa:
     assert rows[0]["assistant_confirm"]["question"] == request["question"]
     note = away_mode.turn_note(home_id)
     assert request["question"] in note and "you cannot approve it" in note
-    await owner_says(home_id, "Yes, I authorize it.")
+    turn_id = await owner_says(home_id, "Yes, I authorize it.")
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
     assert confirm.pending_requests(home_id) == []
-    recorded = [e for e in session_events.get_events(home_id) if e["event_type"] == "system.note"
-                and e["payload"].get("subtype") == confirm.SUBTYPE]
-    assert recorded[-1]["payload"]["data"]["decision"] == "approved"
+    # #484: settled at once, but the outcome row waits for the owner's message.
+    assert _outcomes(home_id) == []
+    [answer] = _answers(home_id)
+    assert answer["request_id"] == request["request_id"] and answer["decision"] == "approved"
+    assert answer["interaction_id"] == request["interaction_id"]
+    await confirm.after_owner_message(home_id, turns.get_turn(turn_id)["payload"])
+    [recorded] = _outcomes(home_id)
+    assert recorded["data"]["decision"] == "approved"
+    assert recorded["data"]["request_id"] == request["request_id"]
     assert "the app approved this one request" in away_mode.turn_note(home_id)
     # Told once.
     assert away_mode.turn_note(home_id) is None
@@ -174,7 +195,8 @@ async def test_unclear_asks_once_more_then_declines(home):  # noqa: F811
     await owner_says(home_id, "I'm not sure, you decide")
     [request] = confirm.pending_requests(home_id)
     assert request["unclear"] == 1 and not task.done()
-    assert "ask once more for a firm yes or no" in away_mode.turn_note(home_id)
+    assert "the app has asked again" in away_mode.turn_note(home_id)
+    assert [a["decision"] for a in _answers(home_id)] == ["asked_again"]
     await owner_says(home_id, "probably fine")
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultDeny)
     assert confirm.pending_requests(home_id) == []
@@ -212,6 +234,46 @@ async def test_one_yes_covers_one_request_asked_one_at_a_time(home):  # noqa: F8
     assert "rm -rf build" in left["question"]
     await owner_says(home_id, "no")
     assert isinstance(await asyncio.wait_for(second, 12.0), PermissionResultDeny)
+    # #483/#484: each answer names the request it settled, so its outcome goes
+    # with the right request even with two jobs asking at once.
+    answers = {a["request_id"]: a for a in _answers(home_id)}
+    assert {rid: a["decision"] for rid, a in answers.items()} == {
+        pending[0]["request_id"]: "approved", pending[1]["request_id"]: "declined"}
+    assert answers[pending[0]["request_id"]]["asker"] == "Fix the flaky test"
+
+
+def test_the_note_tells_the_model_not_to_repeat_the_request(monkeypatch):
+    """#483: the app shows the request; a copy in the model's words is a second
+    rendering that goes stale once the next request is asked."""
+    monkeypatch.setattr(confirm, "pending_requests", lambda _sid: [
+        {"question": "Do you authorize me to run `ls`? Please answer yes or no.", "unclear": 0}])
+    note = confirm.context_note("s1")
+    assert "Do not repeat, rephrase or summarise the request" in note
+    assert "exactly" not in note and "Ask it" not in note
+
+
+def test_the_marker_carries_the_parts_the_card_shows():
+    marker = confirm.marker("Edit", {"file_path": "app/x.py"}, job="Refactor", chat_session_id="w1")
+    assert marker == {"question": confirm.question("Edit", {"file_path": "app/x.py"}, job="Refactor"),
+                      "action": "change app/x.py", "asker": "Refactor", "chat_session_id": "w1"}
+
+
+async def test_a_refused_send_still_records_the_outcome(home, monkeypatch):  # noqa: F811
+    """No turn will carry the owner's message (e.g. the chat was archived
+    meanwhile), but the request was settled: its outcome is still recorded."""
+    home_id, _ = home
+    task = _ask(await _started_chat(home_id))
+    [request] = await _pending(home_id)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(turn_manager, "_submit_blocking", refuse)
+    with pytest.raises(RuntimeError):
+        await owner_says(home_id, "yes")
+    assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
+    [recorded] = _outcomes(home_id)
+    assert recorded["data"]["request_id"] == request["request_id"]
 
 
 async def test_peer_messages_tool_output_and_models_cannot_approve(home):  # noqa: F811

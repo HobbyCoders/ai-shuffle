@@ -4,7 +4,7 @@ Session helper functions, models, and shared state.
 Extracted from sessions.py for maintainability.
 """
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -1303,6 +1303,52 @@ def attach_event_positions(messages: list[dict], session_id: str) -> None:
                 message["seq"], message["epoch"] = event["seq"], event["epoch"]
 
 
+# An approval asked in words (``assistant_confirm``) is one transcript card per
+# request id, settled in place. Mirrors the frontend reducer's projection
+# (frontend/src/lib/utils/assistant-confirm.ts) so a reload reads the same (#483).
+APPROVAL_CARD_SUBTYPE = "assistant_confirm_request"
+# Earlier outcomes that make a same-question card a retry ("Asked again").
+RETRIED_APPROVAL_STATUSES = frozenset({"declined", "expired"})
+
+
+def _approval_card_id(request_id: Any) -> Optional[str]:
+    return f"assistant-confirm-{request_id}" if isinstance(request_id, str) and request_id else None
+
+
+def _approval_card(event: dict, earlier: list[dict]) -> Optional[dict]:
+    """The card fields for an ``interaction.requested`` event, or None."""
+    request = event.get("request") if isinstance(event.get("request"), dict) else {}
+    confirm = request.get("assistant_confirm")
+    card_id = _approval_card_id(event.get("request_id"))
+    if event.get("kind") != "permission" or not isinstance(confirm, dict) or card_id is None:
+        return None
+
+    def clean(value: Any) -> str:
+        return " ".join(value.split()) if isinstance(value, str) else ""
+
+    question = clean(confirm.get("question")) or f"May I use {request.get('tool_name') or 'a tool'}? Yes or no."
+    # Only a repeat of a request the owner declined or that expired is "asked
+    # again"; running an approved action a second time is a new first ask.
+    attempt = 1 + sum(1 for m in earlier if m.get("systemSubtype") == APPROVAL_CARD_SUBTYPE
+                      and (m.get("systemData") or {}).get("question") == question
+                      and (m.get("systemData") or {}).get("status") in RETRIED_APPROVAL_STATUSES)
+    data: dict = {"request_id": event["request_id"], "question": question}
+    for key in ("action", "asker", "chat_session_id"):
+        if clean(confirm.get(key)):
+            data[key] = clean(confirm.get(key))
+    data.update(status="pending", attempt=attempt)
+    return {"id": card_id, "role": "system", "type": "system", "content": question,
+            "systemSubtype": APPROVAL_CARD_SUBTYPE, "systemData": data}
+
+
+def _approval_status(event: dict) -> Optional[str]:
+    if event.get("type") == "interaction.expired":
+        return "expired" if event.get("reason") == "ttl" else "cancelled"
+    answer = event.get("answer") if isinstance(event.get("answer"), dict) else {}
+    decision = answer.get("decision") or answer.get("behavior")
+    return {"allow": "approved", "deny": "declined"}.get(decision)
+
+
 def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
     """Project the persisted event mirror when no local transcript is available.
 
@@ -1324,6 +1370,8 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
 
     messages: list[dict] = []
     tools: dict[str, dict] = {}
+    # Approval cards asked in words, by card id (see _approval_card).
+    approvals: dict[str, dict] = {}
     origins: dict[str, int] = {}
     open_message = None
     current_profile = None
@@ -1443,12 +1491,29 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
                 data = event.get("data") or {}
                 subtype = "compact_boundary" if event.get("subtype") == "compact_boundary" and data.get("compact_metadata") else "compaction_boundary"
                 append(event, role="system", type="system", systemSubtype=subtype, systemData=data)
+            elif kind == "interaction.requested":
+                card = _approval_card(event, messages)
+                if card is None:
+                    continue
+                existing = approvals.get(card["id"])
+                if existing is not None:
+                    # A deferred request re-asked under the same id.
+                    existing["systemData"]["status"] = "pending"
+                    continue
+                open_message = None
+                approvals[card["id"]] = append(event, **card)
+            elif kind in ("interaction.answered", "interaction.expired"):
+                existing = approvals.get(_approval_card_id(event.get("request_id")))
+                status = _approval_status(event) if existing is not None else None
+                if status:
+                    existing["systemData"]["status"] = status
             elif kind == "transcript.rewound":
                 from_seq = event.get("from_seq")
                 if isinstance(from_seq, int) and not isinstance(from_seq, bool):
                     messages = [m for m in messages if origins[m["id"]] < from_seq]
                     origins = {m["id"]: origins[m["id"]] for m in messages}
                     tools = {m["toolId"]: m for m in messages if m.get("toolId")}
+                    approvals = {k: m for k, m in approvals.items() if k in origins}
                     if open_message is not None and open_message["id"] not in origins:
                         open_message = None
             elif kind in ("turn.completed", "turn.aborted", "turn.parked"):

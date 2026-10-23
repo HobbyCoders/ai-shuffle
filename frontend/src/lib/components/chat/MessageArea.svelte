@@ -117,7 +117,14 @@
 	import PendingStatusAnnouncer from './PendingStatusAnnouncer.svelte';
 	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import RunningTasksList from './RunningTasksList.svelte';
-	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
+	import {
+		approvalCardData,
+		currentAssistantQuestion,
+		isApprovalCard,
+		isApprovalOutcome
+	} from '$lib/utils/assistant-confirm';
+	import ApprovalRequestCard from './ApprovalRequestCard.svelte';
+	import ApprovalOutcome from './ApprovalOutcome.svelte';
 
 	/** Exhaustive keyed identity for every presentation-model variant. */
 	function displayItemKey(item: DisplayItem): string {
@@ -355,11 +362,14 @@
 	// Background tasks do NOT gate the dots — the main turn streams concurrently
 	// with running tasks, which have their own "Running N task" panel. See
 	// gap-indicator.ts for the full contract + tests.
-	// The approval the agent is asking in words, if any (assistant_confirm):
-	// any owner chat, answered with a typed or spoken yes or no.
+	// The approval asked in words that the owner's next yes or no answers
+	// (assistant_confirm: the oldest still waiting). Its card sits in the
+	// transcript where it was raised, keyed by request id (#483); this only
+	// marks which card is the one being asked.
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
+	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);
 
-	// The question in words stands in for the dots while it waits.
+	// A request waiting on the owner stands in for the dots while it waits.
 	const showGapIndicator = $derived(
 		!assistantQuestion
 		&& shouldShowGapIndicator(
@@ -2038,20 +2048,6 @@
 				/>
 			{/if}
 
-			<!-- Approval in words: the oldest in-conversation request is the
-			     agent asking, answered with a plain yes or no in the message box.
-			     No card, no buttons. The request itself says so (assistant_confirm). -->
-			{#if assistantQuestion}
-				<div class="assistant-ask" data-permission-request={assistantQuestion.request.request_id}>
-					<AssistantMessage
-						content={assistantQuestion.text}
-						timestamp={assistantQuestion.request.created_at}
-						sessionId={activeSessionId}
-						profileName={sessionProfile?.name ?? 'Assistant'}
-					/>
-				</div>
-			{/if}
-
 			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
 			     running-tool spinner, visible thinking state, or active subagent row. -->
 			{#if showGapIndicator || $activeSession.liveCompaction}
@@ -2276,6 +2272,16 @@
 	{:else if message.type === 'tool_result'}
 		<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
 		<!-- This prevents flickering where result briefly appears separately -->
+	{:else if isApprovalCard(message)}
+		<!-- An approval asked in words: one card per request id, where it was
+		     raised, settled in place (#483). Answered by typing yes or no. -->
+		{@const approval = approvalCardData(message)}
+		{#if approval}
+			<ApprovalRequestCard data={approval} active={approval.request_id === activeApprovalId} />
+		{/if}
+	{:else if isApprovalOutcome(message)}
+		<!-- What the owner's answer did, right after that answer (#484). -->
+		<ApprovalOutcome data={message.systemData} content={message.content} />
 	{:else if message.type === 'system'}
 		<div class="w-full">
 			<div class="min-w-0">

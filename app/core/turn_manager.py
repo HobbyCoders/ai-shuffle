@@ -540,13 +540,20 @@ async def submit_async(
     the start and silently drops the nudge from a worker thread. Ordering is
     unchanged: the turn is durably ``queued`` before the kick.
     """
+    answered: Optional[Dict[str, Any]] = None
     if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):
         # The owner's own message is the only thing that can answer a question
-        # the assistant is waiting on (app/core/assistant_confirm). The turn
-        # still runs, so the assistant sees the reply.
+        # the assistant is waiting on (app/core/assistant_confirm). The request
+        # is settled now, so the job that asked never waits on this chat's
+        # queue. The turn still runs, so the assistant sees the reply, and it
+        # carries the outcome: session_runtime writes it right after the
+        # owner's message, so the transcript reads request, answer, outcome
+        # (#484) however long the turn waits to start.
         from app.core import assistant_confirm
 
-        await assistant_confirm.on_owner_message(session_id, prompt)
+        answered = await assistant_confirm.on_owner_message(session_id, prompt)
+        if answered is not None:
+            payload = {**(payload or {}), assistant_confirm.ANSWER_KEY: answered}
     window_pin: Dict[str, int] = {}
     reactivated: dict[str, Any] = {}
     try:
@@ -567,6 +574,14 @@ async def submit_async(
             window_pin=window_pin,
             reactivated=reactivated,
         )
+    except Exception:
+        if answered is not None:
+            # No turn will record the owner's message now, but the request was
+            # settled: keep its outcome in the transcript all the same.
+            from app.core import assistant_confirm
+
+            await assistant_confirm.record_answer(session_id, answered)
+        raise
     finally:
         if reactivated:
             await _announce_reactivated(session_id, reactivated["user_id"])
