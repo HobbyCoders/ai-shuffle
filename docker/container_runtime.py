@@ -1360,7 +1360,7 @@ def capture_freeze(process):
     """Record why a running app stopped answering, before it is stopped (#436).
 
     SIGUSR1 makes the app's faulthandler write every thread's stack to its
-    fatal.log, without the GIL. The kernel's per-thread state tells a CPU spin
+    freeze.log, without the GIL. The kernel's per-thread state tells a CPU spin
     (one thread R) from native I/O (D with a filesystem wait channel). py-spy,
     only when the image already has it, adds native frames."""
     pid = getattr(process, "pid", None)
@@ -1370,7 +1370,7 @@ def capture_freeze(process):
     if usr1 is not None and _signal_caught(pid, usr1):
         try:
             os.kill(pid, usr1)
-            log(f"asked application pid {pid} to dump every thread's stack to its fatal.log")
+            log(f"asked application pid {pid} to dump every thread's stack to its freeze.log")
             time.sleep(STACK_DUMP_SETTLE)
         except OSError as exc:
             log(f"could not signal application pid {pid} for a stack dump ({type(exc).__name__})")
@@ -1382,8 +1382,10 @@ def capture_freeze(process):
     if py_spy is None:
         return
     try:
+        # The allow-listed environment only: the supervisor's own carries the
+        # app's secrets (see _POSTGRES_ENV_NAMES).
         result = subprocess.run([py_spy, "dump", "--native", "--pid", str(pid)], capture_output=True, text=True,
-                                timeout=PY_SPY_TIMEOUT, check=False)
+                                timeout=PY_SPY_TIMEOUT, check=False, env=postgres_base_env())
     except (OSError, subprocess.SubprocessError) as exc:
         log(f"py-spy dump failed ({type(exc).__name__})")
         return

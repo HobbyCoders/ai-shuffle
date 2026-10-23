@@ -19,7 +19,7 @@ def _wait_for_watchdog_test(stop: threading.Event) -> None:
 def diagnostic_logs(tmp_path, monkeypatch):
     from app.core import file_logging
 
-    fatal_path = tmp_path / "fatal.log"
+    freeze_path = tmp_path / "freeze.log"
     app_path = tmp_path / "app.log"
     handler = logging.FileHandler(app_path, encoding="utf-8")
     log = logging.getLogger("app.core.loop_watchdog")
@@ -28,9 +28,9 @@ def diagnostic_logs(tmp_path, monkeypatch):
     thread = threading.Thread(target=_wait_for_watchdog_test, args=(stop,), name="test-idle-thread")
     thread.start()
     try:
-        with fatal_path.open("w", encoding="utf-8") as stream:
-            monkeypatch.setattr(file_logging, "_fatal_file", stream)
-            yield app_path, fatal_path
+        with freeze_path.open("w", encoding="utf-8") as stream:
+            monkeypatch.setattr(file_logging, "_freeze_file", stream)
+            yield app_path, freeze_path
     finally:
         stop.set()
         thread.join(timeout=1)
@@ -76,8 +76,8 @@ async def test_blocked_loop_dumps_sleeping_frame(caplog, diagnostic_logs):
     assert "time.sleep" in text
     assert "(event-loop thread)" in text
     assert "_wait_for_watchdog_test" in text
-    app_path, fatal_path = diagnostic_logs
-    for path in (app_path, fatal_path):
+    app_path, freeze_path = diagnostic_logs
+    for path in (app_path, freeze_path):
         durable = path.read_text(encoding="utf-8")
         assert "_block_the_loop_for" in durable
         assert "_wait_for_watchdog_test" in durable
@@ -171,11 +171,11 @@ def test_new_stall_gets_its_own_dump_budget(monkeypatch, caplog):
 
 
 def test_durable_dump_precedes_logger_locks(diagnostic_logs):
-    _, fatal_path = diagnostic_logs
+    _, freeze_path = diagnostic_logs
 
     class CheckingLogger:
         def error(self, *args):
-            assert "test_durable_dump_precedes_logger_locks" in fatal_path.read_text(encoding="utf-8")
+            assert "test_durable_dump_precedes_logger_locks" in freeze_path.read_text(encoding="utf-8")
 
     loop = asyncio.new_event_loop()
     try:
@@ -209,11 +209,11 @@ def test_freeze_dump_timer_rearms_from_the_loop_and_disarms_on_stop(monkeypatch)
     assert cancelled == [1]
 
 
-def test_freeze_dump_timer_stays_off_without_a_fatal_log(monkeypatch):
+def test_freeze_dump_timer_stays_off_without_a_freeze_log(monkeypatch):
     from app.core import file_logging
     from app.core.loop_watchdog import FreezeDumpTimer
 
-    monkeypatch.setattr(file_logging, "_fatal_file", None)
+    monkeypatch.setattr(file_logging, "_freeze_file", None)
 
     async def scenario():
         timer = FreezeDumpTimer(asyncio.get_running_loop(), rearm_s=0.01)
@@ -229,35 +229,35 @@ def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil(tmp_path, monke
     """The C watchdog writes all stacks even while this thread never yields."""
     from app.core import file_logging
 
-    with (tmp_path / "fatal.log").open("a", encoding="utf-8") as stream:
-        monkeypatch.setattr(file_logging, "_fatal_file", stream)
+    with (tmp_path / "freeze.log").open("a", encoding="utf-8") as stream:
+        monkeypatch.setattr(file_logging, "_freeze_file", stream)
         assert file_logging.arm_freeze_dump(0.2) is True
         try:
             deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline and "Timeout" not in (tmp_path / "fatal.log").read_text():
+            while time.monotonic() < deadline and "Timeout" not in (tmp_path / "freeze.log").read_text():
                 time.sleep(0.05)
         finally:
             file_logging.cancel_freeze_dump()
-    text = (tmp_path / "fatal.log").read_text()
+    text = (tmp_path / "freeze.log").read_text()
     assert "Timeout (0:00:00.200000)!" in text and "test_faulthandler_dumps_a_frozen_interpreter" in text
 
 
 @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGUSR1"), reason="SIGUSR1 is POSIX only")
-def test_sigusr1_dumps_every_thread_to_the_fatal_log(tmp_path):
+def test_sigusr1_dumps_every_thread_to_the_freeze_log(tmp_path):
     import faulthandler
     import os
     import signal
 
     from app.core import file_logging
 
-    with (tmp_path / "fatal.log").open("a", encoding="utf-8") as stream:
+    with (tmp_path / "freeze.log").open("a", encoding="utf-8") as stream:
         assert file_logging._register_stack_dump_signal(stream) is True
         try:
             os.kill(os.getpid(), signal.SIGUSR1)
             time.sleep(0.1)
         finally:
             faulthandler.unregister(signal.SIGUSR1)
-    assert "test_sigusr1_dumps_every_thread_to_the_fatal_log" in (tmp_path / "fatal.log").read_text()
+    assert "test_sigusr1_dumps_every_thread_to_the_freeze_log" in (tmp_path / "freeze.log").read_text()
 
 
 _GIL_HOLDER = r"""
@@ -266,7 +266,7 @@ sys.path.insert(0, sys.argv[2])
 from app.core import file_logging
 
 stream = open(sys.argv[1], "a", encoding="utf-8")
-file_logging._fatal_file = stream
+file_logging._freeze_file = stream
 assert file_logging._register_stack_dump_signal(stream)
 assert file_logging.arm_freeze_dump(0.5)
 idle = threading.Event()
@@ -279,16 +279,16 @@ ctypes.PyDLL(None).sleep(3)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="libc sleep through ctypes.PyDLL")
-def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_fatal_log(tmp_path):
-    """#436: the interpreter froze with the GIL held and fatal.log stayed empty."""
+def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_freeze_log(tmp_path):
+    """#436: the interpreter froze with the GIL held and no stack was written."""
     import signal
     import subprocess
     from pathlib import Path
 
-    fatal = tmp_path / "fatal.log"
-    fatal.write_text("--- an earlier dump ---\n", encoding="utf-8")
+    freeze = tmp_path / "freeze.log"
+    freeze.write_text("--- an earlier dump ---\n", encoding="utf-8")
     repo = str(Path(__file__).resolve().parents[2])
-    child = subprocess.Popen([sys.executable, "-c", _GIL_HOLDER, str(fatal), repo],
+    child = subprocess.Popen([sys.executable, "-c", _GIL_HOLDER, str(freeze), repo],
                              stdout=subprocess.PIPE, text=True)
     try:
         assert child.stdout.readline().strip() == "holding"
@@ -298,7 +298,7 @@ def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_fatal_log(tmp
     finally:
         if child.poll() is None:
             child.kill()
-    text = fatal.read_text(encoding="utf-8")
+    text = freeze.read_text(encoding="utf-8")
     assert text.startswith("--- an earlier dump ---\n"), "appended, never truncated"
     assert text.count("Timeout (0:00:00.500000)!") >= 2, "the timer repeats while the interpreter stays frozen"
     holding = 'File "<string>", line 15 in <module>'  # the PyDLL sleep line

@@ -35,7 +35,7 @@ module skips, unless ``BOOT_SMOKE_REQUIRED=1`` (CI), where it fails instead.
 Run: ``python -m pytest tests/smoke -m boot_smoke -o addopts="" -p no:cacheprovider``
 (serially; never under xdist, the server owns real ports and a real cluster).
 
-On failure, console/app/fatal logs are copied to a unique directory outside
+On failure, console/app/fatal/freeze logs are copied to a unique directory outside
 pytest's pruned temp roots; the failure report prints its path. Set
 ``SMOKE_ARTIFACT_DIR`` to choose a durable parent directory. These diagnostic
 copies are retained until manually removed (successful runs make no copies).
@@ -231,7 +231,7 @@ def _preserve_logs(root: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     sources = [root / "console.log"]
     sources.extend(path for path in (root / "data" / "logs").rglob("*")
-                   if path.name in {"app.log", "fatal.log"})
+                   if path.name in {"app.log", "fatal.log", "freeze.log"})
     for source in sources:
         if source.is_file():
             target = destination / source.relative_to(root)

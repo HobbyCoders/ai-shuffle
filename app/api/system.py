@@ -84,8 +84,10 @@ async def api_health_check():
 async def _readiness_report() -> tuple[bool, dict]:
     """Build the readiness report: (ready, body).
 
-    Readiness is decided by the database alone: it answers ``SELECT 1`` (the
-    pool is up and the DB reachable). Session-pool occupancy is reported in
+    Readiness is decided by the database alone: it answers ``SELECT 1`` on
+    readiness's own connection and thread (the DB is reachable and answering;
+    the shared pool and default executor are not involved, so their
+    saturation does not fail it). Session-pool occupancy is reported in
     ``checks`` for observability but never makes the instance unready.
 
     Returns a plain dict so both the route and its tests can assert on the body

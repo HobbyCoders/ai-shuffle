@@ -46,6 +46,7 @@ def test_logs_survive_pruning_and_refresh_after_shutdown(tmp_path):
     (root / "console.log").write_text("console before shutdown")
     (logs / "app.log").write_text("traceback body")
     (logs / "fatal.log").write_text("fatal evidence")
+    (logs / "freeze.log").write_text("freeze evidence")
     destination = tmp_path / "durable" / "failed-run"
     _preserve_logs(root, destination)
     (root / "console.log").write_text("console after shutdown")
@@ -54,6 +55,7 @@ def test_logs_survive_pruning_and_refresh_after_shutdown(tmp_path):
     assert (destination / "console.log").read_text() == "console after shutdown"
     assert (destination / "data/logs/run-one/app.log").read_text() == "traceback body"
     assert (destination / "data/logs/run-one/fatal.log").read_text() == "fatal evidence"
+    assert (destination / "data/logs/run-one/freeze.log").read_text() == "freeze evidence"
 
 
 def test_missing_logs_during_failed_startup_are_ok(tmp_path):

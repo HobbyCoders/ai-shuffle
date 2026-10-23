@@ -7,7 +7,7 @@ more dump at 45 s; recovery is logged with the stall duration.
 
 Unlike resource_monitor's coroutine-based lag metric, this captures the
 blocking frame while the loop is stuck. The raw dump goes to file_logging's
-durable fatal.log before the ERROR record goes through normal app logging,
+durable freeze.log before the ERROR record goes through normal app logging,
 so a loop holding a logging handler lock cannot prevent the durable dump.
 """
 
@@ -215,7 +215,7 @@ class FreezeDumpTimer:
     for two minutes and nothing was dumped. Every ``rearm_s`` the loop re-arms
     ``faulthandler.dump_traceback_later(timeout_s, repeat=True)``. When the
     loop or the whole interpreter stops for ``timeout_s``, faulthandler's own
-    C thread writes every Python stack to fatal.log, then again every
+    C thread writes every Python stack to freeze.log, then again every
     ``timeout_s`` until the loop re-arms it.
     """
 
@@ -242,7 +242,7 @@ class FreezeDumpTimer:
         self.armed = arm_freeze_dump(self.timeout_s)
         if not self.armed:
             self._handle = None
-            return  # file logging is off: nowhere durable to dump to
+            return  # file logging is off or freeze.log is full
         self._handle = self._loop.call_later(self.rearm_s, self._tick)
 
     def stop(self) -> None:

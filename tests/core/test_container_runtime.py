@@ -430,12 +430,15 @@ def test_capture_freeze_runs_py_spy_only_when_installed(monkeypatch, tmp_path, c
     process = Mock(pid=77)
     process.poll.return_value = None
     _fake_proc(tmp_path, 77)
-    calls = []
+    calls, envs = [], []
+    monkeypatch.setenv("SECRET_KEY", "supervisor-only-secret")
     monkeypatch.setattr(runtime.shutil, "which", lambda name: "/usr/bin/py-spy" if name == "py-spy" else None)
-    monkeypatch.setattr(runtime.subprocess, "run", lambda args, **kwargs: calls.append(args) or Mock(
-        stdout="Thread 77 (active): \"MainThread\"\n", stderr=""))
+    monkeypatch.setattr(runtime.subprocess, "run", lambda args, **kwargs: calls.append(args) or envs.append(
+        kwargs.get("env")) or Mock(stdout="Thread 77 (active): \"MainThread\"\n", stderr=""))
     runtime.capture_freeze(process)
     assert calls == [["/usr/bin/py-spy", "dump", "--native", "--pid", "77"]]
+    assert envs[0] is not None and "SECRET_KEY" not in envs[0], "py-spy gets the allow-listed environment only"
+    assert envs[0].get("PATH") == runtime.os.environ.get("PATH")
     assert 'py-spy: Thread 77 (active): "MainThread"' in capsys.readouterr().err
 
 

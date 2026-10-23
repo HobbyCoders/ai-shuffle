@@ -29,8 +29,10 @@ fixture removes it so the code under test actually runs.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import os
+import signal
 import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
@@ -85,6 +87,8 @@ def fake_settings(tmp_path, monkeypatch):
     # Reset module singletons before AND clean up after so root logger stays clean.
     file_logging._file_handler = None
     file_logging._fatal_file = None
+    file_logging._freeze_file = None
+    file_logging._freeze_log_full_reported = False
     file_logging._pending_fatal_warning = None
     yield _make
 
@@ -95,13 +99,19 @@ def fake_settings(tmp_path, monkeypatch):
             file_logging._file_handler.close()
         except Exception:
             pass
-    if file_logging._fatal_file is not None:
-        try:
-            file_logging._fatal_file.close()
-        except Exception:
-            pass
+    file_logging.cancel_freeze_dump()
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.unregister(signal.SIGUSR1)
+    for stream in (file_logging._fatal_file, file_logging._freeze_file):
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
     file_logging._file_handler = None
     file_logging._fatal_file = None
+    file_logging._freeze_file = None
+    file_logging._freeze_log_full_reported = False
     file_logging._pending_fatal_warning = None
 
 
@@ -158,27 +168,77 @@ def test_setup_attaches_rotating_file_handler_with_config(fake_settings, tmp_pat
     assert _log_dir(tmp_path).is_dir()
 
 
-def test_diagnostic_dump_uses_managed_fatal_log(fake_settings, tmp_path):
+def test_diagnostic_dump_uses_managed_freeze_log_not_fatal_log(fake_settings, tmp_path):
     fake_settings()
     file_logging.setup_file_logging()
     file_logging.dump_diagnostic_traceback("Event loop stalled for 10.0s")
-    text = (_log_dir(tmp_path) / "fatal.log").read_text(encoding="utf-8")
+    text = (_log_dir(tmp_path) / "freeze.log").read_text(encoding="utf-8")
     assert "Event loop stalled for 10.0s" in text
-    assert "test_diagnostic_dump_uses_managed_fatal_log" in text
+    assert "test_diagnostic_dump_uses_managed_freeze_log_not_fatal_log" in text
+    assert (_log_dir(tmp_path) / "fatal.log").stat().st_size == 0, "fatal.log stays crash-only"
 
 
-def test_diagnostic_dump_without_fatal_stream(monkeypatch):
-    monkeypatch.setattr(file_logging, "_fatal_file", None)
+def test_diagnostic_dump_without_freeze_stream(monkeypatch):
+    monkeypatch.setattr(file_logging, "_freeze_file", None)
     file_logging.dump_diagnostic_traceback("disabled")
 
 
 def test_diagnostic_dump_io_failure_is_nonfatal(monkeypatch):
     class BrokenStream:
+        def fileno(self):
+            raise OSError("diagnostic disk unavailable")
+
         def write(self, text):
             raise OSError("diagnostic disk unavailable")
 
-    monkeypatch.setattr(file_logging, "_fatal_file", BrokenStream())
+    monkeypatch.setattr(file_logging, "_freeze_file", BrokenStream())
     file_logging.dump_diagnostic_traceback("unwritable")
+
+
+def test_freeze_dump_then_normal_boot_is_no_crash_report(fake_settings, tmp_path, caplog):
+    """#436 review: a recovered freeze must not read as a crash at the next boot,
+    nor displace a real crash trace already kept in fatal.log.prev."""
+    fake_settings()
+    log_dir = _log_dir(tmp_path)
+    log_dir.mkdir(parents=True)
+    (log_dir / "fatal.log.prev").write_text("Fatal Python error: Segmentation fault\n", encoding="utf-8")
+    file_logging.setup_file_logging()
+    file_logging.dump_diagnostic_traceback("Event loop stalled for 31.0s")
+    if hasattr(signal, "SIGUSR1"):
+        os.kill(os.getpid(), signal.SIGUSR1)  # the supervisor's pre-stop request
+    assert (log_dir / "fatal.log").stat().st_size == 0
+    assert (log_dir / "freeze.log").stat().st_size > 0
+
+    # The next ordinary boot of the same install runs both boot checks.
+    file_logging._pending_fatal_warning = None
+    with caplog.at_level(logging.WARNING, logger=file_logging.logger.name):
+        file_logging._boot_check_fatal_log(log_dir)
+        file_logging._boot_check_freeze_log(log_dir)
+    assert file_logging._pending_fatal_warning is None
+    assert not any("fatal crash trace" in r.getMessage() for r in caplog.records)
+    assert any("this is not a crash" in r.getMessage() for r in caplog.records)
+    assert "Event loop stalled for 31.0s" in (log_dir / "freeze.log.prev").read_text(encoding="utf-8")
+    assert "Segmentation fault" in (log_dir / "fatal.log.prev").read_text(encoding="utf-8")
+
+    # A real crash trace is still reported.
+    (log_dir / "fatal.log").write_text("Fatal Python error: Aborted\n", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=file_logging.logger.name):
+        file_logging._boot_check_fatal_log(log_dir)
+    assert file_logging._pending_fatal_warning is not None
+    assert "Aborted" in (log_dir / "fatal.log.prev").read_text(encoding="utf-8")
+
+
+def test_freeze_log_stops_taking_dumps_once_full(fake_settings, tmp_path, monkeypatch):
+    fake_settings()
+    file_logging.setup_file_logging()
+    monkeypatch.setattr(file_logging, "FREEZE_LOG_MAX_BYTES", 64)
+    file_logging.dump_diagnostic_traceback("first stall")
+    freeze = _log_dir(tmp_path) / "freeze.log"
+    size = freeze.stat().st_size
+    assert size > 64
+    file_logging.dump_diagnostic_traceback("second stall")
+    assert freeze.stat().st_size == size, "no further stall dumps past the cap"
+    assert file_logging.arm_freeze_dump(30.0) is False, "the timer is not re-armed past the cap"
 
 
 def test_setup_is_idempotent(fake_settings, tmp_path):

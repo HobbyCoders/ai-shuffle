@@ -28,6 +28,11 @@ DB handler:
    exceptions reach the file (and, being logged at ERROR, the ``error_log`` DB).
 4. A startup banner + boot-check that rotates aside any fatal trace left by a
    previous run so each crash's trace is preserved exactly one generation.
+5. ``freeze.log`` for stack dumps of a process that is still alive: the stall
+   watchdog's dump, faulthandler's repeating freeze timer and the SIGUSR1
+   dump the container supervisor requests (#436). They stay out of
+   ``fatal.log`` so a freeze the app recovered from is never reported as a
+   crash, and never displaces a real crash trace from ``fatal.log.prev``.
 
 Layout — the log directory lives under the durable data dir, namespaced PER
 INSTANCE so multiple installs sharing one data dir never fight over rotation
@@ -37,6 +42,8 @@ fatal.log — would corrupt both, and Windows raises on rename-while-open)::
     <data_dir>/logs/<instance_id>/app.log        (+ .1 .. .N rotations)
     <data_dir>/logs/<instance_id>/fatal.log      (faulthandler target)
     <data_dir>/logs/<instance_id>/fatal.log.prev (previous crash's trace)
+    <data_dir>/logs/<instance_id>/freeze.log     (stall/freeze stack dumps)
+    <data_dir>/logs/<instance_id>/freeze.log.prev (previous run's dumps)
 
 ``<data_dir>`` is ``/data`` in Docker (the ``ai-shuffle-data`` named volume,
 durable across container recreation) and ``%USERPROFILE%\\.ai-shuffle`` on a
@@ -81,7 +88,15 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 #    fatal signal would go nowhere.
 _file_handler: Optional[QueuedHandler] = None
 _fatal_file = None
+#  - _freeze_file: stall/freeze stack dumps of a live process (never a crash).
+_freeze_file = None
 _prev_excepthook = None
+
+# freeze.log stops taking new timer and stall dumps past this size; the next
+# boot rotates it to freeze.log.prev. faulthandler writes in C while the
+# interpreter is frozen, so one long freeze can still pass it by its repeats.
+FREEZE_LOG_MAX_BYTES = 8 * 1024 * 1024
+_freeze_log_full_reported = False
 
 # Set by the boot-check when a previous run left a non-empty fatal trace. The
 # WARNING is emitted later (once the error_log DB handler is installed) so it
@@ -151,6 +166,50 @@ def _boot_check_fatal_log(log_dir: Path) -> None:
         logger.warning(message)
     except Exception:  # noqa: BLE001 — boot-check must never block startup
         logger.exception("fatal.log boot-check failed (non-fatal)")
+
+
+def _boot_check_freeze_log(log_dir: Path) -> None:
+    """Rotate the previous run's ``freeze.log`` to ``freeze.log.prev``.
+
+    Its dumps come from a process that was alive (a stall or a freeze, which
+    may have ended in a supervisor restart), so this is reported as a WARNING
+    naming the file, never as a crash and never through ``fatal.log``.
+    """
+    freeze_path = log_dir / "freeze.log"
+    try:
+        if not freeze_path.exists():
+            return
+        size = freeze_path.stat().st_size
+        if size <= 0:
+            return
+        prev_path = log_dir / "freeze.log.prev"
+        try:
+            os.replace(freeze_path, prev_path)
+        except OSError:
+            logger.exception("Failed to rotate previous freeze.log aside")
+            prev_path = freeze_path
+        logger.warning(
+            "Previous run recorded stack dumps of a stalled or frozen event loop "
+            "(%d bytes), preserved as %s. The process was alive when they were "
+            "written; this is not a crash.", size, prev_path)
+    except Exception:  # noqa: BLE001 — boot-check must never block startup
+        logger.exception("freeze.log boot-check failed (non-fatal)")
+
+
+def _freeze_log_has_room() -> bool:
+    """False once freeze.log reached FREEZE_LOG_MAX_BYTES (reported once)."""
+    global _freeze_log_full_reported
+    try:
+        size = os.fstat(_freeze_file.fileno()).st_size
+    except (AttributeError, OSError, ValueError):
+        return False
+    if size < FREEZE_LOG_MAX_BYTES:
+        return True
+    if not _freeze_log_full_reported:
+        _freeze_log_full_reported = True
+        logger.warning("freeze.log reached %d bytes; no further stall or freeze dumps this run",
+                       FREEZE_LOG_MAX_BYTES)
+    return False
 
 
 def emit_pending_fatal_warning() -> bool:
@@ -258,18 +317,21 @@ def install_asyncio_exception_handler(loop: Optional[asyncio.AbstractEventLoop] 
 
 
 def dump_diagnostic_traceback(message: str) -> None:
-    """Write all thread stacks to the managed fatal log without logger locks.
+    """Write all thread stacks to the managed freeze log without logger locks.
 
-    Best effort when file logging is disabled or its stream is unavailable.
-    Do not log failures here: this is also used for stalls inside log handlers.
+    Best effort when file logging is disabled, its stream is unavailable or
+    the log is full. Do not log here: this also runs for stalls inside log
+    handlers (the one-time "full" warning comes from the event loop's re-arm).
     """
-    if _fatal_file is None:
+    if _freeze_file is None:
         return
     try:
-        _fatal_file.write(f"\n--- {message} ---\n")
-        _fatal_file.flush()
-        faulthandler.dump_traceback(file=_fatal_file, all_threads=True)
-        _fatal_file.flush()
+        if os.fstat(_freeze_file.fileno()).st_size >= FREEZE_LOG_MAX_BYTES:
+            return
+        _freeze_file.write(f"\n--- {message} ---\n")
+        _freeze_file.flush()
+        faulthandler.dump_traceback(file=_freeze_file, all_threads=True)
+        _freeze_file.flush()
     except Exception:  # noqa: BLE001 — diagnostics must not kill the watchdog
         pass
 
@@ -298,13 +360,17 @@ def arm_freeze_dump(timeout_s: float) -> bool:
     cancels the previous timer, so the dump fires only once the loop (or the
     whole interpreter, a GIL held in native code included) has stopped for
     ``timeout_s``, and then again every ``timeout_s`` while it stays stopped.
-    The Python stall watchdog cannot do this: it needs the GIL. Writes to the
-    managed fatal log; returns False when file logging is off.
+    The Python stall watchdog cannot do this: it needs the GIL. Writes to
+    freeze.log; returns False (and disarms) when file logging is off or
+    freeze.log is full.
     """
-    if _fatal_file is None:
+    if _freeze_file is None:
+        return False
+    if not _freeze_log_has_room():
+        cancel_freeze_dump()
         return False
     try:
-        faulthandler.dump_traceback_later(timeout_s, repeat=True, file=_fatal_file)
+        faulthandler.dump_traceback_later(timeout_s, repeat=True, file=_freeze_file)
         return True
     except (RuntimeError, ValueError, OSError):
         return False
@@ -326,7 +392,7 @@ def setup_file_logging() -> Optional[Path]:
     Safe to call more than once; the second call no-ops. Never raises — a
     logging setup failure must not stop the app from booting.
     """
-    global _file_handler, _fatal_file
+    global _file_handler, _fatal_file, _freeze_file
 
     from app.core.config import settings
 
@@ -352,6 +418,7 @@ def setup_file_logging() -> Optional[Path]:
     # Boot-check BEFORE reopening fatal.log so we can see the previous run's
     # trace and rotate it aside.
     _boot_check_fatal_log(log_dir)
+    _boot_check_freeze_log(log_dir)
 
     file_level = getattr(logging, str(settings.file_log_level).upper(), logging.INFO)
 
@@ -394,9 +461,14 @@ def setup_file_logging() -> Optional[Path]:
     try:
         _fatal_file = open(log_dir / "fatal.log", "a", encoding="utf-8")
         faulthandler.enable(file=_fatal_file, all_threads=True)
-        _register_stack_dump_signal(_fatal_file)
     except Exception:  # noqa: BLE001
         logger.exception("Could not enable faulthandler (non-fatal)")
+    # Dumps of a live process go to freeze.log, so fatal.log stays crash-only.
+    try:
+        _freeze_file = open(log_dir / "freeze.log", "a", encoding="utf-8")
+        _register_stack_dump_signal(_freeze_file)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not open freeze.log (non-fatal)")
 
     _install_excepthook()
 
