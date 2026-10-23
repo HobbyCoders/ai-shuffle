@@ -35,7 +35,7 @@ module skips, unless ``BOOT_SMOKE_REQUIRED=1`` (CI), where it fails instead.
 Run: ``python -m pytest tests/smoke -m boot_smoke -o addopts="" -p no:cacheprovider``
 (serially; never under xdist, the server owns real ports and a real cluster).
 
-On failure, console/app/fatal logs are copied to a unique directory outside
+On failure, console/app/fatal/freeze logs are copied to a unique directory outside
 pytest's pruned temp roots; the failure report prints its path. Set
 ``SMOKE_ARTIFACT_DIR`` to choose a durable parent directory. These diagnostic
 copies are retained until manually removed (successful runs make no copies).
@@ -231,7 +231,7 @@ def _preserve_logs(root: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     sources = [root / "console.log"]
     sources.extend(path for path in (root / "data" / "logs").rglob("*")
-                   if path.name in {"app.log", "fatal.log"})
+                   if path.name in {"app.log", "fatal.log", "freeze.log"})
     for source in sources:
         if source.is_file():
             target = destination / source.relative_to(root)
@@ -419,6 +419,12 @@ def test_unauthenticated_surface(server):
     # A fresh install: nothing configured, no owner password yet.
     assert body["setup_required"] is True
     assert c.get("/api/v1/health").json()["status"] == "healthy"
+    # The container supervisor restarts only on liveness (#436); readiness
+    # answers again on its own connection after the first probe.
+    for path in ("/health/live", "/api/v1/health/live"):
+        live = c.get(path)
+        assert live.status_code == 200 and live.json() == {"status": "alive"}, path
+    assert c.get("/health/ready").json()["checks"]["database"] == "ok"
 
     version = c.get("/api/v1/version")
     assert version.status_code == 200
