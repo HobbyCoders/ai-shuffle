@@ -20,7 +20,8 @@ with the same seeded ids:
 
 Content-free JSON lines report, per sample: path nodes (durable), nodes the
 store retains in memory and their JSON bytes, the traced Python heap above
-the phase's own starting point, and process RSS (a high-water mark: the
+the phase's own starting point, the in-process SQLite database's size (the
+lab's stand-in for PostgreSQL, which RSS includes) and process RSS (a high-water mark: the
 windowed phase runs first so its RSS is not inflated by the base phase).
 Each phase ends with a SHA-256 over every main-model request (system,
 rendered history, tool names): equal digests mean byte-identical prompts.
@@ -59,6 +60,14 @@ def rss_mib() -> float:
         return -1.0
 
 
+def db_mib(conn) -> float:
+    if conn is None:
+        return -1.0
+    pages = conn.execute("PRAGMA page_count").fetchone()[0]
+    size = conn.execute("PRAGMA page_size").fetchone()[0]
+    return round(pages * size / 2**20, 1)
+
+
 class SeededIds:
     """``uuid.uuid4`` stand-in for fluid's ``new_id``: same ids every phase.
 
@@ -80,7 +89,7 @@ class SeededIds:
         return uuid.UUID(int=self.n << self.SHIFT)
 
 
-async def phase(name: str, args: argparse.Namespace) -> dict:
+async def phase(name: str, args: argparse.Namespace, db=None) -> dict:
     import fluid.store.base as store_base
     from fluid.context.checkpoint_summary import CHECKPOINT_SYSTEM
     from fluid.engine.native import NativeLoop
@@ -184,6 +193,9 @@ async def phase(name: str, args: argparse.Namespace) -> dict:
             "retained_message_json_bytes": stats["message_json_bytes"],
             "traced_mib_above_start": round((tracemalloc.get_traced_memory()[0] - floor) / 2**20, 2),
             "rss_mib": rss_mib(),
+            # The lab's "durable" rows live in an in-process SQLite database,
+            # so RSS includes them; production keeps them in PostgreSQL.
+            "db_mib": db_mib(db),
         }
         row["path_nodes"] = len(await store.load_path(loop.session_id))
         row["main_calls"], row["checkpoint_calls"] = counts["main"], counts["checkpoint"]
@@ -241,8 +253,10 @@ async def main_async(args: argparse.Namespace) -> None:
     results = {}
     names = ("windowed", "base") if args.phase == "both" else (args.phase,)
     for name in names:
-        with route_db_to(new_sqlite_connection()):
-            results[name] = await phase(name, args)
+        conn = new_sqlite_connection()
+        with route_db_to(conn):
+            results[name] = await phase(name, args, conn)
+        conn.close()
         gc.collect()
     if len(results) < 2:
         return  # compare request_sha256 across the two single-phase runs
