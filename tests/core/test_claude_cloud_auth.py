@@ -399,7 +399,7 @@ def test_git_service_children_scrub_inheritance_and_explicit_maps(store, monkeyp
     from app.core.git_service import GitService
 
     run = Mock(return_value=Mock(returncode=0))
-    monkeypatch.setattr("app.core.git_service.subprocess.run", run)
+    monkeypatch.setattr("app.core.git_service.subprocess.Popen", run)
     with patch.dict(os.environ, HOST):
         GitService()._run_git("fake-repo", ["status"], env={**HOST, "GIT_ASKPASS": "fake-askpass"} if explicit else None)
     assert not set(run.call_args.kwargs["env"]) & ALL_CLOUD_NAMES

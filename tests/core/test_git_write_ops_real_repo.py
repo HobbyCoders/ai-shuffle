@@ -599,17 +599,17 @@ def test_network_auth_failure_fails_fast(svc, repo):
 
 
 def test_run_git_disables_terminal_prompts(svc, repo, monkeypatch):
-    import subprocess
-
     monkeypatch.delenv("GIT_TERMINAL_PROMPT", raising=False)
     seen = {}
 
-    def fake_run(args, **kwargs):
+    def fake_popen(args, **kwargs):
+        from unittest.mock import Mock
+
         seen.clear()
         seen.update(kwargs["env"])
-        return subprocess.CompletedProcess(args, 0, "", "")
+        return Mock(returncode=0)
 
-    monkeypatch.setattr("app.core.git_service.subprocess.run", fake_run)
+    monkeypatch.setattr("app.core.git_service.subprocess.Popen", fake_popen)
     svc._run_git(str(repo), ["fetch", "origin"])
     assert seen["GIT_TERMINAL_PROMPT"] == "0"
     svc._run_git(str(repo), ["fetch"], env={"PATH": os.environ["PATH"]})
