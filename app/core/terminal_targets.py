@@ -27,7 +27,7 @@ def peer_reason(row):
     if not row["online"]:
         code, reason = "peer_offline", "The peer worker is offline."
     elif not terminal_relay.peer_targets_enabled():
-        code, reason = "peer_terminals_disabled", "Enable NETWORK_PEER_TERMINALS on both workers."
+        code, reason = "peer_terminals_disabled", "Turn on peer terminals in owner policy on both workers."
     elif row.get("capabilities", {}).get("terminal", 0) < 2:
         code, reason = "peer_unsupported_or_disabled", "The peer does not support owner-approved terminals or has them disabled."
     elif not any(url.lower().startswith("https://") for url in row.get("endpoints", [])):
@@ -51,7 +51,7 @@ async def peer_availability(row):
         code = probe.get("reason_code") if isinstance(probe, dict) else None
         if code == "recipient_approval_required":
             return state
-        reasons = {"peer_terminals_disabled": "Enable NETWORK_PEER_TERMINALS on both workers.",
+        reasons = {"peer_terminals_disabled": "Turn on peer terminals in owner policy on both workers.",
                    "not_supported": "No usable PTY or shell on the peer worker."}
         if code not in reasons:
             code = "peer_unsupported_or_disabled"

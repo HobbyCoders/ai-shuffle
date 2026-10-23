@@ -255,6 +255,10 @@ async def peer_terminal_authorization(authorization_id: str, who: str = Depends(
         entry = terminal_relay.source_authorization(authorization_id, who)
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from None
+    if not terminal_relay.peer_targets_enabled():
+        # Turning the owner policy off ends this worker's pending authority.
+        terminal_relay.forget(authorization_id)
+        raise HTTPException(403, "Peer terminals are turned off in owner policy")
     result = await _peer_call(entry[2], "status", authorization_id)
     return _peer_authorization_response(result, entry[2], authorization_id)
 

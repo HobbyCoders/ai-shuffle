@@ -63,7 +63,7 @@ describe('target selection with peer workers', () => {
 	it("lists every worker with its availability and the reason it can't be used", () => {
 		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer(),
 			peer({ worker_id: 'off', name: 'Laptop', reason_code: 'peer_offline', reason: 'The peer worker is offline.' }),
-			peer({ worker_id: 'dis', name: 'Nas', reason_code: 'peer_terminals_disabled', reason: 'Enable NETWORK_PEER_TERMINALS on both workers.' }),
+			peer({ worker_id: 'dis', name: 'Nas', reason_code: 'peer_terminals_disabled', reason: 'Turn on peer terminals in owner policy on both workers.' }),
 			ssh]), onOpen: vi.fn() });
 		const group = ui.getByRole('group', { name: 'Target' });
 		const needs = within(group).getByRole('radio', { name: 'Peer, Peer worker, Needs approval' }) as HTMLInputElement;
@@ -74,7 +74,7 @@ describe('target selection with peer workers', () => {
 		expect(offline.getAttribute('aria-describedby')).toBeTruthy();
 		expect(document.getElementById(offline.getAttribute('aria-describedby')!)!.textContent).toBe('The peer worker is offline.');
 		expect((within(group).getByRole('radio', { name: 'Nas, Peer worker, Turned off' }) as HTMLInputElement).disabled).toBe(true);
-		expect(ui.getByText('Enable NETWORK_PEER_TERMINALS on both workers.')).toBeTruthy();
+		expect(ui.getByText('Turn on peer terminals in owner policy on both workers.')).toBeTruthy();
 		expect((within(group).getByRole('radio', { name: 'Local, This worker' }) as HTMLInputElement).checked).toBe(true);
 		expect(within(group).getByRole('radio', { name: 'Approved host, SSH grant' })).toBeTruthy();
 	});
@@ -167,7 +167,7 @@ describe('requesting a peer shell', () => {
 		[new TerminalApiError('The peer needs an authenticated HTTPS route.', 503, 'https_required'), 'Peer needs an authenticated HTTPS route'],
 		[new TerminalApiError('The peer worker is offline.', 409, 'peer_offline'), 'The peer worker is offline.'],
 		[new TerminalApiError('Unknown peer worker', 404, 'http_404'), 'no longer a known worker'],
-		[new TerminalApiError('Enable NETWORK_PEER_TERMINALS on both workers.', 409, 'peer_terminals_disabled'), 'Peer terminals are turned off'],
+		[new TerminalApiError('Turn on peer terminals in owner policy on both workers.', 409, 'peer_terminals_disabled'), 'Peer terminals are turned off'],
 	])('explains a refused request (%s)', async (error, text) => {
 		api.requestPeer.mockRejectedValue(error);
 		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer()]), onOpen: vi.fn() });
@@ -181,7 +181,7 @@ describe('requesting a peer shell', () => {
 
 	it('does not offer to open when the recipient answers unavailable', async () => {
 		const ui = await requested({ ...pending(), status: 'unavailable', available: false, reason_code: 'peer_terminals_disabled',
-			reason: 'Enable NETWORK_PEER_TERMINALS on both workers.' });
+			reason: 'Turn on peer terminals in owner policy on both workers.' });
 		const alert = await ui.findByRole('alert');
 		expect(within(alert).getByText('Peer is unavailable')).toBeTruthy();
 		expect(ui.queryByRole('button', { name: 'Open terminal' })).toBeNull();

@@ -87,7 +87,7 @@ export function requestErrorMessage(error: unknown, name: string): string {
 		if (error.status === 429) return `Too many open requests for ${name}. Cancel one or wait for it to expire.`;
 		if (error.code === 'https_required') return `${name} needs an authenticated HTTPS route before it can host a terminal.`;
 		if (error.code === 'peer_unavailable') return `${name} didn't answer or refused the request. Check that it is online and try again.`;
-		if (error.code === 'peer_terminals_disabled') return 'Peer terminals are turned off. Enable NETWORK_PEER_TERMINALS on both workers.';
+		if (error.code === 'peer_terminals_disabled') return 'Peer terminals are turned off. Turn them on in owner policy on both workers.';
 		return error.message;
 	}
 	return `Couldn't reach ${name}. Try again.`;
