@@ -8,7 +8,7 @@ vi.mock('$lib/api/provider-balances', () => ({
  getProviderBalance: mocks.get, saveProviderBalance: mocks.save,
  removeProviderBalance: mocks.remove, startPlatformSignIn: mocks.start
 }));
-const status = { configured: true, source: 'OpenAI Platform balance (unofficial)', fetched_at: Date.now(), fresh_until: Date.now() + 600_000,
+const status = { configured: true, source: 'OpenAI Platform balance', fetched_at: Date.now(), fresh_until: Date.now() + 600_000,
  status: 'fresh', needs_reauth: false, credits: { balance_remaining: 12.34 } };
 afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
 
@@ -17,7 +17,8 @@ it('shows real remaining credit, source and fetched time; writes but never reads
  render(ProviderBalance, { providerId: 'p1', openAI: true });
  await screen.findByText('$12.34');
  expect(screen.getByText(/Last fetched:/)).toBeTruthy();
- expect(screen.getAllByText('OpenAI Platform balance (unofficial)')).toHaveLength(2);
+ expect(screen.getAllByText('OpenAI Platform balance')).toHaveLength(2);
+ expect(document.body.textContent).not.toMatch(/unofficial/i);
  const input = screen.getByLabelText('Platform session key') as HTMLInputElement;
  expect(input.type).toBe('password');
  await fireEvent.input(input, { target: { value: 'sess-test-only' } });

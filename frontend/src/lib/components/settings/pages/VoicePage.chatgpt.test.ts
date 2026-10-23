@@ -21,10 +21,12 @@ import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 
 const CODEX = 'gpt-live-1-codex';
-const LABEL = 'ChatGPT voice (unofficial, unsupported)';
+const LABEL = 'ChatGPT voice (ChatGPT subscription)';
 const UNAVAILABLE =
-	'Unofficial ChatGPT voice is not available on this system. Optional audio libraries could not be loaded.';
-const PREVIEW_NOTE = 'Unofficial, unsupported ChatGPT subscription access. Off by default; explicitly select this engine to opt in. Previews are unavailable.';
+	"ChatGPT voice isn't ready yet. Voice components are still installing; start a call to finish setup.";
+const PREVIEW_NOTE = "Uses your ChatGPT subscription login. Off until you select this engine. Voice samples aren't available for it.";
+/** No warning framing anywhere on the page for the subscription engine. */
+const SCARY = /unofficial|unsupported|may stop working|refuse access/i;
 
 type Details = Record<string, unknown>;
 let server: Record<string, unknown> & { voice_model: string; voice_voice: string; model_details: Details };
@@ -110,7 +112,7 @@ async function mountPage() {
 const engine = () => screen.getByRole('combobox', { name: 'Voice engine' }) as HTMLSelectElement;
 const rowOf = (el: HTMLElement) => el.closest('[data-setting-anchor]') as HTMLElement;
 
-describe('ChatGPT voice (unofficial, unsupported)', () => {
+describe('ChatGPT voice (ChatGPT subscription)', () => {
 	it('is offered in the picker but never the default', async () => {
 		await mountPage();
 		expect(engine().value).toBe('gpt-live-1');
@@ -131,10 +133,11 @@ describe('ChatGPT voice (unofficial, unsupported)', () => {
 		expect(screen.getByRole('option', { name: 'Cove' })).toBeTruthy();
 		expect(screen.queryByRole('option', { name: 'marin' })).toBeNull();
 		expect(screen.getByText('ChatGPT subscription login · server VAD')).toBeTruthy();
-		expect(screen.getByText('Unofficial; no API-key fallback.')).toBeTruthy();
-		expect(screen.getByText(/a connected ChatGPT subscription login is required/i)).toBeTruthy();
-		expect(screen.getByText(/the provider may still refuse access/i)).toBeTruthy();
-		expect(screen.getByText(/model, effort and permissions follow the chat composer/i)).toBeTruthy();
+		expect(screen.getByText("Doesn't fall back to an API key")).toBeTruthy();
+		// Connected and ready: no note under the engine, and nothing styled as a warning.
+		expect(document.querySelector('.chatgpt-help')).toBeNull();
+		expect(document.querySelector('.st-banner')).toBeNull();
+		expect(document.body.textContent).not.toMatch(SCARY);
 	});
 
 	it('runs calls on connected ChatGPT subscription logins only, never on API keys', async () => {
@@ -164,6 +167,9 @@ describe('ChatGPT voice (unofficial, unsupported)', () => {
 		await mountPage();
 		const connect = await screen.findAllByRole('button', { name: /Connect ChatGPT/ });
 		expect(rowOf(engine()).textContent).toContain('Needs a ChatGPT login');
+		expect(screen.getByText(/Connect your ChatGPT login in Settings → Providers to use this\./)).toBeTruthy();
+		expect(document.querySelector('.st-banner')).toBeNull();
+		expect(document.body.textContent).not.toMatch(SCARY);
 		await fireEvent.click(connect[0]);
 		expect(settingsNav.category).toBe('providers');
 		expect(screen.queryByText('OpenAI API key')).toBeNull();
@@ -176,15 +182,18 @@ describe('ChatGPT voice (unofficial, unsupported)', () => {
 		expect(engine().value).toBe(CODEX);
 		const note = screen.getAllByRole('status').find((el) => el.textContent?.includes(UNAVAILABLE));
 		expect(note).toBeTruthy();
-		expect(rowOf(engine()).textContent).toContain('Unavailable on this system');
-		expect(document.body.textContent).not.toMatch(/Traceback|Error:|ImportError|OSError/);
+		expect(note?.closest('.chatgpt-help')).toBeTruthy();
+		expect(document.querySelector('.st-banner')).toBeNull();
+		expect(rowOf(engine()).textContent).toContain('Not ready yet');
+		expect(document.body.textContent).not.toMatch(/on this system|glibc|Traceback|Error:|ImportError|OSError/);
+		expect(document.body.textContent).not.toMatch(SCARY);
 	});
 
 	it('does not show the unavailable notice while the runtime is available', async () => {
 		serve({ voice_model: CODEX });
 		await mountPage();
-		expect(document.body.textContent).not.toContain('could not be loaded');
-		expect(rowOf(engine()).textContent).not.toContain('Unavailable on this system');
+		expect(document.body.textContent).not.toContain('still installing');
+		expect(rowOf(engine()).textContent).not.toContain('Not ready yet');
 	});
 
 	it('disables the sample button with the server preview note instead of requesting one', async () => {
@@ -193,7 +202,7 @@ describe('ChatGPT voice (unofficial, unsupported)', () => {
 		try {
 			serve({ voice_model: CODEX });
 			await mountPage();
-			const button = screen.getByRole('button', { name: 'Samples are not available for ChatGPT voice (unofficial, unsupported)' }) as HTMLButtonElement;
+			const button = screen.getByRole('button', { name: 'Samples are not available for ChatGPT voice (ChatGPT subscription)' }) as HTMLButtonElement;
 			expect(button.disabled).toBe(true);
 			expect(button.title).toBe(PREVIEW_NOTE);
 			expect(rowOf(button).textContent).toContain('No samples for this engine');

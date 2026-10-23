@@ -406,7 +406,7 @@ does not authorize using or publishing its billing keys; authenticated sync does
   omitted zero fields are treated as zero; an omitted spending limit is unknown.
   Cycle usage adds the absolute prepaid usage because its sign is undocumented;
   the sign and cycle totals still need comparison with a live account.
-- **OpenAI Platform (unofficial):** choose **Sign in to OpenAI Platform** and
+- **OpenAI Platform:** choose **Sign in to OpenAI Platform** and
   sign in yourself in the app-owned, isolated browser screen. The supervised
   browser must be enabled and owned by this worker's native or Docker supervisor;
   startup waits for Chrome and refuses an external CDP listener. It keeps its

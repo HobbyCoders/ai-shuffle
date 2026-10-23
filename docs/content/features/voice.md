@@ -10,7 +10,7 @@ Voice mode adds a spoken conversation to a chat. You talk, the assistant answers
 
 ## Set up
 
-1. **Add an API key** under **Settings → Providers**: OpenAI for GPT Live, or xAI for Grok Voice. These supported engines require API keys. An experimental API-only option, `voice_model: "gpt-live-1-codex"`, can use an already connected ChatGPT login. This path is **unofficial and unsupported**, off by default, and separate from the standard engine choices. It uses Cove, has no voice preview or automatic provider retry, and may be refused by the provider. See the [Voice API](/docs/api-reference/voice). SuperGrok subscription calls remain unavailable.
+1. **Add an API key** under **Settings → Providers**: OpenAI for GPT Live, or xAI for Grok Voice. To use a ChatGPT subscription instead, connect your ChatGPT login under **Settings → Providers** and choose **ChatGPT voice (ChatGPT subscription)** as the voice engine in **Settings → Voice** (`voice_model: "gpt-live-1-codex"` in the API). It uses your ChatGPT subscription login; it doesn't fall back to an API key. It stays off until you select it, uses the Cove voice, and has no voice samples or automatic provider retry. See the [Voice API](/docs/api-reference/voice). SuperGrok subscription calls remain unavailable.
 2. **Turn on Voice calls** under **Settings → Voice**. Choose **GPT Live 1** or **Grok Voice**, then a voice (the play button plays a sample), set **Max call length**, and change the **Call prompts** if you like. Grok defaults to **Eve**, uses server voice activity detection, and delegates work to the same chat agent. Calls keep the engine, provider, voice and prompts they started with.
 3. In the voice chat's composer, **choose the model** that does the work, with its effort and permission mode.
 

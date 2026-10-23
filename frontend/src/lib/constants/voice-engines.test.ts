@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { usesAudioStream, usesDelegation } from './voice-engines';
 
-describe('unofficial Codex voice capability', () => {
+describe('ChatGPT subscription (Codex) voice capability', () => {
  it('uses the server PCM leg and same-chat delegation', () => {
   expect(usesAudioStream('gpt-live-1-codex')).toBe(true);
   expect(usesDelegation('gpt-live-1-codex')).toBe(true);

@@ -26,7 +26,7 @@ class CodexVoiceStream(VoiceStream):
     async def start_live(self, history):
         if self.closed:
             self.api_key = ""
-            raise ValueError("Unofficial ChatGPT voice connection is closed.")
+            raise ValueError("ChatGPT voice connection is closed.")
         from app.core.voice_dependencies import availability
         available, reason = availability()
         if not available:
@@ -43,19 +43,19 @@ class CodexVoiceStream(VoiceStream):
         token, account = await _load_codex_access_token(self.config["provider_id"])
         try:
             if self.closed:
-                raise ValueError("Unofficial ChatGPT voice connection is closed.")
+                raise ValueError("ChatGPT voice connection is closed.")
             async with asyncio.timeout(20):
                 await self.upstream.open(get_http_client(), token, account, session)
                 pending = []
                 while True:
                     event = json.loads(await self.upstream.recv())
                     if event.get("type") == "error":
-                        raise ValueError("Unofficial ChatGPT voice access was refused.")
+                        raise ValueError("ChatGPT voice access was refused.")
                     if event.get("type") == "session.started":
                         break
                     pending.append(event)
                     if len(pending) > 128:
-                        raise ValueError("Unofficial ChatGPT voice did not start.")
+                        raise ValueError("ChatGPT voice did not start.")
                 for event in pending:
                     self.upstream.enqueue(event)
         except asyncio.CancelledError:
@@ -63,7 +63,7 @@ class CodexVoiceStream(VoiceStream):
         except Exception:
             # HTTP/network exceptions may carry request headers. Never pass them
             # into the shared lifecycle's logging/browser error channel.
-            raise ValueError("Unofficial ChatGPT voice could not start; access may be unavailable.") from None
+            raise ValueError("ChatGPT voice could not start; access may be unavailable.") from None
         finally:
             self.api_key = ""
         if self.options["opening"] and not history and self.config.get("greet", True):

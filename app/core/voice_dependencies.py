@@ -17,24 +17,24 @@ import time
 _INSTALL_LOCK = threading.Lock()
 _INSTALL_RETRY_AT = None
 _INSTALL_COOLDOWN_SECONDS = 10 * 60
-UNAVAILABLE = "Unofficial ChatGPT voice is not available on this system."
-_INSTALL_RETRY_REASON = UNAVAILABLE + " Install will be retried on Start after a 10-minute cool-down."
+UNAVAILABLE = "ChatGPT voice isn't ready yet."
+_INSTALL_RETRY_REASON = UNAVAILABLE + " Voice components are still installing; try again in about 10 minutes."
 
 
 def platform_reason():
     if platform.system() == "Darwin":
         try:
             if int(platform.mac_ver()[0].split(".")[0]) < 14:
-                return UNAVAILABLE + " Requires macOS 14 or later."
+                return "ChatGPT voice needs macOS 14 or later."
         except (ValueError, IndexError):
-            return UNAVAILABLE + " Could not determine the macOS version."
+            return "ChatGPT voice needs macOS 14 or later; the macOS version could not be read."
     if platform.system() == "Linux":
         libc, version = platform.libc_ver()
         try:
             if libc != "glibc" or tuple(map(int, version.split(".")[:2])) < (2, 28):
-                return UNAVAILABLE + " Requires glibc 2.28 or later."
+                return "ChatGPT voice needs Linux with glibc 2.28 or later."
         except ValueError:
-            return UNAVAILABLE + " Could not determine the glibc version."
+            return "ChatGPT voice needs Linux with glibc 2.28 or later; the glibc version could not be read."
     return None
 
 
@@ -46,7 +46,7 @@ def load_native():
         return importlib.import_module("aiortc"), importlib.import_module("av")
     except (ImportError, OSError):
         # Native loader messages can contain private filesystem paths.
-        raise ValueError(UNAVAILABLE + " Optional audio libraries could not be loaded.") from None
+        raise ValueError(UNAVAILABLE + " Voice components are still installing; start a call to finish setup.") from None
 
 
 def availability():
@@ -133,7 +133,7 @@ def install(root):
     except (OSError, subprocess.SubprocessError):
         installed = False
     if not installed:
-        print(UNAVAILABLE + " Optional audio libraries were not installed; the app can still run.")
+        print(UNAVAILABLE + " Optional voice components were not installed; the app can still run.")
     return installed
 
 

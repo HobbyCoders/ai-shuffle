@@ -1058,9 +1058,9 @@
 		{#if credits}
 			<div class="row-reset usage-credits">{credits}</div>
 		{/if}
-		<!-- Only the unofficial OpenAI Platform reading names its source: an
-		     unofficial integration stays labelled as one. The xAI row shows its
-		     figures without the "xAI Management API" source line (owner call). -->
+		<!-- Only the OpenAI Platform reading names its source, so it is not
+		     mistaken for ChatGPT credits. The xAI row shows its figures without
+		     the "xAI Management API" source line (owner call). -->
 		{#if pb.sourceInfo?.id === 'openai_platform_balance'}<div class="row-reset usage-credits">{pb.source}</div>{/if}
 		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
 	{/if}

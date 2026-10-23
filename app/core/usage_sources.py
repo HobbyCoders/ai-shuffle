@@ -199,7 +199,7 @@ CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _SOURCES: tuple[UsageSource, ...] = (
     UsageSource(
         id="openai_platform_balance", snapshot_type="openai_balance",
-        label="OpenAI Platform balance (unofficial)",
+        label="OpenAI Platform balance",
         credential="OpenAI Platform dashboard sign-in (session key encrypted across network workers)",
         scope="account", scope_label="Platform account API credit, not ChatGPT credits",
         measure=MONETARY_CREDIT, collection=POLLED, support=UNDOCUMENTED,

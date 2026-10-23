@@ -71,7 +71,7 @@ export const entries: SettingEntry[] = [
 		section: 'Voice calls',
 		label: 'Voice engine',
 		hint: 'Applies to new calls',
-		keywords: ['grok', 'xai', 'gpt live', 'voice model', 'chatgpt', 'codex', 'subscription', 'unofficial'],
+		keywords: ['grok', 'xai', 'gpt live', 'voice model', 'chatgpt', 'codex', 'subscription'],
 		default: 'gpt-live-1'
 	},
 	{

@@ -1068,12 +1068,12 @@ async def update_voice_settings(
         provider = request.voice_provider_id if "voice_provider_id" in supplied else current["voice_provider_id"]
         provider = (provider or "").strip() or None
         if model not in (DEFAULT_VOICE_MODEL, GROK_MODEL, CODEX_MODEL):
-            raise HTTPException(400, "Choose GPT Live 1, Grok Voice, or unofficial ChatGPT voice.")
+            raise HTTPException(400, "Choose GPT Live 1, Grok Voice, or ChatGPT voice.")
         if "voice_provider_id" in supplied and provider:
             from app.api.voice import _eligible_provider_row, provider_matches_model
             row = _eligible_provider_row(provider)
             if not row or not provider_matches_model(row, model):
-                raise HTTPException(400, "Choose a provider for the selected voice engine; unofficial ChatGPT voice requires a connected ChatGPT subscription.")
+                raise HTTPException(400, "Choose a provider for the selected voice engine; ChatGPT voice requires a connected ChatGPT subscription login.")
         voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]
         if voice not in voices_for(model):
             if "voice_voice" in supplied:
