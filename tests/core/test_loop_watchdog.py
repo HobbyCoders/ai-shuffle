@@ -95,7 +95,7 @@ async def test_blocked_loop_dumps_sleeping_frame(caplog, diagnostic_logs):
     assert len(ended) == 1
     recovery = ended[0].getMessage()
     assert "threads=" in recovery and "thread_frames=[" in recovery
-    assert "test-idle-thread=" in recovery
+    assert f"thread_frames=[{threading.current_thread().name}=" in recovery
     assert "asyncio_tasks=" in recovery
     assert wd._recovery_task_count > 0
 
@@ -442,13 +442,14 @@ def test_recovery_thread_context_is_bounded(monkeypatch):
     threads = [SimpleNamespace(ident=i, name=f"thread-{i}-" + "x" * 1000) for i in range(30)]
     monkeypatch.setattr(loop_watchdog.threading, "enumerate", lambda: threads)
     frame = sys._getframe()
-    monkeypatch.setattr(loop_watchdog.sys, "_current_frames", lambda: {0: frame})
+    monkeypatch.setattr(loop_watchdog.sys, "_current_frames", lambda: {29: frame})
     loop = asyncio.new_event_loop()
     try:
         wd = LoopStallWatchdog(loop)
-        wd._loop_thread_id = 0
+        wd._loop_thread_id = 29  # not among the first five names alphabetically
         context = wd._recovery_context()
         assert "threads=30" in context
+        assert "thread_frames=[thread-29-" in context
         assert context.count("thread-") == loop_watchdog.RECOVERY_THREAD_LIMIT
         assert "test_recovery_thread_context_is_bounded" in context
         assert len(context) < 1500
