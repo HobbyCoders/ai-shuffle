@@ -414,9 +414,9 @@ def test_voice_outside_the_models_list_is_400(c, voice):
 
 
 @pytest.mark.parametrize("patch,status,detail", [
-    ({"voice_model": "gpt-realtime"}, 400, "Choose GPT Live 1, Grok Voice, or unofficial ChatGPT voice."),
+    ({"voice_model": "gpt-realtime"}, 400, "Choose GPT Live 1, Grok Voice, or ChatGPT voice."),
     ({"voice_provider_id": "prov-1"}, 400,
-     "Choose a provider for the selected voice engine; unofficial ChatGPT voice requires a connected ChatGPT subscription."),
+     "Choose a provider for the selected voice engine; ChatGPT voice requires a connected ChatGPT subscription login."),
     ({"voice_max_call_minutes": 0}, 400, "voice_max_call_minutes must be a positive integer"),
     ({"voice_input_model": "fal-ai/unknown"}, 400, "Choose a supported voice transcription model."),
     ({"voice_options": {"instructions": "x"}, "voice_options_model": "gpt-realtime"}, 409,

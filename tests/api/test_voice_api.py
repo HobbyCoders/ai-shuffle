@@ -621,13 +621,13 @@ class TestCreateVoiceSession:
         load = AsyncMock(return_value=("fake-token", None))
         monkeypatch.setattr(fluid_credentials, "_load_codex_access_token", load)
         monkeypatch.setattr("app.core.voice_dependencies.install", Mock(return_value=False))
-        reason = "Unofficial ChatGPT voice is not available on this system."
+        reason = "ChatGPT voice isn't ready yet."
         monkeypatch.setattr("app.core.voice_dependencies.availability", lambda: (False, reason))
         create = Mock(side_effect=AssertionError("must refuse before creating a session"))
         monkeypatch.setattr(db, "create_session", create)
         response = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "profile_id":"default"})
         assert response.status_code == 400
-        assert response.json()["detail"] == reason + " Install will be retried on Start after a 10-minute cool-down."
+        assert response.json()["detail"] == reason + " Voice components are still installing; try again in about 10 minutes."
         create.assert_not_called()
         load.assert_not_awaited()
 
@@ -670,8 +670,8 @@ class TestCreateVoiceSession:
         monkeypatch.setattr(voice_stream, "take_over", takeover)
         await voice.voice_audio_socket(websocket, "unavailable", token=None, resume=resume)
         websocket.close.assert_awaited_once_with(code=4400, reason=(
-            "Unofficial ChatGPT voice is not available on this system. "
-            "Install will be retried on Start after a 10-minute cool-down."
+            "ChatGPT voice isn't ready yet. "
+            "Voice components are still installing; try again in about 10 minutes."
         ))
         websocket.accept.assert_not_awaited()
         key.assert_not_awaited()

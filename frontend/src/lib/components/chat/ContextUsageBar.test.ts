@@ -721,7 +721,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 	});
 
 	it.each(['openai', 'xai'] as const)('labels %s real balance sources and hides an expired amount', async (type) => {
-		const source = type === 'openai' ? 'OpenAI Platform balance (unofficial)' : 'xAI Management API';
+		const source = type === 'openai' ? 'OpenAI Platform balance' : 'xAI Management API';
 		const id = type === 'openai' ? 'openai_platform_balance' : 'xai_management';
 		const source_info = { id, label: source, scope: 'account', scope_label: 'API prepaid credit',
 			measure: 'monetary_credit' as const, measure_label: 'Provider-reported credit balance', collection: 'polled' as const,
@@ -733,7 +733,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34 left');
-		// The unofficial OpenAI reading stays labelled; the xAI row drops its
+		// The OpenAI Platform reading names its source; the xAI row drops its
 		// "xAI Management API" source line and keeps the figures.
 		if (type === 'openai') expect(container.textContent).toContain(source);
 		else expect(container.textContent).not.toContain(source);

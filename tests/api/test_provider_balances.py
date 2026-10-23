@@ -76,7 +76,7 @@ def test_real_balance_beats_manual_and_admin(authenticated_client, provider, mon
     entry = next(e for e in asyncio.run(_load_provider_usage()) if e.provider_id == provider)
     assert entry.credits["balance_remaining"] == 12.34
     assert "manual_balance" not in entry.credits
-    assert entry.source == "OpenAI Platform balance (unofficial)"
+    assert entry.source == "OpenAI Platform balance"
     assert entry.fetched_at
     assert "do-not-copy" not in db.get_model_provider(provider, include_token=True)["balance_snapshot"]
 

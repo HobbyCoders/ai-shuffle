@@ -97,7 +97,7 @@
  }
 </script>
 
-<RowGroup title={openAI ? 'OpenAI Platform balance (unofficial)' : 'xAI Management API balance'}>
+<RowGroup title={openAI ? 'OpenAI Platform balance' : 'xAI Management API balance'}>
  <SettingRow label="Remaining" hint={status?.source ?? 'Provider-reported prepaid credit'}>
   <ValueText value={reading ? `$${reading.balance_remaining.toFixed(2)}` : status?.configured ? 'Balance unavailable' : 'Not reported yet'} />
  </SettingRow>
@@ -107,7 +107,7 @@
  {#if reading?.spend_month !== undefined}<SettingRow label="Cycle usage"><ValueText value={`$${reading.spend_month.toFixed(2)}`} /></SettingRow>{/if}
  {#if reading?.spending_limit !== undefined}<SettingRow label="Postpaid spending limit"><ValueText value={`$${reading.spending_limit.toFixed(2)}`} /></SettingRow>{/if}
  {#if openAI}
-  <p class="balance-note">Unofficial integration. Sign in to your own OpenAI Platform account in the isolated app browser. The dashboard session key is encrypted and synced across your network workers; it is separate from ChatGPT/Codex and may expire or stop working.</p>
+  <p class="balance-note">Sign in to your own OpenAI Platform account in the isolated app browser. The dashboard session key is encrypted and synced across your network workers; it is separate from ChatGPT/Codex. If it expires, sign in again.</p>
   <button bind:this={signInButton} type="button" class="st-btn primary sm" disabled={busy || signingIn || access.readOnly} onclick={signIn}>Sign in to OpenAI Platform</button>
  {:else}<p class="balance-note">Create a management key in console.x.ai → Settings → Management Keys with billing read access. The normal API key resolves its team; the management key reads prepaid balance and invoice preview.</p>{/if}
  <SettingRow label={openAI ? 'Paste session key (fallback)' : 'Management key'} hint="Write-only · synced encrypted">

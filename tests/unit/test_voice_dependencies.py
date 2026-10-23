@@ -20,9 +20,11 @@ def test_native_import_failure_is_sanitized(monkeypatch, failure):
     monkeypatch.setattr(importlib, "import_module", missing)
     available, reason = deps.availability()
     assert available is False
-    assert "not available on this system" in reason
+    assert "isn't ready yet" in reason
+    assert "still installing" in reason
+    assert len(reason.encode("utf-8")) <= 123  # Fits a WebSocket close frame.
     assert "private-path" not in reason
-    with pytest.raises(ValueError, match="not available on this system"):
+    with pytest.raises(ValueError, match="isn't ready yet"):
         deps.load_native()
 
 
@@ -60,7 +62,7 @@ def test_optional_install_failure_does_not_fail_app_install(monkeypatch, tmp_pat
     run = Mock(return_value=Mock(returncode=1))
     monkeypatch.setattr(deps.subprocess, "run", run)
     assert deps.install(tmp_path) is False
-    assert "not available on this system" in capsys.readouterr().out
+    assert "isn't ready yet" in capsys.readouterr().out
     assert "--require-hashes" in run.call_args.args[0]
     assert "--only-binary=:all:" in run.call_args.args[0]
 
@@ -106,8 +108,7 @@ async def test_failed_optional_install_waits_ten_minutes_before_retry(monkeypatc
     monkeypatch.setattr(deps.subprocess, "run", pip)
     available, reason = await deps.ensure_available(clock=clock)
     assert available is False
-    assert "will be retried" in reason
-    assert "10-minute" in reason
+    assert "try again in about 10 minutes" in reason
     assert len(reason.encode("utf-8")) <= 123  # Keep the whole reason in a WebSocket close frame.
     assert "private" not in reason
     assert state["attempts"] == 1

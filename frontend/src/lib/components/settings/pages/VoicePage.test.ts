@@ -113,7 +113,7 @@ it('switches engines, shows xAI funding and server-provided voices without retai
  await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe('eve'));
  expect(screen.getByRole('option', { name: 'Ara' })).toBeTruthy();
  expect(screen.getByText('xAI API key · server VAD')).toBeTruthy();
- expect(screen.getByText('Subscription voice access is not verified; an API key is required.')).toBeTruthy();
+ expect(screen.getByText('Uses an API key')).toBeTruthy();
  expect(screen.getByRole('button', { name: /Calls run on xAI API key/ })).toBeTruthy();
 });
 

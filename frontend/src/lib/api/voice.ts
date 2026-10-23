@@ -34,7 +34,7 @@ import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-own
 const voiceModelLabels: Record<string, string> = {
  'gpt-live-1': 'GPT Live 1',
  'grok-voice-latest': 'Grok Voice',
- 'gpt-live-1-codex': 'ChatGPT voice (unofficial, unsupported)',
+ 'gpt-live-1-codex': 'ChatGPT voice (ChatGPT subscription)',
  'gpt-realtime-2.1': 'GPT Realtime 2.1',
  'gpt-realtime-2.1-mini': 'GPT Realtime 2.1 Mini',
  'gpt-realtime-2': 'GPT Realtime 2',

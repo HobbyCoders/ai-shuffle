@@ -32,7 +32,7 @@ def codex_session(config: dict, options: dict, history: list[dict]) -> dict:
 def incoming_event(event: dict) -> dict | None:
     kind = event.get("type")
     if kind in ("error", "session.error"):
-        return {"type": "error", "error": {"message": "Unofficial ChatGPT voice rejected the session or event."}}
+        return {"type": "error", "error": {"message": "ChatGPT voice rejected the session or event."}}
     if kind in ("session.started", "session.updated", "session.closed"):
         return {"type": kind}
     if kind in ("input_transcript.added", "output_transcript.added"):
@@ -107,7 +107,7 @@ class CodexPeer:
             self.failed = True
             while not self.events.empty():
                 self.events.get_nowait()
-            event = {"type": "error", "error": {"message": "Unofficial ChatGPT voice event backlog exceeded."}}
+            event = {"type": "error", "error": {"message": "ChatGPT voice event backlog exceeded."}}
         self.events.put_nowait(json.dumps(event))
 
     async def receive_audio(self, track):
@@ -122,11 +122,11 @@ class CodexPeer:
         except MediaStreamError:
             return
         except Exception:
-            self.enqueue({"type": "error", "error": {"message": "Unofficial ChatGPT voice audio transport failed."}})
+            self.enqueue({"type": "error", "error": {"message": "ChatGPT voice audio transport failed."}})
 
     async def open(self, client, token: str, account_id: str | None, session: dict):
         if self.closed:
-            raise ValueError("Unofficial ChatGPT voice connection is closed.")
+            raise ValueError("ChatGPT voice connection is closed.")
         self.pc, self.feed_audio, answer = self.make_peer()
         self.channel = self.pc.createDataChannel("oai-events")
 
@@ -136,7 +136,7 @@ class CodexPeer:
                 payload = json.loads(raw)
                 event = incoming_event(payload) if isinstance(payload, dict) else None
             except (ValueError, TypeError, AttributeError):
-                event = {"type": "error", "error": {"message": "Invalid unofficial ChatGPT voice event."}}
+                event = {"type": "error", "error": {"message": "Invalid ChatGPT voice event."}}
             if event:
                 self.enqueue(event)
 
@@ -150,12 +150,12 @@ class CodexPeer:
         @self.pc.on("connectionstatechange")
         async def connection_changed():
             if self.pc.connectionState in ("failed", "closed", "disconnected") and not self.closed:
-                self.enqueue({"type": "error", "error": {"message": "Unofficial ChatGPT voice connection ended."}})
+                self.enqueue({"type": "error", "error": {"message": "ChatGPT voice connection ended."}})
 
         try:
             await self.pc.setLocalDescription(await self.pc.createOffer())
             if self.closed:
-                raise ValueError("Unofficial ChatGPT voice connection is closed.")
+                raise ValueError("ChatGPT voice connection is closed.")
             headers = {"Authorization": "Bearer " + token, "originator": "codex_cli_rs", "OpenAI-Alpha": "quicksilver=v2"}
             if account_id:
                 headers["ChatGPT-Account-Id"] = account_id
@@ -163,12 +163,12 @@ class CodexPeer:
                                          json={"sdp": self.pc.localDescription.sdp, "session": session},
                                          follow_redirects=False, timeout=20)
             if self.closed:
-                raise ValueError("Unofficial ChatGPT voice connection is closed.")
+                raise ValueError("ChatGPT voice connection is closed.")
             if response.status_code != 201:
-                raise ValueError(f"Unofficial ChatGPT voice refused call creation (HTTP {response.status_code}).")
+                raise ValueError(f"ChatGPT voice refused call creation (HTTP {response.status_code}).")
             await self.pc.setRemoteDescription(answer(response.text))
             if self.closed:
-                raise ValueError("Unofficial ChatGPT voice connection is closed.")
+                raise ValueError("ChatGPT voice connection is closed.")
         except BaseException:
             await self.close()
             raise
@@ -180,7 +180,7 @@ class CodexPeer:
         else:
             from app.core.voice_progress import split_bytes
             if self.channel.readyState != "open":
-                raise ValueError("Unofficial ChatGPT voice data channel is not open.")
+                raise ValueError("ChatGPT voice data channel is not open.")
             # Codex caps each context append at 500 UTF-8 bytes.
             for chunk in split_bytes(event.get("content", ""), 500):
                 wire = outgoing_event({**event, "content": chunk})

@@ -1,7 +1,7 @@
 """Voice engines and their distinct transport/delegation contracts."""
 
 LIVE_MODEL = "gpt-live-1"
-CODEX_MODEL = "gpt-live-1-codex"  # Unofficial subscription path; explicit opt-in only.
+CODEX_MODEL = "gpt-live-1-codex"  # ChatGPT subscription path; explicit opt-in only.
 GROK_MODEL = "grok-voice-latest"
 GROK_URL = "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
 # Built-ins shared by xAI speech-to-speech and TTS, checked 2026-10-18.
@@ -90,7 +90,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
         "model": model,
         "available": available,
         "unavailable_reason": unavailable_reason,
-        "label": "ChatGPT voice (unofficial, unsupported)" if model == CODEX_MODEL else model,
+        "label": "ChatGPT voice (ChatGPT subscription)" if model == CODEX_MODEL else model,
         "voices": [{"id": voice, "label": voice if model == PERSONAPLEX_MODEL else voice.capitalize()} for voice in voices_for(model)],
         "transport": transport_for(model),
         "runtime_settings": runtime,
@@ -98,7 +98,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
         "prompts": prompts,
         "prompt_note": note,
         # Preview generation uses the same Live transport and voice as new calls.
-        "preview_note": ("Unofficial, unsupported ChatGPT subscription access. Off by default; explicitly select this engine to opt in. Previews are unavailable."
+        "preview_note": ("Uses your ChatGPT subscription login. Off until you select this engine. Voice samples aren't available for it."
                          + (" " + unavailable_reason if unavailable_reason else "")
                          if model == CODEX_MODEL else "Previews use the selected engine and voice with your API key."),
     }

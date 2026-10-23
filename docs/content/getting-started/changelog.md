@@ -15,7 +15,7 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 ### Usage and credit
 
 - xAI API keys show your remaining prepaid credit, this month's usage and your spending limit. Add an xAI management key (console.x.ai → Settings → Management Keys) on the provider's Usage tab.
-- OpenAI API keys can show your real remaining credit. Sign in to OpenAI Platform from the provider's Usage tab, in a private browser window only you control, or paste a session key. OpenAI has no official balance API, so this is unofficial and may stop working if OpenAI changes it. A typed-in balance is now only a fallback.
+- OpenAI API keys can show your real remaining credit. Sign in to OpenAI Platform from the provider's Usage tab, in a private browser window only you control, or paste a session key. OpenAI has no public balance API, so this reads the same figure the Platform dashboard shows. A typed-in balance is now only a fallback.
 - When access expires or is refused, the amount is hidden and you are asked to sign in again or replace the key, instead of seeing old numbers.
 - Usage panel numbers no longer flip like a clock when they change.
 
