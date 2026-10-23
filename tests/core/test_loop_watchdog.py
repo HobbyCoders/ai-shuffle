@@ -378,6 +378,7 @@ def test_boot_reports_stale_heartbeat(tmp_path, caplog, clean):
                 LoopStallWatchdog(loop)._boot_heartbeat()
         if clean:
             LoopStallWatchdog(loop)._boot_heartbeat()
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
     assert "previous run stopped ticking at" in caplog.text
@@ -392,6 +393,7 @@ def test_clean_shutdown_downtime_is_not_a_stall(tmp_path, caplog):
     loop = asyncio.new_event_loop()
     try:
         LoopStallWatchdog(loop)._boot_heartbeat()
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
     assert "previous run stopped ticking" not in caplog.text
@@ -423,12 +425,74 @@ def test_heartbeat_rate_limit_and_atomic_failure(tmp_path, monkeypatch):
         loop.close()
 
 
+@pytest.mark.asyncio
+async def test_heartbeat_failure_cannot_block_durable_stall_dump(
+    tmp_path, monkeypatch, diagnostic_logs, caplog,
+):
+    from app.core import loop_watchdog
+
+    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.01)
+    _, freeze_path = diagnostic_logs
+    handler_path = tmp_path / "locked-handler.log"
+    handler = logging.FileHandler(handler_path, encoding="utf-8")
+    log = logging.getLogger("heartbeat-lock-regression")
+    caplog.set_level(logging.WARNING, logger=log.name)
+    monkeypatch.setattr(log, "propagate", False)
+    log.addHandler(handler)
+    inject_failure = threading.Event()
+    write_failed = threading.Event()
+    replace = loop_watchdog.os.replace
+
+    def fail_replace(source, target):
+        if inject_failure.is_set():
+            write_failed.set()
+            raise OSError("heartbeat disk unavailable")
+        replace(source, target)
+
+    monkeypatch.setattr(loop_watchdog.os, "replace", fail_replace)
+    wd = LoopStallWatchdog(
+        asyncio.get_running_loop(), threshold_s=0.08, ping_interval_s=0.01, log=log,
+    )
+
+    def stall_while_holding_logging_lock():
+        handler.acquire()  # Held by the loop, not the watchdog's OS thread.
+        try:
+            inject_failure.set()
+            wd._pong()  # A new successful tick must attempt persistence.
+            assert write_failed.wait(2), "heartbeat failure was not exercised"
+            deadline = time.monotonic() + 2
+            while "Event loop stalled for" not in freeze_path.read_text() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert "Event loop stalled for" in freeze_path.read_text()
+            assert wd.stall_count == 1
+            assert "Could not persist loop heartbeat" not in handler_path.read_text()
+        finally:
+            handler.release()
+
+    wd.start()
+    try:
+        # Let startup and a genuine loop ping/pong complete before the stall.
+        deadline = time.monotonic() + 5
+        while wd._heartbeat_written_tick is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert wd._heartbeat_written_tick is not None
+        stall_while_holding_logging_lock()
+        await asyncio.sleep(0.1)  # Deferred warning now runs on the healthy loop.
+    finally:
+        wd.stop()
+        log.removeHandler(handler)
+        handler.close()
+    assert handler_path.read_text().count("Could not persist loop heartbeat") == 1
+
+
 @pytest.mark.parametrize("record", ["not json", "null", '{"last_tick": "nan"}', '[]'])
 def test_bad_previous_heartbeat_is_nonfatal(tmp_path, caplog, record):
     (tmp_path / "loop-heartbeat.json").write_text(record)
     loop = asyncio.new_event_loop()
     try:
         LoopStallWatchdog(loop)._boot_heartbeat()
+        assert "Could not read previous loop heartbeat" not in caplog.text
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
     assert "Could not read previous loop heartbeat" in caplog.text
@@ -497,6 +561,7 @@ def test_killed_stalled_process_leaves_a_boot_readable_heartbeat(tmp_path, monke
     loop = asyncio.new_event_loop()
     try:
         LoopStallWatchdog(loop, threshold_s=0.05)._boot_heartbeat()
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
     assert "previous run stopped ticking at" in caplog.text

@@ -17,6 +17,7 @@ so a loop holding a logging handler lock cannot prevent the durable dump.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -158,11 +159,23 @@ class LoopStallWatchdog:
         try:
             while not self._stop.wait(self.ping_interval_s):
                 now = time.monotonic()
-                self._write_heartbeat(now)
                 self._check(now)
+                self._write_heartbeat(now)
                 self._send_ping(now)
         finally:
             self._write_heartbeat(time.monotonic(), stopped_at=time.time())
+
+    def _heartbeat_warning(self, message: str, *args: object, exc_info: bool = False) -> None:
+        # Never acquire a handler lock from heartbeat I/O: the frozen loop
+        # may be holding it. Queued warnings run only when the loop runs again.
+        warning = functools.partial(
+            self._log.warning, message, *args,
+            exc_info=sys.exc_info() if exc_info else None,
+        )
+        try:
+            self._loop.call_soon_threadsafe(warning)
+        except RuntimeError:
+            pass  # The loop has closed; do not log from the watchdog at shutdown.
 
     def _boot_heartbeat(self) -> None:
         """All heartbeat filesystem work, including boot inspection, is off-loop."""
@@ -183,14 +196,14 @@ class LoopStallWatchdog:
             if not math.isfinite(tick) or not math.isfinite(end):
                 raise ValueError("non-finite heartbeat")
             if end - tick > self.threshold_s + HEARTBEAT_INTERVAL_S:
-                self._log.warning(
+                self._heartbeat_warning(
                     "previous run stopped ticking at %s (%s)",
                     datetime.fromtimestamp(tick, UTC).isoformat(),
                     "before shutdown" if stopped_at is not None
                     else "unclean exit; process end time unknown, age at boot includes downtime",
                 )
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
-            self._log.warning("Could not read previous loop heartbeat", exc_info=True)
+            self._heartbeat_warning("Could not read previous loop heartbeat", exc_info=True)
 
     def _write_heartbeat(self, now: float, *, stopped_at: Optional[float] = None) -> None:
         path = self._heartbeat_path
@@ -215,7 +228,7 @@ class LoopStallWatchdog:
         except OSError:
             if not self._heartbeat_failed:
                 self._heartbeat_failed = True
-                self._log.warning("Could not persist loop heartbeat", exc_info=True)
+                self._heartbeat_warning("Could not persist loop heartbeat", exc_info=True)
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
