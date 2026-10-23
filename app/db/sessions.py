@@ -6,7 +6,7 @@ import json
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Any, Dict, Iterable, List, Optional, TypedDict
 
 from app.core.session_modes import normalize_session_mode, storage_session_mode
 from app.db.base import get_db, get_cursor, row_to_dict, rows_to_list, logger
@@ -1627,20 +1627,30 @@ def list_sessions_listing_pr(pr_number: int, pr_url: Optional[str] = None) -> li
     ]
 
 
-def list_sessions_for_cleanup(project_id: str, project_v2_id: Optional[str] = None) -> list:
+def list_sessions_for_cleanup(project_id: str, project_v2_id: Optional[str] = None,
+                              session_ids: Optional[Iterable[str]] = None) -> list:
     """All potential checkout users, including hidden workers and older sessions.
 
     Unlike the sidebar list, this safety query has no page or install filter.
     V2 sessions may have no legacy project_id, or a different legacy alias.
+    ``session_ids`` narrows it to those sessions (an activity check that
+    already knows which sessions can be active); empty reads nothing.
     """
     _ph = ph()
+    sql = f"SELECT * FROM sessions WHERE (project_id = {_ph} OR project_v2_id = {_ph})"
+    params: list = [project_id, project_v2_id or project_id]
+    if session_ids is not None:
+        ids = sorted(set(session_ids))
+        if not ids:
+            return []
+        sql += f" AND id IN ({', '.join([_ph] * len(ids))})"
+        params.extend(ids)
     with get_db() as conn:
         cursor = get_cursor(conn)
-        cursor.execute(
-            f"SELECT * FROM sessions WHERE project_id = {_ph} OR project_v2_id = {_ph}",
-            (project_id, project_v2_id or project_id),
-        )
-        return [row_to_dict(r) for r in cursor.fetchall()]
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
+    # Decode after the connection is back in the pool.
+    return [row_to_dict(r) for r in rows]
 
 
 def list_sessions_for_branch(project_id: str, branch: str) -> list:

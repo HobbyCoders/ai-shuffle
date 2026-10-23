@@ -1056,6 +1056,76 @@ def test_stop_then_restart_reaps_real_adapterless_registry_ghost(setup, monkeypa
     assert updates._desktop_request["action"] == "install"
 
 
+def test_stop_then_restart_force_stops_a_turn_that_never_unwinds(setup, monkeypatch, mock_db):
+    """The owner's report: a stopped Task child's execution never unwound, its
+    Stop was a no-op, and every restart was refused until the container was
+    restarted. Now the leftover is forced and the update goes ahead, saying so."""
+    from app.core import session_runtime
+    title = "442 score 6 first route initial"
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", real_active_session_ids)
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: [{"session_id": "child", "title": title, "tasks": []}])
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock())  # the swallowed Stop
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(fleet, "FORCE_STOP_GRACE_SECONDS", 0.05)
+
+    async def scenario():
+        release, pumps = asyncio.Event(), []
+
+        async def stuck():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+        task = asyncio.ensure_future(stuck())
+        session_runtime._executions[task] = "child"
+        session_runtime._execution_runtimes[task] = SimpleNamespace(
+            session_id="child", turn_id="turn-unknown", _cancel_pump=lambda: pumps.append(True))
+        try:
+            refused = (await fleet.dispatch("install"))["results"][-1]
+            assert refused["accepted"] is False and title in refused["reason"]
+            queued = (await fleet.dispatch("install", "stop"))["results"][-1]
+            assert queued["reason"] == "Stopping running work, then restarting"
+            await asyncio.wait_for(asyncio.gather(*fleet._stop_tasks), 5)
+            assert pumps and real_active_session_ids() == set()
+            assert updates._desktop_request["action"] == "install"
+            assert fleet._stop_result["accepted"] is True
+            assert fleet._stop_result["forced"] == [title]
+            assert f"force-stopped work that did not stop within 0.05s: {title}" in fleet._stop_result["reason"]
+        finally:
+            release.set()
+            await task
+            for registry in (session_runtime._executions, session_runtime._execution_runtimes,
+                             session_runtime._ended_executions):
+                registry.pop(task, None)
+
+    asyncio.run(scenario())
+
+
+def test_a_stop_that_never_returns_cannot_leave_the_worker_stopping(busy, monkeypatch):
+    async def hang(*args, **kwargs):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", hang)
+    monkeypatch.setattr(fleet, "STOP_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(fleet, "FORCE_STOP_GRACE_SECONDS", 0.05)
+
+    async def scenario():
+        await fleet.dispatch("install", "stop")
+        # Before: the stop task awaited the stop forever, so the worker read
+        # "stopping" and every later request joined it until a restart.
+        await asyncio.wait_for(asyncio.gather(*fleet._stop_tasks), 5)
+        assert not fleet._stop_tasks
+        assert fleet._stop_result["accepted"] is False
+        assert fleet.waiting_status({"phase": "ready", "version": B[:12]})["install_state"] != "stopping"
+        busy.clear()
+        again = (await fleet.dispatch("install", "stop"))["results"][-1]
+        assert again["accepted"] is True and again["reason"] == "Request queued"
+        assert updates._desktop_request["action"] == "install"
+
+    asyncio.run(scenario())
+
+
 def test_stop_then_restart_retains_named_refusal_when_stop_fails(busy, monkeypatch, caplog):
     updates.desktop_exchange({"phase": "ready", "version": B[:12]})
     monkeypatch.setattr(desktop_lifecycle, "stop_session_work", AsyncMock(side_effect=RuntimeError("stop failed")))

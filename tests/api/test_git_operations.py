@@ -568,6 +568,10 @@ class TestExecuteFinish:
         ), patch(
             "app.core.task_registry.task_registry.has_active_background_work",
             side_effect=lambda sid: sid in busy and activity == "background",
+        ), patch(
+            # Background work is a running registry task, so its session is listed.
+            "app.core.task_registry.task_registry.active_session_ids",
+            side_effect=lambda: sorted(busy) if activity == "background" else [],
         ), patch.object(gitops, "_stop_session_for_cleanup", side_effect=stop), \
              patch.object(gitops, "_release_session_cwd", new_callable=AsyncMock):
             await _execute_finish(

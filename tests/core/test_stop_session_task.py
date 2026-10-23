@@ -557,3 +557,103 @@ class TestStopAllBackgroundTasks:
             assert {row["task_id"] for row in result} == {"agent-1", "shell-1"}
         finally:
             task_registry.clear_session(session_id)
+
+
+class TestStopReachesNestedTaskChildren:
+    """Stopping a Task child stops the workers IT dispatched, recursively.
+
+    A nested worker's supervisor record is keyed under the ROOT session, while
+    the child that dispatched it holds its own registry row for it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stopping_the_dispatching_child_tears_down_its_worker(self, monkeypatch):
+        from app.core import provider_agent_supervisor as sup
+
+        record = sup.WorkerRecord(parent_session_id="root", worker_session_id="grandchild",
+                                  task_id="grandchild", tool_use_id="grandchild")
+        sup.register_worker(record)
+        task_registry.start_task("root", "grandchild", "agent", "Nested worker")
+        task_registry.start_task("child", "grandchild", "agent", "Nested worker")
+
+        async def teardown(rec, **kwargs):
+            task_registry.complete_task("root", "grandchild", "killed", notify=False)
+            return {"outcome": "killed"}
+
+        torn = AsyncMock(side_effect=teardown)
+        monkeypatch.setattr(sup, "teardown_worker", torn)
+        try:
+            result = await stop_session_task("child", "grandchild")
+        finally:
+            sup.unregister_worker("root", "grandchild")
+
+        assert result == {"ok": True, "kind": "agent", "task_id": "grandchild"}
+        torn.assert_awaited_once()
+        assert torn.await_args.args[0] is record
+        assert torn.await_args.kwargs["reason"] == USER_STOP_REASON
+        assert task_registry.get_task("child", "grandchild")["status"] == "killed"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_worker_of_the_same_id_is_not_borrowed(self, monkeypatch):
+        """Only a session holding an agent row for the worker reaches it."""
+        from app.core import provider_agent_supervisor as sup
+
+        sup.register_worker(sup.WorkerRecord(parent_session_id="root", worker_session_id="w",
+                                             task_id="w", tool_use_id="w"))
+        torn = AsyncMock()
+        monkeypatch.setattr(sup, "teardown_worker", torn)
+        try:
+            await stop_session_task("stranger", "w")
+        finally:
+            sup.unregister_worker("root", "w")
+        torn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_teardown_stops_a_parked_workers_own_children(self, monkeypatch):
+        """A worker parked on its own children has no running turn to carry
+        the interrupt to them, so teardown stops them itself."""
+        from app.core import provider_agent_supervisor as sup
+        from app.core import query_session_lifecycle
+
+        record = sup.WorkerRecord(parent_session_id="root", worker_session_id="child",
+                                  task_id="child", tool_use_id="child")
+        sup.register_worker(record)
+        task_registry.start_task("root", "child", "agent", "Reviewer")
+        task_registry.start_task("child", "grandchild", "agent", "Scorer")
+        stop_all = AsyncMock(return_value=[])
+        monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", stop_all)
+        for name in ("_settle_card", "settle_killed_worker", "_cancel_worker_prompts"):
+            monkeypatch.setattr(sup, name, AsyncMock())
+        monkeypatch.setattr(sup, "_kill_worker_session", AsyncMock(return_value="killed"))
+        await sup.teardown_worker(record, reason=USER_STOP_REASON, summary=USER_STOP_SUMMARY,
+                                  preview="Stopped by the user.")
+        stop_all.assert_awaited_once_with("child", user_stop=True, source=USER_STOP_REASON)
+
+        # A worker with nothing of its own running is not latched needlessly.
+        stop_all.reset_mock()
+        lone = sup.WorkerRecord(parent_session_id="root", worker_session_id="lone",
+                                task_id="lone", tool_use_id="lone")
+        sup.register_worker(lone)
+        await sup.teardown_worker(lone, reason=USER_STOP_REASON, summary=USER_STOP_SUMMARY,
+                                  preview="Stopped by the user.")
+        stop_all.assert_not_awaited()
+
+
+def test_stop_latches_running_swarm_workflows():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.core import swarm
+
+    loop = asyncio.new_event_loop()
+    try:
+        running, finished = loop.create_future(), loop.create_future()
+        finished.set_result(None)
+        coordinator = SimpleNamespace(jobs={"wave": running, "done": finished}, cancelled=set())
+        swarm.coordinators["swarm-owner"] = coordinator
+        swarm.latch_all("swarm-owner")
+        assert coordinator.cancelled == {"wave"}
+        swarm.latch_all("no-swarm")  # nothing to latch is fine
+    finally:
+        swarm.coordinators.pop("swarm-owner", None)
+        loop.close()

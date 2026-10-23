@@ -151,6 +151,20 @@ def get_worker(parent_session_id: str, worker_session_id: str) -> Optional[Worke
     return _LIVE.get(parent_session_id, {}).get(worker_session_id)
 
 
+def find_worker(worker_session_id: str) -> Optional[WorkerRecord]:
+    """The live record for a worker under ANY parent, or ``None``.
+
+    A nested worker is keyed under its ROOT session, while the session that
+    dispatched it holds its own registry row for it; stopping that session
+    finds the record here.
+    """
+    for bucket in list(_LIVE.values()):
+        record = bucket.get(worker_session_id)
+        if record is not None:
+            return record
+    return None
+
+
 def live_workers(parent_session_id: str) -> List[WorkerRecord]:
     """Every live worker of ``parent_session_id``, oldest first."""
     bucket = _LIVE.get(parent_session_id)
@@ -597,11 +611,16 @@ async def teardown_worker(
     parent_session_id = record.parent_session_id
     record.torn_down = True
     record.torn_down_reason = reason
-    if record.continuation_turn_id and not record.remote_device_id:
-        # A continuation may still be queued or parked, with no live runtime to
-        # clear its queue or stop descendants when the interrupt is delivered.
-        from app.core.query_session_lifecycle import stop_all_background_tasks
-        await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
+    if not record.remote_device_id:
+        from app.core.task_registry import task_registry
+
+        if record.continuation_turn_id or task_registry.get_active(record.worker_session_id):
+            # A continuation may still be queued or parked, and a worker with
+            # children of its own may have no running turn (it parked on them):
+            # either way no live runtime would receive the interrupt below and
+            # stop its descendants, so stop them here, recursively.
+            from app.core.query_session_lifecycle import stop_all_background_tasks
+            await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
     if record.remote_device_id:
         # The stopped card names the worker it ran on (#1806).
         summary, preview = _with_worker(summary, record), _with_worker(preview, record)
