@@ -40,8 +40,7 @@ def _management_tool(name, action, description, *, filter_text=""):
         "session_ids call over one call per chat. " + filter_text +
         "Use exact IDs from ListSessions (state='all' includes settled and remote chats); "
         "the current chat ID is also allowed. Only same-owner top-level chats are accessible. "
-        "Hidden, voice and subagent chats are refused; personal assistant homes cannot be settled "
-        "or archived. Bulk calls check each chat on its own, so one refusal or failure does not stop "
+        "Hidden, voice and subagent chats are refused. Bulk calls check each chat on its own, so one refusal or failure does not stop "
         "the rest, and return counts (changed, already_in_state, refused, failed) listing only "
         "refused and failed chats with reasons. Repeating a call is safe. "
         "Use only when the user requests session organization."),

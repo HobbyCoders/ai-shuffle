@@ -2137,21 +2137,12 @@ class TestConversationAttachment:
         database.create_session("worker", "default", is_worker=True)
         assert attach_client.post("/api/v1/voice/sessions/worker/attach", json={}).status_code == 404
 
-    def test_fresh_primary_attaches_current_stream_transport_without_new_history(self, attach_client, mock_db):
-        from app.core import assistant_service as service
+    def test_a_hidden_conversation_cannot_be_attached(self, attach_client, mock_db):
+        """The retired assistant home was the one hidden chat a call could attach to (#371)."""
         db.create_profile("primary-agent", "Primary", None, {})
-        service.configure({"agent_id": "primary-agent", "enabled": False})
-        home = service.open_home()
-        response = attach_client.post(f"/api/v1/voice/sessions/{home['id']}/attach", json={})
-        assert response.status_code == 200, response.text
-        assert response.json()["session_id"] == home["id"]
-        assert response.json()["model"] == "gpt-live-1" and response.json()["client_secret"] == ""
-        assert db.get_sessions() == []  # Persistent homes use the Assistant entry, not ordinary cards.
-        assert len(db.get_sessions(include_hidden=True)) == 1
-        assert service.open_home()["id"] == home["id"]
-        binding = json.loads(db.get_session(home["id"])["voice_config"])
-        assert binding["conversation_surface"] is True
-        assert binding["provider_id"] == "prov-openai"
+        db.create_session("hidden-chat", "primary-agent", is_active=True, mode="chat", hidden=True)
+        assert attach_client.post("/api/v1/voice/sessions/hidden-chat/attach", json={}).status_code == 404
+        assert not json.loads(db.get_session("hidden-chat").get("voice_config") or "{}").get("conversation_surface")
 
     def test_call_overlay_has_no_client_action_escape(self, attach_client, mock_db):
         _mk_voice_session("ordinary", mode="chat")

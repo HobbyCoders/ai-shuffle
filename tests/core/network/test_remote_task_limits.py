@@ -1,7 +1,7 @@
-"""The assistant's limits count and stop its jobs on another worker (S11).
+"""The coordination limits count and stop jobs on another worker (S11).
 
 Two in-process workers over the real signed control endpoint: ServerWorker runs the
-jobs, Windows runs the assistant's home ("caller"). No provider.
+jobs, Windows runs the owner's coordination chat ("caller"). No provider.
 """
 import asyncio
 import json
@@ -18,8 +18,24 @@ from app.db import assistant as store, assistant_limits as limits_db, database, 
 from app.db.base import get_db
 from app.network import control
 from tests.core.network.test_remote_task_control import (
-    UNRAID_URL, all_turns, dispatch, finish_child, kicks, network, started_child,  # noqa: F401 - kicks is a fixture
+    UNRAID_URL, all_turns, dispatch as _dispatch, finish_child, kicks, network,  # noqa: F401 - kicks is a fixture
 )
+
+
+def dispatch(a, b, **changes):
+    """A Task from a coordination chat: a chat Task, so it is confined and needs a current target."""
+    fields = dict(tool_allowlist=["Read", "Glob", "Grep"],
+                  worker={"device_id": a.device_id, "device_name": "ServerWorker",
+                          "capabilities": {"remote_task": remote_task.TARGET_DEFAULT_VERSION}})
+    fields.update(changes)
+    return _dispatch(a, b, **fields)
+
+
+def started_child(a, b):
+    with b.active():
+        result = dispatch(a, b)
+    assert result["ok"] is True, result
+    return result["worker_session_id"]
 
 
 @pytest.fixture(autouse=True)
@@ -47,31 +63,21 @@ def interrupts(monkeypatch):
     return seen
 
 
-@pytest.fixture
-def notices(monkeypatch):
-    posted = []
-
-    async def record(session_id, text, extra_payload=None):
-        posted.append((session_id, text))
-        return "brief-" + str(len(posted))
-
-    from app.core import turn_recorder
-    monkeypatch.setattr(turn_recorder, "record_brief", record)
-    return posted
-
-
-def make_home(worker, home):
-    """``home`` is this worker's assistant home (both workers share one id in the harness)."""
+def make_coordinator(worker, session_id):
+    """Make ``session_id`` an owner coordination chat on ``worker`` (a visible no-project chat)."""
+    from app.core import orchestration_limits
+    from app.db import mobile_tool_identity
     with worker.active():
-        aid = service.assistant_id()
+        # The owner check reads this table (production creates it at startup).
+        mobile_tool_identity.init_schema()
         with get_db() as conn:
-            conn.cursor().execute("INSERT INTO assistant_state (id, runner_id, home_session_id) VALUES (%s,%s,%s)",
-                                  (aid, aid, home))
+            conn.cursor().execute("UPDATE sessions SET mode='chat', hidden=FALSE WHERE id=%s", (session_id,))
+        assert orchestration_limits.role(session_id) == "coordinator"
 
 
 def assistant_network(workers, monkeypatch):
     a, b, router = network(workers, monkeypatch)
-    make_home(b, "caller")
+    make_coordinator(b, "caller")
     return a, b, router
 
 
@@ -230,15 +236,12 @@ def test_remote_usage_answers_only_for_jobs_the_asking_worker_started(workers, m
             limits.answer_remote_usage({"version": limits.REMOTE_WIRE_VERSION, "session_ids": []}, b.device_id)
 
 
-def test_the_target_never_links_a_child_another_worker_started_to_its_own_assistant(workers, monkeypatch, kicks):
+def test_the_target_never_counts_a_child_another_worker_started_as_its_own_job(workers, monkeypatch, kicks):
     a, b, _ = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
-        database.create_session(session_id="unraid-home", profile_id="default", title="ServerWorker home")
-    make_home(a, "unraid-home")
-    with a.active():
-        assert service.link_job("unraid-home", child) is None
-        assert store.get_session_job(service.assistant_id(), child) is None
+        assert store.get_remote_job(service.assistant_id(), child) is None
+        assert store.get_activity(service.assistant_id()) == []
 
 
 # --- linking ----------------------------------------------------------------------
@@ -251,9 +254,8 @@ def test_a_child_that_never_started_is_not_counted(workers, monkeypatch, kicks):
         assert store.remote_jobs_to_check(service.assistant_id(), limits.REMOTE_IDLE_FOR) == []
 
 
-def test_a_task_from_a_chat_that_is_not_the_assistants_is_not_linked(workers, monkeypatch, kicks):
+def test_a_task_from_a_chat_that_is_not_a_coordination_chat_is_not_linked(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
-    make_home(b, None)
     child = started_child(a, b)
     with b.active():
         assert store.get_remote_job(service.assistant_id(), child) is None
@@ -292,8 +294,7 @@ async def test_a_remote_start_session_chat_is_linked_to_the_assistant(workers, m
 
 # --- enforcement ------------------------------------------------------------------
 
-def test_at_the_limit_the_remote_child_is_stopped_on_its_worker_once(workers, monkeypatch, kicks, interrupts,
-                                                                     notices):
+def test_at_the_limit_the_remote_child_is_stopped_on_its_worker_once(workers, monkeypatch, kicks, interrupts):
     a, b, router = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
@@ -314,10 +315,9 @@ def test_at_the_limit_the_remote_child_is_stopped_on_its_worker_once(workers, mo
         assert task_registry.get_task("caller", child)["status"] == "killed"
         assert provider_agent_supervisor.get_worker("caller", child) is None
         assert limits_db.stopped(turn["id"])  # Keyed by the target's turn id.
-        assert len(notices) == 1 and 'stopped 1 background job ("Task · Default")' in notices[0][1]
-        asyncio.run(limits.enforce())  # Stopped and reported once.
+        asyncio.run(limits.enforce())  # Stopped once.
         asyncio.run(remote_task.drain_stops())
-        assert len(interrupts) == 1 and len(notices) == 1
+        assert len(interrupts) == 1
         assert len(requests_for(router, remote_task.TASK_STOP_ACTION)) == 1
     with a.active():
         assert turns.get_turn(turn["id"])["state"] == "running"  # The fake stop left it running.
@@ -325,7 +325,7 @@ def test_at_the_limit_the_remote_child_is_stopped_on_its_worker_once(workers, mo
 
 
 def test_a_remote_chat_past_its_job_time_is_stopped_turn_by_turn_and_owner_turns_are_left(
-        workers, monkeypatch, kicks, interrupts, notices):
+        workers, monkeypatch, kicks, interrupts):
     a, b, _ = assistant_network(workers, monkeypatch)
     with a.active():
         database.create_session(session_id="remote-chat", profile_id="default", title="Long chat")
@@ -336,12 +336,12 @@ def test_a_remote_chat_past_its_job_time_is_stopped_turn_by_turn_and_owner_turns
         with get_db() as conn:
             conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id='remote-chat'", (31 * 60000,))
     with b.active():
-        store.link_remote_job(service.assistant_id(), "remote-chat", a.device_id, "chat", "Long chat")
+        store.link_remote_job(service.assistant_id(), "remote-chat", a.device_id, "chat", "Long chat",
+                              starter_session_id="caller")
         set_limits(max_job_minutes=30)
         asyncio.run(limits.enforce())
         assert interrupts == [dict(session_id="remote-chat", mode="stop", stop_background=False,
                                    turn_id=first["id"])]
-        assert notices[-1][1].startswith('The background job "Long chat" ran past its 30-minute limit')
     # The owner types into it there: their turn runs.
     with a.active():
         turns.settle_turn(first["id"], "aborted")
@@ -368,7 +368,7 @@ def test_a_remote_chat_past_its_job_time_is_stopped_turn_by_turn_and_owner_turns
         # to inspect its usage classification, not to bypass that admission guard.
 
 
-def test_an_unreachable_worker_is_not_stopped_until_it_answers(workers, monkeypatch, kicks, interrupts, notices):
+def test_an_unreachable_worker_is_not_stopped_until_it_answers(workers, monkeypatch, kicks, interrupts):
     a, b, router = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
@@ -391,7 +391,7 @@ def test_an_unreachable_worker_is_not_stopped_until_it_answers(workers, monkeypa
 # --- with stop (S8) and messages (S9) ---------------------------------------------
 
 def test_a_child_with_no_record_here_is_stopped_through_the_same_stop_path(workers, monkeypatch, kicks,
-                                                                          interrupts, notices):
+                                                                          interrupts):
     a, b, router = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
@@ -409,7 +409,7 @@ def test_a_child_with_no_record_here_is_stopped_through_the_same_stop_path(worke
         assert limits_db.stopped(turn["id"])
 
 
-def test_a_limit_stop_refuses_later_messages_on_both_workers(workers, monkeypatch, kicks, notices):
+def test_a_limit_stop_refuses_later_messages_on_both_workers(workers, monkeypatch, kicks):
     a, b, router = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
@@ -432,7 +432,7 @@ def test_a_limit_stop_refuses_later_messages_on_both_workers(workers, monkeypatc
             asyncio.run(control.call(a.device_id, remote_task.TASK_MESSAGE_ACTION, body, timeout=10))
 
 
-def test_a_stop_an_older_worker_refused_is_neither_resent_nor_announced(workers, monkeypatch, kicks, notices):
+def test_a_stop_an_older_worker_refused_is_not_resent(workers, monkeypatch, kicks):
     a, b, router = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
@@ -450,7 +450,6 @@ def test_a_stop_an_older_worker_refused_is_neither_resent_nor_announced(workers,
             assert len(requests_for(router, remote_task.TASK_STOP_ACTION)) == 1
             assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_REFUSED
             assert not limits_db.stopped(turn["id"])
-            assert not any("background job" in text for _, text in notices)
     finally:
         control._LAZY_HANDLERS[remote_task.TASK_STOP_ACTION] = original
 
@@ -469,9 +468,8 @@ def test_a_message_to_a_remote_child_is_refused_at_the_limit(workers, monkeypatc
         assert [t for t in all_turns(child) if t["source"] == "agent_message"] == []
 
 
-def test_a_message_to_a_child_the_assistant_did_not_start_ignores_its_limit(workers, monkeypatch, kicks):
+def test_a_message_to_a_child_no_coordination_chat_started_ignores_the_limit(workers, monkeypatch, kicks):
     a, b, router = network(workers, monkeypatch)
-    make_home(b, None)
     child = started_child(a, b)
     deliver(a, child)
     with b.active():

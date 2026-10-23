@@ -1,4 +1,4 @@
-"""The owner introduction is detected, shown and correctable; never typed in."""
+"""The owner introduction is detected (it sets the default git author); never typed in."""
 import json
 from types import SimpleNamespace
 
@@ -11,6 +11,11 @@ from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
 # conftest stubs github_login for every test; keep the real one for its own test.
 REAL_GITHUB_LOGIN = introductions.github_login
+
+
+def introduction():
+    """The effective stored introduction (what the default git author reads)."""
+    return introductions.effective((store.get_account() or {}).get("introduction") or {})
 
 
 def test_corrections_win_and_empty_goes_back_to_detection():
@@ -71,42 +76,29 @@ def test_github_login_needs_a_signed_in_cli(monkeypatch):
 def test_detection_is_stored_shown_and_publishes_only_on_change(assistant_fixture, monkeypatch):
     published = []
     monkeypatch.setattr(service, "_publish", lambda: published.append(1))
-    service.configure({"introduction": {"preferred_name": "Ada"}})
-    published.clear()
-    assert service.apply_detection({"preferred_name": "ada", "github_username": "ada-gh"}, {"gmail": True, "github": True})
-    assert service.apply_detection({"preferred_name": "ada", "github_username": "ada-gh"}, {"gmail": True, "github": True}) is False
+    with store.get_db() as conn:
+        store.write_account(conn, {"introduction": introductions.correct({}, {"preferred_name": "Ada"})})
+    assert service.apply_detection({"preferred_name": "ada", "github_username": "ada-gh"})
+    assert service.apply_detection({"preferred_name": "ada", "github_username": "ada-gh"}) is False
     assert len(published) == 1
-    state = service.get_state()
-    assert state["introduction"] == {"preferred_name": "Ada", "github_username": "ada-gh"}
-    assert state["introduction_detected"] == {"preferred_name": "ada", "github_username": "ada-gh"}
-    assert state["introduction_corrected"] == ["preferred_name"]
-    context = service.build_role_context(assistant_fixture["id"])
-    assert '"preferred_name": "Ada"' in context and "ada-gh" in context and "not access grants" in context
-
-
-def test_connection_suggestions_follow_the_last_pass(assistant_fixture, monkeypatch):
-    monkeypatch.setattr(service, "_connections", {})
-    assert service.get_state()["suggested_connections"] == []  # nothing checked yet
-    service.apply_detection({}, {"gmail": False, "github": False})
-    assert service.get_state()["suggested_connections"] == ["gmail", "github"]
-    service.apply_detection({}, {"gmail": True, "github": False})
-    assert service.get_state()["suggested_connections"] == ["github"]
+    assert introduction() == {"preferred_name": "Ada", "github_username": "ada-gh"}
+    assert introductions.split(store.get_account()["introduction"]) == (
+        {"preferred_name": "ada", "github_username": "ada-gh"}, {"preferred_name": "Ada"})
 
 
 def test_each_configured_worker_detects_locally_and_publishes_only_changes(assistant_fixture, monkeypatch):
     published = []
     monkeypatch.setattr(service, "_publish", lambda: published.append(True))
     assert service.detection_wanted()
-    assert service.apply_detection({"preferred_name": "local-owner"}, {"gmail": False, "github": False})
+    assert service.apply_detection({"preferred_name": "local-owner"})
     assert store.get_account()["introduction"]["detected"]["preferred_name"] == "local-owner"
-    assert service.get_state()["suggested_connections"] == ["gmail", "github"]
-    assert not service.apply_detection({"preferred_name": "local-owner"}, {"gmail": False, "github": False})
+    assert not service.apply_detection({"preferred_name": "local-owner"})
     assert published == [True]
 
 
 def test_nothing_is_written_before_setup(monkeypatch):
     monkeypatch.setattr(service, "_publish", lambda: pytest.fail("published without an assistant"))
-    assert service.apply_detection({"preferred_name": "ada"}, {"gmail": False, "github": False}) is False
+    assert service.apply_detection({"preferred_name": "ada"}) is False
     assert store.get_account() is None
 
 
@@ -122,13 +114,11 @@ async def test_manager_pass_reads_the_running_gmail_address_not_mail(assistant_f
     assert manager.detect_owner() is task  # single flight
     await task
     assert manager.detect_owner(max_age=3600) is None  # fresh enough
-    state = service.get_state()
-    assert state["introduction"]["email"] == "ada@example.com"
-    assert state["suggested_connections"] == ["github"]
+    assert introduction()["email"] == "ada@example.com"
 
 
-def test_dedicated_agent_gets_default_tools_and_every_enabled_plugin(monkeypatch, tmp_path):
-    """A home turn on the dedicated agent loads the install's plugins like any agent."""
+def test_builtin_agent_gets_default_tools_and_every_enabled_plugin(assistant_fixture, monkeypatch, tmp_path):
+    """A research turn on the built-in agent loads the install's plugins like any agent."""
     from app.core import mcp_config, plugin_service
     from app.core.query_options import build_options_from_profile
     plugin_dir = tmp_path / "helper"
@@ -138,13 +128,12 @@ def test_dedicated_agent_gets_default_tools_and_every_enabled_plugin(monkeypatch
     installed.write_text(json.dumps({"plugins": {"helper@market": [{"installPath": str(plugin_dir)}]}}), encoding="utf-8")
     monkeypatch.setattr(plugin_service, "get_plugin_service", lambda: SimpleNamespace(
         INSTALLED_FILE=installed, get_enabled_plugins=lambda: {"helper@market": True, "off@market": False}))
-    state = service.configure({"create_agent": True})
-    agent = database.get_profile(state["agent_id"])
+    agent = database.get_profile(service.AGENT_ID)
     config = agent["config"]
     assert config["tool_selection_mode"] == "all" and config["agent_invoke_mode"] == "all"
     assert "enabled_plugins" not in config and "setting_sources" not in config
-    home = service.open_home()
-    options, _ = build_options_from_profile(agent, session_id=home["id"])
+    run = database.create_session("research-run", service.AGENT_ID, is_active=True)
+    options, _ = build_options_from_profile(agent, session_id=run["id"])
     assert {"type": "local", "path": str(plugin_dir)} in (options.plugins or [])
     assert mcp_config._build_plugins_list(config.get("enabled_plugins"), config.get("setting_sources")) == options.plugins
 
@@ -200,14 +189,12 @@ def test_repositories_are_sorted_and_worktrees_do_not_crowd_them_out(monkeypatch
 
 async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(assistant_fixture, monkeypatch):
     from app.core import auth
-    service.apply_detection({"github_username": "ada-gh"}, {"gmail": True, "github": True})
+    service.apply_detection({"github_username": "ada-gh"})
     monkeypatch.setattr(introductions, "github_login", REAL_GITHUB_LOGIN)
     monkeypatch.setattr(auth, "is_github_authenticated_cached", lambda probe=None: True)
     monkeypatch.setattr(auth.auth_service, "github_login", lambda: None)
     await AssistantManager().detect_owner()
-    state = service.get_state()
-    assert state["introduction"]["github_username"] == "ada-gh"
-    assert "github" not in state["suggested_connections"]
+    assert introduction()["github_username"] == "ada-gh"
 
 
 async def test_no_detection_without_an_assistant_running_here(monkeypatch):

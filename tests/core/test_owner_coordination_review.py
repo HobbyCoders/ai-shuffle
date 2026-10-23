@@ -25,7 +25,7 @@ def owner(mock_db, monkeypatch, tmp_path):
 @pytest.mark.parametrize("project", [False, True])
 @pytest.mark.parametrize("permission", ["default", "auto", "acceptEdits", "bypassPermissions"])
 async def test_start_preserves_permission_without_assistant_scope(owner, project, permission):
-    from app.core import query_options, assistant_permissions, away_mode
+    from app.core import query_options, away_mode
     from app.db import projects_v2, checkouts
     from app.core.config import settings
     registered = projects_v2.upsert_project("folder:review", name="Project")
@@ -37,7 +37,6 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
         "start", {"title": "Child", "prompt": "work", "request_id": "review", "project": "Project"}, ToolCtx())
     assert not result.is_error, result.text
     child = json.loads(result.text)["session_id"]
-    assert assistant_permissions.scope_for_session(child) is None
     # #371 step 5: Away-style question answering reaches every owner chat's
     # started chats; it answers questions only and never widens permissions.
     assert away_mode.assistant_work(child)
@@ -47,10 +46,9 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)
     assert options.permission_mode == expected
     assert not getattr(options, "aih_assistant_scope", None)
-    # Task workers under an ordinary child must not acquire the legacy home's scope.
+    # Task workers under an ordinary child keep their own mode.
     worker = database.create_session("task-worker", "agent", is_worker=True, parent_session_id=child,
                                      project_v2_id=registered["id"], permission_mode=permission)
-    assert assistant_permissions.scope_for_session(worker["id"]) is None
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=worker["id"])
     assert options.permission_mode == permission
 

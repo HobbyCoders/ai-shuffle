@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from app.api.auth import get_api_user_from_request, require_admin
 from app.api.common import require_origin_access
-from app.api.sessions_helpers import refuse_assistant_home_mutation, require_session
+from app.api.sessions_helpers import require_session
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -121,9 +121,8 @@ async def attach_project(
 ):
     """Give this no-project session a project. One-way, owner only.
 
-    Refusals, in order: anyone but the owner (403); an archived chat or the
-    assistant home (409); a session that is not a no-project top-level chat
-    (409); one owned by another worker (409); one with a turn queued or
+    Refusals, in order: anyone but the owner (403); an archived chat (409);
+    a session that is not a no-project top-level chat (409); one owned by another worker (409); one with a turn queued or
     running, or whose state can't be read (409); a project the caller
     cannot reach or that has no checkout on this worker (403/404 via origin
     access). A lost race with another attach also answers 409.
@@ -134,7 +133,6 @@ async def attach_project(
     session = await require_session(request, session_id)
     if archive_guard.is_archived_row(session):
         raise HTTPException(status.HTTP_409_CONFLICT, "This chat is archived. Restore it first.")
-    await refuse_assistant_home_mutation(session_id, "given a project")
     if (
         session_mode_of(session) != "chat"
         or session.get("project_id")

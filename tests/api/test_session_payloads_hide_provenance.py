@@ -52,16 +52,6 @@ def test_patch_session_response_has_no_label(client):  # noqa: F811
     assert database.get_session("patched")["provenance_owner"] == LABEL
 
 
-def test_assistant_open_response_has_no_label(client):  # noqa: F811
-    client.patch("/api/v1/assistant", json={"create_agent": True})
-    home_id = client.get("/api/v1/assistant").json()["home_session_id"]
-    _label(home_id)
-    response = client.post("/api/v1/assistant/open")
-    assert response.status_code == 200
-    assert response.json()["session"]["id"] == home_id
-    _clean(response.json())
-
-
 async def test_websocket_history_frame_has_no_label(mock_db):
     _make_session("sess-1")
     _label("sess-1")

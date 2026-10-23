@@ -2697,6 +2697,7 @@ def _run_column_migrations(cursor):
     migrations_applied.extend(_retire_webhooks_and_legacy_push(cursor))
     migrations_applied.extend(_retire_fal_billing_key(cursor))
     migrations_applied.extend(_retire_secret_named_observations(cursor))
+    migrations_applied.extend(_retire_assistant_home(cursor))
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -3040,6 +3041,168 @@ def _retire_fal_billing_key(cursor) -> List[str]:
     if table_exists(cursor, "provider_usage_snapshots"):
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
     return ["system_settings.fal_billing_api_key"]
+
+
+#: The built-in agent the retired assistant home ran on (``app.db.assistant.AGENT_ID``).
+RETIRED_ASSISTANT_AGENT_ID = "builtin_assistant"
+#: system_settings key: JSON list of the home ids ``_retire_assistant_home``
+#: deleted. ``orchestration_limits`` keeps the chats they started capped.
+RETIRED_ASSISTANT_HOMES_MARKER = "migration:retired_assistant_homes"
+#: How deep Task workers can nest under a home (task_tool_max_depth is 5).
+_ASSISTANT_HOME_WORKER_DEPTH = 16
+#: Session-scoped rows with no foreign key to ``sessions`` (``app.db.sessions``
+#: ``_SESSION_RUNTIME_TABLES``, plus armed wake-ups).
+_ASSISTANT_HOME_RUNTIME_TABLES = (
+    "turns", "session_events", "session_event_counters", "runs",
+    "pending_interactions", "background_tasks", "pending_wakeups",
+)
+#: Transcript stores keyed by the session's ``sdk_session_id``.
+_ASSISTANT_HOME_TRANSCRIPT_TABLES = (
+    "fluid_session_nodes", "fluid_session_events", "fluid_sessions",
+    "session_store_entries", "session_store_summaries",
+)
+
+
+def _assistant_home_ids(cursor) -> List[str]:
+    """Every retired assistant home in this database, plus its Task workers.
+
+    A home is a session a runner row or the synced account names as
+    ``home_session_id``, or a hidden top-level session on the built-in
+    assistant agent (a peer's home mirrored here). Its Task workers are the
+    hidden worker sessions whose parent is a home. Chats a home started with
+    StartSession are ordinary chats and are not included.
+
+    Returns ``(homes, sessions)``: every id named or found as a home, and the
+    home rows that exist plus every hidden Task worker under them, at any
+    depth.
+    """
+    homes: set = set()
+    for table in ("assistant_state", "assistant_account"):
+        if table_exists(cursor, table) and column_exists(cursor, table, "home_session_id"):
+            cursor.execute(f"SELECT home_session_id FROM {table} WHERE home_session_id IS NOT NULL")
+            homes.update(row["home_session_id"] for row in cursor.fetchall())
+    if not table_exists(cursor, "sessions"):
+        return [], []
+    cursor.execute(
+        "SELECT id FROM sessions WHERE profile_id = %s AND COALESCE(hidden, FALSE) = TRUE "
+        "AND parent_session_id IS NULL AND COALESCE(is_worker, FALSE) = FALSE",
+        (RETIRED_ASSISTANT_AGENT_ID,),
+    )
+    homes.update(row["id"] for row in cursor.fetchall())
+    if not homes:
+        return [], []
+    marks = ", ".join(["%s"] * len(homes))
+    cursor.execute(f"SELECT id FROM sessions WHERE id IN ({marks})", tuple(homes))
+    found = {row["id"] for row in cursor.fetchall()}
+    collected, level = set(found), set(found)
+    for _ in range(_ASSISTANT_HOME_WORKER_DEPTH):
+        if not level:
+            break
+        marks = ", ".join(["%s"] * len(level))
+        cursor.execute(
+            f"SELECT id FROM sessions WHERE parent_session_id IN ({marks}) "
+            "AND COALESCE(is_worker, FALSE) = TRUE AND COALESCE(hidden, FALSE) = TRUE",
+            tuple(level),
+        )
+        level = {row["id"] for row in cursor.fetchall()} - collected
+        collected |= level
+    # Every id named as a home is recorded, found or not: a chat it started
+    # can outlive it either way.
+    return sorted(homes), sorted(collected)
+
+
+def _retire_assistant_home(cursor) -> List[str]:
+    """#371 step 5: delete the retired assistant's conversation. Idempotent.
+
+    The personal assistant's own conversation (the "home", shown as "Your
+    ongoing conversation") has no UI or API any more, and the owner chose to
+    delete it rather than keep it. Deleted, per home (see
+    :func:`_assistant_home_ids`) and per hidden Task worker under it:
+
+    * the ``sessions`` row, with what cascades from it (``session_messages``
+      and the other session-keyed tables);
+    * its runtime rows with no foreign key (``turns``, ``session_events``,
+      ``session_event_counters``, ``runs``, ``pending_interactions``,
+      ``background_tasks``, ``pending_wakeups``);
+    * its transcript in ``fluid_*`` and ``session_store_*`` (by
+      ``sdk_session_id``).
+
+    Kept: spend history (``usage_log`` rows are unlinked, as a normal delete
+    does, so on the upgrade day the homes' own spend so far stops counting
+    toward that day's limit once; later days are unaffected); chats a home
+    started (their ``parent_session_id`` is cleared, and the home ids are
+    recorded under ``RETIRED_ASSISTANT_HOMES_MARKER`` so
+    ``orchestration_limits`` still treats those chats as coordination jobs);
+    every other session. Then the pointers to the homes are cleared
+    (``assistant_state`` / ``assistant_account`` / ``assistant_runs``
+    ``home_session_id``, the account's ``home_device_id`` / ``home_created_at``),
+    the home's job links (``assistant_runs`` rows with ``kind <> 'proactive'``)
+    are deleted, and the columns only the home used are dropped
+    (``assistant_runs.brief``, ``assistant_limits.warned`` / ``reached``,
+    ``assistant_limit_stops.reported_at`` and its index). The
+    ``home_session_id`` foreign-key columns are cleared, not dropped (SQLite
+    cannot drop a foreign-key column), and the synced account keeps its
+    ``home_*`` fields for peers on an older release.
+
+    No ``SCHEMA_VERSION`` bump: editing this file changes
+    ``migrations_fingerprint()``, which runs the column pass once. The sync
+    scanner publishes tombstones for the deleted session rows. Returns what
+    was applied.
+    """
+    applied: List[str] = []
+    homes, ids = _assistant_home_ids(cursor)
+    if homes:
+        recorded = set(json.loads(_get_marker(cursor, RETIRED_ASSISTANT_HOMES_MARKER) or "[]"))
+        if not set(homes) <= recorded:
+            _set_marker(cursor, RETIRED_ASSISTANT_HOMES_MARKER, json.dumps(sorted(recorded | set(homes))))
+    if ids:
+        marks = ", ".join(["%s"] * len(ids))
+        params = tuple(ids)
+        cursor.execute(f"SELECT sdk_session_id FROM sessions WHERE id IN ({marks}) "
+                       "AND sdk_session_id IS NOT NULL", params)
+        transcripts = sorted({row["sdk_session_id"] for row in cursor.fetchall() if row["sdk_session_id"]})
+        cursor.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({marks}) "
+                       f"AND id NOT IN ({marks})", params + params)
+        if table_exists(cursor, "usage_log"):
+            cursor.execute(f"UPDATE usage_log SET session_id = NULL WHERE session_id IN ({marks})", params)
+        for table in _ASSISTANT_HOME_RUNTIME_TABLES:
+            if table_exists(cursor, table):
+                cursor.execute(f"DELETE FROM {table} WHERE session_id IN ({marks})", params)
+        if transcripts:
+            transcript_marks = ", ".join(["%s"] * len(transcripts))
+            for table in _ASSISTANT_HOME_TRANSCRIPT_TABLES:
+                if table_exists(cursor, table):
+                    cursor.execute(f"DELETE FROM {table} WHERE session_id IN ({transcript_marks})",
+                                   tuple(transcripts))
+        cursor.execute(f"DELETE FROM sessions WHERE id IN ({marks})", params)
+        applied.append(f"assistant_home.sessions({cursor.rowcount})")
+    for table, columns in (("assistant_state", ("home_session_id",)),
+                           ("assistant_runs", ("home_session_id",)),
+                           ("assistant_account", ("home_session_id", "home_device_id", "home_created_at"))):
+        present = [c for c in columns if table_exists(cursor, table) and column_exists(cursor, table, c)]
+        if not present:
+            continue
+        cursor.execute(f"UPDATE {table} SET " + ", ".join(f"{c} = NULL" for c in present)
+                       + " WHERE " + " OR ".join(f"{c} IS NOT NULL" for c in present))
+        if cursor.rowcount:
+            applied.append(f"{table}.home_cleared({cursor.rowcount})")
+    if table_exists(cursor, "assistant_runs"):
+        cursor.execute("DELETE FROM assistant_runs WHERE kind <> 'proactive'")
+        if cursor.rowcount:
+            applied.append(f"assistant_runs.home_job_links({cursor.rowcount})")
+    if table_exists(cursor, "assistant_runs") and column_exists(cursor, "assistant_runs", "brief"):
+        cursor.execute("ALTER TABLE assistant_runs DROP COLUMN brief")
+        applied.append("assistant_runs.drop_brief")
+    if table_exists(cursor, "assistant_limits"):
+        for column in ("warned", "reached"):
+            if column_exists(cursor, "assistant_limits", column):
+                cursor.execute(f"ALTER TABLE assistant_limits DROP COLUMN {column}")
+                applied.append(f"assistant_limits.drop_{column}")
+    if table_exists(cursor, "assistant_limit_stops") and column_exists(cursor, "assistant_limit_stops", "reported_at"):
+        cursor.execute("DROP INDEX IF EXISTS idx_assistant_limit_stops_unreported")
+        cursor.execute("ALTER TABLE assistant_limit_stops DROP COLUMN reported_at")
+        applied.append("assistant_limit_stops.drop_reported_at")
+    return applied
 
 
 def _backfill_sessions_is_worker(cursor) -> Optional[int]:

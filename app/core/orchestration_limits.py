@@ -1,13 +1,29 @@
-"""Owner coordination admission and spending enforcement (legacy setting retained).
+"""Owner coordination admission and spending enforcement.
 
-Accounting and the Assistant settings API still use assistant_limits' existing
-storage, day boundaries and remote cumulative-cost protocol. Admission no longer
-depends on the existence of the hidden assistant conversation.
+Accounting and the limits API use assistant_limits' storage, day boundaries
+and remote cumulative-cost protocol.
 """
+import json
 import logging
 from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
+
+
+def _retired_homes():
+    """Ids of the retired assistant homes the #371 migration deleted.
+
+    Chats a home started with StartSession survive it, but their starter row
+    is gone; they stay coordination jobs so the limits still cover them.
+    """
+    from app.db.database import RETIRED_ASSISTANT_HOMES_MARKER
+    from app.db.settings import get_system_setting
+    try:
+        raw = get_system_setting(RETIRED_ASSISTANT_HOMES_MARKER)
+        return frozenset(json.loads(raw)) if raw else frozenset()
+    except Exception:  # noqa: BLE001 — an unreadable marker leaves the ordinary rule
+        log.warning("Coordination roles: could not read the retired assistant homes", exc_info=True)
+        return frozenset()
 
 
 def tracked_roles(now=None):
@@ -30,16 +46,11 @@ def tracked_roles(now=None):
         return {}
     view = _Batch(ids)
     memo = {}
-    return {sid: kind for sid in ids if view.legacy(sid) is None
-            and (kind := _role(sid, memo, view=view)) in ("coordinator", "job")}
+    return {sid: kind for sid in ids if (kind := _role(sid, memo, view=view)) in ("coordinator", "job")}
 
 
 class _Reads:
     """One session's role inputs, read on demand (``role``)."""
-
-    def legacy(self, session_id):
-        from app.core import assistant_limits as accounting
-        return accounting.role(session_id)
 
     def row(self, session_id):
         from app.db import sessions
@@ -53,21 +64,20 @@ class _Reads:
         from app.core.session_orchestration import _start_turn
         return (_start_turn(session_id) or {}).get("payload") or {}
 
+    def retired_home(self, session_id):
+        if not hasattr(self, "_retired"):
+            self._retired = _retired_homes()
+        return session_id in self._retired
+
 
 class _Batch(_Reads):
     """The same inputs for many sessions, preloaded with bounded queries."""
 
     def __init__(self, ids):
         from app.core import assistant_limits as accounting
-        from app.db.base import get_db
         self.rows, self.starts, self.principals, self.memo = {}, {}, {}, {}
         self.principals_ok = True
-        with get_db() as conn:
-            cursor = conn.cursor()
-            self.home = accounting._home_id(cursor)
-            cursor.execute("SELECT DISTINCT session_id FROM assistant_runs WHERE assistant_id=%s "
-                           "AND session_id IS NOT NULL", (accounting.assistant_id(),))
-            self.runs = {row["session_id"] for row in cursor.fetchall()}
+        self._retired = _retired_homes()
         wanted, asked = set(ids), set()
         # One pass per ancestry level (workers' parents, StartSession senders).
         for _ in range(_MAX_DEPTH + 1):
@@ -115,14 +125,6 @@ class _Batch(_Reads):
         payload = self.start_payload(session_id)
         return None if payload.get("orchestration_remote_origin") else payload.get("orchestration_sender")
 
-    def legacy(self, session_id):
-        # Same answer as assistant_limits.role, from the preloaded sets.
-        if not self.home:
-            return None
-        if session_id == self.home:
-            return "home"
-        return "job" if session_id in self.runs else None
-
     def row(self, session_id):
         return self.rows.get(session_id)
 
@@ -148,10 +150,6 @@ def _role(session_id, memo, depth=0, *, view=None):
     if not session_id or session_id in memo or depth >= _MAX_DEPTH:
         return memo.get(session_id)
     memo[session_id] = None  # Cycles never acquire a role.
-    legacy = view.legacy(session_id)
-    if legacy:
-        memo[session_id] = legacy
-        return legacy
     row = view.row(session_id)
     if not row or row.get("api_user_id") or row.get("automation_id"):
         return None
@@ -164,8 +162,12 @@ def _role(session_id, memo, depth=0, *, view=None):
         payload = view.start_payload(session_id)
         sender = payload.get("orchestration_sender")
         if sender and not payload.get("orchestration_remote_origin"):
-            # A project owner's independent project work is not a coordination job.
-            kind = "job" if _role(sender, memo, depth + 1, view=view) else None
+            if view.retired_home(sender) and view.row(sender) is None:
+                # Started by a retired assistant home the migration deleted (#371).
+                kind = "job"
+            else:
+                # A project owner's independent project work is not a coordination job.
+                kind = "job" if _role(sender, memo, depth + 1, view=view) else None
         else:
             kind = ("coordinator" if session_mode_of(row) == "chat" and not row.get("hidden")
                     and not (row.get("project_id") or row.get("project_v2_id")) else None)
@@ -202,23 +204,23 @@ def turn_refusal(session_id, source=None, *, payload=None):
     from app.core import assistant_limits as accounting
     try:
         kind = role(session_id)
-        if kind is None or (kind != "home" and accounting._person_input(source, payload)):
+        if kind is None or accounting._person_input(source, payload):
             return None
         state = accounting.status()
         if state["limit_reached"]:
             return accounting._reached_text(state)
         if (kind == "job" and state["job_limit_enabled"]
                 and accounting._job_over_time(session_id, state["max_job_minutes"], datetime.now(timezone.utc),
-                                              coordination=accounting.role(session_id) is None)):
+                                              coordination=True)):
             return (f"This background job passed its {accounting._duration(state['max_job_minutes'])} limit, so it does not "
-                    "start again; only the owner can change the limit on the Assistant page under Limits.")
+                    f"start again; {accounting.WHERE_TO_CHANGE}.")
     except Exception:  # noqa: BLE001 — match existing accounting failure behaviour
         log.warning("Coordination turn admission failed for %s", session_id, exc_info=True)
     return None
 
 
 async def enforce(now=None):
-    """Stop work past the limits and post the owner's notices. Never raises."""
+    """Stop work past the limits. Never raises."""
     from app.core import turn_manager, assistant_limits as accounting
     from app.db.async_database import run_sync
     try:
@@ -250,7 +252,3 @@ async def enforce(now=None):
                             stop["device_id"], stop["reason"])
         except Exception:
             log.exception("Assistant limits: could not stop %s on %s", stop["session_id"], stop["device_id"])
-    try:
-        await accounting._post_notices(state)
-    except Exception:
-        log.exception("Assistant limits: notices failed")

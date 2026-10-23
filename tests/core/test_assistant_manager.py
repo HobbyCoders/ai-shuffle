@@ -183,7 +183,7 @@ async def test_polling_overflow_does_not_acknowledge_unqueued_mail(producer):
 
 
 @pytest.mark.asyncio
-async def test_guard_missing_provider_opt_out_and_stop_fail_closed(producer, assistant_fixture, monkeypatch):
+async def test_guard_missing_provider_and_opt_out_fail_closed(producer, assistant_fixture, monkeypatch):
     events()
     manager = module.AssistantManager()
     await manager.run_once()
@@ -194,12 +194,6 @@ async def test_guard_missing_provider_opt_out_and_stop_fail_closed(producer, ass
     assert store.get_activity(service.assistant_id()) == []
     monkeypatch.setattr(module, "provider_blocker", lambda _: None)
     service.set_source("conn-mail", False)
-    await manager.run_once()
-    assert store.get_activity(service.assistant_id()) == []
-    service.set_source("conn-mail", True)
-    events(message_id="after-opt-in")
-    home_turn = turns.enqueue_turn(assistant_fixture["id"], "user", prompt="Stopped")
-    turns.settle_turn(home_turn["id"], "aborted", stop_reason="user_stopped")
     await manager.run_once()
     assert store.get_activity(service.assistant_id()) == []
 

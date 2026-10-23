@@ -385,8 +385,8 @@ def assistant_route(
 def _assistant_confirm(
     target: Optional[str], kwargs: Dict[str, Any], route: Optional[WorkerApprovalRoute],
 ) -> Optional[Dict[str, Any]]:
-    """The ``assistant_confirm`` marker when the prompt lands on the assistant's
-    home: the owner answers it in the conversation (app/core/assistant_confirm).
+    """The ``assistant_confirm`` marker when the prompt lands on an owner chat:
+    the owner answers it in the conversation (app/core/assistant_confirm).
     None for every other session. Never raises."""
     if not target:
         return None
@@ -400,7 +400,7 @@ def _assistant_confirm(
         if route is not None and route.requester == ASSISTANT_REQUESTER:
             chat = route.label
         elif route is not None:
-            # A background job (Task worker) under the home: its question
+            # A background job (Task worker) under the owner chat: its question
             # names the job, so it is not mistaken for the current request.
             job = route.display_label
         return assistant_confirm.marker(

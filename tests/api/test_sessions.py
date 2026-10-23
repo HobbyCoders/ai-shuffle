@@ -24,7 +24,6 @@ from fastapi.testclient import TestClient
 
 from app.api.sessions import check_session_access, enrich_sessions_with_tags
 from tests.api.helpers import app  # noqa: F401  (fixture)
-from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
 
 # =============================================================================
@@ -1194,103 +1193,35 @@ def stored_sessions_client():
         yield value
 
 
-class TestAssistantHomeMutations:
-    @pytest.mark.parametrize("params", [
-        {"title": "Renamed"},
-        {"title": ""},
-        {"title": "Renamed", "status": "completed"},
-    ])
-    def test_rename_refused_before_any_write(
-        self, stored_sessions_client, assistant_fixture, params, monkeypatch,
-    ):
-        from app.core import assistant_service as service
-        from app.db import assistant as store, database
+class TestNoPersistentAssistantConversation:
+    """The personal assistant's 409 guards are gone (#371): every session can be renamed and deleted."""
 
-        sid = assistant_fixture["id"]
-        before = database.get_session(sid)
-        rename = MagicMock()
-        monkeypatch.setattr("app.api.sessions.sdk_rename_session", rename)
-        response = stored_sessions_client.patch(f"/api/v1/sessions/{sid}", params=params)
-        assert response.status_code == 409
-        assert response.json() == {
-            "detail": "Your personal assistant is a persistent conversation and cannot be renamed"
-        }
-        assert database.get_session(sid) == before
-        assert store.get_state(service.assistant_id())["home_session_id"] == sid
-        rename.assert_not_called()
+    def test_rename_and_delete_are_allowed(self, stored_sessions_client, monkeypatch):
+        from app.db import database
 
-    def test_delete_refused_preserves_home(self, stored_sessions_client, assistant_fixture, monkeypatch):
-        from app.core import assistant_service as service
-        from app.db import assistant as store, database
-
-        sid = assistant_fixture["id"]
-        before = database.get_session(sid)
-        cleanup = AsyncMock()
-        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
-        response = stored_sessions_client.delete(f"/api/v1/sessions/{sid}")
-        assert response.status_code == 409
-        assert response.json() == {
-            "detail": "Your personal assistant is a persistent conversation and cannot be deleted"
-        }
-        assert database.get_session(sid) == before
-        assert store.get_state(service.assistant_id())["home_session_id"] == sid
-        cleanup.assert_not_called()
-
-    def test_batch_delete_skips_home_and_deletes_ordinary_sessions(
-        self, stored_sessions_client, assistant_fixture, monkeypatch,
-    ):
-        from app.core import assistant_service as service
-        from app.db import assistant as store, database
-
-        sid = assistant_fixture["id"]
-        before = database.get_session(sid)
-        ordinary_ids = ["ordinary-before-home", "ordinary-after-home"]
-        for ordinary_id in ordinary_ids:
-            database.create_session(ordinary_id, "default", title="Ordinary")
-        cleanup = AsyncMock()
-        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
-        response = stored_sessions_client.post(
-            "/api/v1/sessions/batch-delete",
-            json={"session_ids": [ordinary_ids[0], sid, ordinary_ids[1]]},
-        )
-        assert response.status_code == 200
-        assert response.json() == {
-            "deleted_count": 2,
-            "total_requested": 3,
-            "errors": [f"Deletion failed for session {sid}: Your personal assistant is a persistent conversation and cannot be deleted"],
-        }
-        assert database.get_session(sid) == before
-        assert store.get_state(service.assistant_id())["home_session_id"] == sid
-        assert all(database.get_session(ordinary_id) is None for ordinary_id in ordinary_ids)
-        assert [call.args[0] for call in cleanup.await_args_list] == ordinary_ids
-
-    def test_status_only_patch_still_allowed(self, stored_sessions_client, assistant_fixture):
-        from app.core import assistant_service as service
-        from app.db import assistant as store, database
-
-        sid = assistant_fixture["id"]
-        response = stored_sessions_client.patch(f"/api/v1/sessions/{sid}", params={"status": "completed"})
-        assert response.status_code == 200
-        row = database.get_session(sid)
-        assert row["status"] == "completed"
-        assert row["title"] == assistant_fixture["title"]
-        assert store.get_state(service.assistant_id())["home_session_id"] == sid
-
-    def test_ordinary_rename_and_delete_still_allowed(
-        self, stored_sessions_client, assistant_fixture, monkeypatch,
-    ):
-        from app.core import assistant_service as service
-        from app.db import assistant as store, database
-
+        database.create_session("hidden-mutation", "default", title="Hidden", hidden=True)
         database.create_session("ordinary-mutation", "default", title="Ordinary")
-        url = "/api/v1/sessions/ordinary-mutation"
-        response = stored_sessions_client.patch(url, params={"title": "Renamed"})
-        assert response.status_code == 200
-        assert database.get_session("ordinary-mutation")["title"] == "Renamed"
+        monkeypatch.setattr("app.api.sessions.sdk_rename_session", MagicMock())
         monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", AsyncMock())
-        assert stored_sessions_client.delete(url).status_code == 204
-        assert database.get_session("ordinary-mutation") is None
-        assert store.get_state(service.assistant_id())["home_session_id"] == assistant_fixture["id"]
+        for sid in ("hidden-mutation", "ordinary-mutation"):
+            url = f"/api/v1/sessions/{sid}"
+            assert stored_sessions_client.patch(url, params={"title": "Renamed"}).status_code == 200
+            assert database.get_session(sid)["title"] == "Renamed"
+            assert stored_sessions_client.delete(url).status_code == 204
+            assert database.get_session(sid) is None
+
+    def test_batch_delete_deletes_every_session(self, stored_sessions_client, monkeypatch):
+        from app.db import database
+
+        ids = ["batch-one", "batch-hidden", "batch-two"]
+        for sid in ids:
+            database.create_session(sid, "default", title="Batch", hidden=sid == "batch-hidden")
+        cleanup = AsyncMock()
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
+        response = stored_sessions_client.post("/api/v1/sessions/batch-delete", json={"session_ids": ids})
+        assert response.status_code == 200
+        assert response.json() == {"deleted_count": 3, "total_requested": 3, "errors": None}
+        assert all(database.get_session(sid) is None for sid in ids)
 
 
 class TestUpdateSession:

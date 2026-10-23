@@ -1,4 +1,4 @@
-"""Assistant overlays, linked jobs and real peer queue steering."""
+"""Owner-chat orchestration with the built-in agent and real peer queue steering."""
 from unittest.mock import AsyncMock
 import pytest
 
@@ -9,30 +9,30 @@ from tests.core.test_session_orchestration import chat
 from tests.core.test_send_steering import _Adapter, _pooled, _live_runtime
 
 
-def test_hidden_home_still_accepts_voice_attachment(assistant_fixture):
+def test_only_visible_chats_accept_voice_attachment(assistant_fixture):
+    from fastapi import HTTPException
     from app.api.voice import _check_attachable_conversation
-    assert assistant_fixture["hidden"]
     _check_attachable_conversation(assistant_fixture)
+    hidden = database.create_session("hidden-chat", "assistant-agent", is_active=True, hidden=True,
+                                     target_instance_id=service.assistant_id())
+    with pytest.raises(HTTPException):
+        _check_attachable_conversation(hidden)
 
 
-def test_start_links_normal_session_without_replacing_agent(assistant_fixture):
+def test_start_makes_a_normal_unlinked_session_without_replacing_agent(assistant_fixture):
     home = assistant_fixture["id"]
     database.set_session_active(home, True)
     turn = turns.enqueue_turn(home, "user", prompt="Coordinate", profile_id="assistant-agent")
     turns.settle_turn(turn["id"], "completed")
     created = orch._queue(home, {"title": "Independent job", "prompt": "Research", "request_id": "job"}, "start")
     row = database.get_session(created["session_id"])
-    assert row["profile_id"] == service.AGENT_ID and not row["is_worker"]
-    assert service.home_for_session(row["id"]) == home
-    assert service.build_role_context(home).startswith("# Personal assistant")
-    assert home in service.build_role_context(row["id"])
+    assert row["profile_id"] == "assistant-agent" and not row["is_worker"]
     turns.settle_turn(created["turn_id"], "completed")
     reply = orch._queue(row["id"], {"session_id": home, "message": "Research complete", "request_id": "return"}, "message")
     assert reply["session_id"] == home
     from app.db import assistant as store
-    # A linked specialist reporting back must not list the enduring home as
-    # another delegated task in its own activity.
-    assert {job["session_id"] for job in store.get_activity(service.assistant_id())} == {row["id"]}
+    # Started work is no longer recorded as assistant activity.
+    assert store.get_activity(service.assistant_id()) == []
 
 
 async def test_peer_message_joins_safe_boundary_with_non_user_attribution(mock_db, monkeypatch):
@@ -93,7 +93,7 @@ def test_proactive_payload_cannot_steer_into_foreground(mock_db):
     queued = turns.enqueue_turn(row["id"], "agent_message", prompt="external", profile_id="agent", payload={"_assistant_proactive": {"version": 1}})
     assert not runtime._steer_eligible(queued)
 
-async def test_task_worker_producer_links_primary_identity(assistant_fixture, monkeypatch, tmp_path):
+async def test_task_worker_producer_is_not_linked_as_assistant_activity(assistant_fixture, monkeypatch, tmp_path):
     from app.core import provider_agent, turn_manager
     home = assistant_fixture["id"]
     from app.core import project_resolver
@@ -115,10 +115,5 @@ async def test_task_worker_producer_links_primary_identity(assistant_fixture, mo
     assert worker.ok, worker.error
     created = database.get_session(worker.session_id)
     assert created["is_worker"] and created["parent_session_id"] == home
-    assert service.home_for_session(created["id"]) == home
     from app.db import assistant as store
-    activity = store.get_activity(service.assistant_id())
-    linked = next(job for job in activity if job["session_id"] == created["id"])
-    assert linked["status"] == "completed"
-    assert linked["cost_usd"] == 0.42
-    assert linked["ended_at"] is not None
+    assert store.get_activity(service.assistant_id()) == []

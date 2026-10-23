@@ -254,7 +254,7 @@ def test_a_local_worker_under_the_remote_child_asks_the_parent_too(workers, monk
     assert row["payload"]["provider_agent"]["worker_session_id"] == child
 
 
-def test_the_assistant_home_answers_in_conversation(workers, monkeypatch, proxies, held):
+def test_the_starter_chat_answers_in_conversation(workers, monkeypatch, proxies, held):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
     from app.core import session_orchestration
@@ -634,19 +634,15 @@ def test_a_child_resumed_by_a_message_asks_the_parent_and_reports_only_its_own(
         assert "permission for Bash" not in second
 
 
-# --- with the assistant's limits (S11) ------------------------------------------------
+# --- with the coordination limits (S11) ------------------------------------------------
 
 def test_a_limit_stop_withdraws_the_childs_open_prompt(workers, monkeypatch, proxies, held):
     """The daily limit stops the child through the S8 path, so its prompt goes too."""
-    from app.core import assistant_limits as limits, turn_recorder
+    from app.core import assistant_limits as limits
     from app.db import assistant_limits as limits_db
-    from tests.core.network.test_remote_task_limits import book, make_home, set_limits
-
-    async def no_brief(*args, **kwargs):
-        return "brief"
-    monkeypatch.setattr(turn_recorder, "record_brief", no_brief)
+    from tests.core.network.test_remote_task_limits import book, make_coordinator, set_limits, started_child
     a, b, _ = network(workers, monkeypatch)
-    make_home(b, "caller")
+    make_coordinator(b, "caller")
     child = started_child(a, b)
     turn = start_child_turn(a, child)
     with b.active():

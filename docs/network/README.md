@@ -122,16 +122,17 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    reinstalls to match one, so publishing on a version difference made two
    workers on different versions overwrite the row on every scan and send
    each other a new operation forever.
-9. **Assistant.** The owner has one assistant across workers. Its
-   configuration and the id of its one home conversation travel as the
-   `assistant` collection (`assistant_account`, a single row). The worker that
-   owns the home session runs it and is the only one that runs background
-   research; the others open the home as a remote session and turn research off
-   in their own runner row. When two workers each hold a home, the older
-   session wins everywhere (ties go to the lower session id) and the other is
-   kept as an ordinary conversation. Research runs, events and source
-   watermarks stay on the worker that runs research. See
-   `app/core/assistant_service.py`.
+9. **Assistant.** The personal assistant's own conversation (its "home") was
+   retired in #371: there is no home to elect, open remotely or protect, and a
+   migration deleted the old ones. What is left is background research. Its
+   configuration (the built-in agent, the opted-in sources and the detected
+   introduction) travels as the `assistant` collection (`assistant_account`, a
+   single row); each worker projects it onto its own runner row and researches
+   only the sources whose connectors run there. Research runs, events and
+   source watermarks stay on that worker. The row's `home_session_id`,
+   `home_device_id`, `home_created_at`, `assistant_name` and `avatar_id`
+   fields still sync, unused, only so peers on an older release keep working.
+   See `app/core/assistant_service.py`.
 
 ## Trust
 

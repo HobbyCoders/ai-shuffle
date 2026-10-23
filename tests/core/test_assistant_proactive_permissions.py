@@ -90,7 +90,7 @@ async def test_delegated_pretool_and_wake_revalidate_provenance(admitted):
     assert policy("mcp__fluid_bundled__AssistantReadSource", {})
 
 
-@pytest.mark.parametrize("change", ["agent", "optout", "credential", "agent_scope", "runner", "home_stop", "research_stop"])
+@pytest.mark.parametrize("change", ["agent", "optout", "credential", "agent_scope", "runner", "research_stop"])
 async def test_running_registry_rechecks_live_source_and_session_scope(admitted, change):
     run, turn = admitted
     options = SessionOptions(model="fake", permission_mode="bypassPermissions", extra={
@@ -111,12 +111,7 @@ async def test_running_registry_rechecks_live_source_and_session_scope(admitted,
         with get_db() as conn:
             conn.cursor().execute("UPDATE connectors SET runner_id=%s WHERE id=%s", ("other-worker", "conn-mail"))
     else:
-        if change == "home_stop":
-            stopped = turns.enqueue_turn(run["home_session_id"], "user", prompt="Stopped")
-            turn_id = stopped["id"]
-        else:
-            turn_id = turn["id"]
-        turns.settle_turn(turn_id, "aborted", stop_reason="user_stopped")
+        turns.settle_turn(turn["id"], "aborted", stop_reason="user_stopped")
     outcome = await registry.dispatch("AssistantReadSource", {"source_id": "conn-mail"})
     assert outcome.is_error, change
     assert not outcome.text.startswith('{"run_id"'), change
@@ -192,7 +187,6 @@ async def test_real_sdk_option_builder_preserves_agent_prompt_and_admission(admi
     profile["config"]["allowed_tools"] = [*modes.PROACTIVE_TOOL_SURFACE, "Read", "Task"]
     options, _ = build_options_from_profile(profile, session_id=run["session_id"], overrides=turn["overrides"])
     assert "Original owner agent prompt" in str(options.system_prompt)
-    assert run["home_session_id"] in str(options.system_prompt)
     adapter = ha.HarnessAdapter()
     adapter.connect = AsyncMock()
     await adapter.connect_with_sdk_options(options)

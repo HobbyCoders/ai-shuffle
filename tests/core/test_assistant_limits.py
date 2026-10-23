@@ -1,4 +1,4 @@
-"""The owner's spending and job time limits for the persistent assistant."""
+"""The owner's spending and job time limits for coordination chats and their jobs."""
 import ast
 import pathlib
 from datetime import datetime, timedelta, timezone
@@ -22,32 +22,16 @@ def book(session_id, cost, at=None):
             "VALUES (%s,'m',1,1,%s,1,%s)", (session_id, cost, at or datetime.now(timezone.utc)))
 
 
-def job(title="Background job", created=None):
-    """A session the assistant started, linked to its home."""
+def job(parent, title="Background job"):
+    """A Task worker a coordination chat (or one of its jobs) started."""
     sid = "job-" + title.lower().replace(" ", "-")
-    database.create_session(sid, "assistant-agent", title=title)
-    if created is not None:
-        with get_db() as conn:
-            conn.cursor().execute("UPDATE sessions SET created_at=%s WHERE id=%s", (created, sid))
-    store.link_job(service.assistant_id(), sid)
+    database.create_session(sid, "assistant-agent", title=title, parent_session_id=parent, is_worker=True,
+                            hidden=True, target_instance_id=service.assistant_id())
     return sid
 
 
 def set_limits(**changes):
     return limits_db.update(service.assistant_id(), changes)
-
-
-@pytest.fixture
-def notices(monkeypatch):
-    posted = []
-
-    async def record(session_id, text, extra_payload=None):
-        posted.append((session_id, text, extra_payload))
-        return "brief-" + str(len(posted))
-
-    from app.core import turn_recorder
-    monkeypatch.setattr(turn_recorder, "record_brief", record)
-    return posted
 
 
 @pytest.fixture
@@ -84,7 +68,7 @@ def answer_job_question(session_id, human_input, launch=None):
 @pytest.mark.parametrize("human_input", [False, True])
 @pytest.mark.parametrize("limit_kind", ["daily_limit", "job_time"])
 def test_question_answer_job_limits(assistant_fixture, human_input, limit_kind):
-    worker = job("Answering job")
+    worker = job(assistant_fixture["id"], "Answering job")
     set_limits(spend_limit_enabled=limit_kind == "daily_limit", daily_spend_limit_usd=1,
                job_limit_enabled=limit_kind == "job_time", max_job_minutes=30)
     book(worker, 2)
@@ -105,7 +89,7 @@ def test_question_answer_job_limits(assistant_fixture, human_input, limit_kind):
 
 @pytest.mark.parametrize("human_input", [False, True])
 def test_remote_usage_after_answer_keeps_launch_identity_and_owner_classification(assistant_fixture, human_input):
-    worker = job("Remote answer")
+    worker = job(assistant_fixture["id"], "Remote answer")
     resumed = answer_job_question(worker, human_input, {
         "orchestration_remote_origin": "starter-device", "orchestration_report_device": "starter-device",
     })
@@ -127,11 +111,11 @@ def test_defaults_without_a_saved_row(assistant_fixture):
     assert not state["limit_reached"] and not state["warning"]
 
 
-def test_counts_home_and_everything_it_started_together(assistant_fixture):
+def test_counts_a_coordination_chat_and_everything_it_started_together(assistant_fixture):
     home = assistant_fixture["id"]
-    worker = job("Worker")
-    chat = job("Started chat")
-    nested = job("Nested")  # Started from a linked job: linked to the same home.
+    worker = job(home, "Worker")
+    chat = job(home, "Second worker")
+    nested = job(worker, "Nested")  # Started from a job: counted with the same chat.
     database.create_project("ordinary-project", "Ordinary project", None, "/example/project")
     outsider = database.create_session("outsider", "assistant-agent", title="Independent project work", project_id="ordinary-project")
     for sid, cost in ((home, 1.25), (worker, 2.0), (chat, 0.5), (nested, 0.25), (outsider["id"], 50.0)):
@@ -139,22 +123,9 @@ def test_counts_home_and_everything_it_started_together(assistant_fixture):
     assert limits.status()["spent_today_usd"] == pytest.approx(4.0)
 
 
-def test_a_messaged_older_chat_counts_only_from_its_link(assistant_fixture):
-    older = database.create_session("older-chat", "assistant-agent", title="Older chat")
-    now = datetime.now(timezone.utc)
-    start = limits.day_window(now)[1]
-    linked_at = start + (now - start) / 2
-    book("older-chat", 7.0, start + (linked_at - start) / 2)  # Before the assistant touched it.
-    store.link_job(service.assistant_id(), older["id"])
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE assistant_runs SET created_at=%s WHERE session_id=%s", (linked_at, older["id"]))
-    book("older-chat", 1.5, now)
-    assert limits.status(now)["spent_today_usd"] == pytest.approx(1.5)
-
-
 def test_running_turns_count_before_they_are_booked(assistant_fixture):
     from app.db.session_events import append_events
-    worker = job("Long worker")
+    worker = job(assistant_fixture["id"], "Long worker")
     turn = live_turn(worker)
     usage = lambda index, cost: {"type": "turn.usage", "turn_id": turn["id"],
                                  "payload": {"usage": {"model_call_index": index, "cost_usd": cost}}}
@@ -184,43 +155,36 @@ def test_browser_local_timezone_preference_reads_as_utc(assistant_fixture):
     assert limits.owner_timezone()[1] == "UTC"
 
 
-async def test_eighty_percent_notice_fires_once_per_day(assistant_fixture, notices, stops):
+async def test_eighty_percent_is_a_warning_and_stops_nothing(assistant_fixture, stops):
     home = assistant_fixture["id"]
     set_limits(daily_spend_limit_usd=10)
     book(home, 7.0)
-    await limits.enforce()
-    assert notices == []
+    assert not limits.status()["warning"]
     book(home, 1.5)
+    state = limits.status()
+    assert state["warning"] and not state["limit_reached"]
     await limits.enforce()
-    await limits.enforce()
-    assert len(notices) == 1
-    session_id, text, extra = notices[0]
-    assert session_id == home and extra == {"source": limits.NOTICE_SOURCE}
-    assert "85% of today's $10.00 spending limit" in text and "Assistant page under Limits" in text
     stops.assert_not_awaited()
 
 
-async def test_reaching_the_limit_blocks_new_work_and_stops_running_work(assistant_fixture, notices, stops):
+async def test_reaching_the_limit_blocks_new_work_and_stops_running_work(assistant_fixture, stops):
     home = assistant_fixture["id"]
-    worker = job("Fix tests")
+    worker = job(assistant_fixture["id"], "Fix tests")
     turn = live_turn(worker)
     set_limits(daily_spend_limit_usd=5)
     book(worker, 5.5)
     reason = limits.start_refusal(home)
-    assert reason and "$5.00" in reason and "only the owner" in reason
+    assert reason and "$5.00" in reason and "only the owner can change it in Settings > Usage" in reason
     assert limits.start_refusal(worker) == reason  # Nested starts from a job are refused too.
-    assert limits.turn_refusal(home, "user")  # The home starts no new turn, whoever asks.
+    assert limits.turn_refusal(home, "agent_message")
+    assert limits.turn_refusal(home, "user") is None  # The owner's own turn in their chat runs.
     assert limits.turn_refusal(worker, "agent_message")
     assert limits.turn_refusal(worker, "user") is None  # The owner's own turn in a job runs.
     assert limits.turn_refusal("unrelated", "wakeup") is None
     await limits.enforce()
     stops.assert_awaited_once_with(worker, "stop", turn_id=turn["id"], source="assistant")
-    assert len(notices) == 1
-    text = notices[0][1]
-    assert text.startswith("Today's $5.00 spending limit is reached ($5.50 spent)")
-    assert 'stopped 1 background job ("Fix tests")' in text and "Assistant page under Limits" in text
-    await limits.enforce()  # Stopped and reported once.
-    assert stops.await_count == 1 and len(notices) == 1
+    await limits.enforce()  # Stopped once.
+    assert stops.await_count == 1
 
 
 def test_start_session_and_task_are_refused_at_the_limit(assistant_fixture, monkeypatch):
@@ -252,8 +216,8 @@ async def test_research_is_not_admitted_at_the_limit(assistant_fixture, monkeypa
     assert admitted == [1]
 
 
-async def test_a_job_past_its_time_limit_is_stopped_and_reported(assistant_fixture, notices, stops):
-    worker = job("Nightly sweep")
+async def test_a_job_past_its_time_limit_is_stopped(assistant_fixture, stops):
+    worker = job(assistant_fixture["id"], "Nightly sweep")
     turn = live_turn(worker)
     set_limits(max_job_minutes=30)
     with get_db() as conn:
@@ -261,40 +225,26 @@ async def test_a_job_past_its_time_limit_is_stopped_and_reported(assistant_fixtu
     assert limits.turn_refusal(worker, "agent_message")
     await limits.enforce()
     stops.assert_awaited_once_with(worker, "stop", turn_id=turn["id"], source="assistant")
-    assert notices[0][1] == ('The background job "Nightly sweep" ran past its 30-minute limit, so I stopped it; '
-                             "you can change it on the Assistant page under Limits.")
 
 
-async def test_an_older_chat_the_assistant_only_messaged_has_no_job_time_limit(assistant_fixture, notices, stops):
-    created = datetime.now(timezone.utc) - timedelta(days=2)
-    older = job("Owner's chat", created=created)
-    live_turn(older)
-    set_limits(max_job_minutes=5)
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (600 * 60000, older))
-    await limits.enforce()
-    stops.assert_not_awaited()
-    assert notices == []
-
-
-async def test_limits_switched_off_block_nothing(assistant_fixture, notices, stops):
+async def test_limits_switched_off_block_nothing(assistant_fixture, stops):
     home = assistant_fixture["id"]
-    worker = job("Free run")
+    worker = job(assistant_fixture["id"], "Free run")
     live_turn(worker)
     set_limits(spend_limit_enabled=False, job_limit_enabled=False, max_job_minutes=5)
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (600 * 60000, worker))
     book(home, 500.0)
     state = limits.status()
-    assert state["spent_today_usd"] == 500 and not state["limit_reached"] and not state["warning"]
+    # With both limits off, coordination chats are not even measured.
+    assert not state["limit_reached"] and not state["warning"]
     assert limits.start_refusal(home) is None
     assert limits.turn_refusal(home, "user") is None and limits.turn_refusal(worker, "agent_message") is None
     await limits.enforce()
     stops.assert_not_awaited()
-    assert notices == []
 
 
-def test_get_usage_reports_todays_spend_to_the_home(assistant_fixture):
+def test_get_usage_reports_todays_spend_to_a_coordination_chat(assistant_fixture):
     home = assistant_fixture["id"]
     book(home, 3.0)
     block = limits.session_usage(home)
@@ -329,7 +279,7 @@ def _tool_sources():
 
 
 def test_no_model_facing_tool_can_change_the_limits():
-    writers = {"update", "claim_notice", "release_notice", "record_stop", "mark_reported"}
+    writers = {"update", "record_stop"}
     for path in _tool_sources():
         source = path.read_text(encoding="utf-8")
         assert "assistant_limits (" not in source and "UPDATE assistant_limits" not in source, path
@@ -349,9 +299,7 @@ def test_stops_are_recorded_once(assistant_fixture):
     aid = service.assistant_id()
     assert limits_db.record_stop(aid, "s", "t1", "job_time", "Job")
     assert not limits_db.record_stop(aid, "s", "t1", "job_time", "Job")
-    assert [row["turn_id"] for row in limits_db.unreported_stops(aid)] == ["t1"]
-    limits_db.mark_reported(["t1"])
-    assert limits_db.unreported_stops(aid) == []
+    assert limits_db.stopped("t1") and not limits_db.stopped("t2")
 
 
 def test_schema_is_idempotent():
@@ -366,35 +314,20 @@ def test_schema_is_idempotent():
         limits_db.update("x", {"unknown": 1})
 
 
-def test_notice_text_is_one_plain_sentence():
-    state = dict(daily_spend_limit_usd=20.0, spent_today_usd=21.5, max_job_minutes=120)
-    text = limits.reached_notice(state, [{"session_id": "home", "label": None},
-                                         {"session_id": "a", "label": "A"}, {"session_id": "b", "label": None}], "home")
-    assert text == ("Today's $20.00 spending limit is reached ($21.50 spent), so I stopped my current reply and "
-                    '2 background jobs ("A" and 1 more) and won\'t start new work until tomorrow; '
-                    "you can change it on the Assistant page under Limits.")
-    assert limits.time_notice(state, [{"label": "A"}, {"label": "B"}]) == (
-        '2 background jobs ran past their 2-hour limit, so I stopped them ("A", "B"); '
-        "you can change it on the Assistant page under Limits.")
-
-
-async def test_the_homes_own_reply_is_stopped_and_reported_once_it_settles(assistant_fixture, notices, stops):
+async def test_the_owners_own_turn_in_a_coordination_chat_is_never_stopped(assistant_fixture, stops):
     home = assistant_fixture["id"]
-    turn = live_turn(home, "user")
+    live_turn(home, "user")
     set_limits(daily_spend_limit_usd=2)
     book(home, 2.5)
     await limits.enforce()
-    stops.assert_awaited_once_with(home, "stop", turn_id=turn["id"], source="assistant")
-    assert notices == []  # Posted between turns, never into a live one.
-    turns.settle_turn(turn["id"], "aborted")
-    await limits.enforce()
-    assert len(notices) == 1 and "so I stopped my current reply and won't start new work" in notices[0][1]
+    stops.assert_not_awaited()
 
 
 # --- jobs on another worker ----------------------------------------------------------
 
 def remote_job(session_id="remote-job", kind="task"):
-    return store.link_remote_job(service.assistant_id(), session_id, "unraid-device", kind, "Remote job")
+    return store.link_remote_job(service.assistant_id(), session_id, "unraid-device", kind, "Remote job",
+                                 starter_session_id="starter-chat")
 
 
 def test_a_remote_jobs_rise_is_booked_once_on_the_day_it_is_learned(assistant_fixture):

@@ -1,7 +1,6 @@
 """Work an owner chat starts with StartSession: report-back, named projects
-and Away-style handling. Since #371 step 5 every owner chat's started chats
-get the Away-style handling the legacy assistant home's did; only the home's
-wider permission scope stays home-only."""
+and Away-style handling. Since #371 every owner chat's started chats get the
+Away-style handling the retired assistant home's did."""
 import json
 from unittest.mock import AsyncMock
 
@@ -95,7 +94,6 @@ async def test_ordinary_owner_start_session_reports_automatically(mock_db, monke
     assert "reports back to you automatically" in result["note"] and "project" not in result
     new_id = result["session_id"]
     assert orch.started_by_owner(new_id) == "caller"
-    assert orch.started_by_home(new_id) is None
     # Its approvals go to the starter, so its questions are answered for it.
     assert approvals.assistant_route(new_id).parent_session_id == "caller"
     assert away_mode.answers_questions(new_id)
@@ -163,7 +161,7 @@ async def test_started_chat_reports_back_once_in_the_report_shape(home):
     assert "reports back to you automatically" in result["note"]
     assert "MessageSession" in result["note"] and "approvals it needs appear" in result["note"]
     new_id = result["session_id"]
-    assert orch.started_by_home(new_id) == home_id
+    assert orch.started_by_owner(new_id) == home_id
     run(new_id, result["turn_id"], "Fixed the race in test_sync; suite passes. Did not run e2e.")
     await turn_scheduler.on_turn_settled(new_id, result["turn_id"], "completed")
     [wake] = wakes(home_id)
@@ -337,7 +335,7 @@ async def test_registered_project_checked_out_here_starts_here(home, tmp_path, b
     assert not row.get("worktree_id") and not row.get("worktree_path")
     assert result["project"] == {"id": project["id"], "name": "ai-shuffle"}
     assert result["note"].startswith("Runs in ai-shuffle on this worker.")
-    assert orch.started_by_home(row["id"]) == home_id
+    assert orch.started_by_owner(row["id"]) == home_id
 
 
 async def test_project_with_no_checkout_anywhere_is_refused_plainly(home):

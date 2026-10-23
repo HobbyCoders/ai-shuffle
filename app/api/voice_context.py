@@ -110,13 +110,6 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
     if "permission_mode" in kwargs and kwargs["permission_mode"] is not None:
         kwargs["permission_mode"] = kwargs["permission_mode"].strip()
 
-    # The assistant's home always runs at its model's default effort, so a
-    # call there never stores one.
-    if "effort" in kwargs:
-        from app.core.assistant_service import is_primary_session
-
-        if is_primary_session(session_id):
-            kwargs.pop("effort")
     # A window is checked once the model change is stored, as the picker checks
     # it; one the model does not offer is ignored (null still clears the pin).
     window = kwargs.pop("context_window") if kwargs.get("context_window") else None

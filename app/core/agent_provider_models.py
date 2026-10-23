@@ -960,25 +960,15 @@ def file_subagent_targets(
     return tuple(targets)
 
 
-# The owner's persistent assistant hands work off without waiting to be told;
-# every other session waits for the user to authorize subagents.
+# Every session waits for the user to authorize subagents.
 DELEGATE_WHEN_AUTHORIZED = "Delegate only when the user authorizes subagents. "
-DELEGATE_BY_DEFAULT = (
-    "Delegate by default: hand work that will take more than a few minutes, "
-    "or that needs a checkout, to a subagent without asking first. "
-)
 
 
 def parent_subagent_guidance(
     *, task_available: bool = True, swarm_available: bool = True,
     monitor_available: bool = True, browser_available: bool = True,
-    delegate_by_default: bool = False,
 ) -> str:
-    """Describe only workflows exposed by this session's effective surface.
-
-    ``delegate_by_default`` is for the assistant's home only: it replaces the
-    authorize-first delegation line.
-    """
+    """Describe only workflows exposed by this session's effective surface."""
     from fluid.tools.fragments import DELEGATION_SIZING, END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING_BRIEF
 
     parts = []
@@ -993,7 +983,7 @@ def parent_subagent_guidance(
             "Match the role to the work: rendered UI goes to the frontend role "
             "when present, not a backend-only worker. Handle quick direct work "
             "yourself. "
-            + (DELEGATE_BY_DEFAULT if delegate_by_default else DELEGATE_WHEN_AUTHORIZED)
+            + DELEGATE_WHEN_AUTHORIZED
             + SUBAGENT_WORKTREE_GUIDANCE + "\n"
             # Swarm's coverage/limit rules ride its own deferred docs
             # (harness_adapter._install_task_contract adds them there).

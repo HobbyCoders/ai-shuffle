@@ -1,15 +1,15 @@
-"""What the owner's assistant does on its own, and what it asks the owner first.
+"""What an owner coordination chat does on its own, and what it asks the owner first.
 
-Scope (:func:`scope_for_session`): the assistant's home conversation, the chats
-it starts, and the Task workers under either. Every other session is untouched.
+Scope: owner coordination chats (no-project owner chats; ``query_options``
+stamps the scope dict on their options). Every other session is untouched.
+(The name is historical: these levels began with the retired personal
+assistant, #371.)
 
-Those sessions run in Bypass (``query_options``), so ordinary work goes ahead
-without a prompt. Every tool has a risk level, declared once in
-:data:`TOOL_LEVELS`:
+Every tool has a risk level, declared once in :data:`TOOL_LEVELS`:
 
 * ``low`` goes ahead.
-* ``high`` asks the owner in the assistant's conversation and waits for a firm
-  yes (``app.core.assistant_confirm``), whatever the session's mode.
+* ``high`` asks the owner in the chat and waits for a firm yes
+  (``app.core.assistant_confirm``), whatever the session's mode.
 
 A tool with no declared level is high, so a new built-in, MCP or plugin tool
 asks until someone declares it here. Tools whose risk depends on their
@@ -33,18 +33,17 @@ import ntpath
 import os
 import posixpath
 import re
-import tempfile
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Union  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 LOW, HIGH = "low", "high"
 
-# What a scope dict carries (built by scope_for_session, stamped on the session
+# What a scope dict carries (built by query_options, stamped on the session
 # options, read back by the runtime seams): plain data, so it survives the
 # options rebuild and never needs a database read at decision time.
 #   session_id       the session the call runs in
-#   home_session_id  the assistant home it belongs to
+#   home_session_id  the coordination chat it belongs to (the same session)
 #   roots            absolute paths of registered projects, their checkouts,
 #                    the app workspace and the temp directory
 #   cwd              the session's working directory, when known
@@ -588,96 +587,4 @@ ASK_REASON = (
 NO_OWNER_DENIAL = (
     "Denied: this action needs the owner's yes in the starting conversation, and "
     "nobody can be asked from here. Tell the owner what you wanted to do."
-)
-
-
-# ---------------------------------------------------------------------------
-# Scope
-# ---------------------------------------------------------------------------
-
-# How far up a chain of Task workers the home may be.
-_MAX_DEPTH = 4
-
-
-def home_of(session_id: Optional[str]) -> Optional[str]:
-    """The assistant home ``session_id`` works for, or None.
-
-    The home itself; a chat the home started; or a Task worker whose parent
-    chain reaches either. Never raises.
-    """
-    try:
-        from app.core import assistant_service
-        from app.db import database
-
-        current = session_id
-        for _ in range(_MAX_DEPTH):
-            if not current:
-                return None
-            if assistant_service.is_primary_session(current):
-                return current
-            home = _started_by_home(current)
-            if home and assistant_service.is_primary_session(home):
-                return home
-            row = database.get_session(current)
-            if not row or not row.get("is_worker"):
-                return None
-            current = row.get("parent_session_id")
-    except Exception:  # noqa: BLE001 — an unknown session keeps ordinary behaviour
-        logger.debug("assistant scope lookup failed for %s", session_id, exc_info=True)
-    return None
-
-
-def _started_by_home(session_id: str) -> Optional[str]:
-    try:
-        from app.core.session_orchestration import started_by_home
-    except ImportError:
-        return None
-    return started_by_home(session_id)
-
-
-def project_roots() -> list:
-    """Registered projects, their checkouts, the workspace and the temp dir."""
-    from app.core.config import settings
-    from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
-    from app.db import projects
-    from app.db.base import get_db
-
-    roots = {str(settings.effective_workspace_dir), tempfile.gettempdir()}
-    for project in projects.get_all_projects():
-        if project.get("path"):
-            roots.add(get_project_working_dir(project))
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM worktrees")
-        for row in cursor.fetchall():
-            try:
-                roots.add(get_worktree_working_dir(dict(row)))
-            except (ValueError, TypeError):
-                continue
-    return sorted(roots)
-
-
-def scope_for_session(session_id: Optional[str], cwd: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """The scope dict for an assistant session, or None for any other session."""
-    home = home_of(session_id)
-    if not home:
-        return None
-    try:
-        roots = project_roots()
-    except Exception:  # noqa: BLE001 — no roots means every path asks
-        logger.warning("Could not list project roots for %s", session_id, exc_info=True)
-        roots = []
-    return {"session_id": session_id, "home_session_id": home, "roots": roots, "cwd": cwd}
-
-
-# Shown to the assistant in its instructions (static text, so the prompt
-# prefix stays cached).
-ASK_LIST_SUMMARY = (
-    "spending money beyond the model calls themselves; deleting or overwriting anything outside a "
-    "project's version control, force pushes, history rewrites and branch or repository deletion; "
-    "merging into a default branch, deploys, releases, workflow runs and worker restarts or updates; "
-    "private access to machines, folders or service credentials, and anything that reads or moves a "
-    "secret; writes on the owner's behalf to email, chat, posts or repositories he does not own; "
-    "computer use of his desktop and acting in the browser; changing app settings, permissions, "
-    "hooks, MCP servers or automations; and anything outside his registered projects"
 )

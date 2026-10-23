@@ -9,8 +9,8 @@ runs the assistant fills it from what this install already knows:
 * repositories: the GitHub remotes of this worker's project checkouts;
 * projects: the project list.
 
-The owner sees the result read-only on the Assistant page and can correct a
-field. A correction wins over detection until the owner clears it. The stored
+It sets the default git author for a new repository (``api/git.py``). A
+correction an older release saved wins over detection until it is cleared. The stored
 value lives in the synced account row's ``introduction`` column::
 
     {"detected": {...}, "corrections": {...}}

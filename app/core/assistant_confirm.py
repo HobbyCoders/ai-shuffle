@@ -1,14 +1,15 @@
-"""Approvals the owner gives the assistant in the conversation, not on a card.
+"""Approvals the owner gives in the conversation, not on a card.
 
-When the assistant's home, a Task worker under it, or a chat it started with
+When an owner chat, a Task worker under it, or a chat it started with
 StartSession needs the owner's decision, the ordinary permission prompt is
-raised on the home (``provider_agent_approvals``) and marked
-``assistant_confirm``. The client shows it as one plain question from the
-assistant instead of an approval card.
+raised on that owner chat (``provider_agent_approvals``) and marked
+``assistant_confirm``. The client shows it as one plain question instead of
+an approval card. (The name is historical: it began in the retired personal
+assistant's conversation and now applies to every owner chat, #371.)
 
 The app decides, not the model:
 
-* Only the owner's own next message in the home resolves it. That is a turn the
+* Only the owner's own next message in that chat resolves it. That is a turn the
   owner authored (typed, or a spoken transcript), handed in by
   ``turn_manager.submit_async`` with source ``user``/``queue``. Peer messages,
   tool output, research briefs and anything a model writes never pass through

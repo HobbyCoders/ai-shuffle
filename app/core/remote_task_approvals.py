@@ -13,7 +13,7 @@ worker, so the prompt travels over the signed control channel:
   worker the child was sent to, then raises a proxy prompt on the root
   parent session exactly where a local child's prompt appears (the same card,
   labelled with the worker's name), or as an ``assistant_confirm`` question
-  when the root is the assistant's home. The decision goes back with
+  when the root is an owner chat. The decision goes back with
   ``task-approval-answer``.
 * **Target** again: :func:`handle_task_approval_answer` accepts the answer only
   from the dispatching worker, only once, and only while the tool call still
@@ -466,7 +466,7 @@ def _proxy_tag(request: _Request, route) -> Dict[str, Any]:
 
 
 def _confirm_marker(request: _Request, route) -> Optional[Dict[str, Any]]:
-    """The ``assistant_confirm`` marker when the root is the assistant's home. Never raises."""
+    """The ``assistant_confirm`` marker when the root is an owner chat. Never raises."""
     try:
         from app.core import assistant_confirm
         from app.core.session_orchestration import is_owner_session

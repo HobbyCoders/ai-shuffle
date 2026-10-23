@@ -137,19 +137,6 @@ async def test_stopped_target_organization_does_not_resume_it(chats, monkeypatch
     assert (await invoke(chats, "ArchiveSession", session_id="target")).is_error
 
 
-async def test_assistant_home_is_protected_by_mutation_guard(chats, monkeypatch):
-    from app.core import assistant_service as service
-    monkeypatch.setattr(service, "_guard_version", 0)
-    service.configure({"agent_id": "agent", "enabled": True})
-    home = service.open_home()
-    ctx = ToolCtx(extra={"session_orchestration": orch.make_handler(lambda: home["id"])})
-    # Drive the real home producer, then try to settle/archive that caller.
-    for name in ("SettleSession", "ArchiveSession"):
-        result = await invoke(ctx, name, session_id=home["id"])
-        assert result.is_error and "persistent" in result.text
-        assert sessions.get_session(home["id"])["is_active"]
-
-
 async def test_mcp_registration_executes_same_tools(chats, monkeypatch):
     from app.mcp.builtin_tools import create_builtin_tools_server, get_builtin_tool_names
     from app.core.provider.fluid_tool_bridge import BUILTINS_RISK_MAP, NATIVE_SHADOWED_BUILTINS
@@ -244,7 +231,6 @@ async def test_single_id_keeps_original_receipt(chats):
 
 @pytest.mark.parametrize("action", ["settle", "unsettle", "archive"])
 async def test_ids_mix_processes_each_item_independently(chats, monkeypatch, action):
-    from app.core import assistant_service as service
     database.create_api_user("other", "Other", "hash")
     for sid in ("ok1", "ok2", "sub", "voice", "worker", "foreign", "mobile"):
         sessions.create_session(sid, "agent", title=sid, is_active=action != "unsettle")
@@ -255,11 +241,8 @@ async def test_ids_mix_processes_each_item_independently(chats, monkeypatch, act
     # A chat bound to another mobile owner, without revocation.
     monkeypatch.setattr(orch, "_principal", lambda sid: {"owner": "phone"} if sid == "mobile" else None)
     monkeypatch.setattr("app.core.mobile_tool_identity.validate", lambda principal: None)
-    monkeypatch.setattr(service, "_guard_version", 0)
-    service.configure({"agent_id": "agent", "enabled": True})
-    home = service.open_home()["id"]
-    if action == "unsettle":
-        _set(home, is_active=False)  # legacy row; the tool must still refuse to touch it
+    # A hidden conversation (such as a retired assistant home) is never touched.
+    home = sessions.create_session("hidden", "agent", title="hidden", is_active=action != "unsettle", hidden=True)["id"]
     before = {sid: _state(sid) for sid in ("sub", "voice", "worker", "foreign", "mobile", home)}
     ids = ["ok1", "sub", "voice", "worker", "foreign", "mobile", home, "missing", "ok2", " ok1 "]
     result = await bulk(chats, TOOLS[action], session_ids=ids)
@@ -268,8 +251,7 @@ async def test_ids_mix_processes_each_item_independently(chats, monkeypatch, act
     assert result["already_in_state"] == 0 and result["failed"] == 0
     refused = {issue["session_id"]: issue["reason"] for issue in result["issues"]}
     assert result["refused"] == len(refused)
-    expected = {"sub", "voice", "worker", "foreign", "mobile", "missing"} | ({home} if action != "unsettle" else set())
-    assert expected <= set(refused) <= expected | {home}
+    assert set(refused) == {"sub", "voice", "worker", "foreign", "mobile", "missing", home}
     assert all(issue["outcome"] == "refused" for issue in result["issues"])
     for sid in ("sub", "voice", "worker", "foreign", "mobile", "missing"):
         assert refused[sid] == management.INACCESSIBLE  # unknown and foreign look the same

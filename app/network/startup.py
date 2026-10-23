@@ -384,7 +384,7 @@ def _on_applied(touched) -> None:
             plugins_sync.apply_desired(plugin_ids)
         except Exception:  # noqa: BLE001
             logger.warning("Applying plugin state failed", exc_info=True)
-    if any(c in ("assistant", "sessions") for c, _r, _o in touched):
+    if any(c == "assistant" for c, _r, _o in touched):
         try:
             from app.core import assistant_service
             assistant_service.on_network_applied(touched)
