@@ -1,6 +1,7 @@
 """Event-loop stall watchdog: a blocked loop gets its stack dumped."""
 
 import asyncio
+import json
 import logging
 import sys
 import threading
@@ -9,6 +10,13 @@ import time
 import pytest
 
 from app.core.loop_watchdog import LoopStallWatchdog, _threshold_from_env
+
+
+@pytest.fixture(autouse=True)
+def isolated_heartbeat(tmp_path, monkeypatch):
+    from app.core import file_logging
+
+    monkeypatch.setattr(file_logging, "get_log_dir", lambda: tmp_path)
 
 
 def _wait_for_watchdog_test(stop: threading.Event) -> None:
@@ -85,6 +93,11 @@ async def test_blocked_loop_dumps_sleeping_frame(caplog, diagnostic_logs):
 
     ended = [r for r in caplog.records if "stall ended after" in r.getMessage()]
     assert len(ended) == 1
+    recovery = ended[0].getMessage()
+    assert "threads=" in recovery and "thread_frames=[" in recovery
+    assert "test-idle-thread=" in recovery
+    assert "asyncio_tasks=" in recovery
+    assert wd._recovery_task_count > 0
 
 
 @pytest.mark.asyncio
@@ -305,3 +318,184 @@ def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_freeze_log(tm
     assert text.count(holding) >= 3, "the GIL-holding frame is in every dump"
     assert text.count(holding) > text.count("Timeout ("), "SIGUSR1 added its own dump while the GIL was held"
     assert "threading.py" in text, "the bystander thread's stack is dumped too"
+
+@pytest.mark.asyncio
+async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch):
+    from app.core import loop_watchdog
+
+    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.04)
+    path = tmp_path / "loop-heartbeat.json"
+    loop_thread = threading.get_ident()
+    writers = []
+    replace = loop_watchdog.os.replace
+
+    def record_replace(source, target):
+        writers.append(threading.get_ident())
+        replace(source, target)
+
+    monkeypatch.setattr(loop_watchdog.os, "replace", record_replace)
+    wd = LoopStallWatchdog(asyncio.get_running_loop(), threshold_s=5, ping_interval_s=0.01)
+    wd.start()
+    try:
+        deadline = time.monotonic() + 5
+        while len(writers) < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        first_tick = json.loads(path.read_text())["last_tick"]
+        await asyncio.sleep(0.1)
+        assert json.loads(path.read_text())["last_tick"] > first_tick
+        # Real loop stall: allow any pre-stall tick to flush, then prove that
+        # neither the record nor its mtime changes while the thread keeps waking.
+        _block_the_loop_for(0.1)
+        during = path.read_bytes(), path.stat().st_mtime_ns
+        _block_the_loop_for(0.1)
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == during
+        stalled_tick = json.loads(during[0])["last_tick"]
+        await asyncio.sleep(0.15)
+        assert json.loads(path.read_text())["last_tick"] > stalled_tick
+    finally:
+        wd.stop()
+    assert writers and loop_thread not in writers
+    assert json.loads(path.read_text())["stopped_at"] is not None
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("clean", [True, False])
+def test_boot_reports_stale_heartbeat(tmp_path, caplog, clean):
+    path = tmp_path / "loop-heartbeat.json"
+    loop = asyncio.new_event_loop()
+    try:
+        old = LoopStallWatchdog(loop)
+        old._boot_heartbeat()
+        old._pong()  # Exercise the producing path, not only a seeded consumer.
+        old._write_heartbeat(0)
+        last_tick = json.loads(path.read_text())["last_tick"]
+        if clean:
+            old._write_heartbeat(20, stopped_at=last_tick + 30)
+        else:
+            # Boot time is only a bound for an unclean process end.
+            import unittest.mock
+            with unittest.mock.patch("app.core.loop_watchdog.time.time", return_value=last_tick + 30):
+                LoopStallWatchdog(loop)._boot_heartbeat()
+        if clean:
+            LoopStallWatchdog(loop)._boot_heartbeat()
+    finally:
+        loop.close()
+    assert "previous run stopped ticking at" in caplog.text
+    assert ("before shutdown" if clean else "process end time unknown") in caplog.text
+
+
+def test_clean_shutdown_downtime_is_not_a_stall(tmp_path, caplog):
+    now = time.time()
+    (tmp_path / "loop-heartbeat.json").write_text(json.dumps({
+        "last_tick": now - 3601, "stopped_at": now - 3600,
+    }))
+    loop = asyncio.new_event_loop()
+    try:
+        LoopStallWatchdog(loop)._boot_heartbeat()
+    finally:
+        loop.close()
+    assert "previous run stopped ticking" not in caplog.text
+
+
+def test_heartbeat_rate_limit_and_atomic_failure(tmp_path, monkeypatch):
+    from app.core import loop_watchdog
+
+    loop = asyncio.new_event_loop()
+    try:
+        wd = LoopStallWatchdog(loop)
+        wd._boot_heartbeat()
+        wd._pong()
+        wd._write_heartbeat(0)
+        path = tmp_path / "loop-heartbeat.json"
+        initial = path.read_bytes()
+        wd._pong()
+        wd._write_heartbeat(1)
+        assert path.read_bytes() == initial
+
+        def fail_replace(*args):
+            raise OSError("disk unavailable")
+
+        monkeypatch.setattr(loop_watchdog.os, "replace", fail_replace)
+        wd._write_heartbeat(5)
+        assert path.read_bytes() == initial  # no partially overwritten record
+        assert wd._heartbeat_failed
+    finally:
+        loop.close()
+
+
+@pytest.mark.parametrize("record", ["not json", "null", '{"last_tick": "nan"}', '[]'])
+def test_bad_previous_heartbeat_is_nonfatal(tmp_path, caplog, record):
+    (tmp_path / "loop-heartbeat.json").write_text(record)
+    loop = asyncio.new_event_loop()
+    try:
+        LoopStallWatchdog(loop)._boot_heartbeat()
+    finally:
+        loop.close()
+    assert "Could not read previous loop heartbeat" in caplog.text
+
+
+def test_recovery_thread_context_is_bounded(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core import loop_watchdog
+
+    threads = [SimpleNamespace(ident=i, name=f"thread-{i}-" + "x" * 1000) for i in range(30)]
+    monkeypatch.setattr(loop_watchdog.threading, "enumerate", lambda: threads)
+    frame = sys._getframe()
+    monkeypatch.setattr(loop_watchdog.sys, "_current_frames", lambda: {0: frame})
+    loop = asyncio.new_event_loop()
+    try:
+        wd = LoopStallWatchdog(loop)
+        wd._loop_thread_id = 0
+        context = wd._recovery_context()
+        assert "threads=30" in context
+        assert context.count("thread-") == loop_watchdog.RECOVERY_THREAD_LIMIT
+        assert "test_recovery_thread_context_is_bounded" in context
+        assert len(context) < 1500
+    finally:
+        loop.close()
+
+
+_HEARTBEAT_CHILD = r"""
+import asyncio, sys, time
+from pathlib import Path
+from app.core import file_logging, loop_watchdog
+file_logging.get_log_dir = lambda: Path(sys.argv[1])
+loop_watchdog.HEARTBEAT_INTERVAL_S = 0.02
+async def main():
+    wd = loop_watchdog.LoopStallWatchdog(asyncio.get_running_loop(), ping_interval_s=0.01)
+    wd.start()
+    while not (Path(sys.argv[1]) / "loop-heartbeat.json").exists():
+        await asyncio.sleep(0.01)
+    print("stalled", flush=True)
+    time.sleep(30)
+asyncio.run(main())
+"""
+
+
+def test_killed_stalled_process_leaves_a_boot_readable_heartbeat(tmp_path, monkeypatch, caplog):
+    import subprocess
+
+    from app.core import loop_watchdog
+
+    child = subprocess.Popen([sys.executable, "-c", _HEARTBEAT_CHILD, str(tmp_path)],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "stalled"
+        time.sleep(0.1)  # let the last pre-stall tick flush
+        path = tmp_path / "loop-heartbeat.json"
+        frozen = path.read_bytes()
+        time.sleep(0.15)
+        assert path.read_bytes() == frozen
+    finally:
+        child.kill()  # no Python cleanup / watchdog stop; SIGKILL on POSIX
+        child.wait(timeout=5)
+        child.stdout.close()
+    assert json.loads(frozen)["stopped_at"] is None
+    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.02)
+    loop = asyncio.new_event_loop()
+    try:
+        LoopStallWatchdog(loop, threshold_s=0.05)._boot_heartbeat()
+    finally:
+        loop.close()
+    assert "previous run stopped ticking at" in caplog.text

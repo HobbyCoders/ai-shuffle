@@ -321,6 +321,14 @@
           "how": "In a disposable account/chat with fal configured, remember an image-to-video or edit model with a required image input and valid saved settings (including an object-valued image_size where supported). Invoke generation without naming a source/model, first omitting the image input and then passing a wrong-type image input. Inspect the structured tool results; do not retry with valid media or submit a paid generation. Restore the disposable preferences and archive the chat.",
           "pass_when": "Both calls return refused with reason invalid_request and the original input-validation error, not a choice card or remembered_unavailable. No reservation or provider submission occurs.",
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
+        },
+        {
+          "id": "harness-basics.12",
+          "check": "Durable loop heartbeat, recovery context and read-only WAL sampling",
+          "kind": "owner",
+          "how": "Use only a disposable candidate worker, never the installed app. Observe logs/<instance>/loop-heartbeat.json advancing during normal loop activity. Block its event loop using an approved diagnostic probe, confirm last_tick stops advancing, then release it and inspect the stall recovery record for bounded thread frames and asyncio task count. Repeat the stall, terminate the disposable process without graceful shutdown, restart it after the stale threshold, and inspect the previous-run heartbeat warning. Run python -m scripts.diagnostics.wal_sample --interval 5 against that candidate's managed database while it has ordinary write activity; compare its deltas with independent read-only pg_stat_wal and checkpoint-view samples and confirm stats_reset timestamps did not change. Remove only disposable resources created for this check.",
+          "pass_when": "Heartbeat advances only for successful loop ticks, remains readable after forced termination, and restart logs the previous last-tick UTC time without claiming downtime is measured stall duration. Recovery reports bounded thread names/current frames and asyncio task count. WAL bytes, FPI, checkpoint counts and sync/write milliseconds are nonnegative deltas from fresh samples, with no statistics reset or credential output.",
+          "past_bug": "#436: an interpreter freeze ended in SIGKILL without a durable last-tick time or recovery context; WAL/checkpoint pressure lacked a non-destructive sampler."
         }
       ]
     }
