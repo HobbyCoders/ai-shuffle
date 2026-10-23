@@ -172,6 +172,17 @@ async def _collect_metrics() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect session pool metrics: {e}")
 
+    # --- Host memory (Linux) ---
+    # The server's own RSS stays flat while agents' children fill the host
+    # (#436), so the whole-host figure is the one that shows an OOM coming.
+    try:
+        from app.core.session_pool import _host_available_mb
+        host_available = _host_available_mb()
+        if host_available is not None:
+            metrics["host_available_mb"] = round(host_available)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to read host available memory: {e}")
+
     # --- Database connection pool (PostgreSQL) ---
     # Distinct from the SDK "session pool" above. db_pool_in_use is the
     # exhaustion/leak indicator: if it sits at db_pool_max the next DB call
@@ -440,6 +451,21 @@ def _check_warnings(metrics: dict) -> list[str]:
     rss = metrics.get("process_rss_mb", 0)
     if rss > 500:
         warnings.append(f"Process RSS is {rss}MB - investigate memory usage")
+
+    # Host close to the kernel OOM killer: warn at twice the admission floor,
+    # before new top-level sessions start being refused at the floor itself.
+    host_available = metrics.get("host_available_mb")
+    if host_available is not None:
+        try:
+            from app.core.config import settings
+            floor_mb = int(getattr(settings, "sdk_admission_min_available_mb", 0) or 0)
+        except Exception:
+            floor_mb = 0
+        if floor_mb > 0 and host_available < 2 * floor_mb:
+            warnings.append(
+                f"Host memory low: {host_available}MB available "
+                f"(new sessions are refused below {floor_mb}MB)"
+            )
 
     # Too many asyncio tasks
     task_count = metrics.get("asyncio_tasks", 0)

@@ -230,3 +230,18 @@ async def test_agents_starting_and_ending_return_pool_and_tasks_to_baseline():
     await asyncio.sleep(0)
     assert len(asyncio.all_tasks()) == baseline_tasks
     assert sp._terminated_trees == {}
+
+
+# ─── Memory pressure is visible before the kernel acts ──────────────────────
+
+
+def test_low_host_memory_is_warned_before_the_admission_floor(monkeypatch):
+    from app.core.config import settings
+    from app.core.resource_monitor import _check_warnings
+
+    monkeypatch.setattr(settings, "sdk_admission_min_available_mb", 1536)
+
+    low = _check_warnings({"host_available_mb": 2500})
+    assert any("Host memory low: 2500MB available" in w for w in low)
+    assert not any("Host memory low" in w for w in _check_warnings({"host_available_mb": 40000}))
+    assert not any("Host memory low" in w for w in _check_warnings({}))
