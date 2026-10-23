@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 import threading
 import time
 
@@ -246,6 +247,7 @@ def test_sigusr1_dumps_every_thread_to_the_fatal_log(tmp_path):
     import faulthandler
     import os
     import signal
+
     from app.core import file_logging
 
     with (tmp_path / "fatal.log").open("a", encoding="utf-8") as stream:
@@ -256,3 +258,50 @@ def test_sigusr1_dumps_every_thread_to_the_fatal_log(tmp_path):
         finally:
             faulthandler.unregister(signal.SIGUSR1)
     assert "test_sigusr1_dumps_every_thread_to_the_fatal_log" in (tmp_path / "fatal.log").read_text()
+
+
+_GIL_HOLDER = r"""
+import ctypes, sys, threading, time
+sys.path.insert(0, sys.argv[2])
+from app.core import file_logging
+
+stream = open(sys.argv[1], "a", encoding="utf-8")
+file_logging._fatal_file = stream
+assert file_logging._register_stack_dump_signal(stream)
+assert file_logging.arm_freeze_dump(0.5)
+idle = threading.Event()
+threading.Thread(target=idle.wait, name="bystander", daemon=True).start()
+print("holding", flush=True)
+# A PyDLL call keeps the GIL for its whole duration, like the native git call
+# in #436: no Python thread (the stall watchdog included) can run meanwhile.
+ctypes.PyDLL(None).sleep(3)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="libc sleep through ctypes.PyDLL")
+def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_fatal_log(tmp_path):
+    """#436: the interpreter froze with the GIL held and fatal.log stayed empty."""
+    import signal
+    import subprocess
+    from pathlib import Path
+
+    fatal = tmp_path / "fatal.log"
+    fatal.write_text("--- an earlier dump ---\n", encoding="utf-8")
+    repo = str(Path(__file__).resolve().parents[2])
+    child = subprocess.Popen([sys.executable, "-c", _GIL_HOLDER, str(fatal), repo],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "holding"
+        time.sleep(1.2)  # past the 0.5 s timer, at least twice with repeat=True
+        child.send_signal(signal.SIGUSR1)  # the supervisor's pre-stop request
+        assert child.wait(timeout=15) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+    text = fatal.read_text(encoding="utf-8")
+    assert text.startswith("--- an earlier dump ---\n"), "appended, never truncated"
+    assert text.count("Timeout (0:00:00.500000)!") >= 2, "the timer repeats while the interpreter stays frozen"
+    holding = 'File "<string>", line 15 in <module>'  # the PyDLL sleep line
+    assert text.count(holding) >= 3, "the GIL-holding frame is in every dump"
+    assert text.count(holding) > text.count("Timeout ("), "SIGUSR1 added its own dump while the GIL was held"
+    assert "threading.py" in text, "the bystander thread's stack is dumped too"

@@ -8,8 +8,9 @@ import logging
 import os
 import subprocess
 import sys
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -148,19 +149,35 @@ class _ReadinessProbe:
     """
 
     def __init__(self) -> None:
-        self._executor = None
-        self._inflight = None
+        self._requests: queue.SimpleQueue[Future] = queue.SimpleQueue()
+        self._thread: Optional[threading.Thread] = None
+        self._inflight: Optional[Future] = None
         self._lock = threading.Lock()
-        self._conn = None  # touched only on the executor thread
+        self._conn = None  # touched only on the readiness thread
 
-    def _submit(self):
+    def _submit(self) -> Future:
         with self._lock:
             if self._inflight is None or self._inflight.done():
-                if self._executor is None:
-                    self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readiness-db")
-                # Late-bound so tests can patch _probe_db.
-                self._inflight = self._executor.submit(lambda: _probe_db())
+                if self._thread is None or not self._thread.is_alive():
+                    # A daemon thread, unlike a ThreadPoolExecutor worker, never
+                    # holds up interpreter exit behind a hung query.
+                    self._thread = threading.Thread(target=self._serve, name="readiness-db", daemon=True)
+                    self._thread.start()
+                self._inflight = Future()
+                self._requests.put(self._inflight)
             return self._inflight
+
+    def _serve(self) -> None:
+        while True:
+            future = self._requests.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                _probe_db()  # late-bound so tests can patch it
+            except BaseException as exc:  # noqa: BLE001 — reported to the waiting probe
+                future.set_exception(exc)
+            else:
+                future.set_result(None)
 
     async def run(self) -> None:
         future = asyncio.wrap_future(self._submit())

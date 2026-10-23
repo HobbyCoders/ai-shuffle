@@ -134,19 +134,27 @@ class TestLivenessAndDedicatedReadiness:
                 assert resp.status_code == 200
                 assert resp.json() == {"status": "alive"}
 
-    def test_readiness_query_runs_on_its_own_thread(self):
+    def test_readiness_query_runs_on_its_own_daemon_thread(self, monkeypatch):
         import threading
+
+        from app.api import system
+        monkeypatch.setattr(system, "_readiness_probe", system._ReadinessProbe())
         threads = []
         client = _client()
-        with patch("app.api.system._probe_db", side_effect=lambda: threads.append(threading.current_thread().name)), \
+        with patch("app.api.system._probe_db", side_effect=lambda: threads.append(threading.current_thread())), \
              patch("app.core.session_pool.get_session_pool", return_value=_FakePool()):
             assert client.get("/health/ready").status_code == 200
-        assert threads and threads[0].startswith("readiness-db")
+            assert client.get("/health/ready").status_code == 200
+        assert len(threads) == 2 and threads[0] is threads[1], "one dedicated thread serves every probe"
+        assert threads[0].name == "readiness-db"
+        assert threads[0].daemon, "a hung query must never hold up interpreter exit"
 
     def test_a_hung_database_check_times_out_and_is_shared(self, monkeypatch):
         import threading
+
         from app.api import system
         monkeypatch.setattr(system, "READINESS_DB_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(system, "_readiness_probe", system._ReadinessProbe())
         release = threading.Event()
         calls = []
         def hung():
@@ -161,5 +169,9 @@ class TestLivenessAndDedicatedReadiness:
                     assert resp.status_code == 503
                     assert resp.json()["reasons"] == ["database unreachable"]
                 assert len(calls) == 1, "probes join the check in flight instead of queueing more"
+                release.set()
+                system._readiness_probe._inflight.result(timeout=5)
+                assert client.get("/health/ready").status_code == 200, "the next probe runs a fresh check"
+                assert len(calls) == 2
         finally:
             release.set()

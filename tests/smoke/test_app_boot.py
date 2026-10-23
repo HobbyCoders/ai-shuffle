@@ -419,6 +419,12 @@ def test_unauthenticated_surface(server):
     # A fresh install: nothing configured, no owner password yet.
     assert body["setup_required"] is True
     assert c.get("/api/v1/health").json()["status"] == "healthy"
+    # The container supervisor restarts only on liveness (#436); readiness
+    # answers again on its own connection after the first probe.
+    for path in ("/health/live", "/api/v1/health/live"):
+        live = c.get(path)
+        assert live.status_code == 200 and live.json() == {"status": "alive"}, path
+    assert c.get("/health/ready").json()["checks"]["database"] == "ok"
 
     version = c.get("/api/v1/version")
     assert version.status_code == 200

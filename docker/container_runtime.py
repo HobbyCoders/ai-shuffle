@@ -47,6 +47,9 @@ LIVE_PROBE_FAILURES = 10
 # at this many liveness failures in a row and again before the stop.
 FREEZE_CAPTURE_AT = 2
 PY_SPY_TIMEOUT = 30
+# faulthandler writes its SIGUSR1 dump from the signal handler; this gives it
+# time to land before the next step (a stop's SIGTERM) arrives.
+STACK_DUMP_SETTLE = 1.0
 APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
@@ -1368,6 +1371,7 @@ def capture_freeze(process):
         try:
             os.kill(pid, usr1)
             log(f"asked application pid {pid} to dump every thread's stack to its fatal.log")
+            time.sleep(STACK_DUMP_SETTLE)
         except OSError as exc:
             log(f"could not signal application pid {pid} for a stack dump ({type(exc).__name__})")
     else:
@@ -1412,7 +1416,7 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
             return 1
         elif monitor is not None and time.monotonic() >= next_probe:
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
-            previous_failures = monitor.failures
+            previous_failures, previous_live_failures = monitor.failures, monitor.live_failures
             if monitor.check():
                 probe_failure = True
                 failure = (f"application liveness probe failed {monitor.live_failures} times in a row"
@@ -1426,6 +1430,11 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
                         "leaving it running")
                 elif previous_failures and monitor.failures == 0:
                     log("application readiness recovered")
+                if monitor.live_failures > previous_live_failures:
+                    log(f"application liveness probe failed ({monitor.live_failures} of {monitor.live_limit} "
+                        "in a row before a restart)")
+                elif previous_live_failures and monitor.live_failures == 0:
+                    log(f"application liveness recovered after {previous_live_failures} failed probes")
                 if monitor.live_failures == FREEZE_CAPTURE_AT:
                     log(f"application liveness probe failed {monitor.live_failures} times in a row; capturing diagnostics")
                     capture_freeze(app)

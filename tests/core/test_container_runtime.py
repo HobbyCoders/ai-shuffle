@@ -366,6 +366,7 @@ def test_watch_leaves_a_busy_app_running_and_restarts_a_frozen_one_after_capture
     assert "not ready for 2 probes in a row but still live; leaving it running" in err
     assert "liveness probe failed 4 times in a row; capturing diagnostics before stopping it" in err
     assert "liveness probe failed 4 times in a row; restarting the application" in err
+    assert "application liveness probe failed (1 of 4 in a row before a restart)" in err
 
 
 def test_log_lines_carry_a_utc_timestamp(capsys):
@@ -387,6 +388,7 @@ def _fake_proc(root, pid, *, caught_mask="0000000000000200"):
 
 
 def test_capture_freeze_signals_only_a_registered_handler_and_logs_thread_states(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(runtime, "STACK_DUMP_SETTLE", 0)
     import signal
     monkeypatch.setattr(runtime, "_PROC", tmp_path)
     monkeypatch.setattr(runtime, "_thread_cpu", {})
@@ -422,6 +424,7 @@ def test_capture_freeze_signals_only_a_registered_handler_and_logs_thread_states
 
 
 def test_capture_freeze_runs_py_spy_only_when_installed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(runtime, "STACK_DUMP_SETTLE", 0)
     monkeypatch.setattr(runtime, "_PROC", tmp_path)
     monkeypatch.setattr(runtime.os, "kill", lambda pid, sig: None)
     process = Mock(pid=77)
