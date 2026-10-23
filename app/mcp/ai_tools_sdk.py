@@ -645,8 +645,9 @@ UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 
 
 # How a unified generation call runs (#379):
-# - Every call that can spend money goes through the resolver's guard: price,
-#   confirmation, daily cap. A remembered choice (an account preference, one
+# - Every call to the four generation tools (image, video, audio, 3D) goes
+#   through the resolver's guard: price, confirmation, daily cap. (runFalModel
+#   does not yet: see the last point.) A remembered choice (an account preference, one
 #   migrated from a saved Settings default included) runs unasked; one the
 #   guard cannot price or run shows the choice card (interactive) or is
 #   skipped and reported (unattended). When the account's choices cannot be
@@ -656,10 +657,12 @@ UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 #   and an unreadable or unmigrated state must not fall back to an unguarded
 #   fal job with no known price, cap or confirmation.
 # - The only generation lane left is the ChatGPT-plan image tool (#1796): it
-#   runs on the subscription login and spends no per-item money. ``runFalModel``
-#   keeps main's fal lane: it names its endpoint, and its refusals that mean
-#   "the guard could not price/resolve this" fall back to main's handler.
-#   A cap, confirmation or chat-mode refusal never falls back.
+#   runs on the subscription login and spends no per-item money.
+# - Exception, until a follow-up fixes it: ``runFalModel`` keeps main's raw fal
+#   handler. Unattended calls go straight to it, and interactive calls fall
+#   back to it when the guard refuses with "could not price/resolve this"
+#   (the reasons below), so those can spend without a known price. A cap,
+#   confirmation or chat-mode refusal never falls back.
 _LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "invalid_request"}
 
 
@@ -823,7 +826,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     fal_lane = lane_for("runFalModel")
 
-    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks. Prefer the kind's tool; get IDs/schema via searchModels.", {
+    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks, but unattended or unpriceable calls still use the previous handler. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},

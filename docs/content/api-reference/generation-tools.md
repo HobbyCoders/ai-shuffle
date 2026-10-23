@@ -21,9 +21,11 @@ with a 15-second limit; a request pinned to this worker does not ask them. A
 malformed peer reply marks only that worker unavailable, and the fal catalog
 search is returned even when the priced lookup fails.
 
-Every generation that can spend money goes through the guard below: a known
-price, confirmation above the threshold and the daily cap. Nothing unpriced
-runs unasked.
+Every call to the four generation tools that can spend money goes through the
+guard below: a known price, confirmation above the threshold and the daily cap.
+Nothing unpriced runs unasked through them. `runFalModel` is the exception for
+now: unattended or unpriceable calls still take its previous handler (see
+below).
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -58,8 +60,9 @@ runs unasked.
   a fal key applies its own setting too: if its Image generation is the
   ChatGPT plan, it lists no fal image models for peers and refuses to run one.
 - **`runFalModel`** runs any fal endpoint again, including image-to-video and
-  audio-to-audio, with `output_type` optional. A priced call with a text prompt
-  gets the same guard; otherwise it takes the previous path. While images are
+  audio-to-audio, with `output_type` optional. An interactive priced call with
+  a text prompt gets the same guard. Unattended calls, and calls the guard
+  cannot price or resolve, take the previous path without a known price. While images are
   set to the ChatGPT plan it still refuses fal image models.
 - **Old or unreachable peers** are listed as unavailable but never make a
   named request ambiguous when a usable candidate matches.
