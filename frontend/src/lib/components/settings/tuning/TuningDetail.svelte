@@ -112,8 +112,13 @@
 		{ label: 'Effort', value: effort.kind === 'adjustable' ? effortText(effort, saved.effort) : effort.kind === 'fixed' ? 'Fixed' : 'Unknown' },
 		{ label: 'Fast', value: fastOn.length ? (saved.fast ? 'On' : saved.fast === false ? 'Off' : 'Not picked') : 'Not offered' },
 		{ label: 'Standard window', value: context ? formatContextTokens(saved.cap ?? context.standardTokens) : 'Fixed' },
-		{ label: 'Runs on', value: multi ? `${model.routes.length} routes` : model.routes[0].group }
+		{ label: 'Runs on', value: runsOn }
 	]);
+	/** The list's warning dot means no route can run now; say so where it is read. */
+	const runsOn = $derived.by(() => {
+		const where = multi ? `${model.routes.length} routes` : model.routes[0].group;
+		return model.routes.every((r) => !r.usable) ? `${where}, cannot run now` : where;
+	});
 
 	function done() {
 		tuningRevision.bump();
