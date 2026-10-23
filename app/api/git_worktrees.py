@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
 from app.core.git_service import git_service
+from app.core.checkout_events import checkout_events
 from app.core.worktree_manager import worktree_manager, WorktreeError
 from app.core.project_utils import get_worktree_working_dir
 from app.db import database
@@ -211,14 +212,15 @@ _WORKTREE_STATUS_FRESH_SECONDS = 5.0
 # A cold project (no refresh has finished since boot or a full invalidation)
 # waits up to this long for its first refresh so the first response is not all
 # blank. Focused and hot worktrees are read first, so they are normally in by
-# then; the rest fill in on later polls.
+# then; historical rows stay not checked until requested.
 _WORKTREE_STATUS_COLD_WAIT_SECONDS = 3.0
 # A refresh re-reads only "hot" worktrees: one the client names in
 # ?focus_worktree_id=, one with a streaming session, or one whose sessions saw
 # activity within this window. Idle worktrees keep their last known status
 # until their checkout is invalidated (a turn ended in it, a Git action ran);
-# a worktree with no status yet is read once. So the work per refresh follows
-# the active worktrees, not every worktree on disk (#436).
+# historical worktrees without a cached status remain not checked (null status
+# and status_checked_at) until focused or active. Work follows active checkouts,
+# not every worktree on disk (#436).
 _WORKTREE_HOT_ACTIVITY_SECONDS = 3 * 60 * 60
 # Rows past their working life are never read: their checkout is gone or being
 # reclaimed. They keep a status already read, if any.
@@ -348,6 +350,7 @@ def _refresh_project_statuses(state: _ProjectStatusState, jobs: list, start_gen:
                 entry = state.entries.setdefault(wt_id, _WorktreeStatusEntry())
                 _record_status(entry, wt_id, status_data, error)
                 entry.generation = generation
+                state.invalidated_gen.pop(wt_id, None)
     except Exception:  # noqa: BLE001 — a failed refresh must still release inflight
         logger.exception("Worktree status refresh failed")
     finally:
@@ -411,14 +414,13 @@ def _plan_refresh(
 ) -> list:
     """Pick the worktrees the next refresh reads, focused/hot first (lock held).
 
-    A worktree never read yet is always picked, and so is one whose checkout
-    was invalidated since its last read. Once the data is stale, so are
-    focused and hot worktrees, and broken ones whose back-off has run out.
-    Anything still backing off is skipped, even when hot, and retired rows
-    (_RETIRED_WORKTREE_STATUSES) are never read.
+    Only focused/active worktrees get an initial read. Historical worktrees
+    retain their last status (or null until checked), unless explicitly
+    invalidated. Failed reads only retry while active, respecting back-off.
+    Retired rows (_RETIRED_WORKTREE_STATUSES) are never read.
     """
     stale = state.refreshed_at is None or now - state.refreshed_at >= _WORKTREE_STATUS_FRESH_SECONDS
-    streaming = _streaming_session_ids() if stale else set()
+    streaming = _streaming_session_ids()
     active_since = time.time() - _WORKTREE_HOT_ACTIVITY_SECONDS
     focused, hot, other = [], [], []
     for wt in existing:
@@ -426,20 +428,17 @@ def _plan_refresh(
             continue
         entry = state.entries.get(wt["id"])
         is_focus = wt["id"] == focus_worktree_id
+        active = is_focus or _is_hot(wt, streaming, active_since)
+        explicit = wt["id"] in state.invalidated_gen
         if entry is None:
-            (focused if is_focus else other).append(wt)
+            if active or explicit:
+                (focused if is_focus else hot).append(wt)
         elif entry.retry_at > now:
             continue
         elif _checkout_changed(wt, entry):
+            (focused if is_focus else other).append(wt)
+        elif stale and active:
             (focused if is_focus else hot).append(wt)
-        elif not stale:
-            continue
-        elif entry.failures:
-            other.append(wt)
-        elif is_focus:
-            focused.append(wt)
-        elif _is_hot(wt, streaming, active_since):
-            hot.append(wt)
     return focused + hot + other
 
 
@@ -458,6 +457,18 @@ async def _load_worktree_statuses(
             wt["git_status"] = None
             wt["status_error"] = "directory missing or not its own Git working tree; needs cleanup"
     existing = [wt for wt in worktrees if wt.get("exists", True) and wt.get("id")]
+    streaming = _streaming_session_ids()
+    active_since = time.time() - _WORKTREE_HOT_ACTIVITY_SECONDS
+    active_paths = set()
+    for wt in existing:
+        if wt.get("status") not in _RETIRED_WORKTREE_STATUSES and (
+            wt["id"] == focus_worktree_id or _is_hot(wt, streaming, active_since)
+        ):
+            try:
+                active_paths.add(get_worktree_working_dir(wt))
+            except (ValueError, TypeError):
+                pass  # the status reader reports invalid bindings
+    checkout_events.update(project_id, active_paths)
     now = time.monotonic()
     with _status_lock:
         state = _worktree_status_cache.get(project_id)
