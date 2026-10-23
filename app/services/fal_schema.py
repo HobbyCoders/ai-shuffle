@@ -89,24 +89,26 @@ class ModelSchema:
     primary_text_field: Optional[str] = None
     input_schema: Optional[dict] = None
 
-    def validate_options(self, options: dict, prompt: str) -> dict:
+    def validate_options(self, options: dict, prompt: str, *, partial: bool = False) -> dict:
         """Validate tool input against the same declared fields the picker uses.
 
         Undeclared parameters are refused, not silently dropped. Defaults and
         the primary text field are resolved once, before pricing and execution.
+        ``partial`` checks only named saved settings, never request completeness.
         """
         import math
 
         fields = {f.name: f for f in self.fields}
         if set(options) - fields.keys():
             raise ValueError("Unknown model option; use the model's declared parameters.")
-        values = {f.name: f.default for f in self.fields if f.default is not None}
+        values = {} if partial else {f.name: f.default for f in self.fields if f.default is not None}
         values.update(options)
         if not self.primary_text_field:
             raise ValueError("This model has no declared text input.")
         if self.primary_text_field in options:
             raise ValueError("Pass the prompt separately, not in options.")
-        values[self.primary_text_field] = prompt
+        if not partial:
+            values[self.primary_text_field] = prompt
         if self.input_schema is not None:
             # Keep nested object/array constraints and local references from
             # the provider's OpenAPI document. Never resolve external URLs.
@@ -121,8 +123,15 @@ class ModelSchema:
                     for item in value:
                         local_refs(item)
             local_refs(self.input_schema)
+            schema = self.input_schema
+            if partial:
+                # Only property values are saved, not a complete request. Keep
+                # reference targets and nested constraints, but omit root-level
+                # requirements/combinations involving other per-call inputs.
+                schema = {key: schema[key] for key in ("properties", "definitions", "$defs", "components")
+                          if key in schema}
             try:
-                Draft7Validator(self.input_schema).validate(values)
+                Draft7Validator(schema).validate(values)
             except Exception:
                 # Validation errors include the user's values and schema. Do
                 # not return those in a provider/tool error or application log.
@@ -130,7 +139,7 @@ class ModelSchema:
             return values
         for name, f in fields.items():
             if name not in values:
-                if f.required:
+                if f.required and not partial:
                     raise ValueError(f"Missing required model option: {name}.")
                 continue
             value = values[name]
@@ -233,6 +242,7 @@ class ModelSchema:
             "endpoint_id": self.endpoint_id,
             "primary_text_field": self.primary_text_field,
             "fields": [f.to_dict() for f in self.fields],
+            "input_schema": self.input_schema,
         }
 
 

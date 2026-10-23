@@ -181,6 +181,39 @@ def test_tool_options_use_full_declared_nested_schema():
             schema.validate_options(options, "tree")
 
 
+def test_partial_saved_options_preserve_local_refs_and_nested_requirements():
+    import pytest
+    from app.services.fal_schema import ModelSchema
+
+    schema = ModelSchema("fake/model", fields=[
+        ParamField("prompt", required=True), ParamField("image_url", required=True),
+        ParamField("image_size"), ParamField("weights", type="array"),
+    ], primary_text_field="prompt", input_schema={
+        "type": "object", "required": ["prompt", "image_url"], "minProperties": 3,
+        "properties": {
+            "prompt": {"type": "string", "minLength": 100}, "image_url": {"type": "string"},
+            "image_size": {"$ref": "#/definitions/Size"},
+            "weights": {"type": "array", "items": {"$ref": "#/components/schemas/Weight"}},
+        },
+        "definitions": {"Size": {"type": "object", "required": ["width"],
+                                 "properties": {"width": {"type": "integer", "minimum": 64}}}},
+        "components": {"schemas": {"Weight": {"type": "integer", "minimum": 1}}},
+    })
+    assert schema.to_dict()["input_schema"] == schema.input_schema
+    assert schema.validate_options({"image_size": {"width": 128}}, "", partial=True) == {"image_size": {"width": 128}}
+    assert schema.validate_options({"weights": [1, 2]}, "", partial=True) == {"weights": [1, 2]}
+    assert schema.validate_options({}, "", partial=True) == {}
+    for options in ({"image_size": {}}, {"image_size": {"width": 32}}, {"weights": ["bad"]},
+                    {"weights": [0]}, {"unknown": 1}, {"prompt": "hidden"}):
+        with pytest.raises(ValueError):
+            schema.validate_options(options, "", partial=True)
+    with pytest.raises(ValueError):
+        schema.validate_options({"image_size": {"width": 128}}, "")
+    schema.input_schema["properties"]["weights"]["items"] = {"$ref": "https://example.invalid/schema"}
+    with pytest.raises(ValueError, match="External"):
+        schema.validate_options({"weights": [1]}, "", partial=True)
+
+
 def test_tool_schema_never_fetches_external_references():
     import pytest
     doc = _openapi_with_input({"prompt": {"type": "string"}, "size": {"$ref": "https://example.invalid/schema"}}, ["prompt"])

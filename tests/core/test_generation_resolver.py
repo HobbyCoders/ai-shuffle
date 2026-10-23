@@ -216,6 +216,42 @@ async def test_remembered_required_input_model_refuses_bad_call_and_runs_good_in
     assert [call[0] for call in backend.calls] == ["reserve", "execute"]
 
 
+@pytest.mark.parametrize("saved_options, expected_status", [
+    ({"weights": ["bad"]}, "choose"),
+    ({"image_size": {"width": 128, "height": 128}}, "refused"),
+])
+async def test_remembered_options_keep_original_nested_constraints(monkeypatch, saved_options, expected_status):
+    from app.services.fal_schema import normalize_openapi, schema_service
+    from app.services.generation_sources import Sources
+    from tests.services.test_fal_schema import _openapi_with_input
+
+    schema = normalize_openapi("image-to-video", _openapi_with_input({
+        "prompt": {"type": "string"},
+        "image_url": {"type": "string"},
+        "weights": {"type": "array", "items": {"type": "integer"}},
+        "image_size": {"type": "object", "required": ["width", "height"],
+                       "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}},
+    }, ["prompt", "image_url"]))
+    entry = replace(candidate(kind="video", model=schema.endpoint_id), options={}, schema=schema.to_dict())
+    backend = FakeBackend([entry])
+    sources = Sources(None, INTERACTIVE)
+    monkeypatch.setattr(sources, "local_worker", lambda: entry.worker)
+    monkeypatch.setattr(sources, "fal_key", AsyncMock(return_value="unused"))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    backend.prepare = sources.prepare
+    context = replace(INTERACTIVE, remembered_choices={"video": {**entry.choice(), "options": saved_options}})
+    output = await Resolver(backend).generate("video", {"prompt": "animate it", "options": {"image_url": 123}}, context)
+    assert output["status"] == expected_status
+    if expected_status == "choose":
+        assert output["remembered_unavailable"] is True
+    else:
+        with pytest.raises(ValueError) as error:
+            schema.validate_options({**saved_options, "image_url": 123}, "animate it")
+        assert output["reason"] == "invalid_request" and output["error"] == str(error.value)
+        assert "remembered_unavailable" not in output
+    assert backend.calls == []
+
+
 @pytest.mark.parametrize("saved_options", [{"unknown": 1}, {"steps": 99}, {"steps": "4"}, {"size": "gone"}])
 async def test_saved_fal_options_still_reoffer_unknown_or_invalid_fields(saved_options):
     from app.services.fal_schema import ModelSchema, ParamField
