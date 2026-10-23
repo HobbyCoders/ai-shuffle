@@ -36,6 +36,12 @@ async def reconciled_active_session_ids() -> set[str]:
     return active_session_ids()
 
 
+def _log_stop_failure(task: asyncio.Future) -> None:
+    """Observe stops that may outlive the shutdown/update budget."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Could not stop work before exiting", exc_info=task.exception())
+
+
 async def force_stop_sessions(session_ids: set[str], *, source: str, grace: float) -> list[str]:
     """End work in ``session_ids`` that a Stop did not end in time.
 
@@ -43,31 +49,36 @@ async def force_stop_sessions(session_ids: set[str], *, source: str, grace: floa
     anything still running anyway. Turn executions are cancelled (and, if
     one still will not unwind, no longer counted); background tasks still
     registered as running are stopped, or marked killed when nothing is left
-    to stop. Returns the session ids that had work forced. Never raises.
+    to stop. All stops run concurrently within one ``grace`` budget; unfinished
+    handlers may continue until process exit. Returns the session ids that had
+    work forced.
     """
+    deadline = asyncio.get_running_loop().time() + grace
     from app.core import session_runtime
     from app.core.query_session_lifecycle import stop_session_task
     from app.core.task_registry import task_registry
 
-    forced: set[str] = set()
-    try:
-        forced.update(await session_runtime.force_end_executions(set(session_ids), grace=grace))
-    except Exception:  # noqa: BLE001
-        logger.warning("Application update: could not force-stop turns in %s", sorted(session_ids), exc_info=True)
-    for sid in sorted(session_ids):
-        for task in task_registry.get_active(sid):
-            tid = task.get("id")
-            if not tid:
-                continue
-            forced.add(sid)
-            try:
-                await asyncio.wait_for(stop_session_task(sid, tid, source=source), timeout=grace)
-            except Exception:  # noqa: BLE001 — including a stop that timed out
-                logger.warning("Application update: could not stop task %s of %s", tid, sid, exc_info=True)
-            record = task_registry.get_task(sid, tid)
-            if record is not None and record.get("status") == "running":
-                task_registry.complete_task(sid, tid, "killed", summary=f"Stopped by host: {source}",
-                                            reason=source)
+    forced = set(session_runtime.active_executions().values()) & session_ids
+    background = [(sid, task["id"]) for sid in sorted(session_ids)
+                  for task in task_registry.get_active(sid) if task.get("id")]
+    forced.update(sid for sid, _ in background)
+    # Turn pumps and background stops share one budget, not one per task.
+    # The two execution-cancel phases each get half of the overall grace.
+    stops = [asyncio.create_task(session_runtime.force_end_executions(set(session_ids), grace=grace / 2))]
+    stops.extend(asyncio.create_task(stop_session_task(sid, tid, source=source)) for sid, tid in background)
+    for stop in stops:
+        stop.add_done_callback(_log_stop_failure)
+    _, pending = await asyncio.wait(stops, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+    if pending:
+        logger.warning("Application update: %d force-stop calls exceeded %.1fs; the exit ends them",
+                       len(pending), grace)
+    # Do not wait for cancellation-resistant stop handlers. They can finish in
+    # the background until exit; the registry must not keep blocking the update.
+    for sid, tid in background:
+        record = task_registry.get_task(sid, tid)
+        if record is not None and record.get("status") == "running":
+            task_registry.complete_task(sid, tid, "killed", summary=f"Stopped by host: {source}",
+                                        reason=source)
     return sorted(forced)
 
 
@@ -204,27 +215,34 @@ async def stop_running_sessions() -> None:
     """Quiesce local work while the database and session clients are still alive.
 
     Do not sweep shared database rows: another desktop may own those sessions.
-    Waiting for the execution tasks also waits for their run leases to release.
+    Allow at most 25 seconds for stops, settlement/lease release and persistence
+    together. Process exit ends work still unwinding; boot reconcile aborts a
+    turn left behind with a dead lease.
     """
+    deadline = asyncio.get_running_loop().time() + SHUTDOWN_SETTLE_SECONDS
     from app.core import session_runtime, startup, task_persistence
 
     startup.is_shutting_down = True
     executions = session_runtime.active_executions()
     session_ids = active_session_ids()
 
-    results = await asyncio.gather(
-        *(stop_session_work(sid, shutdown=True) for sid in session_ids), return_exceptions=True,
-    )
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
-    # Never cancel these tasks on an HTTP timeout: their finally blocks persist
-    # the terminal state and release the lease. Do not wait past the caller's
-    # budget either: one turn that never unwinds must not fail the whole stop
-    # (the supervisor would then roll an update back); the exit ends it.
+    stops = {asyncio.create_task(stop_session_work(sid, shutdown=True)) for sid in session_ids}
+    for stop in stops:
+        stop.add_done_callback(_log_stop_failure)
+    if stops:
+        done, _ = await asyncio.wait(stops, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+        for stop in done:
+            stop.result()
+    # Ordinary shutdown leaves execute() alive to persist and release its lease.
+    # The application-update force path instead settles before cancelling it.
+    # Either way, never extend the shutdown budget for a wedged turn or stop.
     if executions:
-        _, stuck = await asyncio.wait(set(executions), timeout=SHUTDOWN_SETTLE_SECONDS)
+        _, stuck = await asyncio.wait(set(executions), timeout=max(0, deadline - asyncio.get_running_loop().time()))
         for task in stuck:
             logger.warning("Shutdown: the turn in %s did not settle within %.0fs; the exit ends it",
                            executions.get(task), SHUTDOWN_SETTLE_SECONDS)
-    await task_persistence.flush()
+    flush = asyncio.create_task(task_persistence.flush())
+    flush.add_done_callback(_log_stop_failure)
+    await asyncio.wait({flush}, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+    if flush.done():
+        flush.result()
