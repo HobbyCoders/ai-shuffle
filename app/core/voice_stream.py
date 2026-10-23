@@ -230,8 +230,8 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # Only a live binding carries LiveOptions; a WebRTC binding stores the
     # realtime option set, which LiveOptions rejects as extra fields.
     instructions = DELEGATION_INSTRUCTIONS
-    from app.core.voice_models import CODEX_MODEL, GROK_MODEL
-    if binding.get("model") in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL):
+    from app.core.voice_models import CODEX_MODEL, GROK_MODEL, SUPERGROK_MODEL
+    if binding.get("model") in (LIVE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL):
         options = validate_options(binding["model"], binding.get("options") or {})
         instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
     # Submit to the SAME session: reuse its history/client and normal queue,

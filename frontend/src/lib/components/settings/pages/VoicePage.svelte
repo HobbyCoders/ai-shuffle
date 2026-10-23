@@ -34,7 +34,7 @@
 	import RangeField from '../rows/RangeField.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import CallPromptsEditor from './editors/CallPromptsEditor.svelte';
-	import { CODEX_VOICE_MODEL } from '$lib/constants/voice-engines';
+	import { CODEX_VOICE_MODEL, SUPERGROK_VOICE_MODEL } from '$lib/constants/voice-engines';
 	import { voiceModelLabel } from '$lib/api/voice';
 	import { VoicePreview, VoiceState } from './voice-state.svelte';
 	import { voiceVolume, setVoiceVolume, MAX_VOICE_VOLUME } from '$lib/services/voiceVolume';
@@ -85,18 +85,36 @@
 	const chatgptLabel = voiceModelLabel(CODEX_VOICE_MODEL);
 	const chatgptUnavailable = $derived(chatgpt && details?.available === false);
 	const chatgptReason = $derived(details?.unavailable_reason || "ChatGPT voice isn't ready yet.");
+	/**
+	 * Grok voice on a connected SuperGrok login (provider_type "grok"). Selecting
+	 * it is the opt-in; it never runs on an xAI API key and has no samples.
+	 */
+	const supergrok = $derived(s?.voice_model === SUPERGROK_VOICE_MODEL);
+	const supergrokLabel = voiceModelLabel(SUPERGROK_VOICE_MODEL);
+	/** Engines funded by a subscription login: no voice samples. */
+	const loginEngine = $derived(chatgpt || supergrok);
 	const engineOptions = $derived([
 		{ value: 'gpt-live-1', label: 'GPT Live 1' },
 		{ value: 'grok-voice-latest', label: 'Grok Voice' },
+		{ value: SUPERGROK_VOICE_MODEL, label: supergrokLabel },
 		{ value: CODEX_VOICE_MODEL, label: chatgptLabel }
 	]);
 
 	/** The provider a new call runs on: the pin when it is still eligible, else the first by name (server rule). */
 	const grok = $derived(s?.voice_model === 'grok-voice-latest');
-	const providerType = $derived(chatgpt ? 'chatgpt' : grok ? 'xai' : 'openai');
+	const providerType = $derived(chatgpt ? 'chatgpt' : supergrok ? 'grok' : grok ? 'xai' : 'openai');
 	const providers = $derived(voice.providers?.filter((p) => (p.provider_type ?? 'openai') === providerType) ?? null);
 	const chatgptNeedsLogin = $derived(chatgpt && providers !== null && providers.length === 0);
-	const engineHint = $derived(chatgptNeedsLogin ? 'Needs a ChatGPT login' : chatgptUnavailable ? 'Not ready yet' : undefined);
+	const supergrokNeedsLogin = $derived(supergrok && providers !== null && providers.length === 0);
+	const engineHint = $derived(
+		chatgptNeedsLogin
+			? 'Needs a ChatGPT login'
+			: chatgptUnavailable
+				? 'Not ready yet'
+				: supergrokNeedsLogin
+					? 'Needs a SuperGrok login'
+					: undefined
+	);
 	/** Only an actionable state earns the line under the engine row. */
 	const chatgptHelp = $derived(chatgptNeedsLogin || chatgptUnavailable);
 	const effectiveProvider = $derived.by(() => {
@@ -221,29 +239,29 @@
 			hint={engineHint}
 			value={s?.voice_model}
 			onReset={() => voice.save({ voice_model: 'gpt-live-1', voice_provider_id: null })}
-			expanded={chatgptHelp ? chatgptNote : undefined}
+			expanded={chatgptHelp ? chatgptNote : supergrokNeedsLogin ? supergrokConnect : undefined}
 		>
-			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={engineOptions} width={chatgpt ? 340 : 180} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
+			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={engineOptions} width={chatgpt ? 340 : supergrok ? 280 : 180} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
 		</SettingRow>
 		<SettingRow
 			label="Voice access"
-			hint={chatgpt ? "Doesn't fall back to an API key" : 'Uses an API key'}
+			hint={loginEngine ? "Doesn't fall back to an API key" : 'Uses an API key'}
 		>
-			<ValueText value={chatgpt ? 'ChatGPT subscription login · server VAD' : grok ? 'xAI API key · server VAD' : 'OpenAI API key'} />
+			<ValueText value={chatgpt ? 'ChatGPT subscription login · server VAD' : supergrok ? 'SuperGrok login · server VAD' : grok ? 'xAI API key · server VAD' : 'OpenAI API key'} />
 		</SettingRow>
 		<SettingRow
 			id="voice.voice"
 			dim={!callsOn}
-			hint={chatgpt ? 'No samples for this engine' : undefined}
+			hint={loginEngine ? 'No samples for this engine' : undefined}
 			value={s?.voice_voice}
-			onReset={() => voice.save({ voice_voice: chatgpt ? 'cove' : grok ? 'eve' : defaultOf<string>('voice.voice') })}
+			onReset={() => voice.save({ voice_voice: chatgpt ? 'cove' : grok || supergrok ? 'eve' : defaultOf<string>('voice.voice') })}
 		>
-			{#if s?.voice_voice && chatgpt}
-				<!-- The server has no samples for this engine; say so instead of failing on click. -->
+			{#if s?.voice_voice && loginEngine}
+				<!-- The server has no samples for subscription engines; say so instead of failing on click. -->
 				<button
 					type="button"
 					class="st-btn ghost icon"
-					aria-label="Samples are not available for {chatgptLabel}"
+					aria-label="Samples are not available for {chatgpt ? chatgptLabel : supergrokLabel}"
 					title={details?.preview_note || 'Samples are not available for this engine.'}
 					disabled
 				>
@@ -300,7 +318,7 @@
 		</SettingRow>
 		<SettingRow id="voice.callsRunOn" dim={!callsOn} hint={s?.voice_model} hintMono>
 			{#if providers === null}
-				<ValueText value={voice.status === 'forbidden' ? FORBIDDEN_TEXT : chatgpt ? 'ChatGPT login' : 'OpenAI API key'} />
+				<ValueText value={voice.status === 'forbidden' ? FORBIDDEN_TEXT : chatgpt ? 'ChatGPT login' : supergrok ? 'SuperGrok login' : 'OpenAI API key'} />
 			{:else if providers.length > 1 && effectiveProvider}
 				<SelectField
 					value={effectiveProvider.id}
@@ -316,7 +334,7 @@
 					ariaLabel="Calls run on {effectiveProvider.name}. Open in Providers"
 				/>
 			{:else}
-				<LinkValue label={chatgpt ? 'Connect ChatGPT' : grok ? 'Add an xAI API key' : 'Add an OpenAI API key'} target={{ category: 'providers' }} />
+				<LinkValue label={chatgpt ? 'Connect ChatGPT' : supergrok ? 'Connect SuperGrok' : grok ? 'Add an xAI API key' : 'Add an OpenAI API key'} target={{ category: 'providers' }} />
 			{/if}
 		</SettingRow>
 		<SettingRow
@@ -372,6 +390,14 @@
 	</div>
 {/snippet}
 
+{#snippet supergrokConnect()}
+	<!-- A plain next step, not a warning: the engine works once a login is connected. -->
+	<p class="supergrok-connect">
+		<span>Connect your SuperGrok login in Settings → Providers to use this.</span>
+		<LinkValue label="Open Providers" target={{ category: 'providers' }} ariaLabel="Open Providers to connect your SuperGrok login" />
+	</p>
+{/snippet}
+
 {#snippet promptsEditor()}
 	{#if details && s?.voice_options}
 		{#key s.voice_model}
@@ -391,7 +417,8 @@
 		animation: st-spin 0.8s linear infinite;
 	}
 	/* Plain helper text under the engine row: the same muted voice as row hints. */
-	.chatgpt-help p {
+	.chatgpt-help p,
+	.supergrok-connect {
 		margin: 0;
 		font-size: 13px;
 		line-height: 1.5;
@@ -401,12 +428,14 @@
 	.chatgpt-help p + p {
 		margin-top: 4px;
 	}
-	.chatgpt-help :global(.st-vlink) {
+	.chatgpt-help :global(.st-vlink),
+	.supergrok-connect :global(.st-vlink) {
 		padding: 0 2px;
 		vertical-align: baseline;
 		color: var(--st-fg);
 	}
-	.chatgpt-help :global(.st-vlink:hover) {
+	.chatgpt-help :global(.st-vlink:hover),
+	.supergrok-connect :global(.st-vlink:hover) {
 		color: var(--st-primary);
 	}
 </style>

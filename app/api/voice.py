@@ -46,7 +46,15 @@ from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
-    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, session_config, transport_for,
+    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, SUPERGROK_MODEL, session_config,
+    transport_for,
+)
+
+# Engines that converse on the server audio stream and hand work to the chat.
+_DELEGATING_STREAM_MODELS = (LIVE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
+SUPERGROK_LOGIN_REQUIRED = (
+    "Connect your SuperGrok login in Settings > Providers to use this voice engine. "
+    "It does not use an xAI API key."
 )
 
 logger = logging.getLogger(__name__)
@@ -81,15 +89,16 @@ MAX_REMEMBERED_SECRETS = 64
 def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
     """Whether a provider row can fund an OpenAI or xAI voice call.
 
-    API-key engines require enabled ``openai`` / ``xai`` rows. The unofficial
-    Codex engine requires an enabled subscription bundle without a reauth flag.
-    ``provider_matches_model`` keeps these funding paths strictly separate.
+    API-key engines require enabled ``openai`` / ``xai`` rows. The ChatGPT and
+    SuperGrok subscription engines require an enabled login bundle without a
+    reauth flag. ``provider_matches_model`` keeps these funding paths strictly
+    separate.
     """
-    from app.core.provider.fluid_credentials import _is_codex_subscription
+    from app.core.provider.fluid_credentials import _is_codex_subscription, _is_grok_subscription
 
     if not row.get("enabled"):
         return False
-    if _is_codex_subscription(row):
+    if _is_codex_subscription(row) or _is_grok_subscription(row):
         return bool(row.get("codex_access_token")) and not row.get("needs_reauth")
     if row.get("provider_type") not in ("openai", "xai"):
         return False
@@ -97,13 +106,15 @@ def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
 
 
 def provider_matches_model(row: dict, model: str) -> bool:
-    from app.core.provider.fluid_credentials import _is_codex_subscription
+    from app.core.provider.fluid_credentials import _is_codex_subscription, _is_grok_subscription
     if model == PERSONAPLEX_MODEL:
         return row.get("id") == FAL_PROVIDER_ID
     if model == CODEX_MODEL:
         return _is_codex_subscription(row)
-    if _is_codex_subscription(row):
-        return False  # Never fund the default/API-key engine with a subscription.
+    if model == SUPERGROK_MODEL:
+        return _is_grok_subscription(row) and not _is_codex_subscription(row)
+    if _is_codex_subscription(row) or _is_grok_subscription(row):
+        return False  # Never fund an API-key engine with a subscription.
     return row.get("provider_type") == ("xai" if model == GROK_MODEL else "openai")
 
 
@@ -133,13 +144,11 @@ def list_eligible_voice_providers(
     OpenAI audio models in :mod:`app.api.settings_audio`; there is no per-user
     OpenAI policy). fal.ai is listed when the caller's fal key resolves.
     """
-    from app.core.provider.fluid_credentials import _is_codex_subscription
     rows = database.get_enabled_model_providers(include_token=True)
     providers = [
-        {"id": row["id"], "name": row.get("name") or row["id"],
-         "provider_type": "chatgpt" if _is_codex_subscription(row) else row["provider_type"]}
+        {"id": row["id"], "name": row.get("name") or row["id"], "provider_type": _voice_provider_type(row)}
         for row in rows
-        if _is_eligible_voice_provider(row) and (api_user is None or not _is_codex_subscription(row))
+        if _is_eligible_voice_provider(row) and (api_user is None or not _is_personal_subscription(row))
     ]
     if api_user is None:
         from app.core import fal_credential
@@ -150,6 +159,22 @@ def list_eligible_voice_providers(
     if fal_available:
         providers.append({"id": FAL_PROVIDER_ID, "name": "fal.ai"})
     return providers
+
+
+def _is_personal_subscription(row: Dict[str, Any]) -> bool:
+    """A ChatGPT or SuperGrok login: owner and paired devices only."""
+    from app.core.provider.fluid_credentials import _is_codex_subscription, _is_grok_subscription
+    return _is_codex_subscription(row) or _is_grok_subscription(row)
+
+
+def _voice_provider_type(row: Dict[str, Any]) -> str:
+    """The funding kind the client filters on; logins never read as API keys."""
+    from app.core.provider.fluid_credentials import _is_codex_subscription, _is_grok_subscription
+    if _is_codex_subscription(row):
+        return "chatgpt"
+    if _is_grok_subscription(row):
+        return "grok"
+    return row["provider_type"]
 
 
 def _eligible_provider_row(
@@ -171,9 +196,8 @@ def _eligible_provider_row(
             return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
         return None
     row = database.get_model_provider(provider_id, include_token=True)
-    from app.core.provider.fluid_credentials import _is_codex_subscription
     if row and _is_eligible_voice_provider(row):
-        if api_user is not None and _is_codex_subscription(row):
+        if api_user is not None and _is_personal_subscription(row):
             return None  # Personal subscription voice is owner/paired-device only.
         return row
     return None
@@ -434,6 +458,8 @@ def _resolve_provider_row(
         if row is None or not provider_matches_model(row, model):
             if model == CODEX_MODEL:
                 raise HTTPException(400, chatgpt_login_required)
+            if model == SUPERGROK_MODEL:
+                raise HTTPException(400, SUPERGROK_LOGIN_REQUIRED)
             raise HTTPException(400, "Choose an enabled API-key provider for this voice engine. Subscription voice access is not verified; an API key is required.")
         return row
 
@@ -449,6 +475,8 @@ def _resolve_provider_row(
     if not eligible:
         if model == CODEX_MODEL:
             raise HTTPException(400, chatgpt_login_required)
+        if model == SUPERGROK_MODEL:
+            raise HTTPException(400, SUPERGROK_LOGIN_REQUIRED)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -639,13 +667,21 @@ async def _provider_api_key(
         api_key = await run_sync(fal_credential.api_key)
     else:
         from app.core.provider.fluid_credentials import (
-            ProviderCredentialError, _is_codex_subscription, _load_codex_access_token,
+            ProviderCredentialError, _is_codex_subscription, _is_grok_subscription,
+            _load_codex_access_token, _load_grok_access_token,
         )
         if _is_codex_subscription(provider_row):
             try:
                 api_key, _ = await _load_codex_access_token(provider_row["id"])
             except ProviderCredentialError:
                 raise HTTPException(400, "ChatGPT login is unavailable. Reconnect it in Settings > Providers; no API-key fallback is available.") from None
+        elif _is_grok_subscription(provider_row):
+            # The login's OAuth access token, read fresh so a rotation by the
+            # refresh worker applies; never the row's API-key column.
+            try:
+                api_key = await _load_grok_access_token(provider_row["id"])
+            except ProviderCredentialError:
+                raise HTTPException(400, "SuperGrok login is unavailable. Reconnect it in Settings > Providers.") from None
         else:
             api_key = await run_sync(_decrypt_auth_token, provider_row)
     if not api_key:
@@ -846,7 +882,7 @@ async def create_voice_session(
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
     options = voice_settings.get("voice_options", {})
     selected_model, selected_effort = request.model, request.effort
-    if model in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL) and not (selected_model or "").strip():
+    if model in _DELEGATING_STREAM_MODELS and not (selected_model or "").strip():
         raise HTTPException(400, "Choose a chat model in the composer before starting a voice call.")
     client_secret, expires_at = "", None
     if transport_for(model) == "webrtc":
@@ -872,8 +908,8 @@ async def create_voice_session(
     session_create_overrides = {
         "title": "Voice session",
         "is_active": True,
-        "provider_id": None if model in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL) else provider_row["id"],
-        "derive_provider_from_profile": model not in (LIVE_MODEL, GROK_MODEL, CODEX_MODEL),
+        "provider_id": None if model in _DELEGATING_STREAM_MODELS else provider_row["id"],
+        "derive_provider_from_profile": model not in _DELEGATING_STREAM_MODELS,
         "model": selected_model,
         "effort": selected_effort,
         "permission_mode": request.permission_mode,
@@ -1453,10 +1489,12 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             raise HTTPException(409, "This voice session already has an audio connection.")
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
             raise HTTPException(429, "Too many voice calls are connected.")
-        from app.core.voice_grok import GrokVoiceStream
+        from app.core.voice_grok import GrokVoiceStream, SuperGrokVoiceStream
         if config["model"] == CODEX_MODEL:
             from app.core.voice_codex import CodexVoiceStream  # Only when this engine is used.
             stream_cls = CodexVoiceStream
+        elif config["model"] == SUPERGROK_MODEL:
+            stream_cls = SuperGrokVoiceStream
         else:
             stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
         call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],

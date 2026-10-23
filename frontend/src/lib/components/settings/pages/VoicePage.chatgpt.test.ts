@@ -119,6 +119,7 @@ describe('ChatGPT voice (ChatGPT subscription)', () => {
 		expect(Array.from(engine().options).map((o) => [o.value, o.textContent])).toEqual([
 			['gpt-live-1', 'GPT Live 1'],
 			['grok-voice-latest', 'Grok Voice'],
+			['grok-voice-supergrok', 'Grok voice (SuperGrok subscription)'],
 			[CODEX, LABEL]
 		]);
 		expect(transport.put).not.toHaveBeenCalled();

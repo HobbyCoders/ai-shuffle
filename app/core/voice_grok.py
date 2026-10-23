@@ -11,7 +11,7 @@ import logging
 
 from app.core.voice_models import GROK_URL
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
-from app.core.voice_stream import VoiceStream
+from app.core.voice_stream import VoiceStream, connect
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,10 @@ def grok_session(config: dict, options: dict) -> dict:
 
 
 class GrokVoiceStream(VoiceStream):
+    # Shown to the caller; the subscription engine names its own funding.
+    SESSION_REJECTED = "xAI rejected the voice session settings. Check API model access."
+    EVENT_REJECTED = "xAI rejected a voice event. Check your API key and voice model access."
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.pending_tools = set()
@@ -127,7 +131,7 @@ class GrokVoiceStream(VoiceStream):
             while True:
                 event = json.loads(await self.upstream.recv())
                 if event.get("type") == "error":
-                    raise ValueError("xAI rejected the voice session settings. Check API model access.")
+                    raise ValueError(self.SESSION_REJECTED)
                 if event.get("type") == "session.updated":
                     break
         for item in history:
@@ -198,6 +202,53 @@ class GrokVoiceStream(VoiceStream):
                     self.speech_pending = True
                     logger.warning("Grok voice response overlap; retaining queued work note")
                 else:
-                    raise ValueError("xAI rejected a voice event. Check your API key and voice model access.")
+                    raise ValueError(self.EVENT_REJECTED)
             if translated:
                 yield json.dumps(translated)
+
+
+class SuperGrokVoiceStream(GrokVoiceStream):
+    """Grok voice funded by a connected SuperGrok subscription login.
+
+    Same xAI socket, protocol, transcripts and same-chat delegation as the
+    API-key engine; only the bearer differs. The route loads the login's access
+    token server-side (never an xAI API key) and it is dropped once the socket
+    opens. No automatic retry or reconnect, and upstream errors are reduced to
+    fixed messages so no header or token can reach logs or the browser.
+    """
+    SESSION_REJECTED = "SuperGrok voice rejected the session. Access may be unavailable for this subscription."
+    EVENT_REJECTED = "SuperGrok voice rejected a voice event. Access may be unavailable for this subscription."
+
+    async def open_upstream(self):
+        from websockets.exceptions import InvalidStatus
+
+        token, self.api_key = self.api_key, ""
+        if self.closed or not token:
+            raise ValueError("SuperGrok voice connection is closed.")
+        try:
+            return await connect(GROK_URL, additional_headers={"Authorization": "Bearer " + token},
+                                 open_timeout=45, max_size=2_000_000)
+        except asyncio.CancelledError:
+            raise
+        except InvalidStatus as exc:
+            status = exc.response.status_code
+        except Exception:
+            status = None
+        if status is None:
+            raise ValueError("SuperGrok voice could not connect. Try again shortly.")
+        if status == 401:
+            raise ValueError(await self.renew_after_401(token))
+        raise ValueError(f"SuperGrok voice refused the connection (HTTP {status}). Access may be unavailable for this subscription.")
+
+    async def renew_after_401(self, token: str) -> str:
+        """Renew through the provider's own 401 path, then ask the caller to retry."""
+        from app.core import xai_token_refresh
+        try:
+            renewed = await xai_token_refresh.refresh_on_401_once(
+                self.config["provider_id"], stale_access_token=token)
+        except Exception:
+            logger.warning("SuperGrok voice: login renewal after 401 failed for session %s", self.session_id)
+            renewed = False
+        if renewed:
+            return "The SuperGrok login was renewed. Start the call again."
+        return "SuperGrok refused the login. Reconnect SuperGrok in Settings > Providers; there is no API-key fallback."

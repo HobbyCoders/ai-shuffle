@@ -249,7 +249,14 @@ export class VoiceDefaults {
 	get callProviderName(): string {
 		const id = this.settings?.voice_provider_id;
 		const model = this.settings?.voice_model;
-		const fallback = model === 'gpt-live-1-codex' ? 'ChatGPT login' : model === 'grok-voice-latest' ? 'xAI API key' : 'OpenAI API key';
+		const fallback =
+			model === 'gpt-live-1-codex'
+				? 'ChatGPT login'
+				: model === 'grok-voice-supergrok'
+					? 'SuperGrok login'
+					: model === 'grok-voice-latest'
+						? 'xAI API key'
+						: 'OpenAI API key';
 		if (!id) return fallback;
 		return getProviders().find((p) => p.id === id)?.name ?? fallback;
 	}
