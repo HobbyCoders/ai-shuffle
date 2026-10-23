@@ -1199,6 +1199,10 @@ def cmd_fast(args) -> int:
     return 0
 
 
+def is_pr_assets_ref(remote_ref: str) -> bool:
+    return remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/")
+
+
 def push_update_reach(revision: str, remote_ref: str) -> None:
     base = comparison_base(resolve_base(), revision)
     ctx = Context(mode="changed", base=base, files=None, python=choose_python())
@@ -1239,6 +1243,13 @@ def cmd_pre_push(args) -> int:
         return 0
     # The whole working tree as well, as `check` and `full` do; no network audits.
     security_check(choose_python(), audit=False)
+    # pr-assets holds PR screenshots on its own (usually orphan) history and
+    # never merges, so it shares no base with main: the secret scans above
+    # cover it, and update-reach (a policy for code bound for main) does not.
+    branches = [(sha, ref) for sha, ref in branches if not is_pr_assets_ref(ref)]
+    if not branches:
+        print("pre-push: secret scan passed for pr-assets.")
+        return 0
     # Refresh the push remote's main (the next new-branch scan boundary) or,
     # for a URL or a remote without main, the configured comparison base.
     fetch_push_base(push_remote)

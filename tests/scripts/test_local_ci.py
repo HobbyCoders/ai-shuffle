@@ -374,6 +374,31 @@ def test_secret_added_then_removed_still_blocks_a_real_push(asset_repo, tmp_path
     assert git("ls-remote", str(remote)).stdout == ""
 
 
+def test_clean_orphan_pr_assets_push_is_accepted(asset_repo, tmp_path):
+    # The documented screenshot flow: an orphan pr-assets branch shares no
+    # history with main, so it gets the secret scans but not update-reach.
+    repo, git, commit, _ = asset_repo
+    remote = tmp_path / "remote.git"
+    git("init", "--bare", "-q", str(remote))
+    # The fixture's sentinel rule matches its own text in the whole-tree scan;
+    # a self-excluding regex keeps this clean push clean.
+    config = repo / ".gitleaks.toml"
+    config.write_text(config.read_text(encoding="utf-8").replace(
+        'regex = "LOCAL_CI_TEST_SECRET"', 'regex = "LOCAL_CI_TEST_SECRE[T]"'), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "Code history")
+    code_branch = git("branch", "--show-current").stdout.strip()
+    git("checkout", "-q", "--orphan", "pr-assets")
+    git("rm", "-rq", "--cached", ".")
+    commit("pr-123/screenshot.png")
+    # As documented: push it from the code checkout, not from the orphan tree.
+    git("checkout", "-q", "-f", code_branch)
+    result = git("push", str(remote), "pr-assets:refs/heads/pr-assets", check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "secret scan passed for pr-assets" in result.stdout + result.stderr
+    assert git("ls-remote", str(remote)).stdout != ""
+
+
 def test_windows_known_failures_list_is_well_formed():
     sys.path.insert(0, str(ROOT / "scripts" / "ci"))
     import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]
