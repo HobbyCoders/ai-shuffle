@@ -130,7 +130,7 @@ class TestCloneCredentialRedaction:
 
         err = subprocess.CalledProcessError(128, ["git"], stderr=f"fatal: '{self.URL}' denied")
         with caplog.at_level("WARNING", logger="app.core.git_service"), \
-             patch("app.core.git_service.subprocess.run", side_effect=err), \
+             patch("app.core.git_service.subprocess.Popen", side_effect=err), \
              pytest.raises(subprocess.CalledProcessError):
             git._run_git(str(tmp_path), ["clone", "--", self.URL, "."], check=True)
         assert "s3cr3t" not in caplog.text

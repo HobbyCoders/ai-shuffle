@@ -20,9 +20,12 @@ Implementation is split across mixin modules for maintainability:
 import logging
 import os
 import re
+import signal
 import stat
 import subprocess
+import tempfile
 import threading
+import time
 from concurrent.futures import Future
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -155,6 +158,36 @@ def _quiet_git_env(run_env: Dict[str, str]) -> None:
 # One `git status` can take seconds on a cold, busy disk; past this it is
 # killed and the last good status (or "unknown") is served instead.
 STATUS_TIMEOUT_SECONDS = 20
+# A status includes discovery and short metadata commands as well as status.
+# Bound shared-future waits too, even if a reader fails outside subprocess code.
+STATUS_WAIT_TIMEOUT_SECONDS = 2 * STATUS_TIMEOUT_SECONDS + 60
+_GIT_KILL_TIMEOUT_SECONDS = 2
+_GIT_REAP_TIMEOUT_SECONDS = 1
+_IS_WINDOWS = os.name == "nt"
+
+
+def _kill_git_tree(proc: subprocess.Popen) -> None:
+    """End the tree before reaping the redirector, with bounded cleanup."""
+    try:
+        if _IS_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                timeout=_GIT_KILL_TIMEOUT_SECONDS, env=scrub_child_env(),
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("Git process-tree cleanup failed", exc_info=True)
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass  # The tree kill may already have reaped the redirector.
+        try:
+            proc.wait(timeout=_GIT_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass  # Never turn a command timeout into an unbounded reap.
 
 
 class StatusUnavailable(Exception):
@@ -186,9 +219,9 @@ class _StatusReads:
 
     * At most one read per checkout runs at a time; callers that arrive while
       it runs wait for it and share its result.
-    * ``invalidate`` bumps the checkout's generation. A read that started
-      before it is neither joined by later callers nor cached, so a status
-      asked for after a change never describes the checkout before it.
+    * ``invalidate`` bumps the checkout's generation. Later callers wait for
+      the old read to finish, then coalesce on one follow-up for the latest
+      generation. Invalidations are not a queue of concurrent reads.
     * The last failure per checkout is kept so callers can tell a real clean
       status from the empty fallback (see GitService.get_status_error).
     """
@@ -258,17 +291,35 @@ class GitService(
         run_env.setdefault("GIT_TERMINAL_PROMPT", "0")
         _quiet_git_env(run_env)
         try:
-            return subprocess.run(
-                ["git"] + args,
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                check=check,
-                env=run_env,
-            )
+            command = ["git"] + args
+            group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                     if _IS_WINDOWS else {"start_new_session": True})
+            # Files, not PIPEs: Windows communicate() can wait forever draining
+            # pipes inherited by Git for Windows' redirected child. A finite
+            # file snapshot needs no drain, even if tree cleanup fails.
+            with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                proc = subprocess.Popen(
+                    command, cwd=working_dir, stdout=stdout, stderr=stderr,
+                    env=run_env, **group,
+                )
+                try:
+                    proc.wait(timeout=timeout)
+                except BaseException:
+                    _kill_git_tree(proc)
+                    raise
+                stdout.seek(0)
+                stderr.seek(0)
+
+                def captured(stream):
+                    text = stream.read(os.fstat(stream.fileno()).st_size).decode("utf-8", "replace")
+                    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+                result = subprocess.CompletedProcess(
+                    command, proc.returncode, captured(stdout), captured(stderr),
+                )
+            if check:
+                result.check_returncode()
+            return result
         except subprocess.TimeoutExpired:
             logger.warning(
                 "Git command timed out: git %s", redact_url_credentials(" ".join(args))
@@ -573,8 +624,8 @@ class GitService(
 
         Call after anything that can change a checkout: the app's own
         mutations (commit, checkout, stage, push, pull...), the end of an agent
-        turn in it, or an explicit refresh. The next read is fresh, and a read
-        already in flight is not reused or cached.
+        turn in it, or an explicit refresh. The next read is fresh, queued
+        behind any read already in flight (whose result is not reused/cached).
         """
         key = checkout_key(working_dir)
         # The cached status stays (tagged with its generation, so it is no
@@ -640,34 +691,49 @@ class GitService(
         key = checkout_key(working_dir)
         cache_key = f"status:{key}"
         reads = _status_reads
-        # Cached as (generation, status): a status read before the checkout's
-        # last invalidation is never fresh, but can still stand in for a read
-        # that times out.
-        previous = None
-        cached = _git_cache.peek(cache_key)
-        if cached is not None:
-            (cached_generation, cached_status), age = cached
-            if cached_generation == reads.current(key) and age < _STATUS_CACHE_TTL:
-                return cached_status
-            previous = (cached_status, age)
-
-        with reads.lock:
-            generation = reads.generation.get(key, 0)
-            flight = reads.inflight.get(key)
-            if flight is not None and flight[0] == generation:
-                future, owner = flight[1], False
-            else:
-                future, owner = Future(), True
-                reads.inflight[key] = (generation, future)
-        if not owner:
-            return future.result()
+        deadline = time.monotonic() + STATUS_WAIT_TIMEOUT_SECONDS
+        while True:
+            # Check/cache/claim under the generation lock: invalidation cannot
+            # race a cache publication, and an older flight is NEVER replaced.
+            previous = None
+            with reads.lock:
+                generation = reads.generation.get(key, 0)
+                cached = _git_cache.peek(cache_key)
+                if cached is not None:
+                    (cached_generation, cached_status), age = cached
+                    if cached_generation == generation and age < _STATUS_CACHE_TTL:
+                        return cached_status
+                    previous = (cached_status, age)
+                flight = reads.inflight.get(key)
+                if flight is None:
+                    future = Future()
+                    reads.inflight[key] = (generation, future)
+                    break
+                future = flight[1]
+            try:
+                result = future.result(timeout=max(0, deadline - time.monotonic()))
+            except TimeoutError:
+                if previous is not None:
+                    cached = _git_cache.peek(cache_key)
+                    if cached is not None and cached[1] < _STATUS_STALE_TTL:
+                        return cached[0][1]
+                reads.errors[key] = "git status timed out waiting for an active read"
+                return _empty_status()
+            if flight[0] == generation:
+                return result
+            # The active read predates our request. All pending callers retry
+            # the same slot for the latest generation, not one slot per change.
+            if time.monotonic() >= deadline:
+                reads.errors[key] = "git status timed out waiting for a fresh read"
+                return _empty_status()
 
         try:
             result, fresh = self._read_status(working_dir, key, previous)
             with reads.lock:
                 current = reads.generation.get(key, 0) == generation
-            if fresh and current and result.get("is_git_repo"):
-                _git_cache.put(cache_key, (generation, result))
+                if fresh and current and result.get("is_git_repo"):
+                    _git_cache.put(cache_key, (generation, result))
+                del reads.inflight[key]
             future.set_result(result)
             return result
         except BaseException as exc:  # _read_status does not raise; belt and braces
