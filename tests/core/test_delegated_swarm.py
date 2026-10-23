@@ -285,3 +285,93 @@ async def test_delegated_swarm_without_a_session_refuses():
         {"id": "a", "agent": "helper", "prompt": "work"},
     ]})
     assert result.get("isError") is True
+
+
+# ─── The bridge itself withholds Swarm without Task ─────────────────────────
+
+
+def _bridge(options, registry):
+    """The DelegatedLoop bridge filter as connect wires it, and what it serves."""
+    from fluid.engine.delegated import DelegatedLoop
+
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.allowed_tools = ha._delegated_allowed(options)
+    loop.disallowed_tools = ha._delegated_disallowed(options)
+    served = {
+        s.name for s in registry.list_tools(loaded_only=True)
+        if s.source in ("inproc", "builtin") and loop._bridge_tool_permitted(s.name)
+    }
+    return loop._bridge_tool_permitted, served
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [
+    {"disallowed_tools": ["Task"]},
+    {"tool_allowlist": ["Read", "Swarm"]},
+])
+async def test_bridge_never_serves_swarm_without_task(agents, tmp_path, kw):  # noqa: F811
+    """The bridge serves its tools without PreToolUse, so the Task rule must
+    reach its own filter, not only the prompt and grant predicate."""
+    options = _options(tmp_path, _server(cwd=str(tmp_path)), **kw)
+    registry = await ha.HarnessAdapter()._build_registry(options, native=False)
+    permitted, served = _bridge(options, registry)
+    assert permitted("mcp__builtins__Swarm") is False
+    assert "mcp__builtins__Swarm" not in served
+    assert "mcp__builtins__Swarm" in ha._delegated_disallowed(options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{}, {"tool_allowlist": ["Read", "Task", "Swarm"]}])
+async def test_bridge_serves_swarm_with_task(agents, tmp_path, kw):  # noqa: F811
+    options = _options(tmp_path, _server(cwd=str(tmp_path)), **kw)
+    registry = await ha.HarnessAdapter()._build_registry(options, native=False)
+    permitted, served = _bridge(options, registry)
+    assert permitted("mcp__builtins__Swarm") is True
+    assert {"mcp__builtins__Swarm", "mcp__builtins__Task"} <= served
+
+
+def test_chat_lane_withholds_the_bridged_swarm(tmp_path):
+    from app.mcp.builtin_tools import create_builtin_tools_server
+
+    options = _options(tmp_path, create_builtin_tools_server(is_admin=True))
+    options.extra["session_mode"] = "chat"
+    assert "mcp__builtins__Swarm" in ha._delegated_disallowed(options)
+
+
+# ─── The handler-side Task check (defence in depth) ─────────────────────────
+
+
+@pytest.mark.parametrize("kw, task_ok", [
+    ({}, True),
+    ({"tool_allowlist": ["Read", "Task", "Swarm"]}, True),
+    ({"disallowed_tools": ["Task"]}, False),
+    ({"tool_allowlist": ["Read", "Swarm"]}, False),
+])
+def test_connect_installs_the_sessions_tool_filter(agents, tmp_path, kw, task_ok):  # noqa: F811
+    from app.mcp.builtin_tools import BRIDGE_TOOL_FILTER_KEY
+
+    server = _server(cwd=str(tmp_path))
+    options = _options(tmp_path, server, **kw)
+    ha._install_bridge_tool_filter(options)
+    assert server[BRIDGE_TOOL_FILTER_KEY]["tool_filter"]("Task") is task_ok
+
+
+@pytest.mark.asyncio
+async def test_bridged_swarm_start_refuses_when_task_is_not_permitted(agents, tmp_path, monkeypatch):  # noqa: F811
+    """Even if the bridge served it, fluid's handler refuses the start, as on
+    the native leg, and nothing is dispatched."""
+    from app.core import task_dispatch
+
+    _mk_session(agents, PARENT, "root-agent")
+    dispatch = AsyncMock()
+    monkeypatch.setattr(task_dispatch, "dispatch_task_tool", dispatch)
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    server = _server(cwd=str(tmp_path))
+    ha._install_bridge_tool_filter(_options(tmp_path, server, disallowed_tools=["Task"]))
+    result = await _tools(server)["Swarm"].handler({"action": "start", "tasks": [
+        {"id": "a", "agent": "helper", "prompt": "work"},
+    ]})
+    assert result.get("isError") is True
+    assert "Task delegation is not permitted" in result["content"][0]["text"]
+    dispatch.assert_not_awaited()
+    assert PARENT not in swarm.coordinators

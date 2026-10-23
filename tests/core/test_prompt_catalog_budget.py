@@ -35,7 +35,7 @@ def _emulator_tools_listed(monkeypatch):
 # Swarm's schema stays deferred: the always-loaded bridge tools are unchanged.
 MEASURED_FULL = 128_050
 MEASURED_EAGER = 52_573
-MEASURED_DELEGATED_APPEND = 14_275 + 441
+MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
 
 

@@ -661,6 +661,7 @@ class HarnessAdapter(ProviderAdapter):
             # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
+            _install_bridge_tool_filter(options)
             from app.core.usage_limits import claude_mod_usage_sink
             from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
             from app.core import claude_compaction
@@ -5562,8 +5563,8 @@ def _valid_effort(value: Any) -> Optional[str]:
     return None
 
 
-# The CLI's native subagent tools are BANNED: the app's Task tool
-# (mcp__builtins__Task) is the one orchestration surface. The CLI's native
+# The CLI's native subagent tools are BANNED: the app's Task and Swarm
+# (mcp__builtins__Task / mcp__builtins__Swarm) are the orchestration surface. The CLI's native
 # session-cron/wake tools and background-job tools are banned for the same
 # reason: the CLI fires their wake turns between queries, so the delegated
 # client never reads them and they vanish from app history and cost
@@ -5819,7 +5820,48 @@ def _delegated_disallowed(options: SessionOptions) -> list:
             name for name in cached_cli_tools()
             if cli_can_show(name) and not tool_permitted(name, surface, None)
         )
+    if not _delegated_task_permitted(options, surface):
+        # Swarm dispatches every item through Task. This list is the bundled
+        # bridge's filter as well as the CLI's wall, and the bridge serves its
+        # tools without PreToolUse, so the rule must live here, not only in
+        # _delegated_tool_predicate's prompt and grant view.
+        banned.add(_BRIDGED_SWARM)
     return sorted(banned)
+
+
+def _install_bridge_tool_filter(options: SessionOptions) -> None:
+    """Give the builtins server this session's tool filter (bare names).
+
+    fluid's Swarm handler refuses a start when ``tool_filter("Task")`` is
+    False, which the native engine wires through its ctx. The bridged copy
+    reads the same predicate from the server's slot. The bridge already
+    withholds Swarm when Task is not permitted (``_delegated_disallowed``);
+    this is the handler-side check behind it.
+    """
+    from app.mcp.builtin_tools import BRIDGE_TOOL_FILTER_KEY
+
+    config = (options.mcp_servers or {}).get("builtins")
+    slot = config.get(BRIDGE_TOOL_FILTER_KEY) if isinstance(config, dict) else None
+    if not isinstance(slot, dict):
+        return
+    permit = _delegated_tool_predicate(options)
+    task_ok = _delegated_task_permitted(options, _delegated_surface(options))
+
+    def tool_filter(name: str) -> bool:
+        if name == "Task":
+            return task_ok
+        return permit is None or permit(f"mcp__builtins__{name}")
+
+    slot["tool_filter"] = tool_filter
+
+
+def _delegated_task_permitted(options: SessionOptions, surface: Optional[list]) -> bool:
+    """Whether this session may dispatch through the bridged Task."""
+    from app.core.tool_access import tool_permitted
+
+    if _session_mode(options) == "chat":
+        return False
+    return tool_permitted(_BRIDGED_TASK, surface, _delegated_blocklist(options))
 
 
 def _policy_accepts_cwd(policy: Any) -> bool:
@@ -7140,8 +7182,8 @@ def _with_agents_index(
 # bundled bridge. The CLI sees each one as ``mcp__fluid_bundled__`` + this.
 _DELEGATED_MEMORY_TOOLS = ("Remember", "Recall", "Forget")
 _DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
-# The app's own Task and background tools; the CLI's tools of these names are
-# banned on this leg (DELEGATED_BANNED_TOOLS).
+# The app's own Task, Swarm and background tools. The CLI's tools of these
+# names are banned on this leg (DELEGATED_BANNED_TOOLS); the CLI has no Swarm.
 _DELEGATED_TASK_TOOLS = ("Task", "Swarm", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
 # The app's tools standing in for CLI tools banned on this leg (see
 # DELEGATED_BANNED_TOOLS): (app tools, what they are for, the CLI tools).

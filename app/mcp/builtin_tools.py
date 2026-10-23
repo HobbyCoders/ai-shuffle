@@ -1484,6 +1484,7 @@ def _swarm_bridge_tool(
     cwd: Optional[str],
     agent_registry: Optional[Dict[str, Any]],
     workflow_guidance: bool,
+    filter_slot: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """``mcp__builtins__Swarm``: fluid's Swarm handler on a per-call ctx.
 
@@ -1517,6 +1518,12 @@ def _swarm_bridge_tool(
         tool_use_id = current_tool_use_id.get()
         if tool_use_id:
             ctx.extra["tool_use_id"] = tool_use_id
+        # fluid's handler refuses a start when Task is not permitted, as on
+        # the native leg (whose engine sets tool_filter). The bridge already
+        # withholds Swarm then; this is the defence in depth.
+        tool_filter = (filter_slot or {}).get("tool_filter")
+        if tool_filter is not None:
+            ctx.extra["tool_filter"] = tool_filter
         return _fluid_outcome_result(await swarm_mod.handler(args, ctx))
 
     return tool("Swarm", description, schema)(swarm_tool)
@@ -1899,10 +1906,14 @@ def create_builtin_tools_server(
     # handler over app.core.swarm), dispatching every item through the Task
     # dispatcher above. Delegated-leg surface (mcp__builtins__Swarm); native
     # legs get fluid's bare-named Swarm instead (the bridge filters this copy).
+    # The session's final tool surface is known only at connect, after this
+    # server is built: the harness fills this slot (BRIDGE_TOOL_FILTER_KEY).
+    bridge_filter: Dict[str, Any] = {}
     all_tools.append(_swarm_bridge_tool(
         tool, task_contract,
         session_id=session_id, profile_id=profile_id, provider_id=provider_id,
         cwd=cwd, agent_registry=agent_registry, workflow_guidance=workflow_guidance,
+        filter_slot=bridge_filter,
     ))
 
     # Same host-owned top-level coordination on delegated CLI legs.
@@ -3028,10 +3039,19 @@ def create_builtin_tools_server(
         "Registering %d builtin tool(s) as MCP tools (session=%s, project=%s, admin=%s)",
         len(all_tools), session_id, project_id, is_admin,
     )
-    return patch_sdk_server(
+    server = patch_sdk_server(
         create_tool_server(name="builtins", version="1.0.0", tools=all_tools),
         all_tools,
     )
+    server[BRIDGE_TOOL_FILTER_KEY] = bridge_filter
+    return server
+
+
+#: The builtins server config's slot for the session's tool filter. On the
+#: delegated leg ``HarnessAdapter`` stores ``{"tool_filter": (bare name) ->
+#: bool}`` there at connect (``_install_bridge_tool_filter``), and the bridged
+#: Swarm hands it to fluid's handler as the native engine does.
+BRIDGE_TOOL_FILTER_KEY = "aih_bridge_tool_filter"
 
 
 def get_builtin_tool_names() -> List[str]:
