@@ -1,28 +1,29 @@
-"""The owner's spending and run-time limits for the persistent assistant.
+"""The owner's spending and run-time limits for coordination work.
 
-The app enforces these, never the model. Only the owner-only assistant API
-changes them (``app.api.assistant``); no model-facing tool can raise, switch
-off or reset them.
+The app enforces these, never the model. Only the owner-only limits API changes
+them (``/api/v1/assistant/limits``, shown in Settings > Usage); no
+model-facing tool can raise, switch off or reset them. (The module keeps the
+name of the retired personal assistant, whose limits these were, #371.)
 
 What counts
 -----------
-The home conversation plus every session linked to it in ``assistant_runs``:
-research runs, Task workers and chats it started or messaged (nested starts
-link to the same home). A linked session counts from the moment it was
-linked, so an older chat the assistant only messaged counts from then on.
+Owner coordination chats (``orchestration_limits.role``: a no-project owner
+chat) and every job they start: Task workers and the chats they start with
+StartSession, nested or not. Background research runs (``assistant_runs``)
+count too, from the moment each was admitted.
 
-Task workers and chats it started on another worker count too
+Task workers and chats a coordination chat started on another worker count too
 (``assistant_remote_jobs``). That worker books their turns in its own
-``usage_log`` and never links them to its own assistant, so the spend is
-charged to this limit only. Every pass of :func:`enforce` asks each such
-worker (control action ``remote-usage``) for the job's cumulative cost: the
-job's own turns, the Task workers it started there and its running turns'
-per-call costs. The rise over the highest total seen before is booked once,
-here, when it is learned (``assistant_remote_costs``), so an answer seen
-twice, a restart or a worker that comes back after being unreachable never
-counts a dollar twice and never loses one. Cost a worker could not report yet
-counts on the day it arrives. A worker on a release without the action is
-read from its mirrored ``sessions.total_cost_usd`` instead.
+``usage_log``, so the spend is charged to this limit only. Every pass of
+:func:`enforce` asks each such worker (control action ``remote-usage``) for the
+job's cumulative cost: the job's own turns, the Task workers it started there
+and its running turns' per-call costs. The rise over the highest total seen
+before is booked once, here, when it is learned (``assistant_remote_costs``),
+so an answer seen twice, a restart or a worker that comes back after being
+unreachable never counts a dollar twice and never loses one. Cost a worker
+could not report yet counts on the day it arrives. A worker on a release
+without the action is read from its mirrored ``sessions.total_cost_usd``
+instead.
 
 The cost source is the one automations and Stats use: the per-turn
 ``usage_log`` booking of the turn's reported ``total_cost_usd``. A turn counts
@@ -31,7 +32,8 @@ API-price estimate (fluid prices the call from its model table; the Claude
 CLI reports its own estimate), so the limit holds for them too. A model the
 price table does not know books $0, which the run-time limit still covers.
 Turns still running add their per-call ``turn.usage`` costs from the event
-log, so one long turn cannot run past the limit before it settles.
+log, so one long turn cannot run past the limit before it settles. Turns the
+owner typed in a coordination chat or a job are not counted or stopped.
 
 The day starts at midnight in the owner's timezone preference when one is
 recorded (Settings > General > Time zone), else UTC.
@@ -39,12 +41,11 @@ recorded (Settings > General > Time zone), else UTC.
 Enforcement
 -----------
 * At the limit, new background work is refused (Task, StartSession,
-  MessageSession, research), the home starts no new turn and unattended
-  turns in linked jobs do not start.
+  MessageSession, research) and unattended turns in jobs do not start.
 * ``enforce`` runs on the assistant manager's loop: at the limit it stops the
-  live turns of the home and its jobs with the ordinary Stop path, and it
-  stops a job that has worked longer than the job time limit. Turns a person
-  started inside a job are left alone.
+  live unattended turns of coordination work with the ordinary Stop path, and
+  it stops a job that has worked longer than the job time limit. Turns a
+  person started inside a job are left alone.
 * A job on another worker is stopped the way that kind of job is stopped
   from here. A Task child goes through the one remote stop path, as Stop on
   its card or Swarm cancel does: the supervisor's teardown when it has a
@@ -55,8 +56,6 @@ Enforcement
   mirrored chat does. Turns a person started there are left alone too.
 * SendMessage to a Task child on another worker is refused at the limit
   (``message_refusal``), as the turn it would start is for a local child.
-* One plain notice is posted into the home conversation between turns: at
-  80% (once per day), when the limit is reached, and when a job is stopped.
 """
 from __future__ import annotations
 
@@ -73,15 +72,14 @@ from app.db.base import get_db, row_to_dict
 
 logger = logging.getLogger(__name__)
 
-NOTICE_SOURCE = "assistant_limit_notice"
-WHERE_TO_CHANGE = "you can change it on the Assistant page under Limits"
+WHERE_TO_CHANGE = "only the owner can change it in Settings > Usage"
 WARN_FRACTION = 0.8
 # Turn sources a person started. Inside a job these are never stopped or
 # refused by the limits: the owner chose to run them.
 PERSON_SOURCES = frozenset({"user", "queue", "worktree", "resume", "api", "answer"})
 LIVE_STATES = ("running", "interrupting", "draining")
 # A linked session created this close to (or after) its link was started by
-# the assistant, so its whole working time is the job's run time.
+# the research loop, so its whole working time is the job's run time.
 CREATED_BY_ASSISTANT = timedelta(minutes=5)
 _CHUNK = 400
 
@@ -169,26 +167,16 @@ def day_window(now=None):
 
 
 # ---------------------------------------------------------------------------
-# What the assistant spent today
+# What coordination work spent today
 # ---------------------------------------------------------------------------
 
-def _home_id(cursor):
-    cursor.execute("SELECT home_session_id FROM assistant_state WHERE id=%s", (assistant_id(),))
-    return (row_to_dict(cursor.fetchone()) or {}).get("home_session_id")
-
-
 def _tracked(cursor, roles):
-    """``{session_id: counted-from}`` for coordinators and their jobs."""
-    home = _home_id(cursor)
+    """``{session_id: counted-from}`` for coordinators, their jobs and research runs."""
     tracked: dict = {sid: None for sid in roles}
-    if home:
-        tracked[home] = None
     cursor.execute("SELECT session_id, created_at FROM assistant_runs WHERE assistant_id=%s "
                    "AND session_id IS NOT NULL", (assistant_id(),))
     for row in cursor.fetchall():
         sid = row["session_id"]
-        if sid == home:
-            continue
         since = _utc(row["created_at"])
         if sid not in tracked or (since and (tracked[sid] is None or since < tracked[sid])):
             tracked[sid] = since
@@ -279,7 +267,7 @@ def _measure(now=None, limits=None) -> dict:
     """Spend today plus what enforcement needs, from one connection.
 
     Coordination chats and their jobs only matter to a limit that is on, so
-    with both limits off only the legacy assistant's own work is measured.
+    with both limits off only research runs and remote jobs are measured.
     """
     day, start, resets_at, tz_name = day_window(now)
     from app.core.orchestration_limits import tracked_roles
@@ -319,33 +307,17 @@ def status(now=None):
 # Gates
 # ---------------------------------------------------------------------------
 
-def role(session_id):
-    """'home', 'job' or None for a session on this worker's assistant."""
-    if not session_id:
-        return None
-    with get_db() as conn:
-        cursor = conn.cursor()
-        home = _home_id(cursor)
-        if not home:
-            return None
-        if session_id == home:
-            return "home"
-        cursor.execute("SELECT 1 FROM assistant_runs WHERE assistant_id=%s AND session_id=%s LIMIT 1",
-                       (assistant_id(), session_id))
-        return "job" if cursor.fetchone() else None
-
-
 def _reached_text(state):
-    return (f"Today's {_money(state['daily_spend_limit_usd'])} assistant spending limit is reached "
+    return (f"Today's {_money(state['daily_spend_limit_usd'])} spending limit is reached "
             f"({_money(state['spent_today_usd'])} spent), so no new work starts until tomorrow; "
-            f"only the owner can change it on the Assistant page under Limits.")
+            f"{WHERE_TO_CHANGE}.")
 
 
 def start_refusal(session_id):
     """Why ``session_id`` may not start or wake background work now, or None.
 
-    Covers Task workers, StartSession, MessageSession and research admission
-    for the home and every job linked to it.
+    Covers Task workers, StartSession and MessageSession for coordination
+    chats and their jobs.
     """
     from app.core.orchestration_limits import start_refusal as check
     return check(session_id)
@@ -366,6 +338,7 @@ def _job_minutes(session, now):
 
 
 def _created_by_assistant(cursor, session):
+    """Whether the research loop created ``session`` for its run."""
     cursor.execute("SELECT MIN(created_at) AS linked FROM assistant_runs WHERE assistant_id=%s AND session_id=%s",
                    (assistant_id(), session["id"]))
     linked = _utc((row_to_dict(cursor.fetchone()) or {}).get("linked"))
@@ -393,9 +366,8 @@ def _person_input(source, payload=None):
 def turn_refusal(session_id, source=None, *, payload=None):
     """Why a new model turn in ``session_id`` may not start, or None.
 
-    The home starts no turn at the limit, whoever asked. A job starts no
-    unattended turn at the limit or past its job time limit; a turn the owner
-    started in it runs.
+    A coordination chat or job starts no unattended turn at the limit, and a
+    job none past its job time limit; a turn the owner started in it runs.
     """
     from app.core.orchestration_limits import turn_refusal as check
     return check(session_id, source, payload=payload)
@@ -408,12 +380,12 @@ def turn_refusal(session_id, source=None, *, payload=None):
 ROLE_CONTEXT = (
     "Spending limits: the owner sets a daily spending limit for you and all the work you start, and a run-time "
     "limit for each background job. The app enforces them and stops work that reaches them; you cannot change, "
-    "raise or reset them. Only the owner can, on the Assistant page under Limits. To answer how much you have "
+    "raise or reset them. Only the owner can, in Settings > Usage. To answer how much you have "
     "spent today, call GetUsage and read its session_usage field.")
 
 
 def role_context(session_id):
-    """Static text for the home's system prompt (no per-turn values)."""
+    """Static text for a coordination chat's system prompt (no per-turn values)."""
     try:
         from app.core.orchestration_limits import role as coordination_role
         kind = coordination_role(session_id)
@@ -427,7 +399,8 @@ def role_context(session_id):
 
 
 def session_usage(session_id):
-    """GetUsage's ``session_usage`` block for the home and its jobs, else None."""
+    """GetUsage's ``session_usage`` block for coordination chats and their jobs, else None."""
+    from app.core.orchestration_limits import role
     if role(session_id) is None:
         return None
     state = status()
@@ -440,7 +413,7 @@ def session_usage(session_id):
         "limit_reached": state["limit_reached"],
         "max_job_minutes": state["max_job_minutes"] if state["job_limit_enabled"] else None,
         "day": state["day"], "timezone": state["timezone"], "resets_at": state["resets_at"],
-        "note": ("Today's spend for the assistant conversation and every job it started, on this worker "
+        "note": ("Today's spend for coordination chats and every job they started, on this worker "
                  "or another one, in US dollars at API prices (subscription use is an estimate). Another "
                  "worker's spend counts once that worker reports it, about once a minute. Only the owner "
                  "can change these limits."),
@@ -471,21 +444,17 @@ def plan(now=None):
         spent_today_usd=round(measured["spent"], 4), day=measured["day"],
         limit_reached=bool(limits["spend_limit_enabled"] and measured["spent"] >= limits["daily_spend_limit_usd"]),
     )
-    tracked = measured["tracked"]
     stops = []
     coordinators = {sid for sid, kind in measured["roles"].items() if kind == "coordinator"}
     with get_db() as conn:
         cursor = conn.cursor()
-        home = _home_id(cursor)
-        if home:
-            coordinators.add(home)
         for turn in measured["live"]:
             sid = turn["session_id"]
             if limits_db.stopped(turn["id"]):
                 continue
-            person = sid != home and _person_input(turn.get("source"), turn.get("payload"))
+            person = _person_input(turn.get("source"), turn.get("payload"))
             if state["limit_reached"] and not person:
-                stops.append((sid, turn["id"], "daily_limit", _label(cursor, sid) if sid != home else None))
+                stops.append((sid, turn["id"], "daily_limit", _label(cursor, sid)))
                 continue
             if sid in coordinators or person or not limits["job_limit_enabled"]:
                 continue
@@ -499,7 +468,7 @@ def plan(now=None):
 
 
 async def enforce(now=None):
-    """Compatibility for the existing Assistant API and background loop."""
+    """Compatibility for the background loop."""
     from app.core.orchestration_limits import enforce as apply
     return await apply(now)
 
@@ -764,75 +733,3 @@ def wake_remote_job(worker_session_id):
         store.wake_remote_job(assistant_id(), worker_session_id)
     except Exception:  # noqa: BLE001
         logger.debug("Assistant limits: could not wake %s", worker_session_id, exc_info=True)
-
-
-def _list(labels):
-    named = [f'"{label}"' for label in labels if label]
-    shown = named[:3]
-    more = len(labels) - len(shown)
-    if not shown:
-        return ""
-    return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
-
-
-def reached_notice(state, stopped, home_id=None):
-    jobs = [s["label"] for s in stopped if s["session_id"] != home_id]
-    reply = any(s["session_id"] == home_id for s in stopped)
-    parts = []
-    if reply:
-        parts.append("my current reply")
-    if jobs:
-        names = _list(jobs)
-        parts.append(f"{len(jobs)} background {'job' if len(jobs) == 1 else 'jobs'}" + (f" ({names})" if names else ""))
-    what = "stopped " + " and ".join(parts) + " and " if parts else ""
-    return (f"Today's {_money(state['daily_spend_limit_usd'])} spending limit is reached "
-            f"({_money(state['spent_today_usd'])} spent), so I {what}won't start new work until tomorrow; "
-            f"{WHERE_TO_CHANGE}.")
-
-
-def warning_notice(state):
-    percent = int(state["spent_today_usd"] / state["daily_spend_limit_usd"] * 100)
-    return (f"Heads up: I've used {percent}% of today's {_money(state['daily_spend_limit_usd'])} spending limit "
-            f"({_money(state['spent_today_usd'])} so far); {WHERE_TO_CHANGE}.")
-
-
-def time_notice(state, stopped):
-    labels = [s["label"] for s in stopped]
-    limit = _duration(state["max_job_minutes"])
-    if len(labels) == 1:
-        subject = f'The background job "{labels[0]}"' if labels[0] else "A background job"
-        return f"{subject} ran past its {limit} limit, so I stopped it; {WHERE_TO_CHANGE}."
-    names = _list(labels)
-    return (f"{len(labels)} background jobs ran past their {limit} limit, so I stopped them"
-            + (f" ({names})" if names else "") + f"; {WHERE_TO_CHANGE}.")
-
-
-async def _post(home_id, text):
-    from app.core import turn_recorder
-    return await turn_recorder.record_brief(home_id, text, extra_payload={"source": NOTICE_SOURCE})
-
-
-async def _post_notices(state):
-    """Post pending notices into the home, only between its turns."""
-    home_id, hold = await run_sync(service.brief_destination)
-    if hold is not None or not home_id:
-        return
-    aid = assistant_id()
-    key = f"{state['day']}|{state['daily_spend_limit_usd']:g}"
-    pending = await run_sync(limits_db.unreported_stops, aid)
-    by_limit = [s for s in pending if s["reason"] == "daily_limit"]
-    by_time = [s for s in pending if s["reason"] == "job_time"]
-    if state["limit_reached"]:
-        if await run_sync(limits_db.claim_notice, aid, "reached", key):
-            # Reaching the limit also covers the 80% notice for today.
-            await run_sync(limits_db.claim_notice, aid, "warned", key)
-            if await _post(home_id, reached_notice(state, by_limit, home_id)) is None:
-                await run_sync(limits_db.release_notice, aid, "reached", key)
-                return
-        await run_sync(limits_db.mark_reported, [s["turn_id"] for s in by_limit])
-    elif (state["spend_limit_enabled"] and state["spent_today_usd"] >= state["daily_spend_limit_usd"] * WARN_FRACTION
-          and await run_sync(limits_db.claim_notice, aid, "warned", key)):
-        if await _post(home_id, warning_notice(state)) is None:
-            await run_sync(limits_db.release_notice, aid, "warned", key)
-    if by_time and await _post(home_id, time_notice(state, by_time)) is not None:
-        await run_sync(limits_db.mark_reported, [s["turn_id"] for s in by_time])

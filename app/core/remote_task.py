@@ -325,8 +325,8 @@ def _accepts_fast(worker: Mapping[str, Any]) -> bool:
 
 
 def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str) -> None:
-    """Count the child against the assistant's limits when the assistant
-    (its home or one of its jobs) started it. Blocking; never raises."""
+    """Count the child against the owner's spending limit when a coordination
+    chat (or one of its jobs) started it. Blocking; never raises."""
     try:
         from app.core import assistant_service
 

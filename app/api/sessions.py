@@ -61,7 +61,6 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     check_transcript_access,
     filter_readable_sessions,
     require_session,
-    refuse_assistant_home_mutation,
     require_transcript_session,
     enrich_sessions_with_tags,
     fetch_and_enrich_sessions,
@@ -1506,8 +1505,6 @@ async def update_session(
 ):
     """Update session title or status. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
-    if title is not None:
-        await refuse_assistant_home_mutation(session_id, "renamed")
 
     # Sync title rename to Claude SDK session if available. Only a Claude CLI
     # conversation id (a UUID) names a transcript the CLI owns; a fluid
@@ -1744,7 +1741,6 @@ async def _delete_session(existing: dict, background_tasks: BackgroundTasks, *,
     from app.network import control, engine, membership
 
     session_id = existing["id"]
-    await refuse_assistant_home_mutation(session_id, "deleted")
     owner = control.owner_of(existing)
     ctx = engine.context()
     member = ctx.member(owner) if ctx is not None and owner else None

@@ -14,14 +14,12 @@ def test_real_postgres_atomic_fingerprint_admission_and_restart(monkeypatch):
     from app.db import assistant as store, base, database
 
     identity = "assistant-pg-" + uuid4().hex
-    agent_id = identity + "-agent"
     monkeypatch.setattr(settings, "instance_id", identity)
     assert store.get_state(identity) is None  # Never auto-enable at bootstrap.
-    database.create_profile(agent_id, "PG owner assistant", None, {})
-    service.configure({"agent_id": agent_id, "enabled": True})
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        homes = list(executor.map(lambda _: service.open_home(), range(2)))
-    assert homes[0]["id"] == homes[1]["id"]
+    with base.get_db() as conn:
+        store.write_account(conn, {"agent_id": service.AGENT_ID})
+    service.reconcile()
+    assert store.research_allowed(store.get_state(identity))
     from app.core import connector_service, connector_packages
     monkeypatch.setattr(connector_packages, "require_installed", lambda _: "test-runtime")
     connector = asyncio.run(connector_service.create_connector("Disposable source", "gmail", {}, []))
@@ -44,10 +42,9 @@ def test_real_postgres_atomic_fingerprint_admission_and_restart(monkeypatch):
     assert run["event_ids"] == [next(value[0]["id"] for value in observations if value)]
     base.close_pool()
     base.init_pool(min_conn=1, max_conn=6)
-    assert store.get_state(identity)["home_session_id"] == homes[0]["id"]
+    assert store.research_allowed(store.get_state(identity))
     assert store.get_sources(identity)[0]["watermark"] == {"seen_ids": ["one"]}
     assert produce(None) == []
-    service.configure({"paused": True})
-    assert store.admit_run(identity) is None
+    assert store.admit_run(identity) is None  # One run in flight at a time.
     store.settle_run(run["id"], "cancelled", "Owner paused")
     assert store.get_run(run["id"])["status"] == "cancelled"

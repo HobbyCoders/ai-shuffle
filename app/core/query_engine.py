@@ -1909,9 +1909,9 @@ async def _stream_to_websocket_impl(
             yield {"type": "error", "message": _held, "code": loop_guard.HOLD_CODE}
             return
 
-    # The owner's assistant limits: past the daily spending limit the
-    # assistant home starts no new turn, nor does an unattended turn in a job
-    # it started (or one past its job time limit).
+    # The owner's spending limits: past the daily spending limit an
+    # unattended turn in a coordination chat or a job it started does not
+    # start (nor does a job past its job time limit).
     from app.core import orchestration_limits
 
     _limited = await asyncio.to_thread(

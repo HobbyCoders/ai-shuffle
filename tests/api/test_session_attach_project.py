@@ -44,7 +44,6 @@ def quiet(monkeypatch):
     monkeypatch.setattr("app.core.sync_engine.sync_engine.broadcast_user_session_updated", broadcast)
     monkeypatch.setattr(attach_api, "_owned_here", lambda session: True)
     monkeypatch.setattr(attach_api, "get_api_user_from_request", lambda request: None)
-    monkeypatch.setattr(attach_api, "refuse_assistant_home_mutation", AsyncMock())
     return pool, broadcast
 
 

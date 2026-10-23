@@ -20,9 +20,8 @@ handling without the flag (:func:`assistant_work`): their questions are
 answered the same way, and their approval prompts are raised in the starting
 chat (``provider_agent_approvals``) where the owner answers the real card.
 Anything that cannot be routed there, such as a private-access request, is
-deferred exactly as Away mode defers it. Nothing more is ever granted. Since
-#371 step 5 this applies to every owner chat, not only the legacy assistant
-home; the home's wider permission scope (``assistant_permissions``) does not.
+deferred exactly as Away mode defers it. Nothing more is ever granted. This
+applies to every owner chat (#371 step 5).
 """
 
 from __future__ import annotations
@@ -164,8 +163,8 @@ async def answers_questions_async(session_id: Optional[str]) -> bool:
 
 
 def turn_note(session_id: Optional[str]) -> Optional[str]:
-    """The per-turn reminder: Away mode, assistant-started work, the owner's
-    pending yes/no questions in the assistant's home, or None."""
+    """The per-turn reminder: Away mode, work another owner chat started, the
+    owner's pending yes/no questions in this chat, or None."""
     notes = [note for note in (_mode_note(session_id), _confirm_note(session_id)) if note]
     return "\n\n".join(notes) if notes else None
 

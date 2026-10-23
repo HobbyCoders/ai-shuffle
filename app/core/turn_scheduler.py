@@ -1970,9 +1970,9 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
 
 
 async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) -> None:
-    """A chat the owner's assistant started came to rest: wake its home.
+    """A chat an owner chat started came to rest: wake the starter.
 
-    ``session_id`` is the assistant home and ``frame`` the report
+    ``session_id`` is the starting chat and ``frame`` the report
     (``session_orchestration.build_started_report``). The chat is not a
     registry task of the home, so it is admitted to the OWN lane here; the
     merge, mid-turn steer, Stop latch and one-wake-per-completion latch are the

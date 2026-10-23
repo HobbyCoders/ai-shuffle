@@ -1,5 +1,6 @@
 """Durable assistant storage exercised through the PostgreSQL test shim."""
 import asyncio
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -11,13 +12,28 @@ from app.db import assistant as store, database
 from app.db.base import get_db
 
 
+def set_up_research():
+    """What the retired Assistant setup did for research: the synced account
+    names the built-in agent. Returns the account."""
+    with get_db() as conn:
+        store.write_account(conn, {"agent_id": service.AGENT_ID})
+    return service.reconcile()
+
+
+def owner_chat(title="Owner chat"):
+    """An ordinary visible owner chat with no project (a coordination chat)."""
+    return database.create_session(str(uuid.uuid4()), "assistant-agent", title=title, is_active=True,
+                                   mode="chat", target_instance_id=service.assistant_id())
+
+
 @pytest.fixture
 def assistant_fixture(monkeypatch):
+    """Research set up on an opted-in Gmail source; returns an owner chat."""
     monkeypatch.setattr(settings, "instance_id", "assistant-test")
     monkeypatch.setattr(service, "_guard_version", 0)
     database.create_profile("assistant-agent", "Helper", "custom", {"prompt": "Keep custom prompt", "model": "custom-model", "allowed_tools": ["Read"], "permission_mode": "bypassPermissions"}, mcp_tools=["keep-me"])
-    service.configure({"agent_id": "assistant-agent", "enabled": True})
-    home = service.open_home()
+    set_up_research()
+    home = owner_chat()
     from app.core import connector_service, connector_packages
     tokens = iter(("mail", "mail-user"))
     with monkeypatch.context() as package_setup:
@@ -90,12 +106,10 @@ def test_atomic_concurrency_and_daily_admission(assistant_fixture, monkeypatch):
 
 
 def test_research_is_automatic_and_source_revoke_stops_admission(assistant_fixture):
-    # Owners have no research switch: an old client's pause/disable is ignored.
-    service.configure({"paused": True, "enabled": False})
-    assert service.get_state()["paused"] is False
+    # Owners have no research switch: an old row's pause/disable is ignored.
     assert events() != []
     store.configure(service.assistant_id(), {"paused": True, "enabled": False})  # An old row.
-    service.get_state()  # Reconcile sets enabled where the home is and ignores paused.
+    service.reconcile()  # Reconcile sets enabled and ignores paused.
     assert events(message_id="old-row") != []
     assert store.admit_run(service.assistant_id()) is not None
     events(message_id="pending")

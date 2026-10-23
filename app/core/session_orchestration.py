@@ -68,10 +68,7 @@ def _text(data, key, limit):
 
 def _top_level(row, *, allow_settled=False):
     """An open, visible top-level chat row, wherever it runs."""
-    from app.core.assistant_service import is_primary_session
-    # Assistant homes are list-hidden, not command/delegated sessions.
-    visible = row and (not row.get("hidden") or is_primary_session(row["id"]))
-    return bool(visible and (allow_settled or row.get("is_active"))
+    return bool(row and not row.get("hidden") and (allow_settled or row.get("is_active"))
                 and not row.get("is_worker") and not row.get("parent_session_id")
                 and row.get("status") != "archived" and row.get("mode") != "voice")
 
@@ -142,13 +139,8 @@ def _owner(row, principal=_READ_PRINCIPAL, memo=None):
     return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")), memo)
 
 
-def _legacy_home(session_id):
-    from app.core.assistant_service import is_primary_session
-    return is_primary_session(session_id)
-
-
 def is_owner_session(row_or_id, *, principal=_READ_PRINCIPAL, memo=None):
-    """Owner top-level authority, independent of the legacy assistant home.
+    """Owner top-level authority.
 
     Settled sessions retain ownership for report validation, never wake authority.
     API users, delegated workers and foreign paired principals fail closed.
@@ -162,7 +154,7 @@ def is_owner_session(row_or_id, *, principal=_READ_PRINCIPAL, memo=None):
         return bool(row and not row.get("is_worker") and not row.get("parent_session_id")
                     and not row.get("automation_id")
                     and row.get("mode") != "voice" and not row.get("api_user_id")
-                    and (not row.get("hidden") or _legacy_home(row["id"]))
+                    and not row.get("hidden")
                     and _owner(row, principal, memo) == _OWNER_CHAT)
     except Exception:  # noqa: BLE001 — an unreadable identity grants nothing
         return False
@@ -545,18 +537,10 @@ def approval_starter(session_id):
         row = sessions.get_session(starter)
         if not row or not is_owner_session(row):
             return None
-        # The persistent legacy home keeps its routing even while parked.
-        return starter if _top_level(row) or (_legacy_home(starter) and row.get("status") != "archived") else None
+        return starter if _top_level(row) else None
     except Exception:  # noqa: BLE001 — doubt keeps the prompt on the ordinary path
         log.debug("approval_starter failed for %s", session_id, exc_info=True)
         return None
-
-
-def started_by_home(session_id):
-    """Only legacy-home work receives the assistant scope and Away handling."""
-    from app.core.assistant_service import is_primary_session
-    starter = started_by_owner(session_id)
-    return starter if starter and is_owner_session(starter) and is_primary_session(starter) else None
 
 
 def _resolve_project(value):
@@ -812,9 +796,11 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         body.update(model=model_plan["model"], provider_id=model_plan["provider_id"], **mapped)
         body["model_choice"] = _override_record(model_plan)
     if assistant:
-        from app.core.assistant_service import is_primary_session
         body["report_back"] = True
-        body["assistant_work"] = is_primary_session(sender["id"])
+        # Explicit, so a receiver never falls back to the old report_back
+        # default: approvals cannot travel back here, so no chat's remote
+        # start runs in Away mode on the receiver.
+        body["assistant_work"] = False
     from app.core.model_effort import resolve_child_effort, resolve_child_fast
     # Older peers only fit the transmitted flag to their model; send the
     # owner's resolved pick so a saved off cannot become a paid fast child.
@@ -1387,7 +1373,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         raise ValueError("model was not checked; nothing was started.")
     plan = model_plan or None
     if placement is None and data.get("project") is not None:
-        raise ValueError("project is available only in the owner's assistant conversation; omit it.")
+        raise ValueError("project is available only in the owner's own chats; omit it.")
     if placement is not None:
         remote = placement["remote"]
     else:
@@ -1410,10 +1396,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         # The owner's own paired phone or browser is the owner (#2218).
         if sender.get("api_user_id") or not owner_principal(_principal(sender_id)):
             raise PermissionError("Only the owner's chats can start chats on another worker.")
-        from app.core.assistant_service import is_primary_session
         from app.core.runner_capabilities import START_SESSION_PERMISSIONS_VERSION
         capability = (remote.get("capabilities") or {}).get("start_session_permissions", 0)
-        if assistant and not is_primary_session(sender_id) and (
+        if assistant and (
                 type(capability) is not int or capability < START_SESSION_PERMISSIONS_VERSION):
             raise ValueError(f"{remote['device_name']} cannot separate report-back from assistant permissions; "
                              "update that worker before retrying. Nothing was started.")
@@ -1612,10 +1597,6 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             overrides=overrides, payload=payload, command_id=command_id,
             parent_turn_id=root_id, _conn=conn,
         )
-    from app.core.assistant_service import home_for_session, link_job
-    home = home_for_session(sender_id)
-    if home and target["id"] != home:
-        link_job(home, target["id"])
     result = {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
               "delivery_status": "queued", "created": action == "start", "url": "/?session=" + target["id"],
               "note": "Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped status. No automatic reply or completion notification; peers must use MessageSession."}
@@ -1732,8 +1713,8 @@ async def _start_remote(plan, sender_id, sender_generation):
 
 
 def _link_remote_chat(sender_id, session_id, device_id, title):
-    """Count a chat made on another worker against the assistant's limits when
-    the assistant (its home or one of its jobs) asked for it. Never raises."""
+    """Count a chat made on another worker against the owner's spending limit
+    when a coordination chat (or one of its jobs) asked for it. Never raises."""
     try:
         from app.core.assistant_service import link_remote_job
         link_remote_job(sender_id, session_id, device_id, "chat", title)

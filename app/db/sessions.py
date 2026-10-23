@@ -243,15 +243,6 @@ def get_session_by_sdk_id(sdk_session_id: str) -> Optional[SessionRow]:
         return row_to_dict(cursor.fetchone())
 
 
-def _assistant_home_filter(prefix=""):
-    """Hide designated homes, including legacy mirrors whose owner is offline.
-
-    Explicit include_hidden callers and direct get_session retain history.
-    """
-    return (f" AND {prefix}id NOT IN (SELECT home_session_id FROM assistant_state WHERE home_session_id IS NOT NULL"
-            " UNION SELECT home_session_id FROM assistant_account WHERE home_session_id IS NOT NULL)")
-
-
 def get_sessions(
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,
@@ -310,7 +301,6 @@ def get_sessions(
         # _backfill_sessions_is_worker).
         query += " AND COALESCE(s.hidden, FALSE) = FALSE" if tag_id else " AND COALESCE(hidden, FALSE) = FALSE"
         query += " AND COALESCE(s.is_worker, FALSE) = FALSE" if tag_id else " AND COALESCE(is_worker, FALSE) = FALSE"
-        query += _assistant_home_filter("s." if tag_id else "")
 
     query += f" ORDER BY s.updated_at DESC LIMIT {_ph} OFFSET {_ph}" if tag_id else f" ORDER BY updated_at DESC LIMIT {_ph} OFFSET {_ph}"
     params.extend([limit, offset])
@@ -383,7 +373,6 @@ def get_sessions_paginated(
         # ``NOT EXISTS (... turns ...)`` probe.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
-        base_query += _assistant_home_filter(col_prefix)
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -477,7 +466,6 @@ def get_sessions_cursor(
         # probe is needed.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
-        base_query += _assistant_home_filter(col_prefix)
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:
@@ -1876,8 +1864,7 @@ def set_session_active(
 ) -> Optional[SessionRow]:
     """Set the is_active flag (and optionally the archive state) for a session
     and return the updated session. Archiving always leaves Active; restoring
-    only touches a row that is actually archived. Persistent assistant homes
-    can be neither settled nor archived.
+    only touches a row that is actually archived.
 
     On a networked worker a plain membership change is shared sidebar state,
     committed independently of execution ownership."""
@@ -1886,9 +1873,6 @@ def set_session_active(
         return session_active.write_shared(session_id, is_active)
     _ph = ph()
     with get_db() as conn:
-        if archived or not is_active:
-            from app.db.assistant import assert_can_settle
-            assert_can_settle(conn, session_id)
         cursor = get_cursor(conn)
         status_sql, params = archive_status_sql(archived, _ph)
         cursor.execute(
@@ -1914,9 +1898,7 @@ def set_sessions_active(
 ) -> List[SessionRow]:
     """Set-based ``set_session_active`` for a worker that is not networked.
 
-    One UPDATE covers every id. When the change settles or archives, persistent
-    assistant homes are excluded inside the same statement, so a home never
-    appears in the returned rows; callers report missing ids individually.
+    One UPDATE covers every id; callers report missing ids individually.
     Networked workers must use the per-session membership paths instead.
     """
     if not session_ids:
@@ -1924,12 +1906,11 @@ def set_sessions_active(
     _ph = ph()
     marks = ", ".join([_ph] * len(session_ids))
     status_sql, status_params = archive_status_sql(archived, _ph)
-    guard = _assistant_home_filter() if archived or not is_active else ""
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}{status_sql}
-               WHERE id IN ({marks}){guard} RETURNING *""",
+               WHERE id IN ({marks}) RETURNING *""",
             (False if archived else is_active, datetime.now(timezone.utc).isoformat(),
              *status_params, *session_ids)
         )
@@ -1960,7 +1941,7 @@ def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[
     query = (f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
              f" AND (is_active IS NULL OR is_active = FALSE) AND (status IS NULL OR status <> {_ph})"
              " AND COALESCE(hidden, FALSE) = FALSE AND COALESCE(is_worker, FALSE) = FALSE"
-             " AND parent_session_id IS NULL" + _assistant_home_filter())
+             " AND parent_session_id IS NULL")
     params = [*params, "archived"]
     if api_user_id:
         query += f" AND api_user_id = {_ph}"

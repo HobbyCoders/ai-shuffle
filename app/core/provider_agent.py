@@ -2586,10 +2586,6 @@ async def dispatch_worker(
             # and other account members do not (#1877). Label only: no record.
             from app.db import mobile_tool_identity
             mobile_tool_identity.inherit_label(worker_session_id, parent_session_id)
-            from app.core.assistant_service import home_for_session, link_job
-            home = home_for_session(context_session_id or parent_session_id)
-            if home:
-                link_job(home, worker_session_id)
             if branch:
                 database.set_session_branch(
                     worker_session_id, branch, project_v2_id

@@ -784,7 +784,6 @@ CONVERSATION_WORK_RULES = (
 
 def conversation_instructions(row):
     """Overlay the existing identity/prompt rather than replacing its settings."""
-    from app.core.assistant_service import build_role_context
     profile = database.get_profile(row.get("profile_id")) or {}
     config = profile.get("config") or {}
     if isinstance(config, str):
@@ -792,7 +791,7 @@ def conversation_instructions(row):
     prompt = config.get("system_prompt") or ""
     if isinstance(prompt, dict):
         prompt = prompt.get("content", "") if prompt.get("type") == "custom" else prompt.get("append", "")
-    return (str(prompt) + "\n\n" + build_role_context(row["id"]) + "\n\n"
+    return (str(prompt) + "\n\n"
             "You are the audio surface of this existing conversation, not a separate assistant. "
             "Use submit_to_chat for substantive work, tools, connected sources or orchestration; "
             "the existing agent, model, history and permissions govern that queued turn. "

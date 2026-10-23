@@ -62,11 +62,7 @@ def test_human_parked_wake_resets_budget_not_launch_identity(mock_db, source):
 @pytest.mark.parametrize("later_turn", [None, "auto_continue", "failover"])
 @pytest.mark.parametrize("wake_source", ["unpark", "away"])
 def test_started_report_survives_parked_wake(mock_db, monkeypatch, remote, later_turn, wake_source):
-    from app.core import assistant_service
-
     database.create_session("home", "default")
-    monkeypatch.setattr(assistant_service, "get_primary_session_id", lambda: "home")
-    monkeypatch.setattr(assistant_service, "is_primary_session", lambda sid: sid == "home")
     payload = {"orchestration_sender": "home", "orchestration_root": "root", "orchestration_depth": 1}
     if remote:
         payload.update(orchestration_remote_origin="starter-device", orchestration_report_device="starter-device")

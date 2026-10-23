@@ -24,7 +24,6 @@ import app.core.query_engine as qe
 from app.core.provider.events import ResultMessage
 from tests.core.engine_harness import collect, make_state, stream_response
 from tests.core.query_engine_flow_harness import RecordingPool, engine_patches, frames_of
-from tests.db.test_assistant_store import assistant_fixture  # noqa: F401 — fixture
 
 BYPASS = "bypassPermissions"
 
@@ -502,50 +501,3 @@ async def test_owner_send_that_loosens_the_chat_keeps_its_choice(owned_session, 
     tid = turn_manager.submit(owned_session, "user", prompt="go", profile_id="agent",
                               overrides={"permission_mode": BYPASS}, explicit_permission=True, no_kick=True)
     assert await _engine_mode(owned_session, turns.get_turn(tid), tmp_path) == BYPASS
-
-
-# ─── the owner's assistant ─────────────────────────────────────────────────
-
-
-async def test_assistant_home_engine_stays_in_bypass(assistant_fixture, tmp_path):
-    """The builder runs the assistant's engine in Bypass (its own approver
-    asks the owner for high-risk calls); the final reconciliation must not
-    switch it back to the home's resolved mode before the send."""
-    from unittest.mock import MagicMock
-
-    from app.core import query_options
-    from app.db import database
-
-    home = assistant_fixture["id"]
-    real_build = query_options.build_options_from_profile
-    row = database.get_session(home)
-    state = make_state()
-    state.adapter.has_permission_callback = True
-    state.adapter.receive_events = stream_response([ResultMessage(subtype="success")])
-    state.adapter.set_model = AsyncMock()
-    state.connect_options = MagicMock(model=None, permission_mode=BYPASS, aih_provider_id=None)
-    with ExitStack() as stack:
-        b = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path), session_row=row,
-                           profile=database.get_profile(row["profile_id"]))
-        previous = qe.run_sync
-
-        async def read_live(fn, *args, **kwargs):
-            if fn == database.get_session:
-                return database.get_session(*args, **kwargs)
-            return await previous(fn, *args, **kwargs)
-
-        stack.enter_context(patch.object(qe, "run_sync", side_effect=read_live))
-
-        def build(**kwargs):
-            built, _ = real_build(profile=kwargs["profile"], overrides=kwargs["overrides"],
-                                  session_id=kwargs["session_id"])
-            b.options.permission_mode = built.permission_mode
-            b.options.aih_assistant_scope = built.aih_assistant_scope
-            return b.options, {}
-
-        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", side_effect=build))
-        events = await collect(qe._stream_to_websocket_impl("go", home, row["profile_id"], turn_source="user"))
-    assert frames_of(events, "done"), events
-    state.adapter.send_query.assert_awaited_once()
-    state.adapter.set_permission_mode.assert_not_awaited()
-    assert state.connect_options.permission_mode == BYPASS

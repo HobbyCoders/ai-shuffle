@@ -1,10 +1,16 @@
-"""Durable owner assistant configuration, observation inbox and linked activity.
+"""Durable assistant research configuration, observation inbox and remote spend.
 
-The synced ``assistant_account`` holds shared identity and source opt-ins.
-``assistant_state`` holds this worker's persistent home, limits and runner
-configuration. Conversations are not elected across workers. Runs, events
-and source watermarks stay on the worker that runs research. Legacy home
-columns in ``assistant_account`` are retained for upgrade compatibility.
+The synced ``assistant_account`` holds the introduction and source opt-ins.
+``assistant_state`` is this worker's runner row: the research configuration
+and the anchor for the spending limit's remote jobs. Runs, events and source
+watermarks stay on the worker that runs research.
+
+The personal assistant's own conversation (its "home") was retired in #371
+step 5 and the startup migration deleted it
+(``app.db.database._retire_assistant_home``). The ``home_session_id`` /
+``home_*`` columns and the account's ``assistant_name`` / ``avatar_id`` stay
+only so older rows and older peers' synced records still load; nothing reads
+or writes them now.
 
 The runner row is also the per-install admission mutex. A guarded UPDATE
 locks it on PostgreSQL (and serializes writers in the SQLite test shim). No
@@ -43,7 +49,7 @@ AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
 RESEARCH_LIMITS = dict(max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
                        timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0)
 LIMIT_KEYS = tuple(RESEARCH_LIMITS)
-DEFAULTS = dict(agent_id=None, home_session_id=None, enabled=False, paused=False,
+DEFAULTS = dict(agent_id=None, enabled=False, paused=False,
                 **RESEARCH_LIMITS, introduction={})
 ACTIVE = ("admitted", "submitting", "running")
 IN_FLIGHT = ACTIVE + ("cancelling",)
@@ -62,7 +68,7 @@ SCRUBBED_PAYLOAD = json.dumps({"retention_scrubbed": True})
 # The owner's single assistant row. Every worker uses the same key, so the
 # synced row is one record across the network.
 ACCOUNT_ID = "owner"
-# The built-in agent the assistant always runs on (assistant_service owns its
+# The built-in agent background research runs on (assistant_service owns its
 # definition). The underscore keeps it out of the id space agent creation
 # uses ([a-z0-9-]), so no owner agent can already hold it. Agent lists leave
 # it out and agent editors refuse it: it is not a chat agent.
@@ -113,11 +119,6 @@ def create_schema(cursor):
                         ("limits", "JSONB NOT NULL DEFAULT '{}'")):
         if not column_exists(cursor, "assistant_runs", column):
             cursor.execute(f"ALTER TABLE assistant_runs ADD COLUMN {column} {ddl}")
-    # Home-conversation brief for a completed research run: NULL until decided,
-    # then 'posted' or 'none'. Runs from before briefs existed never get one.
-    if not column_exists(cursor, "assistant_runs", "brief"):
-        cursor.execute("ALTER TABLE assistant_runs ADD COLUMN brief TEXT")
-        cursor.execute("UPDATE assistant_runs SET brief='none'")
     cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_events (
         id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
         source_id TEXT NOT NULL, event_type TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -173,13 +174,12 @@ def research_limits(state=None):
 
 
 def research_allowed(state):
-    """Background research is automatic on the worker that holds the home.
+    """Background research is automatic once the account names its agent.
 
     The owner's only control is which sources are opted in, and every
-    observation and admission also requires a trusted opted-in source.
-    ``enabled`` on a runner row is no longer an owner switch: reconcile sets
-    it only where the home is, so every other worker fails closed. The
-    legacy ``paused`` column is ignored.
+    observation and admission also requires a trusted opted-in source that
+    runs on this worker. ``enabled`` on a runner row is no longer an owner
+    switch: reconcile sets it. The legacy ``paused`` column is ignored.
     """
     return bool(state and state.get("agent_id") and state.get("enabled"))
 
@@ -252,35 +252,10 @@ def write_account(conn, changes):
     return _parse(cursor.fetchone())
 
 
-def assert_can_settle(conn, session_id):
-    """Persistent assistant homes never enter the ordinary Settled group.
-
-    Run inside the mutation transaction, including peer control requests.
-    The account check covers a legacy shared home before local reconciliation.
-    """
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM assistant_state WHERE home_session_id=%s UNION ALL SELECT 1 FROM assistant_account WHERE home_session_id=%s LIMIT 1", (session_id, session_id))
-    if cursor.fetchone():
-        raise PermissionError("Your personal assistant is a persistent conversation and cannot be settled")
-
-
-def home_session_ids(session_ids):
-    """The subset of ``session_ids`` that are persistent assistant homes (one query)."""
-    if not session_ids:
-        return set()
-    marks = ", ".join(["%s"] * len(session_ids))
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT home_session_id FROM assistant_state WHERE home_session_id IN ({marks}) "
-                       f"UNION SELECT home_session_id FROM assistant_account WHERE home_session_id IN ({marks})",
-                       (*session_ids, *session_ids))
-        return {row["home_session_id"] for row in cursor.fetchall()}
-
-
 def project(conn, assistant_id, values, sources):
     """Copy the account view this worker runs under into its runner row.
 
-    ``values`` holds runner-row columns (agent, flags, introduction, home).
+    ``values`` holds runner-row columns (agent, flags, introduction).
     ``sources`` maps connector id to the owner's opt-in. A connector this
     worker does not know yet is skipped. Switching a source off here revokes
     its pending events, as an explicit opt-out does.
@@ -493,13 +468,6 @@ def get_activity(assistant_id, limit=50, active_only=False):
         return result
 
 
-def get_session_job(assistant_id, session_id):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM assistant_runs WHERE assistant_id=%s AND session_id=%s ORDER BY created_at DESC LIMIT 1", (assistant_id, session_id))
-        return _parse(cursor.fetchone())
-
-
 def get_run(run_id):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -511,7 +479,7 @@ def admit_run(assistant_id):
     """Coalesce <=10 events under the install mutex and reserve finite budgets."""
     with get_db() as conn:
         state = lock_state(conn, assistant_id)
-        if not research_allowed(state) or not state["home_session_id"]:
+        if not research_allowed(state):
             return None
         limits = research_limits(state)
         cursor = conn.cursor()
@@ -553,44 +521,15 @@ def admit_run(assistant_id):
         event_ids = [e["id"] for e in eligible]
         source_ids = sorted({e["source_id"] for e in eligible})
         deadline = (now() + timedelta(seconds=limits["timeout_seconds"])).isoformat()
-        cursor.execute("""INSERT INTO assistant_runs (id,assistant_id,home_session_id,status,event_ids,source_ids,deadline_at,created_at,agent_id,limits)
-            VALUES (%s,%s,%s,'admitted',%s,%s,%s,%s,%s,%s) RETURNING *""",
-            (run_id, assistant_id, state["home_session_id"], json.dumps(event_ids), json.dumps(source_ids), deadline, now().isoformat(), state["agent_id"],
+        cursor.execute("""INSERT INTO assistant_runs (id,assistant_id,status,event_ids,source_ids,deadline_at,created_at,agent_id,limits)
+            VALUES (%s,%s,'admitted',%s,%s,%s,%s,%s,%s) RETURNING *""",
+            (run_id, assistant_id, json.dumps(event_ids), json.dumps(source_ids), deadline, now().isoformat(), state["agent_id"],
              json.dumps({k: limits[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")})))
         run = _parse(cursor.fetchone())
         for event in eligible:
             cursor.execute("UPDATE assistant_events SET status='admitted',run_id=%s WHERE id=%s AND status='pending'", (run_id, event["id"]))
         run["events"] = eligible
         return run
-
-
-# A completed run's brief is only posted while it is fresh; one the home could
-# not take in time (a long turn, a restart) is dropped rather than posted late.
-BRIEF_WINDOW = timedelta(hours=24)
-
-
-def pending_briefs(assistant_id, limit=5):
-    """Completed research runs whose brief has not been decided yet."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status='completed' "
-                       "AND brief IS NULL AND session_id IS NOT NULL AND ended_at >= %s ORDER BY ended_at,id LIMIT %s",
-                       (assistant_id, (now() - BRIEF_WINDOW).isoformat(), limit))
-        return [_parse(row) for row in cursor.fetchall()]
-
-
-def decide_brief(run_id, brief):
-    """Claim an undecided brief as ``brief`` ('posted' or 'none'); False when already decided."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE assistant_runs SET brief=%s WHERE id=%s AND brief IS NULL RETURNING id", (brief, run_id))
-        return cursor.fetchone() is not None
-
-
-def release_brief(run_id):
-    """Undo a 'posted' claim whose post failed, so the next pass retries it."""
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE assistant_runs SET brief=NULL WHERE id=%s AND brief='posted'", (run_id,))
 
 
 def bind_run_session(run_id, session_id):
@@ -631,20 +570,6 @@ def settle_run(run_id, status, error=None, cost_usd=0):
         return row
 
 
-def link_job(assistant_id, session_id, kind="delegated"):
-    with get_db() as conn:
-        state = lock_state(conn, assistant_id)
-        if not state or not state["home_session_id"]:
-            raise ValueError("Assistant home is not configured")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM assistant_runs WHERE assistant_id=%s AND session_id=%s AND kind=%s", (assistant_id, session_id, kind))
-        existing = _parse(cursor.fetchone())
-        if existing:
-            return existing
-        cursor.execute("INSERT INTO assistant_runs (id,assistant_id,home_session_id,session_id,kind,status) VALUES (%s,%s,%s,%s,%s,'linked') RETURNING *", (str(uuid.uuid4()), assistant_id, state["home_session_id"], session_id, kind))
-        return _parse(cursor.fetchone())
-
-
 # --- jobs on another worker ---------------------------------------------------
 
 #: Ledger rows older than this are pruned; the limits read one day at a time.
@@ -652,14 +577,17 @@ REMOTE_COST_RETENTION = timedelta(days=35)
 
 
 def link_remote_job(assistant_id, session_id, device_id, kind, label=None, *, starter_session_id=None):
-    """Link a job the assistant started on worker ``device_id``. Idempotent."""
+    """Link a job a coordination chat started on worker ``device_id``. Idempotent.
+
+    ``home_session_id`` on the row records ``starter_session_id``, the chat
+    that started it.
+    """
+    if not starter_session_id:
+        raise ValueError("A remote job needs the chat that started it")
     with get_db() as conn:
-        # Ordinary owner sessions can be the first coordinators on a worker;
-        # create only the accounting row, not a legacy assistant conversation.
-        state = lock_state(conn, assistant_id) or configure(assistant_id, {}, _conn=conn)
-        report_to = starter_session_id or state.get("home_session_id")
-        if not report_to:
-            raise ValueError("Assistant home is not configured")
+        # The runner row anchors the job (its foreign key); create it if needed.
+        lock_state(conn, assistant_id) or configure(assistant_id, {}, _conn=conn)
+        report_to = starter_session_id
         cursor = conn.cursor()
         cursor.execute("INSERT INTO assistant_remote_jobs (assistant_id,session_id,device_id,kind,home_session_id,label,"
                        "created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (assistant_id,session_id) DO NOTHING",

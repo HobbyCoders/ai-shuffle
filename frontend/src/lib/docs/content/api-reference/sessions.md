@@ -410,8 +410,6 @@ Update session metadata.
 
 `title` and `status` are query parameters, not a JSON body.
 
-The assistant’s built-in home chat refuses any supplied `title` (including an empty title) with `409` and `{"detail": "Your personal assistant is a persistent conversation and cannot be renamed"}`. Status-only updates are unchanged.
-
 ```bash
 curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Title&status=archived" \
   -H "Authorization: Bearer aih_your_key"
@@ -422,8 +420,6 @@ curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Tit
 Delete a session and all its messages.
 
 For a session owned by another paired worker, deletion runs on that worker before the local catalog copy is removed. The owner publishes a deletion record so other workers remove their copies when synchronization catches up. If the owner is unreachable, the request returns `503`; if it refuses the request or does not support remote deletion, it returns `409`. Neither failure removes the local copy. An orphaned copy whose owner is unknown or removed can still be deleted locally. The same routing applies to batch deletion, where failures are listed in `errors` and other items continue; after one unreachable-owner failure, that owner's remaining items fail immediately rather than repeating the connection timeout.
-
-The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be deleted"}`. Its conversation and home binding are preserved.
 
 ```bash
 curl -X DELETE http://localhost:8000/api/v1/sessions/sess_abc123 \
@@ -928,8 +924,6 @@ Import a Claude Code CLI JSONL session.
 ### POST /api/v1/sessions/{session_id}/fork
 
 Fork a session at a specific message, creating a branch.
-
-The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be forked"}`. No fork is created and its home binding is preserved.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/fork \

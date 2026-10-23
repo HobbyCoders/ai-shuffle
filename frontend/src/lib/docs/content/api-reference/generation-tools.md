@@ -120,12 +120,13 @@ when the next one is issued.
 
 ## Spending and worker protocol
 
-A durable reservation applies the existing daily assistant cap before
-submission. Reservations remain counted after errors, cancellations or unknown
+A durable reservation applies the existing daily spending limit (Settings >
+Usage) before submission. Reservations remain counted after errors, cancellations or unknown
 outcomes, until the next day; they are conservative estimates, not invoices.
 Networked generation reserves on the network founder so two account-holding
-workers cannot independently spend the same generation budget. Ordinary
-assistant spending is included using the existing accounting rules.
+workers cannot independently spend the same generation budget. Spending by
+coordination chats and the work they start is included using the existing
+accounting rules.
 
 Worker presence advertises `generation: 2`. Versioned catalog, prepare,
 reservation, overrun accounting and execution use authenticated worker controls. An old

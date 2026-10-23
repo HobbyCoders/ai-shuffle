@@ -82,8 +82,8 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
 def get_all_profiles() -> List[ProfileRow]:
     """Get all profiles.
 
-    The persistent assistant's built-in agent is left out: it runs only the
-    assistant's home and research, so it never appears in agent pickers,
+    The built-in assistant agent is left out: it runs only background
+    research, so it never appears in agent pickers,
     the Agents page, Task rosters or "first agent" fallbacks. Look it up by
     id with ``get_profile``.
     """

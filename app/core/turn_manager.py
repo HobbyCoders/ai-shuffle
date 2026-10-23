@@ -186,28 +186,6 @@ def _split_window_base(
     return rest, raw or None, True
 
 
-def _without_home_effort(
-    session_id: str, overrides: Optional[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    """``overrides`` minus any effort when ``session_id`` is the assistant's home.
-
-    The home always runs at its model's own default effort (query_options
-    resolves it), so a pick from a client, a voice call or a replayed turn is
-    neither stored on the session nor carried on the turn.
-    """
-    if not overrides or "effort" not in overrides:
-        return overrides
-    try:
-        from app.core.assistant_service import is_primary_session
-
-        if not is_primary_session(session_id):
-            return overrides
-    except Exception:  # noqa: BLE001 — the build-time rule still applies.
-        logger.exception("assistant home check failed for session %s", session_id)
-        return overrides
-    return {key: value for key, value in overrides.items() if key != "effort"}
-
-
 # Payload flag on a person's message that was given a live Task worker's own
 # binding (see ``_active_worker_turn``). A turn carrying it is still the worker's
 # work, so a later message in the same chat joins it the same way.
@@ -367,7 +345,6 @@ def _submit_blocking(
             _supersede_wakeups(session_id)
         return held_id
     overrides, window_base, has_window_base = _split_window_base(overrides)
-    overrides = _without_home_effort(session_id, overrides)
     if source == "connector":
         # Connector turns always go through their API user's approval policy.
         overrides = {**(overrides or {}), "_permission_ceiling": "default"}

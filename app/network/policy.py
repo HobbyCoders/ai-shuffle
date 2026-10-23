@@ -197,8 +197,9 @@ _register(Collection(
     fields=("id", "agent_id", "enabled", "paused", "sources", "introduction", "home_session_id",
             "home_device_id", "home_created_at", "assistant_name", "avatar_id", "created_at", "updated_at"),
     json_fields=("sources", "introduction"), resource="assistant", priority=21,
-    notes="The owner's one assistant: its name, avatar, built-in agent, research switches and legacy home fields. "
-          "Research runs, events and source watermarks stay on the worker that owns the home."))
+    notes="The owner's assistant research account: its built-in agent, introduction and source opt-ins. The name, "
+          "avatar and home fields are retired (#371) and stay only for older peers. Research runs, events and source "
+          "watermarks stay on the worker that runs them."))
 
 _register(Collection(
     name="model_providers", table="model_providers", keys=("id",),

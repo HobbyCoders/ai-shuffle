@@ -199,44 +199,21 @@ def test_a_command_with_no_known_working_dir_asks():
 
 
 # ---------------------------------------------------------------------------
-# Scope: the home, chats it starts, and Task workers under them
+# No chat is placed in the retired assistant's Bypass scope
 # ---------------------------------------------------------------------------
 
-def test_scope_covers_the_home_its_chats_and_their_workers(assistant_fixture, monkeypatch):
-    home = assistant_fixture["id"]
-    assert ap.home_of(home) == home
-    worker = database.create_session("home-worker", service.AGENT_ID, parent_session_id=home, is_worker=True)
-    assert ap.home_of(worker["id"]) == home
-    chat = database.create_session("started-chat", service.AGENT_ID, is_active=True)
-    nested = database.create_session("chat-worker", service.AGENT_ID, parent_session_id=chat["id"], is_worker=True)
-    from app.core import session_orchestration
-    monkeypatch.setattr(session_orchestration, "started_by_home",
-                        lambda sid: home if sid == chat["id"] else None)
-    assert ap.home_of(chat["id"]) == home and ap.home_of(nested["id"]) == home
-    ordinary = database.create_session("ordinary", "assistant-agent", is_active=True)
-    assert ap.home_of(ordinary["id"]) is None
-    # A fork is not a worker: its parent link does not make it assistant work.
-    fork = database.create_session("fork", "assistant-agent", parent_session_id=home)
-    assert ap.home_of(fork["id"]) is None
-    scope = ap.scope_for_session(home, cwd=ROOT)
-    assert scope["home_session_id"] == home and scope["cwd"] == ROOT and scope["roots"]
-
-
-def test_the_home_runs_in_bypass_and_an_ordinary_session_keeps_its_mode(assistant_fixture, tmp_path):
+def test_project_chats_keep_their_own_mode(assistant_fixture, tmp_path):
     from app.core.query_options import build_options_from_profile
-    home = assistant_fixture["id"]
-    database.set_session_run_binding(home, permission_mode="default")
-    options, _ = build_options_from_profile(database.get_profile(service.AGENT_ID), session_id=home)
-    assert options.permission_mode == "bypassPermissions"
-    assert options.aih_assistant_scope["home_session_id"] == home
     from app.db import projects_v2, checkouts
     from app.core.config import settings
     project = projects_v2.upsert_project("folder:independent", name="Independent")
     checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(tmp_path))
-    ordinary = database.create_session("ordinary-chat", "assistant-agent", is_active=True, project_v2_id=project["id"])
-    database.set_session_run_binding(ordinary["id"], permission_mode="default")
-    options, _ = build_options_from_profile(database.get_profile("assistant-agent"), session_id=ordinary["id"])
-    assert options.permission_mode == "default" and options.aih_assistant_scope is None
+    for profile_id in ("assistant-agent", service.AGENT_ID):
+        row = database.create_session("project-chat-" + profile_id, profile_id, is_active=True,
+                                      project_v2_id=project["id"])
+        database.set_session_run_binding(row["id"], permission_mode="default")
+        options, _ = build_options_from_profile(database.get_profile(profile_id), session_id=row["id"])
+        assert options.permission_mode == "default" and options.aih_assistant_scope is None
 
 
 # ---------------------------------------------------------------------------
@@ -353,10 +330,6 @@ async def test_approver_puts_the_call_to_the_owner_past_bypass_and_saved_rules(t
                                 SimpleNamespace(tool_use_id="t", agent_id=None))
         assert type(result).__name__ == "PermissionResultAllow"
         prompt.assert_not_awaited()
-
-
-def test_the_home_is_told_what_will_ask():
-    assert ap.ASK_LIST_SUMMARY in service.HOME_INSTRUCTIONS
 
 
 # ---------------------------------------------------------------------------

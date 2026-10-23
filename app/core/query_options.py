@@ -696,32 +696,6 @@ def _build_thinking_config(
     return result
 
 
-def _assistant_home_effort(
-    model: Optional[str],
-    provider_id: Optional[str],
-    provider_row: Any,
-) -> Optional[str]:
-    """The effort the assistant's home runs at: its model's own default.
-
-    The owner cannot pick one there, so a client override, the session row and
-    the agent config are all ignored. None when the model has no effort levels.
-    Resolved on the same route the harness adapter will use for the model.
-    """
-    from app.core.provider.harness_adapter import model_default_effort
-    from app.core.provider.types import SessionOptions
-
-    extra: Dict[str, Any] = {}
-    row = provider_row or {}
-    if provider_id:
-        extra["provider_id"] = provider_id
-        for key, field in (("provider_type", "provider_type"),
-                           ("provider_auth_mode", "auth_mode"),
-                           ("provider_dialect", "api_dialect")):
-            if row.get(field):
-                extra[key] = row[field]
-    return model_default_effort(SessionOptions(model=model or "", extra=extra))
-
-
 def _resolve_thinking_display(
     config: Dict[str, Any],
     overrides: Optional[Dict[str, Any]] = None,
@@ -1180,10 +1154,8 @@ def build_options_from_profile(
     # rewritten permission binding. Explicit chat rows still run on Ask.
     permission_mode = permission_mode_for_session_mode(permission_mode, session_mode_of(_binding_row))
 
-    # The owner's assistant (its home, the chats it starts and their Task
-    # workers) runs in Bypass, whatever the row says: ordinary work goes ahead
-    # and the app asks the owner for the high-risk calls itself
-    # (``app.core.assistant_permissions``). Research turns keep their ceiling.
+    # An owner coordination chat (no project): the app asks the owner for the
+    # high-risk calls itself (``app.core.assistant_permissions``).
     assistant_scope = ({"session_id": session_id, "home_session_id": session_id,
                         "roots": [], "cwd": working_dir} if owner_coordinator else None)
     if owner_coordinator:
@@ -1192,11 +1164,6 @@ def build_options_from_profile(
             assistant_scope["roots"] = [str(path) for path in roots()]
         except Exception:  # noqa: BLE001 — failed registry reads cannot grant paths
             logger.warning("Could not resolve coordinator read roots", exc_info=True)
-    if session_id and overrides.get("_assistant_proactive") is None and session_mode != "chat":
-        from app.core.assistant_permissions import scope_for_session
-        assistant_scope = scope_for_session(session_id, working_dir)
-        if assistant_scope is not None:
-            permission_mode = "bypassPermissions"
 
     # Stderr callback for AgentOptions.stderr (SDK-shaped; the harness adapter
     # ignores it). Lazy %-formatting avoids f-string overhead when debug is off.
@@ -1383,14 +1350,11 @@ def build_options_from_profile(
         else:
             context_window = None
 
-    from app.core.assistant_service import assert_proactive_allowed, build_role_context, is_primary_session
+    from app.core.assistant_service import assert_proactive_allowed
     from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = overrides.get("_assistant_proactive")
     if assistant_proactive is not None:
         assert_proactive_allowed(assistant_proactive, session_id)
-    # The owner's persistent assistant home delegates by default; every other
-    # session keeps the authorize-first delegation line.
-    assistant_home = is_primary_session(session_id)
     if owner_coordinator:
         final_system_prompt = _append_system_block(final_system_prompt,
             "# No-project coordination\n"
@@ -1400,9 +1364,6 @@ def build_options_from_profile(
             "or skill/plugin writes. App configuration writes require owner confirmation. "
             "Read, Glob and Grep are read-only inside registered project roots and chat attachments. "
             "The read-only broker resolves the current registered roots on this worker.")
-    final_system_prompt = _append_system_block(
-        final_system_prompt, build_role_context(session_id),
-    )
     from app.core.assistant_limits import role_context as assistant_limits_context
     final_system_prompt = _append_system_block(
         final_system_prompt, assistant_limits_context(session_id),
@@ -1849,19 +1810,13 @@ def build_options_from_profile(
         # The provider serializer applies version-aware thinking/effort rules.
         **_build_thinking_config(
             config, model_to_use,
-            # The assistant's home ignores every effort pick (this turn's, the
-            # row's, the agent's) and runs at its model's own default.
-            {k: v for k, v in overrides.items() if k != "effort"} if assistant_home else overrides,
-            session_effort=(
-                _assistant_home_effort(model_to_use, provider_id, main_provider_row)
-                if assistant_home else _session_effort
-            ),
+            overrides,
+            session_effort=_session_effort,
             # A model-bound session owns its effort choice, including an
             # explicit model default (NULL). Do not resurrect a legacy agent's
             # effort after a live reset. Unbound pre-migration sessions retain
             # their old fallback; workers never inherit a saved role default.
-            allow_profile_effort=not assistant_home
-            and not bool((_binding_row or {}).get("is_worker"))
+            allow_profile_effort=not bool((_binding_row or {}).get("is_worker"))
             and not bool((_binding_row or {}).get("model")),
         ),
     )
@@ -2000,7 +1955,6 @@ def build_options_from_profile(
     options.aih_worker_run = _is_worker_run(session_id)
     options.aih_profile_id = profile.get("id")
     options.aih_assistant_proactive = assistant_proactive
-    options.aih_assistant_home = assistant_home
     options.aih_assistant_scope = assistant_scope
     # Durable turn provenance must also survive SDK option rebuilding.
     options.aih_session_runtime = session_runtime

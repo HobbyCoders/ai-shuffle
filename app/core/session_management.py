@@ -23,7 +23,6 @@ MAX_LISTED_ISSUES = 50
 MAX_REASON = 200
 INACCESSIBLE = "Session is not an accessible top-level chat; use ListSessions."
 ARCHIVED = "This session is archived. Restore it in the app before settling or unsettling it."
-ASSISTANT_HOME = "Your personal assistant is a persistent conversation and cannot be settled or archived"
 SELF_ARCHIVE = ("A chat cannot archive itself: archiving stops its work, including this turn. "
                 "The owner can archive it from the app.")
 DONE = {"settle": "settled", "unsettle": "unsettled", "archive": "archived"}
@@ -47,10 +46,7 @@ def visible_session(row):
 def check(caller_id, caller_owner, target_id, row):
     """Every per-session access rule, shared by the single and bulk forms."""
     from app.core import mobile_tool_identity
-    from app.core.assistant_service import is_primary_session
-    # Let the shared transaction enforce the persistent assistant-home guard.
-    visible = visible_session(row) or (row and target_id == caller_id and is_primary_session(target_id))
-    if not visible or orchestration._owner(row) != caller_owner:
+    if not visible_session(row) or orchestration._owner(row) != caller_owner:
         raise ValueError(INACCESSIBLE)
     mobile_tool_identity.validate(orchestration._principal(target_id))
     return row
@@ -129,7 +125,6 @@ def _settled_matches(caller, caller_id, caller_owner, scope):
 
 def plan(caller_id, action, key, value):
     """Run every per-session check; nothing is written here."""
-    from app.db.assistant import home_session_ids
     caller = orchestration._caller(caller_id, allow_settled=True)
     caller_owner = orchestration._owner(caller)
     remaining = False
@@ -137,7 +132,6 @@ def plan(caller_id, action, key, value):
         ids, rows = value, sessions.get_sessions_by_ids(value)
     else:
         ids, rows, remaining = _settled_matches(caller, caller_id, caller_owner, value)
-    homes = home_session_ids(ids) if action != "unsettle" else set()
     targets, issues, already = [], [], 0
     for session_id in ids:
         row = rows.get(session_id)
@@ -151,9 +145,7 @@ def plan(caller_id, action, key, value):
             issues.append(_issue(session_id, "failed", exc))
             continue
         archived = row.get("status") == "archived"
-        if session_id in homes:
-            issues.append(_issue(session_id, "refused", ASSISTANT_HOME))
-        elif action == "archive" and session_id == caller_id and not archived:
+        if action == "archive" and session_id == caller_id and not archived:
             issues.append(_issue(session_id, "refused", SELF_ARCHIVE))
         elif (archived if action == "archive"
               else not archived and bool(row.get("is_active")) is (action == "unsettle")):
@@ -253,10 +245,7 @@ async def manage_one(caller_id, data, action):
     if action != "archive" and archived:
         raise ValueError(ARCHIVED)
     if action == "archive" and row["id"] == caller_id and not archived:
-        from app.core.assistant_service import is_primary_session
-        # The home's own refusal (ASSISTANT_HOME, from the write) says more.
-        if not is_primary_session(caller_id):
-            raise ValueError(SELF_ARCHIVE)
+        raise ValueError(SELF_ARCHIVE)
     updated = await update_membership(row, action == "unsettle", True if action == "archive" else None)
     return {"session_id": updated["id"], "is_active": bool(updated.get("is_active")),
             "status": updated.get("status"), "action": action,

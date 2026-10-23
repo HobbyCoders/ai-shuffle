@@ -37,9 +37,6 @@ async def test_owner_without_project_can_start_registered_project(owner, tmp_pat
     assert child["mode"] is None
     assert child["profile_id"] == owner["profile_id"]
     assert orch.started_by_owner(child["id"]) == owner["id"]
-    assert orch.started_by_home(child["id"]) is None
-    from app.core.assistant_permissions import scope_for_session
-    assert scope_for_session(child["id"]) is None
     run(child["id"], receipt["turn_id"], "Work finished.")
     await turn_scheduler.on_turn_settled(child["id"], receipt["turn_id"], "completed")
     assert "Work finished." in wakes(owner["id"])[0]["prompt"]
@@ -230,17 +227,11 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     assert "# No-project coordination" in str(options.system_prompt)
 
 
-def test_owner_approval_marker_skips_api_and_default_worker_stays_legacy_only(owner, monkeypatch):
-    from app.core import provider_agent_approvals, assistant_worker
-    from app.network import runners
+def test_owner_approval_marker_skips_api(owner):
+    from app.core import provider_agent_approvals
     route = provider_agent_approvals.WorkerApprovalRoute(worker_session_id="child", parent_session_id=owner["id"], label="Work")
     assert provider_agent_approvals._assistant_confirm(owner["id"], {"tool_name": "Write", "tool_input": {}}, route)
     row, _ = chat("api-coordinator", mode="chat", api_user_id="api")
     assert provider_agent_approvals._assistant_confirm(row["id"], {"tool_name": "Write"}, route) is None
-    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "other"}])
-    monkeypatch.setattr(assistant_worker, "_choice", lambda rows: rows[0])
-    # The Assistant-page worker applies only to the legacy home and its jobs.
-    assert assistant_worker.default_for(owner["id"]) is None
-    assert assistant_worker.default_for(row["id"]) is None
 
 

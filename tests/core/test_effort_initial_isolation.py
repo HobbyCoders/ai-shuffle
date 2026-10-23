@@ -26,8 +26,7 @@ def sol(monkeypatch):
     return row
 
 
-def test_clamp_home_and_remembered_null_preserve_vendor_default(mock_db, sol):
-    from app.core.query_options import _assistant_home_effort
+def test_clamp_and_remembered_null_preserve_vendor_default(mock_db, sol):
     cap = me.effort_capabilities("gpt-6.1-sol", sol)
     assert cap["initial_effort"] == "high" and cap["default_effort"] == "low"
     assert me.clamp_effort(None, "gpt-6.1-sol", sol) == "low"
@@ -35,10 +34,8 @@ def test_clamp_home_and_remembered_null_preserve_vendor_default(mock_db, sol):
     database.set_user_preference("account", "owner", me.effort_preference_key("gpt-6.1-sol"), None)
     assert me.resolve_child_effort("gpt-6.1-sol", "sol") == "low"
     assert me.resolve_child_effort("gpt-6.1-sol", "sol", parent="medium") == "medium"
-    assert _assistant_home_effort("gpt-6.1-sol", "sol", sol) == "low"
-    opts = SessionOptions(model="gpt-6.1-sol", extra={"provider_id": "sol", "assistant_home": True})
+    opts = SessionOptions(model="gpt-6.1-sol", extra={"provider_id": "sol"})
     assert ha.model_default_effort(opts) == "low"
-    assert ha._effective_effort(opts, "high") == "low"
 
 
 @pytest.mark.parametrize("remembered", [False, True])

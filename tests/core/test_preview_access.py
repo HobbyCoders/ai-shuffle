@@ -431,14 +431,14 @@ def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, p
                                              ("PATCH", False), ("DELETE", False)])
 def test_preview_listener_reads_owner_pages_but_never_changes_them(method, admitted):
     """On the preview listener the grant is the browser's only credential:
-    the Assistant and Settings pages must render, and nothing there may be
+    owner pages such as Settings > Usage must render, and nothing there may be
     changed from the browser."""
     from fastapi import HTTPException
 
     from app.api.auth import require_admin
 
     cookies = {preview_access.cookie_name(): preview_access.mint(SESSION)}
-    request = _request("/api/v1/assistant", method, port=8002, ingress="preview", peer="172.17.0.2",
+    request = _request("/api/v1/assistant/limits", method, port=8002, ingress="preview", peer="172.17.0.2",
                        cookies=cookies, headers={"Origin": "http://10.0.0.30:8002"})
     if admitted:
         assert require_admin(request) == "preview:" + SESSION
@@ -449,4 +449,4 @@ def test_preview_listener_reads_owner_pages_but_never_changes_them(method, admit
         assert refused.value.status_code == 403
     # Without the cookie the same visit is refused outright.
     with pytest.raises(HTTPException):
-        require_admin(_request("/api/v1/assistant", method, port=8002, ingress="preview", peer="172.17.0.2"))
+        require_admin(_request("/api/v1/assistant/limits", method, port=8002, ingress="preview", peer="172.17.0.2"))
