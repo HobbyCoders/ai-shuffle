@@ -943,6 +943,19 @@ def _frame_is_richer(incoming: Dict[str, Any], stored: Dict[str, Any]) -> bool:
     )
 
 
+#: ``reason`` on a frame the park watchdog delivered on a task's behalf
+#: (``startup_reconcile.PARK_WATCHDOG_REASON``; a literal here to avoid the
+#: import cycle).
+_FORCED_FRAME_REASON = "park_watchdog"
+
+
+def _replaces_forced_frame(incoming: Dict[str, Any], stored: Dict[str, Any]) -> bool:
+    """True iff ``stored`` was forced by the park watchdog and ``incoming`` is
+    the task's own terminal: the real report wins over the app's stand-in."""
+    return (stored.get("reason") == _FORCED_FRAME_REASON
+            and incoming.get("reason") != _FORCED_FRAME_REASON)
+
+
 def _completion_key(frame: Dict[str, Any]) -> tuple:
     return (frame.get("task_id"), frame.get("agent_message_turn_id"),
             frame.get("task_incarnation"))
@@ -2115,8 +2128,9 @@ async def _on_task_terminal_locked(
                     # TaskUpdated built the wake), upgrade the stored frame in place
                     # and rebuild the prompt; otherwise it is a plain idempotent
                     # no-op.
-                    if stored_idx is not None and _frame_is_richer(
-                        frame, existing_pending[stored_idx]
+                    if stored_idx is not None and (
+                        _frame_is_richer(frame, existing_pending[stored_idx])
+                        or _replaces_forced_frame(frame, existing_pending[stored_idx])
                     ):
                         existing_pending[stored_idx] = frame
                         upgraded_payload = dict(existing_payload)

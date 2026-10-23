@@ -510,6 +510,9 @@ PARK_WATCHDOG_REASON = "park_watchdog"
 # restart legitimately re-reports (the boot reconcile has settled the rows by
 # then anyway).
 _park_warned: set = set()
+# Sessions whose force was deferred because every task they are parked on is
+# a worker that is still progressing; logged once per session, like the warn.
+_park_deferred: set = set()
 
 
 async def sweep_stalled_parks(
@@ -533,6 +536,14 @@ async def sweep_stalled_parks(
       turn rows so its lifecycle is not stuck forever. Deliberately generous:
       a legitimate overnight CI run or training job must never be reaped by a
       timer, and the frames say plainly that the app forced them.
+
+      A Task worker that is still progressing is never forced (#417): its
+      transcript wrote within the warn window, or it is itself parked on live
+      work of its own (``background_tasks.worker_progress_evidence``). Such a
+      park is a long wait, not a lost wake, so it is left to wait and is
+      re-checked every tick; the worker's own completion wakes it. Only the
+      tasks with no such evidence are settled, and a park whose tasks are all
+      progressing workers is not touched at all.
 
     Runs on the resource monitor's 5-minute tick beside
     :func:`settle_stale_background_task_rows`. Returns the number of sessions
@@ -583,9 +594,11 @@ async def sweep_stalled_parks(
             logger.debug("Park watchdog: paused-worker check failed", exc_info=True)
         try:
             if ceiling > 0 and parked_seconds >= ceiling:
-                await _force_stalled_park(session_id, turn_id, parked_seconds)
-                _park_warned.discard(session_id)
-                forced += 1
+                if await _force_stalled_park(
+                    session_id, turn_id, parked_seconds, progress_window=warn,
+                ):
+                    _park_warned.discard(session_id)
+                    forced += 1
             elif session_id not in _park_warned:
                 _park_warned.add(session_id)
                 logger.warning(
@@ -612,13 +625,44 @@ async def sweep_stalled_parks(
                 "Park watchdog: handling stalled park for %s failed", session_id,
                 exc_info=True,
             )
+    # A deferred park that woke on its own is no longer deferred; a later
+    # deferral of the same session is news again.
+    _park_deferred.intersection_update(
+        _row_value(row, "session_id", 0) for row in rows
+    )
     return forced
 
 
+def _live_worker_evidence(row: Any, window_seconds: int) -> Optional[str]:
+    """Progress evidence for one parked-on task row, or None. Sync (DB).
+
+    Only a LOCAL Task worker (``kind='agent'``, task id = worker session id)
+    has a session here to read; a shell, an SDK-native subagent or a worker on
+    another device has none, so it keeps the watchdog's original treatment.
+    """
+    from app.db.background_tasks import worker_progress_evidence
+
+    if (_row_value(row, "kind", 5) or "") != "agent":
+        return None
+    if _row_value(row, "remote_device_id", 6):
+        return None
+    task_id = _row_value(row, "task_id", 0)
+    if not task_id or window_seconds <= 0:
+        return None
+    return worker_progress_evidence(task_id, window_seconds)
+
+
 async def _force_stalled_park(
-    session_id: str, turn_id: Any, parked_seconds: int
-) -> None:
-    """Break one stalled park: settle its tasks, fire their frames, unstick it."""
+    session_id: str, turn_id: Any, parked_seconds: int,
+    *, progress_window: int = 0,
+) -> bool:
+    """Break one stalled park: settle its tasks, fire their frames, unstick it.
+
+    Tasks that are Task workers still progressing within ``progress_window``
+    seconds are skipped (#417). When every task is such a worker nothing is
+    touched and False is returned: the park is a long wait, not a lost wake.
+    Returns True when the park was forced.
+    """
     from app.core.task_registry import task_registry
     from app.core.turn_recorder import record_task_settle_frame
     from app.db import turns as turns_db
@@ -633,6 +677,15 @@ async def _force_stalled_park(
         "settled it so the session could move on — it was not a failure, and "
         "its result (if any) was never delivered."
     )
+    # A Task worker's report is still delivered if it finishes after all
+    # (``rearm_wake`` below), so its frame must not promise otherwise.
+    agent_summary = (
+        f"Stopped waiting: this worker showed no progress for the last "
+        f"{progress_window}s after the session had been parked on it for "
+        f"{parked_seconds}s. The app settled its task so the session could "
+        "move on — it was not a failure. If the worker still finishes, its "
+        "report is delivered then."
+    )
     try:
         rows = await asyncio.to_thread(
             list_session_nonterminal_background_tasks, session_id
@@ -643,11 +696,48 @@ async def _force_stalled_park(
         )
         rows = []
 
+    live: Dict[str, str] = {}
+    stalled: list = []
+    for row in rows:
+        try:
+            evidence = await asyncio.to_thread(
+                _live_worker_evidence, row, progress_window
+            )
+        except Exception:  # noqa: BLE001 — no evidence: original treatment
+            logger.debug("Park watchdog: progress check failed", exc_info=True)
+            evidence = None
+        if evidence:
+            live[_row_value(row, "task_id", 0)] = evidence
+        else:
+            stalled.append(row)
+    if live and not stalled:
+        # Every task this park waits on is a worker that is still working:
+        # keep waiting. Its own completion wakes the session; the next tick
+        # checks again, so a worker that goes quiet is reaped then.
+        if session_id not in _park_deferred:
+            _park_deferred.add(session_id)
+            logger.warning(
+                "Park watchdog: session %s parked %ss (turn %s) is past the "
+                "force ceiling but waits on %d worker(s) still progressing "
+                "(%s); not forcing", session_id, parked_seconds, turn_id,
+                len(live), ", ".join(f"{t}: {e}" for t, e in sorted(live.items())),
+            )
+        return False
+    _park_deferred.discard(session_id)
+    if live:
+        logger.info(
+            "Park watchdog: session %s — leaving %d progressing worker(s) "
+            "running: %s", session_id, len(live), ", ".join(sorted(live)),
+        )
+    rows = stalled
+
     for row in rows:
         task_id = _row_value(row, "task_id", 0)
         tool_use_id = _row_value(row, "tool_use_id", 2)
         if not task_id:
             continue
+        kind = _row_value(row, "kind", 5) or "shell"
+        row_summary = agent_summary if kind == "agent" else summary
         try:
             await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
             from app.core.task_persistence import broadcast_running_task_presence
@@ -655,7 +745,7 @@ async def _force_stalled_park(
             if task_registry.get_task(session_id, task_id) is not None:
                 task_registry.complete_task(
                     session_id, task_id, "killed",
-                    summary=summary, reason=PARK_WATCHDOG_REASON,
+                    summary=row_summary, reason=PARK_WATCHDOG_REASON,
                 )
             # OWN-lane admission, same as the Monitor spawner's: without it
             # on_task_terminal drops the frame as not-own work and the park
@@ -663,7 +753,7 @@ async def _force_stalled_park(
             task_registry.mark_monitor_shell_task(session_id, task_id)
             if task_registry.mark_chipped(session_id, task_id, "terminal"):
                 await record_task_settle_frame(
-                    session_id, task_id, "killed", summary,
+                    session_id, task_id, "killed", row_summary,
                     reason=PARK_WATCHDOG_REASON, tool_use_id=tool_use_id,
                 )
             from app.core import turn_scheduler
@@ -671,9 +761,15 @@ async def _force_stalled_park(
             await turn_scheduler.on_task_terminal(session_id, {
                 "task_id": task_id,
                 "status": "killed",
-                "summary": summary,
-                "kind": _row_value(row, "kind", 5) or "shell",
+                "summary": row_summary,
+                "kind": kind,
+                "reason": PARK_WATCHDOG_REASON,
             })
+            if kind == "agent":
+                # Only the ROW was settled; a quiet Task worker may still
+                # finish. Its genuine report must reach the parent, so the
+                # stand-in frame above must not spend the one-wake latch.
+                task_registry.rearm_wake(session_id, task_id)
         except Exception:  # noqa: BLE001 — one bad row must not block the rest
             logger.warning(
                 "Park watchdog: forcing terminal frame for %s/%s failed",
@@ -716,6 +812,7 @@ async def _force_stalled_park(
             "tasks": len(rows),
         },
     )
+    return True
 
 
 async def _repair_orphaned_engine_pending() -> int:

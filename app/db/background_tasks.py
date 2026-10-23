@@ -274,7 +274,8 @@ def list_session_nonterminal_background_tasks(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"""SELECT task_id, session_id, tool_use_id, title, status, kind
+            f"""SELECT task_id, session_id, tool_use_id, title, status, kind,
+                       remote_device_id
                   FROM background_tasks
                  WHERE instance_id = {_ph}
                    AND session_id = {_ph}
@@ -282,6 +283,70 @@ def list_session_nonterminal_background_tasks(
             (instance_id, session_id),
         )
         return rows_to_list(cursor.fetchall())
+
+
+def worker_progress_evidence(
+    worker_session_id: str, window_seconds: int,
+) -> Optional[str]:
+    """Why a local Task worker's session counts as alive, or ``None``.
+
+    Feed for the park watchdog's force stage: a parent parked on a worker that
+    is still doing its job is waiting, not stranded, and its task must not be
+    settled by a timer. A Task worker's task id IS its session id. Two kinds of
+    evidence count, both read from durable rows so they hold whichever process
+    wrote them:
+
+    * ``"recent_activity"`` — the worker's newest transcript event is younger
+      than ``window_seconds``. Every turn start, model message, tool call and
+      tool result is an event, so a worker that is thinking, editing or running
+      tools keeps this fresh; a hung or finished one stops writing.
+    * ``"parked_on_own_work"`` — the worker is itself parked (its last turn is
+      ``parked`` with no turn after it) on background work of its own that is
+      still running, e.g. a Monitor watching CI. That park is bounded by the
+      same watchdog on the worker's session, so waiting on it cannot be
+      unbounded: if the worker's own wait is lost, the watchdog breaks it and
+      the worker either writes again or goes quiet and is reaped next time.
+
+    Anything else — no session, a quiet transcript, a worker idle at rest —
+    returns ``None`` and the watchdog settles the task as before. Instance-
+    scoped where it reads task rows, like the other sweeps.
+    """
+    _ph = ph()
+    instance_id = settings.effective_instance_id
+    terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT created_at > NOW() - make_interval(secs => {_ph}) AS fresh
+                  FROM session_events
+                 WHERE session_id = {_ph}
+                 ORDER BY seq DESC
+                 LIMIT 1""",
+            (int(window_seconds), worker_session_id),
+        )
+        row = cursor.fetchone()
+        if row is not None and bool(row["fresh"]):
+            return "recent_activity"
+        cursor.execute(
+            f"""SELECT 1 AS parked
+                  FROM turns t
+                 WHERE t.session_id = {_ph}
+                   AND t.state = 'parked'
+                   AND NOT EXISTS (
+                         SELECT 1 FROM turns t2
+                          WHERE t2.session_id = t.session_id
+                            AND t2.created_at > t.ended_at)
+                   AND EXISTS (
+                         SELECT 1 FROM background_tasks b
+                          WHERE b.session_id = t.session_id
+                            AND b.instance_id = {_ph}
+                            AND b.status NOT IN ({terminal_list}))
+                 LIMIT 1""",
+            (worker_session_id, instance_id),
+        )
+        if cursor.fetchone() is not None:
+            return "parked_on_own_work"
+    return None
 
 
 def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any]]:
