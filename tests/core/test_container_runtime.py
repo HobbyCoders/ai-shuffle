@@ -543,6 +543,10 @@ def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeyp
         db.private_runtime.cleanup()
     ((args, env),) = spawned
     assert args[0] == "postgres"
+    # WAL settings ride on every start, so existing clusters get them too (#436).
+    for setting in ("max_wal_size=4GB", "checkpoint_timeout=15min",
+                    "checkpoint_completion_target=0.9", "wal_compression=lz4"):
+        assert args[args.index(setting) - 1] == "-c"
     assert _leaked(env) == []
     assert "UNRELATED_APP_SETTING" not in env
     assert env["PATH"] == os.environ["PATH"]
@@ -1491,6 +1495,8 @@ def test_real_pg_failed_role_ddl_never_logs_generated_password(settings_factory,
         db.open()
         assert db.query("SHOW log_statement") == "none"
         assert db.query("SHOW log_min_error_statement") == "panic"
+        assert (db.query("SHOW max_wal_size"), db.query("SHOW checkpoint_timeout")) == ("4GB", "15min")
+        assert db.query("SHOW wal_compression") == "lz4"
         logpath = db.pg / "server.log"
         previous_log_size = logpath.stat().st_size
         # Bootstrap-style DDL can fail (the role already exists here). Keep
