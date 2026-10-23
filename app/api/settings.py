@@ -882,12 +882,18 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # The realtime models a voice session may run on. Anything outside this
 # allowlist is rejected on write, so a typo can never reach OpenAI.
 from app.core.voice_models import (
-    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, voices_for,
+    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, SUPERGROK_MODEL, voices_for,
 )
 DEFAULT_VOICE_MODEL = "gpt-live-1"
+# New calls may choose only these engines; legacy bindings stay readable.
+VOICE_ENGINES = (DEFAULT_VOICE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
 
 # Voice names are validated per model by ``voices_for(model)``.
 DEFAULT_VOICE_VOICE = "marin"
+
+
+def _default_voice_for(model: str) -> str:
+    return "cove" if model == CODEX_MODEL else "eve" if model in (GROK_MODEL, SUPERGROK_MODEL) else DEFAULT_VOICE_VOICE
 # Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
 # bridged by reconnect; this is the separate "don't leave a call running
 # all week" ceiling.
@@ -992,12 +998,12 @@ def get_voice_settings() -> dict:
 
     # Legacy bindings remain readable; new calls choose a supported engine.
     model = database.get_system_setting(VOICE_MODEL_KEY)
-    if model not in (DEFAULT_VOICE_MODEL, GROK_MODEL, CODEX_MODEL):
+    if model not in VOICE_ENGINES:
         model = DEFAULT_VOICE_MODEL
 
     voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
     if voice not in voices_for(model):
-        voice = "cove" if model == CODEX_MODEL else "eve" if model == GROK_MODEL else DEFAULT_VOICE_VOICE
+        voice = _default_voice_for(model)
 
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
     if provider_id == FAL_PROVIDER_ID:
@@ -1067,18 +1073,18 @@ async def update_voice_settings(
         model = request.voice_model if "voice_model" in supplied else current["voice_model"]
         provider = request.voice_provider_id if "voice_provider_id" in supplied else current["voice_provider_id"]
         provider = (provider or "").strip() or None
-        if model not in (DEFAULT_VOICE_MODEL, GROK_MODEL, CODEX_MODEL):
-            raise HTTPException(400, "Choose GPT Live 1, Grok Voice, or ChatGPT voice.")
+        if model not in VOICE_ENGINES:
+            raise HTTPException(400, "Choose GPT Live 1, Grok Voice, Grok voice (SuperGrok subscription), or ChatGPT voice.")
         if "voice_provider_id" in supplied and provider:
             from app.api.voice import _eligible_provider_row, provider_matches_model
             row = _eligible_provider_row(provider)
             if not row or not provider_matches_model(row, model):
-                raise HTTPException(400, "Choose a provider for the selected voice engine; ChatGPT voice requires a connected ChatGPT subscription login.")
+                raise HTTPException(400, "Choose a provider for the selected voice engine; ChatGPT and SuperGrok voice need their connected subscription login.")
         voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]
         if voice not in voices_for(model):
             if "voice_voice" in supplied:
                 raise HTTPException(400, f"voice_voice must be one of {list(voices_for(model))}")
-            voice = "cove" if model == CODEX_MODEL else "eve" if model == GROK_MODEL else DEFAULT_VOICE_VOICE
+            voice = _default_voice_for(model)
         minutes = request.voice_max_call_minutes if "voice_max_call_minutes" in supplied else current["voice_max_call_minutes"]
         if minutes is None or minutes <= 0:
             raise HTTPException(400, "voice_max_call_minutes must be a positive integer")
