@@ -2466,13 +2466,21 @@ def test_canonical_compact_list_skips_cold_session_mapping(app, canonical_checko
     assert "list-recent" not in resolved
     row = compact.json()["worktrees"][0]
     assert row["resource_kind"] == "checkout" and row["branch_name"] == "feature/list"
-    assert row["git_status"]["untracked_count"] == 1 and row["git_status"]["is_clean"] is False
+    assert row["git_status"] is None  # no mapped active session: no cold status scan
     assert "sessions" not in row and "worktree_path" not in row
 
     with patch.object(project_resolver, "resolve_existing_cwd", counting):
-        full = TestClient(app).get(f"/api/v1/projects/{project['id']}/git/worktrees")
+        url = f"/api/v1/projects/{project['id']}/git/worktrees"
+        full = TestClient(app).get(url)
+        pending = _worktree_status_cache[project["id"]].inflight
+        if pending is not None:
+            pending.result(timeout=5)
+        full = TestClient(app).get(url)
     assert "list-recent" in resolved
-    assert [s["id"] for s in full.json()["worktrees"][0]["sessions"]] == ["list-recent"]
+    row = full.json()["worktrees"][0]
+    assert [s["id"] for s in row["sessions"]] == ["list-recent"]
+    assert row["git_status"]["untracked_count"] == 1 and row["git_status"]["is_clean"] is False
+    assert row["status_checked_at"]
 
 
 def test_canonical_list_origin_access_and_remote_only(app, canonical_checkout, monkeypatch):
