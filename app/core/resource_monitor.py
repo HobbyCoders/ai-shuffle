@@ -306,11 +306,6 @@ async def _collect_metrics() -> dict:
         metrics["repo_record_cache_entries"] = len(_repo_record_cache)
     except Exception:
         pass
-    try:
-        from app.core.git_native import _fsmonitor_configured
-        metrics["fsmonitor_tracked_paths"] = len(_fsmonitor_configured)
-    except Exception:
-        pass
 
     # --- Python GC stats (detect reference cycle pressure) ---
     try:

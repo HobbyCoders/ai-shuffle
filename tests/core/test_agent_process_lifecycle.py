@@ -245,3 +245,22 @@ def test_low_host_memory_is_warned_before_the_admission_floor(monkeypatch):
     assert any("Host memory low: 2500MB available" in w for w in low)
     assert not any("Host memory low" in w for w in _check_warnings({"host_available_mb": 40000}))
     assert not any("Host memory low" in w for w in _check_warnings({}))
+
+
+# ─── No per-worktree daemons: the app never enables core.fsmonitor ──────────
+
+
+def test_opening_a_repository_does_not_enable_fsmonitor(tmp_path):
+    """libgit2 ignores core.fsmonitor, but with it set every git CLI call in
+    every worktree started a detached fsmonitor daemon that never exited
+    (228 of them, about 9 GB, on a Windows host running ten agents)."""
+    pygit2 = pytest.importorskip("pygit2")
+    from app.core import git_native
+
+    pygit2.init_repository(str(tmp_path))
+
+    repo = git_native._get_repo(str(tmp_path))
+
+    assert repo is not None
+    with pytest.raises(KeyError):
+        pygit2.Repository(str(tmp_path)).config["core.fsmonitor"]
