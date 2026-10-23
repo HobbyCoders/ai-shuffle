@@ -76,6 +76,7 @@
 	}
 	.gsc-price {
 		margin-left: 6px;
+		white-space: nowrap;
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
 		color: var(--foreground);

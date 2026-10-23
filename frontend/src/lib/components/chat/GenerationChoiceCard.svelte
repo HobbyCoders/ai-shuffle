@@ -669,7 +669,7 @@
 	}
 	.gcc-option.selected {
 		border-color: color-mix(in oklch, var(--gcc-accent) 70%, transparent);
-		background: color-mix(in oklch, var(--gcc-accent) 7%, var(--background));
+		background: color-mix(in srgb, var(--gcc-accent) 7%, var(--background));
 		box-shadow: 0 0 0 1px color-mix(in oklch, var(--gcc-accent) 45%, transparent);
 	}
 	.gcc-option:disabled {
@@ -682,12 +682,16 @@
 	.gcc-opt-top {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		flex-wrap: wrap;
+		gap: 3px 6px;
 		width: 100%;
 		min-width: 0;
 		padding-right: 18px;
 	}
+	/* The account name stays whole; a badge that does not fit wraps below it. */
 	.gcc-source {
+		flex: none;
+		max-width: 100%;
 		font-size: 10.5px;
 		font-weight: 600;
 		letter-spacing: 0.06em;

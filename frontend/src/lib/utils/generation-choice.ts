@@ -200,7 +200,8 @@ export function modelLabel(model: string): string {
 		.replace(/[-_]+/g, ' ')
 		.replace(/\s+/g, ' ')
 		.trim()
-		.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+		.replace(/\b([a-z])/g, (c) => c.toUpperCase())
+		.replace(/\b(Gpt|Ai|Tts|Hd|Xl|Sd|Ltx)\b/g, (word) => word.toUpperCase());
 }
 
 function money(value: string | null): number | null {

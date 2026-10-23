@@ -128,7 +128,7 @@ describe('ModelsCollection', () => {
 		expect(screen.getByText('8 tasks')).toBeTruthy();
 		const labels = [...document.querySelectorAll('.st-lg > span:first-child')].map((e) => e.textContent);
 		expect(labels).toEqual(['Generation', 'App tasks', 'Catalog']);
-		await waitFor(() => expect(item('Video').textContent).toContain('fal.ai · Ltx 2'));
+		await waitFor(() => expect(item('Video').textContent).toContain('fal.ai · LTX 2'));
 		expect(item('Images').textContent).toContain('Asks each time');
 		expect(item('Images').querySelector('.st-dot.off')).toBeTruthy();
 		expect(item('Video').querySelector('.st-dot.off')).toBeNull();

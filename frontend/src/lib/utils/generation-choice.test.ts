@@ -84,6 +84,7 @@ describe('labels and prices', () => {
 	it('labels models readably', () => {
 		expect(modelLabel('fal-ai/flux/dev')).toBe('Flux Dev');
 		expect(modelLabel('grok-imagine-image')).toBe('Grok Imagine Image');
+		expect(modelLabel('gpt-image-1')).toBe('GPT Image 1');
 		expect(modelLabel('default')).toBe('Plan default');
 	});
 
