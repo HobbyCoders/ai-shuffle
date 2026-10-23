@@ -243,6 +243,14 @@
           "how": "Use the branch APK and worker UI on a phone. Start a GPT Live call in a throwaway chat on speaker; plug a wired headset, speak and listen, unplug, then repeat with Bluetooth (including connecting during the call). Set Voice volume to 250% during speech, mute/unmute, switch chats and back, and reload after hanging up. Repeat at 100% and on a desktop browser changing the default microphone. Check legacy Android SCO with WebAudio playback and whether the microphone refresh follows actual Bluetooth route completion rather than the 350 ms delay. Capture Android routing and worker voice health logs; archive the chat.",
           "pass_when": "Both output and microphone follow the headset without restarting the call, unplug/disconnect returns to phone speaker/default mic, 250% is louder without objectionable distortion, mute stays silent, and saved volume survives reload on that device. Android routing is restored after hangup and page navigation.",
           "past_bug": "#2067: headphones connected mid-call were ignored; phone speaker voice was too quiet at maximum system volume"
+        },
+        {
+          "id": "two-worker-smoke.23",
+          "check": "Agents a no-project chat starts inherit its permission mode",
+          "kind": "owner",
+          "how": "In a throwaway chat without a project, pick Bypass. Ask it to start one read-only Task subagent here, one on the other worker, a two-task Swarm, and a StartSession chat in a registered project. Open each child and read its Tool access. Repeat with the chat in Auto (on a Claude model), then in Ask. In the Bypass chat, also ask a child to generate an image priced above the confirmation threshold, with no remembered choice. Archive the chats afterwards.",
+          "pass_when": "Every child shows the chat's mode (Bypass, Auto or Ask), on both workers, and the Bypass children run their tools without approval prompts in the chat. The priced generation is skipped or asks; it never runs unconfirmed. A new private-access request still shows the access card.",
+          "past_bug": "#486: a Bypass chat's subagents all started on Ask, so delegating work raised an approval prompt for every Bash, Write, Edit and SendMessage."
         }
       ]
     },
