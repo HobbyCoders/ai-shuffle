@@ -40,6 +40,7 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 
 ### Git
 
+- Windows and macOS installs clean up the Git file-monitor setting and background daemons left by older versions once at startup. Later deliberate re-enabling is respected.
 - Plain-folder projects hide the Git controls. Creating a repository works without a configured Git identity and can be retried if it fails.
 
 ### Updates

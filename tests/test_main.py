@@ -302,6 +302,7 @@ class TestLifespan:
              patch("app.core.provider_usage.provider_usage_monitor.start"), \
              patch("app.core.provider_usage.provider_usage_monitor.stop", AsyncMock()), \
              patch("app.core.scratch_reaper.maintain_scratch", AsyncMock()) as maintain_scratch, \
+             patch("app.core.fsmonitor_cleanup.cleanup_once", AsyncMock()) as cleanup_fsmonitor, \
              patch("app.core.loop_watchdog.start_loop_watchdog") as start_watchdog, \
              patch("app.core.loop_watchdog.stop_loop_watchdog") as stop_watchdog:
             async with lifespan(MagicMock()):
@@ -309,6 +310,7 @@ class TestLifespan:
                 stop_watchdog.assert_not_called()
             stop_watchdog.assert_called_once()
             assert maintain_scratch.call_count == int(runner_approved and scratch_enabled)
+            assert cleanup_fsmonitor.call_count == int(runner_approved)
 
     @pytest.mark.asyncio
     async def test_failed_boot_task_does_not_interrupt_shutdown(self, caplog):
