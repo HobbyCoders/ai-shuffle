@@ -585,6 +585,23 @@ async def reap_terminated_process_trees() -> int:
     return reaped
 
 
+async def reap_closed_subprocess(pid: Optional[int], descendants: Optional[list]) -> int:
+    """Record a just-closed CLI's descendant snapshot and reap the survivors now.
+
+    The resource monitor's pass runs every five minutes, so leaving the
+    snapshot for it kept whatever the agent had started (a test run, a dev
+    server, a build) running for up to five minutes after its session closed,
+    and a server that died in that window left them to the next boot (#436).
+    Same safety rules as :func:`reap_terminated_process_trees`. Never raises.
+    """
+    record_terminated_subprocess(pid, descendants)
+    try:
+        return await reap_terminated_process_trees()
+    except Exception:  # noqa: BLE001 — hygiene must never fail a teardown
+        logger.debug("[Pool] immediate reap of a closed subprocess tree failed", exc_info=True)
+        return 0
+
+
 # ─── Tiered idle policy ───────────────────────────────────────────────────
 #
 # One pooled session == one long-lived Node CLI subprocess at 100-300+MB RSS,
@@ -1178,7 +1195,7 @@ class SessionPool:
                 await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error during eviction disconnect for {session_id}: {e}")
-        record_terminated_subprocess(pid, descendants)
+        await reap_closed_subprocess(pid, descendants)
         logger.info(f"[Pool] Evicted session {session_id} (pool size: {len(self._pool)})")
         if self._eviction_callback is not None:
             try:
@@ -1212,7 +1229,7 @@ class SessionPool:
                 )
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
-        record_terminated_subprocess(pid, descendants)
+        await reap_closed_subprocess(pid, descendants)
         logger.info(f"[Pool] Removed session {session_id} (pool size: {len(self._pool)})")
         return state
 
@@ -1256,7 +1273,7 @@ class SessionPool:
             try:
                 await graceful_disconnect(state.adapter, session_id)
             finally:
-                record_terminated_subprocess(pid, descendants)
+                await reap_closed_subprocess(pid, descendants)
 
         task = asyncio.create_task(_teardown())
         self._background_teardowns.add(task)
@@ -1388,6 +1405,17 @@ class SessionPool:
         elif state.detached_since is None:
             state.detached_since = now
 
+    def _delegated_rank(self, session_id: str) -> int:
+        """How many delegated sessions were used more recently than this one."""
+        rank = 0
+        for other_id in reversed(self._pool):
+            if other_id == session_id:
+                return rank
+            other = self._pool.get(other_id)
+            if other is not None and other.lane != NATIVE_LANE:
+                rank += 1
+        return rank
+
     def idle_seconds_remaining(
         self, session_id: str, now: Optional[datetime] = None
     ) -> Optional[float]:
@@ -1422,6 +1450,14 @@ class SessionPool:
         if policy.detached_grace_seconds > 0 and state.detached_since is not None:
             detached_for = (now - state.detached_since).total_seconds()
             remaining = min(remaining, policy.detached_grace_seconds - detached_for)
+
+        # OVERFLOW leg: ``max_size`` is how many CLI subprocesses stay warm,
+        # not how many agents may run. Busy sessions grow the pool past it;
+        # once one of them goes idle while more recently used CLIs already
+        # fill the warm size, it is released after the floor instead of
+        # holding its CLI, MCP servers and children for the cold timeout.
+        if state.lane != NATIVE_LANE and self._delegated_rank(session_id) >= self._max_size:
+            remaining = min(remaining, 0.0)
 
         # FLOOR leg: never reclaim a subprocess that was doing something a
         # moment ago, no matter which leg fired. Guards a WS flap mid-conversation.
