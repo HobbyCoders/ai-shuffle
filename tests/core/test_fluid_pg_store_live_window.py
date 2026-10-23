@@ -126,8 +126,12 @@ async def test_cached_walk_raises_on_a_parent_cycle(mock_db):
 
 
 async def test_database_walks_raise_on_a_parent_cycle(mock_db, monkeypatch):
-    """The uncached reads (delegated load_path, evicted read-back, ancestry
-    SQL) stop at MAX_PATH_DEPTH on a cycle stored in the database itself."""
+    """The uncached reads (evicted read-back, delegated memory path and task
+    lookup, delegated load_path) refuse a cycle stored in the database itself,
+    and the ancestry readers do it from one MAX(depth) row: no message or id
+    rows are fetched over the looping walk."""
+    import contextlib
+
     import pytest
     from app.core.provider import fluid_pg_store as module
 
@@ -136,20 +140,60 @@ async def test_database_walks_raise_on_a_parent_cycle(mock_db, monkeypatch):
     await store.create_session("dbcyc")
     await store.append("dbcyc", node("x", "y"))
     await store.append("dbcyc", node("y", "x"))
-    with pytest.raises(module.TranscriptCycleError):
-        module._load_ancestors_sync("dbcyc", "y")
+
+    statements = []
+    real_get_db = module.get_db
+
+    @contextlib.contextmanager
+    def spying_get_db():
+        with real_get_db() as conn:
+            class Cursor:
+                def __init__(self, inner):
+                    self._inner = inner
+
+                def execute(self, sql, params=()):
+                    statements.append(sql)
+                    return self._inner.execute(sql, params)
+
+                def __getattr__(self, name):
+                    return getattr(self._inner, name)
+
+            class Conn:
+                def cursor(self, *a, **k):
+                    return Cursor(conn.cursor(*a, **k))
+
+                def __getattr__(self, name):
+                    return getattr(conn, name)
+
+            yield Conn()
+
+    monkeypatch.setattr(module, "get_db", spying_get_db)
+    readers = [
+        lambda: module._load_ancestors_sync("dbcyc", "y"),
+        lambda: module._load_memory_path_sync("dbcyc", "y"),
+        lambda: module._initial_task_sync("dbcyc", ["x"]),
+    ]
+    for read in readers:
+        statements.clear()
+        with pytest.raises(module.TranscriptCycleError, match="loops"):
+            read()
+        walks = [sql for sql in statements if "WITH RECURSIVE ancestors" in sql]
+        assert walks and all("SELECT MAX(depth) AS depth FROM ancestors" in sql for sql in walks)
+    monkeypatch.setattr(module, "get_db", real_get_db)
+
     with pytest.raises(module.TranscriptCycleError):
         await store.load_path("dbcyc")
-    # The bounded ancestry also ends the memory-path and task lookups.
-    assert await store.load_memory_path("dbcyc") == []
-    assert await store.initial_task_query("dbcyc", ["x"]) == ""
-    # A real chain well under the bound still reads back whole.
+    with pytest.raises(module.TranscriptCycleError):
+        await store.load_memory_path("dbcyc")
+    # A real chain under the bound still reads back whole.
     await store.create_session("ok")
     parent = None
     for i in range(60):
         await store.append("ok", node(f"k{i}", parent))
         parent = f"k{i}"
     assert len(module._load_ancestors_sync("ok", "k59")) == 60
+    assert await store.load_memory_path("ok") == []
+    assert await store.initial_task_query("ok", ["k0"]) == ""
 
 
 # ── End to end: the real NativeLoop, compactor and checkpoint tier ────────────

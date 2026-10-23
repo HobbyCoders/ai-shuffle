@@ -128,14 +128,13 @@ def _load_ancestors_sync(session_id: str, node_id: str) -> List[tuple]:
     """
     with get_db() as conn:
         cur = conn.cursor()
+        _check_ancestry(cur, session_id, node_id)
         cur.execute(_ancestors_sql() + """
-            SELECT n.node_id, n.parent_id, n.ts, n.message, a.depth FROM ancestors a
+            SELECT n.node_id, n.parent_id, n.ts, n.message FROM ancestors a
             JOIN fluid_session_nodes n ON n.node_id = a.node_id AND n.session_id = %s
             ORDER BY a.depth DESC
         """, (session_id, node_id, session_id, session_id))
         rows = cur.fetchall()
-    if rows and rows[0]["depth"] >= MAX_PATH_DEPTH:
-        raise TranscriptCycleError(session_id, node_id)
     if not rows or rows[0]["parent_id"] is not None or rows[-1]["node_id"] != node_id:
         raise KeyError(node_id)
     out = []
@@ -164,10 +163,11 @@ def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
 # projection; never the surrounding owner prompt/tool payload. Overflow is
 # conservative: the adapter re-sends a full snapshot on its next turn.
 MEMORY_PATH_BYTES = 64 * 1024
-# A root→leaf path longer than this is a parent_id cycle, not a session: the
-# walks below raise TranscriptCycleError instead of looping (or recursing in
-# SQL) forever. ~17k nodes is a ~900-turn session, so this is far above any
-# real path.
+# A root→leaf path this long is treated as a parent_id cycle, not a session
+# (an ~880-turn session's whole tree is ~17k nodes). The in-memory walks raise
+# TranscriptCycleError once a path outgrows the tree it walks; the recursive
+# ancestry SQL stops at this depth, and _check_ancestry raises from one
+# server-side MAX(depth) row before any caller fetches a message or id row.
 MAX_PATH_DEPTH = 1_000_000
 
 
@@ -182,11 +182,26 @@ class TranscriptCycleError(RuntimeError):
         self.node_id = node_id
 
 
+def _check_ancestry(cur: Any, session_id: str, node_id: Optional[str]) -> None:
+    """Raise TranscriptCycleError when ``node_id``'s parent chain does not end.
+
+    Runs the bounded CTE server-side and returns a single row, so a cycle
+    costs MAX_PATH_DEPTH id tuples in the database's worktable, never the
+    message rows (gigabytes) that a fetch over the same walk would buffer.
+    """
+    cur.execute(_ancestors_sql() + "SELECT MAX(depth) AS depth FROM ancestors",
+                (session_id, node_id, session_id))
+    row = cur.fetchone()
+    if row is not None and row["depth"] is not None and row["depth"] >= MAX_PATH_DEPTH:
+        raise TranscriptCycleError(session_id, node_id)
+
+
 def _ancestors_sql() -> str:
     """Recursive ancestry of one node, bounded by MAX_PATH_DEPTH.
 
     The bound is what stops a parent_id cycle: without it the recursive CTE
-    never terminates. A row at depth MAX_PATH_DEPTH means the chain did not end.
+    never terminates. A row at depth MAX_PATH_DEPTH means the chain did not
+    end; callers run :func:`_check_ancestry` first, before fetching rows.
     """
     return f"""WITH RECURSIVE ancestors AS (
     SELECT node_id, parent_id, 0 AS depth FROM fluid_session_nodes
@@ -241,6 +256,7 @@ def _load_memory_path_sync(session_id: str, head: Optional[str]) -> Optional[Lis
     size = 0
     with get_db() as conn:
         cur = conn.cursor()
+        _check_ancestry(cur, session_id, head)
         cur.execute(_ancestors_sql() + """
             SELECT n.node_id, n.parent_id, n.ts, n.message FROM ancestors a
             JOIN fluid_session_nodes n ON n.node_id = a.node_id AND n.session_id = %s
@@ -272,6 +288,7 @@ def _initial_task_sync(session_id: str, owner_ids: List[str]) -> str:
     head = _session_head_sync(session_id)
     with get_db() as conn:
         cur = conn.cursor()
+        _check_ancestry(cur, session_id, head)
         slots = ','.join(['%s'] * len(owner_ids))
         cur.execute(_ancestors_sql() + f"SELECT node_id FROM ancestors WHERE node_id IN ({slots}) "
                     "ORDER BY depth DESC", (session_id, head, session_id, *owner_ids))
@@ -1686,7 +1703,9 @@ class PgFluidStore:
         if session_id not in self._evicted:
             raise KeyError(miss)  # never cached and never evicted: unknown node
         rows = await run_sync(_load_ancestors_sync, session_id, miss)
-        if recache:
+        # A window formed during the read (evict_prefix ran meanwhile): keep
+        # it, and do not re-cache the interior it just evicted.
+        if recache and session_id not in self._windows:
             for node, size in rows:
                 if node.node_id not in self._nodes[session_id]:
                     self._cache_node(session_id, node, size)
