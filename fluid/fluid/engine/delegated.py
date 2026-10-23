@@ -1738,6 +1738,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # stdout closed but not reaped yet: finish it off before the
             # respawn, so the next turn does not write into a dead pipe.
             await self._stop_process(grace=1.0)
+        elif self._proc is not None:
+            # The previous CLI exited on its own (a crash, or the CLI's own
+            # exit). Its process group may still hold commands it started;
+            # end them before the respawn replaces the only record of its pid.
+            await _end_process_group(self._proc.pid)
         await self._version_guard()
         spawn_kwargs: dict[str, Any] = {}
         if os.name != "nt":

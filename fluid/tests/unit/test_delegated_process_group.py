@@ -146,6 +146,35 @@ async def test_stop_process_ends_the_group_after_a_clean_exit(monkeypatch) -> No
     assert ended == [424242]
 
 
+async def test_respawn_after_a_cli_crash_ends_the_old_group_first(monkeypatch) -> None:
+    """A CLI that died on its own is replaced; its leftover group must not leak."""
+    ended: list[int] = []
+
+    async def _record(pid, **_kwargs):
+        ended.append(pid)
+
+    monkeypatch.setattr(delegated, "_end_process_group", _record)
+
+    class _Respawning(Exception):
+        pass
+
+    class _Exited:
+        pid = 535353
+        returncode = 1
+
+    loop = _bare_loop(_Exited())
+    loop._proc_usable = lambda: False
+
+    async def _guard() -> None:
+        raise _Respawning  # the respawn itself is out of scope here
+
+    loop._version_guard = _guard
+    with pytest.raises(_Respawning):
+        await loop._ensure_process()
+
+    assert ended == [535353]
+
+
 async def test_end_process_group_is_a_no_op_for_no_pid() -> None:
     await delegated._end_process_group(None)
     await delegated._end_process_group(0)
