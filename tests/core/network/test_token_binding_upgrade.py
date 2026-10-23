@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.api import network as api
 from app.core import managed_connection
 from app.core.config import Settings, settings
+from app.core import internal_defaults, owner_settings
 from app.db import network as store
 from app.network import advertisements, engine, lan, tokens, transport
 from tests.core.network.harness import join
@@ -17,8 +18,8 @@ from tests.core.network.test_token_binding import post, request_body
 
 @pytest.fixture
 def upgrade_pair(workers, monkeypatch):
-    monkeypatch.setattr(settings, "network_token_binding_enabled", False)
-    monkeypatch.setattr(settings, "network_require_token_binding", False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
+    monkeypatch.setattr(type(settings), 'network_require_token_binding', property(lambda self, value=False: value))
     monkeypatch.setattr(settings, "cluster_advertise_url", "http://192.168.50.20:8000")
     monkeypatch.setattr(managed_connection, "status", lambda: {"status": "connected", "url": "https://tunnel.example"})
     monkeypatch.setattr(lan, "owner_addresses", lambda: [])
@@ -32,8 +33,8 @@ def upgrade_pair(workers, monkeypatch):
 
 
 def test_rollout_settings_default_on_with_legacy_compatibility():
-    assert Settings.model_fields["network_token_binding_enabled"].default is True
-    assert Settings.model_fields["network_require_token_binding"].default is False
+    assert internal_defaults.NETWORK_TOKEN_BINDING_ENABLED is True
+    assert owner_settings.OwnerPolicy().network_require_token_binding is False
 
 
 @pytest.mark.asyncio
@@ -42,15 +43,15 @@ async def test_default_on_upgrade_authenticates_both_wire_versions(
         upgrade_pair, monkeypatch, client_enabled, server_enabled):
     server, peer, server_client = upgrade_pair
     endpoint = "https://tunnel.example"
-    default = Settings.model_fields["network_token_binding_enabled"].default
+    default = internal_defaults.NETWORK_TOKEN_BINDING_ENABLED
 
     def handler(request):
         with monkeypatch.context() as receiver, server.active():
-            receiver.setattr(settings, "network_token_binding_enabled", default if server_enabled else False)
+            receiver.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=default if server_enabled else False: value))
             response = server_client.post(request.url.path, json=json.loads(request.content))
         return httpx.Response(response.status_code, json=response.json())
 
-    monkeypatch.setattr(settings, "network_token_binding_enabled", default if client_enabled else False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=default if client_enabled else False: value))
     with peer.active():
         link = transport.PeerLink(server.device_id, [endpoint])
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -65,8 +66,7 @@ async def test_default_on_dialer_refuses_changed_address_until_owner_repairs(upg
     from app.api.auth import require_admin
     server, peer, server_client = upgrade_pair
     alias = "https://proxy.example:8443"
-    monkeypatch.setattr(settings, "network_token_binding_enabled",
-                        Settings.model_fields["network_token_binding_enabled"].default)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=internal_defaults.NETWORK_TOKEN_BINDING_ENABLED: value))
     server_client.app.dependency_overrides[require_admin] = lambda: "owner"
 
     def handler(request):
@@ -100,7 +100,7 @@ async def test_rolling_back_one_peer_requires_opt_out_on_its_pinned_receiver(upg
 
     def handler(request):
         with monkeypatch.context() as receiver, server.active():
-            receiver.setattr(settings, "network_token_binding_enabled", receiver_enabled)
+            receiver.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=receiver_enabled: value))
             response = server_client.post(request.url.path, json=json.loads(request.content))
         return httpx.Response(response.status_code, json=response.json())
 
@@ -110,16 +110,16 @@ async def test_rolling_back_one_peer_requires_opt_out_on_its_pinned_receiver(upg
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
                 return await link._issue_token(client, engine.context(), endpoint)
 
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
     await issue()  # the real producer sends binding support and the receiver pins it
     with server.active():
         assert store.get_member(peer.device_id)["token_binding_required"]
-    monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
     with pytest.raises(transport.PeerError, match="Endpoint binding is required") as refused:
         await issue()
     detail = str(refused.value)
     assert "Update the calling worker" in detail
-    assert "NETWORK_TOKEN_BINDING_ENABLED=false on this worker and restart" in detail
+    assert "Update the calling worker and repair its advertised addresses" in detail
     assert "No re-pairing needed" in detail
     assert len(detail) <= 300  # v1.0.2 callers truncate the response detail at 300 characters
     receiver_enabled = False
@@ -144,13 +144,13 @@ async def test_upgrade_keeps_existing_identity_and_routes(upgrade_pair, monkeypa
         # Upgrading the receiver alone does not enforce binding, even if a
         # newer caller already sends a signed support statement and bound proof.
         with monkeypatch.context() as receiver, server.active():
-            receiver.setattr(settings, "network_token_binding_enabled", False)
+            receiver.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
             # A reverse proxy strips its configured base path before forwarding.
             route = request.url.path.removeprefix(httpx.URL(endpoint).path.rstrip("/"))
             response = server_client.post(route, json=body)
         return httpx.Response(response.status_code, json=response.json())
 
-    monkeypatch.setattr(settings, "network_token_binding_enabled", client_enabled)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=client_enabled: value))
     for restart in (False, True):
         if restart:
             with server.active():
@@ -182,13 +182,13 @@ def test_existing_pin_is_ignored_when_disabled_and_retained_for_reenable(upgrade
     server, peer, client = upgrade_pair
     alias = "https://proxy.example"
     with server.active():
-        monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+        monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
         advertisements.set_owner_urls([alias])
         assert post(client, request_body(client, server, peer, alias)).status_code == 200
         assert store.get_member(peer.device_id)["token_binding_required"]
         assert post(client, request_body(client, server, peer)).status_code == 403
-        monkeypatch.setattr(settings, "network_token_binding_enabled", False)
-        monkeypatch.setattr(settings, "network_require_token_binding", True)
+        monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
+        monkeypatch.setattr(type(settings), 'network_require_token_binding', property(lambda self, value=True: value))
         advertisements.set_owner_urls([])
         engine.reset_for_tests()
         assert engine.context() is not None
@@ -197,7 +197,7 @@ def test_existing_pin_is_ignored_when_disabled_and_retained_for_reenable(upgrade
         assert post(client, request_body(client, server, peer)).status_code == 200
         assert post(client, request_body(client, server, peer, alias)).status_code == 200
         assert store.get_member(peer.device_id)["token_binding_required"]
-        monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+        monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
         assert post(client, request_body(client, server, peer)).status_code == 403
         assert post(client, request_body(client, server, peer, alias)).status_code == 403
         advertisements.set_owner_urls([alias])
@@ -244,7 +244,7 @@ def test_enrollment_snapshot_over_unadvertised_alias_during_upgrade(upgrade_pair
 
     def handler(request):
         with monkeypatch.context() as receiver, server.active():
-            receiver.setattr(settings, "network_token_binding_enabled", False)
+            receiver.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
             if request.url.path.endswith("/auth/token"):
                 seen.append(json.loads(request.content))
             response = server_client.request(request.method, request.url.path,
@@ -255,7 +255,7 @@ def test_enrollment_snapshot_over_unadvertised_alias_during_upgrade(upgrade_pair
 
     monkeypatch.setattr(enrollment.httpx, "Client", lambda **kwargs: real_client(
         transport=httpx.MockTransport(handler), **kwargs))
-    monkeypatch.setattr(settings, "network_token_binding_enabled", client_enabled)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=client_enabled: value))
     with peer.active():
         network_id = engine.context().network_id
         enrollment._copy_snapshot_sync(engine.context(), server.device_id, ["https://proxy.example"])

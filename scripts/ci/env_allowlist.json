@@ -1,0 +1,2813 @@
+{
+  "ACCESS_LOG_SLOW_MS": {
+    "kind": "infra",
+    "reason": "Threshold for logging slow HTTP requests",
+    "base_settings": true
+  },
+  "ACCOUNT_BROWSER_ORIGIN": {
+    "kind": "infra",
+    "reason": "Browser origin for the optional account service",
+    "base_settings": true
+  },
+  "ADMIN_PASSWORD": {
+    "kind": "infra",
+    "reason": "Legacy encrypted-credential adoption key, not a current human login password",
+    "base_settings": true
+  },
+  "AGENT_ISOLATION": {
+    "kind": "infra",
+    "reason": "Container service/agent UID split policy: off, on, required",
+    "base_settings": true
+  },
+  "AGENT_ISOLATION_EXTRA_DIRS": {
+    "kind": "infra",
+    "reason": "Extra host-mounted roots managed by the isolation ownership policy",
+    "base_settings": true
+  },
+  "AGENT_ISOLATION_SERVICE_GID": {
+    "kind": "infra",
+    "reason": "Service-account GID distinct from agent GID",
+    "base_settings": true
+  },
+  "AGENT_ISOLATION_SERVICE_UID": {
+    "kind": "infra",
+    "reason": "Service-account UID distinct from agent UID",
+    "base_settings": true
+  },
+  "AGENT_MEMORY_SYNC": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Share project agent memory through its git remote",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AIHUB_DEBUG_STREAM": {
+    "kind": "infra",
+    "reason": "Legacy alternate streaming-frame trace switch",
+    "base_settings": true
+  },
+  "AIH_FLUID_PROVIDER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Legacy override for the provider used by an unbound harness session",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AIH_GATEWAY_TRANSLATED_MAIN": {
+    "kind": "internal",
+    "reason": "Identify translated model-gateway sessions to hook policy",
+    "base_settings": false
+  },
+  "AIH_OMNI_PROVIDER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Older alias for an unbound harness session provider",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AIS_APP_ROOT": {
+    "kind": "internal",
+    "reason": "Image application root for isolated egress-policy subprocess",
+    "base_settings": false
+  },
+  "AIS_BROWSER_MODE": {
+    "kind": "internal",
+    "reason": "Choose app-managed browser runtime/proxy transport",
+    "base_settings": false
+  },
+  "AIS_BROWSER_PANEL_UPLOAD_DIR": {
+    "kind": "internal",
+    "reason": "File-upload root for human browser-panel editing",
+    "base_settings": false
+  },
+  "AIS_PANEL_REGISTER_URL": {
+    "kind": "internal",
+    "reason": "Session-scoped browser-panel registration URL",
+    "base_settings": false
+  },
+  "AIS_PANEL_TOKEN": {
+    "kind": "internal",
+    "reason": "Authenticate browser panel/proxy registration",
+    "base_settings": false
+  },
+  "AIS_SESSION_ID": {
+    "kind": "internal",
+    "reason": "Identify owning session to browser proxy or workflow guard",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_APP": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_DEV_API": {
+    "kind": "infra",
+    "reason": "Backend URL targeted by frontend Vite development proxy",
+    "base_settings": true
+  },
+  "AI_SHUFFLE_DURABLE_TASKS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Persist and reconcile durable background task state",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_ENV_FILE": {
+    "kind": "infra",
+    "reason": "Point a child/worktree at one canonical env file without copying secrets",
+    "base_settings": true
+  },
+  "AI_SHUFFLE_EXPERIMENTAL_MSTEAMS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Expose the experimental Microsoft Teams connector",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_HOOK_BASH": {
+    "kind": "infra",
+    "reason": "Select the Windows executable that interprets hook commands",
+    "base_settings": true
+  },
+  "AI_SHUFFLE_IN_DOCKER": {
+    "kind": "internal",
+    "reason": "Mark container browser runtime instead of launching native Chrome",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_MANAGED_BY": {
+    "kind": "internal",
+    "reason": "Mark agent children with the managing worker identity",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_PERF_BRIDGE_DEFER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Defer non-core bridge tools behind tool discovery",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_COALESCE_SUBAGENT_PROGRESS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Combine subagent progress updates",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Reuse native HTTP clients instead of rebuilding them per operation",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Slim usage replay payloads",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_PREVIEW": {
+    "kind": "infra",
+    "reason": "Identify an isolated branch-preview process with restricted owner access",
+    "base_settings": true
+  },
+  "AI_SHUFFLE_PRIVATE_CHECKOUT": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_PYTEST_GATE": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_PYTEST_GATE_DIR": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_SCRATCH_REAPER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Run the background session-scratch retention reaper",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_SELF_SEED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Clone a known project onto a newly selected worker on demand",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AI_SHUFFLE_SERVER_RUN": {
+    "kind": "internal",
+    "reason": "Correlate owned process identities to one server run",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_SMOKE_DIR": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_TEST_SCRATCH_ROOT": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_VERSION": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "ALLOW_PROCESS_INTROSPECTION": {
+    "kind": "infra",
+    "reason": "Permit core dumps and same-UID process inspection instead of hardening the worker",
+    "base_settings": true
+  },
+  "ALL_PROXY": {
+    "kind": "infra",
+    "reason": "Fallback outbound proxy",
+    "base_settings": true
+  },
+  "ANDROID_AVD_HOME": {
+    "kind": "internal",
+    "reason": "Place Android virtual-device state under the managed SDK",
+    "base_settings": false
+  },
+  "ANDROID_HOME": {
+    "kind": "infra",
+    "reason": "Locate existing Android SDK",
+    "base_settings": true
+  },
+  "ANDROID_SDK_DIR": {
+    "kind": "infra",
+    "reason": "Directory for the managed or opted-in external Android SDK",
+    "base_settings": true
+  },
+  "ANDROID_SDK_ROOT": {
+    "kind": "infra",
+    "reason": "Locate existing Android SDK (legacy alias)",
+    "base_settings": true
+  },
+  "ANTHROPIC_API_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Anthropic API credential or saved-provider child export",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_AUTH_TOKEN": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Gateway bearer credential for stock Claude Code",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_BASE_URL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Gateway endpoint for stock Claude Code and semantic browser-find",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_BEDROCK_BASE_URL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic bedrock base url input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_CUSTOM_HEADERS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic custom headers input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_FOUNDRY_API_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic foundry api key input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_FOUNDRY_AUTH_TOKEN": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic foundry auth token input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_FOUNDRY_BASE_URL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic foundry base url input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_FOUNDRY_RESOURCE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic foundry resource input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_SMALL_FAST_MODEL": {
+    "kind": "internal",
+    "reason": "Per-session small model for semantic browser element search",
+    "base_settings": false
+  },
+  "ANTHROPIC_VERTEX_BASE_URL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic vertex base url input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ANTHROPIC_VERTEX_PROJECT_ID": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: anthropic vertex project id input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "API_DOCS_ENABLED": {
+    "kind": "infra",
+    "reason": "Expose unauthenticated interactive API schema endpoints",
+    "base_settings": true
+  },
+  "APPDATA": {
+    "kind": "infra",
+    "reason": "Windows roaming application-data root",
+    "base_settings": true
+  },
+  "APPIMAGE": {
+    "kind": "infra",
+    "reason": "Path of the running Linux AppImage used for installed-host updates",
+    "base_settings": true
+  },
+  "APPLICATION_SOURCE_TREE": {
+    "kind": "internal",
+    "reason": "Source tree used to validate/update the container contract",
+    "base_settings": false
+  },
+  "APP_VERSION": {
+    "kind": "infra",
+    "reason": "Release version stamped into the product",
+    "base_settings": true
+  },
+  "AUDIO_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: audio model",
+    "base_settings": false
+  },
+  "AUDIO_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "AUDIO_TO_AUDIO_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: audio to audio model",
+    "base_settings": false
+  },
+  "AUDIO_TO_AUDIO_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "AUTO_CONTINUE_ON_COMPACT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Automatically compact and continue after context exhaustion",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "AWS_ACCESS_KEY_ID": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: aws access key id input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AWS_BEARER_TOKEN_BEDROCK": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: aws bearer token bedrock input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AWS_CA_BUNDLE": {
+    "kind": "infra",
+    "reason": "aws ca bundle input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_CONFIG_FILE": {
+    "kind": "infra",
+    "reason": "aws config file input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN": {
+    "kind": "infra",
+    "reason": "aws container authorization token input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE": {
+    "kind": "infra",
+    "reason": "aws container authorization token file input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI": {
+    "kind": "infra",
+    "reason": "aws container credentials full uri input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": {
+    "kind": "infra",
+    "reason": "aws container credentials relative uri input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_DEFAULT_REGION": {
+    "kind": "infra",
+    "reason": "aws default region input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_EC2_METADATA_DISABLED": {
+    "kind": "infra",
+    "reason": "aws ec2 metadata disabled input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_ENDPOINT_URL": {
+    "kind": "infra",
+    "reason": "aws endpoint url input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME": {
+    "kind": "infra",
+    "reason": "aws endpoint url bedrock runtime input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_PROFILE": {
+    "kind": "infra",
+    "reason": "aws profile input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_REGION": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: aws region input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AWS_ROLE_ARN": {
+    "kind": "infra",
+    "reason": "aws role arn input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_ROLE_SESSION_NAME": {
+    "kind": "infra",
+    "reason": "aws role session name input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_SDK_LOAD_CONFIG": {
+    "kind": "infra",
+    "reason": "aws sdk load config input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_SECRET_ACCESS_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: aws secret access key input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AWS_SESSION_TOKEN": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: aws session token input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "AWS_SHARED_CREDENTIALS_FILE": {
+    "kind": "infra",
+    "reason": "aws shared credentials file input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AWS_WEB_IDENTITY_TOKEN_FILE": {
+    "kind": "infra",
+    "reason": "aws web identity token file input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_ADDITIONALLY_ALLOWED_TENANTS": {
+    "kind": "infra",
+    "reason": "azure additionally allowed tenants input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_AUTHORITY_HOST": {
+    "kind": "infra",
+    "reason": "azure authority host input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_CLIENT_CERTIFICATE_PASSWORD": {
+    "kind": "infra",
+    "reason": "azure client certificate password input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_CLIENT_CERTIFICATE_PATH": {
+    "kind": "infra",
+    "reason": "azure client certificate path input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_CLIENT_ID": {
+    "kind": "infra",
+    "reason": "azure client id input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_CLIENT_SECRET": {
+    "kind": "infra",
+    "reason": "azure client secret input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN": {
+    "kind": "infra",
+    "reason": "azure client send certificate chain input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_CONFIG_DIR": {
+    "kind": "infra",
+    "reason": "azure config dir input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_FEDERATED_TOKEN_FILE": {
+    "kind": "infra",
+    "reason": "azure federated token file input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_PASSWORD": {
+    "kind": "infra",
+    "reason": "azure password input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_TENANT_ID": {
+    "kind": "infra",
+    "reason": "azure tenant id input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_TOKEN_CREDENTIALS": {
+    "kind": "infra",
+    "reason": "azure token credentials input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "AZURE_USERNAME": {
+    "kind": "infra",
+    "reason": "azure username input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "BIND_HOST": {
+    "kind": "infra",
+    "reason": "Host interface on which Compose publishes the worker",
+    "base_settings": true
+  },
+  "BROWSER_EGRESS_ENTRY": {
+    "kind": "infra",
+    "reason": "Location of the mandatory browser egress-proxy launcher",
+    "base_settings": true
+  },
+  "BROWSER_EGRESS_POLICY_SOURCE": {
+    "kind": "internal",
+    "reason": "Label whether browser policy came from app or strict fallback",
+    "base_settings": false
+  },
+  "BROWSER_EGRESS_PROXY": {
+    "kind": "internal",
+    "reason": "Mark browser as running behind our egress proxy",
+    "base_settings": false
+  },
+  "BROWSER_LOOPBACK_HOST": {
+    "kind": "infra",
+    "reason": "Rewrite loopback URLs to the reachable host of a remote browser",
+    "base_settings": true
+  },
+  "BROWSER_MCP_ENTRY": {
+    "kind": "infra",
+    "reason": "Override browser MCP executable/module location",
+    "base_settings": true
+  },
+  "BROWSER_PANEL_REGISTER_URL": {
+    "kind": "internal",
+    "reason": "App-side browser-panel registration endpoint override",
+    "base_settings": false
+  },
+  "BROWSER_SSRF_ALLOW": {
+    "kind": "infra",
+    "reason": "Explicit CIDR destinations allowed by browser egress policy",
+    "base_settings": true
+  },
+  "BROWSER_SSRF_ALLOW_LOOPBACK": {
+    "kind": "infra",
+    "reason": "Override automatic loopback accessibility in browser network policy",
+    "base_settings": true
+  },
+  "BROWSER_SSRF_BLOCK": {
+    "kind": "infra",
+    "reason": "Extra CIDR destinations blocked by browser egress policy",
+    "base_settings": true
+  },
+  "BROWSER_SSRF_DENY_PORTS": {
+    "kind": "infra",
+    "reason": "Deny browser access to worker-internal ports",
+    "base_settings": true
+  },
+  "BROWSER_TOOL_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound wall-clock time for one agent browser tool call",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "BROWSER_UPLOAD_DIR": {
+    "kind": "infra",
+    "reason": "Allowed root for agent-uploaded files",
+    "base_settings": true
+  },
+  "CHILD_PROCESS_NICE": {
+    "kind": "infra",
+    "reason": "Lower scheduling priority of tool children",
+    "base_settings": true
+  },
+  "CHROME_BACKOFF_INITIAL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Initial delay between browser restart attempts",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CHROME_BACKOFF_MAX": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Maximum browser restart delay",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CHROME_CDP": {
+    "kind": "infra",
+    "reason": "Open Chrome\u2019s loopback automation port",
+    "base_settings": true
+  },
+  "CHROME_CDP_PORT": {
+    "kind": "infra",
+    "reason": "Loopback browser automation attachment port",
+    "base_settings": true
+  },
+  "CHROME_DEBUG": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; REMOVE migration deferred: Supervisor forwards this value, but the shipped start-chrome script never consumes it",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CHROME_DEBUG_PORT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; REMOVE migration deferred: Supervisor forwards this value, but the shipped start-chrome script never consumes it",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CHROME_EXECUTABLE": {
+    "kind": "infra",
+    "reason": "Browser executable on this host",
+    "base_settings": true
+  },
+  "CHROME_HEALTHY_SECS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Uptime needed to reset browser crash backoff",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CHROME_MAX_RESTARTS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Rapid browser failures before switching to slower retry",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CHROME_SLOW_RETRY_SECS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Retry interval after sustained browser failure",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "CI": {
+    "kind": "internal",
+    "reason": "Force non-interactive package installation during desktop source updates",
+    "base_settings": false
+  },
+  "CLAUDECODE": {
+    "kind": "internal",
+    "reason": "Detect managed nested Claude/Fluid workflows; cleared for child CLI launches",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW": {
+    "kind": "internal",
+    "reason": "Set Claude CLI compaction threshold from saved session window",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE": {
+    "kind": "internal",
+    "reason": "Keep Claude CLI emergency blocking threshold outside managed context budget",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_BUBBLEWRAP": {
+    "kind": "infra",
+    "reason": "Declare an intentional host sandbox for root CLI permission compatibility",
+    "base_settings": true
+  },
+  "CLAUDE_CODE_CLIENT_CERT": {
+    "kind": "infra",
+    "reason": "Client TLS certificate for Claude installer/proxy",
+    "base_settings": true
+  },
+  "CLAUDE_CODE_CLIENT_KEY": {
+    "kind": "infra",
+    "reason": "Client TLS private key path for Claude installer/proxy",
+    "base_settings": true
+  },
+  "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE": {
+    "kind": "infra",
+    "reason": "Client TLS key passphrase for Claude installer/proxy",
+    "base_settings": true
+  },
+  "CLAUDE_CODE_DISABLE_1M_CONTEXT": {
+    "kind": "internal",
+    "reason": "Express saved per-session context size to Claude CLI",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": {
+    "kind": "internal",
+    "reason": "Keep background-command ownership in Fluid rather than stock CLI",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": {
+    "kind": "internal",
+    "reason": "Keep translated gateway requests on supported features",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": {
+    "kind": "internal",
+    "reason": "Suppress unrelated Claude CLI traffic for translated gateway sessions",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_GIT_BASH_PATH": {
+    "kind": "infra",
+    "reason": "Compatibility Git Bash executable override",
+    "base_settings": true
+  },
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS": {
+    "kind": "internal",
+    "reason": "Express effective context ceiling to Claude CLI",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS": {
+    "kind": "internal",
+    "reason": "Effective per-session output-token limit supplied to Claude CLI",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_OAUTH_TOKEN": {
+    "kind": "internal",
+    "reason": "Stock Claude subscription-token compatibility handoff, CLI only",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_SKIP_BEDROCK_AUTH": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Skip Bedrock credential lookup/authentication",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": {
+    "kind": "internal",
+    "reason": "Avoid unsupported fast-mode organisation check through gateway",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_SKIP_FOUNDRY_AUTH": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Skip Foundry credential lookup/authentication",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLAUDE_CODE_SKIP_VERTEX_AUTH": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Skip Vertex credential lookup/authentication",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLAUDE_CODE_THRIFTY_SONIC": {
+    "kind": "internal",
+    "reason": "Prevent stock CLI shell-first steering from overriding reviewed tool policy",
+    "base_settings": false
+  },
+  "CLAUDE_CODE_USE_BEDROCK": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Select Bedrock as Claude backend",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLAUDE_CODE_USE_FOUNDRY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Select Foundry as Claude backend",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLAUDE_CODE_USE_VERTEX": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Select Vertex as Claude backend",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLAUDE_CONFIG_DIR": {
+    "kind": "infra",
+    "reason": "Stock Claude CLI configuration/transcript home",
+    "base_settings": true
+  },
+  "CLAUDE_IMPORT_SOURCE_HOME": {
+    "kind": "infra",
+    "reason": "Legacy alias for default provider-settings import source",
+    "base_settings": true
+  },
+  "CLAUDE_PROJECTS_DIR": {
+    "kind": "infra",
+    "reason": "Legacy Claude transcript root",
+    "base_settings": true
+  },
+  "CLOUDSDK_CONFIG": {
+    "kind": "infra",
+    "reason": "cloudsdk config input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "CLOUD_ML_REGION": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: cloud ml region input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CLUSTER_ADVERTISE_URL": {
+    "kind": "infra",
+    "reason": "Peer-reachable install URL for legacy clustering",
+    "base_settings": true
+  },
+  "CLUSTER_ARTIFACT_PROXY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Proxy cross-install artifacts through the authenticated origin rather than redirect",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "CLUSTER_SECRET": {
+    "kind": "infra",
+    "reason": "Legacy shared-database cluster bearer secret; generated and persisted if absent",
+    "base_settings": true
+  },
+  "CODEX_APP_SERVER_LOGIN_CLIENT_ID": {
+    "kind": "infra",
+    "reason": "OAuth application identity for Codex/ChatGPT sign-in",
+    "base_settings": true
+  },
+  "CODEX_TOKEN_REFRESH_INTERVAL_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Wake the Codex token refresh worker at this cadence; 0 disables it",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "CODE_MODE_OS_SANDBOX": {
+    "kind": "infra",
+    "reason": "OS-level code-kernel isolation: auto, required or off",
+    "base_settings": true
+  },
+  "COMPUTER_USE_DISABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Hide/disable the host computer-control tool suite",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "COMPUTER_USE_TYPE_DELAY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Delay between typed characters in computer-control tools",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "COMSPEC": {
+    "kind": "infra",
+    "reason": "Windows command interpreter fallback",
+    "base_settings": true
+  },
+  "COOKIE_SECURE": {
+    "kind": "infra",
+    "reason": "Mark cookies HTTPS-only",
+    "base_settings": true
+  },
+  "CORS_ORIGINS": {
+    "kind": "infra",
+    "reason": "Additional permitted browser origins",
+    "base_settings": true
+  },
+  "CURL_CA_BUNDLE": {
+    "kind": "infra",
+    "reason": "curl CA certificate bundle",
+    "base_settings": true
+  },
+  "DATA_DIR": {
+    "kind": "infra",
+    "reason": "Persistent app data, keys and managed database root",
+    "base_settings": true
+  },
+  "DBUS_SESSION_BUS_ADDRESS": {
+    "kind": "infra",
+    "reason": "Session DBus address used by Chromium",
+    "base_settings": true
+  },
+  "DBUS_SYSTEM_BUS_ADDRESS": {
+    "kind": "infra",
+    "reason": "System DBus address used by Chromium",
+    "base_settings": true
+  },
+  "DISPLAY": {
+    "kind": "infra",
+    "reason": "X11 display address for host computer-use tools",
+    "base_settings": true
+  },
+  "DURABLE_TASK_STATE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Alias for durable background task persistence",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "ELECTRON_RUN_AS_NODE": {
+    "kind": "internal",
+    "reason": "Run Electron executable as Node for internal helper children",
+    "base_settings": false
+  },
+  "ELECTRON_SKIP_BINARY_DOWNLOAD": {
+    "kind": "internal",
+    "reason": "Use the controlled Electron download stage during source updates",
+    "base_settings": false
+  },
+  "EMULATOR_IDLE_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Stop an unused emulator after this idle period; 0 keeps it running",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "EMULATOR_MAX_DEVICES": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum simultaneous Android emulators",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "EMULATOR_SYSTEM_IMAGE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Android SDK system-image package used for devices",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "FAL_API_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Alternate fal.ai API credential fallback",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "FAL_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: fal.ai API credential; also exported from saved Media settings",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "FILE_LOG_BACKUP_COUNT": {
+    "kind": "infra",
+    "reason": "Retain this many rotated log files",
+    "base_settings": true
+  },
+  "FILE_LOG_LEVEL": {
+    "kind": "infra",
+    "reason": "Minimum severity persisted to log files",
+    "base_settings": true
+  },
+  "FILE_LOG_MAX_BYTES": {
+    "kind": "infra",
+    "reason": "Rotate each log file at this byte size",
+    "base_settings": true
+  },
+  "FIREBASE_CREDENTIALS": {
+    "kind": "infra",
+    "reason": "Path to Firebase service-account credentials for push delivery",
+    "base_settings": true
+  },
+  "FLUID_ANCHOR_BUDGET": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Allowed regression count for accepting a learning change",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_ANSWER_KEY": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_APPROVAL_POLICY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Standalone Fluid tool permission policy",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_BASE_PROMPT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Include the standalone harness base prompt",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_BASH_FILE_GUARD": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Keep shell-first file operations behind the structured file-tool guard in native and delegated legs",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_BUNDLED_TOKEN": {
+    "kind": "internal",
+    "reason": "Authenticate bundled-MCP child IPC",
+    "base_settings": false
+  },
+  "FLUID_CHILD_ENV_PASSTHROUGH": {
+    "kind": "infra",
+    "reason": "Names of additional non-secret host variables allowed into project children",
+    "base_settings": true
+  },
+  "FLUID_CHILD_ENV_UNSET": {
+    "kind": "internal",
+    "reason": "Remove selected inherited names from a child environment",
+    "base_settings": false
+  },
+  "FLUID_CHILD_NICE": {
+    "kind": "internal",
+    "reason": "Effective scheduling-priority increment propagated from app Settings",
+    "base_settings": false
+  },
+  "FLUID_CLAUDE_MOD": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Load the reviewed stock-Claude mod hooks and prompt steer",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CLAUDE_MOD_COMPACTION": {
+    "kind": "internal",
+    "reason": "Already migrated in PR #421; private delegated bridge export only.",
+    "base_settings": false
+  },
+  "FLUID_CLAUDE_MOD_COMPACT_URL": {
+    "kind": "internal",
+    "reason": "Private per-session compaction callback URL exported to the delegated mod (PR #421).",
+    "base_settings": false
+  },
+  "FLUID_CLAUDE_MOD_SOCKET": {
+    "kind": "internal",
+    "reason": "Local socket for Claude mod bridge",
+    "base_settings": false
+  },
+  "FLUID_CLAUDE_MOD_TOKEN": {
+    "kind": "internal",
+    "reason": "Authenticate the local Claude mod bridge",
+    "base_settings": false
+  },
+  "FLUID_CLAUDE_MOD_URL": {
+    "kind": "internal",
+    "reason": "Local compaction/steer bridge endpoint",
+    "base_settings": false
+  },
+  "FLUID_CODE_MODE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Use the persistent Python code-mode tool surface",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTEXT_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Enable the native context-compaction ladder",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTEXT_HEADROOM_TOKENS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Reserve space before the context window is full",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTEXT_TRIGGER_TOKENS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Start context compaction above this token threshold",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTEXT_TRIGGER_WINDOW_RATIO": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Context-window fraction that arms compaction",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTEXT_WINDOW": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Known model context-window size",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTINUAL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Synthesize and improve reusable skills during agent work",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTINUAL_MODEL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Choose the model used for continual learning",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CONTINUAL_PROVIDER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Provider used for continual-learning synthesis",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_CWD": {
+    "kind": "infra",
+    "reason": "Working directory for standalone Fluid sessions",
+    "base_settings": true
+  },
+  "FLUID_DEFAULT_MODEL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Default model in standalone Fluid layered configuration",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_DEFAULT_PROVIDER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Default provider in standalone Fluid layered configuration",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_DIR": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_EVENT_RETENTION_DAYS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Prune reconstructible streaming events after this many idle days; 0 disables pruning",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "FLUID_EXTERNAL_CALL_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound one external Fluid tool invocation",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_GUIDANCE_HOME": {
+    "kind": "infra",
+    "reason": "Alternate home containing harness guidance files",
+    "base_settings": true
+  },
+  "FLUID_HOME": {
+    "kind": "infra",
+    "reason": "Backup script locates the host Fluid data directory.",
+    "base_settings": false
+  },
+  "FLUID_IDENTITY_FILE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Read the standalone identity/persona file",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_MAX_CALLS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum model calls within one native turn",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_MAX_TOKENS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum output tokens per native model call",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_MEMORY_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Enable native harness memory participation",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_MODEL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Highest-precedence model override in standalone Fluid",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_MODEL_GUIDANCE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Choose when/model names for model-specific prompt guidance",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_PROJECTS_DIR": {
+    "kind": "infra",
+    "reason": "Native per-project memory/session root",
+    "base_settings": true
+  },
+  "FLUID_QUESTION_TOOLS": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_RESPONSES_ROUTING_ARM": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Experimental Responses routing arm choice",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_RESPONSES_ROUTING_HINT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Send experimental Responses routing hint headers",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_SESSION_ID_PREFIX": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_SETTING_SOURCES": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Filesystem scopes supplying instructions, plugins and settings",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_SHELL": {
+    "kind": "infra",
+    "reason": "Explicit Bash executable for Fluid shell commands",
+    "base_settings": true
+  },
+  "FLUID_SKILLS_DIR": {
+    "kind": "infra",
+    "reason": "Directory for saved Fluid skills and episodic journal",
+    "base_settings": true
+  },
+  "FLUID_STORE_FSYNC": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: fsync JSONL storage after writes",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "FLUID_SUMMARY_NOTE": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_TABLES": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_TESTS": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "FLUID_TRACE_REQUESTS": {
+    "kind": "infra",
+    "reason": "File path for raw provider-request diagnostic tracing",
+    "base_settings": true
+  },
+  "FLUID_TURN_WATCHDOG_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: End a Fluid turn silent beyond this duration",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FORCE_DB_MIGRATIONS": {
+    "kind": "infra",
+    "reason": "Force the managed database migration path during maintenance",
+    "base_settings": true
+  },
+  "GCLOUD_PROJECT": {
+    "kind": "infra",
+    "reason": "gcloud project input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "GENERATED_AUDIO_DIR": {
+    "kind": "infra",
+    "reason": "Output root for generated audio",
+    "base_settings": true
+  },
+  "GENERATED_IMAGES_DIR": {
+    "kind": "infra",
+    "reason": "Output root for generated images",
+    "base_settings": true
+  },
+  "GENERATED_MODELS_DIR": {
+    "kind": "infra",
+    "reason": "Output root for generated 3D models",
+    "base_settings": true
+  },
+  "GENERATED_VIDEOS_DIR": {
+    "kind": "infra",
+    "reason": "Output root for generated videos",
+    "base_settings": true
+  },
+  "GH_CONFIG_DIR": {
+    "kind": "infra",
+    "reason": "GitHub CLI authentication/configuration root",
+    "base_settings": true
+  },
+  "GH_TOKEN": {
+    "kind": "infra",
+    "reason": "Inherited GitHub CLI credential",
+    "base_settings": true
+  },
+  "GITHUB_SHA": {
+    "kind": "internal",
+    "reason": "Stamp source update build revision into frontend artifacts",
+    "base_settings": false
+  },
+  "GITHUB_TOKEN": {
+    "kind": "infra",
+    "reason": "Alternate inherited GitHub CLI credential",
+    "base_settings": true
+  },
+  "GIT_CEILING_DIRECTORIES": {
+    "kind": "infra",
+    "reason": "Stop Git root discovery at these directories",
+    "base_settings": true
+  },
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM": {
+    "kind": "infra",
+    "reason": "Allow repository discovery across mount/filesystem boundaries",
+    "base_settings": true
+  },
+  "GIT_SHA": {
+    "kind": "internal",
+    "reason": "Build/source revision identity used by update/status/logging",
+    "base_settings": false
+  },
+  "GIT_USER_EMAIL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Seed Git commit-author email if the mounted gitconfig has none",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "GIT_USER_NAME": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Seed Git commit-author name if the mounted gitconfig has none",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "GOOGLE_APPLICATION_CREDENTIALS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: google application credentials input to the selected Claude cloud credential/endpoint chain",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "GOOGLE_CLOUD_PROJECT": {
+    "kind": "infra",
+    "reason": "google cloud project input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "GOOGLE_CLOUD_QUOTA_PROJECT": {
+    "kind": "infra",
+    "reason": "google cloud quota project input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": {
+    "kind": "infra",
+    "reason": "google external account allow executables input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "HOME": {
+    "kind": "infra",
+    "reason": "Host user home; determines credentials, profiles and default paths",
+    "base_settings": true
+  },
+  "HOMEDRIVE": {
+    "kind": "infra",
+    "reason": "Windows home drive",
+    "base_settings": true
+  },
+  "HOMEPATH": {
+    "kind": "infra",
+    "reason": "Windows home path",
+    "base_settings": true
+  },
+  "HOST": {
+    "kind": "infra",
+    "reason": "Address the HTTP listener binds to",
+    "base_settings": true
+  },
+  "HTTPS_PROXY": {
+    "kind": "infra",
+    "reason": "HTTPS outbound proxy",
+    "base_settings": true
+  },
+  "HTTP_PROXY": {
+    "kind": "infra",
+    "reason": "HTTP outbound proxy",
+    "base_settings": true
+  },
+  "I2V_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "IDENTITY_ENDPOINT": {
+    "kind": "infra",
+    "reason": "identity endpoint input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "IDENTITY_HEADER": {
+    "kind": "infra",
+    "reason": "identity header input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "IDENTITY_SERVER_THUMBPRINT": {
+    "kind": "infra",
+    "reason": "identity server thumbprint input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "IDLE_WATCHDOG_CONTEXT_FRACTION": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Context fraction that arms an idle compaction nudge",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "IDLE_WATCHDOG_COOLDOWN_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Minimum interval between context nudges for the same session",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "IDLE_WATCHDOG_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Nudge idle sessions near their context edge to compact",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "IDLE_WATCHDOG_INTERVAL_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Scan cadence / idle grace for automatic context nudges",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "IDLE_WATCHDOG_MAX_IDLE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Do not nudge old inactive chats beyond this age",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "IMAGE_ASPECT_RATIO": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: image aspect ratio",
+    "base_settings": false
+  },
+  "IMAGE_EDIT_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: image edit model",
+    "base_settings": false
+  },
+  "IMAGE_EDIT_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "IMAGE_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: image model",
+    "base_settings": false
+  },
+  "IMAGE_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "IMAGE_RESOLUTION": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: image resolution",
+    "base_settings": false
+  },
+  "IMAGE_TO_3D_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: image to 3d model",
+    "base_settings": false
+  },
+  "IMAGE_TO_3D_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "IMDS_ENDPOINT": {
+    "kind": "infra",
+    "reason": "imds endpoint input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "INSTANCE_ID": {
+    "kind": "infra",
+    "reason": "Explicit legacy install identity; otherwise persist a generated ID",
+    "base_settings": true
+  },
+  "IS_SANDBOX": {
+    "kind": "infra",
+    "reason": "Declare an intentional host sandbox for root CLI permission compatibility",
+    "base_settings": true
+  },
+  "JQ_SHIM_NO_FALLBACK": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Prevent jq shim from falling back to a real jq binary",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "JQ_SHIM_PYTHON": {
+    "kind": "infra",
+    "reason": "Interpreter for packaged jq compatibility shim",
+    "base_settings": true
+  },
+  "LANG": {
+    "kind": "infra",
+    "reason": "Default process locale",
+    "base_settings": true
+  },
+  "LANGUAGE": {
+    "kind": "infra",
+    "reason": "Preferred message languages",
+    "base_settings": true
+  },
+  "LC_ALL": {
+    "kind": "infra",
+    "reason": "Process locale override (app forces C for machine-readable commands)",
+    "base_settings": true
+  },
+  "LC_CTYPE": {
+    "kind": "infra",
+    "reason": "Character classification/encoding locale",
+    "base_settings": true
+  },
+  "LD_LIBRARY_PATH": {
+    "kind": "infra",
+    "reason": "Native library lookup path preserved for application update children",
+    "base_settings": true
+  },
+  "LOCALAPPDATA": {
+    "kind": "infra",
+    "reason": "Windows local application-data root",
+    "base_settings": true
+  },
+  "LOCAL_MODE": {
+    "kind": "infra",
+    "reason": "Force local/container path and runtime detection",
+    "base_settings": true
+  },
+  "LOGNAME": {
+    "kind": "infra",
+    "reason": "Host login name",
+    "base_settings": true
+  },
+  "LOG_LEVEL": {
+    "kind": "infra",
+    "reason": "Console and in-memory log verbosity",
+    "base_settings": true
+  },
+  "LOOP_STALL_THRESHOLD_S": {
+    "kind": "infra",
+    "reason": "Start reporting event-loop stalls after this duration",
+    "base_settings": true
+  },
+  "MALLOC_ARENA_MAX": {
+    "kind": "infra",
+    "reason": "Limit allocator arenas for worker memory footprint",
+    "base_settings": true
+  },
+  "MAX_DISPLAY_OUTPUT_CHARS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Tool output preview size presented to the user",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "MAX_REQUEST_BODY_MB": {
+    "kind": "infra",
+    "reason": "Reject request bodies larger than this limit",
+    "base_settings": true
+  },
+  "MAX_TOOL_OUTPUT_CHARS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum tool result text retained for the model",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "MOBILE_ACCOUNT_HUB_URL": {
+    "kind": "infra",
+    "reason": "Endpoint of the optional account service",
+    "base_settings": true
+  },
+  "MODEL3D_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: model3d model",
+    "base_settings": false
+  },
+  "MODEL3D_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "MONITOR_COMMAND_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Safety deadline for unbounded background commands",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "MONITOR_SERVING_IDLE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Stop serving shells after their session has been unused this long",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "MONITOR_SUMMARY_MAX_CHARS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Size of background-completion summaries delivered to agents",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "MSI_ENDPOINT": {
+    "kind": "infra",
+    "reason": "msi endpoint input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "MSI_SECRET": {
+    "kind": "infra",
+    "reason": "msi secret input to the selected Claude cloud credential/endpoint chain",
+    "base_settings": true
+  },
+  "NETWORK_PEER_TERMINALS": {
+    "kind": "internal",
+    "reason": "One-release legacy import only; never a BaseSettings field. Remove reader next release.",
+    "target_pr": 1,
+    "base_settings": false
+  },
+  "NETWORK_REQUIRE_TOKEN_BINDING": {
+    "kind": "internal",
+    "reason": "One-release legacy import only; never a BaseSettings field. Remove reader next release.",
+    "target_pr": 1,
+    "base_settings": false
+  },
+  "NODE_EXTRA_CA_CERTS": {
+    "kind": "infra",
+    "reason": "Additional Node TLS trust bundle",
+    "base_settings": true
+  },
+  "NOTES_SYNC_INTERVAL_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Background reconciliation cadence for note files",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "NO_PROXY": {
+    "kind": "infra",
+    "reason": "Proxy bypass host patterns",
+    "base_settings": true
+  },
+  "NPM_CONFIG_CA": {
+    "kind": "infra",
+    "reason": "Installer npm ca input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_CACHE": {
+    "kind": "infra",
+    "reason": "Installer npm cache input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_CAFILE": {
+    "kind": "infra",
+    "reason": "Installer npm cafile input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_GLOBALCONFIG": {
+    "kind": "infra",
+    "reason": "Installer npm globalconfig input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_HTTPS_PROXY": {
+    "kind": "infra",
+    "reason": "Installer npm https proxy input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_NOPROXY": {
+    "kind": "infra",
+    "reason": "Installer npm noproxy input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_PREFIX": {
+    "kind": "infra",
+    "reason": "Installer npm prefix input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_PROXY": {
+    "kind": "infra",
+    "reason": "Installer npm proxy input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_REGISTRY": {
+    "kind": "infra",
+    "reason": "Installer npm registry input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_STRICT_SSL": {
+    "kind": "infra",
+    "reason": "Installer npm strict ssl input",
+    "base_settings": true
+  },
+  "NPM_CONFIG_USERCONFIG": {
+    "kind": "infra",
+    "reason": "Installer npm userconfig input",
+    "base_settings": true
+  },
+  "NUMBER_OF_PROCESSORS": {
+    "kind": "infra",
+    "reason": "Host logical processor count",
+    "base_settings": true
+  },
+  "OPENAI_API_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: OpenAI credential fallback for unbound/standalone clients",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "OPENROUTER_API_KEY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: OpenRouter credential fallback for unbound/standalone clients",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "ORPHAN_RECONCILE_INTERVAL_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Periodically recover never-used orphan session totals",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "OS": {
+    "kind": "infra",
+    "reason": "Windows OS identifier",
+    "base_settings": true
+  },
+  "OSTYPE": {
+    "kind": "infra",
+    "reason": "Select Windows compatibility path conversion",
+    "base_settings": true
+  },
+  "OWNER_PASSWORD": {
+    "kind": "infra",
+    "reason": "Provision an owner password through the startup bootstrap path",
+    "base_settings": true
+  },
+  "PARK_WATCHDOG_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Detect stalled parked sessions and repair missing terminal task frames",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PARK_WATCHDOG_FORCE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Force-settle only genuinely stalled parks beyond this age",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PARK_WATCHDOG_WARN_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Report parked sessions beyond this age",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PATH": {
+    "kind": "infra",
+    "reason": "Executable search path inherited by subprocesses",
+    "base_settings": true
+  },
+  "PATHEXT": {
+    "kind": "infra",
+    "reason": "Windows executable extension search order",
+    "base_settings": true
+  },
+  "PGCONNECT_TIMEOUT": {
+    "kind": "internal",
+    "reason": "Bound managed libpq command connection time",
+    "base_settings": false
+  },
+  "PGDATABASE": {
+    "kind": "internal",
+    "reason": "Managed maintenance database name",
+    "base_settings": false
+  },
+  "PGHOST": {
+    "kind": "internal",
+    "reason": "Managed PostgreSQL loopback/socket address",
+    "base_settings": false
+  },
+  "PGID": {
+    "kind": "infra",
+    "reason": "Container agent Unix group ID",
+    "base_settings": true
+  },
+  "PGPASSWORD": {
+    "kind": "internal",
+    "reason": "Ephemeral/private managed database credential",
+    "base_settings": false
+  },
+  "PGPORT": {
+    "kind": "internal",
+    "reason": "Managed PostgreSQL port",
+    "base_settings": false
+  },
+  "PGSSLCERT": {
+    "kind": "internal",
+    "reason": "Explicit maintenance-URL client certificate path",
+    "base_settings": false
+  },
+  "PGSSLCRL": {
+    "kind": "internal",
+    "reason": "Explicit maintenance-URL revocation-list path",
+    "base_settings": false
+  },
+  "PGSSLKEY": {
+    "kind": "internal",
+    "reason": "Explicit maintenance-URL client key path",
+    "base_settings": false
+  },
+  "PGSSLMODE": {
+    "kind": "internal",
+    "reason": "Explicit maintenance-URL TLS mode",
+    "base_settings": false
+  },
+  "PGSSLROOTCERT": {
+    "kind": "internal",
+    "reason": "Explicit maintenance-URL CA path",
+    "base_settings": false
+  },
+  "PGUSER": {
+    "kind": "internal",
+    "reason": "Managed database maintenance role",
+    "base_settings": false
+  },
+  "PIP_DISABLE_PIP_VERSION_CHECK": {
+    "kind": "internal",
+    "reason": "Keep update dependency installation non-interactive and quiet",
+    "base_settings": false
+  },
+  "PORT": {
+    "kind": "infra",
+    "reason": "HTTP listener port (Compose also uses PORT for the host mapping)",
+    "base_settings": true
+  },
+  "PROCESSOR_ARCHITECTURE": {
+    "kind": "infra",
+    "reason": "Host CPU architecture",
+    "base_settings": true
+  },
+  "PROCESSOR_ARCHITEW6432": {
+    "kind": "infra",
+    "reason": "Native CPU architecture visible to a 32-bit process",
+    "base_settings": true
+  },
+  "PROGRAMDATA": {
+    "kind": "infra",
+    "reason": "Windows machine-wide configuration root",
+    "base_settings": true
+  },
+  "PROMPT_FULL_REPLACE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Use the compiled delegated-agent system prompt rather than appending to the CLI preset",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_AGENT_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Allow agents to use delegated model-provider workers",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Default provider cooldown when upstream sends no usable retry-after",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_CIRCUIT_BREAKER_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Pause new work on a provider after its first HTTP 429",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_CIRCUIT_BREAKER_MAX_COOLDOWN_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Maximum provider cooldown accepted from upstream",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_FIRST_BYTE_TIMEOUT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound time until upstream response headers/first byte",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Separate first-byte bound for model-loading local servers; default disabled",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_PRE_CONTENT_HEARTBEAT_BUDGET": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound accepted Responses streams that send only pre-content heartbeats",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_READ_TIMEOUT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum silence between upstream response reads",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PROVIDER_STREAM_DEADLINE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Wall-clock bound for a complete provider call; 0 disables it",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "PSMODULEPATH": {
+    "kind": "infra",
+    "reason": "PowerShell module search path",
+    "base_settings": true
+  },
+  "PUID": {
+    "kind": "infra",
+    "reason": "Container agent Unix user ID",
+    "base_settings": true
+  },
+  "PYTHONDONTWRITEBYTECODE": {
+    "kind": "internal",
+    "reason": "Avoid writing Python bytecode into image code trees",
+    "base_settings": false
+  },
+  "PYTHONIOENCODING": {
+    "kind": "internal",
+    "reason": "Use UTF-8 for worker child I/O",
+    "base_settings": false
+  },
+  "PYTHONNOUSERSITE": {
+    "kind": "internal",
+    "reason": "Disable user site-packages in app-owned Python children",
+    "base_settings": false
+  },
+  "PYTHONPATH": {
+    "kind": "infra",
+    "reason": "Python import path used for internal bundled-MCP subprocesses",
+    "base_settings": true
+  },
+  "PYTHONUNBUFFERED": {
+    "kind": "internal",
+    "reason": "Deliver Python child output without buffering",
+    "base_settings": false
+  },
+  "PYTHONUTF8": {
+    "kind": "internal",
+    "reason": "Use UTF-8 in internal Python helper",
+    "base_settings": false
+  },
+  "ProgramFiles": {
+    "kind": "infra",
+    "reason": "Windows system application-install root",
+    "base_settings": true
+  },
+  "ProgramFiles(x86)": {
+    "kind": "infra",
+    "reason": "Windows 32-bit application-install root",
+    "base_settings": true
+  },
+  "REAP_STRAY_CLI_ON_BOOT": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Reap provably marked CLI processes left by a previous server run",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "REMOTE_TASK_MAX_PERMISSION_MODE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Recipient-side maximum permission mode granted to remote Tasks",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SDK_ADMISSION_MIN_AVAILABLE_MB": {
+    "kind": "infra",
+    "reason": "Hold back new session admission when host available memory is low",
+    "base_settings": true
+  },
+  "SDK_ADMISSION_RSS_MB": {
+    "kind": "infra",
+    "reason": "Refuse new session admission above this tree RSS; 0 disables",
+    "base_settings": true
+  },
+  "SDK_MAX_CHILD_PROCESSES": {
+    "kind": "infra",
+    "reason": "Refuse new session admission above this host child-process budget; 0 disables",
+    "base_settings": true
+  },
+  "SDK_NATIVE_SESSION_SOFT_CAP": {
+    "kind": "infra",
+    "reason": "Early refusal cap for native sessions; 0 disables cap",
+    "base_settings": true
+  },
+  "SDK_SESSION_COLD_IDLE_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Idle eviction delay for cold delegated sessions",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SDK_SESSION_DETACHED_GRACE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Grace before evicting a disconnected viewer\u2019s warm session",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SDK_SESSION_HOT_POOL_SIZE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Number of most-recent delegated sessions kept warm longer",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SDK_SESSION_IDLE_REEVALUATE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Internal cadence for reconsidering idle warm sessions",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SDK_SESSION_IDLE_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Idle eviction delay for hot delegated sessions",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SDK_SESSION_POOL_SIZE": {
+    "kind": "infra",
+    "reason": "Warm delegated-session pool capacity",
+    "base_settings": true
+  },
+  "SDK_SUBPROCESS_OOM_SCORE_ADJ": {
+    "kind": "infra",
+    "reason": "Make recoverable agent children preferable Linux OOM victims",
+    "base_settings": true
+  },
+  "SELF_SEED_CHECKOUTS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Alias for on-demand project cloning",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "SERVICE_NAME": {
+    "kind": "infra",
+    "reason": "Service label and fallback identity namespace",
+    "base_settings": true
+  },
+  "SESSION_EXPIRE_DAYS": {
+    "kind": "internal",
+    "reason": "One-release legacy import only; never a BaseSettings field. Remove reader next release.",
+    "target_pr": 1,
+    "base_settings": false
+  },
+  "SESSION_STORE_MODE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; REMOVE migration deferred: Only logs a warning that this flag was removed",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SETTINGS_IMPORT_ALLOWED_HOMES": {
+    "kind": "infra",
+    "reason": "Explicit external homes permitted for safe provider import",
+    "base_settings": true
+  },
+  "SETTINGS_IMPORT_DESTINATION_HOME": {
+    "kind": "infra",
+    "reason": "Destination home for active imported Fluid settings",
+    "base_settings": true
+  },
+  "SETTINGS_IMPORT_SOURCE_HOME": {
+    "kind": "infra",
+    "reason": "Default home to preview external provider settings from",
+    "base_settings": true
+  },
+  "SHELL": {
+    "kind": "infra",
+    "reason": "POSIX user shell fallback",
+    "base_settings": true
+  },
+  "SHUFFLE_ACCEPTANCE_DEADLINE_MINUTES": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_ACCEPTANCE_FILLER_GB": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_ACCEPTANCE_STEPS": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_ACCEPTANCE_THROWAWAY": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_AGENT_": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_AGENT_ISOLATION": {
+    "kind": "internal",
+    "reason": "Confirm supervisor enabled the agent/service UID split",
+    "base_settings": false
+  },
+  "SHUFFLE_AGENT_ROOTS": {
+    "kind": "internal",
+    "reason": "Serialized trusted runner roots for agent isolation",
+    "base_settings": false
+  },
+  "SHUFFLE_CHANNEL_DIR": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_CHANNEL_FILE": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_CONTAINER_PATH": {
+    "kind": "internal",
+    "reason": "Preserve agent executable PATH across root privilege dropping",
+    "base_settings": false
+  },
+  "SHUFFLE_CONTAINER_UPDATES": {
+    "kind": "internal",
+    "reason": "Container-managed application-updates root",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP": {
+    "kind": "internal",
+    "reason": "Mark worker as desktop-managed for auth, diagnostics and CLI login flow",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Bypass the desktop agent-access disclosure",
+    "target_pr": 5,
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_ATTACH_ANY": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Allow desktop to attach to an unverified listening worker",
+    "target_pr": 5,
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_ATTACH_TOKEN": {
+    "kind": "internal",
+    "reason": "Authenticate desktop attachment to its own worker",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_DEV_URL": {
+    "kind": "infra",
+    "reason": "Development-only frontend URL loaded by Electron",
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_ISOLATED": {
+    "kind": "internal",
+    "reason": "Mark a desktop profile that must not attach to a stable worker",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN": {
+    "kind": "internal",
+    "reason": "Authenticate desktop/supervisor lifecycle shutdown requests",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_LISTENER_TOKEN": {
+    "kind": "internal",
+    "reason": "Authenticate desktop-only worker listener requests",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_NO_UPDATES": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Disable desktop update checks/downloads",
+    "target_pr": 5,
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_POSTGRES_DIR": {
+    "kind": "infra",
+    "reason": "Development-only assembled PostgreSQL distribution root",
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_PROTECTED_PORT": {
+    "kind": "internal",
+    "reason": "Desktop protected listener port and browser SSRF denial",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_REPO_DIR": {
+    "kind": "infra",
+    "reason": "Development-only worker source checkout override",
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_SHOT": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_SHOT_DELAY": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_SHOT_JS": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_USER_DATA": {
+    "kind": "infra",
+    "reason": "Development-only isolated Electron profile directory",
+    "base_settings": true
+  },
+  "SHUFFLE_DESKTOP_WINDOW_TEST": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_DESKTOP_WORKER_DIR": {
+    "kind": "infra",
+    "reason": "Development-only assembled worker bundle root",
+    "base_settings": true
+  },
+  "SHUFFLE_EXTENSION": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_GOOGLE_CLIENT_ID": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Google connector OAuth application client ID",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "SHUFFLE_GOOGLE_CLIENT_SECRET": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Google connector OAuth application client secret",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "SHUFFLE_GOOGLE_REDIRECT_URI": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Google connector OAuth callback URL",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "SHUFFLE_HANDED_OVER": {
+    "kind": "internal",
+    "reason": "Revision already selected by the container supervisor",
+    "base_settings": false
+  },
+  "SHUFFLE_HANDOVER": {
+    "kind": "internal",
+    "reason": "Private source-supervisor handover protocol, not a user override.",
+    "base_settings": false
+  },
+  "SHUFFLE_ID_ARGS": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: id args",
+    "base_settings": false
+  },
+  "SHUFFLE_ID_COMMAND": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: id command",
+    "base_settings": false
+  },
+  "SHUFFLE_ID_EXPECTED": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: id expected",
+    "base_settings": false
+  },
+  "SHUFFLE_ID_PID": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: id pid",
+    "base_settings": false
+  },
+  "SHUFFLE_IMAGE_DIR": {
+    "kind": "internal",
+    "reason": "Locate image trust metadata during source handover",
+    "base_settings": false
+  },
+  "SHUFFLE_LAUNCHER_VERSION": {
+    "kind": "internal",
+    "reason": "Identify launcher for restore-point validation and swaps",
+    "base_settings": false
+  },
+  "SHUFFLE_LOCAL_ACCESS": {
+    "kind": "infra",
+    "reason": "Allow owner access from the configured local transport",
+    "base_settings": true
+  },
+  "SHUFFLE_LOCAL_HOSTNAMES": {
+    "kind": "infra",
+    "reason": "Hostnames accepted by local-owner access policy",
+    "base_settings": true
+  },
+  "SHUFFLE_MOVE_FROM": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: move from",
+    "base_settings": false
+  },
+  "SHUFFLE_MOVE_TO": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: move to",
+    "base_settings": false
+  },
+  "SHUFFLE_PATCH": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_PREVIEW_PORT": {
+    "kind": "infra",
+    "reason": "Port for isolated branch preview (also used by desktop preview tooling)",
+    "base_settings": true
+  },
+  "SHUFFLE_PREVIEW_PROTECTED_PORT": {
+    "kind": "infra",
+    "reason": "Private listener port of the isolated desktop preview",
+    "base_settings": true
+  },
+  "SHUFFLE_PREVIEW_PYTHON": {
+    "kind": "infra",
+    "reason": "Select development-preview interpreter",
+    "base_settings": true
+  },
+  "SHUFFLE_PREVIEW_ROOT": {
+    "kind": "infra",
+    "reason": "Locate isolated development-preview profile",
+    "base_settings": true
+  },
+  "SHUFFLE_PRIVATE_DIRECTORY": {
+    "kind": "internal",
+    "reason": "Private PowerShell helper input: private directory",
+    "base_settings": false
+  },
+  "SHUFFLE_PROTECTED_PORT": {
+    "kind": "internal",
+    "reason": "Private app listener port supplied by launcher",
+    "base_settings": false
+  },
+  "SHUFFLE_ROLLBACK_BENCH_MIB": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_RUNTIME_OVERLAYS": {
+    "kind": "internal",
+    "reason": "Mark source runtime overlay preparation as completed",
+    "base_settings": false
+  },
+  "SHUFFLE_SKIP_MOBILE_UI": {
+    "kind": "internal",
+    "reason": "Developer build escape hatch: omit /mobile/ assets for desktop-only local iterations",
+    "base_settings": false
+  },
+  "SHUFFLE_SOURCE_NODE": {
+    "kind": "internal",
+    "reason": "Node executable for managed desktop application",
+    "base_settings": false
+  },
+  "SHUFFLE_SOURCE_REPO": {
+    "kind": "infra",
+    "reason": "Locate source repository for deployment-status inspection",
+    "base_settings": true
+  },
+  "SHUFFLE_SOURCE_REVISION": {
+    "kind": "internal",
+    "reason": "Selected source revision for managed desktop application",
+    "base_settings": false
+  },
+  "SHUFFLE_SOURCE_ROOT": {
+    "kind": "internal",
+    "reason": "Managed desktop source application root",
+    "base_settings": false
+  },
+  "SHUFFLE_SOURCE_SUPERVISOR": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable the source-update lifecycle supervisor",
+    "target_pr": 5,
+    "base_settings": true
+  },
+  "SHUFFLE_TEST_DIRECTORY": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_TEST_POSTGRES_DIR": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_TEST_SECRET": {
+    "kind": "internal",
+    "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
+    "base_settings": false
+  },
+  "SHUFFLE_UPDATE_CHANNEL": {
+    "kind": "internal",
+    "reason": "Running container update channel metadata, not the editable preference",
+    "base_settings": false
+  },
+  "SHUFFLE_UPDATE_POLICY_FILE": {
+    "kind": "internal",
+    "reason": "Shared persisted update-policy marker path",
+    "base_settings": false
+  },
+  "SSL_CERT_DIR": {
+    "kind": "infra",
+    "reason": "TLS CA certificate directory",
+    "base_settings": true
+  },
+  "SSL_CERT_FILE": {
+    "kind": "infra",
+    "reason": "TLS CA certificate file",
+    "base_settings": true
+  },
+  "START_CHROME": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Start the browser supervisor and advertise browser tools",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "START_CHROME_COMMAND": {
+    "kind": "internal",
+    "reason": "Run the selected private browser-launch script",
+    "base_settings": false
+  },
+  "STOP_KEEPS_MONITOR_SHELLS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Leave Monitor shells running on Stop instead of stopping the session\u2019s work",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "STREAM_DEBUG": {
+    "kind": "infra",
+    "reason": "Enable verbose streaming-frame ordering logs",
+    "base_settings": true
+  },
+  "SUBAGENT_MAX_CONCURRENT_PER_SESSION": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound simultaneously running children per parent session",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "SystemRoot": {
+    "kind": "infra",
+    "reason": "Windows installation root for PowerShell discovery",
+    "base_settings": true
+  },
+  "TASK_TOOL_MAX_DEPTH": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound nesting of agent-to-agent Task calls",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_TOOL_MAX_WORKERS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound live workers in one root session tree",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_BACKGROUND_SETTLE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Wait for live background work before accepting worker completion",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_FIRST_FRAME_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound how long a new worker may start without producing a first frame",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_MAX_PER_PROVIDER": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Bound active workers per native provider; 0 disables",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_PROVIDER_QUEUE_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum wait for provider worker capacity",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_RATE_LIMIT_BACKOFF_CAP_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Cap worker reschedule backoff; upstream retry-after remains a floor",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_RATE_LIMIT_RETRIES": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Reschedule rate-limited background workers this many times",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_START_RETRIES": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Retry transient background-worker startup failures this many times",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TASK_WORKER_SYNC_MAX_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Move a progressing synchronous worker to background after this duration",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "TEMP": {
+    "kind": "infra",
+    "reason": "Windows temporary-directory root",
+    "base_settings": true
+  },
+  "TERM": {
+    "kind": "infra",
+    "reason": "Terminal type",
+    "base_settings": true
+  },
+  "TMP": {
+    "kind": "infra",
+    "reason": "Alternate temporary directory",
+    "base_settings": true
+  },
+  "TMPDIR": {
+    "kind": "infra",
+    "reason": "Temporary directory for jq launcher",
+    "base_settings": true
+  },
+  "TOOLS_DIR": {
+    "kind": "infra",
+    "reason": "Location of the bundled Node AI tools",
+    "base_settings": true
+  },
+  "TRUSTED_PROXIES": {
+    "kind": "infra",
+    "reason": "Proxy IP/CIDR allowlist whose forwarding headers are trusted",
+    "base_settings": true
+  },
+  "TRUSTED_PROXY_HEADERS": {
+    "kind": "infra",
+    "reason": "Header names used to recover a proxied client address",
+    "base_settings": true
+  },
+  "TURN_PROGRESS_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: End a turn with no progress; pending owner interactions are exempt",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "UPDATE_CHANNEL": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Override saved stable/nightly update channel",
+    "target_pr": 5,
+    "base_settings": true
+  },
+  "USER": {
+    "kind": "infra",
+    "reason": "Host username used in container-mode detection",
+    "base_settings": true
+  },
+  "USERNAME": {
+    "kind": "infra",
+    "reason": "Windows account name used by Codex credential storage",
+    "base_settings": true
+  },
+  "USERPROFILE": {
+    "kind": "infra",
+    "reason": "Windows user home directory",
+    "base_settings": true
+  },
+  "USER_QUESTION_TIMEOUT_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum time an unanswered question/permission can wait",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "VERSION": {
+    "kind": "infra",
+    "reason": "Legacy alias for the product release version",
+    "base_settings": true
+  },
+  "VIDEO_ASPECT_RATIO": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: video aspect ratio",
+    "base_settings": false
+  },
+  "VIDEO_DURATION": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: video duration",
+    "base_settings": false
+  },
+  "VIDEO_MODEL": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: video model",
+    "base_settings": false
+  },
+  "VIDEO_MODEL_PARAMS": {
+    "kind": "internal",
+    "reason": "Schema-driven parameters from saved Media settings, merged under tool arguments",
+    "base_settings": false
+  },
+  "VIDEO_RESOLUTION": {
+    "kind": "internal",
+    "reason": "Saved Media setting exported to Node tool child: video resolution",
+    "base_settings": false
+  },
+  "VITE_PERF_DEFER_GIT_ON_OPEN": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable defer git on open startup optimization",
+    "target_pr": 6,
+    "base_settings": true
+  },
+  "VITE_PERF_EARLY_SESSION_LIST": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable early session list startup optimization",
+    "target_pr": 6,
+    "base_settings": true
+  },
+  "VITE_PERF_PARALLEL_AUTH_PROBES": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable parallel auth probes startup optimization",
+    "target_pr": 6,
+    "base_settings": true
+  },
+  "VITE_PERF_PARALLEL_BOOTSTRAP": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable parallel bootstrap startup optimization",
+    "target_pr": 6,
+    "base_settings": true
+  },
+  "VITE_PERF_SLIM_SESSION_READ": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable slim session read startup optimization",
+    "target_pr": 6,
+    "base_settings": true
+  },
+  "VITE_PERF_STARTUP_DEDUPE": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Enable startup dedupe startup optimization",
+    "target_pr": 6,
+    "base_settings": true
+  },
+  "VITE_SHUFFLE_SHELL": {
+    "kind": "internal",
+    "reason": "Choose mobile versus desktop UI at build time",
+    "base_settings": false
+  },
+  "WAYLAND_DISPLAY": {
+    "kind": "infra",
+    "reason": "Wayland display socket for host computer-use tools",
+    "base_settings": true
+  },
+  "WINDIR": {
+    "kind": "infra",
+    "reason": "Windows installation directory",
+    "base_settings": true
+  },
+  "WORKSPACE_DIR": {
+    "kind": "infra",
+    "reason": "Default project workspace; Compose value also selects the host bind mount",
+    "base_settings": true
+  },
+  "WORKTREE_AUTO_RECLAIM_ENABLED": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Automatically reclaim integrated idle app-managed worktrees after the grace period",
+    "target_pr": 3,
+    "base_settings": true
+  },
+  "WS_RATE_LIMIT_MESSAGES": {
+    "kind": "infra",
+    "reason": "WebSocket per-connection message budget",
+    "base_settings": true
+  },
+  "WS_RATE_LIMIT_WINDOW_SECONDS": {
+    "kind": "infra",
+    "reason": "Window for the WebSocket message budget",
+    "base_settings": true
+  },
+  "XAI_OAUTH_CLIENT_ID": {
+    "kind": "infra",
+    "reason": "OAuth application identity for xAI sign-in",
+    "base_settings": true
+  },
+  "XAI_TOKEN_REFRESH_INTERVAL_SECONDS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Wake the xAI token refresh worker at this cadence",
+    "target_pr": 4,
+    "base_settings": true
+  },
+  "XAUTHORITY": {
+    "kind": "infra",
+    "reason": "X11 authentication cookie-file path",
+    "base_settings": true
+  },
+  "XDG_CACHE_HOME": {
+    "kind": "infra",
+    "reason": "User cache directory",
+    "base_settings": true
+  },
+  "XDG_CONFIG_HOME": {
+    "kind": "infra",
+    "reason": "Linux user configuration root",
+    "base_settings": true
+  },
+  "XDG_DATA_HOME": {
+    "kind": "infra",
+    "reason": "Linux user data root",
+    "base_settings": true
+  },
+  "XDG_RUNTIME_DIR": {
+    "kind": "infra",
+    "reason": "Desktop session runtime sockets directory",
+    "base_settings": true
+  },
+  "XDG_SESSION_TYPE": {
+    "kind": "infra",
+    "reason": "Detect whether host desktop is Wayland or X11",
+    "base_settings": true
+  },
+  "XDG_STATE_HOME": {
+    "kind": "infra",
+    "reason": "User persistent state directory",
+    "base_settings": true
+  },
+  "_AIS_BROWSER_EDITOR_STYLE": {
+    "kind": "internal",
+    "reason": "Enable internal editor typography metadata",
+    "base_settings": false
+  },
+  "_AIS_BROWSER_RUNTIME_ID": {
+    "kind": "internal",
+    "reason": "Correlate browser runtime with its app-owned workspace",
+    "base_settings": false
+  },
+  "all_proxy": {
+    "kind": "infra",
+    "reason": "Lowercase POSIX alias for ALL_PROXY outbound proxy policy",
+    "base_settings": true
+  },
+  "http_proxy": {
+    "kind": "infra",
+    "reason": "Lowercase POSIX alias for HTTP_PROXY outbound proxy policy",
+    "base_settings": true
+  },
+  "https_proxy": {
+    "kind": "infra",
+    "reason": "Lowercase POSIX alias for HTTPS_PROXY outbound proxy policy",
+    "base_settings": true
+  },
+  "no_proxy": {
+    "kind": "infra",
+    "reason": "Lowercase POSIX alias for NO_PROXY outbound proxy policy",
+    "base_settings": true
+  },
+  "npm_config_ca": {
+    "kind": "infra",
+    "reason": "Installer npm ca input",
+    "base_settings": true
+  },
+  "npm_config_cache": {
+    "kind": "infra",
+    "reason": "Installer npm cache input",
+    "base_settings": true
+  },
+  "npm_config_cafile": {
+    "kind": "infra",
+    "reason": "Installer npm cafile input",
+    "base_settings": true
+  },
+  "npm_config_globalconfig": {
+    "kind": "infra",
+    "reason": "Installer npm globalconfig input",
+    "base_settings": true
+  },
+  "npm_config_https_proxy": {
+    "kind": "infra",
+    "reason": "Installer npm https proxy input",
+    "base_settings": true
+  },
+  "npm_config_noproxy": {
+    "kind": "infra",
+    "reason": "Installer npm noproxy input",
+    "base_settings": true
+  },
+  "npm_config_prefix": {
+    "kind": "infra",
+    "reason": "Installer npm prefix input",
+    "base_settings": true
+  },
+  "npm_config_proxy": {
+    "kind": "infra",
+    "reason": "Installer npm proxy input",
+    "base_settings": true
+  },
+  "npm_config_registry": {
+    "kind": "infra",
+    "reason": "Installer npm registry input",
+    "base_settings": true
+  },
+  "npm_config_strict_ssl": {
+    "kind": "infra",
+    "reason": "Installer npm strict ssl input",
+    "base_settings": true
+  },
+  "npm_config_userconfig": {
+    "kind": "infra",
+    "reason": "Installer npm userconfig input",
+    "base_settings": true
+  }
+}

@@ -20,6 +20,7 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
 from app import __version__
+from app.core import internal_defaults, owner_settings
 
 logger = logging.getLogger(__name__)
 
@@ -188,22 +189,33 @@ def _is_text(annotation) -> bool:
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables"""
+    """Startup/deployment settings; area-owned legacy fields are marked PR N.
+
+    Policy properties below are NOT BaseSettings fields and have no env source.
+    The Settings name stays compatible with existing deployment callers.
+    """
 
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
-    # Endpoint binding is on by default; false is the network-wide rollback switch.
-    # Legacy peers remain accepted until their authenticated binding support is pinned.
-    network_token_binding_enabled: bool = True
-    # With binding enabled, require it even for peers without a durable pin.
-    network_require_token_binding: bool = False
+    # Endpoint binding is always on. Legacy peers remain accepted until their
+    # authenticated binding support is pinned.
+    @property
+    def network_token_binding_enabled(self) -> bool:
+        return internal_defaults.NETWORK_TOKEN_BINDING_ENABLED
 
-    # Release safety: recipient-side kill switch. Enabling this alone does not
-    # enable peer terminals: independent recipient-verified owner grants are
-    # still required and are not implemented yet. SSH grants are unaffected.
-    network_peer_terminals: bool = False
+    # With binding enabled, require it even for peers without a durable pin.
+    @property
+    def network_require_token_binding(self) -> bool:
+        return owner_settings.require_token_binding()
+
+    # Recipient capability policy only. Independent recipient-verified owner
+    # grants remain required; an env import is never terminal authorization.
+    # SSH grants are unaffected.
+    @property
+    def network_peer_terminals(self) -> bool:
+        return owner_settings.peer_terminals_enabled()
 
     # Persistent on-disk logging (app.core.file_logging). Survives an app crash
     # and container recreation, unlike the in-memory ring buffer behind
@@ -211,12 +223,14 @@ class Settings(BaseSettings):
     # recreation). Files land under <data_dir>/logs, which is the durable data
     # volume in Docker (ai-shuffle-data:/data) and %USERPROFILE%\.ai-shuffle on
     # a native Windows install.
-    #   - file_logging_enabled: master switch. FILE_LOGGING_ENABLED=false to
-    #     disable the rotating file handler + faulthandler entirely.
+    #   - file_logging_enabled: always on (internal shipped policy).
     #   - file_log_level: minimum level for the on-disk file (independent of the
     #     console/ring-buffer level so you can capture more or less on disk).
     #   - file_log_max_bytes / file_log_backup_count: RotatingFileHandler sizing.
-    file_logging_enabled: bool = True
+    @property
+    def file_logging_enabled(self) -> bool:
+        return internal_defaults.FILE_LOGGING_ENABLED
+
     file_log_level: str = "INFO"
     file_log_max_bytes: int = 10 * 1024 * 1024  # 10MB per file
     file_log_backup_count: int = 5
@@ -224,6 +238,7 @@ class Settings(BaseSettings):
     # START_CHROME=0 tells the container entrypoint not to launch the supervised
     # Chromium. The app reads the same flag so it neither advertises the browser
     # tool suite to agents nor starts a native supervisor with no browser behind it.
+    # PR 3: migrate this area-owned legacy behaviour field.
     start_chrome: bool = True
 
     # Android emulator (app/core/android_emulator; docs/internal/phone-panel-api.md).
@@ -236,8 +251,11 @@ class Settings(BaseSettings):
     #     no tool or panel use for this long is stopped; 0 keeps it running.
     #   - emulator_system_image: the SDK package path of the system image.
     android_sdk_dir: Optional[Path] = None
+    # PR 3: migrate this area-owned legacy behaviour field.
     emulator_max_devices: int = 1
+    # PR 3: migrate this area-owned legacy behaviour field.
     emulator_idle_timeout_seconds: int = 1800
+    # PR 3: migrate this area-owned legacy behaviour field.
     emulator_system_image: str = "system-images;android-35;google_apis;x86_64"
 
     # Service info
@@ -300,10 +318,13 @@ class Settings(BaseSettings):
     # Cross-install artifact GET is proxied through the authed origin by default
     # (the browser cookie cannot follow a 307 to the holder). Kill switch:
     # CLUSTER_ARTIFACT_PROXY=0 restores the 307 redirect.
+    # PR 2: migrate this area-owned legacy behaviour field.
     cluster_artifact_proxy: bool = True
 
     # Session
-    session_expire_days: int = 30
+    @property
+    def session_expire_days(self) -> int:
+        return owner_settings.session_expire_days()
 
     # fluid_session_events retention. The engine persists every bus event, so
     # streaming deltas (ToolArgsDelta / TextDelta / ThinkingDelta) dominate the
@@ -312,6 +333,7 @@ class Settings(BaseSettings):
     # tree, so the maintenance pass drops them once a session has been idle
     # this many days. Everything else in the log is evidence and is kept, Usage
     # in particular (it backs the accounting backfill). 0 disables pruning.
+    # PR 3: migrate this area-owned legacy behaviour field.
     fluid_event_retention_days: int = 7
 
     # Security - Trusted Proxies (for getting real IP behind reverse proxy)
@@ -328,10 +350,14 @@ class Settings(BaseSettings):
     # talk to a worker only through the HTTP/WebSocket APIs, authenticated with
     # a Bearer paired-session token, so this origin stays allowed for CORS
     # regardless of `cors_origins` while such builds are installed.
-    mobile_app_origin: str = "https://appassets.androidplatform.net"
+    @property
+    def mobile_app_origin(self) -> str:
+        return internal_defaults.MOBILE_APP_ORIGIN
     # iOS builds from before /mobile/ did the same from their own URL scheme
     # (a WKURLSchemeHandler), under the same rules.
-    mobile_ios_app_origin: str = "aishuffle://app"
+    @property
+    def mobile_ios_app_origin(self) -> str:
+        return internal_defaults.MOBILE_IOS_APP_ORIGIN
 
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
@@ -349,8 +375,12 @@ class Settings(BaseSettings):
     # asked again, and honored for the grace window when the hub is down or
     # rate limiting. Both bound hub traffic; the hub allows 120 requests a
     # minute per worker. Hub-side revocation takes effect within the TTL.
-    mobile_account_hub_verify_ttl_seconds: float = 90.0
-    mobile_account_hub_grace_seconds: float = 1800.0
+    @property
+    def mobile_account_hub_verify_ttl_seconds(self) -> float:
+        return internal_defaults.MOBILE_ACCOUNT_HUB_VERIFY_TTL_SECONDS
+    @property
+    def mobile_account_hub_grace_seconds(self) -> float:
+        return internal_defaults.MOBILE_ACCOUNT_HUB_GRACE_SECONDS
 
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
@@ -376,10 +406,12 @@ class Settings(BaseSettings):
     # cost of a tick is one small indexed read plus one ``stat`` per note.
     # Nothing in this loop is latency-critical (the UI's own GET reconcile covers
     # the note you are looking at), so 60s is the default.
+    # PR 3: migrate this area-owned legacy behaviour field.
     notes_sync_interval_seconds: int = 60
 
     # Reclaim integrated, idle app-managed branch checkouts after a 24h grace.
     # Set WORKTREE_AUTO_RECLAIM_ENABLED=false to disable the periodic pass.
+    # PR 3: migrate this area-owned legacy behaviour field.
     worktree_auto_reclaim_enabled: bool = True
 
     # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
@@ -391,6 +423,7 @@ class Settings(BaseSettings):
     # unless a token is due. The Codex refresh token ROTATES, so refreshes are
     # serialized per provider by a lock; this is just the wake-up cadence. 0
     # disables the periodic worker (the refresh-on-401 hook still works on demand).
+    # PR 4: migrate this area-owned legacy behaviour field.
     codex_token_refresh_interval_seconds: int = 300
 
     # ─── Cross-install background sweep ─────────────────────────────────────
@@ -401,13 +434,17 @@ class Settings(BaseSettings):
     # every pass to this interval when the install registry shows no peers, and
     # snaps back to the tight per-pass cadences the moment a peer row appears.
     # NOTIFY (turn submit/interrupt) remains the latency path either way.
-    # Set to 0 to disable the stretch and always run the tight cadences.
-    single_install_sweep_interval_seconds: int = 60
+    # The shipped stretch cadence is internal policy, not an env override.
+    @property
+    def single_install_sweep_interval_seconds(self) -> int:
+        return internal_defaults.SINGLE_INSTALL_SWEEP_INTERVAL_SECONDS
 
     # How long a "do we have peer installs?" answer is cached before the sweep
     # re-reads the registry. Bounds the extra read to ~0.2 queries/min, and is
     # also invalidated immediately whenever a pass actually finds work.
-    single_install_peer_check_seconds: int = 300
+    @property
+    def single_install_peer_check_seconds(self) -> int:
+        return internal_defaults.SINGLE_INSTALL_PEER_CHECK_SECONDS
 
     # ─── Orphaned-session reconciler cadence ────────────────────────────────
     # The reconciler heals sessions whose ``sdk_session_id`` a mid-turn crash
@@ -416,12 +453,14 @@ class Settings(BaseSettings):
     # by the persist-on-init write. Each pass re-aggregates the session store for
     # every never-used session, so it runs hourly rather than on the 5-minute
     # monitor tick. 0 disables the periodic pass (startup still runs one).
+    # PR 2: migrate this area-owned legacy behaviour field.
     orphan_reconcile_interval_seconds: int = 3600
 
     # SuperGrok / xAI OAuth token-refresh worker. Same cadence semantics as
     # ``codex_token_refresh_interval_seconds`` (0 disables the periodic worker;
     # the refresh-on-401 hook still works on demand). Defaults to the Codex
     # interval so both sweeps wake together.
+    # PR 4: migrate this area-owned legacy behaviour field.
     xai_token_refresh_interval_seconds: int = 300
 
     # fluid code-mode + continual harness (native legs only — the delegated
@@ -435,14 +474,19 @@ class Settings(BaseSettings):
     #     session's own model.
     #   - fluid_skills_dir: where saved skills + the episodic journal live.
     #     None = <data_dir>/fluid/skills (never fluid's ~/.fluid default).
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_code_mode: bool = True
     # AI Shuffle's Claude Code mod on the delegated Claude leg (Claude Code
     # 2.1.287 and newer; fluid/fluid/engine/claude_mod). It keeps the CLI's
     # bash-first steer from reaching the model. FLUID_CLAUDE_MOD=false turns it
     # off; the CLAUDE_CODE_THRIFTY_SONIC override stays on either way.
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_claude_mod: bool = True
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_continual: bool = True
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_memory_enabled: bool = True
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
     # OS-level sandbox (bubblewrap) for the code-mode kernel child. ``auto``
@@ -466,31 +510,40 @@ class Settings(BaseSettings):
     #   - fluid_turn_watchdog_seconds: a turn silent this long is ended by the
     #     engine with an error instead of dying silently. Env:
     #     FLUID_TURN_WATCHDOG_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_external_call_timeout_seconds: int = 330
+    # PR 2: migrate this area-owned legacy behaviour field.
     fluid_turn_watchdog_seconds: int = 900
     # HTTP bounds on every native provider client the app builds (seconds;
     # see harness_adapter._provider_timeout_kwargs; defaults match fluid's).
     # Longest silence between two reads of a model response.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_read_timeout: float = 600.0
     # Wall clock for one whole model call; 0 disables it.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_stream_deadline: float = 900.0
     # Wait for a call's first byte (every native client: Anthropic, OpenRouter/OpenAI-format chat, Responses); 0 disables it. Retried only
     # when even the response headers never came; after a 200 the call is not re-sent.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_first_byte_timeout: float = 60.0
     # The first-byte bound for a row whose base_url is a local server (loopback,
     # private or link-local address, localhost, *.local, host.docker.internal:
     # Ollama, vLLM, LM Studio). Such a server may hold its headers while it loads
     # a model, so the default 0 disables it, as fluid's LocalClient does.
     # Env: PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_first_byte_timeout_local: float = 0.0
     # Responses lane (OpenAI/Codex): how long an accepted call may send only
     # heartbeats before any reasoning or output; past it the request is
     # re-sent on the client's retry budget and the chat shows a retry card
     # (#1992). 0 disables it. Env: PROVIDER_PRE_CONTENT_HEARTBEAT_BUDGET.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_pre_content_heartbeat_budget: float = 90.0
 
     # Size limits
+    # PR 2: migrate this area-owned legacy behaviour field.
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
+    # PR 2: migrate this area-owned legacy behaviour field.
     max_display_output_chars: int = 2_000  # What we show in the UI
 
     # ─── SDK Session Pool sizing + TIERED idle policy ───────────────────────
@@ -535,6 +588,7 @@ class Settings(BaseSettings):
     # respawn between messages" feel. Everything past this rank is COLD and
     # goes on the short timeout. 0 disables the hot tier entirely (everything
     # cold). Override via SDK_SESSION_HOT_POOL_SIZE.
+    # PR 2: migrate this area-owned legacy behaviour field.
     sdk_session_hot_pool_size: int = 2
 
     # HOT-tier idle timeout: how long one of the ``sdk_session_hot_pool_size``
@@ -548,6 +602,7 @@ class Settings(BaseSettings):
     # is only safe because ``SessionPool._is_busy`` exempts a session blocked on
     # a pending interaction from idle eviction. Deadlines a user can see must be
     # the ones that fire — this timeout is not one of them.
+    # PR 2: migrate this area-owned legacy behaviour field.
     sdk_session_idle_timeout_seconds: int = 1800  # 30 minutes
 
     # COLD-tier idle timeout: everything ranked below the hot tier. These are
@@ -555,6 +610,7 @@ class Settings(BaseSettings):
     # on the chance you scroll back is the wrong trade on a small box. 7
     # minutes is long enough to survive a detour into another chat and back.
     # Override via SDK_SESSION_COLD_IDLE_TIMEOUT_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     sdk_session_cold_idle_timeout_seconds: int = 420  # 7 minutes
 
     # DETACHED grace: once the last device (browser/app) watching a session
@@ -564,6 +620,7 @@ class Settings(BaseSettings):
     # would be paying for. The grace absorbs page reloads and brief network
     # drops. Set to 0 to disable disconnect-driven eviction and rely purely on
     # the idle tiers. Override via SDK_SESSION_DETACHED_GRACE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     sdk_session_detached_grace_seconds: int = 180  # 3 minutes
 
     # How often the pool's idle watchdog re-evaluates deadlines while sessions
@@ -574,6 +631,7 @@ class Settings(BaseSettings):
     # install where the sync engine is not wired to notify the pool. It is a
     # pure in-process timer: no DB, no thread, and NO wake at all when the pool
     # is empty. Override via SDK_SESSION_IDLE_REEVALUATE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     sdk_session_idle_reevaluate_seconds: int = 60
 
     # AskUserQuestion backstop (seconds). A parked question keeps its SDK
@@ -595,6 +653,7 @@ class Settings(BaseSettings):
     # answered the tool with "input_required round-trip interrupted", and the
     # user's device kept showing a live question nobody was listening to.
     # Whoever changes either number must keep that exemption honest.
+    # PR 2: migrate this area-owned legacy behaviour field.
     user_question_timeout_seconds: int = 3600  # 1 hour
 
     # Per-turn progress watchdog (seconds). A turn that produces NO event at all
@@ -608,6 +667,7 @@ class Settings(BaseSettings):
     # question or permission prompt is exempt outright (the wait is bounded by
     # ``user_question_timeout_seconds`` instead). 0 disables the watchdog.
     # Override via TURN_PROGRESS_TIMEOUT_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     turn_progress_timeout_seconds: int = 1800  # 30 minutes of total silence
 
     # Admission backpressure for the subagent fan-out. A single orchestrator
@@ -668,6 +728,7 @@ class Settings(BaseSettings):
     # server. Unattributable processes are never touched, so this is safe to
     # leave on; disable via REAP_STRAY_CLI_ON_BOOT=false if you deliberately
     # keep marked processes alive across server restarts.
+    # PR 2: migrate this area-owned legacy behaviour field.
     reap_stray_cli_on_boot: bool = True
 
     # Session transcripts live in Postgres (the SessionStore adapter) — Postgres
@@ -682,6 +743,7 @@ class Settings(BaseSettings):
     # share a git remote share one logical memory. Safe to disable
     # (AGENT_MEMORY_SYNC=false) — it no-ops for project-less sessions and never
     # breaks a turn on error.
+    # PR 2: migrate this area-owned legacy behaviour field.
     agent_memory_sync: bool = True
 
     # Worker-session restrictions for Task-dispatched workers: when ON,
@@ -689,18 +751,22 @@ class Settings(BaseSettings):
     # tool approvals are routed to the parent, but a question would stall until
     # user_question_timeout_seconds). Disable with PROVIDER_AGENT_ENABLED=false
     # (BaseSettings reads env vars by field name).
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_agent_enabled: bool = True
 
     # Task tool: nesting depth for
     # agent-invokes-agent chains and the live-worker budget per root session
     # tree. Set via TASK_TOOL_MAX_DEPTH / TASK_TOOL_MAX_WORKERS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_tool_max_depth: int = 5
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_tool_max_workers: int = 64
 
     # The most permissive mode a subagent another worker of this account starts
     # here may run in (default, acceptEdits, auto or bypassPermissions). It is
     # a ceiling only: the child also stays at or below the mode its parent
     # asked for and its own agent's mode. Set via REMOTE_TASK_MAX_PERMISSION_MODE.
+    # PR 2: migrate this area-owned legacy behaviour field.
     remote_task_max_permission_mode: str = "bypassPermissions"
 
     # Per-parent concurrent subagent workers, enforced in the dispatch admission
@@ -712,6 +778,7 @@ class Settings(BaseSettings):
     # a simultaneous fan-out actually loses, and it waits briefly for a worker
     # to finish before refusing with a retryable capacity error. 0 disables it.
     # Override via SUBAGENT_MAX_CONCURRENT_PER_SESSION.
+    # PR 2: migrate this area-owned legacy behaviour field.
     subagent_max_concurrent_per_session: int = 64
 
     # ── Task worker lifecycle ────────────────────────────────────────────
@@ -737,6 +804,7 @@ class Settings(BaseSettings):
     # automatically, because the provider may already have been working when
     # the interrupt landed.
     # Override via TASK_WORKER_FIRST_FRAME_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_first_frame_seconds: float = 90.0
     # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every
     # attempt. A sync dispatch blocks the parent turn — it cannot park, cannot
@@ -745,22 +813,26 @@ class Settings(BaseSettings):
     # shown progress moves to the background (same session and task id) and
     # reports to the parent as a background task; one with none is stopped.
     # 0 disables the cap. Override via TASK_WORKER_SYNC_MAX_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_sync_max_seconds: float = 900.0
     # How many times a BACKGROUND dispatch whose worker never streamed a frame
     # is re-dispatched automatically with the same brief. Each retry is its own
     # visible task row. Sync dispatches never take this path — their caller is
     # live and gets the failure to act on. Override via
     # TASK_WORKER_START_RETRIES.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_start_retries: int = 1
     # How many times a worker refused at connect by a provider rate limit (a
     # 429 carrying a parseable "try again in Ns" / Retry-After) is RESCHEDULED
     # rather than terminated: fluid's own 3-retry / ~7s budget cannot outlast a
     # 60s token window. Applies to both modes.
     # Override via TASK_WORKER_RATE_LIMIT_RETRIES.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_rate_limit_retries: int = 3
     # Ceiling on one rate-limit reschedule's backoff. The provider's own
     # retry-after is the floor; it is doubled per attempt and clamped here.
     # Override via TASK_WORKER_RATE_LIMIT_BACKOFF_CAP_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_rate_limit_backoff_cap_seconds: float = 60.0
     # Optional administrator limit on concurrent workers per provider row.
     # Worker count is not a provider token quota: ten small requests can fit
@@ -770,6 +842,7 @@ class Settings(BaseSettings):
     # until a sibling settles. 0 disables this limit. The provider-less
     # delegated Claude leg remains governed by its process/resource guards.
     # Override via TASK_WORKER_MAX_PER_PROVIDER.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_max_per_provider: int = 0
     # How long a dispatch queues on an explicitly configured provider-row
     # limit before giving up with a retryable capacity error. Longer than the
@@ -778,6 +851,7 @@ class Settings(BaseSettings):
     # is also the worst case for how long that call can take to hand back a
     # receipt. Raising it trades a slower tool call for fewer refusals.
     # Override via TASK_WORKER_PROVIDER_QUEUE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_provider_queue_seconds: float = 120.0
     # How long a worker's OWN background work (Monitor shells, nested workers)
     # is given to drain after its turn ends, before its report is written. A
@@ -787,6 +861,7 @@ class Settings(BaseSettings):
     # interim note as a result. 0 disables the WAIT, not the check: a worker
     # that ends with live work then fails immediately.
     # Override via TASK_WORKER_BACKGROUND_SETTLE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_background_settle_seconds: float = 120.0
 
     # Compiled system prompt for a PLAIN-STRING profile prompt on the
@@ -798,6 +873,7 @@ class Settings(BaseSettings):
     # it replaces the CLI preset via --system-prompt, because the profile
     # chose its own prompt. Native legs always run the compiled prompt. Set
     # via PROMPT_FULL_REPLACE.
+    # PR 2: migrate this area-owned legacy behaviour field.
     prompt_full_replace: bool = True
 
     # Auto-continue an autonomous turn cut at the autocompact boundary. The
@@ -809,6 +885,7 @@ class Settings(BaseSettings):
     # and spawns ONE continuation query so the CLI compacts and the model
     # resumes. ON by default. Set via
     # AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
+    # PR 2: migrate this area-owned legacy behaviour field.
     auto_continue_on_compact: bool = True
 
     # Idle-at-edge watchdog. Belt-and-braces backstop for the edge-of-
@@ -817,21 +894,26 @@ class Settings(BaseSettings):
     # window and, via the durable wakeup machinery, fires ONE synthetic nudge turn
     # — a real new turn is what makes the CLI run its deferred lazy compaction.
     # ON by default. Kill switch: IDLE_WATCHDOG_ENABLED=false.
+    # PR 2: migrate this area-owned legacy behaviour field.
     idle_watchdog_enabled: bool = True
     # Sweep cadence. Also the effective idle grace: a session must still be idle
     # (and over the fraction) at a scan tick to be nudged.
+    # PR 2: migrate this area-owned legacy behaviour field.
     idle_watchdog_interval_seconds: int = 300
     # Context-window fraction (totalTokens / maxTokens) at/above which an idle
     # session is treated as "at the edge".
+    # PR 2: migrate this area-owned legacy behaviour field.
     idle_watchdog_context_fraction: float = 0.85
     # Per-session cooldown after a watchdog nudge, so a session whose compaction
     # does not drop it back under the fraction is not re-nudged every tick.
+    # PR 2: migrate this area-owned legacy behaviour field.
     idle_watchdog_cooldown_seconds: int = 1800
     # How recently a session must have been touched (``sessions.updated_at``)
     # to still count as a watchdog candidate. ``status='active'`` is sticky, so
     # without this gate a session abandoned months ago near the context edge
     # would stay eligible forever and draw a fresh nudge turn after every restart.
     # Default 24h. Set to 0 to disable the gate. Env: IDLE_WATCHDOG_MAX_IDLE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     idle_watchdog_max_idle_seconds: int = 86400
 
     # ── Monitor guardrails (background shells) ────────────────────────────
@@ -847,12 +929,14 @@ class Settings(BaseSettings):
     # ``--max-time``, deadline arithmetic, an iteration cap) — the model's own
     # budget wins. Set to 0 to disable the backstop entirely.
     # Env: MONITOR_COMMAND_TIMEOUT_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     monitor_command_timeout_seconds: int = 2700  # 45 minutes
     # Head+tail cap on the completion summary the parent is WOKEN with. The
     # full buffer stays available via TaskOutput; this only bounds what a wake
     # turn has to read (a stack-trace tail can otherwise burn a whole turn).
     # 4,000 is large enough that the summary is a result, not a pointer that
     # sends the agent to TaskOutput. Env: MONITOR_SUMMARY_MAX_CHARS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     monitor_summary_max_chars: int = 4000
     # Idle bound for a SERVING Monitor task (``serves``). Those are exempt from
     # the command budget by design — they are meant to stay up — so without this
@@ -861,6 +945,7 @@ class Settings(BaseSettings):
     # touched, the server is never disturbed. Past this many seconds with no
     # activity on that session, the process is stopped and the completion says
     # why. 0 disables. Env: MONITOR_SERVING_IDLE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     monitor_serving_idle_seconds: int = 3600  # 60 minutes
 
     # ── Park watchdog ─────────────────────────────────────────────────────
@@ -873,14 +958,17 @@ class Settings(BaseSettings):
     # ``force`` ceiling settles the session's still-running task rows and fires
     # their terminal frames so the session wakes instead of sitting forever.
     # Kill switch: PARK_WATCHDOG_ENABLED=false.
+    # PR 2: migrate this area-owned legacy behaviour field.
     park_watchdog_enabled: bool = True
     # Park age at which a stalled park is REPORTED (log + durable error row).
     # Env: PARK_WATCHDOG_WARN_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     park_watchdog_warn_seconds: int = 1800  # 30 minutes
     # Hard ceiling: past this the sweep forces the terminal frames. Generous —
     # a legitimate overnight CI run or training job must never be reaped by a
     # timer. 0 disables forcing (report only).
     # Env: PARK_WATCHDOG_FORCE_SECONDS.
+    # PR 2: migrate this area-owned legacy behaviour field.
     park_watchdog_force_seconds: int = 3600  # 60 minutes
 
     # STOP SEMANTICS opt-out. Stop kills EVERYTHING the session is doing:
@@ -890,6 +978,7 @@ class Settings(BaseSettings):
     # back to life. Set STOP_KEEPS_MONITOR_SHELLS=true to leave running Monitor
     # shells alive on Stop; only ghost rows are then swept.
     # Defaults OFF; the default must stay "kill everything".
+    # PR 2: migrate this area-owned legacy behaviour field.
     stop_keeps_monitor_shells: bool = False
 
     # Durable background-task state. When on, task_registry mirrors every task
@@ -899,6 +988,7 @@ class Settings(BaseSettings):
     # reconcile (stale non-terminal rows are marked killed) and the stop-task
     # force-settle fallback. Kill switch: AI_SHUFFLE_DURABLE_TASKS=false
     # disables all writes instantly.
+    # PR 2: migrate this area-owned legacy behaviour field.
     durable_task_state: bool = Field(
         default=True,
         validation_alias=AliasChoices(
@@ -912,6 +1002,7 @@ class Settings(BaseSettings):
     # data) instead of failing "not on this device". Bounded by the clone-timeout,
     # the interactive-prompt disable, and the local:/manual: hard exclusion. Kill
     # switch: AI_SHUFFLE_SELF_SEED=false disables all on-demand cloning instantly.
+    # PR 4: migrate this area-owned legacy behaviour field.
     self_seed_checkouts: bool = Field(
         default=True,
         validation_alias=AliasChoices(
@@ -925,10 +1016,14 @@ class Settings(BaseSettings):
     # ``GetAppErrors``. Warnings never change that tool's DEFAULT output — it asks for
     # ERROR+ unless the caller passes min_level: "WARNING" — and they are
     # trimmed to their own smaller ceiling before the table-wide prune, so they
-    # cannot evict errors. Set false to restore ERROR-only capture.
-    error_log_capture_warnings: bool = True
+    # cannot evict errors. Warning capture is internal shipped policy.
+    @property
+    def error_log_capture_warnings(self) -> bool:
+        return internal_defaults.ERROR_LOG_CAPTURE_WARNINGS
     # Ceiling on retained WARNING rows, applied before the table-wide trim.
-    error_log_max_warning_rows: int = 1000
+    @property
+    def error_log_max_warning_rows(self) -> int:
+        return internal_defaults.ERROR_LOG_MAX_WARNING_ROWS
 
     # Whether the browser MCP server may reach loopback (127.0.0.0/8, ::1,
     # "localhost"). browser-mcp blocks loopback by default, so a hostile page
@@ -962,11 +1057,14 @@ class Settings(BaseSettings):
     # while its provider is tripped. It never reroutes or fails over. ON by
     # default. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to disable it.
     # See app.core.rate_limit_breaker.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_circuit_breaker_enabled: bool = True
     # Cooldown applied when the upstream 429 carries no usable Retry-After.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_circuit_breaker_cooldown_seconds: int = 60
     # Hard ceiling on any cooldown, including one derived from Retry-After, so a
     # hostile or malformed header cannot lock a provider out indefinitely.
+    # PR 2: migrate this area-owned legacy behaviour field.
     provider_circuit_breaker_max_cooldown_seconds: int = 300
 
     # Project/checkout resolution keys unconditionally off the origin-keyed

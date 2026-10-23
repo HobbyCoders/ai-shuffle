@@ -59,7 +59,7 @@ def _route_httpx(monkeypatch, served):
 
 def test_dropped_unicode_authority_warns_to_use_punycode(monkeypatch, caplog):
     from app.core.config import settings
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
     monkeypatch.setattr(endpoints, "_non_ascii_warning_at", None, raising=False)
     unicode_url = "https://bücher.example"
     punycode_url = "https://" + "bücher.example".encode("idna").decode("ascii")
@@ -95,7 +95,7 @@ def test_dial_endpoints_uses_the_tunnel_alone_when_one_is_advertised():
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot, enabled, monkeypatch):
     from app.core.config import settings
-    monkeypatch.setattr(settings, "network_token_binding_enabled", enabled)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=enabled: value))
     url = f"http://169{dot}254{dot}169{dot}254:80"
     assert endpoints.peer_endpoints({"endpoints": [url]}, None) == []
     assert endpoints.peer_endpoints(None, {"endpoints": [url]}) == []
@@ -116,7 +116,7 @@ async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot, e
 @pytest.mark.parametrize("url", ["https://faß.example", "https://K.example", "http://example.com:８０"])
 def test_peer_authorities_require_ascii_before_normalizing(url, monkeypatch):
     from app.core.config import settings
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
     assert not endpoints.is_valid_endpoint(url)
     assert endpoints.dial_endpoints([url]) == []
 
@@ -148,7 +148,7 @@ _NOW_REFUSED = ["http://169.254.1", "http://169.254.43518", "http://0xa9fea9fe",
 @pytest.mark.parametrize("url", _STILL_VALID)
 def test_names_main_accepted_stay_valid_with_binding_off(url, monkeypatch):
     from app.core.config import settings
-    monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
     assert endpoints.is_valid_endpoint(url)
     assert len(endpoints.validate_endpoints([url])) == 1
 
@@ -157,7 +157,7 @@ def test_names_main_accepted_stay_valid_with_binding_off(url, monkeypatch):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_all_numeric_link_local_and_out_of_range_hosts_are_refused(url, enabled, monkeypatch):
     from app.core.config import settings
-    monkeypatch.setattr(settings, "network_token_binding_enabled", enabled)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=enabled: value))
     assert not endpoints.is_valid_endpoint(url)
     assert endpoints.validate_endpoints([url]) == []
 

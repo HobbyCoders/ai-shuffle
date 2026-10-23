@@ -254,6 +254,11 @@ async def lifespan(app: FastAPI):
         raise
     except Exception:
         logger.exception("Worker network initialization failed (non-fatal)")
+    # The DB and settings replication hooks are ready. One-release compatibility
+    # adopts explicit old values once; stored UI/peer settings always win.
+    from app.core.legacy_settings_import import import_legacy_settings
+    from app.db.async_database import run_sync
+    await run_sync(import_legacy_settings)
     # Now that the DB pool is up, funnel backend ERROR+ logs into error_log so
     # the GetAppErrors MCP tool and admin UI can surface them.
     from app.core.error_log_handler import install_error_log_handler

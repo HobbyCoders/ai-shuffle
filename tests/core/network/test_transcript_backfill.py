@@ -582,7 +582,7 @@ def test_serving_checks_the_table_not_the_cache(workers):
 
 async def test_a_peer_still_backfilling_does_not_stop_the_exchange(workers, monkeypatch):
     from app.core.config import settings
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
     from tests.core.network.harness import join
     a, b, c = workers("a"), workers("b"), workers("c")
     with a.active():
