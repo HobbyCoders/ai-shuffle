@@ -1382,7 +1382,8 @@ class TestListWorktrees:
         Branch/root validation uses real Git and is covered, without this patch,
         by test_git_worktrees_real_repo_api.py. Do not bypass the production guard.
         """
-        with patch("app.core.checkout_manager._require_checkout_root"):
+        with (patch("app.core.checkout_manager._require_checkout_root"),
+              patch("app.api.git_worktrees.checkout_events")):
             yield
 
     def test_list_worktrees_success(
@@ -1544,6 +1545,8 @@ class TestListWorktrees:
         )
 
     def _make_worktrees(self, sample_worktree, n):
+        from datetime import datetime, timezone
+
         worktrees = []
         for i in range(n):
             wt = sample_worktree.copy()
@@ -1551,6 +1554,8 @@ class TestListWorktrees:
             wt["branch_name"] = f"feature/{i}"
             wt["exists"] = True
             wt["git_status"] = None
+            wt["sessions"] = [{"id": f"ses-{i}", "status": "active",
+                               "updated_at": datetime.now(timezone.utc).isoformat()}]
             worktrees.append(wt)
         return worktrees
 
@@ -1566,7 +1571,7 @@ class TestListWorktrees:
         from app.api import git_worktrees as _gw
 
         session = {"id": "ses-x", "title": "A session title " * 4, "status": "active",
-                   "updated_at": "2024-01-15T10:30:00Z"}
+                   "updated_at": datetime.now(timezone.utc).isoformat()}
         worktrees = self._make_worktrees(sample_worktree, 40)
         for wt in worktrees:
             wt["sessions"] = [session] * 3
@@ -1727,7 +1732,9 @@ class TestListWorktrees:
         from app.api import git_worktrees as _gw
 
         worktrees = self._make_worktrees(sample_worktree, 5)
-        # wt-0 has a session active just now; the rest are idle.
+        # wt-0 has a session active just now; the rest are historical.
+        for wt in worktrees:
+            wt["sessions"] = []
         worktrees[0]["sessions"] = [{
             "id": "ses-hot", "title": "t", "status": "active",
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -1751,7 +1758,7 @@ class TestListWorktrees:
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
                         url = "/api/v1/projects/test-project-id/git/worktrees"
-                        r1 = client.get(url)  # cold: reads all 5 once
+                        r1 = client.get(url)  # cold: reads only active wt-0
                         r2 = client.get(url)  # fresh: reads nothing
                         state = _gw._worktree_status_cache["test-project-id"]
                         state.refreshed_at = _t.monotonic() - (_gw._WORKTREE_STATUS_FRESH_SECONDS + 1)
@@ -1761,12 +1768,14 @@ class TestListWorktrees:
                             inflight.result(timeout=5)
 
         assert r1.status_code == r2.status_code == r3.status_code == 200
-        assert mock_git_service.get_status.call_count == 6
-        # Every response carries a status for every worktree, cached or not.
+        assert mock_git_service.get_status.call_count == 2
+        # Keep historical rows in the same response shape, but not cold-scanned.
         for r in (r1, r2, r3):
-            assert all(wt["git_status"]["is_clean"] for wt in r.json()["worktrees"])
-            assert all(wt["status_checked_at"] for wt in r.json()["worktrees"])
-            assert all(wt["status_error"] is None for wt in r.json()["worktrees"])
+            rows = r.json()["worktrees"]
+            assert rows[0]["git_status"]["is_clean"] and rows[0]["status_checked_at"]
+            assert all(wt["git_status"] is None and wt["status_checked_at"] is None
+                       for wt in rows[1:])
+            assert all(wt["status_error"] is None for wt in rows)
 
     def test_list_worktrees_status_one_error_does_not_poison_others(
         self, app, mock_database, mock_git_service,
