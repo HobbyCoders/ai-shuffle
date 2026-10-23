@@ -158,3 +158,41 @@ def test_committed_evidence_has_all_repetitions_and_matches_task_fixture():
     assert all(r["observed_effort"] == r["config"] for r in data["rows"]
                if r["config"] != "default")
     assert all("reasoning_tokens_complete" in r for r in data["rows"])
+
+
+def test_preflight_selects_the_requested_route_and_refuses_a_missing_one(tmp_path):
+    import pytest
+    from scripts import effort_benchmark as bench
+    catalog = {"models": [{"value": "opus", "effort_levels": ["low", "high"], "default_effort": "high"}],
+               "providers": [
+                   {"id": "sub", "provider_type": "chatgpt", "models": [
+                       {"id": "gpt-6.1-sol", "effort_levels": ["low", "high"], "default_effort": "low"}]},
+                   {"id": "key", "provider_type": "openai", "models": [
+                       {"id": "gpt-6.1-sol", "effort_levels": ["low", "medium", "high"], "default_effort": "medium"}]}]}
+    class Client:
+        def deploy_status(self):
+            return {"workers": [{"is_self": True, "revision": "fixture"}]}
+        def models(self):
+            return catalog
+        def agents(self):
+            return [{"id": "coding"}]
+        def close(self):
+            pass
+    def runner(**kw):
+        args = SimpleNamespace(output=str(tmp_path / "r.json"), url="unused", agent="coding",
+                               configs=["default", "high"], **kw)
+        r = bench.Benchmark(args)
+        r.client = Client
+        return r
+    legacy = runner()
+    legacy.preflight()
+    assert legacy.model == "prov:sub:gpt-6.1-sol"
+    key = runner(model="gpt-6.1-sol", provider="openai")
+    key.preflight()
+    assert key.model == "prov:key:gpt-6.1-sol"
+    assert key.capability == {"effort_levels": ["low", "medium", "high"], "default_effort": "medium"}
+    claude = runner(model="opus", provider="claude")
+    claude.preflight()
+    assert claude.model == "opus"
+    with pytest.raises(ValueError, match="no configured openrouter provider"):
+        runner(model="gpt-6.1-sol", provider="openrouter").preflight()

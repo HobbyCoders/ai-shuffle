@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "about": "Every tuning default the app applies to someone who has not chosen, with the committed benchmark that shows it wins against current behaviour (scripts/tuning_gate.py). Explicit opt-ins change no default and are listed with their source instead. tests/test_tuning_gate.py fails when the app produces a default that is not listed here, or a listed default no longer wins on its evidence.",
+  "defaults": [
+    {
+      "id": "chatgpt.gpt-6.1-sol.initial_effort",
+      "what": "A never-picked GPT-6.1 Sol model on a ChatGPT subscription starts new chats at High effort. Remembered picks (including Auto) still win; children, the assistant home and the provider's own default are unchanged.",
+      "applies": {
+        "field": "initial_effort",
+        "model": "gpt-6.1-sol",
+        "route": "openai_responses",
+        "provider": "chatgpt",
+        "value": "high"
+      },
+      "code": "app/core/model_effort.py effort_capabilities",
+      "evidence": "docs/benchmarks/effort-gpt-6.1-sol-2026-10-16.json",
+      "report": "docs/benchmarks/effort-gpt-6.1-sol-2026-10-16.md",
+      "baseline": "default",
+      "candidate": "high"
+    }
+  ],
+  "opt_in": [
+    {
+      "id": "local.qwen3-thinking",
+      "what": "Local model preset the owner picks per model in Settings: temperature 0.6, top P 0.95, top K 20, min P 0, thinking on.",
+      "code": "app/core/local_model_settings.py _PRESETS",
+      "source": "https://huggingface.co/Qwen/Qwen3-8B#best-practices"
+    },
+    {
+      "id": "local.qwen3-non-thinking",
+      "what": "Local model preset the owner picks per model in Settings: temperature 0.7, top P 0.8, top K 20, min P 0, thinking off.",
+      "code": "app/core/local_model_settings.py _PRESETS",
+      "source": "https://huggingface.co/Qwen/Qwen3-8B#best-practices"
+    }
+  ]
+}

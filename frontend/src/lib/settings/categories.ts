@@ -3,6 +3,7 @@
  */
 import {
 	SlidersHorizontal,
+	SlidersVertical,
 	Archive,
 	AudioLines,
 	KeyRound,
@@ -44,6 +45,7 @@ const ROWS: CategoryRow[] = [
 	{ id: 'voice', label: 'Voice', icon: AudioLines, group: 'personal' },
 	{ id: 'providers', label: 'Providers', icon: KeyRound, group: 'ai' },
 	{ id: 'models', label: 'Default models', icon: Sparkles, group: 'ai' },
+	{ id: 'tuning', label: 'Model tuning', icon: SlidersVertical, group: 'ai' },
 	{ id: 'usage', label: 'Usage', icon: Gauge, group: 'ai' },
 	{ id: 'integrations', label: 'Integrations', icon: Plug, group: 'ai' },
 	{ id: 'plugins', label: 'Plugins', icon: Puzzle, group: 'ai' },
