@@ -111,6 +111,26 @@ def lower_priority(proc: Any) -> None:
     lower_process_group_priority(getattr(proc, "pid", None), child_nice())
 
 
+def prefer_for_oom_kill(proc: Any) -> None:
+    """Make a spawned shell the kernel's preferred OOM-kill victim (Linux only).
+
+    Uses the ``sdk_subprocess_oom_score_adj`` setting the agent CLIs get, so a
+    Monitor shell running a test suite or a build (a child of the server, not
+    of any CLI) is killed before the server or its database under a host-wide
+    memory shortage. Everything the shell forks inherits the score. Never
+    raises.
+    """
+    from fluid.tools.priority import raise_oom_score_adj  # noqa: PLC0415
+
+    try:
+        from app.core.config import settings  # noqa: PLC0415
+
+        adj = int(getattr(settings, "sdk_subprocess_oom_score_adj", 0) or 0)
+    except Exception:  # noqa: BLE001
+        adj = 0
+    raise_oom_score_adj(getattr(proc, "pid", None), adj)
+
+
 def child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """The environment a spawned shell should inherit.
 

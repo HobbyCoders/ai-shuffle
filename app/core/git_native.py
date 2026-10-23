@@ -49,11 +49,6 @@ else:
     _WT_MODIFIED_FLAGS = 0
 
 # ---------------------------------------------------------------------------
-# Module-level tracking for fsmonitor configuration
-# ---------------------------------------------------------------------------
-_fsmonitor_configured: set = set()
-
-# ---------------------------------------------------------------------------
 # Last get_status failure per working dir
 # ---------------------------------------------------------------------------
 # A broken checkout (e.g. a zeroed index) fails the same way on every poll.
@@ -75,31 +70,6 @@ def get_status_error(working_dir: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _ensure_fsmonitor(repo: "pygit2.Repository") -> None:
-    """Enable core.fsmonitor if not already set for this repo."""
-    repo_path = os.path.realpath(repo.path)
-    if repo_path in _fsmonitor_configured:
-        return
-
-    try:
-        try:
-            value = repo.config["core.fsmonitor"]
-            if value == "true":
-                logger.debug("fsmonitor already enabled for %s", repo_path)
-                _fsmonitor_configured.add(repo_path)
-                return
-        except KeyError:
-            pass
-
-        repo.config["core.fsmonitor"] = "true"
-        logger.info("Enabled core.fsmonitor for %s", repo_path)
-        _fsmonitor_configured.add(repo_path)
-    except Exception as exc:
-        logger.debug("Could not configure fsmonitor for %s: %s", repo_path, exc)
-        # Still mark as configured to avoid repeated attempts
-        _fsmonitor_configured.add(repo_path)
-
-
 def _get_repo(working_dir: str) -> Optional["pygit2.Repository"]:
     """Open a fresh pygit2.Repository for *working_dir*.
 
@@ -108,9 +78,10 @@ def _get_repo(working_dir: str) -> Optional["pygit2.Repository"]:
     if not HAS_PYGIT2:
         return None
     try:
-        repo = pygit2.Repository(os.path.realpath(working_dir))
-        _ensure_fsmonitor(repo)
-        return repo
+        # Never sets core.fsmonitor: libgit2 does not use it, while every git
+        # CLI call in every worktree of the repository would then start a
+        # detached fsmonitor daemon (Windows and macOS) that never exits (#436).
+        return pygit2.Repository(os.path.realpath(working_dir))
     except Exception:
         return None
 
@@ -1223,13 +1194,9 @@ class GitNativeReader:
 
     @staticmethod
     def invalidate_repo(working_dir: str) -> None:
-        """Remove a repo path from the fsmonitor tracking set.
+        """Hook for structural mutations (worktree add/remove, init, clone).
 
-        Called after structural mutations (worktree add/remove, init, clone)
-        so that fsmonitor configuration is re-checked on next access.
-        With the fresh-per-call Repository strategy there is no handle cache
-        to clear, but this ensures fsmonitor state stays consistent.
+        A no-op: every call opens a fresh Repository, so there is no handle
+        cache to clear. Kept so callers need not know that.
         """
-        real_path = os.path.realpath(working_dir)
-        to_discard = {p for p in _fsmonitor_configured if p.startswith(real_path)}
-        _fsmonitor_configured.difference_update(to_discard)
+        return None

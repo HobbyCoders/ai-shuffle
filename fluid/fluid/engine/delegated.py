@@ -153,6 +153,7 @@ from fluid.store.base import (
     replay_source,
 )
 from fluid.tools.mcp.bundled_server import STREAM_LINE_LIMIT
+from fluid.tools.job_object import assign_kill_on_close_job, close_job
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 if TYPE_CHECKING:
@@ -618,6 +619,46 @@ def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
     return {**settings, "env": {**(env if isinstance(env, dict) else {}), **FORCED_CHILD_ENV}}
 
 
+#: How long the CLI's leftover process group gets after SIGTERM before SIGKILL.
+_GROUP_TERM_GRACE_S = 2.0
+
+
+async def _end_process_group(pid: int | None, *, grace: float = _GROUP_TERM_GRACE_S) -> None:
+    """End what is left of the process group an exited CLI led (POSIX only).
+
+    The CLI was spawned with ``start_new_session``, so its pid is the id of
+    the group its shell commands run in. Once the CLI has been reaped, any
+    process still in that group is something the model started that would
+    otherwise run on with no owner. A pid that a live process holds again is
+    left alone: the kernel does not hand out a pid still used as a group id,
+    so a live holder means the old group is already empty. Never raises.
+    """
+    if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        os.kill(pid, 0)
+        return  # a live process owns this pid: not the CLI's leftover group
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        return  # no such group (nothing left) or not ours to signal
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+        try:
+            os.killpg(pid, 0)
+        except OSError:
+            return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def _settings_json(settings: dict[str, Any]) -> str:
     """Deterministic JSON: the same settings are the same bytes every spawn."""
     return json.dumps(settings, sort_keys=True, separators=(",", ":"))
@@ -916,6 +957,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._session: SessionMeta | None = None
         self._session_id = session_id
         self._proc: asyncio.subprocess.Process | None = None
+        # Windows kill-on-close job holding the CLI's whole process tree.
+        self._proc_job: int | None = None
         self._req_counter = 0
         self._interrupted = asyncio.Event()
         # Set (and replaced by a fresh one) on every Interrupt: a wait that
@@ -1311,10 +1354,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         its own session so its whole process group goes, on Windows
         ``taskkill /T`` walks the descendants. Plain ``terminate()`` reached
         only the CLI and left those children orphaned.
+
+        A clean exit is not the end of the tree either: the CLI closes its MCP
+        servers, but a shell command the model backgrounded (a dev server, a
+        test run, ``nohup``) is still in the CLI's process group and outlives
+        it. On POSIX that group is ended as soon as the CLI is gone (#436).
         """
         proc, self._proc = self._proc, None
+        job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
-        if proc is None or proc.returncode is not None:
+        if proc is None:
+            close_job(job)
+            return
+        try:
+            await self._end_process(proc, grace)
+        finally:
+            # Windows: whatever the CLI started, orphans included, ends here.
+            close_job(job)
+
+    async def _end_process(self, proc: asyncio.subprocess.Process, grace: float) -> None:
+        if proc.returncode is not None:
+            await _end_process_group(proc.pid)
             return
         try:
             if proc.stdin is not None:
@@ -1323,6 +1383,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             pass
         try:
             await asyncio.wait_for(proc.wait(), timeout=grace)
+            await _end_process_group(proc.pid)
             return
         except (TimeoutError, ProcessLookupError):
             pass
@@ -1711,6 +1772,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             limit=STREAM_LINE_LIMIT,
             **spawn_kwargs,
         )
+        # Windows has no process group to end once the CLI is gone, and
+        # ``taskkill /T`` cannot reach an orphaned grandchild. A kill-on-close
+        # job holds the whole tree; _stop_process closes it (#436). A previous
+        # CLI that exited on its own is replaced here, so its job ends now.
+        close_job(self._proc_job)
+        self._proc_job = assign_kill_on_close_job(self._proc.pid)
         self._stdout_backlog.clear()
         self.cli_hooks_registered = False
         # A new CLI: no wake of the old one to wait for, and the model and

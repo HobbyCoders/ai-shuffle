@@ -17,7 +17,11 @@ from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.fragments import CWD_PARAM, FRESH_PROCESS
-from fluid.tools.priority import lower_process_group_priority, priority_creationflags
+from fluid.tools.priority import (
+    lower_process_group_priority,
+    priority_creationflags,
+    raise_oom_score_adj,
+)
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
 
@@ -316,6 +320,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # host's event loop; it still gets all idle CPU. No-op on Windows (the
     # creationflags above do it there) and when FLUID_CHILD_NICE=0.
     lower_process_group_priority(proc.pid)
+    # And the first thing the kernel kills when the host runs out of memory.
+    raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
     try:
         stdout = await asyncio.wait_for(_read_capped(proc.stdout), timeout=timeout)
