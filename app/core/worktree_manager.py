@@ -792,12 +792,11 @@ class WorktreeManager:
 
         if worktree["exists"] and worktree_abs_path:
             from app.core.checkout_manager import _require_checkout_root
-            from app.core import git_native
 
             try:
                 _require_checkout_root(worktree_abs_path)
                 gs = self.git_service.get_status(worktree_abs_path)
-                error = git_native.get_status_error(worktree_abs_path)
+                error = self.git_service.get_status_error(worktree_abs_path)
                 worktree["git_status"] = None if error else gs
                 worktree["status_error"] = error
                 if not error and gs.get("current_branch") != worktree["branch_name"]:

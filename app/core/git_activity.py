@@ -36,12 +36,22 @@ def _project_candidates(project_id, working_dir=None):
     if not canonical:
         project = resolve_project_v2({'project_id': project_id})
         canonical = project['id'] if project else None
-    return active_git_sessions(list_sessions_for_cleanup(project_id, canonical))
+    # Only sessions that can be active are read: a project keeps thousands of
+    # finished chats and Task workers, and loading every row on each Git status
+    # poll held a pooled connection for many seconds under load.
+    live = _live_session_ids()
+    possible = live | set(task_registry.active_session_ids())
+    if not possible:
+        return []
+    return _active(list_sessions_for_cleanup(project_id, canonical, possible), live)
 
 
 def active_git_sessions(sessions):
     """Shared uncached activity truth for Git mutations and stale-registration cleanup."""
-    live = _live_session_ids()
+    return _active(sessions, _live_session_ids())
+
+
+def _active(sessions, live):
     return [s for s in sessions if s.get('id') and
             (s['id'] in live or task_registry.has_active_background_work(s['id'])
              or task_registry.has_running_monitor_shell(s['id']))]

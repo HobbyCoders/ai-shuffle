@@ -30,6 +30,7 @@ type Loader = () => Promise<{ default: Component }>;
 export const COLLECTION_LOADERS: Record<CollectionCategory, Loader> = {
 	providers: () => import('../providers/ProvidersCollection.svelte'),
 	models: () => import('../models/ModelsCollection.svelte'),
+	tuning: () => import('../tuning/TuningCollection.svelte'),
 	integrations: () => import('../integrations/IntegrationsCollection.svelte'),
 	plugins: () => import('../plugins/PluginsCollection.svelte'),
 	mcp: () => import('../mcp/McpCollection.svelte'),

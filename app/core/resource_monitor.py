@@ -94,7 +94,7 @@ async def _collect_metrics() -> dict:
         provider = adapter.provider_kind or "unknown"
         group = by_provider.setdefault(provider, dict(adapters=0, adapters_with_store=0,
             retained_nodes=0, message_json_bytes=0, event_cache_estimated_bytes=0,
-            stores_without_json_byte_counter=0))
+            windowed_sessions=0, stores_without_json_byte_counter=0))
         group["adapters"] += 1
         store = adapter._store
         if store is None:

@@ -60,7 +60,11 @@ async def test_sdk_legacy_option_alias_is_validated_and_not_silently_lost(monkey
 
 
 async def test_unified_metadata_does_not_expand_first_request(monkeypatch, tmp_path, record_property):
-    from tests.core.test_native_first_request_budget import _first_request, _priced_before_the_turn, FIRST_REQUEST_BUDGET
+    from tests.core.test_native_first_request_budget import (
+        FIRST_REQUEST_BUDGET, _first_request, _pin_host, _priced_before_the_turn,
+    )
+    # The Linux host facts on every machine, as the budget was measured.
+    _pin_host(monkeypatch, "linux")
     modern, legacy = tmp_path / "modern", tmp_path / "legacy"
     modern.mkdir()
     legacy.mkdir()
@@ -74,7 +78,7 @@ async def test_unified_metadata_does_not_expand_first_request(monkeypatch, tmp_p
         _, previous, _ = await _first_request(scoped, legacy, code_mode=False)
     tokens = _priced_before_the_turn(current, "hello")
     record_property("unified_json_first_request_tokens", tokens)
-    assert tokens <= FIRST_REQUEST_BUDGET
+    assert tokens <= FIRST_REQUEST_BUDGET["linux"]
     assert tokens <= _priced_before_the_turn(previous, "hello")
 
 

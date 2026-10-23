@@ -191,7 +191,7 @@ curl http://localhost:8000/api/v1/projects/proj_abc123/git/status \
 }
 ```
 
-A staged file's `status` is the git index code: `A` (added), `M` (modified), `D` (deleted), `R` (renamed), `C` (copied) or `T` (type changed, for example a file replaced by a symlink). A rename may instead appear as two entries, `D` for the old path and `A` for the new one, because the faster status reader does not detect renames. The response also carries `head_commit`, `remote_url` and `differs_from_base`.
+A staged file's `status` is the git index code: `A` (added), `M` (modified), `D` (deleted), `R` (renamed, listed under the new path), `C` (copied) or `T` (type changed, for example a file replaced by a symlink). `untracked` lists a directory that holds only new files once, as `dir/`; `/git/changed-files` lists each file in it. The response also carries `head_commit`, `remote_url` and `differs_from_base`. If git does not answer in time, the last status read in the previous five minutes is returned; with none, the request fails with `503`.
 
 ### POST /api/v1/projects/{project_id}/git/commit
 
@@ -425,7 +425,7 @@ uncommitted work.
 
 | Method | Path | Query | Notes |
 |--------|------|-------|-------|
-| `GET` | `/git/worktrees` | `include_status` (default `true`), `focus_worktree_id` | Returns `worktrees` and `total`. With `include_status`, each existing worktree has `git_status` (`is_clean`, `current_branch`, `modified_count`, `staged_count`, `untracked_count`), `status_checked_at` and `status_error`. Statuses come from a server-side cache: only worktrees with recent session activity, or the one named in `focus_worktree_id`, are re-read, so an idle worktree's status can be older than the response. `status_error` is set when the last read failed; that worktree is retried on a back-off of up to 30 minutes |
+| `GET` | `/git/worktrees` | `include_status` (default `true`), `focus_worktree_id` | Returns `worktrees` and `total`. With `include_status`, each existing worktree has `git_status` (`is_clean`, `current_branch`, `modified_count`, `staged_count`, `untracked_count`), `status_checked_at` and `status_error`. Statuses come from a server-side cache: only worktrees with recent session activity, the one named in `focus_worktree_id`, and any whose checkout changed (an agent turn ended in it or a Git action ran there) are re-read, so an idle worktree's status can be older than the response. Rows with status `completed`, `archived` or `deleted` are never read. `status_error` is set when the last read failed; that worktree is retried on a back-off of up to 30 minutes |
 | `GET` | `/git/worktrees/{worktree_id}` | | One worktree |
 | `DELETE` | `/git/worktrees/{worktree_id}` | `keep_branch` (default `true`) | Remove the worktree folder; `keep_branch=false` also deletes its branch. Returns `success` and `message` |
 | `POST` | `/git/worktrees/{worktree_id}/reopen` | | Recreate a removed worktree on the same branch (a new branch from the default branch if it was deleted) so its sessions can continue. `400` if it cannot be recreated |
@@ -1432,6 +1432,14 @@ Create a prompt template.
 ### GET /health
 
 Health check (no auth).
+
+### GET /health/live
+
+Liveness probe (no auth). Returns `{"status": "alive"}` straight from the server's event loop, without touching the database. It fails only when the server process has stopped responding. The Docker container restarts AI Shuffle when this probe fails for about 5 minutes in a row. `/api/v1/health/live` is the same probe.
+
+### GET /health/ready
+
+Readiness probe (no auth). Returns 200 with `status: "ready"` when the database answers, and 503 with `status: "not_ready"` and a `reasons` list when it does not. The database check uses its own connection, so it does not wait behind other work. A server that is busy with many agents can briefly fail this probe. Docker may then show the container as unhealthy, but AI Shuffle is not restarted for it. `/api/v1/health/ready` is the same probe.
 
 ### GET /api/v1/version
 

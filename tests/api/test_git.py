@@ -64,6 +64,9 @@ def mock_git_service():
         "staged": [],
         "untracked": []
     }
+    # get_status never raises; these say the read succeeded and nothing changed.
+    mock.get_status_error.return_value = None
+    mock.status_generation.return_value = 0
     return mock
 
 

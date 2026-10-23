@@ -9,12 +9,12 @@ def test_second_large_repo_status_read_hits_cache(monkeypatch, tmp_path):
     import app.core.git_service as module
     cache = _GitResultCache()
     calls = []
-    result = {"is_clean": False, "untracked": ["x" * (3 * 1024 * 1024)]}
+    result = {"is_git_repo": True, "is_clean": False, "untracked": ["x" * (3 * 1024 * 1024)]}
     def status(path):
         calls.append(path)
         return result
     monkeypatch.setattr(module, "_git_cache", cache)
-    monkeypatch.setattr(module, "_native_reader", SimpleNamespace(get_status=status))
+    monkeypatch.setattr(module.git_service, "_get_status_cli", status)
     assert module.git_service.get_status(str(tmp_path)) is result
     assert module.git_service.get_status(str(tmp_path)) is result
     assert len(calls) == 1

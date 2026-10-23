@@ -38,6 +38,9 @@ def test_required_probe_prepares_the_bypassed_entrypoint_account(tmp_path, monke
     import pytest
     from scripts.ci.verify_agent_isolation import IsolationCheck
 
+    # docker/agent_isolation.py runs as root inside the Linux container.
+    pytest.importorskip("grp", reason="the container account setup needs POSIX pwd/grp")
+
     source = Path(__file__).resolve().parents[1] / "docker/agent_isolation.py"
     spec = importlib.util.spec_from_file_location("agent_isolation", source)
     iso = importlib.util.module_from_spec(spec)

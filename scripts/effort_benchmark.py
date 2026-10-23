@@ -3,6 +3,8 @@
 Run on the worker itself, under Monitor. Never reads or refreshes credentials.
 Example: python -m scripts.effort_benchmark --output /tmp/effort-results.json
 Use --task ID --repetitions 1 --configs default for an inexpensive preflight.
+--model / --provider pick what to measure (default: GPT-6.1 Sol on a ChatGPT
+subscription); judge the result with scripts/tuning_gate.py before shipping.
 Only synthetic tasks/metrics go in results; transcripts stay in the app.
 """
 from __future__ import annotations
@@ -143,6 +145,9 @@ class Benchmark:
         self.revision = None
         self.capability = None
         self.task_hash = hashlib.sha256(TASK_FILE.read_bytes()).hexdigest()
+        # SimpleNamespace args in older callers/tests carry neither field.
+        self.model_id = getattr(args, "model", None) or MODEL
+        self.provider = getattr(args, "provider", None) or "chatgpt"
         # Recovery journal is private local evidence, never part of public results.
         self.journal = Path(args.output).with_suffix(".sessions.json")
 
@@ -159,14 +164,20 @@ class Benchmark:
             workers = c.deploy_status().get("workers") or []
             self.revision = next(w["revision"] for w in workers if w.get("is_self"))
             for p in c.models().get("providers", []):
-                if p.get("provider_type") != "chatgpt":
+                # A row id, provider type or sign-in mode; never a name guess.
+                if self.provider not in (p.get("id"), p.get("provider_type"), p.get("auth_mode")):
                     continue
                 for m in p.get("models", []):
-                    if m.get("id") == MODEL:
-                        self.model = f"prov:{p['id']}:{MODEL}"
+                    if m.get("id") == self.model_id and not self.model:
+                        self.model = f"prov:{p['id']}:{self.model_id}"
+                        self.capability = {k: m.get(k) for k in ("effort_levels", "default_effort")}
+            if not self.model and self.provider == "claude":
+                for m in c.models().get("models", []):
+                    if m.get("value") == self.model_id:
+                        self.model = self.model_id
                         self.capability = {k: m.get(k) for k in ("effort_levels", "default_effort")}
             if not self.model:
-                raise ValueError("configured ChatGPT subscription does not advertise " + MODEL)
+                raise ValueError(f"no configured {self.provider} provider advertises {self.model_id}")
             levels = self.capability["effort_levels"] or []
             if any(v != "default" and v not in levels for v in self.args.configs):
                 raise ValueError("requested effort missing from the live model catalog")
@@ -177,7 +188,7 @@ class Benchmark:
 
     def persist(self):
         # No session identifiers, paths, responses or account data in public output.
-        data = {"version": 1, "model": MODEL, "worker_revision": self.revision,
+        data = {"version": 1, "model": self.model_id, "provider": self.provider, "worker_revision": self.revision,
                 "catalog": self.capability, "seed": self.args.seed,
                 "repetitions": self.args.repetitions, "concurrency": self.args.jobs,
                 "task_sha256": self.task_hash,
@@ -303,7 +314,7 @@ class Benchmark:
         if self.args.resume and Path(self.args.output).exists():
             previous = json.loads(Path(self.args.output).read_text())
             if (previous["task_sha256"] != self.task_hash or previous["worker_revision"] != self.revision
-                    or previous["model"] != MODEL or previous["concurrency"] != self.args.jobs):
+                    or previous["model"] != self.model_id or previous["concurrency"] != self.args.jobs):
                 raise ValueError("resume requires identical tasks, worker revision, model and concurrency")
             self.rows = previous["rows"]
         if self.journal.exists():
@@ -345,6 +356,9 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--task", action="append")
     parser.add_argument("--agent", default="coding")
+    parser.add_argument("--model", default=MODEL, help="bare model id, or a Claude alias with --provider claude")
+    parser.add_argument("--provider", default="chatgpt",
+                        help="provider row id, provider_type or auth_mode (e.g. chatgpt, openai, openrouter), or claude")
     args = parser.parse_args()
     if args.repetitions < 1 or not 1 <= args.jobs <= 4:
         parser.error("positive repetitions and 1-4 jobs required")

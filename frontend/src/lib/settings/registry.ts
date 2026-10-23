@@ -9,6 +9,7 @@ import * as general from './entries/general';
 import * as voice from './entries/voice';
 import * as providers from './entries/providers';
 import * as models from './entries/models';
+import * as tuning from './entries/tuning';
 import * as usage from './entries/usage';
 import * as integrations from './entries/integrations';
 import * as plugins from './entries/plugins';
@@ -27,6 +28,7 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	voice,
 	providers,
 	models,
+	tuning,
 	usage,
 	integrations,
 	plugins,

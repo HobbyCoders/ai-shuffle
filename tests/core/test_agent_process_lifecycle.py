@@ -250,17 +250,24 @@ def test_low_host_memory_is_warned_before_the_admission_floor(monkeypatch):
 # ─── No per-worktree daemons: the app never enables core.fsmonitor ──────────
 
 
-def test_opening_a_repository_does_not_enable_fsmonitor(tmp_path):
-    """libgit2 ignores core.fsmonitor, but with it set every git CLI call in
-    every worktree started a detached fsmonitor daemon that never exited
-    (228 of them, about 9 GB, on a Windows host running ten agents)."""
-    pygit2 = pytest.importorskip("pygit2")
-    from app.core import git_native
+def test_app_git_calls_never_enable_or_use_fsmonitor(tmp_path, monkeypatch):
+    """With core.fsmonitor set, every git CLI call in every worktree started a
+    detached fsmonitor daemon that never exited (228 of them, about 9 GB, on a
+    Windows host running ten agents). Reading a checkout must not write the
+    setting, and the app's own git calls run with it off even where an older
+    release left it on."""
+    from app.core.git_service import GitService
+    from tests.git_repo_helpers import git, hermetic_git_env, init_repo
 
-    pygit2.init_repository(str(tmp_path))
+    hermetic_git_env(monkeypatch, tmp_path)
+    repo = init_repo(tmp_path / "repo")
+    service = GitService()
 
-    repo = git_native._get_repo(str(tmp_path))
+    service.invalidate_status_cache(str(repo))
+    assert service.get_status(str(repo))["is_git_repo"] is True
+    assert git(repo, "config", "--get", "core.fsmonitor", check=False) == ""
 
-    assert repo is not None
-    with pytest.raises(KeyError):
-        pygit2.Repository(str(tmp_path)).config["core.fsmonitor"]
+    git(repo, "config", "core.fsmonitor", "true")
+    seen = service._run_git(str(repo), ["config", "--get", "core.fsmonitor"])
+    assert seen.stdout.strip() == "false"
+    assert git(repo, "config", "--get", "core.fsmonitor") == "true"  # left alone

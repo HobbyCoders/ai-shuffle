@@ -73,6 +73,7 @@ describe('SettingsShell index', () => {
 			'Voice',
 			'Providers',
 			'Default models',
+			'Model tuning',
 			'Usage',
 			'Integrations',
 			'Plugins',

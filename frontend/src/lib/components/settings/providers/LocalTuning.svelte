@@ -50,9 +50,16 @@
 		row: ModelProvider;
 		/** Opens the Models tab (no models saved yet). */
 		onOpenModels?: () => void;
+		/**
+		 * Tune only this model and leave out the model picker (Settings > Model
+		 * tuning shows one model at a time).
+		 */
+		pinned?: string;
+		/** First group's title; defaults to "Local tuning". */
+		title?: string;
 	}
 
-	let { row, onOpenModels }: Props = $props();
+	let { row, onOpenModels, pinned, title = 'Local tuning' }: Props = $props();
 
 	type ServerChoice = LocalServer | 'none';
 	type ReasoningChoice = 'default' | 'on' | 'off';
@@ -78,7 +85,11 @@
 
 	const models = $derived(row.models ?? []);
 	const tunedCount = $derived(models.filter((m) => !!m.local_settings).length);
-	const model = $derived(models.find((m) => m.id === picked) ?? models.find((m) => m.local_settings) ?? models[0]);
+	const model = $derived(
+		pinned !== undefined
+			? models.find((m) => m.id === pinned)
+			: (models.find((m) => m.id === picked) ?? models.find((m) => m.local_settings) ?? models[0])
+	);
 	const settings = $derived<LocalModelSettings | null>(model?.local_settings ?? null);
 	const preset = $derived(presetOf(settings?.preset));
 	const modelOptions = $derived(
@@ -173,7 +184,7 @@
 </script>
 
 {#if models.length === 0}
-	<RowGroup title="Local tuning" bare>
+	<RowGroup {title} bare>
 		<div class="st-card pv-card">
 			<p class="pv-empty">
 				No models saved yet. Add the model this endpoint serves, then tune it here.
@@ -186,17 +197,22 @@
 		{/if}
 	</RowGroup>
 {:else if model}
-	<RowGroup title="Local tuning" count={tunedCount ? `${tunedCount} of ${models.length} tuned` : undefined}>
-		<SettingRow label="Model" hint={models.length > 1 ? 'Tuning is per model' : undefined}>
-			<SelectField
-				value={model.id}
-				options={modelOptions}
-				mono
-				width={240}
-				disabled={saving}
-				onchange={pickModel}
-			/>
-		</SettingRow>
+	<RowGroup
+		{title}
+		count={pinned === undefined && tunedCount ? `${tunedCount} of ${models.length} tuned` : undefined}
+	>
+		{#if pinned === undefined}
+			<SettingRow label="Model" hint={models.length > 1 ? 'Tuning is per model' : undefined}>
+				<SelectField
+					value={model.id}
+					options={modelOptions}
+					mono
+					width={240}
+					disabled={saving}
+					onchange={pickModel}
+				/>
+			</SettingRow>
+		{/if}
 		<SettingRow
 			label="Server"
 			hint={settings ? 'Declared, not detected' : 'Not set: server defaults'}

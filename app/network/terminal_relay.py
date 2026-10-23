@@ -111,12 +111,19 @@ async def handle_owner(body, from_device):
     return {"authorized": allowed}
 
 
+def _whole_seconds(seconds):
+    """Whole seconds, after dropping float noise: ``(t + 120) - t`` is
+    119.99999999999997 for some monotonic ``t`` (199.476812733 on a fresh CI
+    runner), and a bare ``int`` read that as 119."""
+    return max(0, int(round(seconds, 6)))
+
+
 def _public_approval(key, approval):
     return {"request_id": approval["id"], "worker_id": key[0],
             "confirmation_code": approval["confirmation_code"], "source_name": approval["source_name"],
-            "age_seconds": max(0, int(time.monotonic() - approval["created"])),
+            "age_seconds": _whole_seconds(time.monotonic() - approval["created"]),
             "status": "approved" if approval["request"] is not None else "pending", "used": approval["used"],
-            "expires_in": max(0, int(approval["expires"] - time.monotonic()))}
+            "expires_in": _whole_seconds(approval["expires"] - time.monotonic())}
 
 
 def recipient_requests():

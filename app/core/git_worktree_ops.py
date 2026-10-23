@@ -9,8 +9,6 @@ import os
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.core.git_cache import _native_reader
-
 logger = logging.getLogger(__name__)
 
 # git serialises index and ref updates, but not worktree creation: two
@@ -338,8 +336,6 @@ class GitWorktreeMixin:
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
                 logger.debug(f"Added worktree at {path} for branch {branch}")
-                if _native_reader is not None:
-                    _native_reader.invalidate_repo(main_dir)
                 return True, None
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown git error"
@@ -410,8 +406,6 @@ class GitWorktreeMixin:
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
                 logger.debug(f"Removed worktree at {registered}")
-                if _native_reader is not None:
-                    _native_reader.invalidate_repo(main_dir)
                 return True
 
             logger.warning(f"Failed to remove worktree: {result.stderr}")

@@ -42,8 +42,11 @@ NOT_CHECKED = "Not checked yet; will check and download"
 _deferred = None
 DEFER_SECONDS = 12 * 60 * 60
 DEFER_POLL_SECONDS = 5
-# "Stop them and restart": how long stopped sessions get to wind down.
+# "Stop them and restart": how long stopped sessions get to wind down, and
+# then how long forcing what is left may take per step before the install
+# goes ahead without it.
 STOP_WAIT_SECONDS = 60
+FORCE_STOP_GRACE_SECONDS = 10
 _stop_tasks = set()
 _stop_result = None
 logger = logging.getLogger(__name__)
@@ -184,8 +187,9 @@ def _fresh_busy_rows(rows, active):
 
 
 async def _async_waiting_status(state):
-    from app.core.desktop_lifecycle import busy_work
+    from app.core.desktop_lifecycle import busy_work, reconciled_active_session_ids
     try:
+        await reconciled_active_session_ids()
         rows = await run_sync(busy_work)
     except Exception as exc:
         logger.warning("Application update: waiting state unavailable (%s)", type(exc).__name__)
@@ -196,10 +200,13 @@ async def _async_waiting_status(state):
 async def _local_action(action, request_id, mode=None):
     # Keep registry/engine decisions and atomic enqueue on the loop; only the
     # optional owner-display DB reads run in a thread. Recheck busy after await.
-    from app.core.desktop_lifecycle import busy_work
+    from app.core.desktop_lifecycle import busy_work, reconciled_active_session_ids
     rows, unavailable = [], False
     if action == "install":
         try:
+            # A turn that already ended is not running work, even when its
+            # execution never unwound: never refuse a restart over one.
+            await reconciled_active_session_ids()
             rows = await run_sync(busy_work)
         except Exception as exc:
             logger.warning("Application update: waiting state unavailable (%s)", type(exc).__name__)
@@ -242,8 +249,8 @@ async def _restart_when_idle(request_id):
     try:
         while _deferred and _deferred["id"] == request_id and time.time() < _deferred["expires_at"]:
             await asyncio.sleep(DEFER_POLL_SECONDS)
-            from app.core.desktop_lifecycle import active_session_ids
-            if active_session_ids():
+            from app.core.desktop_lifecycle import reconciled_active_session_ids
+            if await reconciled_active_session_ids():
                 continue
             result = await _local_action("install", f"{request_id[:64]}:idle:{uuid.uuid4().hex[:8]}")
             if result.get("busy"):
@@ -255,25 +262,80 @@ async def _restart_when_idle(request_id):
             _deferred = None
 
 
-async def _stop_then_restart(request_id):
-    """Stop this worker's running work as its Stop buttons do, then install."""
-    from app.core.desktop_lifecycle import active_session_ids, stop_session_work
-    sessions = active_session_ids()
-    results = await asyncio.gather(*(stop_session_work(sid, source="worker_update") for sid in sessions), return_exceptions=True)
-    for sid, result in zip(sessions, results):
-        if isinstance(result, BaseException):
-            logger.warning("Application update: could not stop %s before restarting", sid, exc_info=result)
+async def _busy_rows_or_empty():
+    from app.core.desktop_lifecycle import busy_work
+    try:
+        return await run_sync(busy_work)
+    except Exception:  # noqa: BLE001 — names only; the session id stands in.
+        return []
+
+
+async def _stop_work_in_time(sessions):
+    """Stop ``sessions`` as their Stop buttons do; wait at most STOP_WAIT_SECONDS.
+
+    Returns the sessions still running work afterwards. A stop call that has
+    not returned by then keeps running in the background (cancelling a stop
+    halfway helps nothing); what it was stopping is forced next.
+    """
+    from app.core import desktop_lifecycle
     deadline = time.monotonic() + STOP_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        if not active_session_ids():
-            break
-        await asyncio.sleep(1)
-    # Do not bypass the normal guard: both runtimes check again before exit.
-    # A failed stop must remain a named refusal, never a misleading queue ack.
-    result = await _local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
+
+    def logged(sid):
+        def done(task):
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning("Application update: could not stop %s before restarting", sid,
+                               exc_info=task.exception())
+        return done
+
+    stops = {}
+    for sid in sessions:
+        stop = asyncio.ensure_future(desktop_lifecycle.stop_session_work(sid, source="worker_update"))
+        stop.add_done_callback(logged(sid))
+        stops[stop] = sid
+    if stops:
+        _, pending = await asyncio.wait(set(stops), timeout=STOP_WAIT_SECONDS)
+        for stop in pending:
+            logger.warning("Application update: stopping %s did not finish within %ss", stops[stop],
+                           STOP_WAIT_SECONDS)
+    while True:
+        remaining = await desktop_lifecycle.reconciled_active_session_ids()
+        if not remaining or time.monotonic() >= deadline:
+            return remaining
+        await asyncio.sleep(min(1, max(0, deadline - time.monotonic())))
+
+
+async def _stop_then_restart(request_id):
+    """Stop this worker's running work as its Stop buttons do, then install.
+
+    Bounded: work that has not stopped after STOP_WAIT_SECONDS is force-stopped
+    (the restart would end it anyway) and the install goes ahead with a note
+    naming it. Whatever happens, the outcome is recorded and this task ends,
+    so a failed attempt never leaves the worker "stopping" for good.
+    """
+    from app.core import desktop_lifecycle
     global _stop_result
+    sessions = sorted(desktop_lifecycle.active_session_ids())
+    forced = []
+    try:
+        remaining = await _stop_work_in_time(sessions)
+        if remaining:
+            titles = {row["session_id"]: row["title"] for row in await _busy_rows_or_empty()}
+            forced = [titles.get(sid) or sid for sid in await desktop_lifecycle.force_stop_sessions(
+                set(remaining), source="worker_update", grace=FORCE_STOP_GRACE_SECONDS)]
+            if forced:
+                logger.warning("Application update: force-stopped work that did not stop within %ss: %s",
+                               STOP_WAIT_SECONDS, ", ".join(forced))
+        # Do not bypass the normal guard: both runtimes check again before exit.
+        # Work that could not be ended stays a named refusal, never a misleading queue ack.
+        result = await _local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
+    except Exception:  # noqa: BLE001 — a refusal must be recorded, never a stuck "stopping".
+        logger.warning("Application update: stop then restart failed for %s", request_id, exc_info=True)
+        result = {"accepted": False, "reason": "Could not stop running work before restarting; nothing was installed"}
+    if forced and result.get("accepted"):
+        result = {**result, "reason": f"{result['reason']}; force-stopped work that did not stop within "
+                                      f"{STOP_WAIT_SECONDS}s: {', '.join(forced)}"}
     _stop_result = {"request_id": request_id, "accepted": result.get("accepted", False), "reason": result["reason"],
-                    "completed_at": time.time(), "busy": result.get("busy", [])}
+                    "completed_at": time.time(), "busy": result.get("busy", []), "forced": forced}
     logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
     if not result.get("accepted"):
         # Publish after dispatch releases its lock, and only to the same install

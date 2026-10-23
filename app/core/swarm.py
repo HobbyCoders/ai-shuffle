@@ -124,6 +124,17 @@ async def cancel_worker(task_id):
     if launch:
         launch.finish("cancelled", "Session closed" if reason == "session_closed" else "Swarm cancelled")
 
+def latch_all(session_id):
+    """Let no running workflow of ``session_id`` dispatch another worker.
+
+    Stop latches first and then stops each running worker as a task of its
+    own; a workflow left unlatched would replace them as they die.
+    """
+    coordinator = coordinators.get(session_id)
+    if coordinator:
+        coordinator.cancelled.update(key for key, job in coordinator.jobs.items() if not job.done())
+
+
 async def cancel_all(session_id):
     coordinator = coordinators.get(session_id)
     if coordinator:

@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 
 from app.core import config
 from app.core.environment import ProviderConfigError
-from app.core.git_native import HAS_PYGIT2
 from app.db import database
 from tests.git_flow_helpers import (
     FakeModel,
@@ -27,17 +26,10 @@ from tests.git_repo_helpers import (
     commit_file,
     git,
     hermetic_git_env,
-    use_backend,
     write,
 )
 
 BASE = "/api/v1/projects/p1/git"
-
-BACKENDS = [
-    pytest.param("native", marks=pytest.mark.skipif(not HAS_PYGIT2, reason="pygit2 unavailable")),
-    "cli",
-]
-
 
 @pytest.fixture
 def env(mock_db, tmp_path, monkeypatch):
@@ -150,9 +142,7 @@ def test_commit_message_failed_turn_is_500_not_an_empty_message(env):
     assert env.model.disconnects == 1
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_commit_message_oversized_diff_is_truncated(env, monkeypatch, backend):
-    use_backend(monkeypatch, backend)
+def test_commit_message_oversized_diff_is_truncated(env, monkeypatch):
     write(env.repo / "big.txt", "".join(f"line {i:06d} of a very large change\n" for i in range(4000)))
     git(env.repo, "add", "big.txt")
 
@@ -213,11 +203,9 @@ def test_pr_description_explicit_base(env):
     assert "feat: add feature file" not in prompt
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pr_description_option_like_base_writes_no_file(env, monkeypatch, backend):
+def test_pr_description_option_like_base_writes_no_file(env, monkeypatch):
     """Regression: with the CLI backend a base of ``--output=<path>`` reached
     ``git log``/``git diff`` as an option and wrote ``<path>..HEAD``."""
-    use_backend(monkeypatch, backend)
     target = env.tmp / "pwned"
 
     response = _pr_description(env, base_branch=f"--output={target}")

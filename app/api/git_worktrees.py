@@ -21,7 +21,6 @@ from typing import Dict, Optional, Tuple, Union
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from app.core import git_native
 from app.core.git_service import git_service
 from app.core.worktree_manager import worktree_manager, WorktreeError
 from app.core.project_utils import get_worktree_working_dir
@@ -183,7 +182,8 @@ def _session_may_be_hot(streaming: set, active_since: float):
 # main pool: a refresh coordinator (_status_refresh_executor) submits the reads
 # here, so the endpoint holds ZERO GitPool jobs across the fan-out. Each
 # worktree is a distinct working directory with its own index.lock, so
-# concurrent reads across worktrees are safe.
+# concurrent reads across worktrees are safe. Each read is a `git status`
+# subprocess these threads only wait on, so a slow disk never holds the GIL.
 # Kept small: a project with hundreds of worktrees saturated the disk with
 # parallel `git status` reads, and every other blocking call slowed with it (#2112).
 _STATUS_FANOUT_MAX_WORKERS = 4
@@ -215,9 +215,14 @@ _WORKTREE_STATUS_FRESH_SECONDS = 5.0
 _WORKTREE_STATUS_COLD_WAIT_SECONDS = 3.0
 # A refresh re-reads only "hot" worktrees: one the client names in
 # ?focus_worktree_id=, one with a streaming session, or one whose sessions saw
-# activity within this window. Idle worktrees keep their last known status; a
-# worktree with no status yet is read once.
+# activity within this window. Idle worktrees keep their last known status
+# until their checkout is invalidated (a turn ended in it, a Git action ran);
+# a worktree with no status yet is read once. So the work per refresh follows
+# the active worktrees, not every worktree on disk (#436).
 _WORKTREE_HOT_ACTIVITY_SECONDS = 3 * 60 * 60
+# Rows past their working life are never read: their checkout is gone or being
+# reclaimed. They keep a status already read, if any.
+_RETIRED_WORKTREE_STATUSES = frozenset({"completed", "deleted", "archived"})
 # Per-worktree failure back-off: after the Nth consecutive failed read the
 # worktree is skipped for min(BASE * 2**(N-1), MAX) seconds. A corrupt worktree
 # (e.g. a zeroed index) otherwise fails the same way on every poll.
@@ -233,6 +238,9 @@ class _WorktreeStatusEntry:
     error: Optional[str] = None
     failures: int = 0
     retry_at: float = 0.0  # monotonic; no reads before this
+    # git_service.status_generation of the checkout when it was read; a later
+    # invalidation makes the worktree due for a re-read even when idle.
+    generation: Optional[int] = None
 
 
 @dataclass
@@ -252,17 +260,20 @@ _worktree_status_cache: Dict[str, _ProjectStatusState] = {}
 _status_lock = threading.Lock()
 
 
-def _worktree_status_one(wt: dict) -> Tuple[Optional[dict], Optional[str]]:
-    """Read one worktree's git status. Never raises: returns (status, error).
+def _worktree_status_one(wt: dict) -> Tuple[Optional[dict], Optional[str], Optional[int]]:
+    """Read one worktree's git status. Never raises.
 
-    Exactly one of the two is set. Isolating each worktree's failure here keeps
-    one bad worktree (invalid path, deleted on disk, corrupt repo) from
-    poisoning the batch; the caller logs it and backs off.
+    Returns ``(status, error, generation)``: exactly one of the first two is
+    set, and *generation* is the checkout's status generation before the read.
+    Isolating each worktree's failure here keeps one bad worktree (invalid
+    path, deleted on disk, corrupt repo) from poisoning the batch; the caller
+    logs it and backs off.
     """
     try:
         worktree_full_path = get_worktree_working_dir(wt)
     except (ValueError, TypeError) as e:
-        return None, f"invalid worktree path: {e}"
+        return None, f"invalid worktree path: {e}", None
+    generation = git_service.status_generation(worktree_full_path)
     try:
         from app.core.checkout_manager import _require_checkout_root
 
@@ -276,13 +287,13 @@ def _worktree_status_one(wt: dict) -> Tuple[Optional[dict], Optional[str]]:
                 "counts describe the actual checkout. Session use and cleanup remain blocked."
             )
     except Exception as e:  # noqa: BLE001 — one worktree must not fail the batch
-        return None, str(e) or type(e).__name__
-    # The pygit2 reader swallows a failed read and returns a partial "clean"
-    # dict; it records the error on the side so we don't show that as real.
-    native_error = git_native.get_status_error(worktree_full_path)
-    if native_error:
-        return None, native_error
-    return status_data, None
+        return None, str(e) or type(e).__name__, generation
+    # get_status never raises: a failed read returns the empty dict and records
+    # why on the side, so that fallback is not shown as a clean worktree.
+    read_error = git_service.get_status_error(worktree_full_path)
+    if read_error:
+        return None, read_error, generation
+    return status_data, None, generation
 
 
 def _record_status(
@@ -330,12 +341,13 @@ def _refresh_project_statuses(state: _ProjectStatusState, jobs: list, start_gen:
         for fut in concurrent.futures.as_completed(futures):
             wt_id = futures[fut]
             # _worktree_status_one never raises, so fut.result() is safe.
-            status_data, error = fut.result()
+            status_data, error, generation = fut.result()
             with _status_lock:
                 if state.invalidated_gen.get(wt_id, -1) > start_gen:
                     continue  # invalidated mid-read; the next refresh re-reads it
                 entry = state.entries.setdefault(wt_id, _WorktreeStatusEntry())
                 _record_status(entry, wt_id, status_data, error)
+                entry.generation = generation
     except Exception:  # noqa: BLE001 — a failed refresh must still release inflight
         logger.exception("Worktree status refresh failed")
     finally:
@@ -383,25 +395,44 @@ def _is_hot(wt: dict, streaming: set, active_since: float) -> bool:
     return False
 
 
+def _checkout_changed(wt: dict, entry: _WorktreeStatusEntry) -> bool:
+    """Whether the worktree's checkout was invalidated since *entry* was read."""
+    if entry.generation is None:
+        return False
+    try:
+        path = get_worktree_working_dir(wt)
+    except (ValueError, TypeError):
+        return False
+    return git_service.status_generation(path) != entry.generation
+
+
 def _plan_refresh(
     state: _ProjectStatusState, existing: list, focus_worktree_id: Optional[str], now: float
 ) -> list:
     """Pick the worktrees the next refresh reads, focused/hot first (lock held).
 
-    A worktree never read yet is always picked. Once the data is stale, so are
+    A worktree never read yet is always picked, and so is one whose checkout
+    was invalidated since its last read. Once the data is stale, so are
     focused and hot worktrees, and broken ones whose back-off has run out.
-    Anything still backing off is skipped, even when hot.
+    Anything still backing off is skipped, even when hot, and retired rows
+    (_RETIRED_WORKTREE_STATUSES) are never read.
     """
     stale = state.refreshed_at is None or now - state.refreshed_at >= _WORKTREE_STATUS_FRESH_SECONDS
     streaming = _streaming_session_ids() if stale else set()
     active_since = time.time() - _WORKTREE_HOT_ACTIVITY_SECONDS
     focused, hot, other = [], [], []
     for wt in existing:
+        if wt.get("status") in _RETIRED_WORKTREE_STATUSES:
+            continue
         entry = state.entries.get(wt["id"])
         is_focus = wt["id"] == focus_worktree_id
         if entry is None:
             (focused if is_focus else other).append(wt)
-        elif not stale or entry.retry_at > now:
+        elif entry.retry_at > now:
+            continue
+        elif _checkout_changed(wt, entry):
+            (focused if is_focus else hot).append(wt)
+        elif not stale:
             continue
         elif entry.failures:
             other.append(wt)

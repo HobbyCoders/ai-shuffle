@@ -45,12 +45,12 @@ async def retention(rounds):
     tracemalloc.start()
     initial = tracemalloc.take_snapshot()
     snapshot("warm", initial)
-    class NativeFixture:
+    class StatusFixture:
         result = None
-        def get_status(self, _path):
+        def __call__(self, _path):
             return self.result
-    native = NativeFixture()
-    with patch.object(git_module, "_native_reader", native):
+    native = StatusFixture()
+    with patch.object(git_module.git_service, "_get_status_cli", native):
         for turn in range(rounds):
             queue = gateway.subscribe("slow-reader")
             start = time.perf_counter()
@@ -64,10 +64,11 @@ async def retention(rounds):
             del queue
             for i in range(1000):
                 get_reader_lock(f"session-{turn}-{i}")
-            # Real status -> native boundary -> cache path; synthetic git output.
+            # Real status -> read boundary -> cache path; synthetic git output.
             for i in range(100):
                 native.result = {"untracked": [
-                    f"{turn}-{i}-{j}-" + "x" * 500 for j in range(100)], "is_clean": False}
+                    f"{turn}-{i}-{j}-" + "x" * 500 for j in range(100)], "is_clean": False,
+                    "is_git_repo": True}
                 git_service.get_status(f"/synthetic/worktree-{turn}-{i}")
             print(json.dumps({"round": turn, "scheduled_callbacks": scheduled,
                 "subscriber_depth": depth, "reader_locks": len(_reader_locks),

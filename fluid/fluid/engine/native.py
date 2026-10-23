@@ -100,6 +100,7 @@ from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
 from fluid.context.trim import (
     TrimConfig,
+    block_chars,
     estimate_tokens_of_messages,
     estimate_tokens_of_text,
 )
@@ -966,6 +967,17 @@ def _held_peer_id(seq: int) -> str:
     """The id of a peer message held while parked: its progress event's seq."""
     return f"held-peer:{seq}"
 
+
+def _covers(
+    nodes: list[SessionNode], frozen: tuple[str, frozenset[str]] | None, end: str | None,
+) -> bool:
+    """True when ``frozen`` (a checkpoint end) is at or after ``end`` on ``nodes``."""
+    if frozen is None or end is None:
+        return False
+    ids = [node.node_id for node in nodes]
+    return end in ids and frozen[0] in ids and ids.index(frozen[0]) >= ids.index(end)
+
+
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         code_mode=True, inproc_tools=True, subagents=True,
@@ -1281,6 +1293,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Sessions whose ``_last_call_usage`` entry was already looked for in
         # the persisted Usage events (a resume recovers it from there once).
         self._usage_rehydrated: set[str] = set()
+        # Frozen-prefix windows this engine produced, per session:
+        # ``session_id -> (checkpoint end node id, raw chars left out)``. A
+        # store window is trusted only when it matches one of these.
+        self._elided: dict[str, tuple[str, int]] = {}
         # Prompt-cache instrumentation (context/cache_probe.py). Every request
         # gets a short prefix fingerprint; when a call bills a big fresh prompt
         # with ~no cache read, the two fingerprints are bisected to name the
@@ -1948,7 +1964,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         if sid is None and self._session_id is not None:
             sid = self._session_id if await self.store.get_session(self._session_id) else None
         if sid is not None:
-            nodes = await self.store.load_path(sid)
+            nodes = await self._context_path(sid)
             history = repair_dangling_tool_calls(self._compactor.view(nodes))
             # ``stats`` prices the compacted render unconditionally (the intake
             # stub is a stateless view policy inside ``Compactor._render``), so
@@ -1956,7 +1972,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # the request never actually saves. Report nothing instead.
             measured = await self._measured_next_prompt(sid, nodes)
             if self._compactor.active:
-                compaction_stats = self._compaction_stats(nodes, measured)
+                compaction_stats = self._compaction_stats(nodes, measured, sid=sid)
         # The deferred-tool catalog the NEXT user turn will carry (tools not
         # yet announced — every deferred tool before the first turn) is real
         # prompt text that request sends; on the JSON-tool path it is ~1.7k
@@ -1982,6 +1998,59 @@ class NativeLoop(BackgroundLifecycleMixin):
             compaction=compaction_stats,
             measured_prompt_tokens=measured,
         )
+
+    async def _context_path(
+        self, sid: str, leaf_node_id: str | None = None
+    ) -> list[SessionNode]:
+        """The path the compactor reads: root→leaf, frozen prefix windowed.
+
+        The newest checkpoint renders in place of its whole prefix, so
+        ``Compactor.window`` drops that prefix's interior and keeps the view
+        byte-identical. A store with ``load_window``/``evict_prefix`` then
+        stops holding the interior in memory (it stays durable, and
+        ``load_path``/``get_node`` still return it), which keeps a long live
+        session's retained nodes bounded by its uncheckpointed tail.
+
+        A store window is used only when it is the one this engine produced
+        (same checkpoint end); anything else reads the whole path and windows
+        it here, so every compactor input is the same list either way.
+        """
+        nodes: list[SessionNode] | None = None
+        elided = 0
+        from_window = False
+        record = self._elided.get(sid)
+        stored_end: str | None = None
+        load_window = getattr(self.store, "load_window", None)
+        if callable(load_window):
+            window, stored_end = await load_window(sid, leaf_node_id)
+            if stored_end is None:
+                nodes = window
+            elif record is not None and record[0] == stored_end:
+                nodes, elided, from_window = window, record[1], True
+        if nodes is None:
+            nodes = await self.store.load_path(sid, leaf_node_id)
+        frozen = self._compactor.frozen_prefix(nodes)
+        if from_window and not _covers(nodes, frozen, stored_end):
+            # The store window no longer matches a checkpoint this compactor
+            # renders: never hand the compactor a path with a hole in it.
+            nodes, elided = await self.store.load_path(sid, leaf_node_id), 0
+            frozen = self._compactor.frozen_prefix(nodes)
+            stored_end = None  # re-evict at whatever the compactor renders now
+        if frozen is None:
+            self._elided.pop(sid, None)
+            return nodes
+        end, keep = frozen
+        windowed = self._compactor.window(nodes)
+        kept = {node.node_id for node in windowed}
+        elided += sum(
+            block_chars(block) for node in nodes if node.node_id not in kept
+            for block in node.message.content
+        )
+        self._elided[sid] = (end, elided)
+        evict = getattr(self.store, "evict_prefix", None)
+        if callable(evict) and stored_end != end:
+            await evict(sid, end, keep)
+        return windowed
 
     async def _measured_next_prompt(
         self, sid: str, nodes: list[SessionNode]
@@ -2682,7 +2751,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         async def build() -> None:
             try:
-                nodes = await self.store.load_path(sid)
+                nodes = await self._context_path(sid)
                 measured = await self._measured_next_prompt(sid, nodes)
                 region = self._compactor.summary_region(
                     nodes, context_window=self.context_window,
@@ -2774,8 +2843,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                     session_id=sid, turn_id=turn_id, active=False, trigger="auto",
                 ))
 
-    def _compaction_stats(self, nodes: list[SessionNode], measured: int | None) -> dict[str, int]:
-        stats = self._compactor.stats(nodes)
+    def _compaction_stats(
+        self, nodes: list[SessionNode], measured: int | None, *, sid: str | None = None,
+    ) -> dict[str, int]:
+        # ``nodes`` came from _context_path: count the interior it windowed
+        # out, so reclaimed tokens still describe the whole path.
+        record = self._elided.get(sid) if sid is not None else None
+        frozen = self._compactor.frozen_prefix(nodes) if record is not None else None
+        elided = record[1] if frozen is not None and frozen[0] == record[0] else 0
+        stats = self._compactor.stats(nodes, elided_chars=elided)
         stats["projectedAfterCompactTokens"] = self._compactor.projected_after_compact(
             nodes, overhead_tokens=self._context_overhead_tokens(),
             context_window=self.context_window,
@@ -2807,7 +2883,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._emit(ContextCompacting(
             session_id=sid, turn_id=turn_id, active=True, trigger="manual",
         ))
-        nodes = await self.store.load_path(sid)
+        nodes = await self._context_path(sid)
         promotions: list[Promotion] = []
         failure: str | None = None
         scale = 1.0
@@ -3602,7 +3678,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         drop_retry_effort: str | None = None  # lowered effort for the next call only
 
         while True:
-            nodes = await self.store.load_path(sid, parent.node_id)
+            nodes = await self._context_path(sid, parent.node_id)
             if num_calls == 0:
                 await self._note_wake_turn_starts(sid)
             overhead_tokens = self._context_overhead_tokens()
@@ -4182,7 +4258,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # rewriting disabled, ``stats`` would price reclaimed tokens
                     # the request never actually saved.
                     compaction=(
-                        self._compaction_stats(nodes, prompt_tokens)
+                        self._compaction_stats(nodes, prompt_tokens, sid=sid)
                         if self._compactor.active
                         else None
                     ),

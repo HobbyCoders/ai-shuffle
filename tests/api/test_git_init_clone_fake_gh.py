@@ -764,16 +764,9 @@ def test_clone_stores_remote_without_url_credentials(env, monkeypatch, pid, url)
 # =============================================================================
 
 
-@pytest.mark.parametrize("backend", ["native", "cli"])
-def test_status_reports_the_remote_without_url_credentials(env, monkeypatch, backend):
-    from app.core.git_native import HAS_PYGIT2
-    from tests.git_repo_helpers import use_backend
-
-    if backend == "native" and not HAS_PYGIT2:
-        pytest.skip("pygit2 unavailable")
-    use_backend(monkeypatch, backend)
-    pid = f"p-status-creds-{backend}"
-    target = _project(env, pid, f"status-creds-{backend}")
+def test_status_reports_the_remote_without_url_credentials(env):
+    pid = "p-status-creds"
+    target = _project(env, pid, "status-creds")
     init_repo(target)
     url = "https://ghp_s3cr3t@github.com/o/r.git"
     git(target, "remote", "add", "origin", url)

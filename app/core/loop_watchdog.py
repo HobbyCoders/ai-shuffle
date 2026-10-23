@@ -7,7 +7,7 @@ more dump at 45 s; recovery is logged with the stall duration.
 
 Unlike resource_monitor's coroutine-based lag metric, this captures the
 blocking frame while the loop is stuck. The raw dump goes to file_logging's
-durable fatal.log before the ERROR record goes through normal app logging,
+durable freeze.log before the ERROR record goes through normal app logging,
 so a loop holding a logging handler lock cannot prevent the durable dump.
 """
 
@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_THRESHOLD_S = 10.0
 DEFAULT_PING_INTERVAL_S = 1.0
 DEFAULT_SECOND_THRESHOLD_S = 45.0
+# GIL-independent freeze dump (#436): re-armed from the loop every
+# FREEZE_DUMP_REARM_S, fires after FREEZE_DUMP_TIMEOUT_S without a re-arm.
+FREEZE_DUMP_TIMEOUT_S = 30.0
+FREEZE_DUMP_REARM_S = 5.0
 
 
 def _threshold_from_env() -> float:
@@ -203,28 +207,85 @@ class LoopStallWatchdog:
         )
 
 
+class FreezeDumpTimer:
+    """Keep faulthandler's GIL-free C watchdog armed from the event loop.
+
+    The stall watchdog above is a Python thread, so it cannot run while
+    another thread holds the GIL in native code; in #436 the interpreter froze
+    for two minutes and nothing was dumped. Every ``rearm_s`` the loop re-arms
+    ``faulthandler.dump_traceback_later(timeout_s, repeat=True)``. When the
+    loop or the whole interpreter stops for ``timeout_s``, faulthandler's own
+    C thread writes every Python stack to freeze.log, then again every
+    ``timeout_s`` until the loop re-arms it.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        timeout_s: float = FREEZE_DUMP_TIMEOUT_S,
+        rearm_s: float = FREEZE_DUMP_REARM_S,
+    ) -> None:
+        self._loop = loop
+        self.timeout_s = timeout_s
+        self.rearm_s = rearm_s
+        self._handle: Optional[asyncio.TimerHandle] = None
+        self.armed = False
+
+    def start(self) -> None:
+        if self._handle is None:
+            self._tick()
+
+    def _tick(self) -> None:
+        from app.core.file_logging import arm_freeze_dump
+
+        self.armed = arm_freeze_dump(self.timeout_s)
+        if not self.armed:
+            self._handle = None
+            return  # file logging is off or freeze.log is full
+        self._handle = self._loop.call_later(self.rearm_s, self._tick)
+
+    def stop(self) -> None:
+        from app.core.file_logging import cancel_freeze_dump
+
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            handle.cancel()
+        if self.armed:
+            cancel_freeze_dump()
+        self.armed = False
+
+
 # ----------------------------------------------------------------------
 # process-wide singleton (started from app.main's lifespan)
 # ----------------------------------------------------------------------
 
 _watchdog: Optional[LoopStallWatchdog] = None
+_freeze_timer: Optional[FreezeDumpTimer] = None
 
 
 def start_loop_watchdog(
     loop: Optional[asyncio.AbstractEventLoop] = None, **kwargs: object
 ) -> LoopStallWatchdog:
-    """Start the process-wide watchdog (idempotent). Call from the loop thread."""
-    global _watchdog
+    """Start the process-wide watchdog (idempotent). Call from the loop thread.
+
+    Also arms the GIL-independent freeze dump (``FreezeDumpTimer``)."""
+    global _watchdog, _freeze_timer
     if _watchdog is not None:
         return _watchdog
     target_loop = loop or asyncio.get_running_loop()
     _watchdog = LoopStallWatchdog(target_loop, **kwargs)  # type: ignore[arg-type]
     _watchdog.start()
+    _freeze_timer = FreezeDumpTimer(target_loop)
+    _freeze_timer.start()
     return _watchdog
 
 
 def stop_loop_watchdog() -> None:
-    global _watchdog
+    global _watchdog, _freeze_timer
+    if _freeze_timer is not None:
+        _freeze_timer.stop()
+        _freeze_timer = None
     if _watchdog is None:
         return
     _watchdog.stop()

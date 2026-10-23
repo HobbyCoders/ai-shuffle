@@ -1,5 +1,6 @@
 """Owner coordination from ordinary no-project sessions (issue #371, step 1)."""
 import json
+import os
 from unittest.mock import AsyncMock
 
 import pytest
@@ -93,7 +94,14 @@ async def test_registered_project_reads_through_real_registry(owner, tmp_path, m
     source.write_text("registered marker\n")
     outside = tmp_path / "private.txt"
     outside.write_text("private marker\n")
-    (project_path / "escape.txt").symlink_to(outside)
+    escapes = [outside]
+    try:
+        (project_path / "escape.txt").symlink_to(outside)
+        escapes.append(project_path / "escape.txt")
+    except OSError:
+        # Windows without Developer Mode or admin cannot create file symlinks
+        # (WinError 1314); the direct outside read is still checked.
+        assert os.name == "nt"
     if legacy:
         database.create_project("legacy", "Example", None, str(project_path))
     else:
@@ -116,7 +124,7 @@ async def test_registered_project_reads_through_real_registry(owner, tmp_path, m
         result = await registry.dispatch(name(tool), args, ctx)
         assert not result.is_error, result.text
         assert "example.py" in result.text if tool == "Glob" else "registered marker" in result.text
-    for path in (outside, project_path / "escape.txt"):
+    for path in escapes:
         denied = await registry.dispatch(name("Read"), {"file_path": str(path)}, ctx)
         assert denied.is_error and "private marker" not in denied.text
     for tool in ("Glob", "Grep"):

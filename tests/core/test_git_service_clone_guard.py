@@ -222,18 +222,7 @@ class TestStripUrlUserinfo:
 
 
 class TestStatusRemoteUrl:
-    """get_status never carries a clone token, on either reader."""
-
-    def test_native_status_is_stripped_and_not_mutated(self, git):
-        native = MagicMock()
-        raw = {"is_git_repo": True, "remote_url": "https://ghp_tok@github.com/o/r.git"}
-        native.get_status.return_value = raw
-        with patch("app.core.git_service._native_reader", native), \
-             patch("app.core.git_service._git_cache") as cache:
-            cache.get.return_value = None
-            status = git.get_status("/tmp/work-native")
-        assert status["remote_url"] == "https://github.com/o/r.git"
-        assert raw["remote_url"] == "https://ghp_tok@github.com/o/r.git"
+    """get_status never carries a clone token."""
 
     def test_cli_status_is_stripped(self, git, tmp_path):
         import subprocess
@@ -241,8 +230,7 @@ class TestStatusRemoteUrl:
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
                         "https://alice:s3cr3t@git.example.com/r.git"], check=True)
-        with patch("app.core.git_service._native_reader", None):
-            git.invalidate_status_cache(str(repo))
-            status = git.get_status(str(repo))
+        git.invalidate_status_cache(str(repo))
+        status = git.get_status(str(repo))
         assert status["is_git_repo"] is True
         assert status["remote_url"] == "https://git.example.com/r.git"
