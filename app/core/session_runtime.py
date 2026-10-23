@@ -3002,15 +3002,16 @@ class SessionRuntime:
         synchronously before the first ``await``, so two same-loop callers
         cannot both pass it.
 
-        Once the driven interrupt has returned, a later call is not a no-op
-        when this runtime is still executing: its turn is over, so a pump that
-        never unwound is cancelled. Without that, every later Stop (including
-        the one before an application update) was swallowed here while the
-        execution kept counting as running work until the process restarted.
+        Once the driven interrupt has returned, a later call may cancel an
+        orphaned pump, but only after the durable turn row is terminal. An
+        escalation returns before the pump finishes unwinding and booking
+        usage; repeated observations must not deliver another cancel then.
         """
         if self._interrupt_driving:
             if self._interrupt_finished:
-                await self._end_orphaned_pump("a repeated stop")
+                row = await asyncio.to_thread(turns_db.get_turn, self.turn_id)
+                if row is not None and row["state"] in turns_db.TERMINAL_STATES:
+                    await self._end_orphaned_pump("a repeated stop")
             return "interrupting"
         self._interrupt_driving = True
         # Also tells the heartbeat that any later rejection is expected. This
@@ -3612,9 +3613,10 @@ async def force_end_executions(session_ids: Set[str], *, grace: float) -> List[s
     """End this process's executions for ``session_ids`` that a Stop did not end.
 
     For an application update only: the process is about to restart. Cancels
-    each pump, then the execution itself, waiting up to ``grace`` after each.
-    An execution that survives both is marked ended so it cannot hold the
-    restart; the restart ends it. Returns the session ids that were forced.
+    each pump and waits up to ``grace``. Survivors are durably aborted before
+    cancelling execute() and no longer count as running work. Allow a final
+    ``grace`` for cancellation cleanup; the caller caps the whole force-stop
+    phase, and process exit ends any survivors. Returns the forced session ids.
     """
     tasks = {task: sid for task, sid in active_executions().items() if sid in session_ids}
     if not tasks:
@@ -3624,8 +3626,25 @@ async def force_end_executions(session_ids: Set[str], *, grace: float) -> List[s
         if runtime is not None:
             runtime._cancel_pump()
     _, pending = await asyncio.wait(set(tasks), timeout=grace)
-    for task in pending:
+
+    async def abort_before_cancel(task):
+        runtime = _execution_runtimes.get(task)
+        if runtime is not None:
+            # Cancelling execute() can bypass _finalize entirely. Own the
+            # guarded terminal transition (and its callback) before cancelling;
+            # a later finalize then sees a racer-settled row and cannot fire twice.
+            settled = await asyncio.to_thread(
+                turns_db.settle_turn, runtime.turn_id, "aborted", "worker_update",
+                run_id=runtime._run_id,
+            )
+            # The row is now terminal (or no longer ours). Do not let slow
+            # settlement hooks or cancellation cleanup keep refusing the update.
+            _mark_ended(task, runtime.session_id, "force-stopped for an application update")
+            if settled is not None:
+                await _fire_on_turn_settled(runtime.session_id, runtime.turn_id, "aborted")
         task.cancel()
+
+    await asyncio.gather(*(abort_before_cancel(task) for task in pending))
     if pending:
         _, pending = await asyncio.wait(pending, timeout=grace)
     for task in pending:

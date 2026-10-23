@@ -131,7 +131,8 @@ async def test_an_execution_that_outlives_its_turn_no_longer_counts_as_running(m
     assert session_runtime._execution_runtimes == {}
 
 
-async def test_force_end_cancels_a_stuck_execution_and_stops_counting_it():
+async def test_force_end_cancels_a_stuck_execution_and_stops_counting_it(mock_db):
+    turn = turns_db.enqueue_turn("child", "provider_agent", prompt="score")
     release = asyncio.Event()
     cancelled = []
 
@@ -145,12 +146,86 @@ async def test_force_end_cancels_a_stuck_execution_and_stops_counting_it():
     task = asyncio.create_task(stuck())
     session_runtime._executions[task] = "child"
     session_runtime._execution_runtimes[task] = SimpleNamespace(
-        session_id="child", turn_id="t", _cancel_pump=lambda: cancelled.append("pump"))
+        session_id="child", turn_id=turn["id"], _run_id=None,
+        _cancel_pump=lambda: cancelled.append("pump"))
     try:
         assert await session_runtime.force_end_executions({"child", "other"}, grace=0.05) == ["child"]
         assert cancelled == ["pump", "task"]
+        row = turns_db.get_turn(turn["id"])
+        assert (row["state"], row["stop_reason"]) == ("aborted", "worker_update")
         assert session_runtime.active_executions() == {}
         assert await session_runtime.force_end_executions({"child"}, grace=0.05) == []
     finally:
         release.set()
         await task
+
+
+async def test_repeated_stop_does_not_cancel_usage_booking_after_escalation(mock_db):
+    turn = turns_db.enqueue_turn("unwinding", "user", prompt="work")
+    entered, unwinding, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    booked = []
+
+    async def pump(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            unwinding.set()
+            await release.wait()  # usage booking must survive turn_claim's next tick
+            booked.append("usage")
+        yield {"type": "interrupted"}
+
+    with _runtime_env(pump=pump), _interrupt_env(evict=True):
+        execution = asyncio.create_task(session_runtime.execute(turn))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            runtime = session_runtime.get_live_runtime("unwinding")
+            turns_db.interrupt_turn("unwinding", "stop")
+            await runtime.interrupt("stop", escalation_timeout=0.01)
+            await asyncio.wait_for(unwinding.wait(), 2)
+            assert turns_db.get_turn(turn["id"])["state"] not in turns_db.TERMINAL_STATES
+            await runtime.interrupt("stop")
+            assert runtime._pump_task.cancelling() == 1
+            release.set()
+            await asyncio.wait_for(execution, 2)
+            assert booked == ["usage"]
+        finally:
+            release.set()
+            await asyncio.gather(execution, return_exceptions=True)
+
+
+@pytest.mark.parametrize("already_settled", [False, True])
+async def test_force_cancel_settles_real_turn_before_execute_cancellation(mock_db, already_settled):
+    turn = turns_db.enqueue_turn("forced", "user", prompt="work")
+    entered, unwinding = asyncio.Event(), asyncio.Event()
+    observed = []
+
+    async def pump(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            unwinding.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                row = turns_db.get_turn(turn["id"])
+                observed.append((row["state"], row["stop_reason"]))
+                raise
+        yield {"type": "interrupted"}
+
+    with _runtime_env(pump=pump) as env:
+        execution = asyncio.create_task(session_runtime.execute(turn))
+        await asyncio.wait_for(entered.wait(), 2)
+        if already_settled:
+            _settled_by_parent(turn)
+        assert await session_runtime.force_end_executions({"forced"}, grace=0.05) == ["forced"]
+        await asyncio.wait_for(unwinding.wait(), 2)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(execution, 2)
+        reason = "user_stopped" if already_settled else "worker_update"
+        assert observed == [("aborted", reason)]
+        if already_settled:
+            env["scheduler"].assert_not_called()
+        else:
+            env["scheduler"].assert_called_once_with("forced", turn["id"], "aborted")

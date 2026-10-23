@@ -1080,8 +1080,11 @@ def test_stop_then_restart_force_stops_a_turn_that_never_unwinds(setup, monkeypa
 
         task = asyncio.ensure_future(stuck())
         session_runtime._executions[task] = "child"
+        from app.db import turns
+        turn = turns.enqueue_turn("child", "provider_agent", prompt="score")
         session_runtime._execution_runtimes[task] = SimpleNamespace(
-            session_id="child", turn_id="turn-unknown", _cancel_pump=lambda: pumps.append(True))
+            session_id="child", turn_id=turn["id"], _run_id=None,
+            _cancel_pump=lambda: pumps.append(True))
         try:
             refused = (await fleet.dispatch("install"))["results"][-1]
             assert refused["accepted"] is False and title in refused["reason"]
@@ -1089,6 +1092,8 @@ def test_stop_then_restart_force_stops_a_turn_that_never_unwinds(setup, monkeypa
             assert queued["reason"] == "Stopping running work, then restarting"
             await asyncio.wait_for(asyncio.gather(*fleet._stop_tasks), 5)
             assert pumps and real_active_session_ids() == set()
+            settled = turns.get_turn(turn["id"])
+            assert (settled["state"], settled["stop_reason"]) == ("aborted", "worker_update")
             assert updates._desktop_request["action"] == "install"
             assert fleet._stop_result["accepted"] is True
             assert fleet._stop_result["forced"] == [title]
