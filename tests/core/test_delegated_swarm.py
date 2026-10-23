@@ -308,6 +308,11 @@ def _bridge(options, registry):
 @pytest.mark.parametrize("kw", [
     {"disallowed_tools": ["Task"]},
     {"tool_allowlist": ["Read", "Swarm"]},
+    # The bridge also matches the CLI's bundled spelling, so these withhold
+    # Task there and must withhold Swarm too.
+    {"disallowed_tools": ["mcp__fluid_bundled__mcp__builtins__Task"]},
+    {"disallowed_tools": ["*__Task"]},
+    {"disallowed_tools": ["mcp__fluid_bundled__*__Task"]},
 ])
 async def test_bridge_never_serves_swarm_without_task(agents, tmp_path, kw):  # noqa: F811
     """The bridge serves its tools without PreToolUse, so the Task rule must
@@ -315,13 +320,18 @@ async def test_bridge_never_serves_swarm_without_task(agents, tmp_path, kw):  # 
     options = _options(tmp_path, _server(cwd=str(tmp_path)), **kw)
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
     permitted, served = _bridge(options, registry)
+    assert permitted("mcp__builtins__Task") is False
     assert permitted("mcp__builtins__Swarm") is False
     assert "mcp__builtins__Swarm" not in served
     assert "mcp__builtins__Swarm" in ha._delegated_disallowed(options)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kw", [{}, {"tool_allowlist": ["Read", "Task", "Swarm"]}])
+@pytest.mark.parametrize("kw", [
+    {},
+    {"tool_allowlist": ["Read", "Task", "Swarm"]},
+    {"tool_allowlist": ["Read", "mcp__fluid_bundled__mcp__builtins__Task", "Swarm"]},
+])
 async def test_bridge_serves_swarm_with_task(agents, tmp_path, kw):  # noqa: F811
     options = _options(tmp_path, _server(cwd=str(tmp_path)), **kw)
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
@@ -346,6 +356,8 @@ def test_chat_lane_withholds_the_bridged_swarm(tmp_path):
     ({"tool_allowlist": ["Read", "Task", "Swarm"]}, True),
     ({"disallowed_tools": ["Task"]}, False),
     ({"tool_allowlist": ["Read", "Swarm"]}, False),
+    ({"disallowed_tools": ["mcp__fluid_bundled__mcp__builtins__Task"]}, False),
+    ({"disallowed_tools": ["mcp__fluid_bundled__*__Task"]}, False),
 ])
 def test_connect_installs_the_sessions_tool_filter(agents, tmp_path, kw, task_ok):  # noqa: F811
     from app.mcp.builtin_tools import BRIDGE_TOOL_FILTER_KEY
@@ -357,7 +369,10 @@ def test_connect_installs_the_sessions_tool_filter(agents, tmp_path, kw, task_ok
 
 
 @pytest.mark.asyncio
-async def test_bridged_swarm_start_refuses_when_task_is_not_permitted(agents, tmp_path, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("blocked", [
+    ["Task"], ["mcp__fluid_bundled__mcp__builtins__Task"], ["*__Task"], ["mcp__fluid_bundled__*__Task"],
+])
+async def test_bridged_swarm_start_refuses_when_task_is_not_permitted(agents, tmp_path, monkeypatch, blocked):  # noqa: F811
     """Even if the bridge served it, fluid's handler refuses the start, as on
     the native leg, and nothing is dispatched."""
     from app.core import task_dispatch
@@ -367,7 +382,7 @@ async def test_bridged_swarm_start_refuses_when_task_is_not_permitted(agents, tm
     monkeypatch.setattr(task_dispatch, "dispatch_task_tool", dispatch)
     monkeypatch.setattr(swarm, "persist", AsyncMock())
     server = _server(cwd=str(tmp_path))
-    ha._install_bridge_tool_filter(_options(tmp_path, server, disallowed_tools=["Task"]))
+    ha._install_bridge_tool_filter(_options(tmp_path, server, disallowed_tools=blocked))
     result = await _tools(server)["Swarm"].handler({"action": "start", "tasks": [
         {"id": "a", "agent": "helper", "prompt": "work"},
     ]})

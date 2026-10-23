@@ -5712,7 +5712,7 @@ def _delegated_tool_predicate(options: SessionOptions):
         # Swarm dispatches every item through Task: without Task it could
         # only refuse (the native leg refuses its start), so it is not offered.
         if name == _BRIDGED_SWARM:
-            return tool_permitted(_BRIDGED_TASK, surface, blocked)
+            return _bridged_task_permitted(surface, blocked)
         return True
 
     return permit
@@ -5754,7 +5754,7 @@ _BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 def _delegated_disallowed(options: SessionOptions) -> list:
     """``--disallowed-tools`` for the delegated (claude CLI) leg.
 
-    Four sources, unioned:
+    Five sources, unioned:
 
     1. ``DELEGATED_BANNED_TOOLS``, always.
     2. ``options.disallowed_tools``: the agent's own blocklist, in the leg's
@@ -5773,6 +5773,11 @@ def _delegated_disallowed(options: SessionOptions) -> list:
        surface, to be refused only when called. Only CLI built-ins and this
        session's external MCP tools are subtracted; the bridge already
        filters the bundle's tools.
+    5. The bridged ``mcp__builtins__Swarm`` whenever the bridged Task is not
+       permitted (``_delegated_task_permitted``: the chat lane, or a block or
+       allow list that withholds Task under either bridge spelling). Swarm
+       dispatches every item through Task, and the bridge serves it without
+       PreToolUse.
 
     Source 4 needs the CLI's surface, which the CLI announces only in its
     ``init`` frame (republished as ``DelegatedSurface``; ``_translate`` feeds
@@ -5857,11 +5862,28 @@ def _install_bridge_tool_filter(options: SessionOptions) -> None:
 
 def _delegated_task_permitted(options: SessionOptions, surface: Optional[list]) -> bool:
     """Whether this session may dispatch through the bridged Task."""
-    from app.core.tool_access import tool_permitted
-
     if _session_mode(options) == "chat":
         return False
-    return tool_permitted(_BRIDGED_TASK, surface, _delegated_blocklist(options))
+    return _bridged_task_permitted(surface, _delegated_blocklist(options))
+
+
+def _bridged_task_permitted(surface: Optional[list], blocked: Optional[list]) -> bool:
+    """Whether fluid's bundled bridge would serve Task under these lists.
+
+    Mirrors ``DelegatedLoop._bridge_tool_permitted``, which checks both the
+    registry name and the CLI's ``mcp__fluid_bundled__`` spelling: a deny
+    entry matching either spelling withholds Task, and an allow entry
+    matching either serves it. Checking only the registry name would let a
+    stored ``mcp__fluid_bundled__mcp__builtins__Task`` (or a glob aimed at
+    that spelling) withhold Task while Swarm, which dispatches through it,
+    stayed on.
+    """
+    from app.core.tool_access import matches_any, tool_permitted
+
+    spellings = (_BRIDGED_TASK, _BUNDLED_CLI_PREFIX + _BRIDGED_TASK)
+    if blocked and any(matches_any(s, blocked) for s in spellings):
+        return False
+    return any(tool_permitted(s, surface, None) for s in spellings)
 
 
 def _policy_accepts_cwd(policy: Any) -> bool:
