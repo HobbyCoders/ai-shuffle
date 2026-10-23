@@ -50,11 +50,35 @@ export const MOVED_ANCHORS: Readonly<Record<string, SettingsTarget>> = {
 	'system.deactivate': { category: 'cloud', anchor: 'cloud.account' },
 	'cloud.key': { category: 'cloud', anchor: 'cloud.account' },
 	'cloud.deactivate': { category: 'cloud', anchor: 'cloud.account' },
-	'cloud.plan': { category: 'cloud', anchor: 'cloud.account' }
+	'cloud.plan': { category: 'cloud', anchor: 'cloud.account' },
+	// Default models media options became remembered generation choices (#379).
+	'models.imageAspect': { category: 'models', item: 'gen-image' },
+	'models.imageResolution': { category: 'models', item: 'gen-image' },
+	'models.videoAspect': { category: 'models', item: 'gen-video' },
+	'models.videoDuration': { category: 'models', item: 'gen-video' },
+	'models.videoResolution': { category: 'models', item: 'gen-video' }
+};
+
+/**
+ * Default models items that were removed (#379): the four generation tools
+ * became remembered choices; transform tools are pinned from the catalog.
+ */
+export const MOVED_MODEL_ITEMS: Readonly<Record<string, string>> = {
+	t2i: 'gen-image',
+	t2v: 'gen-video',
+	t23d: 'gen-3d',
+	t2a: 'gen-audio',
+	edit: 'catalog',
+	i2v: 'catalog',
+	i23d: 'catalog',
+	a2a: 'catalog',
+	stt: 'catalog'
 };
 
 /** A target whose anchor moved, rewritten to where that row lives now. */
 export function redirectTarget(target: SettingsTarget): SettingsTarget {
+	const item = target.category === 'models' && target.item ? MOVED_MODEL_ITEMS[target.item] : undefined;
+	if (item) return { category: 'models', item };
 	const moved = target.anchor ? MOVED_ANCHORS[target.anchor] : undefined;
 	if (!moved) return target;
 	const open = target.open && MOVED_ANCHORS[target.open]?.anchor;
