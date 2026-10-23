@@ -325,8 +325,8 @@ async def _stop_then_restart(request_id):
             if forced:
                 logger.warning("Application update: force-stopped work that did not stop within %ss: %s",
                                STOP_WAIT_SECONDS, ", ".join(forced))
-        # Do not bypass the normal guard: both runtimes check again before exit.
-        # Work that could not be ended stays a named refusal, never a misleading queue ack.
+        # Timed-out stops were force-ended above so the update can proceed.
+        # Keep the normal guard: newly started work can still refuse the install.
         result = await _local_action("install", f"{request_id[:64]}:stopped:{uuid.uuid4().hex[:8]}")
     except Exception:  # noqa: BLE001 — a refusal must be recorded, never a stuck "stopping".
         logger.warning("Application update: stop then restart failed for %s", request_id, exc_info=True)
