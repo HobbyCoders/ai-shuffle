@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <path d="M32 5v7m0 40v7M5 32h7m40 0h7M13 13l5 5m28 28 5 5M13 51l5-5m28-28 5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
-  <circle class="shape" cx="32" cy="32" r="14" />
-  <path class="eyes" d="M27 29v3m10-3v3" />
-  <path class="smile" d="M28 37q4 3 8 0" />
+  <path d="M35 2.5v6M8 39H2.5m59.5 0h-5M14 13l4 4m35-4-4 4M14 62l3-3m36 3-3-3" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
+  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
+  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
+  <circle class="eyes" cx="29" cy="37" r="1.6"/>
+  <circle class="eyes" cx="41" cy="37" r="1.6"/>
+  <circle cx="23.5" cy="44" r="2.6" fill="currentColor" fill-opacity=".45"/>
+  <circle cx="46.5" cy="44" r="2.6" fill="currentColor" fill-opacity=".45"/>
+  <path class="ring" d="M28 45h14q0 7-7 7t-7-7Z"/>
 </svg>

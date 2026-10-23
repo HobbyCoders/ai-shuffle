@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <circle class="shape" cx="32" cy="32" r="19" />
-  <ellipse cx="32" cy="32" rx="29" ry="10" transform="rotate(-28 32 32)" stroke="currentColor" stroke-width="2" />
-  <path class="eyes" d="M26 27v4m12-4v4" />
-  <path class="smile" d="M29 37q3 3 6 0" />
+  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
+  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
+  <ellipse cx="35" cy="42" rx="29" ry="7.5" stroke="currentColor" stroke-width="2.5" stroke-opacity=".5" transform="rotate(-16 35 42)"/>
+  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
+  <circle class="eyes" cx="29" cy="37" r="1.6"/>
+  <circle class="eyes" cx="41" cy="37" r="1.6"/>
+  <path class="smile" d="M31 45q4 3 8 0"/>
+  <path d="M6 42a29 7.5 0 0 0 58 0" stroke="currentColor" stroke-width="3" stroke-linecap="round" transform="rotate(-16 35 42)"/>
+  <circle class="ring" cx="59" cy="29" r="3.4"/>
 </svg>
