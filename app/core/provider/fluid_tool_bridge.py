@@ -175,6 +175,9 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "RemoteTrigger": "write",
     # Dispatching an agent spawns a session that can act — gated like a write.
     "Task": "write",
+    # A workflow of Task dispatches; its status action only reads
+    # (BUILTINS_RISK_CLASSIFIERS), as on fluid's own Swarm.
+    "Swarm": "write",
 }
 
 def _emulator_risk(data: dict) -> str:
@@ -184,8 +187,15 @@ def _emulator_risk(data: dict) -> str:
 
 
 # Per-call risk for builtins whose actions differ (``register_sdk_tools``).
+def _swarm_risk(data: dict) -> str:
+    from fluid.tools.builtins.swarm import SPEC
+
+    return SPEC.classify_risk(data)
+
+
 BUILTINS_RISK_CLASSIFIERS: Mapping[str, Callable[[dict], str]] = {
     "Emulator": _emulator_risk,
+    "Swarm": _swarm_risk,
 }
 
 # Dynamic gateway tools (per-connector, e.g. sending messages through a linked
@@ -296,9 +306,10 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 # leg's app-memory bridge; native legs run fluid's originals over the same
 # stores via ctx.extra. ListAgents/SendMessage are the delegated leg's route to
 # its Task workers; native legs wire fluid's originals through agent_roster /
-# agent_message on the engine ctx.
+# agent_message on the engine ctx. Swarm is the delegated leg's copy of fluid's
+# Swarm over the same app.core.swarm host.
 NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
-    "Task", "Monitor", "ToolSearch", "GetUsage",
+    "Task", "Swarm", "Monitor", "ToolSearch", "GetUsage",
     "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
     "ListSessions", "MessageSession", "StartSession",
     "SettleSession", "UnsettleSession", "ArchiveSession",

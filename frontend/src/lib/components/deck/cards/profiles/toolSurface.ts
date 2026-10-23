@@ -125,6 +125,18 @@ export function toolBlockedReason(
 	return null;
 }
 
+/**
+ * The note for a grantable tool that Claude-model sessions never get, or null.
+ * The row stays selectable: the grant still applies on other providers.
+ */
+export function claudeMissingNote(tool: ToolSurfaceTool): string | null {
+	if (tool.delegated !== false) return null;
+	const note = tool.delegated_note;
+	return typeof note === 'string' && note.trim()
+		? note
+		: 'Claude-model sessions do not get this tool.';
+}
+
 /** The tools in a group a user may actually write into a list. */
 export function selectableTools(
 	group: ToolSurfaceGroup,

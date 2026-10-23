@@ -32,7 +32,8 @@
 		selectableSurfaceTools,
 		selectableTools,
 		sortGroups,
-		toolBlockedReason
+		toolBlockedReason,
+		claudeMissingNote
 	} from './toolSurface';
 
 	interface Props {
@@ -198,6 +199,7 @@
 					<div class="tools">
 						{#each rows as tool (tool.name)}
 							{@const reason = toolBlockedReason(group, tool, ctx)}
+							{@const claudeNote = claudeMissingNote(tool)}
 							{@const checked = isChecked(group, tool)}
 							<button
 								type="button"
@@ -214,6 +216,7 @@
 									<span class="tname">
 										{shortName(group, tool.name)}
 										{#if tool.risk}<span class="risk {tool.risk}">{tool.risk}</span>{/if}
+										{#if claudeNote && !reason}<span class="leg" title={claudeNote}>not on Claude</span>{/if}
 									</span>
 									<span class="tdesc">{reason ?? tool.description}</span>
 								</span>
@@ -500,6 +503,16 @@
 	.risk.exec {
 		color: var(--rose);
 		background: color-mix(in oklch, var(--rose) 14%, transparent);
+	}
+	.leg {
+		font-family: inherit;
+		font-size: 10px;
+		font-weight: 600;
+		padding: 0 6px;
+		border-radius: 999px;
+		line-height: 16px;
+		background: var(--st-muted);
+		color: var(--st-mfg);
 	}
 	.risk.network {
 		color: var(--tool-glob);

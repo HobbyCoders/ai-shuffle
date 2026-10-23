@@ -661,6 +661,7 @@ class HarnessAdapter(ProviderAdapter):
             # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
+            _install_bridge_tool_filter(options)
             from app.core.usage_limits import claude_mod_usage_sink
             from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
             from app.core import claude_compaction
@@ -5252,8 +5253,8 @@ def _workflow_prompt_blocks(
     Query options only stamps provenance; native compilation supplies the wired
     surface, while delegated compilation supplies its CLI permission surface.
     ``permitted=None`` means every tool is available. The keyword overrides,
-    when given, replace that inference for one tool: the delegated leg has no
-    Swarm at all, and it decides Task and Monitor from what the bridge serves.
+    when given, replace that inference for one tool: the delegated leg decides
+    Swarm, Task and Monitor from what its bridge serves.
     """
     extra = getattr(options, "extra", None) or {}
     if not extra.get("automatic_workflows", False):
@@ -5553,8 +5554,8 @@ def _valid_effort(value: Any) -> Optional[str]:
     return None
 
 
-# The CLI's native subagent tools are BANNED: the app's Task tool
-# (mcp__builtins__Task) is the one orchestration surface. The CLI's native
+# The CLI's native subagent tools are BANNED: the app's Task and Swarm
+# (mcp__builtins__Task / mcp__builtins__Swarm) are the orchestration surface. The CLI's native
 # session-cron/wake tools and background-job tools are banned for the same
 # reason: the CLI fires their wake turns between queries, so the delegated
 # client never reads them and they vanish from app history and cost
@@ -5695,7 +5696,21 @@ def _delegated_tool_predicate(options: SessionOptions):
     blocked = _delegated_blocklist(options)
     if not surface and not blocked:
         return None
-    return lambda name: tool_permitted(name, surface, blocked)
+
+    def permit(name: str) -> bool:
+        if not tool_permitted(name, surface, blocked):
+            return False
+        # Swarm dispatches every item through Task: without Task it could
+        # only refuse (the native leg refuses its start), so it is not offered.
+        if name == _BRIDGED_SWARM:
+            return _bridged_task_permitted(surface, blocked)
+        return True
+
+    return permit
+
+
+_BRIDGED_TASK = "mcp__builtins__Task"
+_BRIDGED_SWARM = "mcp__builtins__Swarm"
 
 
 def _delegated_permitted_names(options: SessionOptions, registry: Any) -> Optional[frozenset]:
@@ -5730,7 +5745,7 @@ _BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 def _delegated_disallowed(options: SessionOptions) -> list:
     """``--disallowed-tools`` for the delegated (claude CLI) leg.
 
-    Four sources, unioned:
+    Five sources, unioned:
 
     1. ``DELEGATED_BANNED_TOOLS``, always.
     2. ``options.disallowed_tools``: the agent's own blocklist, in the leg's
@@ -5749,6 +5764,11 @@ def _delegated_disallowed(options: SessionOptions) -> list:
        surface, to be refused only when called. Only CLI built-ins and this
        session's external MCP tools are subtracted; the bridge already
        filters the bundle's tools.
+    5. The bridged ``mcp__builtins__Swarm`` whenever the bridged Task is not
+       permitted (``_delegated_task_permitted``: the chat lane, or a block or
+       allow list that withholds Task under either bridge spelling). Swarm
+       dispatches every item through Task, and the bridge serves it without
+       PreToolUse.
 
     Source 4 needs the CLI's surface, which the CLI announces only in its
     ``init`` frame (republished as ``DelegatedSurface``; ``_translate`` feeds
@@ -5796,7 +5816,65 @@ def _delegated_disallowed(options: SessionOptions) -> list:
             name for name in cached_cli_tools()
             if cli_can_show(name) and not tool_permitted(name, surface, None)
         )
+    if not _delegated_task_permitted(options, surface):
+        # Swarm dispatches every item through Task. This list is the bundled
+        # bridge's filter as well as the CLI's wall, and the bridge serves its
+        # tools without PreToolUse, so the rule must live here, not only in
+        # _delegated_tool_predicate's prompt and grant view.
+        banned.add(_BRIDGED_SWARM)
     return sorted(banned)
+
+
+def _install_bridge_tool_filter(options: SessionOptions) -> None:
+    """Give the builtins server this session's tool filter (bare names).
+
+    fluid's Swarm handler refuses a start when ``tool_filter("Task")`` is
+    False, which the native engine wires through its ctx. The bridged copy
+    reads the same predicate from the server's slot. The bridge already
+    withholds Swarm when Task is not permitted (``_delegated_disallowed``);
+    this is the handler-side check behind it.
+    """
+    from app.mcp.builtin_tools import BRIDGE_TOOL_FILTER_KEY
+
+    config = (options.mcp_servers or {}).get("builtins")
+    slot = config.get(BRIDGE_TOOL_FILTER_KEY) if isinstance(config, dict) else None
+    if not isinstance(slot, dict):
+        return
+    permit = _delegated_tool_predicate(options)
+    task_ok = _delegated_task_permitted(options, _delegated_surface(options))
+
+    def tool_filter(name: str) -> bool:
+        if name == "Task":
+            return task_ok
+        return permit is None or permit(f"mcp__builtins__{name}")
+
+    slot["tool_filter"] = tool_filter
+
+
+def _delegated_task_permitted(options: SessionOptions, surface: Optional[list]) -> bool:
+    """Whether this session may dispatch through the bridged Task."""
+    if _session_mode(options) == "chat":
+        return False
+    return _bridged_task_permitted(surface, _delegated_blocklist(options))
+
+
+def _bridged_task_permitted(surface: Optional[list], blocked: Optional[list]) -> bool:
+    """Whether fluid's bundled bridge would serve Task under these lists.
+
+    Mirrors ``DelegatedLoop._bridge_tool_permitted``, which checks both the
+    registry name and the CLI's ``mcp__fluid_bundled__`` spelling: a deny
+    entry matching either spelling withholds Task, and an allow entry
+    matching either serves it. Checking only the registry name would let a
+    stored ``mcp__fluid_bundled__mcp__builtins__Task`` (or a glob aimed at
+    that spelling) withhold Task while Swarm, which dispatches through it,
+    stayed on.
+    """
+    from app.core.tool_access import matches_any, tool_permitted
+
+    spellings = (_BRIDGED_TASK, _BUNDLED_CLI_PREFIX + _BRIDGED_TASK)
+    if blocked and any(matches_any(s, blocked) for s in spellings):
+        return False
+    return any(tool_permitted(s, surface, None) for s in spellings)
 
 
 def _policy_accepts_cwd(policy: Any) -> bool:
@@ -7117,9 +7195,9 @@ def _with_agents_index(
 # bundled bridge. The CLI sees each one as ``mcp__fluid_bundled__`` + this.
 _DELEGATED_MEMORY_TOOLS = ("Remember", "Recall", "Forget")
 _DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
-# The app's own Task and background tools; the CLI's tools of these names are
-# banned on this leg (DELEGATED_BANNED_TOOLS).
-_DELEGATED_TASK_TOOLS = ("Task", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
+# The app's own Task, Swarm and background tools. The CLI's tools of these
+# names are banned on this leg (DELEGATED_BANNED_TOOLS); the CLI has no Swarm.
+_DELEGATED_TASK_TOOLS = ("Task", "Swarm", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
 # The app's tools standing in for CLI tools banned on this leg (see
 # DELEGATED_BANNED_TOOLS): (app tools, what they are for, the CLI tools).
 _DELEGATED_STAND_INS = (
@@ -7415,10 +7493,10 @@ def _delegated_append_text(
     card, with its preview link for an owner session) follows the worker
     block.
 
-    Only tools this leg offers are described: the agents index and the Task
-    and Monitor routing need the bridged ``mcp__builtins__Task`` /
-    ``Monitor`` (``_delegated_offered``), and Swarm routing never appears
-    because the leg has no Swarm tool.
+    Only tools this leg offers are described: the agents index and the Task,
+    Swarm and Monitor routing need the bridged ``mcp__builtins__Task`` /
+    ``Swarm`` / ``Monitor`` (``_delegated_offered``). With Swarm offered, the
+    delegation block carries the same Swarm routing as the native leg's.
 
     ``worker`` (the app's ``Worker:`` text, rendered at connect) follows the
     profile's append as a ``# Worker`` block: Claude Code's own environment
@@ -7437,7 +7515,7 @@ def _delegated_append_text(
     parts.append(PEER_MESSAGE_BLOCK)
     parts.extend(_workflow_prompt_blocks(
         options, _delegated_permitted_names(options, registry),
-        swarm_available=False, task_available=task_offered,
+        swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
     ))
     parts.extend(_delegated_fluid_context(options))
