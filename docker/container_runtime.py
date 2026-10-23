@@ -66,6 +66,14 @@ SNAPSHOT_TIMEOUT = 1800
 # supervisor exits and the container's restart policy takes over (#2112).
 RELAUNCH_LIMIT = 3
 RELAUNCH_WINDOW = 15 * 60.0
+# Checkpoint and WAL settings, passed on every start so existing clusters pick
+# them up. The 1 GB / 5 minute defaults forced a checkpoint every few seconds
+# under load, and after each checkpoint the first write to every page logs a
+# full 8 KB page image; a large trigram GIN index made that most of the WAL
+# (#436). The PGDG postgresql-16 package is built with lz4. Keep in step with
+# walSettingArgs in desktop/src/main/postgres.ts.
+WAL_SETTINGS = ("max_wal_size=4GB", "checkpoint_timeout=15min",
+    "checkpoint_completion_target=0.9", "wal_compression=lz4")
 
 
 def _rollback_name(name, kind):
@@ -578,7 +586,8 @@ class Database:
         self.process = subprocess.Popen(["postgres", "-D", str(self.data), "-h", "127.0.0.1",
             "-p", str(self.port), "-k", str(self.socket), "-c", "unix_socket_permissions=0700",
             "-c", "hba_file=" + str(hba), "-c", "password_encryption=scram-sha-256",
-            "-c", "log_statement=none", "-c", "log_min_error_statement=panic"],
+            "-c", "log_statement=none", "-c", "log_min_error_statement=panic",
+            *(arg for setting in WAL_SETTINGS for arg in ("-c", setting))],
             env=client_env(""), stdout=self.pg_log, stderr=self.pg_log, start_new_session=True,
             **isolation().service_spawn())
 

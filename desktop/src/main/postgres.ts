@@ -111,6 +111,31 @@ export interface PgCtlStartOptions {
 	/** Directory for the Unix socket; null on Windows, where there is none. */
 	socketDir: string | null;
 	timeoutSec?: number;
+	/** Defaults to pglz, which every PostgreSQL build accepts. */
+	walCompression?: WalCompression;
+}
+
+export type WalCompression = 'lz4' | 'pglz';
+
+/**
+ * The Windows bundle is built with lz4 (`pg_config --configure` lists
+ * --with-lz4). The other desktop bundles are not checked, and an unknown
+ * wal_compression value stops the server from starting, so they use pglz.
+ */
+export function walCompressionFor(platform: NodeJS.Platform): WalCompression {
+	return platform === 'win32' ? 'lz4' : 'pglz';
+}
+
+/**
+ * Checkpoint and WAL settings, passed on every start so existing clusters pick
+ * them up without editing postgresql.conf. The 1 GB / 5 minute defaults forced
+ * a checkpoint every few seconds under load, and each checkpoint makes the next
+ * write to every page log a full 8 KB page image; a large trigram GIN index
+ * turned that into most of the WAL (#436). Keep in step with
+ * docker/container_runtime.py WAL_SETTINGS.
+ */
+export function walSettingArgs(walCompression: WalCompression): string[] {
+	return ['max_wal_size=4GB', 'checkpoint_timeout=15min', 'checkpoint_completion_target=0.9', `wal_compression=${walCompression}`].map((s) => `-c ${s}`);
 }
 
 /**
@@ -120,7 +145,7 @@ export interface PgCtlStartOptions {
  * the socket directory (which can contain spaces) is quoted inside it.
  */
 export function pgCtlStartArgs(opts: PgCtlStartOptions): string[] {
-	const options = [`-p ${opts.port}`, `-c listen_addresses=${POSTGRES_HOST}`];
+	const options = [`-p ${opts.port}`, `-c listen_addresses=${POSTGRES_HOST}`, ...walSettingArgs(opts.walCompression ?? 'pglz')];
 	if (opts.socketDir !== null) options.push(`-k "${opts.socketDir}"`);
 	return ['-D', opts.dataDir, '-l', opts.logPath, '-w', '-t', String(opts.timeoutSec ?? 60), '-o', options.join(' '), 'start'];
 }
@@ -559,7 +584,7 @@ export class PostgresSupervisor extends EventEmitter {
 		const socketDir = chooseSocketDir(this.rt.platform, this.opts.root, this.rt.tmpDir);
 		const timeoutSec = this.opts.startTimeoutSec ?? 60;
 		this.log(`starting PostgreSQL on ${POSTGRES_HOST}:${port}`);
-		const args = pgCtlStartArgs({ dataDir: this.dataDir, logPath: this._state.logPath, port, socketDir, timeoutSec });
+		const args = pgCtlStartArgs({ dataDir: this.dataDir, logPath: this._state.logPath, port, socketDir, timeoutSec, walCompression: walCompressionFor(this.rt.platform) });
 		this.launched = true;
 		const result = await this.exec(this.opts.binaries.pgCtl, args, { timeoutMs: (timeoutSec + 30) * 1000 });
 		if (result.code !== 0) {
