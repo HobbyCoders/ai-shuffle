@@ -645,9 +645,9 @@ UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 
 
 # How a unified generation call runs (#379):
-# - Every call to the four generation tools (image, video, audio, 3D) goes
-#   through the resolver's guard: price, confirmation, daily cap. (runFalModel
-#   does not yet: see the last point.) A remembered choice (an account preference, one
+# - Every call to the four generation tools (image, video, audio, 3D) and
+#   runFalModel goes through the resolver's guard: price, confirmation, daily
+#   cap. A remembered choice (an account preference, one
 #   migrated from a saved Settings default included) runs unasked; one the
 #   guard cannot price or run shows the choice card (interactive) or is
 #   skipped and reported (unattended). When the account's choices cannot be
@@ -658,20 +658,18 @@ UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 #   fal job with no known price, cap or confirmation.
 # - The only generation lane left is the ChatGPT-plan image tool (#1796): it
 #   runs on the subscription login and spends no per-item money.
-# - Exception, until a follow-up fixes it: ``runFalModel`` keeps main's raw fal
-#   handler. Unattended calls go straight to it, and interactive calls fall
-#   back to it when the guard refuses with "could not price/resolve this"
-#   (the reasons below), so those can spend without a known price. A cap,
-#   confirmation or chat-mode refusal never falls back.
-_LANE_FALLBACK_REASONS = {"price_unavailable", "no_match", "unavailable", "invalid_request"}
+# - runFalModel uses its fal lane only to pin the guarded request to this
+#   worker, never to call the raw handler. Unsupported inputs are refused
+#   (interactive) or skipped and reported (unattended), not run unpriced.
 
 
 def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
-    """``{name: (lane, handler)}`` for main's handlers that can run here.
+    """``{name: (lane, handler)}`` for main's configured routes.
 
     ``"chatgpt"`` is the ChatGPT-plan image tool (#1796), which needs no fal
-    key. ``"fal"`` is ``runFalModel`` while a key is usable. The four unified
-    generation tools never get a fal lane (see above).
+    key. ``"fal"`` pins ``runFalModel`` to this worker while a key is usable;
+    its raw handler is never called. The four unified generation tools never
+    get a fal lane (see above).
     """
     from app.core.provider import subscription_images as sub
 
@@ -824,9 +822,9 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.append(search_models)
 
-    fal_lane = lane_for("runFalModel")
+    fal_local = bool(lane_for("runFalModel"))
 
-    @tool("runFalModel", "Run any fal model by endpoint ID; priced runs get confirmation and daily-cap checks, but unattended or unpriceable calls still use the previous handler. Prefer the kind's tool; get IDs/schema via searchModels.", {
+    @tool("runFalModel", "Run a fal model by endpoint ID through price, confirmation and daily-cap checks. Unknown prices never run; unattended calls need a stored choice or skip and report. A declared text prompt is required. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
@@ -840,9 +838,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         refused = _fal_image_refusal(args) if image_restricted else None
         if refused:
             return _tool_result({"success": False, "error": refused})
-        main = {key: args[key] for key in ("endpoint_id", "input", "output_type") if key in args}
-        if fal_lane and context.unattended:
-            return await fal_lane[1](main)
         endpoint = args.get("endpoint_id")
         kind = args.get("output_type") or (
             (_catalog_output_type(endpoint) or _infer_fal_output_type(endpoint)) if isinstance(endpoint, str) else None)
@@ -850,18 +845,16 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         values = dict(args["input"]) if isinstance(args.get("input"), dict) else None
         prompt = values.pop(schema.primary_text_field, None) if schema and values is not None and schema.primary_text_field else None
         if kind not in KINDS or schema is None or values is None or not isinstance(prompt, str) or not prompt.strip():
-            # Nothing to price (unknown kind, schema or a prompt-less model):
-            # main's path where it exists, otherwise a refusal.
-            if fal_lane:
-                return await fal_lane[1](main)
-            return _tool_result(result("refused", error="A declared input schema with a text prompt is required."))
+            message = "A declared input schema with a text prompt and a known output type is required. Nothing was submitted."
+            return _tool_result(result("skipped" if context.unattended else "refused",
+                                       reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        if fal_lane:
+        if fal_local:
             request["worker"] = backend.local_worker()
         output = await resolver.generate(kind, request, context)
-        if fal_lane and output.get("status") == "refused" and output.get("reason") in _LANE_FALLBACK_REASONS:
-            return await fal_lane[1](main)
+        if context.unattended and output.get("status") == "refused":
+            output.update(status="skipped", message=output.get("error", "Generation skipped; nothing was submitted."))
         return _tool_result(output)
 
     tools.append(run_fal)

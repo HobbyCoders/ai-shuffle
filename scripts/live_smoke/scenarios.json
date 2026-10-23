@@ -307,6 +307,14 @@
           "past_bug": "#468: a CLI-spelling block withheld Remember at the bridge but the delegated system prompt still advertised it"
         },
         {
+          "id": "harness-basics.7",
+          "check": "Unpriced runFalModel never submits",
+          "kind": "owner",
+          "how": "On a candidate worker with a usable fal key, use an owner-approved test endpoint with a declared text-prompt schema and a known output type, but an unavailable price. Verify the unknown price through searchModels first; do not guess an endpoint or substitute a priced model. Record fal request activity and billing before the probe. In a fresh unattended Task with no remembered or job-stored generation choice, call runFalModel for that endpoint and report its result. Repeat the same call in an interactive owner chat. Inspect the actual tool results, worker submission logs and fal request activity/billing after both calls; archive only the throwaway sessions.",
+          "pass_when": "The unattended call returns skipped with a reported reason and submits nothing. The interactive unpriceable call asks or refuses (for example price_unavailable), without submission. Neither call invokes the raw fal handler; no fal request ID or charge appears in worker logs or fal activity/billing. Missing credentials, schema or evidence are not a pass.",
+          "past_bug": "#469: unattended runFalModel calls and interactive pricing/resolution refusals fell back to the raw fal handler without a known price, confirmation or daily cap."
+        },
+        {
           "id": "harness-basics.8",
           "check": "Remembered generation choice with required call input",
           "kind": "owner",
