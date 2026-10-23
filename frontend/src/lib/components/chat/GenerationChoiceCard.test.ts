@@ -149,6 +149,21 @@ describe('GenerationChoiceCard', () => {
 		expect(screen.getByRole('button', { name: /Advanced/ }).textContent).toContain('2 changed');
 	});
 
+	it('steps a decimal range finely enough to keep its default', async () => {
+		const fields = [
+			{ name: 'guidance_scale', type: 'number', title: 'Guidance', minimum: 1, maximum: 20, default: 3.5 },
+			{ name: 'strength', type: 'number', title: 'Strength', minimum: 0, maximum: 1, default: 0.85 },
+			{ name: 'steps', type: 'integer', title: 'Steps', minimum: 1, maximum: 50, default: 28 }
+		];
+		card({ options: [{ ...FAL, options: {}, schema: { fields } }] });
+		await fireEvent.click(screen.getByRole('button', { name: /Advanced/ }));
+		const step = (label: RegExp) => (screen.getByLabelText(label) as HTMLInputElement).step;
+		expect(step(/Guidance/)).toBe('0.1');
+		expect(step(/Strength/)).toBe('0.05');
+		expect(step(/Steps/)).toBe('1');
+		expect((screen.getByLabelText(/Guidance/) as HTMLInputElement).value).toBe('3.5');
+	});
+
 	it('shows only verified values for a plan route, locked', async () => {
 		card();
 		await fireEvent.click(screen.getAllByRole('radio')[1]);

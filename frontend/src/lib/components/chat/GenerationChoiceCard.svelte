@@ -23,6 +23,7 @@
 		modelLabel,
 		pickMessage,
 		priceView,
+		repliedFigure,
 		quickChips,
 		sameChoice,
 		sourceLabel,
@@ -129,6 +130,13 @@
 		return name.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 	}
 
+	/** Integers step by 1; decimals finely enough that a 3.5 default does not snap to 4. */
+	function stepFor(f: SchemaField, hasRange: boolean): number {
+		if (f.type === 'integer') return 1;
+		const span = hasRange ? f.maximum! - f.minimum! : Infinity;
+		return span <= 2 ? 0.05 : span <= 50 ? 0.1 : 1;
+	}
+
 	function fieldsFor(option: GenerationOption | undefined): Field[] {
 		const fields = option?.schema?.fields;
 		if (!fields) return [];
@@ -151,7 +159,7 @@
 						choices: (f.enum ?? []).map((v) => ({ value: String(v), label: String(v) })),
 						min: f.minimum ?? undefined,
 						max: f.maximum ?? undefined,
-						step: f.type === 'integer' ? 1 : hasRange && (f.maximum! - f.minimum!) <= 2 ? 0.05 : 1,
+						step: stepFor(f, hasRange),
 						fallback: f.default,
 						locked: false
 					};
@@ -314,6 +322,12 @@
 	const summaryIndex = $derived(picked?.index ?? repliedIndex);
 	const summaryOption = $derived(summaryIndex >= 0 ? options[summaryIndex] : null);
 	const summaryRemembered = $derived(!!summaryOption && sameChoice(remembered, summaryOption));
+	// After a reload the live quote is gone; the reply carries the figure it was picked at.
+	const summaryFigure = $derived.by(() => {
+		if (!summaryOption) return '';
+		if (picked) return priceView(quotes[summaryIndex], kind).figure;
+		return (reply && repliedFigure(reply)) || priceView(summaryOption.price, kind).figure;
+	});
 </script>
 
 <section
@@ -338,7 +352,7 @@
 			{#if collapsed}
 				<p class="gcc-sub">
 					{#if summaryOption}
-						{priceView(picked ? quotes[summaryIndex] : summaryOption.price, kind).figure}
+						{summaryFigure}
 						{#if summaryRemembered}<span class="gcc-dot" aria-hidden="true">·</span> remembered for {label.plural}{/if}
 					{:else}
 						Answered in the chat
@@ -669,7 +683,8 @@
 	}
 	.gcc-option.selected {
 		border-color: color-mix(in oklch, var(--gcc-accent) 70%, transparent);
-		background: color-mix(in oklch, var(--gcc-accent) 7%, var(--background));
+		/* oklab: the achromatic background carries hue 0, which oklch would drift toward pink. */
+		background: color-mix(in oklab, var(--gcc-accent) 7%, var(--background));
 		box-shadow: 0 0 0 1px color-mix(in oklch, var(--gcc-accent) 45%, transparent);
 	}
 	.gcc-option:disabled {
@@ -679,15 +694,19 @@
 	.gcc-option[aria-disabled='true']:not(:disabled):not(.selected) {
 		opacity: 0.72;
 	}
+	/* The badge wraps under the source rather than truncating it ("F…"). */
 	.gcc-opt-top {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
-		gap: 6px;
+		gap: 3px 6px;
 		width: 100%;
 		min-width: 0;
 		padding-right: 18px;
 	}
 	.gcc-source {
+		flex: 0 1 auto;
+		max-width: 100%;
 		font-size: 10.5px;
 		font-weight: 600;
 		letter-spacing: 0.06em;

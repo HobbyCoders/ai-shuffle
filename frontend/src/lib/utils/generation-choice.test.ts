@@ -8,6 +8,7 @@ import {
 	priceView,
 	quickChips,
 	rememberedResult,
+	repliedFigure,
 	type GenerationOption
 } from './generation-choice';
 import type { ChatMessage } from '$lib/stores/types';
@@ -77,6 +78,9 @@ describe('generation choice results', () => {
 		const used = { status: 'completed', success: true, remembered: true, price: PRICE, choice: { source: 'fal', account: 'fal-ai', worker: 'w', model: 'fal-ai/flux/dev', options: {} } };
 		expect(rememberedResult(row('generateImage', used))).toEqual({ kind: 'image', choice: used.choice, price: PRICE });
 		expect(rememberedResult(row('generateImage', { ...used, remembered: undefined }))).toBeNull();
+		// It stays on screen after the turn settles, so the pick can be changed from it.
+		expect(isGenerationChoiceRow(row('generateImage', used))).toBe(true);
+		expect(isGenerationChoiceRow(row('generateImage', { ...used, remembered: undefined }))).toBe(false);
 	});
 });
 
@@ -85,6 +89,8 @@ describe('labels and prices', () => {
 		expect(modelLabel('fal-ai/flux/dev')).toBe('Flux Dev');
 		expect(modelLabel('grok-imagine-image')).toBe('Grok Imagine Image');
 		expect(modelLabel('default')).toBe('Plan default');
+		expect(modelLabel('gpt-image-2')).toBe('GPT Image 2');
+		expect(modelLabel('fal-ai/stable-diffusion-v35-large')).toBe('Stable Diffusion V35 Large');
 	});
 
 	it('shows every price state, never an unknown one as free', () => {
@@ -111,5 +117,14 @@ describe('labels and prices', () => {
 		expect(text).toContain('I saved it as my choice for images.');
 		expect(text).toContain('{"source":"fal-ai","model":"fal-ai/flux/dev","worker":"worker-a","options":{"image_size":"landscape_16_9"}}');
 		expect(pickMessage('generateVideo', 'video', pick, {}, priceView(PRICE as never, 'video'), false)).not.toContain('saved');
+	});
+
+	it('reads back the figure a reply was picked at', () => {
+		const pick = option({ account: 'fal-ai', worker: 'worker-a' });
+		const quoted = { currency: 'USD', unit: 'item', amount: '0.02', total: '0.08', status: 'estimated' };
+		expect(repliedFigure(pickMessage('generateImage', 'image', pick, {}, priceView(quoted, 'image'), true))).toBe('$0.08');
+		const included = { currency: 'USD', unit: 'item', amount: '0', total: '0', status: 'included' };
+		expect(repliedFigure(pickMessage('generateImage', 'image', pick, {}, priceView(included, 'image'), false))).toBe('Included');
+		expect(repliedFigure('Use the cheap one please ($5).')).toBeNull();
 	});
 });

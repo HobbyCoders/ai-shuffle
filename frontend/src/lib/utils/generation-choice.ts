@@ -171,9 +171,13 @@ export function rememberedResult(message: Pick<ChatMessage, 'type' | 'toolName' 
 	return { kind, choice, price: (result.price as GenerationPrice) ?? null };
 }
 
-/** A tool row the transcript keeps on screen (it asks the reader to decide). */
+/**
+ * A tool row the transcript keeps on screen after the turn settles: a choice
+ * card asks the reader to decide, and a run that spent on the remembered
+ * choice without asking keeps its "Ask me next time / Change" line in view.
+ */
 export function isGenerationChoiceRow(message: ChatMessage): boolean {
-	return chooseResult(message) !== null;
+	return chooseResult(message) !== null || rememberedResult(message) !== null;
 }
 
 // ── Labels ─────────────────────────────────────────────────────────────
@@ -200,8 +204,12 @@ export function modelLabel(model: string): string {
 		.replace(/[-_]+/g, ' ')
 		.replace(/\s+/g, ' ')
 		.trim()
-		.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+		.replace(/\b([a-z])/g, (c) => c.toUpperCase())
+		.replace(/\b[A-Z][a-z0-9]*\b/g, (word) => ACRONYMS.get(word.toLowerCase()) ?? word);
 }
+
+/** Words a title-cased model id would get wrong (`Gpt Image 2` → `GPT Image 2`). */
+const ACRONYMS = new Map(['gpt', 'hd', 'sd', 'sdxl', 'ai', 'xai', 'tts', 'ltx', 'v2v', 'i2v', 't2v', '3d'].map((w) => [w, w.toUpperCase()]));
 
 function money(value: string | null): number | null {
 	if (value === null || value === undefined) return null;
@@ -271,6 +279,13 @@ export function choiceOf(option: GenerationOption, options: Record<string, unkno
 export function sameChoice(a: Partial<GenerationChoice> | null | undefined, b: Partial<GenerationChoice> | null | undefined): boolean {
 	if (!a || !b) return false;
 	return (['source', 'account', 'worker', 'model'] as const).every((k) => !a[k] || !b[k] || a[k] === b[k]) && a.model === b.model;
+}
+
+/** The price figure a `pickMessage` reply names (`$0.08`, `Included`), or null. */
+export function repliedFigure(reply: string): string | null {
+	const firstLine = reply.split('\n', 1)[0];
+	if (/^Use .+ for this .+, included in my plan\./.test(firstLine)) return 'Included';
+	return firstLine.match(/^Use .+ for this .+? \((\$\d+(?:\.\d+)?)\)\./)?.[1] ?? null;
 }
 
 /**
