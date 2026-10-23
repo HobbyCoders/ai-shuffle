@@ -740,19 +740,19 @@ def _started_permission_mode(sender, overrides):
     carries (a connector's) caps it. ``None`` (the sender has no binding)
     leaves the new chat unbound too, so it follows the same agent's mode.
 
-    A no-project (chat) starter's children always start on Ask, even when the
-    owner has put the starter itself in Auto or Bypass (#371 step 4): its
-    children get full project tools, which the starter's own ceiling never
-    had. StartSession takes no permission argument; the owner can loosen the
+    A no-project (chat) starter passes its mode on too: Bypass starts its
+    children in Bypass, Auto in Auto (owner decision, #486, replacing the
+    #415/#416 rule that started them on Ask). Its mode is resolved as its own
+    turns run it, so an unbound chat never hands a child a mode the chat
+    itself cannot run in (its agent's Accept Edits runs the chat on Ask).
+    StartSession takes no permission argument; the owner can change the
     child afterwards.
     """
     from app.core.session_modes import permission_ceiling, session_mode_of, turn_permission_mode
 
-    if session_mode_of(sender) == "chat":
-        return "default"
     ceiling = permission_ceiling({"_permission_ceiling": (overrides or {}).get("_permission_ceiling")},
                                  {**sender, "is_worker": False})
-    if not ceiling:
+    if not ceiling and session_mode_of(sender) != "chat":
         return sender.get("permission_mode")
     from app.db import database
     profile = database.get_profile(sender.get("profile_id")) if sender.get("profile_id") else None

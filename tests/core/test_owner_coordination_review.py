@@ -40,8 +40,9 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
     # #371 step 5: Away-style question answering reaches every owner chat's
     # started chats; it answers questions only and never widens permissions.
     assert away_mode.assistant_work(child)
-    # A chat starter runs on Ask whatever its binding says, so its child does too.
-    expected = permission if project else "default"
+    # The child starts in the starter's current mode (#486), also from a
+    # no-project chat; such a chat runs Accept Edits as Ask, so passes on Ask.
+    expected = "default" if not project and permission == "acceptEdits" else permission
     assert database.get_session(child)["permission_mode"] == expected
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)
     assert options.permission_mode == expected
@@ -68,25 +69,39 @@ async def _start(starter, request_id="review", **extra):
     return json.loads(result.text)["session_id"]
 
 
-@pytest.mark.parametrize("case", ["null_binding_bypass_agent", "stored_bypass"])
-async def test_chat_coordinator_in_bypass_never_starts_a_bypass_child(owner, case):
-    """A no-project coordinator may itself run in Bypass (#371 step 4), but the
-    sessions it starts are created on Ask, never its binding or agent default."""
+@pytest.mark.parametrize("case", ["null_binding_agent", "stored"])
+@pytest.mark.parametrize("permission", ["default", "auto", "bypassPermissions"])
+async def test_chat_coordinator_starts_children_in_its_own_mode(owner, case, permission):
+    """A no-project coordinator's started sessions, in a named project or
+    without one, start in the coordinator's current mode (#486, owner
+    decision replacing the #415/#416 rule that started them on Ask)."""
     from app.core import query_options
     _project(owner)
     chat("coord", mode="chat")
-    if case == "null_binding_bypass_agent":
-        database.update_profile("agent", config={"model": "sonnet", "permission_mode": "bypassPermissions"})
+    if case == "null_binding_agent":
+        database.update_profile("agent", config={"model": "sonnet", "permission_mode": permission})
         with get_db() as conn:
             conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id='coord'")
     else:
-        database.set_session_run_binding("coord", permission_mode="bypassPermissions")
+        database.set_session_run_binding("coord", permission_mode=permission)
     coordinator, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id="coord")
-    assert coordinator.permission_mode == "bypassPermissions"
+    assert coordinator.permission_mode == permission
     for child in (await _start("coord", "named", project="Project"), await _start("coord", "chat")):
-        assert database.get_session(child)["permission_mode"] == "default"
+        assert database.get_session(child)["permission_mode"] == permission
         options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)
-        assert options.permission_mode == "default"
+        assert options.permission_mode == permission
+
+
+async def test_chat_coordinator_never_hands_on_a_mode_it_cannot_run(owner):
+    """An unbound chat whose agent says Accept Edits runs on Ask (a chat has
+    no Accept Edits), so a project child it starts runs on Ask too."""
+    _project(owner)
+    chat("coord", mode="chat")
+    database.update_profile("agent", config={"model": "sonnet", "permission_mode": "acceptEdits"})
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id='coord'")
+    child = await _start("coord", "named", project="Project")
+    assert database.get_session(child)["permission_mode"] == "default"
 
 
 @pytest.mark.parametrize("fate", ["live", "deleted", "archived", "settled"])

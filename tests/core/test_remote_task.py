@@ -779,6 +779,30 @@ def test_the_child_runs_at_the_ceiling(world, monkeypatch):
     assert turn_permission_mode(followup["overrides"], database.get_session(child_id)) == "acceptEdits"
 
 
+@pytest.mark.parametrize("mode", ["default", "auto", "bypassPermissions"])
+def test_a_chats_remote_child_starts_in_the_chats_mode(world, monkeypatch, mode):
+    """#486 (owner decision): a no-project chat's Task on another worker
+    starts there in the chat's current mode, binding and ceiling."""
+    target = {**UNRAID, "capabilities": {**UNRAID["capabilities"],
+                                         "remote_task": remote_task.TARGET_DEFAULT_VERSION}}
+    monkeypatch.setattr(runners, "directory", lambda: {"runners": [SELF, target]})
+    database.create_session("chat-caller", "root-agent", title="No-project chat", mode="chat",
+                            permission_mode=mode)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = asyncio.run(td.dispatch_task_tool(
+        {"agent": "research", "prompt": "Find the flaky test.", "worker": "ServerWorker"},
+        caller_session_id="chat-caller"))
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert body["permission_mode"] == mode and body["session_mode"] == "chat"
+    assert result["permission_mode"] == mode
+    row = database.get_session(result["worker_session_id"])
+    assert (row["permission_mode"], row["permission_ceiling"]) == (mode, mode)
+    [turn] = child_turns(row["id"])
+    assert turn["overrides"]["permission_mode"] == turn["overrides"]["_permission_ceiling"] == mode
+
+
 # --- the caller's context window ----------------------------------------------
 
 def _target_version(monkeypatch, version):

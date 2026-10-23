@@ -156,7 +156,7 @@ async def test_automation_session_with_a_null_binding_still_uses_the_agent_mode(
 # ─── finding 3: local dispatch persists the child's binding ─────────────────
 
 
-async def _local_dispatch(monkeypatch, parent_id, **kwargs):
+async def _local_dispatch(monkeypatch, parent_id, profile_id="worker-agent", **kwargs):
     """Drive the real ``dispatch_worker``: real session creation and real
     durable turn submission; only the worker's run is skipped."""
     from app.core import provider_agent as pa, turn_manager, turn_scheduler
@@ -170,7 +170,7 @@ async def _local_dispatch(monkeypatch, parent_id, **kwargs):
         "usage": {}, "error": None, "interrupted": False, "terminal_found": True})
     monkeypatch.setattr(pa, "final_assistant_text", lambda sid: "report")
     monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
-    outcome = await pa.dispatch_worker(parent_session_id=parent_id, profile_id="worker-agent",
+    outcome = await pa.dispatch_worker(parent_session_id=parent_id, profile_id=profile_id,
                                        prompt="do the work", **kwargs)
     assert outcome.ok, outcome.error
     return outcome.session_id
@@ -401,6 +401,198 @@ async def test_start_session_child_of_an_unbound_sender_follows_its_agent(mock_d
     child = database.get_session(result["session_id"])
     assert child["permission_mode"] is None
     assert await _engine_mode(child["id"], turns.get_turn(result["turn_id"]), tmp_path) == BYPASS
+
+
+# ─── #486: a no-project chat passes its mode on (owner decision) ────────────
+#
+# Replaces the #415/#416 rule that started every agent a chat starts on Ask.
+# Each start path, each mode the chat offers: the child's binding (and, for
+# a Task or Swarm worker, its durable ceiling) is the chat's current mode.
+
+CHAT_MODES = ["default", "auto", BYPASS]
+
+
+@pytest.fixture
+def chat_parent(mock_db, monkeypatch):
+    """A no-project chat in ``mode``, with a running owner turn."""
+    from app.core import session_orchestration as orch, turn_manager
+    from app.db import sessions, turns
+
+    _profile("chat-agent", "default")
+    _profile("worker-agent", "default")
+    _profile("reader", "default", allowed_tools=["Read", "Grep", "Glob"])
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
+
+    def make(mode, **fields):
+        sessions.create_session("chat-parent", "chat-agent", title="chat", is_active=True, mode="chat",
+                                permission_mode=mode, **fields)
+        tid = turn_manager.submit("chat-parent", "user", prompt="work", profile_id="chat-agent",
+                                  explicit_permission=True, no_kick=True)
+        turns.start_turn(tid)
+        return "chat-parent"
+
+    return make
+
+
+@pytest.mark.parametrize("mode", CHAT_MODES)
+async def test_task_worker_of_a_chat_starts_in_the_chats_mode(chat_parent, monkeypatch, tmp_path, mode):
+    from app.db import database
+
+    worker = await _local_dispatch(monkeypatch, chat_parent(mode), "reader")
+    row = database.get_session(worker)
+    assert (row["permission_mode"], row["permission_ceiling"]) == (mode, mode)
+    assert await _engine_mode(worker, _first_turn(worker), tmp_path) == mode
+
+
+@pytest.mark.parametrize("mode", CHAT_MODES)
+async def test_swarm_worker_of_a_chat_starts_in_the_chats_mode(chat_parent, monkeypatch, tmp_path, mode):
+    """The real Swarm tool and Task dispatcher; only the worker's run is skipped."""
+    import asyncio
+
+    from fluid.tools.registry import ToolCtx
+
+    from app.core import provider_agent as pa, swarm, task_dispatch
+    from app.db import database
+
+    parent = chat_parent(mode)
+    real_dispatch = pa.dispatch_worker
+    started = []
+
+    async def dispatch_without_run(**kwargs):
+        started.append(kwargs["worker_session_id"])
+        return await real_dispatch(**kwargs)
+
+    for name, value in (("_await_worker_idle", AsyncMock(return_value=None)),
+                        ("_worker_still_working", lambda sid: False),
+                        ("final_turn_outcome", lambda sid: {"usage": {}, "error": None, "interrupted": False,
+                                                            "terminal_found": True}),
+                        ("final_assistant_text", lambda sid: "report"),
+                        ("dispatch_worker", dispatch_without_run)):
+        monkeypatch.setattr(pa, name, value)
+    monkeypatch.setattr("app.core.turn_scheduler.on_task_terminal", AsyncMock())
+    monkeypatch.setattr(task_dispatch, "_await_worker_registration", AsyncMock(return_value=True))
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    swarm.coordinators.pop(parent, None)
+    ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher(parent),
+                         "background_task_started": AsyncMock()})
+    try:
+        outcome = await swarm.make_handler(lambda: parent)(
+            {"action": "start", "tasks": [{"id": "look", "agent": "reader", "prompt": "read it"}]}, ctx)
+        assert not outcome.is_error, outcome
+        await asyncio.wait_for(swarm.coordinators[parent].jobs[outcome.background_task.task_id], 30)
+    finally:
+        swarm.coordinators.pop(parent, None)
+        swarm.workers.clear()
+        swarm.worker_jobs.clear()
+    [worker] = started
+    row = database.get_session(worker)
+    assert (row["permission_mode"], row["permission_ceiling"]) == (mode, mode)
+    assert await _engine_mode(worker, _first_turn(worker), tmp_path) == mode
+
+
+@pytest.mark.parametrize("mode", CHAT_MODES)
+async def test_start_session_child_of_a_chat_starts_in_the_chats_mode(chat_parent, tmp_path, mode):
+    from app.core import session_orchestration as orch
+    from app.db import database, turns
+
+    result = orch._queue(chat_parent(mode), {"title": "Child", "prompt": "go", "request_id": "c1"}, "start")
+    child = database.get_session(result["session_id"])
+    assert child["permission_mode"] == mode
+    assert await _engine_mode(child["id"], turns.get_turn(result["turn_id"]), tmp_path) == mode
+
+
+@pytest.mark.parametrize("mode", CHAT_MODES)
+async def test_remote_start_session_from_a_chat_carries_the_chats_mode(chat_parent, mode):
+    from app.core import session_orchestration as orch
+
+    sender = chat_parent(mode)
+    remote = {"device_id": "dev-2", "device_name": "DesktopWorker",
+              "capabilities": {"start_session_permissions": 1}}
+    with patch.object(orch, "_remote_worker", return_value=remote):
+        planned = orch._queue(sender, {"title": "Child", "prompt": "go", "request_id": "c2",
+                                       "worker": "DesktopWorker"}, "start")
+    assert planned["body"]["permission_mode"] == mode
+
+
+async def test_start_session_child_of_a_chat_stays_under_its_turn_ceiling(chat_parent, tmp_path):
+    """A chat in Bypass whose turn carries an Auto ceiling starts children in Auto."""
+    import json
+
+    from app.core import session_orchestration as orch
+    from app.db import database, turns
+    from app.db.base import get_db
+
+    sender = chat_parent(BYPASS)
+    live = turns.get_latest_turn(sender)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET overrides=%s WHERE id=%s", (
+            json.dumps({**(live.get("overrides") or {}), "_permission_ceiling": "auto"}), live["id"]))
+    result = orch._queue(sender, {"title": "Child", "prompt": "go", "request_id": "c3"}, "start")
+    assert database.get_session(result["session_id"])["permission_mode"] == "auto"
+
+
+async def test_task_worker_of_a_chat_stays_under_its_stored_ceiling(chat_parent, monkeypatch):
+    from app.db import database
+
+    worker = await _local_dispatch(monkeypatch, chat_parent(BYPASS, permission_ceiling="auto"), "reader")
+    row = database.get_session(worker)
+    assert (row["permission_mode"], row["permission_ceiling"]) == ("auto", "auto")
+
+
+async def test_bypass_children_still_get_the_paid_generation_confirmation(chat_parent, monkeypatch):
+    """Bypass passing down never waives the paid-generation confirmation: a
+    Bypass chat's Task worker and its StartSession chat run unattended for
+    generation, so a priced-above-threshold run is skipped, never submitted,
+    even when the call claims it was confirmed."""
+    from dataclasses import replace
+
+    from app.core import session_orchestration as orch
+    from app.core.generation_resolver import Candidate, Resolver, RunContext
+    from app.core.query_options import _is_interactive_run
+    from app.db import database, turns
+
+    parent = chat_parent(BYPASS)
+    worker = await _local_dispatch(monkeypatch, parent, "reader")
+    started = orch._queue(parent, {"title": "Child", "prompt": "go", "request_id": "g1"}, "start")["session_id"]
+    expensive = Candidate("fal", "account-a", "worker-a", "model-a", "image", True, options={},
+                          price={"currency": "USD", "unit": "item", "amount": "5.00", "total": "5.00",
+                                 "status": "estimated"})
+    calls = []
+
+    class Backend:
+        async def catalog(self, kind, **kw):
+            return [expensive]
+
+        async def prepare(self, candidate, options, prompt):
+            return replace(candidate, options=options)
+
+        async def reserve(self, candidate, context):
+            calls.append("reserve")
+            return True
+
+        async def execute(self, candidate, prompt, context):
+            calls.append("execute")
+            return {"success": True}
+
+    for child in (worker, started):
+        row = database.get_session(child)
+        assert row["permission_mode"] == BYPASS
+        turn = turns.get_latest_turn(child)
+        # Built as query_options builds it for the child's turn.
+        context = RunContext(session_id=child, owner=True, remembered_choice=expensive.choice(),
+                             unattended=not _is_interactive_run({"turn_source": turn["source"]}, row))
+        assert context.unattended
+        output = await Resolver(Backend()).generate("image", {"prompt": "a cat", "confirmed": True}, context)
+        assert (output["status"], output["reason"]) == ("skipped", "needs_confirmation")
+        assert "confirmation_token" not in output
+    # The Bypass chat itself, typed by the owner, is asked first too.
+    row = database.get_session(parent)
+    assert _is_interactive_run({"turn_source": "user"}, row)
+    context = RunContext(session_id=parent, owner=True, unattended=False)
+    output = await Resolver(Backend()).generate("image", {"prompt": "a cat", "source": "fal"}, context)
+    assert output["status"] == "needs-confirmation"
+    assert calls == []
 
 
 # ─── finding 2: network receipt grants only a stated owner send ─────────────
