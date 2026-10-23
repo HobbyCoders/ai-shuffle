@@ -5690,20 +5690,18 @@ def _delegated_tool_predicate(options: SessionOptions):
 
     The delegated counterpart of ``_tool_predicate``; None means unrestricted.
     """
-    from app.core.tool_access import tool_permitted
-
     surface = _delegated_surface(options)
     blocked = _delegated_blocklist(options)
     if not surface and not blocked:
         return None
 
     def permit(name: str) -> bool:
-        if not tool_permitted(name, surface, blocked):
+        if not _bridged_tool_permitted(name, surface, blocked):
             return False
         # Swarm dispatches every item through Task: without Task it could
         # only refuse (the native leg refuses its start), so it is not offered.
         if name == _BRIDGED_SWARM:
-            return _bridged_task_permitted(surface, blocked)
+            return _bridged_tool_permitted(_BRIDGED_TASK, surface, blocked)
         return True
 
     return permit
@@ -5855,23 +5853,21 @@ def _delegated_task_permitted(options: SessionOptions, surface: Optional[list]) 
     """Whether this session may dispatch through the bridged Task."""
     if _session_mode(options) == "chat":
         return False
-    return _bridged_task_permitted(surface, _delegated_blocklist(options))
+    return _bridged_tool_permitted(_BRIDGED_TASK, surface, _delegated_blocklist(options))
 
 
-def _bridged_task_permitted(surface: Optional[list], blocked: Optional[list]) -> bool:
-    """Whether fluid's bundled bridge would serve Task under these lists.
+def _bridged_tool_permitted(name: str, surface: Optional[list], blocked: Optional[list]) -> bool:
+    """Whether fluid's bundled bridge would serve a tool under these lists.
 
     Mirrors ``DelegatedLoop._bridge_tool_permitted``, which checks both the
     registry name and the CLI's ``mcp__fluid_bundled__`` spelling: a deny
-    entry matching either spelling withholds Task, and an allow entry
-    matching either serves it. Checking only the registry name would let a
-    stored ``mcp__fluid_bundled__mcp__builtins__Task`` (or a glob aimed at
-    that spelling) withhold Task while Swarm, which dispatches through it,
-    stayed on.
+    entry matching either spelling withholds the tool, and an allow entry
+    matching either serves it. The prompt must use the same rule or it can
+    advertise tools the bridge withholds.
     """
     from app.core.tool_access import matches_any, tool_permitted
 
-    spellings = (_BRIDGED_TASK, _BUNDLED_CLI_PREFIX + _BRIDGED_TASK)
+    spellings = (name, _BUNDLED_CLI_PREFIX + name)
     if blocked and any(matches_any(s, blocked) for s in spellings):
         return False
     return any(tool_permitted(s, surface, None) for s in spellings)

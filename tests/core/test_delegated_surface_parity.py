@@ -392,6 +392,32 @@ def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
     assert loop._bridge_tool_permitted("mcp__builtins__Recall")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked", [
+    "mcp__builtins__Remember",
+    "mcp__fluid_bundled__mcp__builtins__Remember",
+    "mcp__fluid_bundled__*__Remember",
+])
+async def test_blocked_bridged_tool_is_absent_from_prompt(tmp_path, builtins_server, blocked):
+    options = _options(tmp_path, {"builtins": builtins_server})
+    registry = await ha.HarnessAdapter()._build_registry(options, native=False)
+    original = ha._delegated_append_text("APPEND", options, registry) or ""
+    assert "__Remember" in original
+    assert ha._MEMORY_BLOCK_CORE in original
+    options.disallowed_tools = [blocked]
+    loop = _loop(options, registry)
+    try:
+        assert registry.get("mcp__builtins__Remember") is not None
+        assert not loop._bridge_tool_permitted("mcp__builtins__Remember")
+        assert loop._bridge_tool_permitted("mcp__builtins__Recall")
+        text = ha._delegated_append_text("APPEND", options, registry) or ""
+        assert "__Remember" not in text
+        assert "__ListAgents" in text  # unrelated app tools remain advertised
+        assert ha._MEMORY_BLOCK_CORE not in text
+    finally:
+        await loop.aclose()
+
+
 def test_allow_mode_walls_only_names_this_cli_can_show(tmp_path):
     from app.core import cli_tool_surface
 

@@ -297,6 +297,14 @@
           "how": "Start disposable installs on Windows and ServerWorker, never against live DATA_DIR. Give the test worker harmless APP_DSN and SESSION_SECRET sentinel environment variables before launch. In a throwaway chat, run a child Python assertion through Bash and Monitor that those names are absent; also invoke PowerShell on Windows. Generate keys through normal startup and inspect only ACL/mode metadata on the disposable files. Archive the chats and stop the disposable installs. Never dump environments or read production credential files.",
           "pass_when": "Real Bash, Monitor and PowerShell children inherit no sentinel names; generated key files have 0600/0700 POSIX modes or protected current-user-only Windows ACLs. Same-user file access remains possible and is not a claimed denial test.",
           "past_bug": "#1957: Monitor copied the full server environment; Python key writers had no Windows ACL restriction. OS-user isolation remains a separate owner decision."
+        },
+        {
+          "id": "harness-basics.6",
+          "check": "Delegated prompt respects CLI-spelling tool blocks",
+          "kind": "owner",
+          "how": "Create a throwaway profile with tool selection mode disallow and blocked tool mcp__fluid_bundled__mcp__builtins__Remember. Start a fresh delegated Claude CLI session with that profile on a real worker. Inspect the actual assembled system prompt and bundled bridge tool list, not the model's recollection. Attempt Remember through that session's bundled bridge with a harmless unique test marker. Compare with an unblocked throwaway session, then archive both sessions and remove only the profile created for this check. Keep prompt artifacts private and do not read credential files.",
+          "pass_when": "The unblocked control advertises Remember. In the blocked session, the system prompt does not list Remember as available or include memory-writing guidance; the bundled bridge omits mcp__builtins__Remember and refuses a direct call to it without writing the marker. Unrelated allowed tools remain listed and callable.",
+          "past_bug": "#468: a CLI-spelling block withheld Remember at the bridge but the delegated system prompt still advertised it"
         }
       ]
     }
