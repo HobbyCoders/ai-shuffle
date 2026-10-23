@@ -3957,6 +3957,16 @@ async def _stream_to_websocket_impl(
         state.interrupt_requested = False
         state.last_activity = datetime.now(timezone.utc)
 
+        # The turn may have edited, staged or committed files in its checkout:
+        # the next git status read there (session panel, worktree list) is
+        # fresh instead of waiting out a cache or a poll window (#436).
+        try:
+            from app.core.git_service import git_service as _git_service
+            if getattr(options, "cwd", None):
+                _git_service.invalidate_status_cache(str(options.cwd))
+        except Exception:  # noqa: BLE001 — never let cache upkeep fail a turn
+            logger.debug("[WS] git status invalidation failed for %s", session_id, exc_info=True)
+
         # Clear stale broadcast ref — will be set fresh on next query
         if state.callback_refs:
             state.callback_refs["broadcast_func"] = None

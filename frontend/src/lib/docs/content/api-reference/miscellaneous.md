@@ -191,7 +191,7 @@ curl http://localhost:8000/api/v1/projects/proj_abc123/git/status \
 }
 ```
 
-A staged file's `status` is the git index code: `A` (added), `M` (modified), `D` (deleted), `R` (renamed), `C` (copied) or `T` (type changed, for example a file replaced by a symlink). A rename may instead appear as two entries, `D` for the old path and `A` for the new one, because the faster status reader does not detect renames. The response also carries `head_commit`, `remote_url` and `differs_from_base`.
+A staged file's `status` is the git index code: `A` (added), `M` (modified), `D` (deleted), `R` (renamed, listed under the new path), `C` (copied) or `T` (type changed, for example a file replaced by a symlink). `untracked` lists a directory that holds only new files once, as `dir/`; `/git/changed-files` lists each file in it. The response also carries `head_commit`, `remote_url` and `differs_from_base`. If git does not answer in time, the last status read in the previous five minutes is returned; with none, the request fails with `503`.
 
 ### POST /api/v1/projects/{project_id}/git/commit
 
@@ -425,7 +425,7 @@ uncommitted work.
 
 | Method | Path | Query | Notes |
 |--------|------|-------|-------|
-| `GET` | `/git/worktrees` | `include_status` (default `true`), `focus_worktree_id` | Returns `worktrees` and `total`. With `include_status`, each existing worktree has `git_status` (`is_clean`, `current_branch`, `modified_count`, `staged_count`, `untracked_count`), `status_checked_at` and `status_error`. Statuses come from a server-side cache: only worktrees with recent session activity, or the one named in `focus_worktree_id`, are re-read, so an idle worktree's status can be older than the response. `status_error` is set when the last read failed; that worktree is retried on a back-off of up to 30 minutes |
+| `GET` | `/git/worktrees` | `include_status` (default `true`), `focus_worktree_id` | Returns `worktrees` and `total`. With `include_status`, each existing worktree has `git_status` (`is_clean`, `current_branch`, `modified_count`, `staged_count`, `untracked_count`), `status_checked_at` and `status_error`. Statuses come from a server-side cache: only worktrees with recent session activity, the one named in `focus_worktree_id`, and any whose checkout changed (an agent turn ended in it or a Git action ran there) are re-read, so an idle worktree's status can be older than the response. Rows with status `completed`, `archived` or `deleted` are never read. `status_error` is set when the last read failed; that worktree is retried on a back-off of up to 30 minutes |
 | `GET` | `/git/worktrees/{worktree_id}` | | One worktree |
 | `DELETE` | `/git/worktrees/{worktree_id}` | `keep_branch` (default `true`) | Remove the worktree folder; `keep_branch=false` also deletes its branch. Returns `success` and `message` |
 | `POST` | `/git/worktrees/{worktree_id}/reopen` | | Recreate a removed worktree on the same branch (a new branch from the default branch if it was deleted) so its sessions can continue. `400` if it cannot be recreated |

@@ -23,16 +23,6 @@ GIT_IDENTITY = {
     "GIT_COMMITTER_EMAIL": "author@example.invalid",
 }
 
-# Modules that bind ``_native_reader`` at import time. Switching the backend
-# means patching every one of them.
-_NATIVE_READER_MODULES = (
-    "app.core.git_service",
-    "app.core.git_branch_ops",
-    "app.core.git_diff_ops",
-    "app.core.git_worktree_ops",
-)
-
-
 def hermetic_git_env(monkeypatch, tmp_path: Path) -> None:
     """Isolate git from the machine's global/system config for this test."""
     empty_config = tmp_path / ".gitconfig-empty"
@@ -109,25 +99,6 @@ def clone(tmp_path: Path, bare: Path, name: str) -> Path:
     git(target, "config", "user.name", GIT_IDENTITY["GIT_AUTHOR_NAME"])
     git(target, "config", "user.email", GIT_IDENTITY["GIT_AUTHOR_EMAIL"])
     return target
-
-
-def use_backend(monkeypatch, backend: str) -> None:
-    """Route GitService reads through pygit2 (``native``) or the git CLI (``cli``)."""
-    import importlib
-
-    from app.core import git_cache
-
-    if backend == "native":
-        from app.core.git_native import GitNativeReader
-
-        reader = GitNativeReader()
-    elif backend == "cli":
-        reader = None
-    else:  # pragma: no cover - programming error in a test
-        raise ValueError(backend)
-    for name in _NATIVE_READER_MODULES:
-        monkeypatch.setattr(importlib.import_module(name), "_native_reader", reader)
-    git_cache._git_cache.invalidate_prefix("")
 
 
 @contextmanager

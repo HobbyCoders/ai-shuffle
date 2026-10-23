@@ -12,6 +12,7 @@ import subprocess
 import pytest
 
 from app.core import git_commit_ops
+from app.core.git_cache import _git_cache
 from app.core.git_service import GitService
 from tests.git_repo_helpers import (
     auth_required_http_remote,
@@ -21,17 +22,14 @@ from tests.git_repo_helpers import (
     hermetic_git_env,
     init_repo,
     make_origin,
-    use_backend,
     write,
 )
 
 
-@pytest.fixture(params=["native", "cli"])
-def svc(request, monkeypatch, tmp_path):
+@pytest.fixture
+def svc(monkeypatch, tmp_path):
     hermetic_git_env(monkeypatch, tmp_path)
-    if request.param == "native":
-        pytest.importorskip("pygit2")
-    use_backend(monkeypatch, request.param)
+    _git_cache.invalidate_prefix("")
     return GitService()
 
 

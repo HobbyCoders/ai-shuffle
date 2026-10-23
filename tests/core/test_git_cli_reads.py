@@ -1,10 +1,9 @@
-"""GitService read paths against real repositories, through both backends.
+"""GitService read paths against real repositories.
 
-Every read has two implementations: pygit2 (``git_native.GitNativeReader``) and
-the git CLI fallback in the service mixins. Each test here runs against a real
-temporary repository once per backend, so the two stay interchangeable: same
-keys, same paths, same edge-case behaviour (empty repo, detached HEAD,
-conflicts, renames, binary and non-UTF-8 file names).
+Every read runs as a git CLI subprocess (no in-process libgit2, #436). Each
+test runs against a real temporary repository: keys, paths and edge-case
+behaviour (empty repo, detached HEAD, conflicts, renames, binary and non-UTF-8
+file names).
 """
 
 import json
@@ -13,8 +12,7 @@ import shutil
 
 import pytest
 
-from app.core import git_native
-from app.core.git_native import HAS_PYGIT2, GitNativeReader
+from app.core.git_cache import _git_cache
 from app.core.git_service import GitService
 from tests.git_repo_helpers import (
     clone,
@@ -24,14 +22,8 @@ from tests.git_repo_helpers import (
     init_repo,
     make_origin,
     non_utf8_name_supported,
-    use_backend,
     write,
 )
-
-BACKENDS = [
-    pytest.param("native", marks=pytest.mark.skipif(not HAS_PYGIT2, reason="pygit2 unavailable")),
-    "cli",
-]
 
 STATUS_KEYS = {
     "is_git_repo", "current_branch", "is_detached", "head_commit", "remote_url",
@@ -40,11 +32,10 @@ STATUS_KEYS = {
 }
 
 
-@pytest.fixture(params=BACKENDS)
-def backend(request, monkeypatch, tmp_path):
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch, tmp_path):
     hermetic_git_env(monkeypatch, tmp_path)
-    use_backend(monkeypatch, request.param)
-    return request.param
+    _git_cache.invalidate_prefix("")
 
 
 @pytest.fixture
@@ -53,7 +44,7 @@ def svc():
 
 
 @pytest.fixture
-def repo(tmp_path, backend):
+def repo(tmp_path):
     return init_repo(tmp_path / "repo", {
         "a.txt": "".join(f"line {i}\n" for i in range(20)),
         "del.txt": "delete me\n",
@@ -77,7 +68,7 @@ def _staged(status):
 # =============================================================================
 
 
-def test_status_reports_index_codes_worktree_changes_and_untracked(svc, repo, backend):
+def test_status_reports_index_codes_worktree_changes_and_untracked(svc, repo):
     git(repo, "rm", "-q", "del.txt")                     # D  (staged delete)
     write(repo / "mod.txt", "one\ntwo\n")
     git(repo, "add", "mod.txt")
@@ -95,7 +86,7 @@ def test_status_reports_index_codes_worktree_changes_and_untracked(svc, repo, ba
     assert status["is_detached"] is False
     assert len(status["head_commit"]) == 12
     assert _staged(status) == {("del.txt", "D"), ("mod.txt", "M"), ("new.txt", "A")}
-    # An unstaged deletion is a worktree modification in both backends.
+    # An unstaged deletion is a worktree modification.
     assert sorted(status["modified"]) == ["keep.txt", "mod.txt"]
     assert status["untracked"] == ["loose.txt"]
     assert status["conflicts"] == []
@@ -103,29 +94,25 @@ def test_status_reports_index_codes_worktree_changes_and_untracked(svc, repo, ba
     json.dumps(status)  # the API serializes this dict verbatim
 
 
-def test_clean_repository_is_clean(svc, repo, backend):
+def test_clean_repository_is_clean(svc, repo):
     status = _fresh(svc, repo)
     assert status["is_clean"] is True
     assert status["staged"] == status["modified"] == status["untracked"] == []
 
 
-def test_staged_rename_reports_usable_paths(svc, repo, backend):
+def test_staged_rename_reports_usable_paths(svc, repo):
     git(repo, "mv", "a.txt", "renamed.txt")
 
     staged = _staged(_fresh(svc, repo))
 
-    if backend == "cli":
-        # Porcelain -z gives the destination path with the R code; the old
-        # "a.txt -> renamed.txt" display string is not a path at all.
-        assert staged == {("renamed.txt", "R")}
-    else:
-        # libgit2 status does not pair renames: delete + add.
-        assert staged == {("a.txt", "D"), ("renamed.txt", "A")}
+    # Porcelain -z gives the destination path with the R code; the old
+    # "a.txt -> renamed.txt" display string is not a path at all.
+    assert staged == {("renamed.txt", "R")}
     for path, _code in staged:
         assert " -> " not in path
 
 
-def test_worktree_rename_of_intent_to_add_file(svc, repo, backend):
+def test_worktree_rename_of_intent_to_add_file(svc, repo):
     """``git add -N`` after a rename gives porcelain ``" R new\\0old\\0"``: the
     source is a separate -z entry for a worktree rename too, and must never be
     parsed as a status line (``MM.txt`` would read as a phantom ``MM`` entry)."""
@@ -135,20 +122,15 @@ def test_worktree_rename_of_intent_to_add_file(svc, repo, backend):
 
     status = _fresh(svc, repo)
 
-    # Both backends: the new path and the vanished source are worktree changes.
+    # The new path and the vanished source are both worktree changes.
     assert sorted(status["modified"]) == ["MM.txt", "new file.txt"]
     assert status["untracked"] == status["conflicts"] == []
-    if backend == "cli":
-        assert _staged(status) == set()
-    else:
-        # libgit2 reports an intent-to-add entry as an index addition.
-        assert _staged(status) == {("new file.txt", "A")}
+    assert _staged(status) == set()
 
 
-def test_plain_intent_to_add_file_is_a_worktree_change(svc, repo, backend):
+def test_plain_intent_to_add_file_is_a_worktree_change(svc, repo):
     """R8-10: ``git add -N`` gives porcelain ``" A n.txt"``. The CLI parser
-    dropped a worktree ``A`` from every list, so the checkout read clean while
-    git_native listed the file."""
+    dropped a worktree ``A`` from every list, so the checkout read clean."""
     write(repo / "n.txt", "new\n")
     git(repo, "add", "-N", "n.txt")
 
@@ -157,16 +139,10 @@ def test_plain_intent_to_add_file_is_a_worktree_change(svc, repo, backend):
     assert status["modified"] == ["n.txt"]
     assert status["untracked"] == status["conflicts"] == []
     assert status["is_clean"] is False
-    if backend == "cli":
-        assert _staged(status) == set()
-    else:
-        # libgit2 reports an intent-to-add entry as an index addition.
-        assert _staged(status) == {("n.txt", "A")}
+    assert _staged(status) == set()
 
 
-def test_cli_status_reports_copies_with_the_copy_destination(svc, repo, backend):
-    if backend != "cli":
-        pytest.skip("libgit2 status has no copy detection")
+def test_cli_status_reports_copies_with_the_copy_destination(svc, repo):
     git(repo, "config", "status.renames", "copies")
     shutil.copy(repo / "a.txt", repo / "copy.txt")
     write(repo / "a.txt", (repo / "a.txt").read_text() + "more\n")
@@ -177,7 +153,7 @@ def test_cli_status_reports_copies_with_the_copy_destination(svc, repo, backend)
     assert staged == {("a.txt", "M"), ("copy.txt", "C")}
 
 
-def test_non_ascii_path_is_reported_verbatim(svc, repo, backend):
+def test_non_ascii_path_is_reported_verbatim(svc, repo):
     write(repo / "café menu.txt", "x\n")
     write(repo / "日本.md", "y\n")
 
@@ -186,7 +162,7 @@ def test_non_ascii_path_is_reported_verbatim(svc, repo, backend):
     assert sorted(status["untracked"]) == sorted(["café menu.txt", "日本.md"])
 
 
-def test_non_utf8_path_is_serializable(svc, repo, backend):
+def test_non_utf8_path_is_serializable(svc, repo):
     if not non_utf8_name_supported(repo):
         pytest.skip("filesystem rejects non-UTF-8 names")
     with open(os.path.join(os.fsencode(repo), b"bad\xff.txt"), "wb") as fh:
@@ -199,20 +175,6 @@ def test_non_utf8_path_is_serializable(svc, repo, backend):
     json.dumps(status, ensure_ascii=False).encode("utf-8")
 
 
-def test_non_utf8_guard_bites_when_disabled(svc, repo, backend, monkeypatch):
-    """With the display-path guard disabled the native status is unserializable."""
-    if backend != "native":
-        pytest.skip("guard lives in the native reader")
-    if not non_utf8_name_supported(repo):
-        pytest.skip("filesystem rejects non-UTF-8 names")
-    monkeypatch.setattr(git_native, "_display_path", lambda p: p)
-    with open(os.path.join(os.fsencode(repo), b"bad\xff.txt"), "wb") as fh:
-        fh.write(b"x\n")
-
-    status = _fresh(svc, repo)
-
-    with pytest.raises(UnicodeEncodeError):
-        json.dumps(status, ensure_ascii=False).encode("utf-8")
 
 
 def _conflicting_merge(repo, base_rel="c.txt"):
@@ -223,7 +185,7 @@ def _conflicting_merge(repo, base_rel="c.txt"):
     git(repo, "merge", "other", check=False)
 
 
-def test_content_conflict_is_listed_only_as_conflict(svc, repo, backend):
+def test_content_conflict_is_listed_only_as_conflict(svc, repo):
     commit_file(repo, "c.txt", "base\n", "base")
     _conflicting_merge(repo)
 
@@ -235,7 +197,7 @@ def test_content_conflict_is_listed_only_as_conflict(svc, repo, backend):
     assert svc._get_conflict_files(str(repo)) == ["c.txt"]
 
 
-def test_add_add_and_delete_modify_conflicts(svc, repo, backend):
+def test_add_add_and_delete_modify_conflicts(svc, repo):
     # add/add: both branches create the same path.
     _conflicting_merge(repo, "both.txt")
     add_add = _fresh(svc, repo)
@@ -257,7 +219,7 @@ def test_add_add_and_delete_modify_conflicts(svc, repo, backend):
     assert _staged(status) == set()
 
 
-def test_detached_head(svc, repo, backend):
+def test_detached_head(svc, repo):
     first = git(repo, "rev-parse", "HEAD")
     commit_file(repo, "later.txt", "x\n", "later")
     git(repo, "checkout", "-q", first)
@@ -272,7 +234,7 @@ def test_detached_head(svc, repo, backend):
     assert svc.get_ahead_behind_counts(str(repo)) == (0, 0)
 
 
-def test_empty_repository_status_and_stats(svc, tmp_path, backend):
+def test_empty_repository_status_and_stats(svc, tmp_path):
     repo = init_repo(tmp_path / "empty", commit=False)
     write(repo / "first.txt", "a\nb\n")
     write(repo / "loose.txt", "c\n")
@@ -286,8 +248,7 @@ def test_empty_repository_status_and_stats(svc, tmp_path, backend):
     assert status["is_detached"] is False
     assert _staged(status) == {("first.txt", "A")}
     assert status["untracked"] == ["loose.txt"]
-    # Regression: pygit2 ``Index.diff_to_tree()`` needs a tree; with an unborn
-    # HEAD the native reader silently reported zero staged changes.
+    # An unborn HEAD still diffs the index against the empty tree.
     assert svc.get_diff_stats(str(repo)) == {"additions": 2, "deletions": 0, "files_changed": 1}
     assert svc.get_per_file_diff_stats(str(repo)) == [
         {"file": "first.txt", "additions": 2, "deletions": 0, "is_binary": False, "staged": True},
@@ -299,23 +260,9 @@ def test_empty_repository_status_and_stats(svc, tmp_path, backend):
     assert svc.get_branch_log(str(repo)) == ("", "")
 
 
-def test_empty_tree_guard_bites_when_disabled(svc, tmp_path, backend, monkeypatch):
-    """Without the empty-tree base, an unborn repo's staged file vanishes."""
-    if backend != "native":
-        pytest.skip("guard lives in the native reader")
-
-    def _broken(repo):
-        raise TypeError("Index.diff_to_tree() missing 1 required positional argument")
-
-    monkeypatch.setattr(git_native, "_empty_tree", _broken)
-    repo = init_repo(tmp_path / "empty", commit=False)
-    write(repo / "first.txt", "a\nb\n")
-    git(repo, "add", "first.txt")
-
-    assert svc.get_diff_stats(str(repo))["files_changed"] == 0
 
 
-def test_non_repository_and_nested_directory(svc, tmp_path, repo, backend):
+def test_non_repository_and_nested_directory(svc, tmp_path, repo):
     plain = tmp_path / "plain"
     plain.mkdir()
     nested = repo / "sub"
@@ -339,7 +286,7 @@ def test_non_repository_and_nested_directory(svc, tmp_path, repo, backend):
 # =============================================================================
 
 
-def test_ahead_behind_unpushed_and_base_tree(svc, tmp_path, repo, backend):
+def test_ahead_behind_unpushed_and_base_tree(svc, tmp_path, repo):
     bare = make_origin(tmp_path, repo)
     git(repo, "checkout", "-q", "-b", "feature")
     commit_file(repo, "f.txt", "1\n", "f1")
@@ -367,7 +314,7 @@ def test_ahead_behind_unpushed_and_base_tree(svc, tmp_path, repo, backend):
     assert (status["ahead"], status["behind"]) == (3, 1)
 
 
-def test_commits_that_cancel_out_do_not_differ_from_base(svc, repo, backend):
+def test_commits_that_cancel_out_do_not_differ_from_base(svc, repo):
     git(repo, "checkout", "-q", "-b", "noop")
     commit_file(repo, "mod.txt", "changed\n", "change")
     commit_file(repo, "mod.txt", "one\n", "revert")
@@ -384,7 +331,7 @@ def test_commits_that_cancel_out_do_not_differ_from_base(svc, repo, backend):
 # =============================================================================
 
 
-def test_diff_stats_staged_unstaged_and_binary(svc, repo, backend):
+def test_diff_stats_staged_unstaged_and_binary(svc, repo):
     write(repo / "mod.txt", "one\ntwo\n")
     git(repo, "add", "mod.txt")                                  # staged +1
     write(repo / "mod.txt", "one\ntwo\nthree\n")                 # unstaged +1
@@ -398,7 +345,7 @@ def test_diff_stats_staged_unstaged_and_binary(svc, repo, backend):
     assert staged_only == {"additions": 1, "deletions": 0, "files_changed": 1}
 
 
-def test_per_file_stats_split_staged_and_flag_binary(svc, repo, backend):
+def test_per_file_stats_split_staged_and_flag_binary(svc, repo):
     write(repo / "mod.txt", "one\ntwo\n")
     git(repo, "add", "mod.txt")
     write(repo / "mod.txt", "one\ntwo\nthree\n")
@@ -415,7 +362,7 @@ def test_per_file_stats_split_staged_and_flag_binary(svc, repo, backend):
     ]
 
 
-def test_per_file_stats_use_status_paths_for_renames_and_unicode(svc, repo, backend):
+def test_per_file_stats_use_status_paths_for_renames_and_unicode(svc, repo):
     (repo / "dir with space").mkdir()
     git(repo, "mv", "a.txt", "dir with space/rénamed.txt")
     write(repo / "café.txt", "x\n")
@@ -432,7 +379,7 @@ def test_per_file_stats_use_status_paths_for_renames_and_unicode(svc, repo, back
     assert not any("=>" in p or p.startswith('"') for p in stat_paths)
 
 
-def test_diff_stats_are_cached_until_invalidated(svc, repo, backend):
+def test_diff_stats_are_cached_until_invalidated(svc, repo):
     first = svc.get_diff_stats(str(repo))
     write(repo / "mod.txt", "one\ntwo\n")
     assert svc.get_diff_stats(str(repo)) == first
@@ -445,7 +392,7 @@ def test_diff_stats_are_cached_until_invalidated(svc, repo, backend):
 # =============================================================================
 
 
-def test_file_diff_tracked_staged_and_unstaged(svc, repo, backend):
+def test_file_diff_tracked_staged_and_unstaged(svc, repo):
     write(repo / "mod.txt", "one\nstaged\n")
     git(repo, "add", "mod.txt")
     write(repo / "mod.txt", "one\nstaged\nunstaged\n")
@@ -460,7 +407,7 @@ def test_file_diff_tracked_staged_and_unstaged(svc, repo, backend):
     assert unstaged["is_binary"] is staged["is_binary"] is False
 
 
-def test_file_diff_binary_tracked_and_untracked(svc, repo, backend):
+def test_file_diff_binary_tracked_and_untracked(svc, repo):
     write(repo / "img.bin", b"\x00\x09" * 10)
     write(repo / "new.bin", b"\x00\xff" * 10)
 
@@ -470,7 +417,7 @@ def test_file_diff_binary_tracked_and_untracked(svc, repo, backend):
         assert result["diff"] == "Binary file (not displayable)"
 
 
-def test_file_diff_untracked_text_is_synthesized(svc, repo, backend):
+def test_file_diff_untracked_text_is_synthesized(svc, repo):
     write(repo / "fresh.txt", "alpha\nbeta\n")
 
     diff = svc.get_file_diff(str(repo), "fresh.txt")["diff"]
@@ -480,11 +427,9 @@ def test_file_diff_untracked_text_is_synthesized(svc, repo, backend):
     assert "+alpha\n+beta\n" in diff
 
 
-def test_cli_untracked_diff_treats_an_option_like_name_as_a_path(svc, repo, backend):
+def test_cli_untracked_diff_treats_an_option_like_name_as_a_path(svc, repo):
     """R8-9: the CLI fallback's numstat for an untracked file had no ``--``, so
     a file named ``--output=<x>`` made ``git diff`` create or truncate <x>."""
-    if backend != "cli":
-        pytest.skip("the git CLI fallback only")
     name = "--output=victim.txt"
     write(repo / name, "alpha\n")
 
@@ -494,7 +439,7 @@ def test_cli_untracked_diff_treats_an_option_like_name_as_a_path(svc, repo, back
     assert "+alpha" in result["diff"]
 
 
-def test_file_diff_large_file_is_truncated(svc, repo, backend):
+def test_file_diff_large_file_is_truncated(svc, repo):
     write(repo / "a.txt", "changed line\n" * 5000)
 
     result = svc.get_file_diff(str(repo), "a.txt", max_chars=1000)
@@ -504,7 +449,7 @@ def test_file_diff_large_file_is_truncated(svc, repo, backend):
     assert len(result["diff"]) < 1100
 
 
-def test_file_diff_of_staged_rename(svc, repo, backend):
+def test_file_diff_of_staged_rename(svc, repo):
     git(repo, "mv", "a.txt", "renamed.txt")
 
     result = svc.get_file_diff(str(repo), "renamed.txt", staged=True)
@@ -514,7 +459,7 @@ def test_file_diff_of_staged_rename(svc, repo, backend):
 
 
 @pytest.mark.parametrize("kind", ["relative", "absolute", "symlink"])
-def test_file_diff_never_reads_outside_the_repository(svc, tmp_path, repo, backend, kind, request):
+def test_file_diff_never_reads_outside_the_repository(svc, tmp_path, repo, kind, request):
     secret = tmp_path / "secret.txt"
     secret.write_text("TOP SECRET\n")
     if kind == "symlink":
@@ -528,11 +473,11 @@ def test_file_diff_never_reads_outside_the_repository(svc, tmp_path, repo, backe
     )
 
 
-def test_file_diff_unknown_file_is_empty(svc, repo, backend):
+def test_file_diff_unknown_file_is_empty(svc, repo):
     assert svc.get_file_diff(str(repo), "nope.txt")["diff"] == ""
 
 
-def test_diff_text_combines_and_truncates(svc, repo, backend):
+def test_diff_text_combines_and_truncates(svc, repo):
     write(repo / "mod.txt", "one\nstaged\n")
     git(repo, "add", "mod.txt")
     write(repo / "keep.txt", "keep\nunstaged\n")
@@ -551,7 +496,7 @@ def test_diff_text_combines_and_truncates(svc, repo, backend):
 # =============================================================================
 
 
-def test_list_branches_upstreams_and_ordering(svc, tmp_path, repo, backend):
+def test_list_branches_upstreams_and_ordering(svc, tmp_path, repo):
     make_origin(tmp_path, repo)
     git(repo, "checkout", "-q", "-b", "pushed")
     commit_file(repo, "p.txt", "p\n", "pushed work | with pipe")
@@ -581,7 +526,7 @@ def test_list_branches_upstreams_and_ordering(svc, tmp_path, repo, backend):
     assert [b["name"] for b in svc.list_branches(str(repo), include_remote=False)] == local
 
 
-def test_commit_graph_refs_filter_and_limit(svc, repo, backend):
+def test_commit_graph_refs_filter_and_limit(svc, repo):
     first = git(repo, "rev-parse", "HEAD")
     git(repo, "tag", "v1")
     git(repo, "checkout", "-q", "-b", "side")
@@ -608,7 +553,7 @@ def test_commit_graph_refs_filter_and_limit(svc, repo, backend):
     assert svc.get_commit_graph(str(repo), branch="no-such-branch") == []
 
 
-def test_branch_log_lists_commits_since_base(svc, repo, backend):
+def test_branch_log_lists_commits_since_base(svc, repo):
     git(repo, "checkout", "-q", "-b", "feat")
     c1 = commit_file(repo, "f.txt", "1\n", "feat one")
     c2 = commit_file(repo, "f.txt", "2\n", "feat two")
@@ -620,7 +565,7 @@ def test_branch_log_lists_commits_since_base(svc, repo, backend):
     assert svc.get_branch_log(str(repo), "does-not-exist")[0] == ""
 
 
-def test_default_branch_resolution(svc, tmp_path, backend):
+def test_default_branch_resolution(svc, tmp_path):
     with_origin = init_repo(tmp_path / "o")
     make_origin(tmp_path, with_origin)
     master_only = init_repo(tmp_path / "m", branch="master")
@@ -637,27 +582,3 @@ def test_default_branch_resolution(svc, tmp_path, backend):
 # Native -> CLI fallback
 # =============================================================================
 
-
-@pytest.mark.skipif(not HAS_PYGIT2, reason="pygit2 unavailable")
-def test_native_failure_falls_back_to_cli(svc, repo, backend, monkeypatch):
-    if backend != "native":
-        pytest.skip("fallback starts from the native reader")
-
-    def boom(self, *a, **k):
-        raise RuntimeError("libgit2 exploded")
-
-    for name in ("get_status", "get_diff_stats", "get_per_file_diff_stats",
-                 "get_file_diff", "list_branches", "get_commit_graph",
-                 "get_current_branch", "is_git_repo"):
-        monkeypatch.setattr(GitNativeReader, name, boom)
-    write(repo / "mod.txt", "one\ntwo\n")
-
-    status = _fresh(svc, repo)
-    assert status["modified"] == ["mod.txt"]
-    assert svc.get_diff_stats(str(repo))["additions"] == 1
-    assert svc.get_per_file_diff_stats(str(repo))[0]["file"] == "mod.txt"
-    assert "+two" in svc.get_file_diff(str(repo), "mod.txt")["diff"]
-    assert svc.list_branches(str(repo))[0]["name"] == "main"
-    assert len(svc.get_commit_graph(str(repo))) == 1
-    assert svc.get_current_branch(str(repo)) == "main"
-    assert svc.is_git_repo(str(repo)) is True

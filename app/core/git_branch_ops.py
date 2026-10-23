@@ -6,28 +6,74 @@ get current/default branch, ahead/behind counts, and remote HEAD checks.
 """
 
 import logging
+import os
+import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.git_cache import (
     _git_cache,
-    _native_reader,
     DEFAULT_BRANCH_CACHE_TTL,
 )
 
 logger = logging.getLogger(__name__)
+
+_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_UNKNOWN = object()
+
+
+def _read_first_line(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.readline().strip()
+
+
+def _head_branch_from_files(working_dir: str):
+    """HEAD's branch read straight from a repository root's files.
+
+    The busy-checkout guard asks for the branch of every active session's
+    checkout on each status poll; a file read keeps that free of a subprocess
+    per session. Returns the branch, None when HEAD is detached, or _UNKNOWN
+    for anything unusual (not a repository root, an unborn branch, reftable
+    storage...), which the caller hands to git itself.
+    """
+    dotgit = os.path.join(working_dir, ".git")
+    try:
+        if os.path.isdir(dotgit):
+            gitdir = dotgit
+        else:
+            line = _read_first_line(dotgit)  # a linked worktree: "gitdir: <path>"
+            if not line.startswith("gitdir: "):
+                return _UNKNOWN
+            gitdir = os.path.join(working_dir, line[len("gitdir: "):])
+        head = _read_first_line(os.path.join(gitdir, "HEAD"))
+        if _OBJECT_ID_RE.fullmatch(head):
+            return None  # detached
+        if not head.startswith("ref: refs/heads/") or head == "ref: refs/heads/.invalid":
+            return _UNKNOWN
+        ref = head[len("ref: "):]
+        commondir = gitdir
+        if os.path.exists(os.path.join(gitdir, "commondir")):
+            commondir = os.path.join(gitdir, _read_first_line(os.path.join(gitdir, "commondir")))
+        if os.path.isfile(os.path.join(commondir, ref)):
+            return ref[len("refs/heads/"):]
+        packed = os.path.join(commondir, "packed-refs")
+        if os.path.isfile(packed):
+            with open(packed, encoding="utf-8") as fh:
+                if any(line.rstrip("\n").endswith(" " + ref) for line in fh):
+                    return ref[len("refs/heads/"):]
+    except (OSError, UnicodeDecodeError):
+        pass
+    return _UNKNOWN  # unborn, or a layout git should judge
 
 
 class GitBranchMixin:
     """Mixin providing branch operations for GitService."""
 
     def get_current_branch(self, working_dir: str) -> Optional[str]:
-        """Get the current branch name."""
-        if _native_reader is not None:
-            try:
-                return _native_reader.get_current_branch(working_dir)
-            except Exception as e:
-                logger.warning(f"pygit2 get_current_branch failed, CLI fallback: {e}")
+        """Get the current branch name (None when detached or unknown)."""
+        branch = _head_branch_from_files(working_dir)
+        if branch is not _UNKNOWN:
+            return branch
         return self._get_current_branch_cli(working_dir)
 
     def _get_current_branch_cli(self, working_dir: str) -> Optional[str]:
@@ -52,16 +98,6 @@ class GitBranchMixin:
         if cached is not None:
             return cached
 
-        # Try native reader
-        if _native_reader is not None:
-            try:
-                result = _native_reader.get_default_branch(working_dir)
-                _git_cache.put(cache_key, result)
-                return result
-            except Exception as e:
-                logger.warning(f"pygit2 get_default_branch failed, CLI fallback: {e}")
-
-        # CLI fallback
         return self._get_default_branch_cli(working_dir)
 
     def _get_default_branch_cli(self, working_dir: str) -> str:
@@ -117,11 +153,6 @@ class GitBranchMixin:
             - ahead: Commits ahead of tracking branch (local only)
             - behind: Commits behind tracking branch (local only)
         """
-        if _native_reader is not None:
-            try:
-                return _native_reader.list_branches(working_dir, include_remote)
-            except Exception as e:
-                logger.warning(f"pygit2 list_branches failed, CLI fallback: {e}")
         return self._list_branches_cli(working_dir, include_remote)
 
     def _list_branches_cli(
@@ -382,11 +413,6 @@ class GitBranchMixin:
         Returns:
             Tuple of (ahead, behind) counts. (0, 0) on error.
         """
-        if _native_reader is not None:
-            try:
-                return _native_reader.get_ahead_behind_counts(working_dir)
-            except Exception as e:
-                logger.warning(f"pygit2 get_ahead_behind_counts failed, CLI fallback: {e}")
         return self._get_ahead_behind_counts_cli(working_dir)
 
     def _get_ahead_behind_counts_cli(self, working_dir: str) -> Tuple[int, int]:

@@ -3,14 +3,16 @@ Git Result Cache
 
 Thread-safe per-key TTL cache for expensive git operations.
 
-Also hosts the module-level ``_native_reader`` (pygit2) singleton so that
-both ``git_service.py`` and the mixin modules can import it without
-circular-import issues.
+Every git read runs as a ``git`` CLI subprocess (see GitService._run_git).
+An in-process libgit2 reader is not used: pygit2 holds the GIL for the whole
+native call, and one cold ``Repository.status()`` per worktree froze the whole
+interpreter for minutes on a busy disk (#436).
 """
 
 import logging
+import os
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 from collections import OrderedDict
 
 from app.core.bounded_cache import ByteBoundedLRU, estimate_size
@@ -21,18 +23,14 @@ logger = logging.getLogger(__name__)
 STATUS_CACHE_TTL = 2.0            # seconds — match active poll cadence for fresh UI
 DIFF_STATS_CACHE_TTL = 2.0        # seconds
 DEFAULT_BRANCH_CACHE_TTL = 300.0   # 5 minutes — rarely changes
-AHEAD_BEHIND_CACHE_TTL = 30.0     # seconds — only changes on commit/push/fetch
+AHEAD_BEHIND_CACHE_TTL = 30.0     # seconds — keyed by HEAD; base moves on fetch/push
+# A status read that times out serves the last good result up to this old.
+STATUS_STALE_TTL = 300.0
 
-# ---------------------------------------------------------------------------
-# Native git reader (pygit2) — falls back to CLI if unavailable
-# ---------------------------------------------------------------------------
-try:
-    from app.core.git_native import GitNativeReader
-    _native_reader: "GitNativeReader | None" = GitNativeReader()
-    logger.info("Git read operations: using pygit2 (native)")
-except ImportError:
-    _native_reader = None
-    logger.info("Git read operations: using CLI subprocess (pygit2 not available)")
+
+def checkout_key(working_dir: str) -> str:
+    """One cache identity per checkout, however the caller spelled its path."""
+    return os.path.normcase(os.path.abspath(working_dir))
 
 
 class _GitResultCache:
@@ -64,6 +62,20 @@ class _GitResultCache:
                     if now - entry[1] < ttl:
                         return entry[0]
                     self.invalidate(key)
+            return None
+
+    def peek(self, key: str) -> Optional[Tuple[Any, float]]:
+        """``(value, age)`` of *key* without expiring it, or None.
+
+        Lets a caller serve a stale value when a fresh read fails.
+        """
+        with self._lock:
+            now = time.monotonic()
+            self._expire_oversized(now)
+            for bucket in (self._oversized, self._data, self._markers):
+                entry = bucket.get(key)
+                if entry is not None:
+                    return entry[0], now - entry[1]
             return None
 
     def put(self, key: str, value: Any) -> None:

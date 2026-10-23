@@ -7,11 +7,12 @@ per-file diff stats, diff text, and branch log.
 
 import logging
 import os
+import subprocess
 from typing import Any, Dict, List, Tuple
 
 from app.core.git_cache import (
     _git_cache,
-    _native_reader,
+    checkout_key,
     DIFF_STATS_CACHE_TTL,
 )
 
@@ -71,21 +72,11 @@ class GitDiffMixin:
             - deletions: Total lines deleted
             - files_changed: Number of files changed
         """
-        cache_key = f"diff_stats:{working_dir}:{include_unstaged}"
+        cache_key = f"diff_stats:{checkout_key(working_dir)}:{include_unstaged}"
         cached = _git_cache.get(cache_key, DIFF_STATS_CACHE_TTL)
         if cached is not None:
             return cached
 
-        # Try native reader
-        if _native_reader is not None:
-            try:
-                result = _native_reader.get_diff_stats(working_dir, include_unstaged)
-                _git_cache.put(cache_key, result)
-                return result
-            except Exception as e:
-                logger.warning(f"pygit2 get_diff_stats failed, CLI fallback: {e}")
-
-        # CLI fallback
         return self._get_diff_stats_cli(working_dir, include_unstaged)
 
     def _get_diff_stats_cli(
@@ -93,7 +84,7 @@ class GitDiffMixin:
         working_dir: str,
         include_unstaged: bool = True
     ) -> Dict[str, Any]:
-        cache_key = f"diff_stats:{working_dir}:{include_unstaged}"
+        cache_key = f"diff_stats:{checkout_key(working_dir)}:{include_unstaged}"
         try:
             total_additions = 0
             total_deletions = 0
@@ -144,11 +135,6 @@ class GitDiffMixin:
         Returns:
             Dictionary with: file, diff, is_binary, truncated
         """
-        if _native_reader is not None:
-            try:
-                return _native_reader.get_file_diff(working_dir, file_path, staged, max_chars)
-            except Exception as e:
-                logger.warning(f"pygit2 get_file_diff failed, CLI fallback: {e}")
         return self._get_file_diff_cli(working_dir, file_path, staged, max_chars)
 
     def _get_file_diff_cli(
@@ -261,25 +247,15 @@ class GitDiffMixin:
         Returns:
             List of dicts with: file, additions, deletions, is_binary, staged
         """
-        cache_key = f"per_file_diff:{working_dir}"
+        cache_key = f"per_file_diff:{checkout_key(working_dir)}"
         cached = _git_cache.get(cache_key, DIFF_STATS_CACHE_TTL)
         if cached is not None:
             return cached
 
-        # Try native reader
-        if _native_reader is not None:
-            try:
-                result = _native_reader.get_per_file_diff_stats(working_dir)
-                _git_cache.put(cache_key, result)
-                return result
-            except Exception as e:
-                logger.warning(f"pygit2 get_per_file_diff_stats failed, CLI fallback: {e}")
-
-        # CLI fallback
         return self._get_per_file_diff_stats_cli(working_dir)
 
     def _get_per_file_diff_stats_cli(self, working_dir: str) -> List[Dict[str, Any]]:
-        cache_key = f"per_file_diff:{working_dir}"
+        cache_key = f"per_file_diff:{checkout_key(working_dir)}"
         files: List[Dict[str, Any]] = []
 
         try:
@@ -322,11 +298,6 @@ class GitDiffMixin:
         Returns:
             Combined diff text, truncated to max_chars
         """
-        if _native_reader is not None:
-            try:
-                return _native_reader.get_diff_text(working_dir, include_unstaged, max_chars)
-            except Exception as e:
-                logger.warning(f"pygit2 get_diff_text failed, CLI fallback: {e}")
         return self._get_diff_text_cli(working_dir, include_unstaged, max_chars)
 
     def _get_diff_text_cli(
@@ -337,16 +308,19 @@ class GitDiffMixin:
     ) -> str:
         parts = []
 
-        # Staged changes
-        result = self._run_git(working_dir, ["diff", "--staged"], timeout=15)
-        if result.returncode == 0 and result.stdout and result.stdout.strip():
-            parts.append(result.stdout.strip())
-
-        # Unstaged changes
-        if include_unstaged:
-            result = self._run_git(working_dir, ["diff"], timeout=15)
+        try:
+            # Staged changes
+            result = self._run_git(working_dir, ["diff", "--staged"], timeout=15)
             if result.returncode == 0 and result.stdout and result.stdout.strip():
                 parts.append(result.stdout.strip())
+
+            # Unstaged changes
+            if include_unstaged:
+                result = self._run_git(working_dir, ["diff"], timeout=15)
+                if result.returncode == 0 and result.stdout and result.stdout.strip():
+                    parts.append(result.stdout.strip())
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"Error getting diff text: {e}")
 
         diff_text = "\n".join(parts)
 
@@ -372,11 +346,6 @@ class GitDiffMixin:
         Returns:
             Tuple of (commit_log, diff_stat) strings
         """
-        if _native_reader is not None:
-            try:
-                return _native_reader.get_branch_log(working_dir, base_branch, max_commits)
-            except Exception as e:
-                logger.warning(f"pygit2 get_branch_log failed, CLI fallback: {e}")
         return self._get_branch_log_cli(working_dir, base_branch, max_commits)
 
     def _get_branch_log_cli(
@@ -395,22 +364,25 @@ class GitDiffMixin:
             logger.warning("Refusing option-like base branch: %s", base_branch[:50])
             return (commit_log, diff_stat)
 
-        # Get commit messages
-        result = self._run_git(
-            working_dir,
-            ["log", f"{base_branch}..HEAD", "--oneline", f"-{max_commits}"],
-            timeout=10
-        )
-        if result.returncode == 0:
-            commit_log = result.stdout.strip()
+        try:
+            # Get commit messages
+            result = self._run_git(
+                working_dir,
+                ["log", f"{base_branch}..HEAD", "--oneline", f"-{max_commits}"],
+                timeout=10
+            )
+            if result.returncode == 0:
+                commit_log = result.stdout.strip()
 
-        # Get diff stat summary
-        result = self._run_git(
-            working_dir,
-            ["diff", f"{base_branch}..HEAD", "--stat"],
-            timeout=10
-        )
-        if result.returncode == 0:
-            diff_stat = result.stdout.strip()
+            # Get diff stat summary
+            result = self._run_git(
+                working_dir,
+                ["diff", f"{base_branch}..HEAD", "--stat"],
+                timeout=10
+            )
+            if result.returncode == 0:
+                diff_stat = result.stdout.strip()
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"Error getting branch log: {e}")
 
         return (commit_log, diff_stat)
