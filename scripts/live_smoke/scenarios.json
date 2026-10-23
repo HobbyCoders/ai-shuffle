@@ -331,6 +331,14 @@
           "past_bug": "#436: an interpreter freeze ended in SIGKILL without a durable last-tick time or recovery context; WAL/checkpoint pressure lacked a non-destructive sampler."
         },
         {
+          "id": "harness-basics.13",
+          "check": "One-time cleanup of leftover Git fsmonitor daemons",
+          "kind": "owner",
+          "how": "On a disposable Windows install with a fresh data directory, register a temporary Git project and create app worktrees. Set repo-local core.fsmonitor=true and run git status in each checkout to start real daemons. Start the candidate install normally. Inspect local config, daemon process/IPC state and the single cleanup summary. Then deliberately re-enable the setting and restart only the disposable install. Repeat on macOS when available; never restart a production worker or modify its repositories.",
+          "pass_when": "First startup stays responsive, removes only the literal repo-local true setting and stops the root/worktree daemons. Global settings and custom hook values remain unchanged. The persistent per-install completion marker prevents cleanup from overriding a deliberate re-enable on the second boot. An interrupted cleanup retries outstanding stops next boot.",
+          "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
+        },
+        {
           "id": "harness-basics.9",
           "check": "Bounded update stops preserve usage and abort forced turns",
           "kind": "owner",
