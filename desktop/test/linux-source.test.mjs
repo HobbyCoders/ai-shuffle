@@ -81,7 +81,7 @@ test('Linux native setup selects bin/python3, bin/node and lib/node_modules/npm 
   if(id==='node:path')return path;
   if(id==='node:crypto')return {createHash:()=>({update(){return this;},digest:()=> 'a'.repeat(64)}),randomUUID:()=> 'build-id'};
   if(id==='./source-build')return {buildEnvironment:()=>({})};
-  if(id==='node:fs')return {promises:{access:async()=>{throw Error('not cached');},mkdir:async()=>{},rename:async()=>{},rm:async()=>{},open:async()=>({fd:1,close:async()=>{}}),readFile:async file=>{reads.push(file);return file.endsWith('manifest.json')?JSON.stringify({pythonDependencies:'b'.repeat(64)}):'signed source';}}};
+  if(id==='node:fs')return {promises:{access:async()=>{throw Error('not cached');},mkdir:async()=>{},rename:async()=>{},rm:async()=>{},open:async()=>({fd:1,write:async()=>{},close:async()=>{}}),readFile:async file=>{reads.push(file);return file.endsWith('manifest.json')?JSON.stringify({pythonDependencies:'b'.repeat(64)}):'signed source';}}};
   if(id==='node:child_process')return {spawn:(...args)=>{spawns.push(args);const child={once:(event,fn)=>{if(event==='exit')queueMicrotask(()=>fn(0));return child;}};return child;}};
   throw Error('Unexpected module '+id);
  },queueMicrotask});

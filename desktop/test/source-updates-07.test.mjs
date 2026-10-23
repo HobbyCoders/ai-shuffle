@@ -118,7 +118,7 @@ test('restore journal: persistent cleanup lock reports actionable error, then Re
  const events=[],states=[],module={exports:{}};
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/updater.js',import.meta.url),'utf8'),{
   module,exports:module.exports,process:{env:{}},Date,setTimeout,clearTimeout,setInterval,clearInterval,
-  require:id=>id==='electron'?{app:{relaunch:()=>events.push('restart'),quit:()=>events.push('quit')}}:path,
+  require:id=>id==='electron'?{app:{relaunch:()=>events.push('restart'),quit:()=>events.push('quit')}}:id==='./timed-phase'?require('../dist/main/timed-phase.js'):path,
  });
  const updater=new module.exports.Updater();updater.onBeforeInstall(async()=>events.push('stop'));
  const reported=new Promise(resolve=>updater.subscribe(state=>{states.push(state.phase);if(state.phase==='error')resolve();}));

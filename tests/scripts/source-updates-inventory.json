@@ -93,7 +93,7 @@
   "'restore journal: interruption before baseline floor promotion leaves cleanup-only journal'": "d04719e6d976692d90eaa9aa5c391c15c8a73a82c22053d53b2a9377ed6405a4",
   "'restore journal: legacy same-build retry retains its migration fence without inventing an old restore point'": "b94e9d75269310597c28e78df74cca0fff9b772425b2699186acdadc6847f733",
   "'restore journal: no unprotected first database start, including an older-launcher bundled handoff'": "2e2f69f1d1716230e79b198c0ba8ad110940e44b201cbdf286ab1ca8bc039387",
-  "'restore journal: persistent cleanup lock reports actionable error, then Retry enables activation without a futile restart'": "f357da15cabfb005931585615ee2f04efa30e11ce3530eb52fa2f380a5689091",
+  "'restore journal: persistent cleanup lock reports actionable error, then Retry enables activation without a futile restart'": "28078b94156d705369e3f620b2640e0b7f24ee056802c51ca54eb52ac30d2b43",
   "'restore journal: ready before selection can resume; a crash during handoff restores even before databaseStarting'": "19face318c6a7a3452ded770b5ecb8dc0a1200e54b75645ffaa4ca33b285799e",
   "'restore journal: restore failure retains snapshot and fence; explicit Go back retries it'": "4e38d669af1f13183ceade3ecd16452d70289c53a8f976901926bde679c2378d",
   "'restore journal: signed download to snapshot to migrated crash to previous source and floor'": "b2b947c697386d7b39230f0ce8323bd09f3b6d820714b713f2fd099b9e36d675",
