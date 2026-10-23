@@ -99,3 +99,44 @@ def lower_process_group_priority(pid: int | None, nice: int | None = None) -> No
         setpriority(getattr(os, "PRIO_PGRP", 1), pid, target)
     except OSError as exc:  # ProcessLookupError, PermissionError, ...
         log.debug("could not lower priority of process group %s: %s", pid, exc)
+
+
+#: ``oom_score_adj`` for the shell commands the model runs (Linux). The kernel
+#: adds it to a process's OOM badness, and children inherit it, so under a
+#: host-wide memory shortage a test run or build is killed before the host
+#: process that runs every session, or its database. 0 turns it off.
+DEFAULT_CHILD_OOM_SCORE_ADJ = 300
+#: The kernel's ceiling for ``oom_score_adj``.
+MAX_OOM_SCORE_ADJ = 1000
+
+
+def raise_oom_score_adj(pid: int | None, adj: int = DEFAULT_CHILD_OOM_SCORE_ADJ) -> None:
+    """Make ``pid`` a preferred OOM-kill victim (Linux only); never lowers it.
+
+    Raising the value needs no privilege, only lowering does, so this works
+    in an unprivileged container. Call it right after the spawn: whatever the
+    process forks afterwards inherits the value. Never raises; a process that
+    already exited, another user's process, or a platform without
+    ``/proc/<pid>/oom_score_adj`` leaves the score unchanged.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        target = min(int(adj), MAX_OOM_SCORE_ADJ)
+    except (TypeError, ValueError):
+        return
+    if target <= 0:
+        return
+    path = f"/proc/{pid}/oom_score_adj"
+    try:
+        with open(path, encoding="ascii") as f:
+            current = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return
+    if current >= target:
+        return
+    try:
+        with open(path, "w", encoding="ascii") as f:
+            f.write(str(target))
+    except OSError as exc:
+        log.debug("could not raise oom_score_adj of %s: %s", pid, exc)

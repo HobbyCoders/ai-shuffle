@@ -1301,7 +1301,7 @@ async def _spawn_background(
     # shell the environment block declares. stdin is closed so a command
     # that prompts exits instead of inheriting the server's stdin.
     from fluid.tools.shell import resolve_shell
-    from app.core.process_tree import child_env, lower_priority, spawn_kwargs
+    from app.core.process_tree import child_env, lower_priority, prefer_for_oom_kill, spawn_kwargs
 
     # Its own process group on BOTH platforms (POSIX session / Windows
     # CREATE_NEW_PROCESS_GROUP) so the stop path can address the whole tree,
@@ -1322,6 +1322,7 @@ async def _spawn_background(
         **spawn_kwargs(),
     )
     lower_priority(proc)
+    prefer_for_oom_kill(proc)
     task.process = proc
     task.own_process_group = True
     # On disk, so a restart after an abrupt server death can find this shell
