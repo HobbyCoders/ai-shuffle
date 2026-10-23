@@ -2,8 +2,9 @@
 	/**
 	 * CatalogDetail: every fal.ai model the catalog knows. Search across name,
 	 * description, id and tags; category chips; Refresh re-pulls the catalog
-	 * from fal.ai. Picking a model makes it the default of the tool fal.ai
-	 * files it under; a model no tool uses is greyed out.
+	 * from fal.ai. Picking an image, video, audio or 3D generation model makes
+	 * it the remembered choice for that kind; any other model is pinned for
+	 * the tool fal.ai files it under. A model no tool uses is greyed out.
 	 */
 	import { RefreshCw } from 'lucide-svelte';
 	import { catalogStore } from '$lib/stores/catalog';
@@ -15,7 +16,9 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ModelOption from './ModelOption.svelte';
 	import SearchBox from './SearchBox.svelte';
-	import { ALL_TOOLS, toolMeta } from './media-tools.svelte';
+	import { ALL_TOOLS, GENERATION_TOOL_KIND, toolMeta } from './media-tools.svelte';
+	import { generationChoices } from '$lib/stores/generation-choices.svelte';
+	import { KIND_LABEL } from '$lib/utils/generation-choice';
 	import { getModelsState } from './tasks.svelte';
 	import { CATALOG_ICON } from './icons';
 
@@ -66,11 +69,13 @@
 		return result;
 	});
 	const page = $derived(filtered.slice(0, shown));
-	const toolsWithModel = $derived(ALL_TOOLS.filter((t) => tools.modelId(t)).length);
+	const remembered = $derived(Object.keys(generationChoices.remembered).length);
+	const pinned = $derived(ALL_TOOLS.filter((t) => !GENERATION_TOOL_KIND[t.id] && tools.modelId(t)).length);
 
 	const facts = $derived<Fact[]>([
 		{ label: 'Models', value: size ? size.toLocaleString() : null },
-		{ label: 'Used by tools', value: toolsWithModel },
+		{ label: 'Remembered', value: remembered },
+		{ label: 'Pinned for tools', value: pinned },
 		{ label: 'Categories', value: categories.length || null }
 	]);
 
@@ -86,7 +91,10 @@
 	}
 
 	function rowMeta(model: CatalogModel): { text?: string; badge: boolean } {
-		if (tools.isDefault(model.endpoint_id)) return { text: 'Default', badge: true };
+		const tool = tools.toolForCatalogModel(model);
+		if (tools.isDefault(model.endpoint_id)) {
+			return { text: tool && GENERATION_TOOL_KIND[tool.id] ? 'Remembered' : 'Pinned', badge: true };
+		}
 		if (!tools.toolForCatalogModel(model)) return { text: 'No tool uses this', badge: false };
 		return { badge: false };
 	}
@@ -94,7 +102,9 @@
 	function rowTitle(model: CatalogModel): string {
 		const tool = tools.toolForCatalogModel(model);
 		if (!tool) return `${model.endpoint_id}: ${NO_TOOL}`;
-		return `${model.endpoint_id}: set as the ${toolMeta(tool).name.toLowerCase()} default`;
+		const kind = GENERATION_TOOL_KIND[tool.id];
+		if (kind) return `${model.endpoint_id}: remember for ${KIND_LABEL[kind].plural}`;
+		return `${model.endpoint_id}: pin for ${toolMeta(tool).name.toLowerCase()}`;
 	}
 </script>
 
@@ -123,7 +133,7 @@
 	status={loading ? 'busy' : error ? 'err' : 'ok'}
 	statusText={loading ? 'Refreshing' : error ? 'Could not load' : 'Synced'}
 	badge="Catalog"
-	subtitle="Pick to set a default"
+	subtitle="Pick to remember or pin a model"
 	{primary}
 	{facts}
 	{banner}

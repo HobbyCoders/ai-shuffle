@@ -1,0 +1,1165 @@
+<script lang="ts">
+	/**
+	 * GenerationChoiceCard: the in-chat card for a generation tool's `choose`
+	 * result (#379 step 2), also used by Settings → Default models to change
+	 * a remembered pick.
+	 *
+	 * 2–4 options (account, model, price, quick settings) with "Same as last
+	 * time" first. Advanced lists exactly the selected model's declared options
+	 * and re-quotes the price as they change. "Use this" saves the pick as the
+	 * account's last choice (and remembered choice when the box is ticked) and,
+	 * in a chat, replies with the exact arguments the agent passes back.
+	 */
+	import { onMount, untrack } from 'svelte';
+	import { derived } from 'svelte/store';
+	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
+	import { activeSession } from '$lib/stores/active-session';
+	import { generationChoices } from '$lib/stores/generation-choices.svelte';
+	import { getErrorMessage } from '$lib/api/client';
+	import {
+		KIND_LABEL,
+		choiceOf,
+		formatValue,
+		modelLabel,
+		pickMessage,
+		priceView,
+		quickChips,
+		sameChoice,
+		sourceLabel,
+		type GenerationKind,
+		type GenerationOption,
+		type GenerationPrice,
+		type NativeValue,
+		type SchemaField
+	} from '$lib/utils/generation-choice';
+
+	interface Props {
+		kind: GenerationKind;
+		options: GenerationOption[];
+		/** The tool to call again (chat variant). */
+		tool?: string;
+		prompt?: string;
+		/** The tool row this card belongs to; a later user message answers it. */
+		toolId?: string;
+		variant?: 'chat' | 'settings';
+		rememberedUnavailable?: boolean;
+		/** Tests and Settings: override the transcript-derived answer. */
+		answeredBy?: string | null;
+		/** Settings: called after a pick is saved. */
+		onsaved?: (choice: GenerationOption) => void;
+	}
+
+	let {
+		kind,
+		options,
+		tool = '',
+		prompt = '',
+		toolId = '',
+		variant = 'chat',
+		rememberedUnavailable = false,
+		answeredBy = undefined,
+		onsaved
+	}: Props = $props();
+
+	onMount(() => {
+		void generationChoices.load();
+	});
+
+	const KIND_ICON = { image: ImageIcon, video: Film, audio: AudioLines, '3d': Box } as const;
+	const QUOTE_DEBOUNCE_MS = 350;
+	const uid = `gcc-${Math.random().toString(36).slice(2, 9)}`;
+
+	// The first later user message answers a chat card (a tap here or a typed reply).
+	const laterReply = derived(activeSession, ($s) => {
+		if (!toolId) return null;
+		const messages = $s.messages ?? [];
+		const index = messages.findIndex((m) => m.toolId === toolId);
+		if (index < 0) return null;
+		const reply = messages.slice(index + 1).find((m) => m.role === 'user');
+		return reply ? String(reply.content ?? '') : null;
+	});
+	const reply = $derived(answeredBy !== undefined ? answeredBy : variant === 'chat' ? $laterReply : null);
+
+	const firstUsable = untrack(() => Math.max(0, options.findIndex((o) => o.available)));
+	let selected = $state(firstUsable);
+	let values = $state<Record<string, unknown>[]>(untrack(() => options.map((o) => ({ ...o.options }))));
+	let quotes = $state<(GenerationPrice | null)[]>(untrack(() => options.map((o) => o.price)));
+	let quoteError = $state<string | null>(null);
+	let quoting = $state(false);
+	let advancedOpen = $state(false);
+	let remember = $state(true);
+	let saving = $state(false);
+	let saveError = $state<string | null>(null);
+	let picked = $state<{ index: number; remembered: boolean } | null>(null);
+	let tick = $state(0);
+	let quoteTimer: ReturnType<typeof setTimeout> | null = null;
+	let quoteSeq = 0;
+
+	const current = $derived(options[selected]);
+	const currentPrice = $derived(priceView(quotes[selected], kind));
+	const label = $derived(KIND_LABEL[kind]);
+	const Icon = $derived(KIND_ICON[kind]);
+	const remembered = $derived(generationChoices.remembered[kind]);
+
+	// Which option a reply picked (it carries the exact model and account).
+	const repliedIndex = $derived.by(() => {
+		if (!reply) return -1;
+		return options.findIndex((o) => reply.includes(`"model":${JSON.stringify(o.model)}`) && reply.includes(`"source":${JSON.stringify(o.account)}`));
+	});
+	const settled = $derived(variant === 'chat' && (picked !== null || reply !== null));
+	let reopened = $state(false);
+	const collapsed = $derived(settled && !reopened);
+
+	// ── Advanced: exactly the selected model's declared options ─────────
+
+	interface Field {
+		name: string;
+		title: string;
+		help: string;
+		control: 'toggle' | 'select' | 'range' | 'number' | 'text' | 'json';
+		choices: { value: string; label: string; disabled?: boolean; note?: string }[];
+		min?: number;
+		max?: number;
+		step?: number;
+		fallback: unknown;
+		locked: boolean;
+	}
+
+	function titleCase(name: string): string {
+		return name.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+	}
+
+	function fieldsFor(option: GenerationOption | undefined): Field[] {
+		const fields = option?.schema?.fields;
+		if (!fields) return [];
+		if (Array.isArray(fields)) {
+			return (fields as SchemaField[])
+				.filter((f) => !f.is_primary_text)
+				.map((f) => {
+					const hasRange = typeof f.minimum === 'number' && typeof f.maximum === 'number';
+					const numeric = f.type === 'number' || f.type === 'integer';
+					let control: Field['control'] = 'text';
+					if (f.type === 'boolean') control = 'toggle';
+					else if (f.enum && f.enum.length) control = 'select';
+					else if (numeric) control = hasRange ? 'range' : 'number';
+					else if (f.type === 'array' || f.type === 'object') control = 'json';
+					return {
+						name: f.name,
+						title: f.title || titleCase(f.name),
+						help: f.description || '',
+						control,
+						choices: (f.enum ?? []).map((v) => ({ value: String(v), label: String(v) })),
+						min: f.minimum ?? undefined,
+						max: f.maximum ?? undefined,
+						step: f.type === 'integer' ? 1 : hasRange && (f.maximum! - f.minimum!) <= 2 ? 0.05 : 1,
+						fallback: f.default,
+						locked: false
+					};
+				});
+		}
+		// Native plan routes: only the verified combination is selectable.
+		return Object.entries(fields as Record<string, NativeValue[]>)
+			.filter(([name, list]) => name !== 'model' && Array.isArray(list) && list.length)
+			.map(([name, list]) => ({
+				name,
+				title: titleCase(name),
+				help: 'Plan routes allow only the verified combination.',
+				control: 'select' as const,
+				choices: list.map((v) => ({
+					value: String(v.value),
+					label: formatValue(v.value),
+					disabled: !v.selectable,
+					note: v.selectable ? undefined : v.reason || 'not yet verified'
+				})),
+				fallback: list.find((v) => v.selectable)?.value,
+				locked: list.filter((v) => v.selectable).length <= 1
+			}));
+	}
+
+	const fields = $derived(fieldsFor(current));
+	const editedCount = $derived(
+		Object.keys(values[selected] ?? {}).filter((k) => JSON.stringify(values[selected][k]) !== JSON.stringify(current?.options?.[k])).length
+	);
+
+	function valueOf(field: Field): unknown {
+		const v = values[selected]?.[field.name];
+		return v === undefined ? field.fallback : v;
+	}
+
+	function coerce(field: Field, raw: string): unknown {
+		const original = current?.schema?.fields;
+		if (field.control === 'select' && !Array.isArray(original)) {
+			// Native values keep their type (booleans, integers).
+			const list = (original as Record<string, NativeValue[]>)[field.name] ?? [];
+			return list.find((v) => String(v.value) === raw)?.value ?? raw;
+		}
+		if (field.control === 'select' && Array.isArray(original)) {
+			const def = (original as SchemaField[]).find((f) => f.name === field.name);
+			const match = def?.enum?.find((v) => String(v) === raw);
+			return match === undefined ? raw : match;
+		}
+		if (field.control === 'range' || field.control === 'number') {
+			if (raw.trim() === '') return undefined;
+			const n = Number(raw);
+			return Number.isFinite(n) ? n : raw;
+		}
+		if (field.control === 'json') {
+			try {
+				return JSON.parse(raw);
+			} catch {
+				return raw;
+			}
+		}
+		return raw;
+	}
+
+	function setValue(field: Field, value: unknown) {
+		const next = { ...values[selected] };
+		if (value === undefined || value === '') delete next[field.name];
+		else next[field.name] = value;
+		values = values.map((v, i) => (i === selected ? next : v));
+		scheduleQuote();
+	}
+
+	function resetAdvanced() {
+		values = values.map((v, i) => (i === selected ? { ...options[i].options } : v));
+		quotes = quotes.map((q, i) => (i === selected ? options[i].price : q));
+		quoteError = null;
+	}
+
+	function scheduleQuote() {
+		if (quoteTimer) clearTimeout(quoteTimer);
+		quoting = true;
+		const index = selected;
+		const seq = ++quoteSeq;
+		quoteTimer = setTimeout(async () => {
+			quoteTimer = null;
+			try {
+				const quote = await generationChoices.quote(kind, choiceOf(options[index], values[index]), prompt);
+				if (seq !== quoteSeq) return;
+				if (quote.ok && quote.price) {
+					quotes = quotes.map((q, i) => (i === index ? quote.price! : q));
+					quoteError = null;
+					tick++;
+				} else {
+					quoteError = quote.error || 'These options cannot be priced.';
+				}
+			} catch (e) {
+				if (seq === quoteSeq) quoteError = getErrorMessage(e, 'Could not update the price.');
+			} finally {
+				if (seq === quoteSeq) quoting = false;
+			}
+		}, QUOTE_DEBOUNCE_MS);
+	}
+
+	function select(index: number) {
+		if (!options[index]?.available || collapsed) return;
+		selected = index;
+		quoteError = null;
+		saveError = null;
+	}
+
+	function onRadioKey(event: KeyboardEvent, index: number) {
+		const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'];
+		if (!keys.includes(event.key)) return;
+		event.preventDefault();
+		const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+		for (let n = 1; n <= options.length; n++) {
+			const next = (index + step * n + options.length) % options.length;
+			if (options[next].available) {
+				select(next);
+				document.getElementById(`${uid}-opt-${next}`)?.focus();
+				return;
+			}
+		}
+	}
+
+	const canUse = $derived(
+		!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !collapsed
+	);
+
+	async function use() {
+		if (!canUse || !current) return;
+		saving = true;
+		saveError = null;
+		const index = selected;
+		const option = options[index];
+		const chosen = values[index];
+		const keep = variant === 'settings' ? true : remember;
+		try {
+			await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			if (variant === 'chat') {
+				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep));
+				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
+			}
+			picked = { index, remembered: keep };
+			reopened = false;
+			onsaved?.(option);
+		} catch (e) {
+			saveError = getErrorMessage(e, 'Could not use this choice.');
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function forget() {
+		try {
+			await generationChoices.forget(kind);
+			if (picked) picked = { ...picked, remembered: false };
+		} catch (e) {
+			saveError = getErrorMessage(e, 'Could not change the saved choice.');
+		}
+	}
+
+	const summaryIndex = $derived(picked?.index ?? repliedIndex);
+	const summaryOption = $derived(summaryIndex >= 0 ? options[summaryIndex] : null);
+	const summaryRemembered = $derived(!!summaryOption && sameChoice(remembered, summaryOption));
+</script>
+
+<section
+	class="gcc"
+	class:settings={variant === 'settings'}
+	class:collapsed
+	aria-labelledby="{uid}-title"
+	data-kind={kind}
+>
+	<header class="gcc-head">
+		<span class="gcc-glyph" aria-hidden="true"><Icon /></span>
+		<div class="gcc-heading">
+			<h3 id="{uid}-title">
+				{#if variant === 'settings'}
+					Pick a source for {label.plural}
+				{:else if collapsed}
+					{summaryOption ? `Using ${sourceLabel(summaryOption.source)} · ${modelLabel(summaryOption.model)}` : `Choice answered`}
+				{:else}
+					How should I make this {label.noun}?
+				{/if}
+			</h3>
+			{#if collapsed}
+				<p class="gcc-sub">
+					{#if summaryOption}
+						{priceView(picked ? quotes[summaryIndex] : summaryOption.price, kind).figure}
+						{#if summaryRemembered}<span class="gcc-dot" aria-hidden="true">·</span> remembered for {label.plural}{/if}
+					{:else}
+						Answered in the chat
+					{/if}
+				</p>
+			{:else if prompt && variant === 'chat'}
+				<p class="gcc-sub gcc-prompt" title={prompt}>“{prompt}”</p>
+			{/if}
+		</div>
+		{#if collapsed}
+			<div class="gcc-head-actions">
+				{#if summaryRemembered}
+					<button type="button" class="gcc-link" onclick={forget}>Ask me next time</button>
+				{/if}
+				<button type="button" class="gcc-link" aria-expanded="false" onclick={() => (reopened = true)}>Show options</button>
+			</div>
+		{:else if settled}
+			<button type="button" class="gcc-link" aria-expanded="true" onclick={() => (reopened = false)}>Hide</button>
+		{/if}
+	</header>
+
+	{#if !collapsed}
+		{#if rememberedUnavailable}
+			<p class="gcc-note warn" role="status">
+				<TriangleAlert aria-hidden="true" />Your remembered choice for {label.plural} is not available right now. Pick another one.
+			</p>
+		{/if}
+
+		<div class="gcc-options" role="radiogroup" aria-labelledby="{uid}-title">
+			{#each options as option, index (index)}
+				{@const view = priceView(quotes[index], kind)}
+				{@const chips = quickChips({ ...option, quick_settings: index === selected ? values[index] : option.quick_settings })}
+				<button
+					type="button"
+					role="radio"
+					id="{uid}-opt-{index}"
+					class="gcc-option"
+					class:selected={index === selected}
+					aria-checked={index === selected}
+					aria-disabled={!option.available || settled}
+					tabindex={index === selected ? 0 : -1}
+					disabled={!option.available}
+					onclick={() => select(index)}
+					onkeydown={(event) => onRadioKey(event, index)}
+					style="--i: {index}"
+				>
+					<span class="gcc-opt-top">
+						<span class="gcc-source">{sourceLabel(option.source)}</span>
+						{#if option.label}
+							<span class="gcc-badge">{option.label}</span>
+						{:else if sameChoice(remembered, option)}
+							<span class="gcc-badge">Remembered</span>
+						{:else if option.verified && option.source !== 'fal'}
+							<span class="gcc-badge quiet">Verified</span>
+						{/if}
+					</span>
+					<span class="gcc-model" title={option.model}>{modelLabel(option.model)}</span>
+					{#if option.available}
+						{#if chips.length}
+							<span class="gcc-chips">{chips.join(' · ')}</span>
+						{/if}
+					{:else}
+						<span class="gcc-chips">{option.reason || 'Unavailable'}</span>
+					{/if}
+					<span class="gcc-price" class:unknown={!view.priced}>
+						<span class="gcc-figure">{view.figure}</span>
+						<span class="gcc-per">{view.note}</span>
+					</span>
+					{#if index === selected}<span class="gcc-check" aria-hidden="true"><Check /></span>{/if}
+				</button>
+			{/each}
+		</div>
+
+		{#if current?.available}
+			<div class="gcc-advanced">
+				<button
+					type="button"
+					class="gcc-adv-toggle"
+					aria-expanded={advancedOpen}
+					aria-controls="{uid}-adv"
+					onclick={() => (advancedOpen = !advancedOpen)}
+				>
+					<ChevronDown class="gcc-chev" aria-hidden="true" />
+					Advanced
+					<span class="gcc-adv-meta">
+						{fields.length} {fields.length === 1 ? 'option' : 'options'} for {modelLabel(current.model)}{editedCount ? ` · ${editedCount} changed` : ''}
+					</span>
+				</button>
+				{#if advancedOpen}
+					<div class="gcc-adv-body" id="{uid}-adv">
+						{#if !fields.length}
+							<p class="gcc-empty">This model declares no options.</p>
+						{/if}
+						{#each fields as field (field.name)}
+							{@const value = valueOf(field)}
+							{@const inputId = `${uid}-f-${field.name}`}
+							<div class="gcc-field">
+								<label for={inputId} title={field.help || undefined}>
+									{field.title}
+									{#if field.help}<span class="gcc-help">{field.help}</span>{/if}
+								</label>
+								<div class="gcc-control">
+									{#if field.control === 'toggle'}
+										<input
+											id={inputId}
+											type="checkbox"
+											role="switch"
+											class="gcc-switch"
+											checked={Boolean(value)}
+											onchange={(e) => setValue(field, (e.currentTarget as HTMLInputElement).checked)}
+										/>
+									{:else if field.control === 'select'}
+										<select
+											id={inputId}
+											value={value === undefined || value === null ? '' : String(value)}
+											disabled={field.locked}
+											onchange={(e) => setValue(field, coerce(field, (e.currentTarget as HTMLSelectElement).value))}
+										>
+											{#if value === undefined || value === null}<option value="">Default</option>{/if}
+											{#each field.choices as choice (choice.value)}
+												<option value={choice.value} disabled={choice.disabled}>
+													{choice.label}{choice.note ? ` (${choice.note})` : ''}
+												</option>
+											{/each}
+										</select>
+									{:else if field.control === 'range'}
+										<input
+											id={inputId}
+											type="range"
+											min={field.min}
+											max={field.max}
+											step={field.step}
+											value={Number(value ?? field.min)}
+											oninput={(e) => setValue(field, coerce(field, (e.currentTarget as HTMLInputElement).value))}
+										/>
+										<output for={inputId} class="gcc-range-value">{formatValue(value ?? field.min)}</output>
+									{:else if field.control === 'number'}
+										<input
+											id={inputId}
+											type="number"
+											inputmode="decimal"
+											placeholder="Default"
+											value={value === undefined || value === null ? '' : String(value)}
+											oninput={(e) => setValue(field, coerce(field, (e.currentTarget as HTMLInputElement).value))}
+										/>
+									{:else}
+										<input
+											id={inputId}
+											type="text"
+											placeholder={field.control === 'json' ? 'JSON' : 'Default'}
+											value={value === undefined || value === null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)}
+											onchange={(e) => setValue(field, coerce(field, (e.currentTarget as HTMLInputElement).value))}
+										/>
+									{/if}
+								</div>
+							</div>
+						{/each}
+						{#if editedCount}
+							<button type="button" class="gcc-link gcc-reset" onclick={resetAdvanced}>Reset to the model's defaults</button>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if quoteError}
+			<p class="gcc-note warn" role="alert"><TriangleAlert aria-hidden="true" />{quoteError}</p>
+		{:else if currentPrice.asksFirst}
+			<p class="gcc-note" role="note">Above $0.10, so I'll ask again before spending.</p>
+		{:else if current && !currentPrice.priced}
+			<p class="gcc-note warn" role="note"><TriangleAlert aria-hidden="true" />This price is unknown, so it cannot run. Pick another option.</p>
+		{/if}
+		{#if saveError}
+			<p class="gcc-note warn" role="alert"><TriangleAlert aria-hidden="true" />{saveError}</p>
+		{/if}
+
+		<footer class="gcc-foot">
+			{#if variant === 'chat'}
+				<label class="gcc-remember">
+					<input type="checkbox" bind:checked={remember} disabled={settled} />
+					<span>Use this every time for {label.plural}</span>
+				</label>
+			{/if}
+			<div class="gcc-receipt" aria-live="polite" aria-busy={quoting}>
+				<span class="gcc-receipt-label">{variant === 'settings' ? 'Price' : 'Total'}</span>
+				<span class="gcc-leader" aria-hidden="true"></span>
+				{#key tick}
+					<span class="gcc-total" class:busy={quoting}>{currentPrice.figure}</span>
+				{/key}
+			</div>
+			<button type="button" class="gcc-use" disabled={!canUse} onclick={use}>
+				{#if saving}
+					<span class="gcc-spinner" aria-hidden="true"></span>Saving
+				{:else if variant === 'settings'}
+					<Sparkles aria-hidden="true" />Remember this
+				{:else}
+					Use this
+				{/if}
+			</button>
+		</footer>
+		{#if variant === 'chat' && !settled}
+			<p class="gcc-hint">Or reply in your own words. Change saved choices in Settings, Default models.</p>
+		{/if}
+	{/if}
+</section>
+
+<style>
+	.gcc {
+		--gcc-accent: var(--primary);
+		--gcc-wash: color-mix(in oklch, var(--primary) 6%, transparent);
+		--gcc-radius: 10px;
+		container-type: inline-size;
+		position: relative;
+		width: 100%;
+		min-width: 0;
+		margin: 6px 0;
+		padding: 14px;
+		border: 1px solid var(--border);
+		border-radius: var(--gcc-radius);
+		background:
+			radial-gradient(120% 80% at 0% 0%, var(--gcc-wash), transparent 60%),
+			var(--card);
+		color: var(--foreground);
+		animation: gcc-in 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+	}
+	.gcc.settings {
+		margin: 0;
+		background: var(--card);
+	}
+	.gcc.collapsed {
+		padding: 10px 12px;
+	}
+
+	.gcc-head {
+		display: flex;
+		align-items: flex-start;
+		gap: 10px;
+		min-width: 0;
+	}
+	.gcc-glyph {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border-radius: 8px;
+		color: var(--gcc-accent);
+		background: color-mix(in oklch, var(--gcc-accent) 12%, transparent);
+		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--gcc-accent) 22%, transparent);
+	}
+	.gcc-glyph :global(svg) {
+		width: 16px;
+		height: 16px;
+	}
+	.gcc-heading {
+		flex: 1;
+		min-width: 0;
+	}
+	h3 {
+		margin: 0;
+		font-size: 13.5px;
+		font-weight: 600;
+		line-height: 1.35;
+		letter-spacing: -0.005em;
+		overflow-wrap: anywhere;
+	}
+	.gcc-sub {
+		margin: 2px 0 0;
+		font-size: 12px;
+		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
+	}
+	.gcc-prompt {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		font-style: italic;
+	}
+	.gcc-dot {
+		margin: 0 4px;
+	}
+	.gcc-head-actions {
+		display: flex;
+		gap: 12px;
+		flex: none;
+		align-items: center;
+		align-self: center;
+	}
+
+	/* ── Options ─────────────────────────────────────────────────── */
+	.gcc-options {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+		gap: 8px;
+		margin-top: 12px;
+	}
+	.gcc-option {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 3px;
+		min-width: 0;
+		min-height: 44px;
+		padding: 10px 11px 11px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--background);
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+		transition:
+			border-color 160ms ease-out,
+			background-color 160ms ease-out,
+			transform 160ms ease-out,
+			box-shadow 160ms ease-out;
+		animation: gcc-rise 300ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+		animation-delay: calc(var(--i) * 45ms + 60ms);
+	}
+	.gcc-option:hover:not(:disabled) {
+		border-color: var(--border-strong, var(--border));
+		background: var(--muted);
+		transform: translateY(-1px);
+	}
+	.gcc-option:active:not(:disabled) {
+		transform: translateY(0);
+	}
+	.gcc-option.selected {
+		border-color: color-mix(in oklch, var(--gcc-accent) 70%, transparent);
+		background: color-mix(in oklch, var(--gcc-accent) 7%, var(--background));
+		box-shadow: 0 0 0 1px color-mix(in oklch, var(--gcc-accent) 45%, transparent);
+	}
+	.gcc-option:disabled {
+		cursor: not-allowed;
+		opacity: 0.5;
+	}
+	.gcc-option[aria-disabled='true']:not(:disabled):not(.selected) {
+		opacity: 0.72;
+	}
+	.gcc-opt-top {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		min-width: 0;
+		padding-right: 18px;
+	}
+	.gcc-source {
+		font-size: 10.5px;
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.gcc-badge {
+		flex: none;
+		padding: 1px 6px;
+		border-radius: 999px;
+		font-size: 10px;
+		font-weight: 600;
+		color: var(--gcc-accent);
+		background: color-mix(in oklch, var(--gcc-accent) 12%, transparent);
+		white-space: nowrap;
+	}
+	.gcc-badge.quiet {
+		color: var(--muted-foreground);
+		background: var(--muted);
+	}
+	.gcc-model {
+		max-width: 100%;
+		font-size: 13px;
+		font-weight: 600;
+		line-height: 1.3;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.gcc-chips {
+		max-width: 100%;
+		font-size: 11px;
+		line-height: 1.35;
+		color: var(--muted-foreground);
+		overflow: hidden;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+	}
+	.gcc-price {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		margin-top: auto;
+		padding-top: 6px;
+	}
+	.gcc-figure {
+		font-family: var(--font-mono);
+		font-size: 15px;
+		font-weight: 600;
+		letter-spacing: -0.02em;
+		font-variant-numeric: tabular-nums;
+	}
+	.gcc-per {
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+	}
+	.gcc-price.unknown .gcc-figure {
+		color: var(--muted-foreground);
+	}
+	.gcc-check {
+		position: absolute;
+		top: 9px;
+		right: 9px;
+		display: grid;
+		place-items: center;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		color: var(--primary-foreground, var(--background));
+		background: var(--gcc-accent);
+		animation: gcc-pop 220ms cubic-bezier(0.3, 1.4, 0.5, 1) both;
+	}
+	.gcc-check :global(svg) {
+		width: 11px;
+		height: 11px;
+		stroke-width: 3;
+	}
+
+	/* ── Advanced ────────────────────────────────────────────────── */
+	.gcc-advanced {
+		margin-top: 10px;
+		border-top: 1px dashed var(--border);
+	}
+	.gcc-adv-toggle {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		min-height: 36px;
+		padding: 8px 0 4px;
+		border: 0;
+		background: none;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12px;
+		font-weight: 600;
+		cursor: pointer;
+		text-align: left;
+	}
+	.gcc-adv-toggle :global(.gcc-chev) {
+		width: 14px;
+		height: 14px;
+		transform: rotate(-90deg);
+		transition: transform 200ms ease-out;
+	}
+	.gcc-adv-toggle[aria-expanded='true'] :global(.gcc-chev) {
+		transform: rotate(0deg);
+	}
+	.gcc-adv-meta {
+		font-weight: 400;
+		color: var(--muted-foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		min-width: 0;
+	}
+	.gcc-adv-body {
+		display: grid;
+		gap: 2px;
+		padding: 4px 0 2px;
+		animation: gcc-rise 200ms ease-out both;
+	}
+	.gcc-field {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+		align-items: center;
+		gap: 12px;
+		min-height: 40px;
+		padding: 4px 0;
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+	}
+	.gcc-field:last-of-type {
+		border-bottom: 0;
+	}
+	.gcc-field label {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+		font-size: 12px;
+		font-weight: 500;
+	}
+	.gcc-help {
+		font-size: 10.5px;
+		font-weight: 400;
+		color: var(--muted-foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.gcc-control {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 8px;
+		min-width: 0;
+	}
+	.gcc-control select,
+	.gcc-control input[type='text'],
+	.gcc-control input[type='number'] {
+		width: 100%;
+		max-width: 220px;
+		min-height: 32px;
+		padding: 5px 8px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--background);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12px;
+	}
+	.gcc-control input[type='number'] {
+		max-width: 120px;
+		font-family: var(--font-mono);
+	}
+	.gcc-control select:disabled {
+		opacity: 0.7;
+	}
+	.gcc-control input[type='range'] {
+		flex: 1;
+		max-width: 170px;
+		accent-color: var(--gcc-accent);
+	}
+	.gcc-range-value {
+		min-width: 3ch;
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
+	}
+	.gcc-switch {
+		appearance: none;
+		position: relative;
+		width: 34px;
+		height: 20px;
+		border-radius: 999px;
+		background: var(--muted);
+		box-shadow: inset 0 0 0 1px var(--border);
+		cursor: pointer;
+		transition: background-color 160ms ease-out;
+	}
+	.gcc-switch::after {
+		content: '';
+		position: absolute;
+		top: 3px;
+		left: 3px;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: var(--background);
+		box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+		transition: transform 180ms cubic-bezier(0.3, 1.3, 0.5, 1);
+	}
+	.gcc-switch:checked {
+		background: var(--gcc-accent);
+	}
+	.gcc-switch:checked::after {
+		transform: translateX(14px);
+	}
+	.gcc-empty {
+		margin: 4px 0;
+		font-size: 12px;
+		color: var(--muted-foreground);
+	}
+	.gcc-reset {
+		justify-self: start;
+		margin-top: 4px;
+	}
+
+	/* ── Notes, footer ───────────────────────────────────────────── */
+	.gcc-note {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		margin: 10px 0 0;
+		font-size: 11.5px;
+		line-height: 1.45;
+		color: var(--muted-foreground);
+	}
+	.gcc-note.warn {
+		color: var(--warning, var(--foreground));
+	}
+	.gcc-note :global(svg) {
+		flex: none;
+		width: 13px;
+		height: 13px;
+		margin-top: 2px;
+	}
+	.gcc-foot {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 10px 14px;
+		margin-top: 12px;
+		padding-top: 12px;
+		border-top: 1px solid var(--border);
+	}
+	.gcc-remember {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 32px;
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.gcc-remember input {
+		width: 15px;
+		height: 15px;
+		margin: 0;
+		accent-color: var(--gcc-accent);
+	}
+	/* The signature: a receipt line whose total ticks as options change. */
+	.gcc-receipt {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		flex: 1 1 140px;
+		min-width: 120px;
+		font-size: 11px;
+		color: var(--muted-foreground);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+	.gcc-leader {
+		flex: 1;
+		min-width: 12px;
+		border-bottom: 1px dotted color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+		transform: translateY(-3px);
+	}
+	.gcc-total {
+		font-family: var(--font-mono);
+		font-size: 16px;
+		font-weight: 600;
+		letter-spacing: -0.02em;
+		text-transform: none;
+		color: var(--foreground);
+		font-variant-numeric: tabular-nums;
+		animation: gcc-tick 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+	}
+	.gcc-total.busy {
+		opacity: 0.45;
+	}
+	.gcc-use {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		min-height: 36px;
+		min-width: 104px;
+		padding: 0 14px;
+		border: 1px solid transparent;
+		border-radius: 8px;
+		background: var(--foreground);
+		color: var(--background);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			opacity 160ms ease-out,
+			transform 120ms ease-out;
+	}
+	.gcc-use:hover:not(:disabled) {
+		opacity: 0.88;
+	}
+	.gcc-use:active:not(:disabled) {
+		transform: scale(0.98);
+	}
+	.gcc-use:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.gcc-use :global(svg) {
+		width: 14px;
+		height: 14px;
+	}
+	.gcc-spinner {
+		width: 12px;
+		height: 12px;
+		border: 2px solid currentColor;
+		border-right-color: transparent;
+		border-radius: 50%;
+		animation: gcc-spin 700ms linear infinite;
+	}
+	.gcc-hint {
+		margin: 8px 0 0;
+		font-size: 11px;
+		color: var(--muted-foreground);
+	}
+	.gcc-link {
+		min-height: 28px;
+		padding: 2px 0;
+		border: 0;
+		background: none;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 12px;
+		cursor: pointer;
+		text-decoration: underline;
+		text-decoration-color: color-mix(in oklch, currentColor 35%, transparent);
+		text-underline-offset: 3px;
+		white-space: nowrap;
+	}
+	.gcc-link:hover {
+		color: var(--foreground);
+	}
+	.gcc :focus-visible {
+		outline: 2px solid var(--ring, var(--foreground));
+		outline-offset: 2px;
+	}
+
+	@container (max-width: 420px) {
+		.gcc-options {
+			grid-template-columns: 1fr;
+		}
+		.gcc-option {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			grid-template-areas: 'top price' 'model price' 'chips price';
+			column-gap: 10px;
+		}
+		.gcc-opt-top {
+			grid-area: top;
+			padding-right: 0;
+		}
+		.gcc-model {
+			grid-area: model;
+		}
+		.gcc-chips {
+			grid-area: chips;
+		}
+		.gcc-price {
+			grid-area: price;
+			flex-direction: column;
+			align-items: flex-end;
+			gap: 0;
+			margin: 0;
+			padding: 0 0 0 4px;
+			align-self: center;
+		}
+		.gcc-check {
+			display: none;
+		}
+		.gcc-field {
+			grid-template-columns: 1fr;
+			gap: 4px;
+		}
+		.gcc-control {
+			justify-content: flex-start;
+		}
+		.gcc-control select,
+		.gcc-control input[type='text'] {
+			max-width: none;
+		}
+		.gcc-use {
+			flex: 1 1 100%;
+			min-height: 44px;
+		}
+		.gcc-head-actions {
+			flex-direction: column;
+			align-items: flex-end;
+			gap: 0;
+		}
+	}
+
+	@keyframes gcc-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+	}
+	@keyframes gcc-rise {
+		from {
+			opacity: 0;
+			transform: translateY(6px);
+		}
+	}
+	@keyframes gcc-pop {
+		from {
+			transform: scale(0.4);
+			opacity: 0;
+		}
+	}
+	@keyframes gcc-tick {
+		from {
+			opacity: 0;
+			transform: translateY(-6px);
+			filter: blur(2px);
+		}
+	}
+	@keyframes gcc-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.gcc,
+		.gcc-option,
+		.gcc-check,
+		.gcc-total,
+		.gcc-adv-body {
+			animation: none;
+		}
+		.gcc-option,
+		.gcc-switch::after,
+		.gcc-adv-toggle :global(.gcc-chev) {
+			transition: none;
+		}
+	}
+</style>

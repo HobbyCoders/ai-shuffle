@@ -29,6 +29,19 @@ import {
 	type ToolSetting
 } from '$lib/types/ai-tool-registry';
 import { ALL_TTS_MODELS, type CatalogModel, type TTSVoice } from '$lib/types/ai-models';
+import { generationChoices } from '$lib/stores/generation-choices.svelte';
+import type { GenerationKind } from '$lib/utils/generation-choice';
+
+/**
+ * Tools the unified generation tools replaced (#379): a catalog pick for one
+ * of them becomes the account's remembered choice, not a worker setting.
+ */
+export const GENERATION_TOOL_KIND: Readonly<Record<string, GenerationKind>> = {
+	image_generation: 'image',
+	video_generation: 'video',
+	text_to_audio: 'audio',
+	text_to_3d: '3d'
+};
 
 /** List group a tool sits in on the Default models page. */
 export type ToolGroup = 'Image' | 'Video' | '3D' | 'Audio';
@@ -48,7 +61,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
 	image_to_video: { item: 'i2v', name: 'Image to video', group: 'Video' },
 	text_to_3d: { item: 't23d', name: 'Text to 3D', group: '3D' },
 	image_to_3d: { item: 'i23d', name: 'Image to 3D', group: '3D' },
-	tts: { item: 'tts', name: 'Text to speech', group: 'Audio' },
+	tts: { item: 'tts', name: 'Read aloud', group: 'Audio' },
 	stt: { item: 'stt', name: 'Speech to text', group: 'Audio' },
 	text_to_audio: { item: 't2a', name: 'Text to audio', group: 'Audio' },
 	audio_to_audio: { item: 'a2a', name: 'Audio to audio', group: 'Audio' }
@@ -69,12 +82,6 @@ export const SELECTABLE_TOOL_TYPES: readonly string[] = ALL_TOOLS.map((t) => t.c
 
 /** Registry ids of the curated option rows, by tool id and setting key. */
 export const OPTION_ENTRY: Record<string, Record<string, string>> = {
-	image_generation: { aspect_ratio: 'models.imageAspect', resolution: 'models.imageResolution' },
-	video_generation: {
-		aspect_ratio: 'models.videoAspect',
-		duration: 'models.videoDuration',
-		resolution: 'models.videoResolution'
-	},
 	tts: { voice: 'models.ttsVoice', speed: 'models.ttsSpeed', output_format: 'models.ttsFormat' }
 };
 
@@ -252,9 +259,16 @@ export class MediaTools {
 		return this.falEnabled === false && !!this.modelId(tool) && this.runsOnFal(tool);
 	}
 
-	/** True when some tool uses this catalog model. */
+	/**
+	 * True when this catalog model is remembered for a generation kind or
+	 * pinned for a media tool (editing, image to video, read aloud...).
+	 */
 	isDefault(endpointId: string): boolean {
-		return ALL_TOOLS.some((t) => this.modelId(t) === endpointId);
+		return ALL_TOOLS.some((t) => {
+			const kind = GENERATION_TOOL_KIND[t.id];
+			if (kind) return generationChoices.remembered[kind]?.model === endpointId;
+			return this.modelId(t) === endpointId;
+		});
 	}
 
 	toolForCatalogModel(model: CatalogModel): ToolDefinition | undefined {
@@ -336,11 +350,34 @@ export class MediaTools {
 		}
 	}
 
-	/** Pick a model from the fal.ai catalog: it becomes the default of its tool. */
+	/**
+	 * Pick a model from the fal.ai catalog. For image, video, audio and 3D
+	 * generation it becomes the remembered choice; for any other tool it is
+	 * pinned as that tool's model.
+	 */
 	async selectFromCatalog(model: CatalogModel): Promise<boolean> {
 		const tool = this.toolForCatalogModel(model);
 		if (!tool) return false;
-		return this.selectModel(tool, model.endpoint_id);
+		const kind = GENERATION_TOOL_KIND[tool.id];
+		if (!kind) return this.selectModel(tool, model.endpoint_id);
+		if (!this.isCurrent() || this.saving) return false;
+		this.saving = tool.id;
+		try {
+			await generationChoices.load();
+			await generationChoices.save(
+				kind,
+				{ source: 'fal', account: 'fal-ai', worker: generationChoices.worker || undefined, model: model.endpoint_id, options: {} },
+				true,
+				'settings'
+			);
+			if (this.isCurrent()) flashSaved();
+			return true;
+		} catch (e: unknown) {
+			if (this.isCurrent()) notify.error(getErrorMessage(e, 'Could not remember this model'));
+			return false;
+		} finally {
+			if (this.isCurrent()) this.saving = null;
+		}
 	}
 
 	/** Pills and selects: save at once. */

@@ -23,6 +23,7 @@ import { canRewindUserMessage } from './message-presentation';
 import { isNavigableUserTurn } from './transcript-navigation';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
+import { isGenerationChoiceRow } from './generation-choice';
 import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
 import { handoffEpisodes, isHandoffTool, sameHandoffs, type HandoffEpisodes } from './handoff-episodes';
 
@@ -238,7 +239,9 @@ function isSpecialTool(msg: ChatMessage): boolean {
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
 		msg.toolName === 'AskUserQuestion' ||
-		msg.toolName === 'AskUser'
+		msg.toolName === 'AskUser' ||
+		// A generation choice card asks the reader to pick (#379).
+		isGenerationChoiceRow(msg)
 	);
 }
 

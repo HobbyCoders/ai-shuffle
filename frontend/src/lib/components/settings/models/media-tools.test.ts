@@ -5,9 +5,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogModel } from '$lib/types/ai-models';
 
-const mocks = vi.hoisted(() => ({ owner: 0, get: vi.fn(), patch: vi.fn(), post: vi.fn(), invalidate: vi.fn(), error: vi.fn() }));
+const mocks = vi.hoisted(() => ({ owner: 0, get: vi.fn(), patch: vi.fn(), post: vi.fn(), put: vi.fn(), invalidate: vi.fn(), error: vi.fn() }));
 vi.mock('$lib/api/client', () => ({
-	api: { get: mocks.get, patch: mocks.patch, post: mocks.post },
+	api: { get: mocks.get, patch: mocks.patch, post: mocks.post, put: mocks.put },
 	getErrorMessage: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 }));
 vi.mock('$lib/stores/session-owner', () => ({ sessionOwnerEpoch: () => mocks.owner }));
@@ -15,6 +15,7 @@ vi.mock('$lib/services/sttStream', () => ({ invalidateSttCapability: mocks.inval
 vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.error } }));
 
 import { catalogStore } from '$lib/stores/catalog';
+import { generationChoices } from '$lib/stores/generation-choices.svelte';
 import { ALL_TOOLS, MediaTools, toolByItem, TOOL_META } from './media-tools.svelte';
 
 const model = (endpoint_id: string, over: Partial<CatalogModel> = {}): CatalogModel => ({
@@ -45,9 +46,13 @@ beforeEach(async () => {
 		if (url === '/settings/integrations') return settings;
 		if (url === '/catalog/categories') return { categories: [{ category: 'text-to-image', count: 1, tool_type: 'image_generation' }], total_models: 3 };
 		if (url.startsWith('/catalog/models')) return { models: catalog, total: 3, catalog_size: 3 };
+		if (url === '/generation/choices') return { remembered: {}, last: {}, migrated: true, worker: 'worker-a' };
 		return {};
 	});
 	mocks.patch.mockResolvedValue({ success: true });
+	mocks.put.mockImplementation(async (_url: string, body: { choice: unknown }) => ({ choice: body.choice }));
+	generationChoices.remembered = {};
+	generationChoices.last = {};
 	await catalogStore.load(true);
 });
 afterEach(() => vi.useRealTimers());
@@ -110,14 +115,26 @@ describe('MediaTools', () => {
 		expect(mocks.patch).not.toHaveBeenCalled();
 	});
 
-	it('persists a catalog pick to its tool and marks it default', async () => {
+	it('remembers a catalog pick for a generation kind instead of saving a worker default (#379)', async () => {
 		const tools = await loaded();
 		expect(tools.isDefault('fal-ai/new-image')).toBe(false);
-		await tools.selectFromCatalog(catalog[0]);
-		expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/image/model', { model: 'fal-ai/new-image' });
+		expect(await tools.selectFromCatalog(catalog[0])).toBe(true);
+		expect(mocks.put).toHaveBeenCalledWith('/generation/choices/image', {
+			choice: { source: 'fal', account: 'fal-ai', worker: 'worker-a', model: 'fal-ai/new-image', options: {} },
+			remember: true,
+			origin: 'settings'
+		});
+		expect(mocks.patch).not.toHaveBeenCalled();
 		expect(tools.isDefault('fal-ai/new-image')).toBe(true);
-		expect(tools.displayName(tool('t2i'))).toBe('New Image');
-		expect(mocks.invalidate).not.toHaveBeenCalled();
+		expect(tools.saving).toBeNull();
+	});
+
+	it('still pins a catalog pick for a tool the generation tools did not replace', async () => {
+		const tools = await loaded();
+		await tools.selectFromCatalog(catalog[1]);
+		expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/audio/stt', { model: 'fal-ai/wizper' });
+		expect(tools.isDefault('fal-ai/wizper')).toBe(true);
+		expect(mocks.put).not.toHaveBeenCalled();
 	});
 
 	it('drops the cached speech-to-text capability when the STT model changes', async () => {
@@ -127,13 +144,21 @@ describe('MediaTools', () => {
 		expect(mocks.invalidate).toHaveBeenCalledOnce();
 	});
 
-	it('keeps the previous default when saving the pick fails', async () => {
+	it('keeps the previous choice when remembering the pick fails', async () => {
+		const tools = await loaded();
+		mocks.put.mockRejectedValueOnce(new Error('no key'));
+		expect(await tools.selectFromCatalog(catalog[0])).toBe(false);
+		expect(mocks.error).toHaveBeenCalledWith('no key');
+		expect(generationChoices.remembered.image).toBeUndefined();
+		expect(tools.saving).toBeNull();
+	});
+
+	it('keeps the previous pinned model when saving the pin fails', async () => {
 		const tools = await loaded();
 		mocks.patch.mockRejectedValueOnce(new Error('no key'));
-		expect(await tools.selectFromCatalog(catalog[0])).toBe(false);
+		expect(await tools.selectFromCatalog(catalog[1])).toBe(false);
 		expect(mocks.patch).toHaveBeenCalledOnce();
 		expect(mocks.error).toHaveBeenCalledWith('no key');
-		expect(tools.modelId(tool('t2i'))).toBe('fal-ai/flux/dev');
 		expect(tools.saving).toBeNull();
 	});
 

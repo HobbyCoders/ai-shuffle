@@ -65,6 +65,9 @@
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import HandoffCard from './HandoffCard.svelte';
+	import GenerationChoiceCard from './GenerationChoiceCard.svelte';
+	import GenerationSavedChoice from './GenerationSavedChoice.svelte';
+	import { chooseResult, rememberedResult } from '$lib/utils/generation-choice';
 	import { EMPTY_HANDOFFS, settleByOwner } from '$lib/utils/handoff-episodes';
 	import { handoffPending, pollHandoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
 	import { HANDOFF_PROGRESS_POLL_MS, progressForEpisode } from '$lib/utils/handoff-progress';
@@ -2256,17 +2259,32 @@
 		     it succeeds. Only a failed cell keeps its card: that one is a problem
 		     worth reading. -->
 	{:else if message.type === 'tool_use'}
-		<ToolUseMessage
-			name={message.toolName || 'Tool'}
-			input={message.toolInput}
-			partialInput={message.partialToolInput}
-			result={message.toolResult}
-			status={message.toolStatus || 'running'}
-			streaming={message.streaming}
-			sessionId={activeSessionId}
-			serverSide={message.serverSide ?? message.server_side ?? false}
-			screenshot={message.toolScreenshot}
-		/>
+		<!-- A generation tool that asks which source to use renders as its choice card (#379). -->
+		{@const choose = chooseResult(message)}
+		{#if choose}
+			<GenerationChoiceCard
+				kind={choose.kind}
+				options={choose.options}
+				tool={choose.tool}
+				prompt={choose.prompt}
+				toolId={message.toolId}
+				rememberedUnavailable={choose.rememberedUnavailable}
+			/>
+		{:else}
+			{@const saved = rememberedResult(message)}
+			<ToolUseMessage
+				name={message.toolName || 'Tool'}
+				input={message.toolInput}
+				partialInput={message.partialToolInput}
+				result={message.toolResult}
+				status={message.toolStatus || 'running'}
+				streaming={message.streaming}
+				sessionId={activeSessionId}
+				serverSide={message.serverSide ?? message.server_side ?? false}
+				screenshot={message.toolScreenshot}
+			/>
+			{#if saved}<GenerationSavedChoice {saved} />{/if}
+		{/if}
 	{:else if message.type === 'tool_result'}
 		<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
 		<!-- This prevents flickering where result briefly appears separately -->

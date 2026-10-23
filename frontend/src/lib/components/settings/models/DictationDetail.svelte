@@ -76,7 +76,7 @@
 				<LinkValue label="Voice" target={{ category: 'voice' }} />
 			</SettingRow>
 			<SettingRow label="Transcribing files">
-				<LinkValue label="Speech to text" target={{ category: 'models', item: 'stt' }} />
+				<LinkValue label="Pin in the catalog" target={{ category: 'models', item: 'catalog' }} />
 			</SettingRow>
 		</RowGroup>
 	{/if}

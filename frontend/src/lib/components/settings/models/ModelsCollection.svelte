@@ -1,8 +1,14 @@
 <script lang="ts">
 	/**
-	 * Default models: the model each task uses. Text tasks, the fal.ai media
-	 * tools (image, video, 3D, audio), dictation, voice calls (read-only) and
-	 * the fal.ai catalog. A list of tasks beside the selected task's detail.
+	 * Default models (#379 step 3): the model catalog, the remembered choice
+	 * per generation kind, and the app tasks that are not agent requests
+	 * (session titles and commit text, dictation, read-aloud, voice calls).
+	 *
+	 * The per-tool media defaults are gone: an agent request names what it
+	 * wants or gets a choice card, and a remembered pick is reused. Saved
+	 * defaults were migrated into remembered choices on the server; media
+	 * transform tools (editing, image to video, ...) keep their saved model and
+	 * can be pinned from the catalog.
 	 */
 	import { onMount } from 'svelte';
 	import { Sparkles } from 'lucide-svelte';
@@ -11,18 +17,32 @@
 	import type { StatusTone } from '$lib/settings/types';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { catalogStore } from '$lib/stores/catalog';
+	import { GENERATION_KINDS, generationChoices } from '$lib/stores/generation-choices.svelte';
+	import { modelLabel, sourceLabel, type GenerationKind } from '$lib/utils/generation-choice';
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
 	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
-	import { ALL_TOOLS, MediaTools, toolByItem, toolMeta, type ToolGroup } from './media-tools.svelte';
+	import { ALL_TOOLS, MediaTools, toolByItem, toolMeta } from './media-tools.svelte';
 	import { setModelsState, TextTasks, VoiceDefaults, VOICE_CALL_MODEL } from './tasks.svelte';
-	import { CATALOG_ICON, DICTATION_ICON, TEXT_ICON, TOOL_ICONS, VOICE_CALL_ICON } from './icons';
+	import {
+		CATALOG_ICON,
+		DICTATION_ICON,
+		GENERATION_ICONS,
+		GENERATION_NAMES,
+		TEXT_ICON,
+		TOOL_ICONS,
+		VOICE_CALL_ICON
+	} from './icons';
 	import TextTasksDetail from './TextTasksDetail.svelte';
 	import ToolDetail from './ToolDetail.svelte';
 	import DictationDetail from './DictationDetail.svelte';
 	import VoiceCallsDetail from './VoiceCallsDetail.svelte';
 	import CatalogDetail from './CatalogDetail.svelte';
+	import GenerationChoiceDetail from './GenerationChoiceDetail.svelte';
+
+	/** The one media tool left here: the read-aloud voice is an app task. */
+	const READ_ALOUD = ALL_TOOLS.find((t) => t.id === 'tts');
 
 	const tools = new MediaTools();
 	const text = new TextTasks(tools);
@@ -33,6 +53,7 @@
 		const stop = tools.start();
 		void text.load();
 		void voice.load();
+		void generationChoices.load(true);
 		return () => {
 			stop();
 			text.dispose();
@@ -40,7 +61,7 @@
 		};
 	});
 	watchResources(['settings'], async () => {
-		await Promise.all([tools.load(), text.refresh(), voice.load()]);
+		await Promise.all([tools.load(), text.refresh(), voice.load(), generationChoices.load(true)]);
 	});
 
 	let filter = $state('');
@@ -53,18 +74,29 @@
 		status?: StatusTone;
 	}
 
-	function toolRows(...groups: ToolGroup[]): Row[] {
-		return ALL_TOOLS.filter((t) => groups.includes(toolMeta(t).group)).map((t) => {
-			const meta = toolMeta(t);
-			const name = tools.displayName(t);
-			return {
-				id: meta.item,
-				name: meta.name,
+	function generationRow(kind: GenerationKind): Row {
+		const choice = generationChoices.remembered[kind];
+		return {
+			id: `gen-${kind}`,
+			name: GENERATION_NAMES[kind],
+			summary: choice ? `${sourceLabel(choice.source)} · ${modelLabel(choice.model)}` : 'Asks each time',
+			icon: GENERATION_ICONS[kind],
+			status: choice ? undefined : 'off'
+		};
+	}
+
+	function readAloudRow(): Row[] {
+		if (!READ_ALOUD) return [];
+		const name = tools.displayName(READ_ALOUD);
+		return [
+			{
+				id: toolMeta(READ_ALOUD).item,
+				name: 'Read aloud',
 				summary: name || 'No model chosen',
-				icon: TOOL_ICONS[t.id],
-				status: !name ? 'off' : tools.blockedByFal(t) ? 'warn' : undefined
-			};
-		});
+				icon: TOOL_ICONS[READ_ALOUD.id],
+				status: !name ? 'off' : tools.blockedByFal(READ_ALOUD) ? 'warn' : undefined
+			}
+		];
 	}
 
 	const catalogSummary = $derived.by(() => {
@@ -74,44 +106,34 @@
 	});
 
 	const effortText = $derived(text.effort ? `${text.effortLabel.toLowerCase()} effort` : 'default effort');
-	const groups = $derived.by((): { label: string; rows: Row[] }[] => {
-		const audioTools = toolRows('Audio');
-		return [
-			{
-				label: 'Text',
-				rows: [
-					{
-						id: 'text',
-						name: 'Text tasks',
-						summary: `${text.label}, ${effortText}`,
-						icon: TEXT_ICON,
-						status: text.blocked ? 'warn' : undefined
-					}
-				]
-			},
-			{ label: 'Image', rows: toolRows('Image') },
-			{ label: 'Video', rows: toolRows('Video') },
-			{ label: '3D', rows: toolRows('3D') },
-			{
-				label: 'Audio',
-				rows: [
-					{
-						id: 'dict',
-						name: 'Dictation',
-						summary: voice.settings ? voice.inputModelName() : 'Chat mic and hotkey',
-						icon: DICTATION_ICON,
-						status: tools.falEnabled === false && voice.settings && voice.inputOnFal ? 'warn' : undefined
-					},
-					...audioTools,
-					{ id: 'voicecall', name: 'Voice calls', summary: voice.settings?.voice_model ?? VOICE_CALL_MODEL, icon: VOICE_CALL_ICON }
-				]
-			},
-			{
-				label: 'Catalog',
-				rows: [{ id: 'catalog', name: 'All fal.ai models', summary: catalogSummary, icon: CATALOG_ICON }]
-			}
-		];
-	});
+	const groups = $derived.by((): { label: string; rows: Row[] }[] => [
+		{ label: 'Generation', rows: GENERATION_KINDS.map(generationRow) },
+		{
+			label: 'App tasks',
+			rows: [
+				{
+					id: 'text',
+					name: 'Text tasks',
+					summary: `${text.label}, ${effortText}`,
+					icon: TEXT_ICON,
+					status: text.blocked ? 'warn' : undefined
+				},
+				{
+					id: 'dict',
+					name: 'Dictation',
+					summary: voice.settings ? voice.inputModelName() : 'Chat mic and hotkey',
+					icon: DICTATION_ICON,
+					status: tools.falEnabled === false && voice.settings && voice.inputOnFal ? 'warn' : undefined
+				},
+				...readAloudRow(),
+				{ id: 'voicecall', name: 'Voice calls', summary: voice.settings?.voice_model ?? VOICE_CALL_MODEL, icon: VOICE_CALL_ICON }
+			]
+		},
+		{
+			label: 'Catalog',
+			rows: [{ id: 'catalog', name: 'All fal.ai models', summary: catalogSummary, icon: CATALOG_ICON }]
+		}
+	]);
 
 	const taskCount = $derived(groups.reduce((n, g) => n + g.rows.length, 0) - 1);
 	const q = $derived(filter.trim().toLowerCase());
@@ -126,6 +148,9 @@
 
 	const selected = $derived(settingsNav.selectedItem('models'));
 	const selectedTool = $derived(toolByItem(selected));
+	const selectedKind = $derived(
+		GENERATION_KINDS.find((kind) => selected === `gen-${kind}`) ?? null
+	);
 </script>
 
 <CollectionPage category="models" count="{taskCount} tasks" filterPlaceholder="Filter default models" bind:filter>
@@ -155,10 +180,12 @@
 			<VoiceCallsDetail />
 		{:else if selected === 'catalog'}
 			<CatalogDetail />
-		{:else if selectedTool}
-			{#key selectedTool.id}
-				<ToolDetail tool={selectedTool} />
+		{:else if selectedKind}
+			{#key selectedKind}
+				<GenerationChoiceDetail kind={selectedKind} />
 			{/key}
+		{:else if selectedTool && selectedTool.id === READ_ALOUD?.id}
+			<ToolDetail tool={selectedTool} />
 		{:else}
 			<EmptyDetail icon={Sparkles} message="Select a task." />
 		{/if}
