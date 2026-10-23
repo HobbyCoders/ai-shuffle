@@ -90,3 +90,42 @@ it('does not hold sends once the catalog has answered', async () => {
  expect(active.composerAwaitingProjectCatalog).toBe(false);
  expect(active.current).toMatchObject({ project: 'local-clone', worktreeBranch: 'topic/remote' });
 });
+// #434: a new session whose project was deleted (here, or on another tab or
+// worker) must not keep sending into it, even under a typed draft.
+it.each([
+ ['local', { projectId: 'local-clone', projectV2Id: 'repo' }],
+ ['remote-only', { projectId: '', projectV2Id: 'repo' }],
+])('drops a deleted %s project from a new session', async (_kind, pick) => {
+ mocks.catalog.projects = [{ id: 'local-clone' }]; mocks.catalog.clusterProjects = [linked]; mocks.catalogLoaded = true;
+ active.setProject(pick.projectId, pick.projectV2Id);
+ active.setDraft('typed for the old project');
+ expect(active.current).toMatchObject({ project: pick.projectId, projectV2Id: 'repo' });
+
+ mocks.catalog.projects = []; mocks.catalog.clusterProjects = [];
+ active.dropMissingProject();
+
+ expect(active.current).toMatchObject({ project: '', projectV2Id: null, draft: 'typed for the old project' });
+});
+it('keeps a project that is still listed, and waits for the catalog before judging', async () => {
+ mocks.catalog.projects = [{ id: 'local-clone' }]; mocks.catalog.clusterProjects = [linked]; mocks.catalogLoaded = true;
+ active.setProject('local-clone', 'repo');
+ active.dropMissingProject();
+ expect(active.current).toMatchObject({ project: 'local-clone', projectV2Id: 'repo' });
+
+ mocks.catalog.projects = []; mocks.catalogLoaded = false;
+ active.dropMissingProject();
+ expect(active.current).toMatchObject({ project: 'local-clone', projectV2Id: 'repo' });
+});
+it('never unbinds an open chat whose project was deleted', async () => {
+ mocks.catalog.projects = []; mocks.catalog.clusterProjects = []; mocks.catalogLoaded = true;
+ Object.assign(active.current, { sessionId: 'open-chat', project: 'gone', projectV2Id: 'pv2-gone' });
+ active.dropMissingProject();
+ expect(active.current).toMatchObject({ sessionId: 'open-chat', project: 'gone', projectV2Id: 'pv2-gone' });
+});
+it('drops a deleted extra folder from a new session', async () => {
+ mocks.catalog.projects = [{ id: 'local-clone' }, { id: 'extra' }]; mocks.catalog.clusterProjects = [linked]; mocks.catalogLoaded = true;
+ active.setProject('local-clone', 'repo');
+ Object.assign(active.current, { workspaceProjectIds: ['extra', 'gone'] });
+ active.dropMissingProject();
+ expect(active.current).toMatchObject({ project: 'local-clone', workspaceProjectIds: ['extra'] });
+});

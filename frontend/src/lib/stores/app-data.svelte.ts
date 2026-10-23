@@ -595,6 +595,17 @@ async function loadApiUserSessionsInternal() {
 	}
 }
 
+/** The catalog as it stands once this worker's clone `projectId` is gone. */
+function withoutLocalClone(catalog: ClusterProject[], projectId: string): ClusterProject[] {
+	const out: ClusterProject[] = [];
+	for (const row of catalog) {
+		if (row.local_project_id !== projectId) { out.push(row); continue; }
+		const eligible = row.eligible.filter(install => !install.is_self);
+		if (eligible.length) out.push({ ...row, local_project_id: null, remote_only: true, eligible });
+	}
+	return out;
+}
+
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
 // ─── Project Catalog Readiness ───────────────────────────────────────────────
@@ -766,6 +777,10 @@ export const appData = {
 		_update(s => ({
 			...s,
 			projects: s.projects.filter(project => project.id !== projectId),
+			// The catalog row carried this worker's clone; without it the picker
+			// would re-offer the deleted project as one on this device until the
+			// catalog reload answers (#434). Another worker's clone still lists it.
+			clusterProjects: withoutLocalClone(s.clusterProjects, projectId),
 			sessions: s.sessions.filter(session => session.project_id !== projectId),
 			sessionsTotal: Math.max(0, s.sessionsTotal - removedSessionIds.size),
 			...(s.sessions.length === removedSessionIds.size
@@ -786,7 +801,9 @@ export const appData = {
 		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
 			activeSession.newChat();
 		}
+		activeSession.dropMissingProject();
 		await Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+		activeSession.dropMissingProject();
 	},
 
 	/**

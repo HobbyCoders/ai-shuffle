@@ -1139,6 +1139,26 @@ export const activeSession = {
 	},
 
 	/**
+	 * A new session's project was deleted, here or on another tab or worker:
+	 * leave the compose without it rather than send into a project no
+	 * selector lists any more (#434). Only an answered catalog can say a
+	 * project is gone. An open chat keeps its binding and still opens.
+	 */
+	dropMissingProject() {
+		if (_state.sessionId || composerBusy()) return;
+		if (!appData.projectCatalogLoaded || appData.projectCatalogFailed) return;
+		const { projects, clusterProjects } = appData.current;
+		const live = (id: string) => projects.some(p => p.id === id);
+		const folders = _state.workspaceProjectIds ?? [];
+		if (folders.some(id => !live(id))) {
+			_update(s => ({ ...s, workspaceProjectIds: (s.workspaceProjectIds ?? []).filter(live) }));
+		}
+		const { project, projectV2Id } = _state;
+		if (project ? live(project) : !projectV2Id || clusterProjects.some(p => p.project_v2_id === projectV2Id)) return;
+		activeSession.clearProject();
+	},
+
+	/**
 	 * A running no-project session was given a project (POST attach-project).
 	 * The row is now an ordinary project session; mirror it so the composer,
 	 * git button and project controls appear without a reload.

@@ -532,6 +532,10 @@
 	let remoteChange = $state('');
 	let remoteBaseline = '';
 	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formModel, formActionSteps]); }
+	// The project picker: a project deleted elsewhere leaves it at once (#434).
+	watchResources(['projects'], async () => {
+		try { projects = await api.get<Project[]>('/projects'); } catch { /* the next load retries */ }
+	});
 	watchResources(['automations'], async () => {
 		const selected = selectedAutomation;
 		const snapshot = remoteSnapshot();

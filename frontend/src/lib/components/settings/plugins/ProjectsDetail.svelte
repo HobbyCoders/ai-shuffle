@@ -19,6 +19,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import { getPluginsModel } from './plugins-model.svelte';
+	import { watchResources } from '$lib/services/watch-resources';
 	import { PROJECTS_ICON } from './icons';
 	import type { ProjectPlugin } from '$lib/api/plugins';
 
@@ -28,6 +29,8 @@
 	onMount(() => {
 		void model.loadProjectPlugins();
 	});
+	// A project added or deleted in another tab or on another worker (#434).
+	watchResources(['projects'], () => model.loadProjectPlugins());
 
 	const total = $derived(model.projectPlugins.reduce((n, r) => n + r.plugins.length, 0));
 	const facts = $derived<Fact[]>([
