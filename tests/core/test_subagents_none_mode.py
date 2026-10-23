@@ -316,7 +316,8 @@ async def test_delegated_leg_under_none_offers_no_delegation(mock_db, tmp_path, 
     _caller(database)
     _, options = await _session_options(tmp_path, monkeypatch, NONE)
     banned = set(ha._delegated_disallowed(options))
-    assert {"Task", "Agent", "Swarm", "mcp__builtins__Task"} <= banned
+    # Workflow: the CLI's multi-agent tool, blocked with Swarm.
+    assert {"Task", "Agent", "Swarm", "Workflow", "mcp__builtins__Task"} <= banned
     registry = _delegated_registry()
     assert ha._delegated_offered(options, registry)("Task") is False
     text = ha._delegated_append_text("USER", options, registry) or ""

@@ -5556,8 +5556,12 @@ def _valid_effort(value: Any) -> Optional[str]:
     return None
 
 
-# The CLI's native subagent tools are BANNED: the app's Task tool
-# (mcp__builtins__Task) is the one orchestration surface. The CLI's native
+# The CLI's native Task and Agent are BANNED: the app's Task tool
+# (mcp__builtins__Task) is the one way to start a single subagent. The CLI's
+# Workflow stays: it runs a scripted multi-agent workflow inside the CLI's own
+# process tree (its agents' cost reaches the CLI's running total_cost_usd, and
+# an interrupt or the process-group kill ends them). The picker gates it with
+# Swarm (tool_access.DELEGATED_CLI_ALIASES). The CLI's native
 # session-cron/wake tools and background-job tools are banned for the same
 # reason: the CLI fires their wake turns between queries, so the delegated
 # client never reads them and they vanish from app history and cost
@@ -5574,7 +5578,6 @@ DELEGATED_BANNED_TOOLS = frozenset({
     "ExitWorktree",
     "Task",
     "Agent",
-    "Workflow",
     "ScheduleWakeup",
     "CronCreate",
     "CronDelete",
@@ -5777,7 +5780,8 @@ def _delegated_disallowed(options: SessionOptions) -> list:
         # Withholding auto-approval is insufficient: the CLI also auto-approves
         # cwd reads. Only our bundled, handle-confined attachment reader is safe.
         banned.update({"Read", "Bash", "PowerShell", "Grep", "Glob", "LSP", "Write",
-                       "Edit", "NotebookEdit", "Task", "Agent", "Skill", "ToolSearch"})
+                       "Edit", "NotebookEdit", "Task", "Agent", "Workflow", "Skill",
+                       "ToolSearch"})
 
     surface = _delegated_surface(options)
     if surface:

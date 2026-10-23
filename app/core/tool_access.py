@@ -83,6 +83,9 @@ DELEGATED_CLI_ALIASES: Dict[str, tuple] = {
     # The CLI's language-server tool reads code; it follows Read and Grep.
     "Read": ("LSP",),
     "Grep": ("LSP",),
+    # The CLI's Workflow runs a multi-agent workflow, the CLI's counterpart of
+    # the app's Swarm: allowing or blocking Swarm allows or blocks it too.
+    "Swarm": ("Workflow",),
 }
 
 # CLI tools whose schemas the CLI defers behind its own ToolSearch. A surface

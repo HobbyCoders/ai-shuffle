@@ -70,6 +70,7 @@ KNOWN_CLI_TOOLS: tuple = (
     "Grep", "LSP", "WebSearch", "WebFetch", "Skill", "ToolSearch",
     "AskUserQuestion", "RemoteTrigger", "PushNotification", "SendMessage",
     "ListAgents", "EnterWorktree", "ExitWorktree", "DesignSync", "ReportFindings",
+    "Workflow",
 )
 
 _LOCK = threading.Lock()

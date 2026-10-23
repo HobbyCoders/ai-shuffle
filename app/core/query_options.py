@@ -1099,9 +1099,9 @@ def build_options_from_profile(
         if override_append:
             final_system_prompt += "\n\n" + override_append
 
-    # SDK AgentDefinitions are retired: the CLI's native Task/Agent/Workflow
-    # tools are banned on the delegated leg (harness_adapter passes
-    # --disallowed-tools), so ``agents_dict`` is permanently None.
+    # SDK AgentDefinitions are retired: the CLI's native Task/Agent tools are
+    # banned on the delegated leg (harness_adapter passes --disallowed-tools),
+    # so ``agents_dict`` is permanently None.
     #
     # ``enabled_agents``/``agent_invoke_mode`` are a CONTEXT-DECLARATION
     # concern — see

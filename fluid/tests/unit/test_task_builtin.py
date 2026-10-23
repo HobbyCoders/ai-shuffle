@@ -162,7 +162,7 @@ def test_delegated_disallowed_tools_argv():
     loop.add_dirs = None
     loop.allowed_tools = None
     loop.permission_grants = []
-    loop.disallowed_tools = ["Task", "Agent", "Workflow"]
+    loop.disallowed_tools = ["Task", "Agent"]
     loop.partial = False
     loop.settings = None
     loop.commit_attribution = True
@@ -170,7 +170,7 @@ def test_delegated_disallowed_tools_argv():
     loop.effort = None
     argv = loop._build_argv()
     i = argv.index("--disallowed-tools")
-    assert argv[i + 1] == "Task,Agent,Workflow"
+    assert argv[i + 1] == "Task,Agent"
 
 
 def test_delegated_effort_argv():

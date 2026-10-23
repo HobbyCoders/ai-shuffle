@@ -473,7 +473,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     # Web lookups.
     "WebSearch": LOW, "WebFetch": LOW,
     # Starting and steering work.
-    "Task": LOW, "Agent": LOW, "Swarm": LOW, "TaskGet": LOW, "TaskList": LOW, "TaskOutput": LOW, "TaskStop": LOW,
+    "Task": LOW, "Agent": LOW, "Swarm": LOW, "Workflow": LOW, "TaskGet": LOW, "TaskList": LOW, "TaskOutput": LOW, "TaskStop": LOW,
     "ListAgents": LOW, "SendMessage": LOW, "ListSessions": LOW, "MessageSession": LOW,
     "StartSession": _start_session_rule, "SettleSession": LOW, "UnsettleSession": LOW, "ArchiveSession": LOW,
     "HandOffSession": HIGH, "RemoteTrigger": HIGH, "ScheduleWakeup": LOW,

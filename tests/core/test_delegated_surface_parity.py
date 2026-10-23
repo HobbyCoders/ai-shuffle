@@ -272,6 +272,35 @@ def test_cli_copies_of_app_tools_are_banned(tmp_path):
     assert {"RemoteTrigger", "PushNotification", "ListAgents", "SendMessage"} <= denied
 
 
+# ─── The CLI's Workflow follows the picker's Swarm ──────────────────────────
+
+
+def test_cli_workflow_offered_on_an_unrestricted_session(tmp_path):
+    options = _options(tmp_path)
+    assert "Workflow" not in ha._delegated_disallowed(options)
+    assert ha._delegated_tool_policy(options, None, [])("Workflow", {}) is None
+
+
+def test_cli_workflow_follows_swarm_on_an_allowlist(tmp_path):
+    with_swarm = _options(tmp_path, surface=[*PICKED, "Swarm"])
+    assert "Workflow" in ha._delegated_surface(with_swarm)
+    assert "Workflow" not in ha._delegated_disallowed(with_swarm)
+
+    without = _options(tmp_path, surface=PICKED)
+    # Walled from the first connect: Workflow is in the known CLI tools seed.
+    assert "Workflow" in ha._delegated_disallowed(without)
+    assert ha._delegated_tool_policy(without, None, [])("Workflow", {}) is not None
+
+
+def test_blocking_swarm_blocks_cli_workflow(tmp_path):
+    options = _options(tmp_path, disallowed_tools=["Swarm"])
+    assert "Workflow" in ha._delegated_disallowed(options)
+
+
+def test_chat_lane_bans_cli_workflow(tmp_path):
+    assert "Workflow" in ha._delegated_disallowed(_options(tmp_path, lane="chat"))
+
+
 @pytest.mark.asyncio
 async def test_no_builtins_leaf_duplicates_a_cli_builtin(tmp_path, builtins_server):
     """Every app builtin named like a CLI built-in is either banned on the CLI

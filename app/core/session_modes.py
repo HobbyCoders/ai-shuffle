@@ -523,7 +523,7 @@ def chat_mode_read_permitted(tool_name: str, tool_input: Any) -> bool:
 PROACTIVE_TOOL_SURFACE = ["WebSearch", "WebFetch", "AssistantReadSource"]
 PROACTIVE_DENIED_TOOLS = [
     "Bash", "Monitor", "Write", "Edit", "NotebookEdit", "Read", "Grep", "Glob",
-    "Task", "Agent", "Swarm", "StartSession", "MessageSession", "RemoteTrigger",
+    "Task", "Agent", "Swarm", "Workflow", "StartSession", "MessageSession", "RemoteTrigger",
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",

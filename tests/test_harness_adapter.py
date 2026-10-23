@@ -3545,8 +3545,9 @@ async def test_delegated_plain_prompt_without_full_replace_keeps_the_environment
 
 @pytest.mark.asyncio
 async def test_delegated_leg_bans_cli_subagent_tools(monkeypatch, tmp_path):
-    """Ruling A6: the CLI's native Task/Agent/Workflow are always disallowed;
-    profile-level disallows merge in."""
+    """Ruling A6: the CLI's native Task/Agent are always disallowed; profile-
+    level disallows merge in. The CLI's Workflow is not banned: the picker's
+    Swarm gates it (tests/core/test_delegated_surface_parity.py)."""
     import app.core.provider.harness_adapter as ha
     from fluid.tools.registry import ToolRegistry
 
@@ -3561,7 +3562,8 @@ async def test_delegated_leg_bans_cli_subagent_tools(monkeypatch, tmp_path):
         )
     )
     banned = set(_CapturingLoop.captured["disallowed_tools"])
-    assert {"Task", "Agent", "Workflow", "WebSearch"} <= banned
+    assert {"Task", "Agent", "WebSearch"} <= banned
+    assert "Workflow" not in banned
 
 
 @pytest.mark.asyncio
