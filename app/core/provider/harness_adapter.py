@@ -2078,6 +2078,12 @@ class HarnessAdapter(ProviderAdapter):
                 # An over-budget projection is unknown, not held. Still recover
                 # task provenance below before conservatively sending it in full.
                 nodes = await store.load_memory_path(sid) or []
+            elif self._memory_rehydrated and callable(getattr(store, "load_window", None)):
+                # Steady turns read the pinned chain and the tail only. A live
+                # window keeps every # Memory node of the prefix it evicted
+                # (Compactor.frozen_prefix), so held_from_path reads the same
+                # chain without re-reading the evicted prefix every turn.
+                nodes, _end = await store.load_window(sid)
             else:
                 nodes = await store.load_path(sid)
             identity = self._memory_engine_identity()

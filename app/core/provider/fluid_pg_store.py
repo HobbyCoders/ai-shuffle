@@ -119,6 +119,33 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
     return {"meta": meta, "nodes": nodes, "node_sizes": sizes}
 
 
+def _load_ancestors_sync(session_id: str, node_id: str) -> List[tuple]:
+    """``(node, cached JSON size)`` for ``node_id`` and every ancestor, root-first.
+
+    The on-demand read for nodes a live store evicted (``PgFluidStore.evict_prefix``):
+    indexed ancestry only, decoded off-loop, never the session's other branches.
+    Raises KeyError when the chain is not complete back to a root.
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(_ancestors_sql() + """
+            SELECT n.node_id, n.parent_id, n.ts, n.message, a.depth FROM ancestors a
+            JOIN fluid_session_nodes n ON n.node_id = a.node_id AND n.session_id = %s
+            ORDER BY a.depth DESC
+        """, (session_id, node_id, session_id, session_id))
+        rows = cur.fetchall()
+    if rows and rows[0]["depth"] >= MAX_PATH_DEPTH:
+        raise TranscriptCycleError(session_id, node_id)
+    if not rows or rows[0]["parent_id"] is not None or rows[-1]["node_id"] != node_id:
+        raise KeyError(node_id)
+    out = []
+    for r in rows:
+        node = SessionNode(node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
+                           message=Message.from_dict(_as_dict(r["message"])))
+        out.append((node, len(json.dumps(node.message.to_dict()))))
+    return out
+
+
 def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
     with get_db() as conn:
         cur = conn.cursor()
@@ -137,12 +164,37 @@ def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
 # projection; never the surrounding owner prompt/tool payload. Overflow is
 # conservative: the adapter re-sends a full snapshot on its next turn.
 MEMORY_PATH_BYTES = 64 * 1024
-_ANCESTORS_SQL = """WITH RECURSIVE ancestors AS (
+# A root→leaf path longer than this is a parent_id cycle, not a session: the
+# walks below raise TranscriptCycleError instead of looping (or recursing in
+# SQL) forever. ~17k nodes is a ~900-turn session, so this is far above any
+# real path.
+MAX_PATH_DEPTH = 1_000_000
+
+
+class TranscriptCycleError(RuntimeError):
+    """A node's parent chain loops back on itself (corrupt or mis-seeded ids)."""
+
+    def __init__(self, session_id: str, node_id: Optional[str]) -> None:
+        super().__init__(
+            f"fluid session {session_id}: the parent chain from node {node_id} "
+            f"loops (a cycle in parent_id); refusing to walk it")
+        self.session_id = session_id
+        self.node_id = node_id
+
+
+def _ancestors_sql() -> str:
+    """Recursive ancestry of one node, bounded by MAX_PATH_DEPTH.
+
+    The bound is what stops a parent_id cycle: without it the recursive CTE
+    never terminates. A row at depth MAX_PATH_DEPTH means the chain did not end.
+    """
+    return f"""WITH RECURSIVE ancestors AS (
     SELECT node_id, parent_id, 0 AS depth FROM fluid_session_nodes
     WHERE session_id = %s AND node_id = %s
     UNION ALL
     SELECT n.node_id, n.parent_id, a.depth + 1 FROM fluid_session_nodes n
-    JOIN ancestors a ON n.node_id = a.parent_id WHERE n.session_id = %s
+    JOIN ancestors a ON n.node_id = a.parent_id
+    WHERE n.session_id = %s AND a.depth < {int(MAX_PATH_DEPTH)}
 ) """
 
 
@@ -189,7 +241,7 @@ def _load_memory_path_sync(session_id: str, head: Optional[str]) -> Optional[Lis
     size = 0
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(_ANCESTORS_SQL + """
+        cur.execute(_ancestors_sql() + """
             SELECT n.node_id, n.parent_id, n.ts, n.message FROM ancestors a
             JOIN fluid_session_nodes n ON n.node_id = a.node_id AND n.session_id = %s
             WHERE n.message ->> 'role' = 'user' AND n.message -> 'context_pin' IS NOT NULL
@@ -221,7 +273,7 @@ def _initial_task_sync(session_id: str, owner_ids: List[str]) -> str:
     with get_db() as conn:
         cur = conn.cursor()
         slots = ','.join(['%s'] * len(owner_ids))
-        cur.execute(_ANCESTORS_SQL + f"SELECT node_id FROM ancestors WHERE node_id IN ({slots}) "
+        cur.execute(_ancestors_sql() + f"SELECT node_id FROM ancestors WHERE node_id IN ({slots}) "
                     "ORDER BY depth DESC", (session_id, head, session_id, *owner_ids))
         ids = [row["node_id"] for row in cur.fetchall()]
     for node_id in ids:
@@ -242,6 +294,8 @@ def _load_path_sync(session_id: str, leaf_node_id: Optional[str]) -> List[Sessio
     while cursor is not None:
         node = data["nodes"][cursor]
         path.append(node)
+        if len(path) > len(data["nodes"]):  # a tree path visits a node once
+            raise TranscriptCycleError(session_id, leaf_node_id)
         cursor = node.parent_id
     path.reverse()
     return path
@@ -1423,6 +1477,12 @@ class PgFluidStore:
         self._pending_events: Dict[str, List[Event]] = {}
         self._pending_since: Dict[str, float] = {}
         self._pending_bytes: Dict[str, int] = {}
+        # Native live-session window (see evict_prefix): the checkpoint end
+        # the engine windowed at and the anchors kept before it, root-first
+        # and ending with that node. Sessions that ever evicted read cache
+        # misses back from the database instead of treating them as absent.
+        self._windows: Dict[str, tuple[str, List[SessionNode]]] = {}
+        self._evicted: set = set()
         self._loaded: set = set()
         self._load_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
@@ -1457,7 +1517,14 @@ class PgFluidStore:
         """
         return dict(retained_nodes=sum(map(len, self._nodes.values())),
                     message_json_bytes=sum(self._node_json_bytes.values()),
-                    event_cache_estimated_bytes=sum(self._event_bytes.values()))
+                    event_cache_estimated_bytes=sum(self._event_bytes.values()),
+                    windowed_sessions=len(self._windows))
+
+    def _uncache_node(self, session_id: str, node_id: str) -> None:
+        self._nodes.get(session_id, {}).pop(node_id, None)
+        size = self._node_sizes.get(session_id, {}).pop(node_id, 0)
+        if session_id in self._node_json_bytes:
+            self._node_json_bytes[session_id] -= size
 
     def _cache_events(self, session_id: str, events: List[Event], floor: int) -> None:
         from fluid.events.bus import _retained_size
@@ -1574,27 +1641,122 @@ class PgFluidStore:
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
         if not await self._ensure_loaded(session_id):
             return None
-        if not self.cache_nodes:
-            return await run_sync(_get_node_sync, session_id, node_id)
-        return self._nodes.get(session_id, {}).get(node_id)
+        node = self._nodes.get(session_id, {}).get(node_id) if self.cache_nodes else None
+        if node is None and (not self.cache_nodes or session_id in self._evicted):
+            # Evicted nodes stay durable: read one back without re-caching it.
+            node = await run_sync(_get_node_sync, session_id, node_id)
+        return node
+
+    def _cached_walk(
+        self, session_id: str, leaf_node_id: Optional[str], *, windowed: bool,
+    ) -> tuple[List[SessionNode], Optional[str], Optional[str]]:
+        """Walk leaf→root over the cache: ``(path root-first, window end, miss)``.
+
+        ``windowed`` stops at the session's window end and splices in its
+        anchors. ``miss`` is the first uncached id; the path then holds only
+        the cached part below it (leaf-side), still in root-first order.
+        """
+        meta = self._sessions[session_id]
+        nodes = self._nodes[session_id]
+        window = self._windows.get(session_id) if windowed else None
+        cursor = leaf_node_id or meta.head_node_id
+        path: List[SessionNode] = []
+        while cursor is not None:
+            if window is not None and cursor == window[0]:
+                path.extend(reversed(window[1]))
+                path.reverse()
+                return path, window[0], None
+            node = nodes.get(cursor)
+            if node is None:
+                path.reverse()
+                return path, None, cursor
+            path.append(node)
+            if len(path) > len(nodes):  # a tree path visits a node once
+                raise TranscriptCycleError(session_id, leaf_node_id or meta.head_node_id)
+            cursor = node.parent_id
+        path.reverse()
+        return path, None, None
+
+    async def _load_full_path(
+        self, session_id: str, leaf_node_id: Optional[str], *, recache: bool,
+    ) -> List[SessionNode]:
+        path, _end, miss = self._cached_walk(session_id, leaf_node_id, windowed=False)
+        if miss is None:
+            return path
+        if session_id not in self._evicted:
+            raise KeyError(miss)  # never cached and never evicted: unknown node
+        rows = await run_sync(_load_ancestors_sync, session_id, miss)
+        if recache:
+            for node, size in rows:
+                if node.node_id not in self._nodes[session_id]:
+                    self._cache_node(session_id, node, size)
+        return [node for node, _size in rows] + path
 
     async def load_path(
         self, session_id: str, leaf_node_id: Optional[str] = None
     ) -> List[SessionNode]:
+        """The whole root→leaf path. Nodes a live window evicted are read back
+        from the database for this call only; they are not re-cached."""
         await self._ensure_loaded(session_id)
         if not self.cache_nodes:
             await self.flush_events(session_id)
             return await run_sync(_load_path_sync, session_id, leaf_node_id)
-        meta = self._sessions[session_id]
+        return await self._load_full_path(session_id, leaf_node_id, recache=False)
+
+    async def load_window(
+        self, session_id: str, leaf_node_id: Optional[str] = None
+    ) -> tuple[List[SessionNode], Optional[str]]:
+        """fluid's optional windowed read (``NativeLoop._context_path``).
+
+        ``(path, end)``: root→leaf with the interior evicted before ``end``
+        left out (its anchors kept), or the whole path and None when the leaf
+        is not below the window. A leaf inside the evicted interior (a rewind)
+        drops the window and re-caches the path it reads.
+        """
+        await self._ensure_loaded(session_id)
+        if not self.cache_nodes:
+            return await self.load_path(session_id, leaf_node_id), None
+        path, end, miss = self._cached_walk(session_id, leaf_node_id, windowed=True)
+        if miss is None:
+            return path, end
+        self._windows.pop(session_id, None)
+        return await self._load_full_path(session_id, leaf_node_id, recache=True), None
+
+    async def evict_prefix(self, session_id: str, end_node_id: str, keep: Any) -> None:
+        """Stop retaining the frozen prefix before ``end_node_id``.
+
+        ``keep`` names the anchors the engine still reads there (the root,
+        ``end_node_id`` and pinned-reminder nodes). Everything else cached
+        that is not below ``end_node_id`` leaves memory: the prefix interior
+        and branches off it. All of it is already durable (``append`` writes
+        before caching), and ``load_path``/``get_node`` read it back.
+        """
+        if not self.cache_nodes or not await self._ensure_loaded(session_id):
+            return
+        path, _end, miss = (self._cached_walk(session_id, end_node_id, windowed=True)
+                            if end_node_id in self._nodes.get(session_id, {}) else ([], None, end_node_id))
+        if miss is not None or not path:
+            # An end inside what an older window evicted: drop that window so
+            # the next load_window re-caches the path and this can run again.
+            self._windows.pop(session_id, None)
+            return
+        keep = set(keep) | {path[0].node_id, end_node_id}
+        anchors = [node for node in path if node.node_id in keep]
         nodes = self._nodes[session_id]
-        cursor = leaf_node_id or meta.head_node_id
-        path: List[SessionNode] = []
-        while cursor is not None:
-            node = nodes[cursor]
-            path.append(node)
-            cursor = node.parent_id
-        path.reverse()
-        return path
+        children: Dict[Optional[str], List[str]] = {}
+        for node in nodes.values():
+            children.setdefault(node.parent_id, []).append(node.node_id)
+        retained = {node.node_id for node in anchors}
+        stack = [end_node_id]
+        while stack:
+            for child in children.get(stack.pop(), ()):
+                if child not in retained:
+                    retained.add(child)
+                    stack.append(child)
+        for node_id in [key for key in nodes if key not in retained]:
+            self._uncache_node(session_id, node_id)
+        self._windows[session_id] = (end_node_id, anchors)
+        self._evicted.add(session_id)
 
     async def load_memory_path(self, session_id: str) -> Optional[List[SessionNode]]:
         """Bounded pinned-memory projection, validated against the durable head."""

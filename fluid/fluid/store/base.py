@@ -428,6 +428,27 @@ class SessionStore(Protocol):
     # (root→head), 0-indexed; ``start`` may be negative to count from the end
     # (clamped, python-slice style); return None for an unknown session.
 
+    # ─── Optional: bounded live retention ────────────────────────────────
+    #
+    #     async def evict_prefix(
+    #         self, session_id: str, end_node_id: str, keep: Collection[str],
+    #     ) -> None: ...
+    #
+    #     async def load_window(
+    #         self, session_id: str, leaf_node_id: str | None = None,
+    #     ) -> tuple[list[SessionNode], str | None]: ...
+    #
+    # For a store that caches its node tree in memory. NativeLoop calls
+    # ``evict_prefix`` when the newest checkpoint summary freezes the prefix
+    # up to ``end_node_id`` (``Compactor.frozen_prefix``): the store may stop
+    # holding every node of that prefix except ``keep`` (and off-path branches
+    # hanging from it), as long as ``load_path``/``get_node`` still return
+    # them. ``load_window`` is the engine's per-call read: the root→leaf path
+    # with the evicted interior left out and the ``end_node_id`` it was
+    # windowed at, or the whole path and None when the leaf is not below a
+    # window. A store without them serves ``load_path`` and the engine
+    # windows that list itself, so the compactor input is identical.
+
 
 class MemoryStore:
     def __init__(self) -> None:
