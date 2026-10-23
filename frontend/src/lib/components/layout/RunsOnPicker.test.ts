@@ -95,6 +95,19 @@ describe('RunsOnPicker keyboard', () => {
 		expect(document.activeElement).toBe(trigger);
 	});
 
+	it('floats the menu to <body> so the agent card cannot trap it under the composer', async () => {
+		const trigger = await openMenu();
+		const menu = screen.getByRole('menu');
+		expect(menu.parentElement).toBe(document.body);
+		expect(trigger.closest('.runs-on-wrap')?.contains(menu)).toBe(false);
+		expect(menu.style.position).toBe('fixed');
+		// A click inside the floated menu is not an outside click.
+		await fireEvent.click(menu);
+		expect(screen.queryByRole('menu')).not.toBeNull();
+		await fireEvent.click(document.body);
+		await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+	});
+
 	it('Tab leaves the menu and closes it', async () => {
 		await openMenu();
 		await fireEvent.keyDown(screen.getByRole('menu'), { key: 'Tab' });
