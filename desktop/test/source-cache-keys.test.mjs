@@ -90,7 +90,7 @@ const PYPROJECT = '[project]\nname = "fluid"\ndependencies = ["httpx>=0.27"]\n\n
 test('only Fluid\'s pytest settings are left out of the Python key, the same way in both implementations', async t => {
   const f = await load(t);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-python-key-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   await fs.mkdir(path.join(root, 'fluid'));
   for (const name of ['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock']) await fs.writeFile(path.join(root, name), `# ${name}`);
   const key = async (text) => {
