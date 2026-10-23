@@ -25,7 +25,9 @@ def _status(branch="main"):
             "modified": [], "staged": [], "untracked": []}
 
 
-def _wt(i, *, updated_at=None, exists=True):
+def _wt(i, *, updated_at="recent", exists=True):
+    if updated_at == "recent":
+        updated_at = _recent()
     sessions = []
     if updated_at is not None:
         sessions.append({"id": f"ses-{i}", "title": "t", "status": "active",
@@ -58,6 +60,7 @@ def git(monkeypatch):
 
     service.get_status.side_effect = get_status
     from app.core import checkout_manager
+    monkeypatch.setattr(gw, "checkout_events", MagicMock())
     monkeypatch.setattr(checkout_manager, "_require_checkout_root", lambda path: None)
     monkeypatch.setattr(gw, "git_service", service)
     monkeypatch.setattr(gw, "get_worktree_working_dir", lambda wt: wt["worktree_path"])
@@ -86,7 +89,7 @@ def _make_stale(project="p1"):
 
 
 def test_cold_request_waits_for_first_refresh(git):
-    rows = _load([_wt(i, updated_at=_old()) for i in range(4)])
+    rows = _load([_wt(i, updated_at=_recent()) for i in range(4)])
     assert sorted(git.reads) == [f"/wt/{i}" for i in range(4)]
     assert all(r["git_status"]["current_branch"] == "main" for r in rows)
     assert all(r["status_checked_at"] and r["status_error"] is None for r in rows)
@@ -153,9 +156,9 @@ def test_refresh_reads_only_hot_worktrees(git, monkeypatch):
         _wt(1, updated_at=_recent()),  # recent activity
         _wt(2, updated_at=_old()),     # focused by the client
         _wt(3, updated_at=_old()),     # idle
-        _wt(4),                        # idle, no sessions at all
+        _wt(4, updated_at=None),       # idle, no sessions at all
     ]
-    _load(rows)
+    _load([_wt(i) for i in range(5)])  # known statuses from earlier activity
     _make_stale()
     git.reads.clear()
     monkeypatch.setattr(gw, "_streaming_session_ids", lambda: {"ses-0"})
@@ -163,24 +166,71 @@ def test_refresh_reads_only_hot_worktrees(git, monkeypatch):
     served = _load([dict(r) for r in rows] + [_wt(5, updated_at=_old())], focus="wt-2")
     _settle()
 
-    # Hot, focused, and the never-read wt-5; idle ones keep their last status.
-    assert sorted(git.reads) == ["/wt/0", "/wt/1", "/wt/2", "/wt/5"]
+    # Hot/focused only; even never-read historical rows stay not checked.
+    assert sorted(git.reads) == ["/wt/0", "/wt/1", "/wt/2"]
+    assert served[5]["git_status"] is None
+    assert served[5]["status_checked_at"] is None
     assert served[3]["git_status"]["current_branch"] == "main"
     assert served[4]["git_status"]["current_branch"] == "main"
 
 
-def test_new_worktree_is_read_even_while_fresh(git):
+def test_unseen_historical_worktree_is_read_only_on_demand(git):
     _load([_wt(0, updated_at=_old())])
-    git.reads.clear()
-    _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
-    _settle()
-    assert git.reads == ["/wt/1"]
-    # Read once: once the project is stale again, the idle wt-1 is left alone.
-    _make_stale()
-    git.reads.clear()
-    _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
+    rows = [_wt(0, updated_at=_old()), _wt(1, updated_at=_old())]
+    _load(rows)
     _settle()
     assert git.reads == []
+    assert all(row["git_status"] is None and row["status_checked_at"] is None for row in rows)
+    _load(rows, focus="wt-1")
+    _settle()
+    assert git.reads == ["/wt/1"]
+    _make_stale()
+    git.reads.clear()
+    _load(rows)
+    _settle()
+    assert git.reads == []
+
+
+def test_100_historical_and_three_active_scale_from_cold(git, monkeypatch):
+    rows = [_wt(i, updated_at=_old()) for i in range(100)] + [
+        _wt(100, updated_at=_old()), _wt(101), _wt(102, updated_at=_old()),
+    ]
+    monkeypatch.setattr(gw, "_streaming_session_ids", lambda: {"ses-102"})
+    for _ in range(3):
+        _load(rows, focus="wt-100")
+        _settle()
+        assert set(git.reads) == {"/wt/100", "/wt/101", "/wt/102"}
+        assert len(git.reads) == 3
+        assert all(row["status_checked_at"] is None for row in rows[:100])
+        gw.checkout_events.update.assert_called_with({"/wt/100", "/wt/101", "/wt/102"})
+        _make_stale()
+        git.reads.clear()
+
+
+def test_explicit_invalidation_checks_unseen_historical_row_once(git):
+    rows = [_wt(0, updated_at=_old()), _wt(1, updated_at=_old())]
+    _load(rows)
+    gw._invalidate_worktree_status_cache("p1", "wt-1")
+    _load(rows)
+    _settle()
+    assert git.reads == ["/wt/1"]
+    assert not gw._worktree_status_cache["p1"].invalidated_gen
+    _make_stale()
+    _load(rows)
+    _settle()
+    assert git.reads == ["/wt/1"]
+
+
+def test_inactive_failure_does_not_retry_just_because_backoff_expired(git):
+    git.get_status.side_effect = RuntimeError("boom")
+    _load([_wt(0)])
+    entry = gw._worktree_status_cache["p1"].entries["wt-0"]
+    entry.retry_at = 0
+    _make_stale()
+    git.get_status.reset_mock()
+    _load([_wt(0, updated_at=_old())])
+    _settle()
+    git.get_status.assert_not_called()
 
 
 def test_deleted_worktree_drops_out(git):
@@ -318,7 +368,7 @@ def test_retired_worktrees_are_never_read(git):
 def test_invalidated_idle_worktree_is_reread_while_fresh(git):
     """A turn end or Git action in an idle worktree's checkout makes it due at
     once, without waiting for the project to go stale or the worktree to be hot."""
-    _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
+    _load([_wt(0), _wt(1)])
     git.reads.clear()
     _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
     _settle()
@@ -364,3 +414,162 @@ def test_corrupt_index_warns_once_then_recovers(tmp_path, caplog, monkeypatch):
     status = service.get_status(path)
     assert status["is_git_repo"] is True
     assert service.get_status_error(path) is None
+
+
+
+def test_idle_edit_invalidates_real_status_after_debounce(tmp_path, monkeypatch):
+    """Real file event -> service generation -> SWR reread, not a seeded cache."""
+    from app.core import checkout_events as ce
+    from app.core.git_service import GitService
+    from tests.git_repo_helpers import hermetic_git_env
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    run("init", "-q")
+    (repo / "tracked.txt").write_text("before")
+    run("add", ".")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+    service = GitService()
+    invalidated = threading.Event()
+    ready = threading.Event()
+    native_watch = ce.watch
+
+    def observed_watch(*args, **kwargs):
+        # A timeout means native registration has completed, without guessing
+        # how long registration takes on a loaded Windows/Linux runner.
+        for changes in native_watch(*args, **kwargs):
+            ready.set()
+            yield changes
+
+    def invalidate(path):
+        service.invalidate_status_cache(path)
+        invalidated.set()
+
+    events = ce.CheckoutEvents(invalidate)
+    monkeypatch.setattr(ce, "watch", observed_watch)
+    monkeypatch.setattr(gw, "checkout_events", events)
+    monkeypatch.setattr(gw, "git_service", service)
+    monkeypatch.setattr(gw, "_streaming_session_ids", lambda: set())
+    rows = [_wt(0)]
+    rows[0]["worktree_path"] = str(repo)
+    gw._worktree_status_cache.clear()
+    try:
+        first = _load(rows)[0]["status_checked_at"]
+        assert rows[0]["git_status"]["is_clean"]
+        assert ready.wait(10), "native watch did not register"
+        # Session is idle (not streaming) but recently active. No turn-end hook.
+        (repo / "tracked.txt").write_text("after")
+        assert invalidated.wait(10), "file event did not invalidate status"
+        _load(rows)
+        _settle()
+        _load(rows)
+        assert "tracked.txt" in rows[0]["git_status"]["modified"]
+        assert rows[0]["status_checked_at"] > first
+    finally:
+        events.close()
+        gw._worktree_status_cache.clear()
+
+
+def test_checkout_watches_prune_history_share_and_expire(tmp_path, monkeypatch):
+    from app.core import checkout_events as ce
+
+    root = tmp_path / "active"
+    root.mkdir()
+    (root / "src").mkdir()
+    for name in (".fluid", ".git", "node_modules"):
+        (root / name).mkdir()
+        (root / name / "historical").mkdir()
+    assert set(ce._directories(str(root))) == {str(root), str(root / "src")}
+    registered = threading.Event()
+    stopped = threading.Event()
+
+    def fake_watch(*paths, stop_event, **kwargs):
+        assert set(paths) == {str(root), str(root / "src")}
+        assert kwargs["recursive"] is False
+        assert kwargs["debounce"] == kwargs["step"] == ce._DEBOUNCE_MS
+        registered.set()
+        stop_event.wait(5)
+        stopped.set()
+        return
+        yield  # make this a generator
+
+    monkeypatch.setattr(ce, "watch", fake_watch)
+    events = ce.CheckoutEvents(MagicMock())
+    try:
+        events.update({str(root)})
+        assert registered.wait(5)
+        entry = events._watches[str(root)]
+        events.update({str(root)})
+        events.update(set())
+        assert events._watches[str(root)] is entry
+        assert not entry.stop.is_set()
+        # Omission never cancels a live lease; only expiry releases the path.
+        with events._lock:
+            entry.expires = time.monotonic() - 1
+        assert not events._live(entry)
+        assert stopped.wait(5)
+        entry.thread.join(timeout=5)
+        assert not events._watches
+    finally:
+        events.close()
+
+
+
+def test_same_project_requests_keep_independent_focus_leases(git, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.core import checkout_events as ce
+
+    roots = [tmp_path / name for name in ("focus-a", "focus-b")]
+    for root in roots:
+        root.mkdir()
+    registered = {str(root): threading.Event() for root in roots}
+    now = [100.0]
+    monkeypatch.setattr(ce, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def fake_watch(*paths, stop_event, **kwargs):
+        registered[paths[0]].set()
+        stop_event.wait(5)
+        return
+        yield
+
+    monkeypatch.setattr(ce, "watch", fake_watch)
+    events = ce.CheckoutEvents(git.invalidate_status_cache)
+    monkeypatch.setattr(gw, "checkout_events", events)
+    rows = [_wt(i, updated_at=_old()) for i in range(2)]
+    for row, root in zip(rows, roots):
+        row["worktree_path"] = str(root)
+    try:
+        # Two clients of the SAME project focus different checkouts. A third
+        # request has no focus at all; none may revoke another client's lease.
+        _load(rows, focus="wt-0", project="shared")
+        _settle("shared")
+        assert registered[str(roots[0])].wait(5)
+        first = events._watches[str(roots[0])]
+        _load(rows, focus="wt-1", project="shared")
+        _settle("shared")
+        assert registered[str(roots[1])].wait(5)
+        second = events._watches[str(roots[1])]
+        _load(rows, project="shared")
+        assert events._watches[str(roots[0])] is first
+        assert events._watches[str(roots[1])] is second
+        assert not first.stop.is_set() and not second.stop.is_set()
+
+        # Renew A but not B. Both survive until B's own deadline, and expiry
+        # must not stop the independently renewed A or recreate its watch.
+        now[0] += ce._LEASE_SECONDS / 2
+        _load(rows, focus="wt-0", project="shared")
+        assert events._watches[str(roots[0])] is first
+        now[0] = second.expires - 0.01
+        assert events._live(first) and events._live(second)
+        now[0] = second.expires + 0.01
+        assert events._live(first)
+        assert not events._live(second)
+        second.thread.join(timeout=5)
+        assert set(events._watches) == {str(roots[0])}
+        assert not first.stop.is_set()
+    finally:
+        events.close()

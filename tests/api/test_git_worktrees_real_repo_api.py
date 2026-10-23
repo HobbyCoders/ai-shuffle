@@ -48,6 +48,7 @@ def wt_api(mock_db, tmp_path, monkeypatch):
     app.dependency_overrides[git_worktrees.require_admin] = lambda: "test-owner"
     with TestClient(app) as client:
         yield client, repo, path, tmp_path
+    git_worktrees.checkout_events.close()
     git_worktrees._worktree_status_cache.clear()
     git_helpers.invalidate_working_dir_cache()
 
@@ -55,7 +56,13 @@ def wt_api(mock_db, tmp_path, monkeypatch):
 def test_list_worktrees_with_git_status(wt_api):
     client, _, path, _ = wt_api
 
-    response = client.get(BASE)
+    unchecked = client.get(BASE).json()["worktrees"][0]
+    assert unchecked["git_status"] is None and unchecked["status_checked_at"] is None
+    response = client.get(BASE, params={"focus_worktree_id": "wt-1"})
+    pending = git_worktrees._worktree_status_cache["p1"].inflight
+    if pending is not None:
+        pending.result(timeout=5)
+    response = client.get(BASE, params={"focus_worktree_id": "wt-1"})
 
     assert response.status_code == 200
     body = response.json()
@@ -82,17 +89,17 @@ def test_stale_marker_is_reported_not_parent_status_and_recovery_is_detected(wt_
     # Keep .git present but point it at a main checkout that no longer exists.
     (path / ".git").unlink()  # Git marks this file hidden on Windows.
     (path / ".git").write_text("gitdir: /missing-fixture/gitdir\n")
-    response = client.get(BASE)
+    response = client.get(BASE, params={"focus_worktree_id": "wt-1"})
     assert response.status_code == 200
     row = response.json()["worktrees"][0]
     assert row["git_status"] is None
     assert "not its own Git working tree" in row["status_error"]
     (path / ".git").write_text(marker)
-    client.get(BASE)  # retry on the normal refresh path after back-off
+    client.get(BASE, params={"focus_worktree_id": "wt-1"})  # retry on the normal refresh path after back-off
     pending = git_worktrees._worktree_status_cache["p1"].inflight
     if pending is not None:
         pending.result(timeout=5)
-    row = client.get(BASE).json()["worktrees"][0]
+    row = client.get(BASE, params={"focus_worktree_id": "wt-1"}).json()["worktrees"][0]
     assert row["status_error"] is None
     assert row["git_status"]["current_branch"] == "feature/api"
     assert git(repo, "branch", "--show-current") == "main"
@@ -101,7 +108,7 @@ def test_stale_marker_is_reported_not_parent_status_and_recovery_is_detected(wt_
 def test_missing_marker_is_reported_as_needing_cleanup(wt_api):
     client, _, path, _ = wt_api
     (path / ".git").unlink()
-    row = client.get(BASE).json()["worktrees"][0]
+    row = client.get(BASE, params={"focus_worktree_id": "wt-1"}).json()["worktrees"][0]
     assert row["exists"] is False
     assert row["git_status"] is None
     assert "needs cleanup" in row["status_error"]
@@ -112,12 +119,12 @@ def test_missing_marker_is_reported_as_needing_cleanup(wt_api):
 def test_wrong_branch_reports_actual_counts_with_binding_warning(wt_api):
     client, repo, path, _ = wt_api
     git(path, "switch", "-q", "-c", "feature/reassigned")
-    row = client.get(BASE).json()["worktrees"][0]
+    row = client.get(BASE, params={"focus_worktree_id": "wt-1"}).json()["worktrees"][0]
     assert row["git_status"]["current_branch"] == "feature/reassigned"
     assert row["git_status"]["untracked_count"] == 1
     assert row["status_error"] is None
     assert "not the bound branch" in row["binding_warning"]
-    compact = client.get(BASE, params={"compact": "true"}).json()["worktrees"][0]
+    compact = client.get(BASE, params={"compact": "true", "focus_worktree_id": "wt-1"}).json()["worktrees"][0]
     assert compact["git_status"]["current_branch"] == "feature/reassigned"
     assert compact["git_status"]["untracked_count"] == 1
     assert compact["binding_warning"] == row["binding_warning"]
@@ -147,7 +154,7 @@ def test_canonical_checkout_list_preserves_stale_bindings_with_actual_root_statu
     else:
         git(path, "switch", "-q", "-c", "feature/canonical-actual")
     url = f"/api/v1/projects/{canonical['id']}/git/worktrees"
-    response = client.get(url, params={"compact": "true"})
+    response = client.get(url, params={"compact": "true", "focus_worktree_id": checkout["id"]})
     assert response.status_code == 200
     row = response.json()["worktrees"][0]
     assert row["id"] == checkout["id"] and row["resource_kind"] == "checkout"
