@@ -823,6 +823,42 @@ def test_an_invalid_context_window_is_refused(world, value):
 
 # --- the caller's fast mode -----------------------------------------------------
 
+@pytest.mark.parametrize("saved", [True, False])
+def test_sol_task_transmits_real_composer_pick_without_destination_preference(world, monkeypatch, saved):
+    from types import SimpleNamespace
+    from app.core import preference_identity
+
+    # Separate account namespaces stand in for a destination whose preference
+    # sync has not arrived. The sender must resolve before transmitting.
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda:
+                        "sender-owner" if world.net.device_id == PARENT else "target-owner")
+    identity = preference_identity.request_preference_identity(
+        SimpleNamespace(state=SimpleNamespace(is_admin=True)))
+    database.set_user_preference(*identity, "composer.modelFast.gpt-6.1-sol", saved)
+    database.create_model_provider("chatgpt-plan", "ChatGPT plan", "chatgpt",
+                                   "https://example.invalid", models=[{"id": "gpt-6.1-sol", "label": "GPT 6.1 Sol"}])
+    monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
+    from app.db import turns
+    request = turns.enqueue_turn("parent", "user", prompt="Use gpt 6.1 sol for this worker", profile_id="root-agent")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (request["id"],))
+    database.set_session_run_binding("parent", fast=not saved)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({"mode": "background", "model": "gpt 6.1 sol"})
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert (body["provider_id"], body["model"], body["fast"]) == ("chatgpt-plan", "gpt-6.1-sol", saved)
+    child = database.get_session(result["worker_session_id"])
+    [turn] = child_turns(child["id"])
+    assert bool(child["fast"]) is saved
+    assert turn["overrides"]["fast"] is saved
+    with world.net.as_target():
+        target_identity = preference_identity.request_preference_identity(
+            SimpleNamespace(state=SimpleNamespace(is_admin=True)))
+        assert database.get_user_preference(*target_identity, "composer.modelFast.gpt-6.1-sol") is None
+
+
 @pytest.mark.parametrize("supported", [True, False])
 def test_the_child_runs_fast_when_the_caller_does(world, monkeypatch, supported):
     from app.core import model_override
