@@ -2,8 +2,9 @@
 
 Drives ``app.api.git_worktrees._load_worktree_statuses`` directly with a mocked
 ``git_service`` so timing is under the test's control (the endpoint wiring is
-covered in tests/api/test_git.py). The last test uses a real repository with a
-zeroed index to check the pygit2 reader's log de-duplication.
+covered in tests/api/test_git.py). The last tests use real repositories: a
+zeroed index (one warning, then recovery) and a checkout invalidated by a
+turn end.
 """
 
 import asyncio
@@ -17,7 +18,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.api import git_worktrees as gw
-from app.core import git_native
 
 
 def _status(branch="main"):
@@ -47,6 +47,10 @@ def git(monkeypatch):
     """A mocked git_service whose get_status records the paths it read."""
     service = MagicMock()
     service.reads = []
+    service.errors = {}
+    service.generations = {}
+    service.get_status_error.side_effect = lambda path: service.errors.get(path)
+    service.status_generation.side_effect = lambda path: service.generations.get(path, 0)
 
     def get_status(path):
         service.reads.append(path)
@@ -260,10 +264,10 @@ def test_backoff_is_capped(git):
     assert entry.retry_at <= time.monotonic() + gw._WORKTREE_STATUS_BACKOFF_MAX_SECONDS
 
 
-def test_native_partial_status_counts_as_failure(git, monkeypatch):
-    """pygit2 hands back a partial 'clean' dict on failure; it must surface as
-    an error, not as a clean worktree."""
-    monkeypatch.setitem(git_native._status_errors, "/wt/0", "incorrect header signature")
+def test_failed_read_fallback_counts_as_failure(git):
+    """get_status hands back the empty dict on failure and records why; that
+    must surface as an error, not as a clean worktree."""
+    git.errors["/wt/0"] = "incorrect header signature"
     rows = _load([_wt(0)])
     assert rows[0]["git_status"] is None
     assert rows[0]["status_error"] == "incorrect header signature"
@@ -300,8 +304,42 @@ def test_full_invalidation_makes_project_cold(git):
     assert "p1" not in gw._worktree_status_cache
 
 
-@pytest.mark.skipif(not git_native.HAS_PYGIT2, reason="pygit2 not installed")
-def test_native_reader_logs_a_corrupt_index_once(tmp_path, caplog):
+def test_retired_worktrees_are_never_read(git):
+    """Finished rows stay listed, but the fan-out leaves them alone (#436)."""
+    rows = [_wt(0), _wt(1), _wt(2), _wt(3)]
+    rows[1]["status"] = "completed"
+    rows[2]["status"] = "archived"
+    rows[3]["status"] = "deleted"
+    served = _load(rows)
+    assert git.reads == ["/wt/0"]
+    assert [r["git_status"] is None for r in served] == [False, True, True, True]
+
+
+def test_invalidated_idle_worktree_is_reread_while_fresh(git):
+    """A turn end or Git action in an idle worktree's checkout makes it due at
+    once, without waiting for the project to go stale or the worktree to be hot."""
+    _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
+    git.reads.clear()
+    _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
+    _settle()
+    assert git.reads == []
+
+    git.generations["/wt/1"] = 1  # git_service.invalidate_status_cache("/wt/1")
+    git.get_status.side_effect = lambda path: git.reads.append(path) or _status("edited")
+    _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
+    _settle()
+    assert git.reads == ["/wt/1"]
+    served = _load([_wt(0, updated_at=_old()), _wt(1, updated_at=_old())])
+    assert served[1]["git_status"]["current_branch"] == "edited"
+    _settle()
+    assert git.reads == ["/wt/1"], "read once per invalidation, not on every poll"
+
+
+def test_corrupt_index_warns_once_then_recovers(tmp_path, caplog, monkeypatch):
+    from app.core.git_service import GitService
+    from tests.git_repo_helpers import hermetic_git_env
+
+    hermetic_git_env(monkeypatch, tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     run = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)  # noqa: E731
@@ -310,19 +348,19 @@ def test_native_reader_logs_a_corrupt_index_once(tmp_path, caplog):
     index = repo / ".git" / "index"
     index.write_bytes(b"\0" * 64)
 
-    reader = git_native.GitNativeReader()
+    service = GitService()
     path = str(repo)
-    caplog.set_level(logging.DEBUG, logger="app.core.git_native")
-    try:
-        reader.get_status(path)
-        reader.get_status(path)
-        errors = [r for r in caplog.records
-                  if r.levelno == logging.ERROR and "pygit2" in r.getMessage()]
-        assert len(errors) == 1
-        assert git_native.get_status_error(path)
+    caplog.set_level(logging.DEBUG, logger="app.core.git_service")
+    service.invalidate_status_cache(path)
+    for _ in range(2):
+        status = service.get_status(path)
+        assert status["is_git_repo"] is False
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "git status failed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert service.get_status_error(path)
 
-        index.unlink()
-        reader.get_status(path)
-        assert git_native.get_status_error(path) is None
-    finally:
-        git_native._status_errors.pop(path, None)
+    index.unlink()
+    status = service.get_status(path)
+    assert status["is_git_repo"] is True
+    assert service.get_status_error(path) is None

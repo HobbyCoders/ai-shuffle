@@ -4,8 +4,7 @@ The router runs in a bare FastAPI app with auth overridden; the project row
 points at a real repository under ``tmp_path`` and GitService is NOT mocked,
 so these tests pin the response shapes and status codes the docs promise
 (docs/content/api-reference/miscellaneous.md, "Git Integration") on real git
-behaviour. Each test runs once with the pygit2 reader and once with the CLI
-fallback.
+behaviour.
 """
 
 import os
@@ -16,8 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.api import git as git_api
 from app.api import git_helpers, git_worktrees
-from app.core import config
-from app.core.git_native import HAS_PYGIT2
+from app.core import config, git_cache
 from app.db import database
 from tests.git_repo_helpers import (
     auth_required_http_remote,
@@ -28,7 +26,6 @@ from tests.git_repo_helpers import (
     init_repo,
     make_origin,
     non_utf8_name_supported,
-    use_backend,
     write,
 )
 
@@ -41,13 +38,10 @@ STATUS_FIELDS = {
 }
 
 
-@pytest.fixture(params=[
-    pytest.param("native", marks=pytest.mark.skipif(not HAS_PYGIT2, reason="pygit2 unavailable")),
-    "cli",
-])
-def api(request, mock_db, tmp_path, monkeypatch):
+@pytest.fixture
+def api(mock_db, tmp_path, monkeypatch):
     hermetic_git_env(monkeypatch, tmp_path)
-    use_backend(monkeypatch, request.param)
+    git_cache._git_cache.invalidate_prefix("")
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     repo = init_repo(
         tmp_path / "repo", {"a.txt": "a\n", "b.txt": "b\n", "src/app.py": "print(1)\n"}
@@ -131,7 +125,7 @@ def test_status_detached_empty_and_non_repo(api, mock_db):
 
 
 def test_status_survives_non_utf8_file_name(api):
-    """Regression: one undecodable name made /git/status a 500 (pygit2)."""
+    """Regression: one undecodable name made /git/status a 500."""
     client, repo, _ = api
     if not non_utf8_name_supported(repo):
         pytest.skip("filesystem rejects non-UTF-8 names")
@@ -195,6 +189,25 @@ def test_changed_files_rename_and_conflict(api):
     _refresh(repo)
     rows = client.get(f"{BASE}/changed-files").json()["files"]
     assert [(r["file"], r["status"], r["category"]) for r in rows] == [("moved.txt", "U", "conflict")]
+
+
+def test_new_directory_is_one_status_entry_but_each_file_in_changed_files(api):
+    """Status lists a wholly untracked directory once (git's ``normal`` mode,
+    no per-poll walk of a new tree); the changed-files panel lists each file
+    so every one can be opened and diffed."""
+    client, repo, _ = api
+    write(repo / "newpkg" / "mod.py", "x = 1\n")
+    write(repo / "newpkg" / "sub" / "deep.py", "y = 2\n")
+    write(repo / "newpkg" / "build.log", "noise\n")
+    write(repo / ".gitignore", "*.log\n")
+
+    assert sorted(_status(client)["untracked"]) == [".gitignore", "newpkg/"]
+
+    rows = client.get(f"{BASE}/changed-files").json()["files"]
+    untracked = sorted(r["file"] for r in rows if r["category"] == "untracked")
+    assert untracked == [".gitignore", "newpkg/mod.py", "newpkg/sub/deep.py"]
+    diff = client.post(f"{BASE}/file-diff", json={"file_path": "newpkg/sub/deep.py"}).json()
+    assert "+y = 2" in diff["diff"]
 
 
 def test_changed_files_for_non_repo_is_empty(api, mock_db):

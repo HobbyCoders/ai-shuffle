@@ -354,16 +354,16 @@ def _archive(source, row):
 def _invalidate(source, path):
     from app.api.git_helpers import invalidate_working_dir_cache
     from app.api.git_worktrees import _invalidate_worktree_status_cache
-    from app.core.git_cache import _git_cache, _native_reader
+    from app.core.git_cache import _git_cache
+    from app.core.git_service import git_service
 
     invalidate_working_dir_cache()
     for alias in source["aliases"]:
         _invalidate_worktree_status_cache(alias)
     for prefix in ("status:", "branches:", "ahead_behind:", "worktrees:"):
         _git_cache.invalidate_prefix(prefix)
-    if _native_reader is not None:
-        _native_reader.invalidate_repo(source["path"])
-        _native_reader.invalidate_repo(path)
+    git_service.invalidate_status_cache(source["path"])
+    git_service.invalidate_status_cache(path)
 
 
 def _prepare(source, registered, preview, automatic):

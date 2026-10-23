@@ -1024,8 +1024,12 @@ async def get_changed_files(
             is_binary=fstats.get("is_binary", False),
         ))
 
-    # Untracked
-    for fname in git_status.get("untracked", []):
+    # Untracked. Status lists a new directory as one "dir/" entry; this panel
+    # shows (and diffs) each file, so only it pays for the expansion.
+    untracked = git_status.get("untracked", [])
+    if any(entry.endswith("/") for entry in untracked):
+        untracked = await run_git(git_service.expand_untracked_dirs, working_dir, untracked)
+    for fname in untracked:
         files.append(FileChangeInfo(
             file=fname, status="?", category="untracked",
             additions=0, deletions=0, is_binary=False,
