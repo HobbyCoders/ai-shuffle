@@ -19,12 +19,15 @@ export async function prepareNativeRuntime(source: string, root: string, bootstr
     const temporary = path.join(root, 'runtimes', `build-${randomUUID().slice(0, 8)}`);
     await fs.mkdir(temporary, { recursive: true });
     const log = await fs.open(path.join(root, 'build.log'), 'a');
+    const started = Date.now();
+    const stamp = (text: string) => log.write(`[${new Date().toISOString()}] ${text}\n`);
     try {
+      await stamp(`native runtime ${key.slice(0, 24)}: build started`);
       await new Promise<void>((resolve, reject) => {
         const child = spawn(bootstrapNode, [path.join(source, 'desktop/scripts/build-worker.mjs'), '--runtime-only', '--python-from', path.resolve(path.dirname(bootstrapNode), process.platform === 'win32' ? '..' : '../..'), '--out', path.join(temporary, 'worker'), '--postgres-out', path.join(temporary, 'postgres'), '--cache', path.join(root, 'downloads')], { cwd: source, env: buildEnvironment(bootstrapNode, 'python'), windowsHide: true, stdio: ['ignore', log.fd, log.fd], timeout: 20 * 60_000 });
         child.once('error', reject);
         child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`Native runtime setup failed (${signal ?? code}). See ${path.join(root, 'build.log')}`)));
-      });
+      }).finally(() => stamp(`native runtime build ended after ${((Date.now() - started) / 1000).toFixed(1)}s`));
       await fs.rename(temporary, target);
     } finally { await log.close(); await fs.rm(temporary, { recursive: true, force: true }); }
   }

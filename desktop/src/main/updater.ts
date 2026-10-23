@@ -5,6 +5,25 @@ import type { SourceUpdates } from './source-updates';
 import { installedRelease, returnToStable, type InstalledRelease } from './channel-return';
 import type { InstallerUpdates } from './installer-updates';
 
+/**
+ * A timestamped install or start phase on the console, which the installed
+ * launcher writes to launch.log, so a slow update shows which phase took the
+ * time (#430).
+ */
+export async function timedPhase<T>(name: string, action: () => Promise<T>): Promise<T> {
+  const started = Date.now();
+  const elapsed = () => `${((Date.now() - started) / 1000).toFixed(1)}s`;
+  console.log(`[${new Date(started).toISOString()}] ${name}: started`);
+  try {
+    const result = await action();
+    console.log(`[${new Date().toISOString()}] ${name}: done after ${elapsed()}`);
+    return result;
+  } catch (error) {
+    console.log(`[${new Date().toISOString()}] ${name}: failed after ${elapsed()}`);
+    throw error;
+  }
+}
+
 export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'unsupported';
 export interface UpdateState {
   phase: UpdatePhase; version: string | null; percent: number | null;
@@ -326,9 +345,9 @@ export class Updater {
       // A lock can appear after a ready check. Refuse before stopping services.
       await this.applications.retryCleanup?.();
       stopping = true;
-      await this.beforeInstall();
-      await this.applications.prepareInstall?.();
-      await this.prepared?.prepare();
+      await timedPhase('update install: stop worker and database', () => this.beforeInstall());
+      await timedPhase('update install: prepare', async () => { await this.applications!.prepareInstall?.(); });
+      if (this.prepared) await timedPhase('update install: database restore point', () => this.prepared!.prepare());
       if (this.installedExecutable) {
         // Electron's relaunch inherits this process's environment. An older
         // installed launcher treats these variables as an instruction to attach
@@ -338,6 +357,7 @@ export class Updater {
         for (const key of launchKeys) delete process.env[key];
         try {
           this.announceRestart();
+          console.log(`[${new Date().toISOString()}] update install: restarting through the installed launcher`);
           app.relaunch({ execPath: this.installedExecutable, args: this.restartArgs });
           app.quit();
         } catch (error) {

@@ -26,7 +26,7 @@ import { quiesceRecordedWorker } from './worker-process';
 import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
-import { Updater } from './updater';
+import { timedPhase, Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
 import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
 import { launcherImage, launchUpdateSplash } from './update-splash';
@@ -278,7 +278,7 @@ async function main(): Promise<void> {
 		// No installed handoff, an old/unknown launcher, or recovery: hash it here.
 		const launcherChecked = launcherValidatedRestorePoint(process.platform, launcherVersion(process.env[LAUNCHER_VERSION_ENV]), !!managed?.host && !!managed.application, applications?.hasMigrationRisk !== false);
 		const existing = launcherChecked ? { validate: () => checkRestorePointStructure(path.join(userData, 'postgres')) } : postgres.updateRestorePoint();
-		try { await applications?.requireRestorePoint(existing, restorePoint); await applications?.databaseStarting(); }
+		try { await timedPhase('start: database restore point check', async () => { await applications?.requireRestorePoint(existing, restorePoint); await applications?.databaseStarting(); }); }
 		catch (error) {
 			preparingRestorePoint = false;
 			// Keep the supervisor: Try again repeats the copy here. A relaunch would go
@@ -292,9 +292,9 @@ async function main(): Promise<void> {
 			return;
 		}
 		finally { preparingRestorePoint = false; }
-		const state = await postgres.start();
+		const state = await timedPhase('start: database', () => postgres!.start());
 		if (quitting || state.phase !== 'ready') return;
-		await supervisor.start();
+		await timedPhase('start: worker', () => supervisor!.start());
 	};
 
 	const worker: WorkerControl = {

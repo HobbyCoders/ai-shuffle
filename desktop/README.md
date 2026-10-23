@@ -222,7 +222,12 @@ worker's under `<userData>/logs/postgres.log`. The worker log is
 whenever it passes 20 MB during a run, so `worker.prev.log` holds either the
 previous run's log or, after a mid-run move, this run's earlier output (the
 previous run's log is then gone). Windows source-update builds log to
-`<userData>/updates/build.log`.
+`<userData>/updates/build.log`, with an ISO timestamp on every command and
+its duration when it ends. The app's own output goes to
+`<userData>/updates/launch.log`, which records when each install phase (stopping
+the worker and database, the database restore point copy and its validation,
+the restart through the launcher) and each start phase (restore point check,
+database, worker) starts, and how long it took.
 
 The worker's own data directory (`DATA_DIR`) holds its app data, the
 credential keys the database contents depend on, and the transient

@@ -42,15 +42,18 @@ export function buildEnvironment(node: string, python: string): NodeJS.ProcessEn
 async function run(executable: string, args: string[], cwd: string, opts: BuildOptions, python = opts.runtime.python, electronDownload = false): Promise<void> {
   await fs.mkdir(path.dirname(opts.log), { recursive: true });
   const log = await fs.open(opts.log, 'a');
+  const started = Date.now();
+  // Timestamps and durations make each step's cost visible in build.log (#430).
+  const finish = (result: string) => log.write(`[${new Date().toISOString()}] ${result} after ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
   try {
-    await log.write(`\n$ ${path.basename(executable)} ${args.join(' ')}\n`);
+    await log.write(`\n[${new Date(started).toISOString()}] $ ${path.basename(executable)} ${args.join(' ')}\n`);
     await new Promise<void>((resolve, reject) => {
       const env: NodeJS.ProcessEnv = { ...buildEnvironment(opts.runtime.node, python), GITHUB_SHA: opts.revision };
       if (electronDownload) delete env.ELECTRON_SKIP_BINARY_DOWNLOAD;
       const child = spawn(executable, args, { cwd, env, windowsHide: true, stdio: ['ignore', log.fd, log.fd], timeout: 15 * 60_000 });
       child.once('error', reject);
       child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`${path.basename(executable)} failed (${signal ?? code}). Build log: ${opts.log}`)));
-    });
+    }).then(() => finish('done'), async (error) => { await finish('failed'); throw error; });
   } finally { await log.close(); }
 }
 
