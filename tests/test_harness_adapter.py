@@ -2239,16 +2239,39 @@ async def test_delegated_append_with_the_tool_use_block_is_byte_identical(cli_sh
     assert first.count(DELEGATED_TOOL_USE_BLOCK) == 1
 
 
-def test_delegated_append_never_routes_to_swarm():
-    """The delegated leg has no Swarm tool, so its append must not route to one."""
+def test_delegated_append_routes_to_swarm_only_when_the_bridge_serves_it():
+    """The delegated append carries the native leg's Swarm routing exactly
+    when the bridge serves ``mcp__builtins__Swarm``, and the no-Swarm text
+    otherwise. Byte-stable across calls either way."""
+    from fluid.tools.fragments import SWARM_ROUTING_BRIEF
+    from app.core.agent_provider_models import parent_subagent_guidance
     from app.core.provider.harness_adapter import _delegated_append_text
 
-    options = SessionOptions(
-        model="opus",
-        extra={"automatic_workflows": True, "fluid_registry": _registry_with_bridged_task()},
+    def options(**kw):
+        return SessionOptions(model="opus", extra={"automatic_workflows": True}, **kw)
+
+    without = _delegated_append_text("APPEND", options(), _registry_with_bridged_task())
+    assert "Swarm" not in without
+    assert "do not invent an unavailable workflow tool" in without
+
+    registry = _registry_with_bridged_task(swarm=True)
+    text = _delegated_append_text("APPEND", options(), registry)
+    assert text == _delegated_append_text("APPEND", options(), registry)
+    assert SWARM_ROUTING_BRIEF in text
+    # The same delegation block the native leg compiles with Swarm on.
+    native = parent_subagent_guidance(
+        task_available=True, monitor_available=False, swarm_available=True,
+        browser_available=False,
     )
-    text = _delegated_append_text("APPEND", options, _registry_with_bridged_task())
-    assert "Swarm" not in text
+    assert native.split("\n\n")[0] in text
+    # The app-tools note maps the prompt's Swarm onto the bridged name.
+    assert "__Swarm" in text
+
+    # A profile that blocks Swarm (or Task, which every Swarm item runs
+    # through) gets the no-Swarm text.
+    for blocked in (["Swarm"], ["Task"]):
+        denied = _delegated_append_text("APPEND", options(disallowed_tools=blocked), registry)
+        assert SWARM_ROUTING_BRIEF not in denied, blocked
 
 
 def test_delegated_append_drops_the_agents_index_without_task(monkeypatch):
@@ -6527,11 +6550,11 @@ async def test_native_file_agents_reach_dispatch_but_plugins_stay_inert(monkeypa
 # the Task tool at all. The block now rides whichever prompt part the CLI reads.
 
 
-def _registry_with_bridged_task():
+def _registry_with_bridged_task(*, swarm=False):
     """A delegated registry carrying the app's bridged Task, as production has.
 
     The delegated append advertises agents only when the bridge serves
-    ``mcp__builtins__Task``.
+    ``mcp__builtins__Task``; ``swarm`` adds the bridged ``mcp__builtins__Swarm``.
     """
     from fluid.tools.registry import ToolRegistry, ToolSpec
 
@@ -6539,11 +6562,13 @@ def _registry_with_bridged_task():
         return ""
 
     registry = ToolRegistry()
-    registry.register_builtin(
-        ToolSpec(name="mcp__builtins__Task", description="Dispatch an agent.",
-                 input_schema={"type": "object"}, risk="write"),
-        _unused,
-    )
+    names = ["mcp__builtins__Task"] + (["mcp__builtins__Swarm"] if swarm else [])
+    for name in names:
+        registry.register_builtin(
+            ToolSpec(name=name, description="Dispatch agents.",
+                     input_schema={"type": "object"}, risk="write"),
+            _unused,
+        )
     return registry
 
 

@@ -112,8 +112,55 @@ def harness_tools() -> List[Dict[str, Any]]:
         _tool_row(spec.name, spec.description, spec.risk)
         for spec in registry.list_tools(loaded_only=False)
     ]
+    reachable = delegated_harness_names()
+    for row in rows:
+        if row["name"] not in reachable:
+            row["delegated"] = False
+            row["delegated_note"] = DELEGATED_MISSING_NOTE
     rows.sort(key=lambda r: r["name"])
     return rows
+
+
+# fluid builtins the DelegatedLoop serves to the claude CLI itself, beside the
+# app's bridge (fluid.engine.delegated registers them on its bundled server).
+DELEGATED_FLUID_BUNDLED = frozenset({"HistoryExpand", "HistorySearch", "Glob", "Grep"})
+
+#: Why a harness row is not on a Claude session, shown by the picker.
+DELEGATED_MISSING_NOTE = (
+    "Claude models run through the Claude Code CLI, which does not get this "
+    "tool; it applies to sessions on other providers."
+)
+
+
+def delegated_harness_names() -> frozenset:
+    """The picker's harness names a Claude (delegated, claude CLI) session gets.
+
+    A name counts when the CLI carries a tool of that name or under its CLI
+    spelling (``tool_access.DELEGATED_CLI_ALIASES``: AskUser is the CLI's
+    AskUserQuestion), when the app's ``builtins`` server serves it over the
+    bridge (Task, Swarm, Monitor, the memory and session tools), or when the
+    DelegatedLoop bundles fluid's own copy. The rest (fluid's Note and Ledger)
+    exist only on the native leg: both rely on the native loop reciting them on
+    every user turn, which the CLI's own loop does not do.
+    """
+    from app.core.cli_tool_surface import KNOWN_CLI_TOOLS
+    from app.core.tool_access import DELEGATED_CLI_ALIASES
+
+    names = set(KNOWN_CLI_TOOLS) | DELEGATED_FLUID_BUNDLED
+    names.update(
+        name for name, aliases in DELEGATED_CLI_ALIASES.items()
+        if set(aliases) & set(KNOWN_CLI_TOOLS)
+    )
+    try:
+        from app.mcp.builtin_tools import get_builtin_tool_names
+
+        names.update(
+            name[len("mcp__builtins__"):] for name in get_builtin_tool_names()
+            if name.startswith("mcp__builtins__")
+        )
+    except Exception:  # noqa: BLE001 — the marking never breaks discovery
+        logger.debug("could not list the bridged builtins", exc_info=True)
+    return frozenset(names)
 
 
 def _sdk_server_tools(server_cfg: Any) -> List[Any]:

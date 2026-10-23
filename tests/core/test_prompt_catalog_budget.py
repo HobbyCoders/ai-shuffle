@@ -28,9 +28,14 @@ def _emulator_tools_listed(monkeypatch):
 # memory block's save and correction rules, restored after review).
 # Verified delegation adds one shared peer-frame policy per call on each leg.
 # Measured 2026-10-20 on the owner/code fixture; no tool is made eager.
+# Delegated Swarm (Oct 2026, #463): the CLI leg now serves mcp__builtins__Swarm,
+# so its delegation block carries the native leg's SWARM_ROUTING_BRIEF instead
+# of the no-Swarm sizing line, and the app-tools note maps Swarm onto its
+# bridged name: +441 chars (14,094 -> 14,535 on a local run of the fixture).
+# Swarm's schema stays deferred: the always-loaded bridge tools are unchanged.
 MEASURED_FULL = 128_050
 MEASURED_EAGER = 52_573
-MEASURED_DELEGATED_APPEND = 14_275
+MEASURED_DELEGATED_APPEND = 14_275 + 441
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
 
 
@@ -117,19 +122,19 @@ def test_workflow_duplicates_have_one_owner(native):
     system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
               if native else compiled.text)
     combined = system + "\n\n" + "\n\n".join(text for text, _ in catalog)
-    routing = SWARM_ROUTING_BRIEF if native else DELEGATION_SIZING
+    # Both legs serve Swarm (the CLI leg as mcp__builtins__Swarm), so both
+    # carry the same routing, once, in the system prompt.
+    routing = SWARM_ROUTING_BRIEF
     for paragraph in (routing, SUBAGENT_WORKTREE_GUIDANCE, _COMMON.strip()):
         assert combined.count(paragraph) == 1, paragraph
-    if native:
-        # Swarm's workflow coverage/limit rules live once, in its own docs.
-        assert combined.count(SWARM_SCOPE_RULES) == 1
-        assert SWARM_SCOPE_RULES not in system
-        swarm = next(s for s in specs if s.name == "Swarm")
-        assert SWARM_SCOPE_RULES in swarm.description
+    assert combined.count(DELEGATION_SIZING) == 1
+    # Swarm's workflow coverage/limit rules live once, in its own docs.
+    assert combined.count(SWARM_SCOPE_RULES) == 1
+    assert SWARM_SCOPE_RULES not in system
+    swarm = next(s for s in specs if s.name.rsplit("__", 1)[-1] == "Swarm")
+    assert SWARM_SCOPE_RULES in swarm.description
     assert combined.count("Host safety ceilings (from configuration):") == 1
     assert system.count(routing) == 1
-    if not native:
-        assert "Swarm" not in system
     assert system.count(SUBAGENT_WORKTREE_GUIDANCE) == 1
     assert "never override a restriction on delegation" in combined
     assert "Never run `git worktree remove`" in combined

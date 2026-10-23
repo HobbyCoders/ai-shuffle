@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ToolSurfaceGroup } from '$lib/api/toolSurface';
 import {
+	claudeMissingNote,
 	countAllowedTools,
 	groupBlockedReason,
 	groupPattern,
@@ -321,5 +322,18 @@ describe('profileToolCount', () => {
 		expect(profileToolCount({ allowed_tools: [] }, surface, true, true)).toBe(0);
 		expect(profileToolCount({ allowed_tools: ['Read'] }, surface, true, true)).toBe(1);
 		expect(profileToolCount({}, surface, true, true)).toBe(6);
+	});
+});
+
+describe('claudeMissingNote', () => {
+	it('tags only the harness tools a Claude session does not get, and keeps them selectable', () => {
+		const ledger = { name: 'Ledger', description: 'Pinned state.', delegated: false, delegated_note: 'Not on the CLI.' };
+		expect(claudeMissingNote(ledger)).toBe('Not on the CLI.');
+		expect(claudeMissingNote({ ...ledger, delegated_note: ' ' })).toBe('Claude-model sessions do not get this tool.');
+		expect(claudeMissingNote({ name: 'Swarm', description: 'Workflows.' })).toBeNull();
+		expect(claudeMissingNote({ name: 'Task', description: 'Delegate.', delegated: true })).toBeNull();
+		const group: ToolSurfaceGroup = { id: 'harness', label: 'Harness', kind: 'harness', tools: [ledger] };
+		expect(toolBlockedReason(group, ledger, OPEN)).toBeNull();
+		expect(selectableTools(group, OPEN)).toEqual([ledger]);
 	});
 });

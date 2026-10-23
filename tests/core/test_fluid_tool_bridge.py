@@ -332,6 +332,9 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
             # The agent-messaging bridge re-exposes fluid's own specs.
             from fluid.tools.builtins import list_agents, send_message
             actual.update({list_agents.SPEC.name, send_message.SPEC.name})
+            # So does the Swarm bridge (builtin_tools._swarm_bridge_tool).
+            from fluid.tools.builtins import swarm as fluid_swarm
+            actual.add(fluid_swarm.SPEC.name)
         mapped = set(SERVER_RISK_MAPS[server])
         stale = mapped - actual
         assert not stale, f"{server}: risk map entries with no matching registered tool: {sorted(stale)}"

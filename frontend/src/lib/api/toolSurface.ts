@@ -33,6 +33,13 @@ export interface ToolSurfaceTool {
 	available?: boolean;
 	/** Why the row cannot be granted, when the backend knows — shown as the tooltip. */
 	unavailable_reason?: string | null;
+	/**
+	 * False for a harness tool that Claude-model sessions never get (they run
+	 * the Claude Code CLI): it can still be granted for other providers.
+	 */
+	delegated?: boolean;
+	/** Why a Claude session does not get the tool, shown with its tag. */
+	delegated_note?: string | null;
 }
 
 export interface ToolSurfaceGroup {

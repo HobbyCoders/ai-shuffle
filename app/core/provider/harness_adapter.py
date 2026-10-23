@@ -5250,8 +5250,8 @@ def _workflow_prompt_blocks(
     Query options only stamps provenance; native compilation supplies the wired
     surface, while delegated compilation supplies its CLI permission surface.
     ``permitted=None`` means every tool is available. The keyword overrides,
-    when given, replace that inference for one tool: the delegated leg has no
-    Swarm at all, and it decides Task and Monitor from what the bridge serves.
+    when given, replace that inference for one tool: the delegated leg decides
+    Swarm, Task and Monitor from what its bridge serves.
     """
     extra = getattr(options, "extra", None) or {}
     if not extra.get("automatic_workflows", False):
@@ -5698,7 +5698,21 @@ def _delegated_tool_predicate(options: SessionOptions):
     blocked = _delegated_blocklist(options)
     if not surface and not blocked:
         return None
-    return lambda name: tool_permitted(name, surface, blocked)
+
+    def permit(name: str) -> bool:
+        if not tool_permitted(name, surface, blocked):
+            return False
+        # Swarm dispatches every item through Task: without Task it could
+        # only refuse (the native leg refuses its start), so it is not offered.
+        if name == _BRIDGED_SWARM:
+            return tool_permitted(_BRIDGED_TASK, surface, blocked)
+        return True
+
+    return permit
+
+
+_BRIDGED_TASK = "mcp__builtins__Task"
+_BRIDGED_SWARM = "mcp__builtins__Swarm"
 
 
 def _delegated_permitted_names(options: SessionOptions, registry: Any) -> Optional[frozenset]:
@@ -7122,7 +7136,7 @@ _DELEGATED_MEMORY_TOOLS = ("Remember", "Recall", "Forget")
 _DELEGATED_RECALL_TOOLS = ("SessionSearch", "SessionView")
 # The app's own Task and background tools; the CLI's tools of these names are
 # banned on this leg (DELEGATED_BANNED_TOOLS).
-_DELEGATED_TASK_TOOLS = ("Task", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
+_DELEGATED_TASK_TOOLS = ("Task", "Swarm", "Monitor", "TaskOutput", "TaskStop", "ScheduleWakeup")
 # The app's tools standing in for CLI tools banned on this leg (see
 # DELEGATED_BANNED_TOOLS): (app tools, what they are for, the CLI tools).
 _DELEGATED_STAND_INS = (
@@ -7418,10 +7432,10 @@ def _delegated_append_text(
     card, with its preview link for an owner session) follows the worker
     block.
 
-    Only tools this leg offers are described: the agents index and the Task
-    and Monitor routing need the bridged ``mcp__builtins__Task`` /
-    ``Monitor`` (``_delegated_offered``), and Swarm routing never appears
-    because the leg has no Swarm tool.
+    Only tools this leg offers are described: the agents index and the Task,
+    Swarm and Monitor routing need the bridged ``mcp__builtins__Task`` /
+    ``Swarm`` / ``Monitor`` (``_delegated_offered``). With Swarm offered, the
+    delegation block carries the same Swarm routing as the native leg's.
 
     ``worker`` (the app's ``Worker:`` text, rendered at connect) follows the
     profile's append as a ``# Worker`` block: Claude Code's own environment
@@ -7440,7 +7454,7 @@ def _delegated_append_text(
     parts.append(PEER_MESSAGE_BLOCK)
     parts.extend(_workflow_prompt_blocks(
         options, _delegated_permitted_names(options, registry),
-        swarm_available=False, task_available=task_offered,
+        swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
     ))
     parts.extend(_delegated_fluid_context(options))

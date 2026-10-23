@@ -55,6 +55,18 @@ def test_tool_row_normalizes_risk():
 # ---------------------------------------------------------------------------
 
 
+def test_harness_rows_say_which_tools_claude_sessions_never_get():
+    """Claude models run the claude CLI: fluid's Note and Ledger never reach it
+    (the native loop recites them each turn), so the picker marks them. Every
+    other harness tool reaches that leg under some name, Swarm included."""
+    rows = {row["name"]: row for row in tc.harness_tools()}
+    missing = {name for name, row in rows.items() if row.get("delegated") is False}
+    assert missing == {"Ledger", "Note"}
+    assert rows["Note"]["delegated_note"] == tc.DELEGATED_MISSING_NOTE
+    for name in ("Swarm", "Task", "AskUser", "HistoryExpand", "Remember"):
+        assert "delegated" not in rows[name], name
+
+
 def test_fluid_mcp_config_stdio_and_http():
     stdio = McpServerConfig(name="s", command="node", args=["x.js"], env={"K": "V"})
     assert tc._fluid_mcp_config(stdio) == {
