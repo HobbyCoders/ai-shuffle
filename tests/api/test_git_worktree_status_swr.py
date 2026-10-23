@@ -48,7 +48,9 @@ def git(monkeypatch):
     service = MagicMock()
     service.reads = []
 
-    def get_status(path):
+    def get_status(path, untracked="all"):
+        # The list only needs counts: it must not recurse untracked folders.
+        assert untracked == "normal"
         service.reads.append(path)
         return _status()
 
@@ -99,7 +101,7 @@ def test_concurrent_stale_requests_share_one_refresh(git, monkeypatch):
     release = threading.Event()
     started = threading.Event()
 
-    def slow_status(path):
+    def slow_status(path, **_):
         started.set()
         release.wait(5)
         git.reads.append(path)
@@ -143,12 +145,12 @@ def test_fresh_data_is_not_reread(git):
     assert git.reads == []
 
 
-def test_refresh_reads_only_hot_worktrees(git, monkeypatch):
+def test_refresh_reads_only_worktrees_that_may_have_changed(git, monkeypatch):
     rows = [
-        _wt(0, updated_at=_old()),     # streaming session
-        _wt(1, updated_at=_recent()),  # recent activity
+        _wt(0, updated_at=_old()),     # a turn starts on it after the first read
+        _wt(1, updated_at=_old()),     # its session records activity after the read
         _wt(2, updated_at=_old()),     # focused by the client
-        _wt(3, updated_at=_old()),     # idle
+        _wt(3, updated_at=_recent()),  # active earlier, nothing since the read
         _wt(4),                        # idle, no sessions at all
     ]
     _load(rows)
@@ -156,13 +158,81 @@ def test_refresh_reads_only_hot_worktrees(git, monkeypatch):
     git.reads.clear()
     monkeypatch.setattr(gw, "_streaming_session_ids", lambda: {"ses-0"})
 
-    served = _load([dict(r) for r in rows] + [_wt(5, updated_at=_old())], focus="wt-2")
+    later = [dict(r) for r in rows]
+    later[1]["sessions"] = [dict(later[1]["sessions"][0], updated_at=_recent())]
+    served = _load(later + [_wt(5, updated_at=_old())], focus="wt-2")
     _settle()
 
-    # Hot, focused, and the never-read wt-5; idle ones keep their last status.
+    # Changed, focused, and the never-read wt-5; the rest keep their last status.
     assert sorted(git.reads) == ["/wt/0", "/wt/1", "/wt/2", "/wt/5"]
     assert served[3]["git_status"]["current_branch"] == "main"
     assert served[4]["git_status"]["current_branch"] == "main"
+
+
+def test_turn_end_rereads_and_streaming_is_read_on_a_slow_cadence(git, monkeypatch):
+    rows = lambda: [_wt(0, updated_at=_old())]  # noqa: E731
+    monkeypatch.setattr(gw, "_streaming_session_ids", lambda: {"ses-0"})
+    _load(rows())
+    entry = gw._worktree_status_cache["p1"].entries["wt-0"]
+    assert entry.read_streaming is True
+
+    # Still streaming, last read recent: a stale project does not re-read it.
+    _make_stale()
+    git.reads.clear()
+    _load(rows())
+    _settle()
+    assert git.reads == []
+
+    # Still streaming, last read older than the streaming cadence: re-read.
+    entry.read_at -= gw._WORKTREE_STATUS_STREAMING_SECONDS + 1
+    _make_stale()
+    _load(rows())
+    _settle()
+    assert git.reads == ["/wt/0"]
+
+    # The turn ends: the next stale poll re-reads it once, then leaves it.
+    monkeypatch.setattr(gw, "_streaming_session_ids", lambda: set())
+    git.reads.clear()
+    _make_stale()
+    _load(rows())
+    _settle()
+    assert git.reads == ["/wt/0"]
+    assert entry.read_streaming is False
+    _make_stale()
+    git.reads.clear()
+    _load(rows())
+    _settle()
+    assert git.reads == []
+
+
+def test_retired_worktrees_are_not_read(git):
+    rows = [_wt(0, updated_at=_recent()), _wt(1, updated_at=_recent())]
+    rows[1]["status"] = "archived"
+    served = _load(rows)
+    assert git.reads == ["/wt/0"]
+    assert served[1]["git_status"] is None and served[1]["status_error"] is None
+    # Focusing a retired worktree still reads it.
+    _load([dict(r) for r in rows], focus="wt-1")
+    _settle()
+    assert git.reads == ["/wt/0", "/wt/1"]
+
+
+def test_cold_project_fills_in_a_batch_per_refresh(git):
+    total = gw._WORKTREE_STATUS_COLD_BATCH * 2 + 3
+    rows = lambda: [_wt(i, updated_at=_old()) for i in range(total)]  # noqa: E731
+    _load(rows())
+    _settle()
+    assert len(git.reads) == gw._WORKTREE_STATUS_COLD_BATCH
+    for _ in range(2):
+        _load(rows())
+        _settle()
+    assert sorted(git.reads) == sorted(f"/wt/{i}" for i in range(total))
+    # Everything read once and idle: nothing more to read.
+    git.reads.clear()
+    _make_stale()
+    _load(rows())
+    _settle()
+    assert git.reads == []
 
 
 def test_new_worktree_is_read_even_while_fresh(git):
@@ -195,7 +265,7 @@ def test_missing_on_disk_worktree_gets_no_status(git):
 def test_broken_worktree_backs_off_then_recovers(git, caplog):
     broken = {"on": True}
 
-    def status(path):
+    def status(path, **_):
         git.reads.append(path)
         if path == "/wt/1" and broken["on"]:
             raise RuntimeError("invalid data in index - incorrect header signature")
@@ -274,7 +344,7 @@ def test_invalidation_rereads_one_worktree_and_resets_backoff(git):
     _load([_wt(0), _wt(1)])
     assert gw._worktree_status_cache["p1"].entries["wt-0"].failures == 1
 
-    git.get_status.side_effect = lambda path: git.reads.append(path) or _status()
+    git.get_status.side_effect = lambda path, **_: git.reads.append(path) or _status()
     git.reads.clear()
     gw._invalidate_worktree_status_cache("p1", "wt-0")
     rows = _load([_wt(0), _wt(1)])

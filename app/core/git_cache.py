@@ -3,8 +3,9 @@ Git Result Cache
 
 Thread-safe per-key TTL cache for expensive git operations.
 
-Also hosts the module-level ``_native_reader`` (pygit2) singleton so that
-both ``git_service.py`` and the mixin modules can import it without
+Also hosts the module-level ``_native_reader`` slot (always ``None``: reads go
+through the git CLI, see below) and the last status-read error per checkout, so
+that ``git_service.py`` and the mixin modules can import them without
 circular-import issues.
 """
 
@@ -24,15 +25,34 @@ DEFAULT_BRANCH_CACHE_TTL = 300.0   # 5 minutes — rarely changes
 AHEAD_BEHIND_CACHE_TTL = 30.0     # seconds — only changes on commit/push/fetch
 
 # ---------------------------------------------------------------------------
-# Native git reader (pygit2) — falls back to CLI if unavailable
+# Git reads run as `git` CLI subprocesses, never in this interpreter (#436)
 # ---------------------------------------------------------------------------
-try:
-    from app.core.git_native import GitNativeReader
-    _native_reader: "GitNativeReader | None" = GitNativeReader()
-    logger.info("Git read operations: using pygit2 (native)")
-except ImportError:
-    _native_reader = None
-    logger.info("Git read operations: using CLI subprocess (pygit2 not available)")
+# pygit2's C extension keeps the GIL for the whole of status, diff, merge-base
+# and repository open. A cold status scan of one checkout took up to 11 s on a
+# busy disk, and while it ran no other thread could run: not the event loop,
+# not the readiness probe, not the stall watchdog. A `git` subprocess releases
+# the GIL while it waits and can be killed when it overruns its timeout. Every
+# reader method already has a CLI path returning the same shape, so the native
+# reader stays off. The mixins keep their ``_native_reader`` checks; the name
+# stays importable so tests can still drive the pygit2 reader directly.
+_native_reader: "Any | None" = None
+
+
+# ---------------------------------------------------------------------------
+# Last failed status read per working dir
+# ---------------------------------------------------------------------------
+# A broken checkout fails the same way on every poll. get_status records the
+# failure here and still returns its partial dict, so callers that show status
+# (the worktree fan-out) can tell a failed read from a clean checkout.
+_status_errors: dict = {}
+
+
+def get_status_error(working_dir: str) -> Optional[str]:
+    """The error from the last failed status read of *working_dir*, if any.
+
+    Cleared by the next successful read of the same path.
+    """
+    return _status_errors.get(working_dir)
 
 
 class _GitResultCache:

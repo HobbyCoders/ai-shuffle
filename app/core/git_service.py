@@ -20,7 +20,9 @@ import os
 import re
 import stat
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from collections import OrderedDict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fluid.tools.child_env import child_env_with_overlay, scrub_child_env
 
@@ -37,6 +39,7 @@ from app.core.git_cache import (
 from app.core.git_cache import (
     _git_cache,
     _native_reader,
+    _status_errors,
 )
 from app.core.fs_utils import force_rmtree
 from app.core.git_commit_ops import GitCommitMixin
@@ -498,19 +501,31 @@ class GitService(
         Call after mutations (commit, checkout, stage, push, pull, etc.)
         so the next poll gets fresh data.
         """
-        _git_cache.invalidate(f"status:{working_dir}")
+        for mode in _UNTRACKED_MODES:
+            _git_cache.invalidate(_status_cache_key(working_dir, mode))
         _git_cache.invalidate_prefix(f"diff_stats:{working_dir}:")
         _git_cache.invalidate_prefix(f"per_file_diff:{working_dir}")
         _git_cache.invalidate_prefix(f"ahead_behind:{working_dir}:")
 
-    def get_status(self, working_dir: str) -> Dict[str, Any]:
+    def get_status(self, working_dir: str, untracked: str = "all") -> Dict[str, Any]:
         """
         Get repository status.
 
-        Results are cached for a short TTL to coalesce rapid polls.
+        Results are cached for a short TTL to coalesce rapid polls, and at most
+        one read per checkout and mode runs at a time: concurrent callers wait
+        for it and share its result.
+
+        A read that overruns its timeout is killed. The caller then gets the
+        last good status of that checkout with ``"stale": True``, or, when there
+        is none, the empty status with the error recorded (see
+        :func:`app.core.git_cache.get_status_error`). It never raises.
 
         Args:
             working_dir: Repository directory
+            untracked: ``"all"`` lists every untracked file (the changed-files
+                panel needs per-file paths); ``"normal"`` lists an untracked
+                directory as one ``dir/`` entry without recursing into it,
+                which is all a count or a dirty flag needs.
 
         Returns:
             Dictionary with:
@@ -526,13 +541,27 @@ class GitService(
             - ahead: Commits ahead of upstream
             - behind: Commits behind upstream
             - conflicts: List of files with merge conflicts
+            - stale: present (True) only when a timed-out read served the
+              last good status instead
         """
-        cache_key = f"status:{working_dir}"
+        if untracked not in _UNTRACKED_MODES:
+            raise ValueError(f"untracked must be one of {_UNTRACKED_MODES}")
+        cache_key = _status_cache_key(working_dir, untracked)
+        cached = _git_cache.get(cache_key, _STATUS_CACHE_TTL)
+        if cached is not None:
+            return cached
+        return _status_reads.run(
+            cache_key, lambda: self._read_status(working_dir, untracked, cache_key)
+        )
+
+    def _read_status(self, working_dir: str, untracked: str, cache_key: str) -> Dict[str, Any]:
+        """One status read for :meth:`get_status` (the single-flight leader)."""
+        # A read that finished while this caller queued for the flight lock.
         cached = _git_cache.get(cache_key, _STATUS_CACHE_TTL)
         if cached is not None:
             return cached
 
-        # Try native reader
+        # Only set when a test drives the pygit2 reader (see git_cache).
         if _native_reader is not None:
             try:
                 result = _native_reader.get_status(working_dir)
@@ -544,33 +573,46 @@ class GitService(
             except Exception as e:
                 logger.warning(f"pygit2 get_status failed, CLI fallback: {e}")
 
-        # CLI fallback
-        return self._get_status_cli(working_dir)
+        try:
+            return self._get_status_cli(working_dir, untracked)
+        except subprocess.TimeoutExpired:
+            last = _last_good_status.get(cache_key)
+            if last is not None:
+                logger.warning(
+                    "git status timed out for %s; serving its last good status", working_dir
+                )
+                stale = {**last, "stale": True}
+                # Held for the normal TTL so polls do not start a new slow read
+                # every time; the next read after it retries.
+                _git_cache.put(cache_key, stale)
+                return stale
+            _record_status_error(working_dir, "git status timed out")
+            return _empty_status()
 
-    def _get_status_cli(self, working_dir: str) -> Dict[str, Any]:
-        cache_key = f"status:{working_dir}"
-        status = {
-            "is_git_repo": False,
-            "current_branch": None,
-            "is_detached": False,
-            "head_commit": None,
-            "remote_url": None,
-            "is_clean": True,
-            "staged": [],
-            "modified": [],
-            "untracked": [],
-            "ahead": 0,
-            "behind": 0,
-            "differs_from_base": False,
-            "unpushed": None,
-            "matches_base_tree": None,
-            "conflicts": []
-        }
+    def _get_status_cli(self, working_dir: str, untracked: str = "all") -> Dict[str, Any]:
+        """Read status through the git CLI.
+
+        Raises ``subprocess.TimeoutExpired`` when a git call overruns (the
+        caller decides what to serve). Any other failure is recorded as the
+        checkout's status error and returns the partial status.
+        """
+        cache_key = _status_cache_key(working_dir, untracked)
+        status = _empty_status()
 
         # Only the repository root counts (as in git_native.get_status): a
         # project folder nested inside another repo must not report — or let
-        # the UI act on — the enclosing repo's changes.
-        if not self._is_git_repo_cli(working_dir):
+        # the UI act on — the enclosing repo's changes. A timeout here must not
+        # read as "not a repository", so it propagates.
+        try:
+            top = self._run_git(working_dir, ["rev-parse", "--show-toplevel"], timeout=_STATUS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"is_git_repo check failed for '{working_dir}': {e}")
+            _record_status_error(working_dir, None)
+            return status
+        if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != os.path.realpath(working_dir):
+            _record_status_error(working_dir, None)
             return status
 
         status["is_git_repo"] = True
@@ -676,8 +718,13 @@ class GitService(
             # Get file status using porcelain format. ``-z`` keeps paths
             # verbatim: without it git C-quotes non-ASCII names and prints a
             # rename as "old -> new", neither of which is a usable path.
+            # ``--no-optional-locks``: a read must not take index.lock to
+            # write back refreshed stat data, or it races an agent's commit.
             result = self._run_git(
-                working_dir, ["status", "--porcelain=v1", "-z"], timeout=10
+                working_dir,
+                ["--no-optional-locks", "status", "--porcelain=v1", "-z",
+                 f"--untracked-files={untracked}"],
+                timeout=_STATUS_TIMEOUT,
             )
             if result.returncode == 0:
                 entries = iter(result.stdout.split("\0"))
@@ -727,11 +774,133 @@ class GitService(
                     not status["conflicts"]
                 )
 
+        except subprocess.TimeoutExpired:
+            raise
         except Exception as e:
             logger.error(f"Error getting git status: {e}")
+            _record_status_error(working_dir, str(e) or type(e).__name__)
+            _git_cache.put(cache_key, status)
+            return status
 
+        _record_status_error(working_dir, None)
+        _last_good_status.put(cache_key, status)
         _git_cache.put(cache_key, status)
         return status
+
+
+# Status reads: a killed read serves the last good status, and concurrent
+# callers for one checkout share a single read.
+_STATUS_TIMEOUT = 15
+_UNTRACKED_MODES = ("all", "normal")
+
+
+def _status_cache_key(working_dir: str, untracked: str) -> str:
+    # "all" keeps the historical key; other modes get a suffix no path has.
+    return f"status:{working_dir}" if untracked == "all" else f"status:{working_dir}\0{untracked}"
+
+
+def _empty_status() -> Dict[str, Any]:
+    return {
+        "is_git_repo": False,
+        "current_branch": None,
+        "is_detached": False,
+        "head_commit": None,
+        "remote_url": None,
+        "is_clean": True,
+        "staged": [],
+        "modified": [],
+        "untracked": [],
+        "ahead": 0,
+        "behind": 0,
+        "differs_from_base": False,
+        "unpushed": None,
+        "matches_base_tree": None,
+        "conflicts": [],
+    }
+
+
+def _record_status_error(working_dir: str, error: Optional[str]) -> None:
+    """Set (or with ``None`` clear) the last status error of *working_dir*.
+
+    A checkout that keeps failing the same way logs at ERROR once, then DEBUG.
+    """
+    if error is None:
+        if _status_errors.pop(working_dir, None) is not None:
+            logger.info("git status recovered for %s", working_dir)
+        return
+    if _status_errors.get(working_dir) == error:
+        logger.debug("git status failed again for %s: %s", working_dir, error)
+    else:
+        logger.error("git status failed for %s: %s", working_dir, error)
+    _status_errors[working_dir] = error
+
+
+class _LastGood:
+    """Last successful status per cache key, kept past the TTL (bounded LRU)."""
+
+    def __init__(self, max_entries: int = 1024) -> None:
+        self._data: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._max = max_entries
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._data.get(key)
+
+    def put(self, key: str, value: Dict[str, Any]) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self._max:
+                self._data.popitem(last=False)
+
+
+class _SingleFlight:
+    """At most one call per key in flight; concurrent callers share its result.
+
+    A follower waits for the leader without a timeout of its own: the leader's
+    git calls all carry timeouts, so the wait is bounded by them.
+    """
+
+    class _Call:
+        def __init__(self) -> None:
+            self.done = threading.Event()
+            self.result: Any = None
+            self.error: Optional[BaseException] = None
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._calls: Dict[str, "_SingleFlight._Call"] = {}
+
+    def run(self, key: str, fn: Callable[[], Any]) -> Any:
+        with self._lock:
+            call = self._calls.get(key)
+            leader = call is None
+            if leader:
+                call = self._calls[key] = _SingleFlight._Call()
+        if not leader:
+            call.done.wait()
+            if call.error is not None:
+                raise call.error
+            return call.result
+        try:
+            call.result = fn()
+            return call.result
+        except BaseException as exc:
+            call.error = exc
+            raise
+        finally:
+            with self._lock:
+                self._calls.pop(key, None)
+            call.done.set()
+
+    def in_flight(self) -> int:
+        with self._lock:
+            return len(self._calls)
+
+
+_last_good_status = _LastGood()
+_status_reads = _SingleFlight()
 
 
 # Global instance

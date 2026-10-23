@@ -1,9 +1,14 @@
 """
 Git Native Reader — pygit2 (libgit2) implementation of read-only git operations.
 
-Replaces subprocess-based git CLI calls in GitService with fast, in-process
-reads via pygit2. Every method returns the EXACT same shape as the
-corresponding GitService method.
+NOT used by the running app (#436): libgit2's status, diff, merge-base and
+repository open hold the GIL for the whole call, so one slow scan froze every
+thread. GitService reads through the git CLI instead (see
+``app.core.git_cache``). The reader is kept so the CLI-parity tests can check
+the two implementations still agree.
+
+Every method returns the EXACT same shape as the corresponding GitService
+method.
 
 Thread safety: each method opens a fresh pygit2.Repository handle (~0.1ms)
 because pygit2.Repository is NOT thread-safe across threads. This is still
@@ -59,7 +64,8 @@ _fsmonitor_configured: set = set()
 # A broken checkout (e.g. a zeroed index) fails the same way on every poll.
 # Log the first failure (or a new message) at ERROR and repeats at DEBUG, and
 # let callers ask whether the dict they got back is the partial fallback.
-_status_errors: Dict[str, str] = {}
+# Shared with the CLI status path, which is what the app runs (#436).
+from app.core.git_cache import _status_errors  # noqa: E402
 
 
 def get_status_error(working_dir: str) -> Optional[str]:
