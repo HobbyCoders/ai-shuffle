@@ -107,7 +107,7 @@ To build Android apps, the agent also needs Java and the Android build tools. Th
 
 ## Who can use it
 
-Only the owner can open the Phone panel and its controls. API keys and other people's devices cannot. Agents use the emulator through their tools and follow the chat's permission mode. Installing the emulator always asks first in the assistant.
+Only the owner can open the Phone panel and its controls. API keys and other people's devices cannot. Agents use the emulator through their tools and follow the chat's permission mode. Installing the emulator always asks you first.
 
 ## Troubleshooting
 

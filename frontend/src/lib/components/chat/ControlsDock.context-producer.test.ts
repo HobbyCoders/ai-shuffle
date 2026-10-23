@@ -36,8 +36,8 @@ async function openSession(mode: 'code' | 'chat' | 'voice') {
 	activeSession.reconcileSessionMode([{ id: 'context-fixture', mode }]);
 	expect(get(activeSession).mode).toBe(mode);
 }
-function mount(assistantMode = false) {
-	return render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), assistantMode } });
+function mount() {
+	return render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
 }
 
 describe('ControlsDock single responsive context producer', () => {
@@ -74,12 +74,5 @@ describe('ControlsDock single responsive context producer', () => {
 		expect(getContextUsage).toHaveBeenCalledTimes(2);
 		await fireEvent.keyDown(document, { key: 'Escape' });
 		expect(container.querySelector('.usage-popover')).toBeNull();
-	});
-	it('never starts a context read in assistant mode', async () => {
-		await openSession('chat');
-		mount(true);
-		await tick();
-		expect(screen.queryByRole('button', { name: /^Context and usage/ })).toBeNull();
-		expect(getContextUsage).not.toHaveBeenCalled();
 	});
 });

@@ -75,8 +75,6 @@
 
 	interface Props {
 		compact?: boolean;
-		/** The assistant's home: just the box, attach, voice, stash, model and Stop. */
-		assistantMode?: boolean;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
@@ -90,7 +88,7 @@
 		agentCard?: boolean;
 	}
 
-	let { compact = false, assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, agentCard = false }: Props = $props();
+	let { compact = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, agentCard = false }: Props = $props();
 	// ChatView remounts the editor when its account changes. Teardown and
 	// already queued callbacks must not write the previous account's text.
 	const ownerEpoch = sessionOwnerEpoch();
@@ -101,9 +99,8 @@
 	// once one is open, and only falls back to the sidepanel's pick on a fresh
 	// compose screen.
 	const composerMode = $derived($activeSession.mode);
-	// Which lane's project rules apply. The assistant's home is stored as a
-	// code session but has no project by construction, like the chat lane.
-	const projectLane = $derived(projectRulesLane(composerMode, assistantMode));
+	// Which lane's project rules apply.
+	const projectLane = $derived(projectRulesLane(composerMode));
 	// Remote runtime summaries are display/control truth, not transcript streaming
 	// state. A parked turn can also retain background work that Stop must reach.
 	const stoppableWork = $derived(hasStoppableWork(
@@ -139,8 +136,7 @@
 	const agentName = $derived($profiles.find(profile => profile.id === $activeSession.profile)?.name?.trim() || null);
 	const composerPlaceholder = $derived(
 		moveWait ??
-			(assistantMode ? 'What can I do for you?'
-				: agentCard && agentName ? `What should ${agentName} do?`
+			(agentCard && agentName ? `What should ${agentName} do?`
 				: composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
 	);
 
@@ -540,7 +536,7 @@
 	let dismissedMismatch = $state<string | null>(null);
 	// Without a project the nudge offers to add the one the draft names.
 	const projectMismatch = $derived(
-		!$activeSession.sessionId && !assistantMode && plainTextValue.length >= 8
+		!$activeSession.sessionId && plainTextValue.length >= 8
 			? detectProjectMismatch(plainTextValue, appData.current.projects, $activeSession.project)
 			: null
 	);
@@ -1405,9 +1401,9 @@
 			<!-- The phone shell carries these selectors in its controls panel; a
 			     second, hidden copy would share their dropdown state. -->
 			{#if !mobileViewport}
-			{#if !assistantMode && !agentCard}
-				<!-- The assistant picks project, branch and runner itself. The
-				     new-session screen's agent card and project strip carry them. -->
+			{#if !agentCard}
+				<!-- The new-session screen's agent card and project strip carry
+				     project, branch and runner instead. -->
 				<div class="context-pill-row"><ContextPillBar /></div>
 			{/if}
 			{/if}
@@ -1541,11 +1537,10 @@
 				     component's recording state and render inside the form. -->
 				<ControlsDock
 					bind:this={controlsDockRef}
-					{assistantMode}
-					onBrowserToggle={assistantMode ? undefined : onBrowserToggle}
+					{onBrowserToggle}
 					{onBrowserPreload}
 					{browserOpen}
-					terminal={assistantMode ? undefined : terminal}
+					{terminal}
 					{isUploading}
 					inertToolbar={toolbarPointerBlocked}
 					onAttachClick={triggerFileUpload}

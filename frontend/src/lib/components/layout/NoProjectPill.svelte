@@ -13,13 +13,11 @@
 	import AttachProjectSheet from './AttachProjectSheet.svelte';
 
 	interface Props {
-		/** The legacy assistant home never takes a project. */
-		assistantMode?: boolean;
 		/** Phone top bar: icon-sized pill. */
 		compact?: boolean;
 	}
 
-	let { assistantMode = false, compact = false }: Props = $props();
+	let { compact = false }: Props = $props();
 
 	let open = $state(false);
 
@@ -34,7 +32,7 @@
 		backgroundWork: !!row?.parked_task_kind,
 		archived: !!(sessionId && $archivedChats.has(sessionId)),
 		subagent: !!(sessionId && $subagentChats.has(sessionId)),
-		assistantHome: assistantMode
+		hidden: !!row?.hidden
 	});
 	const visible = $derived(noProjectPillVisible(attachState));
 	const blockedReason = $derived(attachBlockedReason(attachState));

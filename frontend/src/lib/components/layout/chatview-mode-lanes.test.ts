@@ -2,9 +2,8 @@
  * ChatView's per-lane empty state.
  *
  * Three things have to stay true and are all easy to break by accident:
- *  1. For ordinary sessions, the cleared-session hero wins over the lane heroes.
- *     The designated Assistant home has a personalized role-level welcome;
- *     other cleared sessions show their own title in EVERY lane. Reordering would make
+ *  1. The cleared-session hero wins over the lane heroes: a cleared session
+ *     shows its own title in EVERY lane. Reordering would make
  *     a cleared chat-lane session read as a brand-new one, the exact regression
  *     #558 fixed for the code lane.
  *  2. Every lane keeps the same mounted composer and its draft.
@@ -43,7 +42,7 @@ describe('ChatView — the new-session hero (#371 step 4)', () => {
 
 	it('puts the optional project under the composer, only on the new-session screen', () => {
 		expect(codeOnly).toMatch(/\{#if showAgentCard && !archivedSessionId\}\s*<div class="project-slot-wrap">\s*<ProjectSlot \/>/);
-		expect(codeOnly).toContain("const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !primaryAssistant && !unavailable)");
+		expect(codeOnly).toContain("const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !unavailable)");
 		expect(codeOnly).toContain('agentCard={showAgentCard}');
 	});
 
@@ -52,14 +51,8 @@ describe('ChatView — the new-session hero (#371 step 4)', () => {
 		expect(codeOnly).not.toMatch(/VoiceModeHero|startNewVoiceSession/);
 	});
 
-	it('personalizes only the designated home before the ordinary cleared-session hero', () => {
-		// The home is identified once, in MainPanel, and arrives as a flag.
-		expect(codeOnly).toContain('const primaryAssistant = $derived(assistantMode ? $assistantState : null)');
-		expect(codeOnly).not.toContain('home_session_id');
-		const primary = codeOnly.indexOf('{#if primaryAssistant}');
-		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
-		expect(primary).toBeGreaterThan(-1);
-		expect(cleared).toBeGreaterThan(primary);
+	it('has no personalized assistant-home hero any more (#371 step 5)', () => {
+		expect(codeOnly).not.toMatch(/primaryAssistant|assistantState|home_session_id/);
 	});
 
 	it('keeps the cleared-session hero ahead of the agent card', () => {

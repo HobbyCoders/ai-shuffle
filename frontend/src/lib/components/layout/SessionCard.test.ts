@@ -1,8 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { platform } from '$lib/stores/platform.svelte';
-import { assistantState } from '$lib/stores/assistant';
-import type { AssistantState } from '$lib/api/assistant';
 
 const mocks = vi.hoisted(() => {
 	function store<T>(initial: T) {
@@ -154,7 +152,6 @@ function renderCard(overrides: Record<string, unknown> = {}, propOverrides: Reco
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	assistantState.set(null);
 	Object.defineProperty(window, 'matchMedia', {
 		writable: true,
 		value: vi.fn().mockImplementation(() => ({
@@ -230,21 +227,6 @@ describe('SessionCard archive and undo', () => {
 });
 
 describe('SessionCard actions', () => {
-	it('does not offer settlement for the persistent assistant home', () => {
-		assistantState.set({ home_session_id: 'session-a' } as AssistantState);
-		renderCard();
-		expect(screen.queryByTitle('Settle session')).toBeNull();
-		expect(screen.getByText('Persistent')).toBeTruthy();
-		expect(mocks.setSessionActive).not.toHaveBeenCalled();
-	});
-	it('offers no archive, rename, fork or delete for the persistent assistant home', () => {
-		assistantState.set({ home_session_id: 'session-a' } as AssistantState);
-		renderCard();
-		for (const title of ['Archive session', 'Rename session', 'Fork session', 'Delete session']) {
-			expect(screen.queryByTitle(title)).toBeNull();
-		}
-		expect(screen.queryByRole('menu')).toBeNull();
-	});
 	it('keeps settle and omits rename, fork, and delete controls', () => {
 		renderCard();
 

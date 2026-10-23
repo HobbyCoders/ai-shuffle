@@ -439,23 +439,7 @@ npx vite dev --config tests/vite.chat-access.config.js --host 127.0.0.1 --port 6
 node tests/verify-chat-access.mjs   # in a second terminal
 ```
 
-#### Browser check for Assistant setup
-
-`frontend/tests/assistant-setup.html` mounts the real `AssistantHome` with
-stub app-data, layout and voice modules; `frontend/tests/verify-assistant-setup.mjs`
-answers `/api/v1/assistant` from an in-script fake backend and drives the
-setup at 1440x900 and 390x844. It checks the defaults (name, dedicated agent,
-one preset avatar), the 4x4 avatar grid drawn from the per-avatar SVG files,
-that no introduction form, research switch, pause button, usage panel or limit
-numbers remain, the save payload, the per-source opt-in and its one status
-line, the read-only "About you" details with their correction form and payload,
-the Gmail/GitHub suggestion cards and their links, and overflow. Same requirements as the Git panel
-check; set `SCREENSHOT_DIR` to keep screenshots.
-
-```sh
-cd frontend
-npx vite dev --config tests/vite.assistant-setup.config.js --host 127.0.0.1 --port 5741 --strictPort
-node tests/verify-assistant-setup.mjs   # in a second terminal
+#### Browser check for the one-time branch choice
 
 `frontend/tests/one-time-branch.html` mounts the real composer worktree chip
 (`ExecutionModeBar` and `CreateBranchModal`) over the real session and
@@ -469,6 +453,9 @@ while that create is in flight and a failed create. Same requirements as above.
 cd frontend
 npx vite dev --config tests/vite.one-time-branch.config.js --host 127.0.0.1 --port 5401 --strictPort
 node tests/verify-one-time-branch.mjs   # in a second terminal
+```
+
+#### Browser check for the New branch dialog
 
 `frontend/tests/create-branch-modal.html` mounts the real new-session composer
 with a project selected. `frontend/tests/verify-create-branch-modal.mjs` opens
@@ -480,6 +467,7 @@ Same setup as the Git panel harness:
 cd frontend
 npx vite dev --config tests/vite.create-branch-modal.config.js --host 127.0.0.1 --port 5301 --strictPort
 node tests/verify-create-branch-modal.mjs   # in a second terminal
+```
 
 #### Browser check for Settings > Plugins
 

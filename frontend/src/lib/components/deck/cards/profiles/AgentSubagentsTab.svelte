@@ -5,13 +5,13 @@
 	 * takes Task and Swarm off this agent). Each caller's provider assignments
 	 * still narrow the roster at run time.
 	 */
-	import type { AvatarId } from '$lib/api/assistant';
+	import type { AvatarId } from '$lib/api/agent-identity';
 	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import type { AgentInvokeMode, RosterAgent } from './agentForm';
 	import { pinnedProviders } from './agentList';
 

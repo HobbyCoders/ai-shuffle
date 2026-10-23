@@ -46,6 +46,8 @@ HARNESS_REMINDER_OPENERS = (
     # REPORTED_AWAY_NOTE
     "The owner is away. Do not ask questions",
     "The owner is back. Away mode is OFF.",
+    "Another of the owner's chats started this chat.",
+    # The pre-#371-step-5 wording, still in older transcripts.
     "The owner's assistant started this chat.",
     "Your final reply goes back to the owner's assistant automatically",
     # app.core.assistant_confirm note lines

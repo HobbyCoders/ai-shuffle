@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.db import assistant as store
 
-AVATARS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "components" / "assistant" / "avatars"
+AVATARS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "components" / "agents" / "avatars"
 SVG = "{http://www.w3.org/2000/svg}"
 DRAWING_TAGS = {SVG + tag for tag in ("path", "circle", "ellipse", "rect")}
 

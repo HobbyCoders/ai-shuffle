@@ -102,13 +102,13 @@ describe('Runs on visibility', () => {
 describe('Attach a project', () => {
 	const idle: AttachState = {
 		sessionId: 's1', hasProject: false, isRemote: false, busy: false,
-		archived: false, subagent: false, assistantHome: false
+		archived: false, subagent: false, hidden: false
 	};
 
 	it('names background work when only that blocks the attach', () => {
 		const base: AttachState = {
 			sessionId: 's1', hasProject: false, isRemote: false, busy: false,
-			archived: false, subagent: false, assistantHome: false
+			archived: false, subagent: false, hidden: false
 		};
 		expect(attachBlockedReason({ ...base, backgroundWork: true })).toMatch(/running or background work/);
 		// A running turn says so first.
@@ -122,7 +122,7 @@ describe('Attach a project', () => {
 		expect(noProjectPillVisible({ ...idle, hasProject: true })).toBe(false);
 		expect(noProjectPillVisible({ ...idle, archived: true })).toBe(false);
 		expect(noProjectPillVisible({ ...idle, subagent: true })).toBe(false);
-		expect(noProjectPillVisible({ ...idle, assistantHome: true })).toBe(false);
+		expect(noProjectPillVisible({ ...idle, hidden: true })).toBe(false);
 	});
 
 	it('lets an idle local session attach, and says why otherwise', () => {

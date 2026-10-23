@@ -2,8 +2,6 @@ import { updateVoiceContext, type VoiceExecutionContext } from '$lib/api/voice';
 import type { ActiveSessionState } from '$lib/stores/active-session';
 import { selectedContextWindow } from '$lib/stores/session/context-window';
 import { getDefaultModel } from '$lib/constants/models';
-import { get } from 'svelte/store';
-import { assistantState, isAssistantHome } from '$lib/stores/assistant';
 import { isBindingUnhydrated } from '$lib/stores/session/composer-binding';
 
 const writes = new Map<string, { key: string; done: Promise<void> }>();
@@ -12,8 +10,7 @@ export function voiceContextFor(state: ActiveSessionState): VoiceExecutionContex
 	const model = state.modelOverride || getDefaultModel();
 	return {
 		model,
-		// The assistant's home carries no effort at all (see effortToSend).
-		...(isAssistantHome(state.sessionId, get(assistantState)) ? {} : { effort: state.effortLevelOverride || null }),
+		effort: state.effortLevelOverride || null,
 		// An existing session's access and Fast still loading are placeholders
 		// (#418): leave the key out so the call keeps the session's own value.
 		// `null` is not "unknown" here — it explicitly clears to inherit.

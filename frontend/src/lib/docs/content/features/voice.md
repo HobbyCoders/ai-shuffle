@@ -44,14 +44,14 @@ Ask for something in plain words, for example "fix the failing test" or "summari
 - Routine progress is not announced. Ask "how is it going?" whenever you want an update.
 - What you and the assistant say is saved in the chat as text.
 
-## Calling the assistant while it works
+## Calling a chat while it works
 
-You can call your personal assistant at any time, even while it is busy. A call never starts by itself: nothing listens until you press the call button.
+You can call any of your chats at any time, even while its agent is busy. Only a chat another device is running refuses a call. A call never starts by itself: nothing listens until you press the call button.
 
 - **Ask for status**, such as "what are you working on?" or "is it done yet?". It answers from the app's task list.
 - **Finished jobs** are mentioned at the next pause.
-- **Approvals:** when work needs your permission, the assistant asks one plain question. Only a clear yes approves and a clear no declines. An unclear answer is asked once more, then declined.
-- **Secrets stay on screen.** Private access requests are answered on screen, and the assistant tells you when that is needed.
+- **Approvals:** when work needs your permission, the agent asks one plain question, and you can answer it out loud or by typing. Only a clear yes approves and a clear no declines. An unclear answer is asked once more, then declined.
+- **Secrets stay on screen.** Private access requests are answered on screen, and the agent tells you when that is needed.
 
 ## Background noise
 

@@ -349,22 +349,16 @@ describe('Chat controls panel', () => {
 	});
 });
 
-describe('assistant\'s chat', () => {
-	it('gets the same bar and panel with Fast mode, without agent, project, branch, worktree or export', () => {
+describe('every chat (#371 step 5)', () => {
+	it('keeps Away mode and Tool access in the panel even without setup tiles', () => {
 		render(MobileComposerControlsSheet, { props: props({
-			open: true, assistantMode: true, showSetup: false, showCodeControls: false, showEffort: false, fastSupported: true
+			open: true, showSetup: false, showEffort: false, fastSupported: true
 		}) });
-		expect(cell(/^Model: Opus/)).toBeTruthy();
-		expect(cell(/^Reasoning effort: the assistant's model default$/).textContent).toContain('Default');
 		expect(cell(/^Tool access: Ask$/)).toBeTruthy();
-		expect(cell(/^All chat controls/)).toBeTruthy();
 		const dialog = panel();
 		expect(within(dialog).getByRole('switch', { name: 'Fast mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('switch', { name: 'Away mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('radiogroup', { name: 'Tool access' })).toBeTruthy();
-		expect(dialog.querySelector('.context-pill-bar')).toBeNull();
-		expect(within(dialog).queryByRole('button', { name: /^Agent:/ })).toBeNull();
-		expect(within(dialog).queryByRole('button', { name: 'Export chat' })).toBeNull();
-		expect(within(dialog).getByText('Model default')).toBeTruthy();
+		expect(within(dialog).getByRole('heading', { name: 'Model and setup' })).toBeTruthy();
 	});
 });

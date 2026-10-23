@@ -25,7 +25,6 @@
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import ArchivedChatBar from '$lib/components/chat/ArchivedChatBar.svelte';
 	import { archivedChats } from '$lib/stores/archived-chats';
-	import { assistantState } from '$lib/stores/assistant';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
@@ -42,15 +41,13 @@
 	import { composerShell } from '$lib/components/chat/composer-shell';
 
 	interface Props {
-		/** The open chat is the assistant's home (decided once, in MainPanel). */
-		assistantMode?: boolean;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
 	}
 
-	let { assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -86,21 +83,20 @@
 	// hero with the session's own title + a "cleared" hint instead of the
 	// brand-new "Let's build your project" workspace picker.
 	const isClearedSession = $derived(chatSurface === 'cleared');
-	const primaryAssistant = $derived(assistantMode ? $assistantState : null);
 	// A chat that could not be opened, while this surface is still the unbound
 	// New Chat it fell back to. Binding any chat hides it.
 	const unavailable = $derived($activeSession.sessionId ? null : $unavailableChat);
 
-	// The assistant's background work, as plain lines beside its composer.
+	// Chats this one started (StartSession) that are still working, as plain
+	// lines beside the composer, in every chat. Its own background tasks stay
+	// in the transcript's running-tasks list, so they are not repeated here.
 	const backgroundJobs = $derived(
-		assistantMode
-			? buildBackgroundJobs({
-				tasks: $activeSession.activeTasks ?? [],
-				messages: $activeSession.messages,
-				sessions: $sessions,
-				streaming: $streamingSessions
-			})
-			: []
+		buildBackgroundJobs({
+			tasks: [],
+			messages: $activeSession.messages,
+			sessions: $sessions,
+			streaming: $streamingSessions
+		})
 	);
 	function openJob(job: BackgroundJob) {
 		if (job.sessionId) openSession(job.sessionId);
@@ -108,9 +104,9 @@
 	async function stopJob(job: BackgroundJob): Promise<boolean> {
 		try {
 			if (job.stop.kind === 'task') {
-				const home = $activeSession.sessionId;
-				if (!home) return false;
-				const result = await stopSessionTask(home, job.stop.taskId);
+				const owner = $activeSession.sessionId;
+				if (!owner) return false;
+				const result = await stopSessionTask(owner, job.stop.taskId);
 				if (!result.ok) notify.error('Could not stop that job. It may have finished.');
 				return result.ok;
 			}
@@ -137,10 +133,10 @@
 	// mid-call. The transcript column takes over and fills in as the exchange
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
-	// A brand-new session (not a cleared one, the assistant home or the
-	// "could not open" notice) leads with the agent card; the project is an
-	// optional strip under the composer.
-	const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !primaryAssistant && !unavailable);
+	// A brand-new session (not a cleared one or the "could not open" notice)
+	// leads with the agent card; the project is an optional strip under the
+	// composer.
+	const showAgentCard = $derived(showEmptyHero && chatSurface === 'new' && !unavailable);
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
@@ -169,10 +165,10 @@
 	// the agent's respond_approval finds nothing to answer. So the modal's
 	// permission leg is suppressed for exactly the sessions/timespan the spoken
 	// leg covers; it returns the moment the call ends. Questions are unaffected.
-	// A request the assistant asks in words (`assistant_confirm`) never opens
-	// the dialog: it reads as the assistant's question in the transcript and is
-	// answered by typing or saying yes or no (MessageArea renders it). Every
-	// other request keeps the dialog, in the home too.
+	// A request the agent asks in words (`assistant_confirm`, raised on any
+	// owner chat) never opens the dialog: it reads as the agent's question in
+	// the transcript and is answered by typing or saying yes or no
+	// (MessageArea renders it). Every other request keeps the dialog.
 	const dialogPermissions = $derived(($activeSession.pendingPermissions ?? []).filter((request) => !isAssistantConfirm(request)));
 	const showPermissionModal = $derived(!voiceCallActive && dialogPermissions.length > 0);
 	// A shell prompt dock answers permissions, private access and questions
@@ -308,12 +304,7 @@
 			{/if}
 
 			<div class="empty-hero-content">
-				{#if primaryAssistant}
-					<div class="cleared-hero">
-						<h1 class="cleared-title">{primaryAssistant.introduction.preferred_name ? `Hello, ${primaryAssistant.introduction.preferred_name}.` : 'Where shall we begin?'}</h1>
-						<p class="cleared-hint">Just say what you need.</p>
-					</div>
-				{:else if unavailable}
+				{#if unavailable}
 					<ChatUnavailableNotice chat={unavailable} onDismiss={clearUnavailableChat} />
 				{:else if isClearedSession}
 					<!-- Bound existing session with an empty transcript (cleared via the
@@ -372,7 +363,7 @@
 					deviceName={$sessions.find(s => s.id === $activeSession.sessionId)?.device_name ?? $activeSession.ownerDeviceName}
 					onCaughtUp={() => activeSession.reloadSession()}
 				>
-					<MessageArea {assistantMode} />
+					<MessageArea />
 				</MirrorSyncGate>
 			</div>
 		</div>
@@ -389,9 +380,7 @@
 			{#if voiceCallActive && $activeSession.sessionId}
 				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
-			{#if assistantMode}
-				<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
-			{/if}
+			<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
 			{#if archivedSessionId}
 				<ArchivedChatBar sessionId={archivedSessionId} />
 			{:else}
@@ -410,7 +399,7 @@
 						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
 						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
-					<ChatInput compact={!showEmptyHero} {assistantMode} agentCard={showAgentCard} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
+					<ChatInput compact={!showEmptyHero} agentCard={showAgentCard} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}
 			{/if}
 			{#if showAgentCard && !archivedSessionId}

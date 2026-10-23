@@ -9,11 +9,11 @@
 	 */
 	import { tick } from 'svelte';
 	import { Check, RefreshCw } from 'lucide-svelte';
-	import { AVATARS, updateAgentIdentity, assistantError, type AvatarId } from '$lib/api/assistant';
-	import { assistantState, agentIdentities } from '$lib/stores/assistant';
+	import { AVATARS, updateAgentIdentity, apiErrorText, type AvatarId } from '$lib/api/agent-identity';
+	import { agentIdentities } from '$lib/stores/agent-identities';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
-	import { AVATAR_COLORS, AVATAR_COLOR_LABELS, avatarColorToken, type AvatarColor } from '$lib/components/assistant/avatar-colors';
+	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
+	import { AVATAR_COLORS, AVATAR_COLOR_LABELS, avatarColorToken, type AvatarColor } from '$lib/components/agents/avatar-colors';
 
 	interface Props {
 		agentId: string;
@@ -60,11 +60,10 @@
 			agentIdentities.update((rows) =>
 				rows.some((row) => row.id === target) ? rows.map((row) => (row.id === target ? result : row)) : [...rows, result]
 			);
-			assistantState.update((state) => (state?.agent_id === target ? { ...state, avatar_id, agent: result } : state));
 			saved = true;
 		} catch (e) {
 			if (owner === sessionOwnerEpoch()) {
-				error = assistantError(e);
+				error = apiErrorText(e);
 				failed = avatar_id;
 			}
 		} finally {

@@ -15,12 +15,14 @@ as the permission mode. While it is on:
   explicitly cancels it, even if compaction or a restart hid the old reminder.
   Read-only previews and slash commands do not acknowledge that cancellation.
 
-Chats the owner's assistant starts with StartSession get Away-style handling
-without the flag (:func:`assistant_work`): their questions are answered the
-same way, and their approval prompts are raised in the assistant's
-conversation (``provider_agent_approvals``) where the owner answers the real
-card. Anything that cannot be routed there, such as a private-access request,
-is deferred exactly as Away mode defers it. Nothing more is ever granted.
+Chats another of the owner's chats starts with StartSession get Away-style
+handling without the flag (:func:`assistant_work`): their questions are
+answered the same way, and their approval prompts are raised in the starting
+chat (``provider_agent_approvals``) where the owner answers the real card.
+Anything that cannot be routed there, such as a private-access request, is
+deferred exactly as Away mode defers it. Nothing more is ever granted. Since
+#371 step 5 this applies to every owner chat, not only the legacy assistant
+home; the home's wider permission scope (``assistant_permissions``) does not.
 """
 
 from __future__ import annotations
@@ -71,11 +73,10 @@ DEFERRED_MESSAGE = (
 
 ASSISTANT_WORK_NOTE = (
     "<system-reminder>\n"
-    "The owner's assistant started this chat. Do not ask questions: any question "
-    "is answered with its recommended option, so state the assumptions you make. "
-    "Approvals you need are shown to the owner in the assistant's conversation. "
-    "Your final reply goes back to the assistant automatically; do not also send "
-    "it with MessageSession.\n"
+    "Another of the owner's chats started this chat. Do not ask questions: any "
+    "question is answered with its recommended option, so state the assumptions "
+    "you make. Approvals you need are shown to the owner in that chat. Your final "
+    "reply goes back to it automatically; do not also send it with MessageSession.\n"
     "</system-reminder>"
 )
 
@@ -130,16 +131,22 @@ async def is_away_async(session_id: Optional[str]) -> bool:
 
 
 def assistant_work(session_id: Optional[str]) -> bool:
-    """Whether ``session_id`` is a local chat the owner's assistant started.
+    """Whether ``session_id`` is a local chat another owner chat started and
+    whose approval prompts are routed back to that chat.
 
+    The same rule ``provider_agent_approvals`` uses to route the prompts
+    (:func:`~app.core.session_orchestration.approval_starter`), so a chat whose
+    questions are answered for it always has somewhere its approvals are seen.
+    Remote starts keep their own flag (``assistant_work`` in the start body):
+    there approvals cannot reach the starter, so Away would defer them.
     Never raises (False on error): an unknown chat keeps ordinary behaviour.
     """
     if not session_id:
         return False
     try:
-        from app.core.session_orchestration import started_by_home
+        from app.core.session_orchestration import approval_starter
 
-        return started_by_home(session_id) is not None
+        return approval_starter(session_id) is not None
     except Exception:  # noqa: BLE001 — absent marker means an ordinary chat
         logger.debug("assistant_work check failed for %s", session_id, exc_info=True)
         return False

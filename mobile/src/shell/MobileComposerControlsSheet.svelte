@@ -58,7 +58,7 @@
 		fastSupported = false, fastEnabled = false, fastPending = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
-		assistantMode = false, onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
+		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
 	}: Props = $props();
 
 	type Picker = 'effort' | 'access';
@@ -77,34 +77,30 @@
 		return [...groups.values()];
 	});
 
-	/** The assistant's home runs its model's own effort; the backend ignores a pick. */
-	const effortLocked = $derived(assistantMode || modelLocked || !effortKnown || effortOptions.length === 0);
+	const effortLocked = $derived(modelLocked || !effortKnown || effortOptions.length === 0);
 	const effortValues = $derived(effortOptions.map((o) => o.value));
 	/** What the meter draws: the pinned level, else the model's default. */
 	const effortShown = $derived(effortValue ?? effortDefaultValue ?? null);
 	const effortIndex = $derived(effortShown ? effortValues.indexOf(effortShown) : -1);
 	const effortLabel = $derived(
-		assistantMode ? 'Default'
-			: !effortKnown ? (effortValue ?? 'Unknown')
+		!effortKnown ? (effortValue ?? 'Unknown')
 			: !effortOptions.length ? 'Fixed'
 			: effortValue ? (effortOptions.find((o) => o.value === effortValue)?.label ?? 'Auto')
 			: 'Auto'
 	);
 	const effortA11y = $derived(
-		assistantMode ? "Reasoning effort: the assistant's model default"
-			: !effortKnown ? `Reasoning effort: ${effortValue ?? 'unknown'}`
+		!effortKnown ? `Reasoning effort: ${effortValue ?? 'unknown'}`
 			: !effortOptions.length ? 'Reasoning effort: set by the model'
 			: `Reasoning effort: ${effortLabel}`
 	);
-	// Tool access exists in code chats and in the assistant's home (a code
-	// session by construction); chat and voice run a fixed tool surface.
-	const accessShown = $derived(showCodeControls || assistantMode);
+	// Tool access exists in code chats; chat and voice run a fixed tool surface.
+	const accessShown = $derived(showCodeControls);
 	const accessValues = $derived(permissionOptions.map((o) => o.value));
 	// While the chat's own access is still loading (#418) no mode is selected:
 	// showing Ask would be a guess, and stepping from a guess picks the wrong one.
 	const accessValue = $derived(permissionPending ? '' : (permissionValue ?? 'default'));
 	const accessIcons: Record<string, typeof Hand> = { default: Hand, auto: Sparkles, acceptEdits: FilePen, bypassPermissions: ShieldOff };
-	const showSetupTiles = $derived(showSetup && !assistantMode);
+	const showSetupTiles = $derived(showSetup);
 	const awayShown = $derived(accessShown && !!onToggleAway);
 	/** Away as the quick bar shows it: the desktop composer's "· Away" badge. */
 	const awayOn = $derived(awayShown && awayEnabled && awayAvailable);
@@ -112,7 +108,7 @@
 
 	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
 	const chatTitle = $derived($activeSession.title?.trim() || 'New chat');
-	const canExport = $derived(!assistantMode && !!$activeSession.sessionId && $activeSession.messages.length > 0);
+	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
 
 	// ── Quick bar: pickers and sideways steps ─────────────────────────────
 	let picker = $state<Picker | null>(null);
@@ -137,7 +133,7 @@
 
 	function togglePicker(kind: Picker) {
 		if (kind === 'effort' && effortLocked) {
-			notify(assistantMode ? "The assistant uses its model's effort" : effortExplanation || 'Set by the model', { severity: 'info' });
+			notify(effortExplanation || 'Set by the model', { severity: 'info' });
 			return;
 		}
 		picker = picker === kind ? null : kind;
@@ -698,8 +694,8 @@
 							</button>
 						{/if}
 
-						<section class="sec" aria-label={assistantMode ? 'Assistant' : 'Model and setup'}>
-							<h3 class="sec-h">{assistantMode ? 'Assistant' : 'Model and setup'}</h3>
+						<section class="sec" aria-label="Model and setup">
+							<h3 class="sec-h">Model and setup</h3>
 							<button type="button" class="tile model-tile" disabled={modelLocked} onclick={() => goTo('model')} aria-label={`Model: ${modelLabel}${modelLocked ? ', locked' : ''}`}>
 								<span><span class="tile-label">Model</span><span class="nm">{modelLabel}</span></span>
 								{#if modelLocked}<Lock size={18} class="mcp-chev" aria-hidden="true" />{:else}<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />{/if}
@@ -747,7 +743,7 @@
 							{/if}
 
 							<div class="tile effort-tile">
-								<div class="tile-row"><span class="tile-label">Reasoning effort</span><span class="tile-value">{effortLocked ? (assistantMode ? 'Model default' : effortKnown ? 'Set by the model' : effortLabel) : panelEffortLabel}</span></div>
+								<div class="tile-row"><span class="tile-label">Reasoning effort</span><span class="tile-value">{effortLocked ? (effortKnown ? 'Set by the model' : effortLabel) : panelEffortLabel}</span></div>
 								{#if !effortLocked}
 									<!-- The bars are the tab stops; the group takes the scrub. -->
 									<!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -810,18 +806,15 @@
 							<Globe size={20} aria-hidden="true" /><span class="act-label">Browser</span>
 						</button>
 					{/if}
-					{#if terminal && !assistantMode}
+					{#if terminal}
 						<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
 							onclick={toggleTerminal} aria-label="Terminal" title={terminal.disabledReason ?? undefined}>
 							<SquareTerminal size={20} aria-hidden="true" /><span class="act-label">Terminal</span>
 						</button>
 					{/if}
-					{#if !assistantMode}
-						<!-- The assistant's home keeps no transcript download. -->
-						<button type="button" class="act" disabled={!canExport} onclick={() => goTo('export')} aria-label="Export chat">
-							<Download size={20} aria-hidden="true" /><span class="act-label">Export</span>
-						</button>
-					{/if}
+					<button type="button" class="act" disabled={!canExport} onclick={() => goTo('export')} aria-label="Export chat">
+						<Download size={20} aria-hidden="true" /><span class="act-label">Export</span>
+					</button>
 				</div>
 			</footer>
 		{/if}

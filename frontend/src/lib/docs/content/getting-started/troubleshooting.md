@@ -63,7 +63,7 @@ The message in the app says which of these it is.
 
 - **No AI provider is connected.** Connect one in **Settings → Providers**.
 - **A subscription sign-in stopped working.** Sign in again in **Settings → Providers**.
-- **Your plan's usage limit was reached.** Agents pause until it resets. To continue by itself after the reset, turn on **Settings → General → Usage limits → Resume when the limit resets**. See [Modes and costs](/docs/getting-started/modes-and-costs).
+- **Your plan's usage limit was reached.** Agents pause until it resets. To continue by itself after the reset, turn on **Settings → Usage → Usage limits → Resume when the limit resets**. See [Modes and costs](/docs/getting-started/modes-and-costs).
 - **The API key is refused.** The key was deleted, or the account is out of credit or at its spend limit. Check your provider's console, then paste a new key.
 
 

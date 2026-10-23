@@ -14,7 +14,6 @@ import { createSubscribers } from './store-utils';
 // ============================================
 
 export type ViewType =
-	| 'assistant'
 	| 'session'
 	| 'board'
 	| 'build'
@@ -77,6 +76,9 @@ function loadPersistedState(): Partial<LayoutState> | null {
 		const parsed = JSON.parse(raw);
 		// Pre-rename ViewType 'chat' meant this conversation panel, not SessionMode.
 		if (parsed?.activeView?.type === 'chat') parsed.activeView.type = 'session';
+		// The Assistant page was removed (#371 step 5): a layout saved on it
+		// reopens as a new session.
+		if (parsed?.activeView?.type === 'assistant') parsed.activeView = { type: 'session', sessionId: null };
 		return parsed;
 	} catch {
 		return null;

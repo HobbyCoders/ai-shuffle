@@ -1,17 +1,17 @@
 <script lang="ts">
 	/**
-	 * The Profile tab: Identity (avatar, name, description, folder) and the
-	 * personal-assistant link. The danger zone comes after it (AgentDetail).
+	 * The Profile tab: Identity (avatar, name, description, folder). The
+	 * danger zone comes after it (AgentDetail).
 	 */
 	import { tick } from 'svelte';
-	import { ArrowUpRight, Check, FolderPlus, Lock, Trash2, X } from 'lucide-svelte';
+	import { Check, FolderPlus, Lock, Trash2, X } from 'lucide-svelte';
 	import type { Profile } from '$lib/api/client';
-	import type { AvatarId } from '$lib/api/assistant';
+	import type { AvatarId } from '$lib/api/agent-identity';
 	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import AvatarPicker from './AvatarPicker.svelte';
 	import type { AgentForm, GroupState } from './agentForm';
 
@@ -22,7 +22,6 @@
 		avatar: AvatarId;
 		isAdmin: boolean;
 		colorSupported: boolean;
-		isAssistant: boolean;
 		groups: GroupState;
 		identityError?: string;
 		onRetryIdentity?: () => void;
@@ -31,7 +30,6 @@
 		onRemoveFromGroup: (profileId: string) => void;
 		onCreateGroup: (category: string, name: string) => void;
 		onDeleteGroup: (category: string, name: string) => void;
-		onOpenAssistant: (profileId: string) => void;
 	}
 
 	let {
@@ -40,7 +38,6 @@
 		avatar,
 		isAdmin,
 		colorSupported,
-		isAssistant,
 		groups,
 		identityError = '',
 		onRetryIdentity,
@@ -48,8 +45,7 @@
 		onAssignToGroup,
 		onRemoveFromGroup,
 		onCreateGroup,
-		onDeleteGroup,
-		onOpenAssistant
+		onDeleteGroup
 	}: Props = $props();
 
 	const builtin = $derived(!!editingProfile?.is_builtin);
@@ -190,24 +186,6 @@
 	{/if}
 </RowGroup>
 
-{#if editingProfile && isAdmin}
-	{@const profileId = editingProfile.id}
-	<RowGroup title="Assistant">
-		<SettingRow
-			label={isAssistant ? 'Your personal assistant' : 'Personal assistant'}
-			hint={isAssistant ? 'Home chat and research.' : 'Give it a lasting home chat.'}
-		>
-			<button
-				type="button"
-				class="st-btn sm"
-				aria-label={isAssistant ? 'Assistant settings' : 'Set up as assistant'}
-				onclick={() => onOpenAssistant(profileId)}
-			>
-				{isAssistant ? 'Assistant settings' : 'Set up'}<ArrowUpRight />
-			</button>
-		</SettingRow>
-	</RowGroup>
-{/if}
 
 <style>
 	.st-area {

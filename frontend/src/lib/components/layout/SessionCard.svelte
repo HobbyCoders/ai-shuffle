@@ -45,7 +45,6 @@
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
-	import { assistantState } from '$lib/stores/assistant';
 	import { git } from '$lib/stores/git.svelte';
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -128,7 +127,6 @@
 		onSettled
 	}: Props = $props();
 
-	const persistentAssistant = $derived($assistantState?.home_session_id === session.id);
 	const live = $derived(isLiveStatus(status));
 	// Only a turn holding the live slot ticks; a parked turn's interval has
 	// ended, so its timer takes the plain style, not the live accent.
@@ -331,7 +329,6 @@
 	}
 
 	async function commitAction(action: CardAction) {
-		if (persistentAssistant) return;
 		const id = session.id;
 		const wasActive = !!session.is_active;
 		try {
@@ -417,7 +414,7 @@
 		// Any fresh press clears the click guard the last gesture left behind.
 		suppressNextClick = false;
 		if (event.isPrimary === false || event.button !== 0 || isControlTarget(event.target)) return;
-		if (slideX !== null || persistentAssistant) return;
+		if (slideX !== null) return;
 		pointerId = event.pointerId;
 		pointerType = event.pointerType;
 		startX = lastX = event.clientX;
@@ -735,9 +732,7 @@
 		</span>
 	</div>
 
-	{#if persistentAssistant}
-		<span class="hover-acts persistent" title="Persistent assistant conversation">Persistent</span>
-	{:else if !selecting}
+	{#if !selecting}
 		<!-- Hover actions on a pointer that hovers. On touch they stay in the
 		     DOM for assistive tech, visually hidden: the swipe is the gesture. -->
 		<span class="hover-acts" aria-label="Session actions">
@@ -1155,11 +1150,6 @@
 			transparent,
 			color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)) 18px
 		);
-	}
-	.hover-acts.persistent {
-		padding: 0 6px 0 18px;
-		font-size: 11px;
-		color: var(--sidebar-muted);
 	}
 	.row-action {
 		display: grid;

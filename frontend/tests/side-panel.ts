@@ -3,11 +3,9 @@ import '@fontsource-variable/inter';
 import '../src/app.css';
 
 // The real Sidebar against a controlled local transport: no request leaves the
-// page. `?ui=mobile` renders the phone shell's panel (the drawer content) and
-// `?assistant=ready` gives the owner a set-up assistant.
+// page. `?ui=mobile` renders the phone shell's panel (the drawer content).
 const params = new URLSearchParams(location.search);
 const phone = params.get('ui') === 'mobile';
-const assistantReady = params.get('assistant') === 'ready';
 // `?older=1`: the server also holds older history behind the first page:
 // settled chats, a long run of archived ones (Settings owns those), a page and
 // a half of chats from a deleted project (the sidebar drops them), and a last
@@ -26,7 +24,6 @@ const day = 24 * hour;
 const now = Date.now();
 const iso = (ago: number) => new Date(now - ago).toISOString();
 let rows: Record<string, unknown>[] = [
-	['home', 'Assistant home', null, true, 1 * hour, {}],
 	['a1', 'Redesign the mobile side panel', 'shuffle', true, 0.1 * hour, { worktree_branch: 'feat/side-panel', pr_state: 'open', pr_number: 1690 }],
 	['a2', 'Fix the update check on desktop', 'shuffle', true, 2 * hour, {}],
 	['a3', 'Draft the release notes for 0.8.23', 'notes', true, 5 * hour, {}],
@@ -42,7 +39,7 @@ let rows: Record<string, unknown>[] = [
 	status: 'idle', is_active: active, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0,
 	turn_count: 3, tags: [], work_ms: Math.round(((ago as number) % 7 + 1) * 97_000), created_at: iso((ago as number) + hour), updated_at: iso(ago as number),
 	is_remote: false, mode: 'code', ...(extra as object),
-})).filter((row) => assistantReady || row.id !== 'home');
+}));
 const olderRows: Record<string, unknown>[] = olderHistory
 	? [
 		...Array.from({ length: 90 }, (_, i) => ({ id: `older${i}`, title: `Older settled chat ${i + 1}`, status: 'idle', project: 'shuffle' })),
@@ -78,12 +75,6 @@ const projects = [
 	{ id: 'shuffle', name: 'ai-shuffle' },
 	{ id: 'notes', name: 'notes' },
 ];
-const assistant = {
-	status: assistantReady ? 'ready' : 'not_configured',
-	home_session_id: assistantReady ? 'home' : null,
-	assistant_name: assistantReady ? 'Juniper' : null,
-	avatar_id: 'robot',
-};
 
 window.fetch = async (input, init) => {
 	const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
@@ -101,8 +92,7 @@ window.fetch = async (input, init) => {
 	} else if (path.startsWith('/sessions/cursor')) body = cursorPage(url);
 	else if (path === '/sessions') body = rows;
 	else if (path === '/projects') body = projects;
-	else if (path === '/assistant') body = assistant;
-	else if (path.startsWith('/assistant')) body = [];
+	else if (path.startsWith('/assistant/agents')) body = [];
 	else if (path === '/settings/application-updates/workers') body = { allow_updates: true, update_all_workers: false, workers: [] };
 	else if (path === '/settings/application-updates' && init?.method === 'POST') {
 		window.fixture.updateRequests.push(JSON.parse(String(init.body)));
@@ -121,14 +111,12 @@ window.EventSource = LocalSocket as unknown as typeof EventSource;
 const { platform } = await import('../src/lib/stores/platform.svelte');
 if (phone) platform.set('mobile');
 await import('../src/lib/stores/active-session');
-const [{ appData }, { acceptAssistant }, { default: Fixture }] = await Promise.all([
+const [{ appData }, { default: Fixture }] = await Promise.all([
 	import('../src/lib/stores/app-data.svelte'),
-	import('../src/lib/stores/assistant'),
 	import('./SidePanelFixture.svelte'),
 ]);
 Object.assign(appData.current, { sessions: rows.map((r) => ({ ...r })), projects, clusterProjects: [] });
 // The older-history mode needs the store's real cursor state, so it loads the
 // first page the way the app does on boot.
 if (olderHistory) await appData.loadSessions(null);
-if (assistantReady) acceptAssistant(assistant as never);
 mount(Fixture, { target: document.getElementById('app')!, props: { phone } });

@@ -35,12 +35,9 @@ export interface ListQuery {
 	folders: string[];
 	/** The open agent stays listed even when the search no longer matches it. */
 	selectedId: string | null;
-	/** The personal assistant's agent id. */
-	assistantId: string | null;
 }
 
 export interface AgentSections {
-	assistant: Profile[];
 	yours: Profile[];
 	builtin: Profile[];
 	/** Agents that match the query and filters (the kept-open one aside). */
@@ -60,7 +57,7 @@ export function matchesSearch(p: Profile, q: string, folder: string): boolean {
 
 export function sectionAgents(profiles: Profile[], opts: ListQuery): AgentSections {
 	const q = opts.query.trim().toLowerCase();
-	const out: AgentSections = { assistant: [], yours: [], builtin: [], matches: 0 };
+	const out: AgentSections = { yours: [], builtin: [], matches: 0 };
 	for (const p of profiles) {
 		const folder = folderOf(p.id, opts.assignments, opts.folders);
 		if (opts.filter === 'yours' && p.is_builtin) continue;
@@ -70,8 +67,7 @@ export function sectionAgents(profiles: Profile[], opts: ListQuery): AgentSectio
 		const hit = matchesSearch(p, q, folder);
 		if (!hit && p.id !== opts.selectedId) continue;
 		if (hit) out.matches += 1;
-		if (p.id === opts.assistantId) out.assistant.push(p);
-		else if (p.is_builtin) out.builtin.push(p);
+		if (p.is_builtin) out.builtin.push(p);
 		else out.yours.push(p);
 	}
 	return out;

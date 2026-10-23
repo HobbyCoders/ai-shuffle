@@ -15,10 +15,9 @@ describe('streaming composer actions', () => {
 		const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 		expect(dock).not.toContain('isRemoteOnlyCompose');
 		expect(dock).toContain('projectLane, $activeSession.sessionId');
-		// The assistant's home is projectless: both components take their
-		// project rules from the same lane, not from the stored session mode.
-		expect(source).toContain('projectRulesLane(composerMode, assistantMode)');
-		expect(dock).toContain('projectRulesLane($activeSession.mode, assistantMode)');
+		// Both components take their project rules from the same lane.
+		expect(source).toContain('projectRulesLane(composerMode)');
+		expect(dock).toContain('projectRulesLane($activeSession.mode)');
 		const sender = readFileSync(resolve(process.cwd(), 'src/lib/stores/session/message-sender.ts'), 'utf8');
 		expect(sender).toContain('upload_paths: (!remoteOnly || !!_state.sessionId)');
 	});

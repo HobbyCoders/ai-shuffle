@@ -23,7 +23,7 @@
 
 <RowGroup title="Usage limits">
 	<SettingRow
-		id="general.limitResume"
+		id="usage.limitResume"
 		value={s.resume_on_reset}
 		onReset={() => model.save({ resume_on_reset: LIMIT_RESUME_DEFAULTS.resume_on_reset })}
 	>
@@ -35,7 +35,7 @@
 		/>
 	</SettingRow>
 	<SettingRow
-		id="general.limitCompact"
+		id="usage.limitCompact"
 		dim={!s.resume_on_reset}
 		value={s.compact_before_resume}
 		onReset={() => model.save({ compact_before_resume: LIMIT_RESUME_DEFAULTS.compact_before_resume })}

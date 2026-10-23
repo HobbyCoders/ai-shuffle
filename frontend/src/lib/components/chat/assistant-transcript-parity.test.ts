@@ -2,7 +2,7 @@
  * Assistant-mode parity (transcript-organization spec §10.5). The assistant's
  * home renders its transcript through MessageArea's one item loop: the same
  * presentation model, built with the same `groupToolCalls` pref and lifecycle,
- * and the same WorkLogGroup folds. assistant-mode.test.ts pins that wiring in
+ * and the same WorkLogGroup folds. every-chat-behaviours.test.ts pins that wiring in
  * MessageArea's source (mounting it pulls in the whole session graph); this
  * renders that loop (test-fixtures/TranscriptItems.svelte mirrors it) over the
  * spec's long turn and checks what an assistant-home reader sees, live and

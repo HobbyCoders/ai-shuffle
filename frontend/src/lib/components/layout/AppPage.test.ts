@@ -102,15 +102,21 @@ it.runIf(process.env.PERF_BOOTSTRAP_LAB === '1')('bootstrap wall-clock lab', asy
  }))));
 });
 
-describe('AppPage initial Assistant landing', () => {
- it.each([null, emptyView])('lands an owner with no selected session on Assistant (%j)', async view => {
-  views.set(view); await boot();
-  expect(mocks.openFeaturePage).toHaveBeenCalledWith('assistant');
-  expect(mocks.newChat).not.toHaveBeenCalled();
+describe('AppPage initial landing', () => {
+ // #371 step 5: the Assistant landing is gone; an empty start is the new-session composer.
+ it('lands an owner with no layout snapshot on the new-session composer', async () => {
+  views.set(null); await boot();
+  expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openChat).toHaveBeenCalledWith(null);
+  expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)).toEqual(emptyView);
+ });
+ it('keeps an owner already on the empty composer there', async () => {
+  await boot();
+  expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)).toEqual(emptyView);
  });
  it('treats serialized empty Tiptap content as empty, not a meaningful draft', async () => {
+  views.set(null);
   active.set({ sessionId: null, draft: JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] }), project: null });
-  await boot(); expect(mocks.openFeaturePage).toHaveBeenCalledWith('assistant');
+  await boot(); expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
  });
  it.each(['Finish my question', JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'fileChip', attrs: { name: 'notes.txt' } }] }] })])('preserves meaningful composer content', async draft => {
   active.set({ sessionId: null, draft, project: null }); await boot();
@@ -174,8 +180,9 @@ describe('AppPage initial Assistant landing', () => {
   views.set({ type: 'profile' }); await boot();
   expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)?.type).toBe('profile');
  });
- it('does not send non-owners to owner-only Assistant configuration', async () => {
+ it('lands non-owners on the same composer', async () => {
   admin.set(false); await boot(); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
+  expect(get(activeView)).toEqual(emptyView);
  });
  it('still permits New conversation after the initial landing', async () => {
   await boot(); mocks.openFeaturePage.mockClear();
@@ -196,7 +203,7 @@ describe('AppPage initial Assistant landing', () => {
   window.history.replaceState({}, '', '/?session=notification-task'); await boot();
   expect(mocks.init).toHaveBeenCalledWith({ deepLinkSessionId: 'notification-task' });
   expect(mocks.openSession).toHaveBeenCalledWith('notification-task');
-  // Assistant is never mounted first (its requests would race the deep link).
+  // No feature page is mounted first (its requests would race the deep link).
   expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(get(activeView)).toEqual({ type: 'session', sessionId: 'notification-task' });
   expect(window.location.search).toBe('');

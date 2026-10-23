@@ -38,16 +38,14 @@ const base: ListQuery = {
 	folder: '',
 	assignments: { 'release-captain': 'Shipping', 'general-purpose': 'Shipping', scribe: 'Gone' },
 	folders: ['Shipping', 'Research'],
-	selectedId: null,
-	assistantId: 'juniper'
+	selectedId: null
 };
 const ids = (list: Profile[]) => list.map((p) => p.id);
 
 describe('sectionAgents', () => {
-	it('splits the assistant, your agents and the built-ins', () => {
+	it('splits your agents and the built-ins', () => {
 		const s = sectionAgents(profiles, base);
-		expect(ids(s.assistant)).toEqual(['juniper']);
-		expect(ids(s.yours)).toEqual(['release-captain', 'scribe']);
+		expect(ids(s.yours)).toEqual(['juniper', 'release-captain', 'scribe']);
 		expect(ids(s.builtin)).toEqual(['general-purpose', 'explore']);
 		expect(s.matches).toBe(5);
 	});
@@ -69,9 +67,9 @@ describe('sectionAgents', () => {
 	it('filters to yours or built-ins', () => {
 		const yours = sectionAgents(profiles, { ...base, filter: 'yours' });
 		expect(yours.builtin).toEqual([]);
-		expect(ids(yours.assistant)).toEqual(['juniper']);
+		expect(ids(yours.yours)).toEqual(['juniper', 'release-captain', 'scribe']);
 		const builtin = sectionAgents(profiles, { ...base, filter: 'builtin' });
-		expect([...builtin.assistant, ...builtin.yours]).toEqual([]);
+		expect(builtin.yours).toEqual([]);
 		expect(builtin.builtin).toHaveLength(2);
 	});
 
@@ -79,7 +77,7 @@ describe('sectionAgents', () => {
 		const shipping = sectionAgents(profiles, { ...base, folder: 'Shipping' });
 		expect([...ids(shipping.yours), ...ids(shipping.builtin)]).toEqual(['release-captain', 'general-purpose']);
 		const none = sectionAgents(profiles, { ...base, folder: FOLDER_NONE });
-		expect(ids(none.yours)).toEqual(['scribe']);
+		expect(ids(none.yours)).toEqual(['juniper', 'scribe']);
 		expect(ids(none.builtin)).toEqual(['explore']);
 	});
 });

@@ -1,10 +1,6 @@
 import type { Session } from '$lib/api/sessions';
 import type { Task } from '$lib/stores/types';
 import { notify } from '$lib/stores/notifications';
-import { hasStoppableWork } from './stoppable-work';
-
-export const CALL_WORKING_REASON = 'Calls can start once this session finishes working';
-export const CALL_PARKED_REASON = 'Calls can start once this session’s background tasks finish';
 
 export interface CallGateState {
 	sessionId: string | null;
@@ -18,37 +14,15 @@ type CallGateRow = Pick<Session, 'id' | 'is_remote' | 'controllable' | 'remote_r
 
 export const CALL_ELSEWHERE_REASON = 'Calls run on the device that runs this conversation';
 
-export interface CallGateOptions {
-	/** The persistent assistant's home conversation. It can be called at any
-	 * time: while it works, while it waits on background jobs and while a
-	 * decision is pending, because the call reads its status and asks its
-	 * approvals aloud. */
-	alwaysAvailable?: boolean;
-}
-
-/** Why a call cannot start on this session yet, or null when it can.
+/** Why a call cannot start on this session, or null when it can.
  *
- * An ordinary conversation takes a call only when it is ready or finished
- * (#1611). Busy is the Stop button's signal (streaming, running tasks,
- * has_running_tasks, remote runtime) plus an unanswered permission or
- * question; parked is the sidebar's Parked marker.
- *
- * The assistant's home is always callable, except when another device runs
- * it: a call attaches only to a conversation this install runs. */
-export function callBusyReason(
-	state: CallGateState,
-	row?: CallGateRow | null,
-	options: CallGateOptions = {}
-): string | null {
-	if (options.alwaysAvailable) {
-		return row?.is_remote && row.id === state.sessionId ? CALL_ELSEWHERE_REASON : null;
-	}
-	const working = hasStoppableWork(state, row ?? undefined)
-		|| state.pendingPermissions.length > 0
-		|| state.pendingQuestions.length > 0;
-	if (working) return CALL_WORKING_REASON;
-	if (row?.parked_task_kind) return CALL_PARKED_REASON;
-	return null;
+ * Every conversation can be called at any time: while it works, while it
+ * waits on background jobs and while a decision is pending. The call reads
+ * the conversation's status (`check_work`) and asks its approvals aloud.
+ * A call attaches only to a conversation this install runs, so one another
+ * device runs is refused. `state` is kept so callers pass one shape. */
+export function callBusyReason(state: CallGateState, row?: CallGateRow | null): string | null {
+	return row?.is_remote && row.id === state.sessionId ? CALL_ELSEWHERE_REASON : null;
 }
 
 export const CALL_CREATING_REASON = 'Calls can start once this session is created';

@@ -5,8 +5,8 @@
 	 *
 	 * Left: an icon rail (SidebarRail) holding New, the destinations the user
 	 * put there, More and Settings. Right: one column with the mode toggle and
-	 * header buttons, search and filter, the Assistant's single persistent
-	 * conversation, and the ledger itself: Needs you, Active and Settled.
+	 * header buttons, search and filter, and the ledger itself: Needs you,
+	 * Active and Settled.
 	 *
 	 * Rows follow the inbox model. Swipe left settles an active session (or
 	 * brings a settled one back); swipe right archives. A long press starts a
@@ -17,9 +17,7 @@
 	 * phone they ride with the drawer and on desktop they never cover the chat.
 	 */
 	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
-	import { assistantState, refreshAssistant } from '$lib/stores/assistant';
-	import { openAssistant as openAssistantHome } from '$lib/api/assistant';
+	import { refreshAgentIdentities } from '$lib/stores/agent-identities';
 	import {
 		Search,
 		ListFilter,
@@ -162,11 +160,11 @@
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
 	const liveKeys = $derived(liveProjectKeys($projects, $clusterProjects));
 	// Every session, with or without a project, is listed together. This is
-	// the one place rows are excluded (the assistant home, hidden rows): the
+	// the one place rows are excluded (hidden rows): the
 	// filter options, `rows`, the three groups and the PR-branch fetch set all
 	// derive from `sidebarSessions`.
 	const sidebarSessions = $derived(
-		$sessions.filter((s) => s.id !== $assistantState?.home_session_id && isVisibleSidebarSession(s, liveKeys))
+		$sessions.filter((s) => isVisibleSidebarSession(s, liveKeys))
 	);
 
 	// User-wide run and task updates own sidebar state, not transcript replay.
@@ -419,7 +417,8 @@
 	const emptyLabel = 'No sessions yet';
 	onMount(() => {
 		if (!isAdmin) return;
-		void refreshAssistant().catch(() => {});
+		// Agent names and avatars for the new-session agent card.
+		void refreshAgentIdentities().catch(() => {});
 		// The worker's answer is the only terminal gate (see terminal/gating.ts).
 		void terminals.ensureCapability();
 	});
@@ -491,50 +490,6 @@
 	function checkForUpdates() {
 		sheet = null;
 		void updater?.checkForUpdates();
-	}
-
-	// --- assistant -----------------------------------------------------------
-	// Once the assistant exists the row always opens its conversation. Research
-	// sources and the home's existence do not gate it (the home is made on open).
-	const assistantReady = $derived(!!$assistantState?.configured);
-	const assistantName = $derived($assistantState?.assistant_name?.trim() || 'Assistant');
-	const assistantOpen = $derived(
-		currentType === 'assistant' ||
-			(!!$assistantState?.home_session_id && currentType === 'session' && activeId === $assistantState.home_session_id)
-	);
-	const assistantWorking = $derived(
-		!!$assistantState?.home_session_id && isStreaming($assistantState.home_session_id)
-	);
-	const assistantLine = $derived(
-		!assistantReady ? 'Set up your assistant' : assistantWorking ? 'Working…' : 'Your ongoing conversation'
-	);
-
-	/** Exists: open the one conversation, creating it first if needed. Not yet: open setup. */
-	let assistantOpening = false;
-	async function openAssistant() {
-		if (!assistantReady) {
-			pickFeature('assistant');
-			return;
-		}
-		sheet = null;
-		const home = $assistantState?.home_session_id;
-		if (home) {
-			onOpenSession(home);
-			return;
-		}
-		if (assistantOpening) return;
-		assistantOpening = true;
-		try {
-			const opened = await openAssistantHome();
-			onOpenSession(opened.session_id);
-			// Pick up the new home id so the row marks itself current.
-			void refreshAssistant().catch(() => {});
-		} catch {
-			// The setup page explains what is missing (worker offline, agent gone).
-			pickFeature('assistant');
-		} finally {
-			assistantOpening = false;
-		}
 	}
 
 	// --- filters (sheet) -----------------------------------------------------
@@ -817,29 +772,6 @@
 				</div>
 			{/if}
 
-			{#if isAdmin}
-				<!-- One persistent conversation. It never joins Active, Settled or
-				     Archived; set up, it opens the chat, otherwise its settings. -->
-				<div
-					class="asst"
-					class:open={assistantOpen}
-					role="button"
-					tabindex="0"
-					aria-label="Open your assistant"
-					aria-current={assistantOpen ? 'page' : undefined}
-					onclick={() => void openAssistant()}
-					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openAssistant(); } }}
-				>
-					<span class="av">
-						<AgentAvatar avatar={$assistantState?.avatar_id ?? 'robot'} size={34} />
-						{#if assistantReady}<span class="live" class:working={assistantWorking} aria-hidden="true"></span>{/if}
-					</span>
-					<span class="txt">
-						<b>{assistantName}</b>
-						<span class="prev" class:setup={!assistantReady}>{assistantLine}</span>
-					</span>
-				</div>
-			{/if}
 		</div>
 
 		<div class="list" class:edge-guard={phone}>
@@ -996,8 +928,8 @@
 		overflow: clip;
 	}
 
-	/* Top block: mode toggle and header buttons, search, filter chips and the
-	   Assistant. No z-index on the header itself (#1678): it would trap the
+	/* Top block: mode toggle and header buttons, search and filter chips.
+	   No z-index on the header itself (#1678): it would trap the
 	   notification panel below the rows. */
 	.p-top { flex: none; position: relative; padding: 0 8px; background: var(--sidebar); }
 	.phone .p-top { padding-top: env(safe-area-inset-top, 0px); }
@@ -1110,59 +1042,6 @@
 	}
 	.chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.chip :global(svg) { flex: none; }
-
-	/* Assistant: one pinned conversation. */
-	.asst {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		margin-bottom: 6px;
-		padding: 8px 8px 8px 8px;
-		border: 1px solid var(--sidebar-border);
-		border-radius: 13px;
-		background: color-mix(in oklch, var(--primary) 5%, var(--sidebar));
-		cursor: pointer;
-		transition: background-color 0.15s ease, border-color 0.15s ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-	.asst:hover { background: color-mix(in oklch, var(--primary) 8%, var(--sidebar)); }
-	.asst.open {
-		border-color: color-mix(in oklch, var(--primary) 45%, transparent);
-		background: color-mix(in oklch, var(--primary) 10%, var(--sidebar));
-	}
-	.asst:active { transform: translateY(1px); }
-	.av { position: relative; flex: none; display: grid; }
-	.live {
-		position: absolute;
-		right: -2px;
-		bottom: -2px;
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		background: var(--primary);
-		box-shadow: 0 0 0 2px var(--sidebar);
-	}
-	.live.working { animation: ping 1.6s ease-in-out infinite; }
-	.txt { flex: 1; min-width: 0; }
-	.txt b {
-		display: block;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 13.5px;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-	.prev {
-		display: block;
-		margin-top: 2px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 12px;
-		color: var(--sidebar-muted);
-	}
-	.prev.setup { color: var(--primary); }
 
 	/* The ledger */
 	.list {
@@ -1386,7 +1265,6 @@
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	@keyframes ping { 50% { opacity: 0.5; transform: scale(0.8); } }
 	.shelf :global(.shelf-spin) { animation: shelf-spin 0.9s linear infinite; }
 	@keyframes shelf-spin { to { transform: rotate(360deg); } }
 
@@ -1399,8 +1277,7 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.selbar, .sect .chev, .asst, .search { transition: none; }
-		.live.working { animation: none; }
+		.selbar, .sect .chev, .search { transition: none; }
 		.shelf :global(.shelf-spin) { animation: none; }
 	}
 </style>

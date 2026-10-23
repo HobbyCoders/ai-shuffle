@@ -7,7 +7,7 @@
   * `color` is an avatar colour name (./avatar-colors), drawn from a theme
   * accent token. `neutral` is the built-in look: muted colour, dashed edge.
   */
- import type { AvatarId } from '$lib/api/assistant';
+ import type { AvatarId } from '$lib/api/agent-identity';
  import { avatarColorToken } from './avatar-colors';
  const files = import.meta.glob('./avatars/*.svg', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
  const drawings: Record<string, string> = Object.fromEntries(

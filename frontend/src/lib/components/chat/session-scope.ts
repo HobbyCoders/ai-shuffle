@@ -96,13 +96,13 @@ export interface AttachState {
 	archived: boolean;
 	/** A subagent's own chat. */
 	subagent: boolean;
-	/** The legacy assistant home. */
-	assistantHome: boolean;
+	/** A hidden internal chat (the retired assistant home); it never takes a project. */
+	hidden: boolean;
 }
 
 /** Whether the "No project" pill shows at all. */
 export function noProjectPillVisible(state: AttachState): boolean {
-	return !!state.sessionId && !state.hasProject && !state.subagent && !state.assistantHome && !state.archived;
+	return !!state.sessionId && !state.hasProject && !state.subagent && !state.hidden && !state.archived;
 }
 
 /**

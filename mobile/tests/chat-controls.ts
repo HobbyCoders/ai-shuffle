@@ -11,7 +11,6 @@ import { installMobileShell } from '../src/shell/register';
  * here; nothing reaches a backend.
  *
  *   ?theme=vercel   the Vercel preset instead of the default dark theme
- *   ?view=assistant the assistant's own chat
  *   ?turn=idle      no turn running (Runs on moves now instead of queueing)
  *   ?prompt=question|access|none  what waits above the composer
  *   ?bound=unknown|server  an xAI model with no advertised context window, and
@@ -20,7 +19,6 @@ import { installMobileShell } from '../src/shell/register';
 installMobileShell();
 
 const params = new URLSearchParams(location.search);
-const assistant = params.get('view') === 'assistant';
 const turn = params.get('turn') ?? 'running';
 const promptKind = params.get('prompt') ?? 'permission';
 const bound = params.get('bound');
@@ -40,8 +38,8 @@ const contextUsage = {
 		percentage: serverMax ? (84_200 / serverMax) * 100 : null, model: GROK, isAutoCompactEnabled: false
 	}
 };
-const SESSION = assistant ? 'fixture-assistant' : 'fixture-session';
-const TITLE = assistant ? 'Assistant' : 'How does user install ai shuffle on linux non docker for desktop app?';
+const SESSION = 'fixture-session';
+const TITLE = 'How does user install ai shuffle on linux non docker for desktop app?';
 const project = { id: 'ai-shuffle', name: 'ai-shuffle', path: 'D:/Development/ai-shuffle' };
 const branch = 'docs/add-linux-desktop-install-guide';
 const now = Date.now();
@@ -114,14 +112,14 @@ Object.assign(activeSession.current, {
 	sessionId: SESSION,
 	title: TITLE,
 	mode: 'code',
-	worktreeBranch: assistant ? null : branch,
-	worktreeId: assistant ? null : 'wt-1',
+	worktreeBranch: branch,
+	worktreeId: 'wt-1',
 	isStreaming: turn === 'running',
 	messages: [
 		{ id: 'm1', type: 'user', content: TITLE },
 		{ id: 'm2', type: 'assistant', content: "There's no Linux desktop guide yet. I'll check what the desktop build produces, then write it." }
 	],
-	activeTasks: assistant ? [] : [
+	activeTasks: [
 		{ id: 't1', subject: 'Fix: memory health signals and running revisions', status: 'running', kind: 'agent', summary: null, toolUseId: null, startedAt: new Date(now - 252e3).toISOString(), updatedAt: new Date().toISOString() },
 		{ id: 't2', subject: 'pytest -q tests/test_memory_health.py', status: 'running', kind: 'shell', summary: null, toolUseId: null, startedAt: new Date(now - 58e3).toISOString(), updatedAt: new Date().toISOString() }
 	],
@@ -131,7 +129,7 @@ Object.assign(activeSession.current, {
 activeSession.setDraft('');
 
 // What waits on the owner. The permission is the mockup's Bash prompt.
-const permissions = promptKind === 'none' || assistant ? [] : [
+const permissions = promptKind === 'none' ? [] : [
 	{ request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'cd desktop && npm run dist:linux' } }
 ];
 const questions = promptKind === 'question' || promptKind === 'all' ? [{
@@ -154,4 +152,4 @@ if (promptKind === 'access' || promptKind === 'all') {
 
 const { default: Harness } = await import('./ChatControlsHarness.svelte');
 await import('../src/mobile.css');
-mount(Harness, { target: document.getElementById('app')!, props: { permissions, questions, assistant, title: TITLE } });
+mount(Harness, { target: document.getElementById('app')!, props: { permissions, questions, title: TITLE } });

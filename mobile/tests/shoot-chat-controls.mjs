@@ -92,14 +92,6 @@ const scenarios = {
 		await shot(page, `${theme}-14-runs-on-busy`);
 		await page.close();
 	},
-	async assistant(theme) {
-		const page = await open(`?theme=${theme}&view=assistant&prompt=none`);
-		await shot(page, `${theme}-15-assistant`);
-		await page.getByRole('button', { name: /^All chat controls/ }).click();
-		await page.waitForTimeout(500);
-		await shot(page, `${theme}-16-assistant-panel`);
-		await page.close();
-	},
 	async conn(theme) {
 		const page = await open(`?theme=${theme}&prompt=none`);
 		await page.getByRole('button', { name: /^Connected to/ }).click();

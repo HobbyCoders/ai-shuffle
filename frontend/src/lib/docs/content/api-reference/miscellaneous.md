@@ -1101,7 +1101,7 @@ Drop a held turn without running it. Returns `{"success": true}`, or `404`.
 
 ### GET /api/v1/settings/limit-resume
 
-The **Resume when the limit resets** and **Compact before resuming** switches (Settings > General > Usage limits). One pair applies to every provider. With the first on, a chat or background Task worker that a provider's usage limit stopped is resumed once, shortly after the limit resets. With the second on, the chat is compacted first, so the resumed turn reads a smaller context.
+The **Resume when the limit resets** and **Compact before resuming** switches (Settings > Usage > Usage limits). One pair applies to every provider. With the first on, a chat or background Task worker that a provider's usage limit stopped is resumed once, shortly after the limit resets. With the second on, the chat is compacted first, so the resumed turn reads a smaller context.
 
 **Auth:** Required
 

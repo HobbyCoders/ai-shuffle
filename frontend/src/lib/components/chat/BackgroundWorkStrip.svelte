@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * BackgroundWorkStrip — the assistant's running jobs, beside its composer.
+	 * BackgroundWorkStrip — a chat's running jobs, beside its composer.
 	 *
 	 * Up to three plain lines ("Fixing the sidebar bug, 6 min"). A line opens
 	 * the job's chat when it has one and carries one Stop action. More than three
