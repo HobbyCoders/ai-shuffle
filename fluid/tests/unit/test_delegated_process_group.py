@@ -159,12 +159,17 @@ async def test_raise_oom_score_adj_raises_but_never_lowers() -> None:
     proc = await asyncio.create_subprocess_exec("sleep", "30")
     path = f"/proc/{proc.pid}/oom_score_adj"
     try:
-        priority.raise_oom_score_adj(proc.pid, 300)
+        # Start from whatever the test process inherited (CI runners run
+        # with a raised score already); the target sits above it.
         with open(path, encoding="ascii") as f:
-            assert int(f.read()) == 300
-        priority.raise_oom_score_adj(proc.pid, 100)
+            inherited = int(f.read())
+        target = min(inherited + 100, priority.MAX_OOM_SCORE_ADJ)
+        priority.raise_oom_score_adj(proc.pid, target)
         with open(path, encoding="ascii") as f:
-            assert int(f.read()) == 300
+            assert int(f.read()) == target
+        priority.raise_oom_score_adj(proc.pid, max(target - 200, 1))
+        with open(path, encoding="ascii") as f:
+            assert int(f.read()) == target
     finally:
         proc.kill()
         await proc.wait()
