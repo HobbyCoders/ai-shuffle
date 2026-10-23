@@ -1,12 +1,20 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { compactionBridge, mounted } from '../hooks/mechanical.ts'
+import { compactedRows, compactionBridge, mounted, postedRows } from '../hooks/mechanical.ts'
 
 const START = { cwd: '/work', surface: null, isInteractive: false }
 const ROWS = [
   { role: 'user' as const, text: 'Original task', toolUses: [], handle: 'user-1' },
   { role: 'assistant' as const, text: 'Working', toolUses: [], handle: 'assistant-1' },
 ]
+// A parallel group as the engine lists it: each call and each result its own
+// row, every outcome repeated under the call and beside the result.
+const call = (id: string) => ({ role: 'assistant' as const, text: '', handle: `c-${id}`, toolUses: [
+  { tool_use_id: id, tool: 'Read', input: { file_path: `${id}.py` }, result: { file: 'x'.repeat(500) }, text: 'x'.repeat(500) }] })
+const result = (id: string) => ({ role: 'user' as const, text: '', handle: `r-${id}`, toolUses: [],
+  toolResults: [{ tool_use_id: id, text: 'x'.repeat(500), isError: false, result: { file: 'x'.repeat(500) } }] })
+const GROUP = [ROWS[0], call('a'), call('b'), result('a'), result('b'), ROWS[1]]
+const THREE = [ROWS[0], call('a'), call('b'), call('c'), result('a'), result('b'), result('c'), ROWS[1]]
 const BUILT = [{ role: 'user' as const, text: 'Recovered through HistoryExpand("node_abc")', toolUses: [] }]
 const ENV = { FLUID_CLAUDE_MOD_URL: 'http://127.0.0.1:50123/claude-mod/usage',
   FLUID_CLAUDE_MOD_TOKEN: 'mod-token', FLUID_CLAUDE_MOD_COMPACT_URL: 'http://127.0.0.1:50123/claude-mod/compact' }
@@ -41,6 +49,53 @@ describe('mechanical compaction', () => {
     expect(mounted(tcp, 'http://127.0.0.1:50124/claude-mod/compact')).toBe(false)
     expect(mounted(tcp, 'http://localhost/claude-mod/compact')).toBe(false)
     expect(mounted(null, ENV.FLUID_CLAUDE_MOD_COMPACT_URL)).toBe(false)
+  })
+
+  test('posts only what Fluid reads: one copy of each outcome, handles kept', () => {
+    const rows = postedRows(GROUP)
+    expect(rows[1]).toEqual({ role: 'assistant', text: '', handle: 'c-a',
+      toolUses: [{ tool_use_id: 'a', tool: 'Read', input: { file_path: 'a.py' } }] })
+    expect(rows[3]).toEqual({ role: 'user', text: '', handle: 'r-a', toolUses: [],
+      toolResults: [{ tool_use_id: 'a', text: 'x'.repeat(500), isError: false }] })
+    expect(rows[0]).toEqual(ROWS[0])
+    expect(JSON.stringify(rows).length).toBeLessThan(JSON.stringify(GROUP).length / 2)
+  })
+
+  test('a parallel group kept as the engine\'s own rows is accepted, calls then results', () => {
+    const rows = postedRows(GROUP)
+    const answer = [rows[0], rows[1], rows[2], rows[3], rows[4], rows[5]]
+    expect(compactedRows({ messages: answer }, rows)).toEqual(answer)
+  })
+
+  const NOTE = { role: 'user' as const, text: 'Earlier context continues below.', toolUses: [] }
+  for (const [name, answer] of [
+    ['a user message between a call and its result', (r: typeof THREE) => [r[0], r[1], NOTE]],
+    ['a new call after part of the results', (r: typeof THREE) => [r[0], r[1], r[2], r[4], r[3], r[5], r[6], r[7]]],
+    ['a result left open', (r: typeof THREE) => [r[0], r[1], r[2], r[4]]],
+    ['two user rows outside a tool group', (r: typeof THREE) => [r[0], NOTE]],
+  ] as const) {
+    test(`an answer with ${name} is refused`, () => {
+      const rows = postedRows(THREE)
+      expect(compactedRows({ messages: rows }, rows)).toEqual(rows)
+      expect(() => compactedRows({ messages: answer(rows) }, rows)).toThrow()
+    })
+  }
+
+  test('the hook posts and checks the slim rows, never the engine\'s duplicated outcomes', async ($, on) => {
+    const calls = engine(on)
+    mock.env(on, ENV)
+    mock.clock(on, { now: 0 })
+    let body = ''
+    const kept = postedRows(GROUP)
+    on('http.fetch', (_$, e) => {
+      body = (e as { init: { body: string } }).init.body
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ messages: kept }) } }
+    })
+    await $.session.start(START)
+    expect(await $.session.compact({ trigger: 'manual', messages: GROUP })).toEqual({ messages: kept })
+    expect(calls.length).toBe(0)
+    expect(body).not.toContain('"result"')
+    expect(JSON.parse(body)).toEqual({ v: 1, messages: kept })
   })
 
   test('the bridge is captured before the engine can compact during session.start', async ($, on) => {

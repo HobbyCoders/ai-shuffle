@@ -7,7 +7,7 @@ import json
 import pytest
 
 from fluid.engine.claude_mod_compaction import (
-    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, compact_messages,
+    COMPACT_PATH, MAX_COMPACT_BODY_BYTES, compact_messages, project,
 )
 from fluid.context.compaction import CompactionConfig
 from fluid.context.recall import expand_ref
@@ -318,6 +318,120 @@ async def test_parallel_frames_compact_as_paired_built_groups():
     results = {t['tool_use_id'] for r in output for t in r.get('toolResults', [])}
     assert calls == results
     assert len(json.dumps(output)) < len(json.dumps(rows))
+
+
+def streamed_parallel_history(order, *, error_at=None):
+    """Stored the way a delegated turn streams it (call, result, call, result),
+    listed the way Claude Code's session.compact lists it: every call before
+    the results, or a call arriving after a result while others are open."""
+    nodes, rows = [], []
+
+    def add(message, uuid):
+        nodes.append(SessionNode(new_id('node'), nodes[-1].node_id if nodes else None, message))
+        message.provider_meta['claude_uuid'] = uuid
+        row = {**project(message), 'handle': uuid}
+        return row
+
+    for turn in range(8):
+        rows.append(add(Message('user', [Text(f'request {turn}')]), f'u{turn}'))
+        calls, results = [], []
+        for part in range(3):
+            tid = f'p{turn}-{part}'
+            calls.append(add(Message('assistant', [ToolUseBlock(tid, 'Read', {'file_path': f'{tid}.py'})]), f'c{tid}'))
+            results.append(add(Message('user', [ToolResultBlock(
+                tid, [Text(f'parallel-{tid} ' * 600)], is_error=(turn, part) == error_at)]), f'r{tid}'))
+        if order == 'calls_first':
+            rows += calls + results
+        else:  # call, call, result, call, result, result
+            rows += [calls[0], calls[1], results[0], calls[2], results[1], results[2]]
+        rows.append(add(Message('assistant', [Text(f'finished {turn}')]), f'a{turn}'))
+    return nodes, rows
+
+
+def assert_mod_accepts(output, originals):
+    """What the mod's compactedRows (hooks/mechanical.ts) demands of an answer."""
+    by_handle = {r['handle']: json.dumps(r) for r in originals}
+    calls = {u['tool_use_id'] for r in originals for u in r['toolUses']}
+    assert output[0]['role'] == 'user'
+    pending = set()
+    for previous, row in zip([None] + output, output):
+        if pending:  # an open group continues: more calls, or its results
+            assert (row['role'] == previous['role'] == 'assistant' and row['toolUses']
+                    or row['role'] == 'user' and row.get('toolResults'))
+        else:
+            assert previous is None or previous['role'] != row['role']
+        if 'handle' in row:
+            assert by_handle[row['handle']] == json.dumps(row)
+        for result in row.get('toolResults', []):
+            pending.remove(result['tool_use_id'])
+        for use in row['toolUses']:
+            assert use['tool_use_id'] in calls
+            pending.add(use['tool_use_id'])
+    assert not pending
+
+
+@pytest.mark.parametrize('order', ['calls_first', 'interleaved'])
+def test_parallel_group_listed_out_of_stream_order_compacts(order):
+    nodes, rows = streamed_parallel_history(order)
+    output = compact_messages(rows, nodes)
+    assert_mod_accepts(output, rows)
+    assert len(json.dumps(output)) < len(json.dumps(rows))
+    assert output[-1] == rows[-1]
+    import re
+    refs = re.findall(r'node_[0-9a-f]+(?:\.\.node_[0-9a-f]+)?', json.dumps(output))
+    assert refs
+    for ref in refs:
+        restored, error = expand_ref(nodes, ref)
+        assert not error and restored, ref
+
+
+def test_group_with_an_error_result_is_kept_whole():
+    nodes, rows = streamed_parallel_history('calls_first', error_at=(1, 1))
+    output = compact_messages(rows, nodes)
+    assert_mod_accepts(output, rows)
+    text = json.dumps(output)
+    for part in range(3):
+        # Call and result of every member, untrimmed, not just the error.
+        assert f'"p1-{part}.py"' in text
+        assert f'parallel-p1-{part} ' * 600 in text
+
+
+@pytest.mark.parametrize('order', ['calls_first', 'interleaved'])
+def test_group_with_a_member_only_the_cli_can_rebuild_stays_its_own_rows(order):
+    # ToolSearch's tool_reference result: the CLI lists it with no text, the
+    # stream stored it as text, so it never matches and must keep its handle.
+    nodes, rows = streamed_parallel_history(order)
+    opaque = next(r for r in rows if r['handle'] == 'rp1-1')
+    opaque['toolResults'][0]['text'] = ''
+    output = compact_messages(rows, nodes)
+    assert_mod_accepts(output, rows)
+    # The calls may merge into one built row; the results keep their handles
+    # (one of them cannot be rebuilt), right after the calls, in order.
+    start = next(i for i, r in enumerate(output) if any(u['tool_use_id'] == 'p1-0' for u in r['toolUses']))
+    import itertools
+    call_rows = list(itertools.takewhile(lambda r: r['toolUses'], output[start:]))
+    assert [u['tool_use_id'] for r in call_rows for u in r['toolUses']] == ['p1-0', 'p1-1', 'p1-2']
+    after = output[start + len(call_rows):][:3]
+    assert [r.get('handle') for r in after] == ['rp1-0', 'rp1-1', 'rp1-2']
+    assert after[1] == opaque
+    assert len(json.dumps(output)) < len(json.dumps(rows))
+
+
+async def test_a_refused_compaction_is_logged_without_content(caplog):
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = DelegatedLoop(store=MemoryStore(), model='m', registry=registry)
+    await loop._ensure_session()
+    await loop._start_bundled_server()
+    _, rows = history()  # nothing stored for them: no safe saving
+    try:
+        with caplog.at_level('INFO', logger='fluid.engine.delegated'):
+            status, _ = await request(loop._socket_path, {'v': 1, 'messages': rows}, token=loop._mod_token)
+        assert status == 400
+        assert 'fell back to the CLI summarizer: no safe compaction saving' in caplog.text
+        assert 'original-0' not in caplog.text
+    finally:
+        await loop.aclose()
 
 
 async def test_loop_off_does_not_expose_route_and_on_injects_recall():

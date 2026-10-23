@@ -1635,7 +1635,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         meta = await self._ensure_session()
         nodes = await self.store.load_path(meta.session_id)
         started = time.monotonic()
-        messages = compact_messages(body.get("messages"), nodes)
+        try:
+            messages = compact_messages(body.get("messages"), nodes)
+        except ValueError as exc:
+            # The bridge turns this into a 400 and the CLI summarizes instead.
+            # Said where a fallback can be seen: the reason is a fixed phrase
+            # from compact_messages, never message content.
+            logger.info("claude mod compaction fell back to the CLI summarizer: %s", exc)
+            raise
         logger.info("claude mod compacted through Fluid: %d -> %d messages, %.3fs, no summarizer",
                     len(body["messages"]), len(messages), time.monotonic() - started)
         return {"messages": messages}
