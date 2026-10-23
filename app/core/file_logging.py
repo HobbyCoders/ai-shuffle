@@ -59,6 +59,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -273,6 +274,50 @@ def dump_diagnostic_traceback(message: str) -> None:
         pass
 
 
+def _register_stack_dump_signal(stream) -> bool:
+    """Dump every thread's stack to ``stream`` on SIGUSR1 (POSIX only).
+
+    faulthandler answers the signal in C without the GIL, so the container
+    supervisor gets a stack dump even from an interpreter a native call has
+    frozen (#436). Returns whether the handler was installed.
+    """
+    signum = getattr(signal, "SIGUSR1", None)
+    if signum is None:
+        return False
+    try:
+        faulthandler.register(signum, file=stream, all_threads=True, chain=False)
+        return True
+    except (AttributeError, RuntimeError, ValueError, OSError):
+        return False
+
+
+def arm_freeze_dump(timeout_s: float) -> bool:
+    """(Re)arm faulthandler's C watchdog to dump all stacks after ``timeout_s``.
+
+    Call this from the event loop more often than ``timeout_s``: each call
+    cancels the previous timer, so the dump fires only once the loop (or the
+    whole interpreter, a GIL held in native code included) has stopped for
+    ``timeout_s``, and then again every ``timeout_s`` while it stays stopped.
+    The Python stall watchdog cannot do this: it needs the GIL. Writes to the
+    managed fatal log; returns False when file logging is off.
+    """
+    if _fatal_file is None:
+        return False
+    try:
+        faulthandler.dump_traceback_later(timeout_s, repeat=True, file=_fatal_file)
+        return True
+    except (RuntimeError, ValueError, OSError):
+        return False
+
+
+def cancel_freeze_dump() -> None:
+    """Disarm ``arm_freeze_dump`` (shutdown may legitimately stop the loop)."""
+    try:
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:  # noqa: BLE001 — teardown must not raise
+        pass
+
+
 def setup_file_logging() -> Optional[Path]:
     """Attach the rotating file handler + faulthandler + excepthook (idempotent).
 
@@ -344,9 +389,12 @@ def setup_file_logging() -> Optional[Path]:
 
     # faulthandler: native traceback on a fatal signal. Keep the fd open for the
     # process lifetime (module-level ref) so it is valid when a crash fires.
+    # Append mode: the boot-check has already moved a previous dump aside, and
+    # if that move failed the old trace must not be truncated by this run.
     try:
-        _fatal_file = open(log_dir / "fatal.log", "w", encoding="utf-8")
+        _fatal_file = open(log_dir / "fatal.log", "a", encoding="utf-8")
         faulthandler.enable(file=_fatal_file, all_threads=True)
+        _register_stack_dump_signal(_fatal_file)
     except Exception:  # noqa: BLE001
         logger.exception("Could not enable faulthandler (non-fatal)")
 

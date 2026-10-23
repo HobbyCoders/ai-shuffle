@@ -183,3 +183,76 @@ def test_durable_dump_precedes_logger_locks(diagnostic_logs):
         assert wd.dump_count == 1
     finally:
         loop.close()
+
+
+def test_freeze_dump_timer_rearms_from_the_loop_and_disarms_on_stop(monkeypatch):
+    from app.core import file_logging
+    from app.core.loop_watchdog import FreezeDumpTimer
+
+    armed, cancelled = [], []
+    monkeypatch.setattr(file_logging, "arm_freeze_dump", lambda timeout: armed.append(timeout) or True)
+    monkeypatch.setattr(file_logging, "cancel_freeze_dump", lambda: cancelled.append(1))
+
+    async def scenario():
+        timer = FreezeDumpTimer(asyncio.get_running_loop(), timeout_s=30.0, rearm_s=0.01)
+        timer.start()
+        await asyncio.sleep(0.1)
+        timer.stop()
+        count = len(armed)
+        await asyncio.sleep(0.05)
+        return count
+
+    count = asyncio.run(scenario())
+    assert count >= 3 and set(armed) == {30.0}
+    assert len(armed) == count, "no re-arm after stop"
+    assert cancelled == [1]
+
+
+def test_freeze_dump_timer_stays_off_without_a_fatal_log(monkeypatch):
+    from app.core import file_logging
+    from app.core.loop_watchdog import FreezeDumpTimer
+
+    monkeypatch.setattr(file_logging, "_fatal_file", None)
+
+    async def scenario():
+        timer = FreezeDumpTimer(asyncio.get_running_loop(), rearm_s=0.01)
+        timer.start()
+        await asyncio.sleep(0.05)
+        assert timer.armed is False
+        timer.stop()
+
+    asyncio.run(scenario())
+
+
+def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil(tmp_path, monkeypatch):
+    """The C watchdog writes all stacks even while this thread never yields."""
+    from app.core import file_logging
+
+    with (tmp_path / "fatal.log").open("a", encoding="utf-8") as stream:
+        monkeypatch.setattr(file_logging, "_fatal_file", stream)
+        assert file_logging.arm_freeze_dump(0.2) is True
+        try:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and "Timeout" not in (tmp_path / "fatal.log").read_text():
+                time.sleep(0.05)
+        finally:
+            file_logging.cancel_freeze_dump()
+    text = (tmp_path / "fatal.log").read_text()
+    assert "Timeout (0:00:00.200000)!" in text and "test_faulthandler_dumps_a_frozen_interpreter" in text
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGUSR1"), reason="SIGUSR1 is POSIX only")
+def test_sigusr1_dumps_every_thread_to_the_fatal_log(tmp_path):
+    import faulthandler
+    import os
+    import signal
+    from app.core import file_logging
+
+    with (tmp_path / "fatal.log").open("a", encoding="utf-8") as stream:
+        assert file_logging._register_stack_dump_signal(stream) is True
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+            time.sleep(0.1)
+        finally:
+            faulthandler.unregister(signal.SIGUSR1)
+    assert "test_sigusr1_dumps_every_thread_to_the_fatal_log" in (tmp_path / "fatal.log").read_text()

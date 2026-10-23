@@ -7,6 +7,7 @@ The lifetime lock belongs to the supervisor, never to a daemonized child.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import fcntl
 import json
 import os
@@ -25,16 +26,27 @@ import time
 
 
 MAJOR = "16"
-# Readiness supervision: `restart: unless-stopped` only restarts an exited
-# container, so an application that is alive but no longer answers
-# /health/ready is probed here and the supervisor exits non-zero after
-# READY_PROBE_FAILURES consecutive failures (2 minutes at these values).
-# Until the first successful probe a larger allowance covers first-boot
-# migrations; the probe itself is one cheap loopback GET per interval.
+# Health supervision: `restart: unless-stopped` only restarts an exited
+# container, so the application is probed here every READY_PROBE_INTERVAL.
+# Until the first successful /health/ready, READY_PROBE_STARTUP_FAILURES
+# failures in a row (15 minutes) mean a first boot that will not finish, and
+# the app is restarted (an update's failed first start rolls back).
+# After that, readiness only reports: a worker busy with many agents can miss
+# /health/ready (database or executor saturated) and is never killed for it
+# (#436). It is restarted only when /health/live, answered by the event loop
+# alone, fails LIVE_PROBE_FAILURES times in a row (5 minutes): a frozen
+# interpreter. An application without /health/live (404) falls back to
+# readiness. Each probe is one cheap loopback GET.
 READY_PROBE_INTERVAL = 30.0
 READY_PROBE_TIMEOUT = 5.0
-READY_PROBE_FAILURES = 4
+READY_PROBE_FAILURES = 4  # consecutive readiness failures logged as "not ready"
 READY_PROBE_STARTUP_FAILURES = 30
+LIVE_PROBE_TIMEOUT = 10.0
+LIVE_PROBE_FAILURES = 10
+# Thread states, a SIGUSR1 stack dump and (when installed) py-spy are captured
+# at this many liveness failures in a row and again before the stop.
+FREEZE_CAPTURE_AT = 2
+PY_SPY_TIMEOUT = 30
 APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
@@ -88,7 +100,8 @@ class RestartRejected(RuntimeFailure):
 
 
 def log(message):
-    print(f"container runtime: {message}", file=sys.stderr, flush=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"{stamp} container runtime: {message}", file=sys.stderr, flush=True)
 
 
 def load_startup_settings():
@@ -1225,27 +1238,153 @@ def probe_ready(url, timeout=None):
         return False
 
 
-class ReadinessMonitor:
-    """Counts consecutive readiness failures; `record` says when the app is considered dead."""
+def probe_live(url, timeout=None):
+    """True when the liveness endpoint answers 200, None when the application
+    has none (404: a revision older than /health/live), otherwise False."""
+    from urllib.error import HTTPError
+    from urllib.request import urlopen
+    try:
+        with urlopen(url, timeout=LIVE_PROBE_TIMEOUT if timeout is None else timeout) as response:
+            return response.status == 200
+    except HTTPError as exc:
+        return None if exc.code == 404 else False
+    except Exception:
+        return False
 
-    def __init__(self, url, *, probe=probe_ready, failures=None, startup_failures=None):
+
+def _live_url(ready_url):
+    suffix = "/health/ready"
+    return ready_url[:-len(suffix)] + "/health/live" if ready_url.endswith(suffix) else None
+
+
+class ReadinessMonitor:
+    """Counts consecutive health failures; `check` says when to restart the app.
+
+    Before the first ready answer, READY_PROBE_STARTUP_FAILURES readiness
+    failures in a row restart it. After that only liveness counts: a live but
+    unready app is reported, never restarted (#436)."""
+
+    def __init__(self, url, *, probe=probe_ready, live_probe=probe_live, failures=None, startup_failures=None,
+                 live_failures=None):
         self.url = url
+        self.live_url = _live_url(url)
         self.probe = probe
+        self.live_probe = live_probe
         self.limit = READY_PROBE_FAILURES if failures is None else failures
         self.startup_limit = READY_PROBE_STARTUP_FAILURES if startup_failures is None else startup_failures
+        self.live_limit = LIVE_PROBE_FAILURES if live_failures is None else live_failures
         self.failures = 0
+        self.live_failures = 0
         self.ever_ready = False
 
     def check(self):
-        return self.record(self.probe(self.url))
+        ready = self.probe(self.url)
+        if ready or not self.ever_ready or self.live_url is None:
+            return self.record(ready)
+        return self.record(False, live=self.live_probe(self.live_url))
 
-    def record(self, ready):
+    def record(self, ready, live=None):
+        """``live`` is the liveness answer for an unready app: True, False, or
+        None when there is none, so readiness decides as it did before."""
         if ready:
-            self.failures = 0
+            self.failures = self.live_failures = 0
             self.ever_ready = True
             return False
         self.failures += 1
-        return self.failures >= (self.limit if self.ever_ready else self.startup_limit)
+        if not self.ever_ready:
+            return self.failures >= self.startup_limit
+        if live is None:
+            return self.failures >= self.limit
+        if live:
+            self.live_failures = 0
+            return False
+        self.live_failures += 1
+        return self.live_failures >= self.live_limit
+
+
+_PROC = Path("/proc")
+_thread_cpu = {}
+
+
+def _signal_caught(pid, signum):
+    """Whether ``pid`` installed a handler for ``signum`` (SigCgt in /proc).
+
+    SIGUSR1's default action terminates, so it is sent only to an application
+    whose faulthandler registered it."""
+    try:
+        for line in (_PROC / str(pid) / "status").read_text().splitlines():
+            if line.startswith("SigCgt:"):
+                return bool(int(line.split()[1], 16) >> (signum - 1) & 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
+def thread_states(pid, *, limit=256):
+    """One line per thread of ``pid``: state (R running, D disk wait, S sleep),
+    kernel wait channel, CPU seconds and their change since the last capture."""
+    try:
+        ticks = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, OSError, ValueError):
+        ticks = 100
+    try:
+        tasks = sorted((_PROC / str(pid) / "task").iterdir(), key=lambda path: int(path.name))
+    except (OSError, ValueError) as exc:
+        return [f"thread states for pid {pid} unavailable ({type(exc).__name__})"]
+    lines = []
+    for task in tasks[:limit]:
+        try:
+            raw = (task / "stat").read_text()
+            name = raw[raw.index("(") + 1:raw.rindex(")")]
+            fields = raw[raw.rindex(")") + 2:].split()
+            state, cpu = fields[0], (int(fields[11]) + int(fields[12])) / ticks
+        except (OSError, ValueError, IndexError):
+            continue
+        try:
+            wchan = (task / "wchan").read_text().strip() or "0"
+        except OSError:
+            wchan = "?"
+        key = (pid, task.name)
+        delta = "" if key not in _thread_cpu else f" (+{cpu - _thread_cpu[key]:.2f}s since the last capture)"
+        _thread_cpu[key] = cpu
+        lines.append(f"thread {task.name} ({name}) state={state} wchan={wchan} cpu={cpu:.2f}s{delta}")
+    if len(tasks) > limit:
+        lines.append(f"... {len(tasks) - limit} more threads not shown")
+    return lines
+
+
+def capture_freeze(process):
+    """Record why a running app stopped answering, before it is stopped (#436).
+
+    SIGUSR1 makes the app's faulthandler write every thread's stack to its
+    fatal.log, without the GIL. The kernel's per-thread state tells a CPU spin
+    (one thread R) from native I/O (D with a filesystem wait channel). py-spy,
+    only when the image already has it, adds native frames."""
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or pid <= 0 or process.poll() is not None:
+        return
+    usr1 = getattr(signal, "SIGUSR1", None)
+    if usr1 is not None and _signal_caught(pid, usr1):
+        try:
+            os.kill(pid, usr1)
+            log(f"asked application pid {pid} to dump every thread's stack to its fatal.log")
+        except OSError as exc:
+            log(f"could not signal application pid {pid} for a stack dump ({type(exc).__name__})")
+    else:
+        log(f"application pid {pid} has no SIGUSR1 stack-dump handler; none requested")
+    for line in thread_states(pid):
+        log(line)
+    py_spy = shutil.which("py-spy")
+    if py_spy is None:
+        return
+    try:
+        result = subprocess.run([py_spy, "dump", "--native", "--pid", str(pid)], capture_output=True, text=True,
+                                timeout=PY_SPY_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"py-spy dump failed ({type(exc).__name__})")
+        return
+    for line in (result.stdout + result.stderr).splitlines():
+        log(f"py-spy: {line}")
 
 
 def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None, chrome_current=None):
@@ -1262,6 +1401,7 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
     while not STOP.is_set():
         chrome_process = chrome_current() if chrome_current is not None else chrome
         failure = update_failure = None
+        probe_failure = False
         if app.poll() is not None:
             failure = "application exited unexpectedly"
         elif db.process is not None and db.process.poll() is not None:
@@ -1274,12 +1414,21 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
             previous_failures = monitor.failures
             if monitor.check():
-                failure = f"application readiness probe failed {monitor.failures} times in a row"
+                probe_failure = True
+                failure = (f"application liveness probe failed {monitor.live_failures} times in a row"
+                           if monitor.live_failures else
+                           f"application readiness probe failed {monitor.failures} times in a row")
             else:
                 if monitor.failures == 1:
                     log("application readiness degraded; waiting for subsequent probes")
+                elif monitor.failures == monitor.limit and monitor.ever_ready and monitor.live_failures == 0:
+                    log(f"application not ready for {monitor.failures} probes in a row but still live; "
+                        "leaving it running")
                 elif previous_failures and monitor.failures == 0:
                     log("application readiness recovered")
+                if monitor.live_failures == FREEZE_CAPTURE_AT:
+                    log(f"application liveness probe failed {monitor.live_failures} times in a row; capturing diagnostics")
+                    capture_freeze(app)
                 if updates is not None and monitor.ever_ready and monitor.failures == 0:
                     updates.healthy()
                     confirm_handover(updates.root)
@@ -1304,6 +1453,9 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
             elif monitor.ever_ready and monitor.failures == 0:
                 updates.tick()
         if failure is not None:
+            if probe_failure:
+                log(f"{failure}; capturing diagnostics before stopping it")
+                capture_freeze(app)
             now = time.monotonic()
             relaunched = [moment for moment in relaunched if now - moment < RELAUNCH_WINDOW]
             if relaunch is None or len(relaunched) >= RELAUNCH_LIMIT:

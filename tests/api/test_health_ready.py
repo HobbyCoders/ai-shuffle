@@ -121,3 +121,45 @@ class TestBusyPoolStaysReady:
                 assert body["status"] == "ready"
                 assert body["checks"]["session_pool"]["delegated_size"] == 40
                 assert "reasons" not in body
+
+
+class TestLivenessAndDedicatedReadiness:
+    """#436: liveness never touches the DB; readiness has its own thread."""
+
+    def test_liveness_answers_without_the_database(self):
+        client = _client()
+        with patch("app.api.system._probe_db", side_effect=AssertionError("liveness must not query")):
+            for path in ("/health/live", "/api/v1/health/live"):
+                resp = client.get(path)
+                assert resp.status_code == 200
+                assert resp.json() == {"status": "alive"}
+
+    def test_readiness_query_runs_on_its_own_thread(self):
+        import threading
+        threads = []
+        client = _client()
+        with patch("app.api.system._probe_db", side_effect=lambda: threads.append(threading.current_thread().name)), \
+             patch("app.core.session_pool.get_session_pool", return_value=_FakePool()):
+            assert client.get("/health/ready").status_code == 200
+        assert threads and threads[0].startswith("readiness-db")
+
+    def test_a_hung_database_check_times_out_and_is_shared(self, monkeypatch):
+        import threading
+        from app.api import system
+        monkeypatch.setattr(system, "READINESS_DB_TIMEOUT_S", 0.2)
+        release = threading.Event()
+        calls = []
+        def hung():
+            calls.append(1)
+            release.wait(5)
+        client = _client()
+        try:
+            with patch("app.api.system._probe_db", side_effect=hung), \
+                 patch("app.core.session_pool.get_session_pool", return_value=_FakePool()):
+                for _ in range(3):
+                    resp = client.get("/health/ready")
+                    assert resp.status_code == 503
+                    assert resp.json()["reasons"] == ["database unreachable"]
+                assert len(calls) == 1, "probes join the check in flight instead of queueing more"
+        finally:
+            release.set()
