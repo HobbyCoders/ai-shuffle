@@ -313,6 +313,14 @@
           "how": "On a candidate worker with a usable fal key, use an owner-approved test endpoint with a declared text-prompt schema and a known output type, but an unavailable price. Verify the unknown price through searchModels first; do not guess an endpoint or substitute a priced model. Record fal request activity and billing before the probe. In a fresh unattended Task with no remembered or job-stored generation choice, call runFalModel for that endpoint and report its result. Repeat the same call in an interactive owner chat. Inspect the actual tool results, worker submission logs and fal request activity/billing after both calls; archive only the throwaway sessions.",
           "pass_when": "The unattended call returns skipped with a reported reason and submits nothing. The interactive unpriceable call asks or refuses (for example price_unavailable), without submission. Neither call invokes the raw fal handler; no fal request ID or charge appears in worker logs or fal activity/billing. Missing credentials, schema or evidence are not a pass.",
           "past_bug": "#469: unattended runFalModel calls and interactive pricing/resolution refusals fell back to the raw fal handler without a known price, confirmation or daily cap."
+        },
+        {
+          "id": "harness-basics.8",
+          "check": "Remembered generation choice with required call input",
+          "kind": "owner",
+          "how": "In a disposable account/chat with fal configured, remember an image-to-video or edit model with a required image input and valid saved settings (including an object-valued image_size where supported). Invoke generation without naming a source/model, first omitting the image input and then passing a wrong-type image input. Inspect the structured tool results; do not retry with valid media or submit a paid generation. Restore the disposable preferences and archive the chat.",
+          "pass_when": "Both calls return refused with reason invalid_request and the original input-validation error, not a choice card or remembered_unavailable. No reservation or provider submission occurs.",
+          "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
         }
       ]
     }
