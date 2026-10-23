@@ -30,7 +30,8 @@ def target(monkeypatch, tmp_path):
 def test_same_branch_different_directory_is_busy(target):
     here, _, _, listing = target
     assert activity.busy_git_target_sessions('legacy', here) == ['busy']
-    listing.assert_called_with('legacy', 'pv2')
+    # Only sessions that can be active are read, never the whole project.
+    listing.assert_called_with('legacy', 'pv2', {'busy'})
 
 def test_same_directory_different_branch_metadata_is_busy(target, monkeypatch):
     here, _, sessions, _ = target
@@ -51,9 +52,26 @@ def test_unrelated_known_branch_directory_remains_idle(target, monkeypatch):
 def test_idle_no_longer_locks_after_lease_release(target, monkeypatch):
     monkeypatch.setattr(activity, '_live_session_ids', lambda: set())
     assert activity.busy_git_target_sessions('legacy', target[0]) == []
+    # Nothing can be active, so no session row is read at all.
+    target[3].assert_not_called()
+
+
+def test_project_listing_reads_only_possibly_active_sessions(mock_db):
+    from app.db import database
+    from app.db.sessions import list_sessions_for_cleanup
+
+    for sid in ('live', 'finished', 'elsewhere'):
+        database.create_session(sid, 'default')
+    cursor = mock_db.cursor()
+    cursor.execute("UPDATE sessions SET project_v2_id='pv2' WHERE id IN ('live', 'finished')")
+    mock_db.commit()
+    assert {row['id'] for row in list_sessions_for_cleanup('legacy', 'pv2')} == {'live', 'finished'}
+    assert [row['id'] for row in list_sessions_for_cleanup('legacy', 'pv2', {'live', 'elsewhere'})] == ['live']
+    assert list_sessions_for_cleanup('legacy', 'pv2', set()) == []
 
 def test_background_work_without_model_lease_is_busy(target, monkeypatch):
     monkeypatch.setattr(activity, '_live_session_ids', lambda: set())
+    monkeypatch.setattr(activity.task_registry, 'active_session_ids', lambda: ['busy'])
     monkeypatch.setattr(activity.task_registry, 'has_active_background_work', lambda _: True)
     assert activity.busy_git_target_sessions('legacy', target[0]) == ['busy']
 

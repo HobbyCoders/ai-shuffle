@@ -287,6 +287,12 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     from app.core.task_registry import AGENT_STOP_REASON, PARENT_AGENT_STOP_SUMMARY
 
     record = provider_agent_supervisor.get_worker(session_id, task_id)
+    if record is None and existing is not None and existing.get("kind") == "agent":
+        # A nested worker: its record is keyed under the ROOT session, while
+        # this session (the one that dispatched it) holds its own row. Without
+        # this, stopping a Task child only marked its children's rows killed
+        # and left them running.
+        record = provider_agent_supervisor.find_worker(task_id)
     if record is not None:
         if source == USER_STOP_REASON:
             summary, preview = USER_STOP_SUMMARY, "Stopped by the user."
@@ -298,6 +304,10 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
         torn = await provider_agent_supervisor.teardown_worker(
             record, reason=source, summary=summary, preview=preview,
         )
+        own = task_registry.get_task(session_id, task_id)
+        if record.parent_session_id != session_id and own is not None and own.get("status") == "running":
+            # teardown_worker settles the root's row; this session's row too.
+            task_registry.complete_task(session_id, task_id, "killed", summary=summary, reason=source)
         # A child on another worker: whether the stop reached it, in words.
         detail = (torn or {}).get("detail")
         return {"ok": True, "kind": "agent", "task_id": task_id, **({"detail": detail} if detail else {})}
@@ -565,6 +575,15 @@ async def stop_all_background_tasks(
         await enter_user_stop(session_id)
         if include_shells and respect_shell_preference and _keep_monitor_shells_on_stop():
             include_shells = False
+        # A Swarm this session runs would start its next workers as the current
+        # ones die: latch its workflows first. The running workers are stopped
+        # below with this stop's attribution, like any other task.
+        try:
+            from app.core.swarm import latch_all
+
+            latch_all(session_id)
+        except Exception:  # noqa: BLE001 — the per-task stops below still run.
+            logger.warning("Stop: latching Swarm workflows failed for %s", session_id, exc_info=True)
 
     # Checkpoints belong to the pooled engine, not the task registry. Idle
     # sessions have no turn runtime to interrupt, but Stop/archive must still

@@ -93,6 +93,10 @@ def _notify_run_change(session_id: str, *, force: bool = False) -> None:
 # shrink it.
 ESCALATION_TIMEOUT_SECONDS = 8.0
 _SETTLE_POLL_SECONDS = 0.05
+# How long an interrupt lets a pump finish on its own once another path has
+# already settled the turn (a stopped Task child's turn is settled by its
+# parent's teardown), before it cancels the pump. Tests shrink it.
+ORPHANED_PUMP_GRACE_SECONDS = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +817,10 @@ class SessionRuntime:
         # construction — a SessionRuntime instance executes exactly one turn
         # row, and the next turn gets a fresh instance with a fresh guard.
         self._interrupt_driving = False
+        # Set once the driven interrupt has returned. A later Stop that finds
+        # this runtime still executing (its pump never unwound) must end it,
+        # not be swallowed by the idempotency guard above.
+        self._interrupt_finished = False
         # One-shot guard for the start-window steer sweep. A turn is invisible
         # to ``turns_db.get_live_turn`` from the moment it is enqueued until
         # ``start_turn`` lands, and its adapter is not steerable for a while
@@ -2993,11 +3001,16 @@ class SessionRuntime:
         or start a second escalation clock. The check-and-set below runs
         synchronously before the first ``await``, so two same-loop callers
         cannot both pass it.
-        """
-        sid = self.session_id
-        tid = self.turn_id
 
+        Once the driven interrupt has returned, a later call is not a no-op
+        when this runtime is still executing: its turn is over, so a pump that
+        never unwound is cancelled. Without that, every later Stop (including
+        the one before an application update) was swallowed here while the
+        execution kept counting as running work until the process restarted.
+        """
         if self._interrupt_driving:
+            if self._interrupt_finished:
+                await self._end_orphaned_pump("a repeated stop")
             return "interrupting"
         self._interrupt_driving = True
         # Also tells the heartbeat that any later rejection is expected. This
@@ -3009,6 +3022,45 @@ class SessionRuntime:
         # chose to stop it) from one this turn swallowed on its way out
         # (absorbed at-or-after — never answered, so it must run again).
         self._interrupt_requested_at = time.perf_counter()
+        try:
+            return await self._drive_interrupt(
+                mode, escalation_timeout=escalation_timeout, source=source,
+            )
+        finally:
+            self._interrupt_finished = True
+
+    async def _end_orphaned_pump(self, why: str, *, grace: float = 0.0) -> None:
+        """Cancel this runtime's pump when its turn is already over.
+
+        The turn row is terminal, so whatever settled it (a parent's teardown
+        settles a stopped Task child's turn, ``settle_killed_worker``) owns the
+        outcome; this runtime only has to stop executing. ``grace`` lets a pump
+        that is about to finish do so; ``execute()`` then finalizes through the
+        racer-settled path and fires nothing twice.
+        """
+        pump = self._pump_task
+        if pump is None or pump.done() or pump is asyncio.current_task():
+            return
+        if grace > 0:
+            await asyncio.wait({pump}, timeout=grace)
+            if pump.done():
+                return
+        logger.warning(
+            "SessionRuntime: %s turn %s already ended (%s) but its pump was still "
+            "running; cancelling it", self.session_id, self.turn_id, why,
+        )
+        self._cancel_pump()
+
+    async def _drive_interrupt(
+        self,
+        mode: str,
+        *,
+        escalation_timeout: Optional[float],
+        source: Optional[str],
+    ) -> str:
+        """The body of :meth:`interrupt`, run once per turn."""
+        sid = self.session_id
+        tid = self.turn_id
 
         # The WebSocket that wrote the durable interrupt may live on another
         # install, where its in-memory task registry cannot reach this runtime's
@@ -3103,6 +3155,15 @@ class SessionRuntime:
         while loop.time() < deadline:
             turn = await asyncio.to_thread(turns_db.get_turn, tid)
             if turn is not None and turn["state"] in turns_db.TERMINAL_STATES:
+                # execute() finalizes only after its pump returns, so a pump
+                # still running here means another path settled the turn (a
+                # stopped Task child: its parent's teardown evicted the client
+                # and settled the row). Nothing else would ever end that pump,
+                # and its execution would count as running work for good.
+                await self._end_orphaned_pump(
+                    f"settled {turn['state']} elsewhere",
+                    grace=ORPHANED_PUMP_GRACE_SECONDS,
+                )
                 return turn["state"]
             await asyncio.sleep(_SETTLE_POLL_SECONDS)
 
@@ -3481,11 +3542,95 @@ class SessionRuntime:
 
 # Include turns still acquiring their lease, not just registered live runtimes.
 _executions: Dict[asyncio.Task, str] = {}
+# The runtime each execution built, so a stuck one can be told apart from a
+# running turn by its own turn row.
+_execution_runtimes: Dict[asyncio.Task, "SessionRuntime"] = {}
+# Executions whose turn is over (its row is terminal) and whose pump was
+# cancelled, but whose task has not unwound. No turn runs in them, so they are
+# not running work: they must never block a restart or a Git change. Their
+# task's own finally still removes them.
+_ended_executions: Dict[asyncio.Task, str] = {}
+# A turn that ended this long ago with its execution still alive is stuck: a
+# healthy execution leaves within moments of settling its turn.
+ENDED_EXECUTION_SECONDS = 30.0
 
 
 def active_executions() -> Dict[asyncio.Task, str]:
-    """Snapshot of turn executions owned by this process."""
-    return dict(_executions)
+    """Snapshot of turn executions owned by this process that still run a turn."""
+    return {task: sid for task, sid in _executions.items() if task not in _ended_executions}
+
+
+def _mark_ended(task: asyncio.Task, session_id: str, why: str) -> None:
+    if task.done() or task not in _executions or task in _ended_executions:
+        return
+    _ended_executions[task] = session_id
+    logger.warning(
+        "SessionRuntime: execution for %s did not unwind (%s); it no longer counts "
+        "as running work", session_id, why,
+    )
+
+
+async def reconcile_executions(
+    session_ids: Optional[Set[str]] = None, *, ended_for: float = ENDED_EXECUTION_SECONDS,
+) -> List[str]:
+    """Stop counting executions whose turn already ended in the database.
+
+    ``_executions`` is this process's record of running turns, but a task can
+    outlive its turn: a stopped Task child's turn is settled by its parent's
+    teardown while the child's pump waits on a client that was evicted under
+    it. The turn row is the truth: terminal for at least ``ended_for`` seconds
+    means no turn runs there. Such an execution's pump is cancelled and it is
+    marked ended. Returns the session ids reconciled.
+    """
+    candidates = [
+        (task, runtime) for task, runtime in list(_execution_runtimes.items())
+        if task in _executions and task not in _ended_executions and not task.done()
+        and (session_ids is None or runtime.session_id in session_ids)
+    ]
+    if not candidates:
+        return []
+    turn_ids = {runtime.turn_id for _, runtime in candidates}
+    rows = await asyncio.to_thread(lambda: {tid: turns_db.get_turn(tid) for tid in turn_ids})
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    reconciled = []
+    for task, runtime in candidates:
+        row = rows.get(runtime.turn_id) or {}
+        if row.get("state") not in turns_db.TERMINAL_STATES:
+            continue
+        ended_at = turns_db._to_utc(row.get("ended_at"))
+        if ended_for and (ended_at is None or (now - ended_at).total_seconds() < ended_for):
+            continue
+        runtime._cancel_pump()
+        _mark_ended(task, runtime.session_id, f"turn {runtime.turn_id} {row['state']}")
+        reconciled.append(runtime.session_id)
+    return reconciled
+
+
+async def force_end_executions(session_ids: Set[str], *, grace: float) -> List[str]:
+    """End this process's executions for ``session_ids`` that a Stop did not end.
+
+    For an application update only: the process is about to restart. Cancels
+    each pump, then the execution itself, waiting up to ``grace`` after each.
+    An execution that survives both is marked ended so it cannot hold the
+    restart; the restart ends it. Returns the session ids that were forced.
+    """
+    tasks = {task: sid for task, sid in active_executions().items() if sid in session_ids}
+    if not tasks:
+        return []
+    for task in tasks:
+        runtime = _execution_runtimes.get(task)
+        if runtime is not None:
+            runtime._cancel_pump()
+    _, pending = await asyncio.wait(set(tasks), timeout=grace)
+    for task in pending:
+        task.cancel()
+    if pending:
+        _, pending = await asyncio.wait(pending, timeout=grace)
+    for task in pending:
+        _mark_ended(task, tasks[task], "force-stopped for an application update")
+    return sorted(set(tasks.values()))
 
 
 async def execute(turn_row: Dict[str, Any], **kwargs: Any) -> Optional[str]:
@@ -3497,6 +3642,10 @@ async def execute(turn_row: Dict[str, Any], **kwargs: Any) -> Optional[str]:
     task = asyncio.current_task()
     _executions[task] = turn_row["session_id"]
     try:
-        return await SessionRuntime(turn_row, **kwargs).execute()
+        runtime = SessionRuntime(turn_row, **kwargs)
+        _execution_runtimes[task] = runtime
+        return await runtime.execute()
     finally:
         _executions.pop(task, None)
+        _execution_runtimes.pop(task, None)
+        _ended_executions.pop(task, None)

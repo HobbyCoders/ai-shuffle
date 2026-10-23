@@ -67,7 +67,11 @@ async def test_command_credentials_never_reach_update_surfaces(service, monkeypa
     await asyncio.gather(*fleet._stop_tasks)
     stopped_snapshot = await fleet.snapshot()
     stopped_peer = await fleet.peer_action({"operation": "status"}, "peer")
-    assert stopped_peer["stop_result"]["accepted"] is False
+    # The stop failed, so the update force-stopped the service and went ahead,
+    # naming the chat (never the command line) in its note.
+    assert stopped_peer["stop_result"]["accepted"] is True
+    assert stopped_peer["stop_result"]["forced"] == ["Preview chat"]
+    assert "force-stopped" in stopped_peer["stop_result"]["reason"]
     for value in (snapshot, peer, receipt, stopping, stopped_snapshot, stopped_peer):
         serialized = json.dumps(value)
         assert all(secret not in serialized for secret in secrets)

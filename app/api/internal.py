@@ -122,9 +122,11 @@ _shutdown_task = None
 @router.get("/desktop/active-sessions")
 async def desktop_active_sessions(request: Request):
     require_desktop(request)
-    from app.core.desktop_lifecycle import active_session_ids, remote_workers
+    from app.core.desktop_lifecycle import reconciled_active_session_ids, remote_workers
 
-    return {"active_sessions": len(active_session_ids()), "remote_workers": remote_workers()}
+    # The updater asks this right before a restart: a turn that already ended
+    # must not refuse it (desktop_lifecycle.reconciled_active_session_ids).
+    return {"active_sessions": len(await reconciled_active_session_ids()), "remote_workers": remote_workers()}
 
 
 @router.post("/desktop/stop-sessions")

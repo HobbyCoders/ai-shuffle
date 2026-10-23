@@ -2,7 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Shutdown waits this long for stopped turns to settle. The container
+# supervisor gives the whole stop-sessions call 35 seconds; a turn that has
+# not unwound by then is ended by the process exit.
+SHUTDOWN_SETTLE_SECONDS = 25.0
 
 
 def active_session_ids() -> set[str]:
@@ -10,6 +18,57 @@ def active_session_ids() -> set[str]:
     from app.core.task_registry import task_registry
 
     return set(active_executions().values()) | set(task_registry.active_session_ids())
+
+
+async def reconciled_active_session_ids() -> set[str]:
+    """``active_session_ids`` after dropping executions whose turn already ended.
+
+    Use before deciding anything on "is this worker busy": an execution can
+    outlive its turn (session_runtime.reconcile_executions), and the stale
+    entry would otherwise refuse every restart until the process restarted.
+    """
+    from app.core import session_runtime
+
+    try:
+        await session_runtime.reconcile_executions()
+    except Exception:  # noqa: BLE001 — unreconciled is the old, stricter answer.
+        logger.warning("Could not reconcile stuck turn executions", exc_info=True)
+    return active_session_ids()
+
+
+async def force_stop_sessions(session_ids: set[str], *, source: str, grace: float) -> list[str]:
+    """End work in ``session_ids`` that a Stop did not end in time.
+
+    For an application update only: the process restarts next, which ends
+    anything still running anyway. Turn executions are cancelled (and, if
+    one still will not unwind, no longer counted); background tasks still
+    registered as running are stopped, or marked killed when nothing is left
+    to stop. Returns the session ids that had work forced. Never raises.
+    """
+    from app.core import session_runtime
+    from app.core.query_session_lifecycle import stop_session_task
+    from app.core.task_registry import task_registry
+
+    forced: set[str] = set()
+    try:
+        forced.update(await session_runtime.force_end_executions(set(session_ids), grace=grace))
+    except Exception:  # noqa: BLE001
+        logger.warning("Application update: could not force-stop turns in %s", sorted(session_ids), exc_info=True)
+    for sid in sorted(session_ids):
+        for task in task_registry.get_active(sid):
+            tid = task.get("id")
+            if not tid:
+                continue
+            forced.add(sid)
+            try:
+                await asyncio.wait_for(stop_session_task(sid, tid, source=source), timeout=grace)
+            except Exception:  # noqa: BLE001 — including a stop that timed out
+                logger.warning("Application update: could not stop task %s of %s", tid, sid, exc_info=True)
+            record = task_registry.get_task(sid, tid)
+            if record is not None and record.get("status") == "running":
+                task_registry.complete_task(sid, tid, "killed", summary=f"Stopped by host: {source}",
+                                            reason=source)
+    return sorted(forced)
 
 
 def remote_workers() -> list[str]:
@@ -160,6 +219,12 @@ async def stop_running_sessions() -> None:
         if isinstance(result, BaseException):
             raise result
     # Never cancel these tasks on an HTTP timeout: their finally blocks persist
-    # the terminal state and release the lease.
-    await asyncio.gather(*executions, return_exceptions=True)
+    # the terminal state and release the lease. Do not wait past the caller's
+    # budget either: one turn that never unwinds must not fail the whole stop
+    # (the supervisor would then roll an update back); the exit ends it.
+    if executions:
+        _, stuck = await asyncio.wait(set(executions), timeout=SHUTDOWN_SETTLE_SECONDS)
+        for task in stuck:
+            logger.warning("Shutdown: the turn in %s did not settle within %.0fs; the exit ends it",
+                           executions.get(task), SHUTDOWN_SETTLE_SECONDS)
     await task_persistence.flush()
