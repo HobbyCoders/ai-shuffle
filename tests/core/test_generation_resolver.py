@@ -170,6 +170,111 @@ async def test_unusable_remembered_choice_asks_again_interactively():
     assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
 
 
+@pytest.mark.parametrize("raw_schema", [False, True])
+@pytest.mark.parametrize("saved_options", [{}, {"steps": 6}])
+async def test_remembered_required_input_model_refuses_bad_call_and_runs_good_input(monkeypatch, raw_schema, saved_options):
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    from app.services.generation_sources import Sources
+
+    schema = ModelSchema("image-to-video", fields=[
+        ParamField("prompt", required=True, is_primary_text=True, enum=["animate it"]),
+        ParamField("image_url", required=True, is_file=True),
+        ParamField("steps", type="integer", default=4, minimum=1, maximum=10),
+    ], primary_text_field="prompt", input_schema={
+        "type": "object", "required": ["prompt", "image_url"],
+        "properties": {"prompt": {"type": "string"}, "image_url": {"type": "string"},
+                       "steps": {"type": "integer", "minimum": 1, "maximum": 10}},
+    } if raw_schema else None)
+    entry = replace(candidate(kind="video", model=schema.endpoint_id), options={"steps": 4}, schema=schema.to_dict())
+    backend = FakeBackend([entry])
+    sources = Sources(None, INTERACTIVE)
+    monkeypatch.setattr(sources, "local_worker", lambda: entry.worker)
+    monkeypatch.setattr(sources, "fal_key", AsyncMock(return_value="unused"))
+    monkeypatch.setattr(sources, "fal_price", AsyncMock(return_value=dict(PRICE)))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    # Exercise production preparation, not a fake that merely imitates the error.
+    backend.prepare = sources.prepare
+    context = replace(INTERACTIVE, remembered_choices={"video": {**entry.choice(), "options": saved_options}})
+    resolver = Resolver(backend)
+    steps = saved_options.get("steps", 4)
+
+    for supplied in ({}, {"image_url": 123}):
+        with pytest.raises(ValueError) as error:
+            schema.validate_options({"steps": steps, **supplied}, "animate it")
+        output = await resolver.generate("video", {"prompt": "animate it", "options": supplied}, context)
+        assert output["status"] == "refused" and output["reason"] == "invalid_request"
+        assert output["error"] == str(error.value)
+        assert "remembered_unavailable" not in output
+        assert backend.calls == []
+
+    output = await resolver.generate("video", {"prompt": "animate it", "options": {
+        "image_url": "https://example.com/input.png",
+    }}, context)
+    assert output["status"] == "completed" and output["remembered"] is True
+    assert output["choice"]["model"] == schema.endpoint_id
+    assert output["choice"]["options"] == {"steps": steps, "image_url": "https://example.com/input.png"}
+    assert [call[0] for call in backend.calls] == ["reserve", "execute"]
+
+
+@pytest.mark.parametrize("saved_options, expected_status", [
+    ({"weights": ["bad"]}, "choose"),
+    ({"image_size": {"width": 128, "height": 128}}, "refused"),
+])
+async def test_remembered_options_keep_original_nested_constraints(monkeypatch, saved_options, expected_status):
+    from app.services.fal_schema import normalize_openapi, schema_service
+    from app.services.generation_sources import Sources
+    from tests.services.test_fal_schema import _openapi_with_input
+
+    schema = normalize_openapi("image-to-video", _openapi_with_input({
+        "prompt": {"type": "string"},
+        "image_url": {"type": "string"},
+        "weights": {"type": "array", "items": {"type": "integer"}},
+        "image_size": {"type": "object", "required": ["width", "height"],
+                       "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}},
+    }, ["prompt", "image_url"]))
+    entry = replace(candidate(kind="video", model=schema.endpoint_id), options={}, schema=schema.to_dict())
+    backend = FakeBackend([entry])
+    sources = Sources(None, INTERACTIVE)
+    monkeypatch.setattr(sources, "local_worker", lambda: entry.worker)
+    monkeypatch.setattr(sources, "fal_key", AsyncMock(return_value="unused"))
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    backend.prepare = sources.prepare
+    context = replace(INTERACTIVE, remembered_choices={"video": {**entry.choice(), "options": saved_options}})
+    output = await Resolver(backend).generate("video", {"prompt": "animate it", "options": {"image_url": 123}}, context)
+    assert output["status"] == expected_status
+    if expected_status == "choose":
+        assert output["remembered_unavailable"] is True
+    else:
+        with pytest.raises(ValueError) as error:
+            schema.validate_options({**saved_options, "image_url": 123}, "animate it")
+        assert output["reason"] == "invalid_request" and output["error"] == str(error.value)
+        assert "remembered_unavailable" not in output
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("saved_options", [{"unknown": 1}, {"steps": 99}, {"steps": "4"}, {"size": "gone"}])
+async def test_saved_fal_options_still_reoffer_unknown_or_invalid_fields(saved_options):
+    from app.services.fal_schema import ModelSchema, ParamField
+
+    schema = ModelSchema("image-to-video", fields=[
+        ParamField("prompt", required=True, is_primary_text=True),
+        ParamField("image_url", required=True, is_file=True),
+        ParamField("steps", type="integer", minimum=1, maximum=10),
+        ParamField("size", enum=["square", "wide"]),
+    ], primary_text_field="prompt")
+    entry = candidate(kind="video", model=schema.endpoint_id, schema=schema.to_dict())
+
+    class Strict(FakeBackend):
+        async def prepare(self, c, options, prompt):
+            return replace(c, options=schema.validate_options(options, prompt))
+
+    backend = Strict([entry])
+    context = replace(INTERACTIVE, remembered_choices={"video": {**entry.choice(), "options": saved_options}})
+    output = await Resolver(backend).generate("video", {"prompt": "animate it"}, context)
+    assert output["status"] == "choose" and output["remembered_unavailable"] is True
+    assert backend.calls == []
+
+
 async def test_unreadable_choices_skip_unattended_and_ask_interactively():
     backend = FakeBackend([candidate(), candidate(account="account-b", model="model-b")])
     output = await Resolver(backend).generate("image", {"prompt": "make it"}, RunContext(choices_unreadable=True))

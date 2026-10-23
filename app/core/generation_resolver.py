@@ -167,7 +167,18 @@ class Resolver:
 
     async def _saved_options_valid(self, candidate, choice) -> bool:
         try:
-            await self.backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, _NEUTRAL_PROMPT)
+            if candidate.source == "fal" and candidate.schema:
+                from app.services.fal_schema import ModelSchema, ParamField
+                # Preserve original property constraints (including nested
+                # objects/arrays and local refs), without requiring call inputs.
+                schema = ModelSchema(
+                    candidate.model, fields=[ParamField(**f) for f in candidate.schema["fields"]],
+                    primary_text_field=candidate.schema.get("primary_text_field"),
+                    input_schema=candidate.schema.get("input_schema"),
+                )
+                schema.validate_options(choice.get("options") or {}, _NEUTRAL_PROMPT, partial=True)
+            else:
+                await self.backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, _NEUTRAL_PROMPT)
         except ValueError:
             return False
         return True

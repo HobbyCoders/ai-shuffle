@@ -305,6 +305,14 @@
           "how": "Create a throwaway profile with tool selection mode disallow and blocked tool mcp__fluid_bundled__mcp__builtins__Remember. Start a fresh delegated Claude CLI session with that profile on a real worker. Inspect the actual assembled system prompt and bundled bridge tool list, not the model's recollection. Attempt Remember through that session's bundled bridge with a harmless unique test marker. Compare with an unblocked throwaway session, then archive both sessions and remove only the profile created for this check. Keep prompt artifacts private and do not read credential files.",
           "pass_when": "The unblocked control advertises Remember. In the blocked session, the system prompt does not list Remember as available or include memory-writing guidance; the bundled bridge omits mcp__builtins__Remember and refuses a direct call to it without writing the marker. Unrelated allowed tools remain listed and callable.",
           "past_bug": "#468: a CLI-spelling block withheld Remember at the bridge but the delegated system prompt still advertised it"
+        },
+        {
+          "id": "harness-basics.8",
+          "check": "Remembered generation choice with required call input",
+          "kind": "owner",
+          "how": "In a disposable account/chat with fal configured, remember an image-to-video or edit model with a required image input and valid saved settings (including an object-valued image_size where supported). Invoke generation without naming a source/model, first omitting the image input and then passing a wrong-type image input. Inspect the structured tool results; do not retry with valid media or submit a paid generation. Restore the disposable preferences and archive the chat.",
+          "pass_when": "Both calls return refused with reason invalid_request and the original input-validation error, not a choice card or remembered_unavailable. No reservation or provider submission occurs.",
+          "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
         }
       ]
     }
