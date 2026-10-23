@@ -135,7 +135,7 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && showDropdown) closeBranchDropdown();
+		if (e.key === 'Escape' && showDropdown) { e.preventDefault(); closeBranchDropdown(); }
 	}
 
 	onDestroy(closeBranchDropdown);

@@ -2,8 +2,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import SessionSidePanel from './SessionSidePanel.test.svelte';
 import { createLazyComponent } from '../deck/lazy/lazy-component';
-import { registerShortcut, clearAllShortcuts, NOT_HANDLED } from '$lib/services/keyboard';
+import { registerShortcut, clearAllShortcuts } from '$lib/services/keyboard';
+import { closeModalShortcut } from './close-modal-shortcut';
+import ConfirmDialog from '../ui/ConfirmDialog.svelte';
 import Stub from '../deck/lazy/__fixtures__/StubPanel.svelte';
+
+/** The panel decides once the key event has reached every listener. */
+const afterDispatch = () => new Promise((resolve) => setTimeout(resolve, 0));
+async function pressEscape(target: Window | Element = window) {
+	await fireEvent.keyDown(target, { key: 'Escape' });
+	await afterDispatch();
+}
 
 afterEach(() => { cleanup(); clearAllShortcuts(); });
 function mount(active: 'browser' | 'changes' | 'phone' | 'terminal' | 'artifact' = 'changes') {
@@ -54,10 +63,21 @@ describe('session side panel controls', () => {
 	});
 	it('closes browser with Escape but leaves changes confirmations to the diff view', async () => {
 		const { props, rerender } = mount('browser');
-		await fireEvent.keyDown(window, { key: 'Escape' });
+		await pressEscape();
 		expect(props.onClose).toHaveBeenCalledOnce();
 		await rerender({ ...props, active: 'changes' });
-		await fireEvent.keyDown(window, { key: 'Escape' });
+		await pressEscape();
+		expect(props.onClose).toHaveBeenCalledOnce();
+	});
+	it('leaves Escape inside the terminal to the shell', async () => {
+		const { props, container } = mount('terminal');
+		const xterm = container.ownerDocument.createElement('div');
+		xterm.className = 'xterm';
+		xterm.tabIndex = 0;
+		container.appendChild(xterm);
+		await pressEscape(xterm);
+		expect(props.onClose).not.toHaveBeenCalled();
+		await pressEscape();
 		expect(props.onClose).toHaveBeenCalledOnce();
 	});
 	it('keeps close in the content toolbar on mobile without resizing', async () => {
@@ -71,19 +91,19 @@ describe('session side panel controls', () => {
 	// AppPage registers the global Escape shortcut (`close-modal`) BEFORE the
 	// side panel mounts, and the shortcut manager's window listener is attached
 	// first. It used to preventDefault every Escape, so the panel never saw one.
+	// This drives AppPage's real shortcut definition.
 	describe('with the app\'s global Escape shortcut registered first', () => {
 		let modalOpen = false;
-		const registerCloseModal = () => registerShortcut({
-			id: 'close-modal', description: 'Close modal', key: 'Escape', category: 'general', allowInInput: true,
-			// Mirrors AppPage: close a modal if one is open, else leave Escape alone.
-			action: () => { if (modalOpen) modalOpen = false; else return NOT_HANDLED; },
-		});
+		const registerCloseModal = () => registerShortcut(closeModalShortcut([
+			{ isOpen: () => false, close: () => {} },
+			{ isOpen: () => modalOpen, close: () => { modalOpen = false; } },
+		]));
 
 		it.each(['phone', 'browser', 'terminal', 'artifact'] as const)('Escape closes the %s panel when no modal is open', async (view) => {
 			modalOpen = false;
 			registerCloseModal();
 			const { props } = mount(view);
-			await fireEvent.keyDown(window, { key: 'Escape' });
+			await pressEscape();
 			expect(props.onClose).toHaveBeenCalledOnce();
 		});
 
@@ -91,11 +111,30 @@ describe('session side panel controls', () => {
 			modalOpen = true;
 			registerCloseModal();
 			const { props } = mount('phone');
-			await fireEvent.keyDown(window, { key: 'Escape' });
+			await pressEscape();
 			expect(modalOpen).toBe(false);
 			expect(props.onClose).not.toHaveBeenCalled();
 			// The next Escape reaches the panel.
-			await fireEvent.keyDown(window, { key: 'Escape' });
+			await pressEscape();
+			expect(props.onClose).toHaveBeenCalledOnce();
+		});
+	});
+
+	// A dialog opened over the panel attaches its window listener AFTER the
+	// panel's, so the panel sees the Escape first. One Escape still closes only
+	// the dialog.
+	describe('with a dialog opened after the panel', () => {
+		it.each(['browser', 'phone', 'terminal', 'artifact'] as const)('Escape closes only the dialog over the %s panel; the next closes the panel', async (view) => {
+			registerShortcut(closeModalShortcut([]));
+			const { props } = mount(view);
+			const onCancel = vi.fn();
+			const dialog = render(ConfirmDialog, { open: true, message: 'Delete it?', onConfirm: vi.fn(), onCancel });
+			await pressEscape();
+			expect(onCancel).toHaveBeenCalledOnce();
+			expect(props.onClose).not.toHaveBeenCalled();
+			await dialog.rerender({ open: false, message: 'Delete it?', onConfirm: vi.fn(), onCancel });
+			await pressEscape();
+			expect(onCancel).toHaveBeenCalledOnce();
 			expect(props.onClose).toHaveBeenCalledOnce();
 		});
 	});

@@ -465,6 +465,7 @@
 
 	function handleRunnerKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && showRunnerMenu) {
+			e.preventDefault();
 			busyChoice = null;
 			closeDropdown('runner');
 		}

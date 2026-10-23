@@ -71,6 +71,7 @@
 	function onWindowKeydown(e: KeyboardEvent) {
 		if (!open) return;
 		if (e.key === 'Escape') {
+			e.preventDefault();
 			e.stopPropagation();
 			onCancel();
 		} else if (e.key === 'Enter') {

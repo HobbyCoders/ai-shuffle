@@ -499,7 +499,7 @@
 	function handleKeydown(e: KeyboardEvent) {
 		// A popover closes itself on Escape (back to the panel); the panel only
 		// closes when it is the thing on top.
-		if (e.key === 'Escape' && $openHeaderDropdown === 'git-panel') closePanel();
+		if (e.key === 'Escape' && $openHeaderDropdown === 'git-panel') { e.preventDefault(); closePanel(); }
 	}
 
 	// Clear our shared-store flag on unmount so the panel doesn't re-open on remount.

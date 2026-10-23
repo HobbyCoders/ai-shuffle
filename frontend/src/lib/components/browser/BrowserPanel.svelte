@@ -506,6 +506,7 @@
 			e.preventDefault();
 			sendElementPrompt();
 		} else if (e.key === 'Escape') {
+			e.preventDefault();
 			clearSelection();
 		}
 	}
@@ -883,7 +884,7 @@
 						inputmode="url"
 						aria-label="Page address"
 						onkeydown={(e) => {
-							if (e.key === 'Escape') cancelEditing();
+							if (e.key === 'Escape') { e.preventDefault(); cancelEditing(); }
 						}}
 					/>
 				{:else}

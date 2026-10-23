@@ -36,6 +36,7 @@ vi.mock('$lib/stores/gitCheckoutAction', () => ({ checkoutBranchWithToast }));
 
 import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 import BranchSelector from './BranchSelector.svelte';
+import SessionSidePanel from '../layout/SessionSidePanel.test.svelte';
 
 const b = (name: string, remote = false) => ({ name, remote, current: false });
 
@@ -156,6 +157,21 @@ describe('BranchSelector', () => {
 		await fireEvent.click(screen.getByRole('menuitem', { name: 'New branch...' }));
 		expect(onClickNewBranch).toHaveBeenCalledOnce();
 		expect(screen.queryByRole('menu')).toBeNull();
+	});
+
+	it('with a side panel open, one Escape closes only the menu; the next closes the panel', async () => {
+		// The panel mounts first, so its window listener sees Escape first.
+		const onClose = vi.fn();
+		render(SessionSidePanel, { active: 'browser', expanded: false, width: 640, onClose, onResize: vi.fn(), onExpand: vi.fn() });
+		render(BranchSelector);
+		await open();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(onClose).not.toHaveBeenCalled();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(onClose).toHaveBeenCalledOnce();
 	});
 
 	it('closes when another header dropdown opens', async () => {

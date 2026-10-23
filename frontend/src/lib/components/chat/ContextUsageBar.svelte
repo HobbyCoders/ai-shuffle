@@ -899,7 +899,7 @@
 		}
 	}
 	function handleEscape(e: KeyboardEvent) {
-		if (e.key === 'Escape' && open) setOpen(false);
+		if (e.key === 'Escape' && open) { e.preventDefault(); setOpen(false); }
 	}
 
 	onMount(() => {

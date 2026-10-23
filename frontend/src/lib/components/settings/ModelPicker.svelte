@@ -157,6 +157,7 @@
 	}
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
+		e.preventDefault();
 		open = false;
 		// This Escape closed the panel; keep it from also closing a dialog the
 		// picker sits in (those listen on window, after this document listener).

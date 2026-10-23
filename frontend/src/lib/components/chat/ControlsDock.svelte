@@ -146,6 +146,7 @@
 
 	function handleWindowKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && openPopover) {
+			e.preventDefault();
 			e.stopPropagation();
 			closePopover();
 		}

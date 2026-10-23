@@ -33,7 +33,8 @@
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { registerShortcut, NOT_HANDLED, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { closeModalShortcut } from './close-modal-shortcut';
 	import { getTags, type Tag } from '$lib/api/client';
 
 	// Layout components
@@ -355,22 +356,12 @@
 				category: 'general',
 				action: () => { showKeyboardShortcuts = true; }
 			}),
-			registerShortcut({
-				id: 'close-modal',
-				description: 'Close modal',
-				key: 'Escape',
-				category: 'general',
-				allowInInput: true,
-				action: () => {
-					if (showKeyboardShortcuts) showKeyboardShortcuts = false;
-					else if (showSpotlight) showSpotlight = false;
-					else if (showImportModal) showImportModal = false;
-					else if (showTagManager) showTagManager = false;
-					// Nothing to close: leave Escape un-prevented so the side panel
-					// (browser, terminal, phone) can take it.
-					else return NOT_HANDLED;
-				}
-			}),
+			registerShortcut(closeModalShortcut([
+				{ isOpen: () => showKeyboardShortcuts, close: () => { showKeyboardShortcuts = false; } },
+				{ isOpen: () => showSpotlight, close: () => { showSpotlight = false; } },
+				{ isOpen: () => showImportModal, close: () => { showImportModal = false; } },
+				{ isOpen: () => showTagManager, close: () => { showTagManager = false; } }
+			])),
 			registerShortcut({
 				id: 'open-settings',
 				description: 'Open settings',

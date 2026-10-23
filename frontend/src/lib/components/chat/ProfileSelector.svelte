@@ -102,7 +102,8 @@
 	}
 
 	function handleEscape(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
+		if (e.key === 'Escape' && showProfileDropdown) {
+			e.preventDefault();
 			closeProfileDropdown();
 		}
 	}
