@@ -72,6 +72,10 @@ def test_the_frontend_build_emits_the_phone_ui():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     scripts = json.loads((root / "frontend/package.json").read_text())["scripts"]
-    assert "build-mobile-ui.mjs" in scripts["postbuild"]
+    assert "build-mobile-ui.mjs --with-frontend" in scripts["build"]
+    assert "build-mobile-ui.mjs --copy" in scripts["postbuild"]
+    # The phone build may run beside the desktop one only when memory allows both.
+    builder = (root / "frontend/scripts/build-mobile-ui.mjs").read_text()
+    assert "PARALLEL_MIN_AVAILABLE" in builder and "await frontend();\n\t\tawait mobile();" in builder
     assert "paths" in (root / "mobile/svelte.config.js").read_text()
     assert "base: '/mobile'" in (root / "mobile/svelte.config.js").read_text()

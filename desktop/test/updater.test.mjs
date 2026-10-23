@@ -3,13 +3,17 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import path from 'node:path';
 import { test } from 'node:test';
+import { createRequire } from 'node:module';
+
+// The updater's own timing helper loads for real, as in the packaged app.
+const timedPhaseModule = createRequire(import.meta.url)('../dist/main/timed-phase.js');
 
 function fixture(env = {}, modules = {}, platform = 'win32') {
  const calls = []; const timers = [];
  const app = { relaunch: options => calls.push(options), quit: () => calls.push('quit') };
  const module = { exports: {} };
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
-  exports: module.exports, module, require: id => id === 'electron' ? { app } : modules[id] ?? path,
+  exports: module.exports, module, require: id => id === 'electron' ? { app } : modules[id] ?? (id === './timed-phase' ? timedPhaseModule : path),
   process: { env, platform, versions: {electron:'44.2.0'} }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
   setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date, console
  });

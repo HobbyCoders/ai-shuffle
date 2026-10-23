@@ -37,6 +37,9 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
     const snapshot = path.join(this.cluster, 'update-snapshot');
     await fs.mkdir(snapshot, { mode: 0o700 });
     const manifest: Record<string, string> = {};
+    // Timings for launch.log (#430); the checks below are unchanged.
+    const started = Date.now();
+    const stamp = (text: string) => console.log(`[${new Date().toISOString()}] database restore point: ${text} after ${((Date.now() - started) / 1000).toFixed(1)}s`);
     // The same walk and key order as inventory() in database-restore.ts: validate() compares the JSON text.
     const copy = async (relative: string): Promise<void> => {
       const from = path.join(source, relative), to = path.join(snapshot, 'data', relative);
@@ -60,8 +63,10 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
     await copy('');
     await durableJson(path.join(snapshot, 'manifest.json'), manifest);
     await syncDirectory(this.cluster);
+    stamp(`copied ${Object.keys(manifest).length} entries`);
     // The launcher validates the copy the same way before it starts the update.
     await this.validate();
+    stamp('copy validated');
     if (JSON.stringify(before) !== JSON.stringify(await shape(source))) throw new Error('Database changed while taking its restore point');
   }
 }

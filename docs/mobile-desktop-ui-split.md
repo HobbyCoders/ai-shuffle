@@ -133,8 +133,11 @@ When you add mobile-specific styling to a shared component, add it to
 
 1. `mobile/` builds with `paths.base = '/mobile'` and an `index.html`
    fallback (client-only, no service worker, no manifest).
-2. The frontend build's `postbuild` runs `frontend/scripts/build-mobile-ui.mjs`,
-   which builds `mobile/` into `frontend/build/mobile`. Every install path
+2. `npm run build` in `frontend/` runs `frontend/scripts/build-mobile-ui.mjs`,
+   which builds the desktop UI and `mobile/` (at the same time when at least
+   8 GB of memory is free, one after the other otherwise; either failure fails
+   the build). Its `postbuild` then copies `mobile/build` into
+   `frontend/build/mobile`. Every install path
    copies `frontend/build` into `app/static` (Docker image, source archive,
    desktop source build), so every worker has `app/static/mobile`. A build
    without it fails unless `SHUFFLE_SKIP_MOBILE_UI=1` is set on purpose.

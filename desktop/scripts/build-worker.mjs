@@ -114,13 +114,16 @@ function parseArgs(argv) {
 	return out;
 }
 
+/** Timestamped, so the desktop build.log shows what each step cost (#430). */
 function log(msg) {
-	console.log(`[build-worker] ${msg}`);
+	console.log(`[${new Date().toISOString()}] [build-worker] ${msg}`);
 }
 
 function run(cmd, cmdArgs, opts = {}) {
 	log(`$ ${cmd} ${cmdArgs.join(' ')}${opts.cwd ? `  (in ${path.relative(repoDir, opts.cwd) || '.'})` : ''}`);
+	const started = Date.now();
 	const result = spawnSync(cmd, cmdArgs, { stdio: 'inherit', shell: false, windowsHide: true, ...opts });
+	log(`${result.status === 0 ? 'done' : 'failed'} after ${((Date.now() - started) / 1000).toFixed(1)}s`);
 	if (result.status !== 0) {
 		throw new Error(`${cmd} ${cmdArgs.join(' ')} exited with ${result.status ?? result.signal}`);
 	}
