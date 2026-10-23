@@ -54,7 +54,7 @@ async def _wait_gone(pid: int, timeout: float = 5.0) -> bool:
 async def _spawn_cli_that_backgrounds_a_command() -> tuple[asyncio.subprocess.Process, int]:
     """A stand-in CLI: starts a long command in the background, exits on stdin EOF."""
     proc = await asyncio.create_subprocess_exec(
-        "sh", "-c", "sleep 120 & echo $!; cat >/dev/null",
+        "sh", "-c", "sleep 120 </dev/null >/dev/null 2>&1 & echo $!; cat >/dev/null",
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
