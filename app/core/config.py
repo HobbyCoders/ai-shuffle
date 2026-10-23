@@ -968,7 +968,9 @@ class Settings(BaseSettings):
     park_watchdog_warn_seconds: int = 1800  # 30 minutes
     # Hard ceiling: past this the sweep forces the terminal frames. Generous —
     # a legitimate overnight CI run or training job must never be reaped by a
-    # timer. 0 disables forcing (report only).
+    # timer. 0 disables forcing (report only). A Task worker whose session
+    # wrote within the warn window, or is itself parked on live work, is never
+    # forced: the park keeps waiting for it.
     # Env: PARK_WATCHDOG_FORCE_SECONDS.
     # PR 2: migrate this area-owned legacy behaviour field.
     park_watchdog_force_seconds: int = 3600  # 60 minutes

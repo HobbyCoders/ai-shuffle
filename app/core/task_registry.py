@@ -658,6 +658,18 @@ class TaskRegistry:
         key = (task_id, completion_id) if completion_id else task_id
         return key in self._woken.get(session_id, set())
 
+    def rearm_wake(self, session_id: str, task_id: str) -> None:
+        """Let ``task_id`` drive one more wake after a wake the APP forced.
+
+        The park watchdog settles a stalled task and delivers a "killed" frame
+        on its behalf; that spends the task's late-frame latch. If the worker
+        was only quiet, not gone, its genuine report arrives later and would be
+        dropped as a duplicate. Clearing the latch lets that report wake the
+        parent once (``mark_woken`` latches it again). Missing ids are a no-op.
+        """
+        if session_id and task_id:
+            self._woken.get(session_id, set()).discard(task_id)
+
     def suppress_wake(self, session_id: str, task_id: str) -> bool:
         """Prevent a user-canceled task from waking its parent.
 
