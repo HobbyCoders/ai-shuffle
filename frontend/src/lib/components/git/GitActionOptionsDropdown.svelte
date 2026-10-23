@@ -113,7 +113,7 @@
 		return () => window.removeEventListener('keydown', onKeydown);
 	});
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+		if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
 	}
 
 	const cannotSubmit = $derived(busy || !!submitBlocked);

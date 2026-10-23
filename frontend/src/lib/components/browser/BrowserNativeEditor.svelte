@@ -129,7 +129,8 @@
 			if (e.key === 'Tab') e.preventDefault();
 			onNavKey(e.key, e.code || e.key, navCode, (e.altKey ? 1 : 0) | (e.ctrlKey || e.metaKey ? 2 : 0) | (e.shiftKey ? 8 : 0));
 		}
-		if (e.key === 'Escape') el?.blur();
+		// Leaving the page's field is this Escape's whole job; the panel stays.
+		if (e.key === 'Escape') { e.preventDefault(); el?.blur(); }
 		if (e.key === 'Enter' && field.type !== 'textarea' && !e.isComposing) { e.preventDefault(); onEnter(); }
 	}
 </script>

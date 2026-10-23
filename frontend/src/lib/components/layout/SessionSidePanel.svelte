@@ -2,6 +2,7 @@
 	import { onDestroy, type Snippet } from 'svelte';
 	import { Maximize2, Minimize2, X } from 'lucide-svelte';
 	import type { SidePanelView } from '$lib/stores/side-panel.svelte';
+	import { whenEscapeUnclaimed } from '$lib/utils/escape-layers';
 	let { active, expanded, width, mobile = false,
 		onClose, onResize, onExpand, children }: {
 		active: SidePanelView; expanded: boolean; width: number; mobile?: boolean;
@@ -11,7 +12,8 @@
 	let element: HTMLElement;
 	let resizing = $state(false);
 	let cleanupResize = () => {};
-	onDestroy(() => cleanupResize());
+	let cancelEscape = () => {};
+	onDestroy(() => { cleanupResize(); cancelEscape(); });
 	function startResize(event: PointerEvent) {
 		if (event.button !== 0) return;
 		event.preventDefault();
@@ -34,13 +36,17 @@
 </script>
 
 <svelte:window onkeydown={(e) => {
+	if (e.key !== 'Escape') return;
 	// Changes owns Escape so its confirmation dialog gets the first dismissal.
-	if ((active === 'browser' || active === 'artifact') && e.key === 'Escape' && !e.defaultPrevented) onClose();
-	// On the phone screen Esc is Android's Back; the screen marks it handled.
-	else if (active === 'phone' && e.key === 'Escape' && !e.defaultPrevented) onClose();
+	if (active === 'changes') return;
 	// Inside a terminal, Esc belongs to the shell (vim, less, readline).
-	else if (active === 'terminal' && e.key === 'Escape' && !e.defaultPrevented
-		&& !(e.target instanceof Element && e.target.closest('.xterm, .tpanel input, .tpanel [role="alertdialog"]'))) onClose();
+	if (active === 'terminal' && e.target instanceof Element
+		&& e.target.closest('.xterm, .tpanel input, .tpanel [role="alertdialog"]')) return;
+	// The panel is the bottom layer: it closes only if no dialog, popover or
+	// input claimed this Escape (on the phone screen Esc is Android's Back, and
+	// the screen claims it the same way).
+	cancelEscape();
+	cancelEscape = whenEscapeUnclaimed(e, () => onClose());
 }} />
 
 <aside bind:this={element} class="side-panel" class:expanded class:mobile class:resizing

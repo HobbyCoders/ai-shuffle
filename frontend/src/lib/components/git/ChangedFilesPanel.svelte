@@ -17,8 +17,9 @@
 	import type { FileChangeInfo } from '$lib/api/git';
 	import { platform } from '$lib/stores/platform.svelte';
 	import ReviewDiffPanel from './ReviewDiffPanel.svelte';
-	import type { Snippet } from 'svelte';
+	import { onDestroy, type Snippet } from 'svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import { whenEscapeUnclaimed } from '$lib/utils/escape-layers';
 	import { notify } from '$lib/stores/notifications';
 
 	interface Props {
@@ -288,6 +289,9 @@
 		}
 	}
 
+	let cancelEscape = () => {};
+	onDestroy(() => cancelEscape());
+
 	function handleKeydown(e: KeyboardEvent) {
 		if (!open || e.defaultPrevented) return;
 		const target = e.target instanceof HTMLElement ? e.target : null;
@@ -295,13 +299,21 @@
 		if (embedded && e.key !== 'Escape' && (!target || !panelElement?.contains(target)
 			|| target.closest('input, textarea, select, [contenteditable="true"]'))) return;
 		if (e.key === 'Escape') {
-			e.preventDefault();
 			// Modal layering: Escape dismisses an open confirm dialog first,
 			// leaving the panel open. A second Escape then closes the panel.
 			if (pendingConfirm) {
+				e.preventDefault();
 				pendingConfirm = null;
 				return;
 			}
+			// Docked in the side panel, this is the bottom layer: close only if
+			// no popover or dialog elsewhere claimed this Escape.
+			if (embedded) {
+				cancelEscape();
+				cancelEscape = whenEscapeUnclaimed(e, () => { if (open) onClose(); });
+				return;
+			}
+			e.preventDefault();
 			onClose();
 			return;
 		}

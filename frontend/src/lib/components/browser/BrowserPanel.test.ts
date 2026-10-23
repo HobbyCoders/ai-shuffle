@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import BrowserPanel from './BrowserPanel.svelte';
+import SessionSidePanel from '../layout/SessionSidePanel.test.svelte';
 import type { BrowserStreamConfig } from '$lib/browser-panel/stream-client';
 import type { BrowserWorkspaceState } from '$lib/browser-panel/workspace';
 
@@ -144,5 +145,23 @@ describe('browser control handoff', () => {
   mocks.config!.onCommandResult?.(release.id, true);
   await tick();
   expect(view.getByText('Agent control')).toBeTruthy();
+ });
+});
+
+describe('Escape layering with the side panel', () => {
+ it('Escape in the address input cancels the edit only; the next Escape closes the panel', async () => {
+  // The side panel mounts first, so its window listener sees Escape first.
+  const onClose = vi.fn();
+  render(SessionSidePanel, { active: 'browser', expanded: false, width: 640, onClose, onResize: vi.fn(), onExpand: vi.fn() });
+  const view = await setup();
+  await fireEvent.click(view.container.querySelector('.address-display')!);
+  const input = view.getByRole('textbox', { name: 'Page address' });
+  await fireEvent.keyDown(input, { key: 'Escape' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(view.queryByRole('textbox', { name: 'Page address' })).toBeNull();
+  expect(onClose).not.toHaveBeenCalled();
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(onClose).toHaveBeenCalledOnce();
  });
 });

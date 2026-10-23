@@ -276,7 +276,7 @@
 	function closePanel() { panel = null; }
 	function openInstallerPage() { window.open(INSTALLER_URL, '_blank', 'noopener,noreferrer'); }
 	function panelKey(event: KeyboardEvent) {
-		if (panel && event.key === 'Escape') { closePanel(); buttonEl?.focus(); }
+		if (panel && event.key === 'Escape') { event.preventDefault(); closePanel(); buttonEl?.focus(); }
 	}
 	/** Plain text of what is running, for the bell: "Fix login (Run tests); Update docs". */
 	function busyText(workers: BusyGroup[]): string {

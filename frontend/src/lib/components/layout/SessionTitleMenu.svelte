@@ -125,6 +125,7 @@
 
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && open) {
+			e.preventDefault();
 			e.stopPropagation();
 			if (sheet) closeSheet();
 			else closeMenu();

@@ -658,6 +658,7 @@
 		else if (sheet) sheet = null;
 		else if (selecting) cancelSelection();
 		else return;
+		e.preventDefault();
 		e.stopPropagation();
 	}
 

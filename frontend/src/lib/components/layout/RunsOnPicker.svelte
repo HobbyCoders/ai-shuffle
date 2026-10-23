@@ -170,7 +170,7 @@
 		if (open && wrapRef && !wrapRef.contains(target) && !menuRef?.contains(target)) open = false;
 	}
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && open) closeMenu(true);
+		if (e.key === 'Escape' && open) { e.preventDefault(); closeMenu(true); }
 	}
 </script>
 

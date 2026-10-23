@@ -70,6 +70,7 @@
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape' || !showPanel) return;
+		e.preventDefault();
 		// Hand focus back to the bell rather than dropping it on <body>.
 		const focusWasInside = !!rootRef?.contains(document.activeElement);
 		closeDropdown('notifications');

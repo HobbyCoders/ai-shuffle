@@ -62,6 +62,7 @@
 	// Handle escape key
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && open) {
+			e.preventDefault();
 			onClose();
 		}
 	}

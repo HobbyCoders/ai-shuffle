@@ -25,7 +25,23 @@ describe('embedded changes panel', () => {
 		window.dispatchEvent(event);
 		expect(event.defaultPrevented).toBe(false);
 		await fireEvent.keyDown(window, { key: 'Escape' });
+		// Docked, it decides once every listener has seen the Escape.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(onClose).toHaveBeenCalledOnce();
+	});
+	it('stays open when a popover attached after it claims the Escape', async () => {
+		const onClose = vi.fn();
+		render(ChangedFilesPanel, { projectId: 'test', open: true, reviewMode: true,
+			embedded: true, onClose, onViewDiff: vi.fn() });
+		const popover = (e: KeyboardEvent) => { if (e.key === 'Escape') e.preventDefault(); };
+		window.addEventListener('keydown', popover);
+		try {
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(onClose).not.toHaveBeenCalled();
+		} finally {
+			window.removeEventListener('keydown', popover);
+		}
 	});
 	it('preserves the standalone close button and modal layout', async () => {
 		const onClose = vi.fn();

@@ -29,7 +29,7 @@
 			if (root && !root.contains(event.target as Node)) onOpenChange(false);
 		};
 		const escape = (event: KeyboardEvent) => {
-			if (event.key === 'Escape') onOpenChange(false);
+			if (event.key === 'Escape') { event.preventDefault(); onOpenChange(false); }
 		};
 		document.addEventListener('pointerdown', close, true);
 		document.addEventListener('keydown', escape);
