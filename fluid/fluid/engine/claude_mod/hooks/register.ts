@@ -10,7 +10,7 @@
 import type { Register } from 'claude-code'
 import { withFluidNote } from './compact.ts'
 import { classify, enabled, lastUserRequest, refusal, replacementInput } from './file_guard.ts'
-import { compactedRows, compactionBridge, mounted } from './mechanical.ts'
+import { compactedRows, compactionBridge, mounted, postedRows } from './mechanical.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
@@ -87,12 +87,14 @@ export const register: Register = (on) => {
       try {
         const target = compactionBridge(bridge)
         if (target === null) throw new Error('bridge')
+        reason = 'unreadable messages'
+        const rows = postedRows(e.messages)
         reason = 'bridge transport error'
         const response = await Promise.race([
           $.http.fetch(target.url, {
             method: 'POST',
             headers: { 'content-type': 'application/json', authorization: `Bearer ${target.token}` },
-            body: JSON.stringify({ v: 1, messages: e.messages }),
+            body: JSON.stringify({ v: 1, messages: rows }),
             ...(target.socketPath ? { socketPath: target.socketPath } : {}),
           }),
           $.clock.sleep(POST_TIMEOUT_MS).then(() => { reason = 'bridge timeout'; throw new Error('timeout') }),
@@ -102,7 +104,7 @@ export const register: Register = (on) => {
           throw new Error('status')
         }
         reason = 'invalid bridge response'
-        return { messages: compactedRows(JSON.parse(response.text), e.messages) }
+        return { messages: compactedRows(JSON.parse(response.text), rows) }
       } catch {
         try { await $.ui.log(`Fluid compaction fallback: ${reason}`, { to: 'debug' }) } catch { /* Best effort. */ }
         return next(e)

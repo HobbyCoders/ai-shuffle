@@ -55,6 +55,71 @@ def _signature(row: dict[str, Any]) -> str:
     }, sort_keys=True, ensure_ascii=False, allow_nan=False)
 
 
+def _call_row(row: Any) -> bool:
+    return (isinstance(row, dict) and row.get("role") == "assistant"
+            and isinstance(row.get("toolUses"), list) and bool(row["toolUses"])
+            and not row.get("toolResults"))
+
+
+def _result_row(row: Any) -> bool:
+    return (isinstance(row, dict) and row.get("role") == "user" and row.get("text") == ""
+            and row.get("toolUses") == [] and isinstance(row.get("toolResults"), list)
+            and bool(row["toolResults"]))
+
+
+def _ids(items: list[Any], key: str) -> set[Any]:
+    return {item.get(key) for item in items if isinstance(item, dict)}
+
+
+def _tool_groups(rows: list[Any]) -> list[tuple[int, int]]:
+    """``[start, end)`` of each tool group: call rows and the result rows that
+    answer them, in whatever order the CLI lists them, until no call is open.
+
+    Claude Code runs a tool while it still streams the rest of the message, so
+    one parallel group can read call, call, result, call, result, result. No
+    model turn can start while a call is open, so every call row seen then is
+    part of the same group.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(rows):
+        if not _call_row(rows[i]):
+            i += 1
+            continue
+        pending: set[Any] = set()
+        j = i
+        while j < len(rows):
+            row = rows[j]
+            if _call_row(row):
+                pending |= _ids(row["toolUses"], "tool_use_id")
+            elif _result_row(row) and _ids(row["toolResults"], "tool_use_id") <= pending:
+                pending -= _ids(row["toolResults"], "tool_use_id")
+            else:
+                break
+            j += 1
+            if not pending:
+                break
+        if not pending and j > i + 1:
+            spans.append((i, j))
+        i = max(j, i + 1)
+    return spans
+
+
+def group_tool_calls(rows: Any) -> Any:
+    """Each tool group as one block of calls, then its results, in their order.
+
+    The order the model's API request has. Anything else (no list, a group
+    that never closes) is returned as it came, for ``validate_rows`` to judge.
+    """
+    if not isinstance(rows, list):
+        return rows
+    grouped = list(rows)
+    for start, end in _tool_groups(rows):
+        span = rows[start:end]
+        grouped[start:end] = [r for r in span if _call_row(r)] + [r for r in span if not _call_row(r)]
+    return grouped
+
+
 def validate_rows(rows: Any, *, handles: bool) -> None:
     if not isinstance(rows, list) or not 0 < len(rows) <= MAX_MESSAGES:
         raise ValueError("invalid message count")
@@ -120,15 +185,24 @@ def _mapped_nodes(rows: list[dict[str, Any]], nodes: list[SessionNode]) -> list[
     contiguous same-role nodes, retaining a real end-node anchor for recall.
     Result rows spanning different stored nodes stay opaque: a one-node
     placeholder must never promise more than that node can recover.
+
+    A row whose handle is the uuid of exactly one stored frame with the same
+    projection is that frame, wherever the cursor is: the CLI lists a parallel
+    group's calls before their results, while the stream stored them in the
+    order they ran (call, result, call, result).
     """
     signatures: dict[str, list[int]] = {}
+    node_signatures: list[str] = []
     uuids: dict[str, list[int]] = {}
     for i, node in enumerate(nodes):
-        signatures.setdefault(_signature(project(node.message)), []).append(i)
+        node_signature = _signature(project(node.message))
+        node_signatures.append(node_signature)
+        signatures.setdefault(node_signature, []).append(i)
         uuid = node.message.provider_meta.get("claude_uuid")
         if isinstance(uuid, str):
             uuids.setdefault(uuid, []).append(i)
     cursor = 0
+    used: set[int] = set()
     mapped: list[SessionNode | None] = []
     # Keep indices monotone even when the stored path contains an older CLI
     # prefix that has already been summarized on the delegated side.
@@ -138,7 +212,12 @@ def _mapped_nodes(rows: list[dict[str, Any]], nodes: list[SessionNode]) -> list[
         match: tuple[int, int, Message] | None = None
         uuid_group = [j for j in uuids.get(row["handle"], []) if j >= cursor]
         preferred = [j for j in candidates if j in uuid_group]
-        if len(preferred) == 1 or len(candidates) == 1:
+        same_frame = [j for j in uuids.get(row["handle"], [])
+                      if j not in used and node_signatures[j] == signature]
+        if len(same_frame) == 1:
+            j = same_frame[0]
+            match = (j, j, nodes[j].message)
+        elif len(preferred) == 1 or len(candidates) == 1:
             j = preferred[0] if len(preferred) == 1 else candidates[0]
             match = (j, j, nodes[j].message)
         elif (uuid_group and not row.get("toolResults")
@@ -152,9 +231,10 @@ def _mapped_nodes(rows: list[dict[str, Any]], nodes: list[SessionNode]) -> list[
         if match is None:
             mapped.append(None)
         else:
-            _, end, message = match
+            start, end, message = match
             mapped.append(SessionNode(nodes[end].node_id, nodes[end].parent_id, message))
-            cursor = end + 1
+            used.update(range(start, end + 1))
+            cursor = max(cursor, end + 1)
     return mapped
 
 
@@ -171,12 +251,18 @@ def _buildable(message: Message) -> bool:
 def compact_messages(
     rows: Any, nodes: list[SessionNode], *, config: CompactionConfig | None = None,
 ) -> list[dict[str, Any]]:
+    rows = group_tool_calls(rows)
     validate_rows(rows, handles=True)
     anchors = _mapped_nodes(rows, nodes)
     # Native turn digests quote bounded error excerpts. This experiment's
     # stronger contract keeps error results verbatim even at tiers 2 and 3.
     mapped = [None if any(r.get("isError") for r in row.get("toolResults", [])) else node
               for row, node in zip(rows, anchors)]
+    # A tool group is kept whole or compacted whole: a run that ended inside
+    # one would leave its kept call or result without the other half.
+    for start, end in _tool_groups(rows):
+        if any(node is None for node in mapped[start:end]):
+            mapped[start:end] = [None] * (end - start)
     out: list[dict[str, Any]] = []
     i = 0
     while i < len(rows):
@@ -222,6 +308,14 @@ def compact_messages(
             left = alternating[-1]
             if left["toolUses"] or row.get("toolResults"):
                 if not can_build(left) or not can_build(row):
+                    # A kept row holds what a rebuild cannot (a tool_reference,
+                    # an image, signed thinking): the group stays as the
+                    # engine's own rows, calls then results, which the mod
+                    # accepts as one group.
+                    if _call_row(left) and _call_row(row) or (
+                            _result_row(left) and _result_row(row)):
+                        alternating.append(row)
+                        continue
                     raise ValueError("cannot alternate an opaque tool group")
                 # A newly built parallel group, not a kept handle: preserve
                 # every result, id, input and error bit without fake messages

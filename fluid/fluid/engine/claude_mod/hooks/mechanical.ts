@@ -8,6 +8,28 @@ type Row = {
   toolResults?: { tool_use_id: string; text: string; isError?: boolean }[]
 }
 
+/**
+ * The rows as the bridge is sent them: the fields Fluid matches and rebuilds
+ * from, nothing else. The engine also lists each tool outcome under its call
+ * (`result`, `text`) and again as `result` beside its tool_result: four copies
+ * of every output, and an image-heavy session's post then failed in the
+ * engine's own fetch before it reached the bridge. A row handed back with its
+ * handle stands as the engine has it, so none of that has to travel.
+ */
+export function postedRows(messages: readonly Row[]): Row[] {
+  return messages.map((m) => ({
+    role: m.role,
+    text: m.text,
+    toolUses: m.toolUses.map((u) => ({ tool_use_id: u.tool_use_id, tool: u.tool, input: u.input })),
+    ...(m.toolResults === undefined ? {} : {
+      toolResults: m.toolResults.map((r) => ({
+        tool_use_id: r.tool_use_id, text: r.text, ...(r.isError === undefined ? {} : { isError: r.isError }),
+      })),
+    }),
+    ...(m.handle === undefined ? {} : { handle: m.handle }),
+  }))
+}
+
 export function compactedRows(body: unknown, originals: readonly Row[]): Row[] {
   if (!body || typeof body !== 'object' || !('messages' in body)) throw new Error('validation')
   const rows = body.messages
@@ -20,9 +42,20 @@ export function compactedRows(body: unknown, originals: readonly Row[]): Row[] {
   const pending = new Set<string>()
   let previous: string | undefined
   for (const row of rows) {
-    if (!row || (row.role !== 'user' && row.role !== 'assistant') || row.role === previous ||
+    if (!row || (row.role !== 'user' && row.role !== 'assistant') ||
         typeof row.text !== 'string' || !Array.isArray(row.toolUses) ||
         (row.toolResults !== undefined && !Array.isArray(row.toolResults))) throw new Error('validation')
+    // Roles alternate. An open tool group (a parallel group kept as the
+    // engine's own rows) may continue its calls over consecutive assistant
+    // rows, then its results over consecutive user rows; nothing else comes
+    // between a call and its result.
+    if (pending.size) {
+      const moreCalls = row.role === 'assistant' && previous === 'assistant' && row.toolUses.length > 0
+      const moreResults = row.role === 'user' && (row.toolResults?.length ?? 0) > 0
+      if (!moreCalls && !moreResults) throw new Error('validation')
+    } else if (row.role === previous) {
+      throw new Error('validation')
+    }
     previous = row.role
     if (row.handle !== undefined) {
       if (typeof row.handle !== 'string' || seen.has(row.handle) ||
@@ -37,7 +70,6 @@ export function compactedRows(body: unknown, originals: readonly Row[]): Row[] {
       if (!result || typeof result.text !== 'string' || !pending.delete(result.tool_use_id) ||
           (result.isError !== undefined && typeof result.isError !== 'boolean')) throw new Error('validation')
     }
-    if (pending.size) throw new Error('validation')
     for (const use of row.toolUses) {
       if (!use || typeof use.tool_use_id !== 'string' || !use.tool_use_id ||
           typeof use.tool !== 'string' || !use.input || typeof use.input !== 'object' ||
