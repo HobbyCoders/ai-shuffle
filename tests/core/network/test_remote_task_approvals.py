@@ -263,7 +263,7 @@ def test_the_starter_chat_answers_in_conversation(workers, monkeypatch, proxies,
     async def say_yes(row):
         confirm = row["payload"]["assistant_confirm"]
         assert "df -h /mnt/user" in confirm["question"] and "on ServerWorker" in confirm["question"]
-        assert await assistant_confirm.on_owner_message("caller", "yes") == "approved"
+        assert (await assistant_confirm.on_owner_message("caller", "yes"))["decision"] == "approved"
     _, result = round_trip(a, b, proxies, held, ask_kwargs(child), say_yes)
     assert isinstance(result, PermissionResultAllow)
 

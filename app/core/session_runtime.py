@@ -1436,6 +1436,12 @@ class SessionRuntime:
             )
             if self._abort_reason == "recording_failed":
                 return
+            if not resume and not already_recorded:
+                # The owner's message answered an approval in words: its outcome
+                # goes right after the message it came from (#484).
+                from app.core import assistant_confirm
+
+                await assistant_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
             completion_frames, prompt = await refresh_completion_prompt()
             if completion_frames:
                 # The wake turn is the claimed completions' delivery point, so this
@@ -2303,6 +2309,11 @@ class SessionRuntime:
                 )
                 if not recorded:
                     return
+                # An approval answered in words: its outcome follows the
+                # message, wherever the message lands (#484).
+                from app.core import assistant_confirm
+
+                await assistant_confirm.after_owner_message(self.session_id, row.get("payload"))
                 await self._persist_user_message(
                     content, profile_id=profile_id, source=row.get("source") or "user",
                 )

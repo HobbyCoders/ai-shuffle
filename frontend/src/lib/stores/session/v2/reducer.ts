@@ -21,6 +21,12 @@ import type { SessionEvent } from '$lib/contract/events';
 import { isSwarmTool } from '$lib/utils/swarm';
 import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
 import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
+import {
+	APPROVAL_CARD_SUBTYPE,
+	approvalCardFromRequest,
+	approvalCardId,
+	approvalStatusFromSettle
+} from '$lib/utils/assistant-confirm';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -2523,15 +2529,22 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			};
 		}
 
+		// ── Approvals asked in words (#483) ─────────────────────────────
+		// A request marked `assistant_confirm` is one card in the transcript,
+		// keyed by its request id, at the point it was raised; its answer or
+		// expiry settles that same card. Every other interaction stays on the
+		// legacy WS card path and leaves the transcript alone.
+		case 'interaction.requested':
+		case 'interaction.answered':
+		case 'interaction.expired':
+			return reduceApprovalCard(state, event, seq, createdAt);
+
 		// ── Phase-1 non-goals (stay on legacy WS) / envelope-only ───────
 		// Queue UI, interrupt affordance, permissions/questions and artifacts
 		// are handled by the legacy WS path or deferred; they do not mutate the
 		// rendered transcript here.
 		case 'turn.queued':
 		case 'turn.interrupting':
-		case 'interaction.requested':
-		case 'interaction.answered':
-		case 'interaction.expired':
 		case 'artifact.created':
 			return state;
 
@@ -2539,6 +2552,50 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		default:
 			return state;
 	}
+}
+
+/**
+ * `interaction.*` for a request asked in words: `requested` appends its card
+ * (or, for a deferred request re-asked under the same id, re-opens it in
+ * place); `answered` / `expired` settle it in place. One card per request id,
+ * so the request keeps its position and its outcome, live and on replay.
+ */
+function reduceApprovalCard(state: V2SessionState, event: WireEvent, seq: number, createdAt: string): V2SessionState {
+	const requestId = str(event.request_id);
+	if (!requestId) return state;
+	const id = approvalCardId(requestId);
+	const known = state.messageOriginSeq.has(id);
+	if (event.type === 'interaction.requested') {
+		if (str(event.kind) !== 'permission') return state;
+		if (known) return updateApprovalCard(state, id, { status: 'pending' });
+		const data = approvalCardFromRequest(requestId, obj(event.request), state.messages);
+		if (!data) return state;
+		const card: ChatMessage = {
+			id,
+			role: 'system',
+			type: 'system',
+			content: data.question,
+			systemSubtype: APPROVAL_CARD_SUBTYPE,
+			systemData: data as unknown as Record<string, unknown>,
+			timestamp: createdAt || undefined,
+		};
+		return appendMessage(closeOpen(state), card, seq);
+	}
+	if (!known) return state;
+	const status = approvalStatusFromSettle(
+		event.type as 'interaction.answered' | 'interaction.expired',
+		event.type === 'interaction.answered' ? obj(event.answer) : (event as Record<string, unknown>)
+	);
+	return status ? updateApprovalCard(state, id, { status }) : state;
+}
+
+function updateApprovalCard(state: V2SessionState, id: string, patch: Record<string, unknown>): V2SessionState {
+	const index = state.messages.findIndex((m) => m.id === id);
+	if (index < 0) return state;
+	const current = state.messages[index];
+	const messages = ownedMessages.has(state.messages) ? state.messages : own(state.messages.slice());
+	messages[index] = { ...current, systemData: { ...(current.systemData ?? {}), ...patch } };
+	return { ...state, messages };
 }
 
 /** Convenience: fold an ordered event log from scratch (used by replay/tests). */

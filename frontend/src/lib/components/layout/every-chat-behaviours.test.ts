@@ -22,6 +22,7 @@ const mainPanel = lib('components/layout/MainPanel.svelte');
 const chatView = lib('components/layout/ChatView.svelte');
 const chatInput = lib('components/chat/ChatInput.svelte');
 const messageArea = lib('components/chat/MessageArea.svelte');
+const approvalCard = lib('components/chat/ApprovalRequestCard.svelte');
 
 describe('no assistant mode anywhere', () => {
 	it('leaves no flag in the chat surface, composer or phone controls', () => {
@@ -78,10 +79,11 @@ describe('approvals asked in words, in every chat', () => {
 		expect(messageArea).toContain('const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));');
 		// The question stands in for the working dots in any chat.
 		expect(messageArea).toMatch(/const showGapIndicator = \$derived\(\s*!assistantQuestion\s*&&/);
-		const start = messageArea.indexOf('class="assistant-ask"');
-		const ask = messageArea.slice(start, messageArea.indexOf('{/if}', start));
-		expect(ask).toContain('content={assistantQuestion.text}');
-		expect(ask).not.toMatch(/<button|onRespond|sendPermissionResponse/);
+		// #483: the request is a card in the transcript, keyed by request id,
+		// never a second copy floating after it.
+		expect(messageArea).not.toContain('class="assistant-ask"');
+		expect(messageArea).toContain('<ApprovalRequestCard data={approval} active={approval.request_id === activeApprovalId} />');
+		expect(approvalCard).not.toMatch(/<button|onRespond|sendPermissionResponse/);
 	});
 
 	it('organizes every transcript with one presentation model', () => {

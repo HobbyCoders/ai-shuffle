@@ -349,10 +349,11 @@ class SpokenApprovals:
         try:
             from app.core import assistant_confirm
             request = {"request_id": ask.request_id, "question": ask.confirm.get("question") or ask.summary,
+                       "action": ask.confirm.get("action"), "asker": ask.confirm.get("asker"),
                        "chat_session_id": ask.confirm.get("chat_session_id")}
             outcome = "approved" if decision == "allow" else "declined"
             assistant_confirm._remember(self.session_id, request, outcome)
-            await assistant_confirm._record(self.session_id, request, outcome)
+            await assistant_confirm.record_answer(self.session_id, {**request, "decision": outcome})
         except Exception:  # noqa: BLE001
             logger.warning("Voice approval: could not record the outcome for %s", self.session_id, exc_info=True)
 

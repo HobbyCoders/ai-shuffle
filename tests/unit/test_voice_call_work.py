@@ -624,10 +624,10 @@ async def test_spoken_answer_to_the_assistants_question_is_recorded_like_a_typed
     desk, calls, _ = _desk(monkeypatch)
     recorded = []
 
-    async def record(session_id, request, decision):
-        recorded.append((session_id, request["request_id"], request["question"], decision))
+    async def record(session_id, answer):
+        recorded.append((session_id, answer["request_id"], answer["question"], answer["decision"]))
 
-    monkeypatch.setattr(assistant_confirm, "_record", record)
+    monkeypatch.setattr(assistant_confirm, "record_answer", record)
     assistant_confirm.reset()
     desk.offer({"request_id": "req-c", "tool_name": "Bash",
                 "assistant_confirm": {"question": "Do you authorize me to run `pytest`? Please answer yes or no."}})
