@@ -55,7 +55,7 @@ npx vite dev --config tests/vite.chat-controls.config.js --port 5191 --strictPor
 CHROMIUM_PATH=/usr/bin/chromium node tests/shoot-chat-controls.mjs
 ```
 
-Query options on the page: `?theme=vercel`, `?view=assistant`, `?turn=idle`,
+Query options on the page: `?theme=vercel`, `?turn=idle`,
 `?prompt=question|access|all|none`.
 
 Since #1816 the composer no longer collapses and the sheet owns the pull-up
