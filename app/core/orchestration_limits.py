@@ -3,10 +3,27 @@
 Accounting and the limits API use assistant_limits' storage, day boundaries
 and remote cumulative-cost protocol.
 """
+import json
 import logging
 from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
+
+
+def _retired_homes():
+    """Ids of the retired assistant homes the #371 migration deleted.
+
+    Chats a home started with StartSession survive it, but their starter row
+    is gone; they stay coordination jobs so the limits still cover them.
+    """
+    from app.db.database import RETIRED_ASSISTANT_HOMES_MARKER
+    from app.db.settings import get_system_setting
+    try:
+        raw = get_system_setting(RETIRED_ASSISTANT_HOMES_MARKER)
+        return frozenset(json.loads(raw)) if raw else frozenset()
+    except Exception:  # noqa: BLE001 — an unreadable marker leaves the ordinary rule
+        log.warning("Coordination roles: could not read the retired assistant homes", exc_info=True)
+        return frozenset()
 
 
 def tracked_roles(now=None):
@@ -47,6 +64,11 @@ class _Reads:
         from app.core.session_orchestration import _start_turn
         return (_start_turn(session_id) or {}).get("payload") or {}
 
+    def retired_home(self, session_id):
+        if not hasattr(self, "_retired"):
+            self._retired = _retired_homes()
+        return session_id in self._retired
+
 
 class _Batch(_Reads):
     """The same inputs for many sessions, preloaded with bounded queries."""
@@ -55,6 +77,7 @@ class _Batch(_Reads):
         from app.core import assistant_limits as accounting
         self.rows, self.starts, self.principals, self.memo = {}, {}, {}, {}
         self.principals_ok = True
+        self._retired = _retired_homes()
         wanted, asked = set(ids), set()
         # One pass per ancestry level (workers' parents, StartSession senders).
         for _ in range(_MAX_DEPTH + 1):
@@ -139,8 +162,12 @@ def _role(session_id, memo, depth=0, *, view=None):
         payload = view.start_payload(session_id)
         sender = payload.get("orchestration_sender")
         if sender and not payload.get("orchestration_remote_origin"):
-            # A project owner's independent project work is not a coordination job.
-            kind = "job" if _role(sender, memo, depth + 1, view=view) else None
+            if view.retired_home(sender) and view.row(sender) is None:
+                # Started by a retired assistant home the migration deleted (#371).
+                kind = "job"
+            else:
+                # A project owner's independent project work is not a coordination job.
+                kind = "job" if _role(sender, memo, depth + 1, view=view) else None
         else:
             kind = ("coordinator" if session_mode_of(row) == "chat" and not row.get("hidden")
                     and not (row.get("project_id") or row.get("project_v2_id")) else None)

@@ -3045,6 +3045,11 @@ def _retire_fal_billing_key(cursor) -> List[str]:
 
 #: The built-in agent the retired assistant home ran on (``app.db.assistant.AGENT_ID``).
 RETIRED_ASSISTANT_AGENT_ID = "builtin_assistant"
+#: system_settings key: JSON list of the home ids ``_retire_assistant_home``
+#: deleted. ``orchestration_limits`` keeps the chats they started capped.
+RETIRED_ASSISTANT_HOMES_MARKER = "migration:retired_assistant_homes"
+#: How deep Task workers can nest under a home (task_tool_max_depth is 5).
+_ASSISTANT_HOME_WORKER_DEPTH = 16
 #: Session-scoped rows with no foreign key to ``sessions`` (``app.db.sessions``
 #: ``_SESSION_RUNTIME_TABLES``, plus armed wake-ups).
 _ASSISTANT_HOME_RUNTIME_TABLES = (
@@ -3066,6 +3071,10 @@ def _assistant_home_ids(cursor) -> List[str]:
     assistant agent (a peer's home mirrored here). Its Task workers are the
     hidden worker sessions whose parent is a home. Chats a home started with
     StartSession are ordinary chats and are not included.
+
+    Returns ``(homes, sessions)``: every id named or found as a home, and the
+    home rows that exist plus every hidden Task worker under them, at any
+    depth.
     """
     homes: set = set()
     for table in ("assistant_state", "assistant_account"):
@@ -3073,7 +3082,7 @@ def _assistant_home_ids(cursor) -> List[str]:
             cursor.execute(f"SELECT home_session_id FROM {table} WHERE home_session_id IS NOT NULL")
             homes.update(row["home_session_id"] for row in cursor.fetchall())
     if not table_exists(cursor, "sessions"):
-        return []
+        return [], []
     cursor.execute(
         "SELECT id FROM sessions WHERE profile_id = %s AND COALESCE(hidden, FALSE) = TRUE "
         "AND parent_session_id IS NULL AND COALESCE(is_worker, FALSE) = FALSE",
@@ -3081,20 +3090,25 @@ def _assistant_home_ids(cursor) -> List[str]:
     )
     homes.update(row["id"] for row in cursor.fetchall())
     if not homes:
-        return []
+        return [], []
     marks = ", ".join(["%s"] * len(homes))
     cursor.execute(f"SELECT id FROM sessions WHERE id IN ({marks})", tuple(homes))
     found = {row["id"] for row in cursor.fetchall()}
-    if not found:
-        return []
-    marks = ", ".join(["%s"] * len(found))
-    cursor.execute(
-        f"SELECT id FROM sessions WHERE parent_session_id IN ({marks}) "
-        "AND COALESCE(is_worker, FALSE) = TRUE AND COALESCE(hidden, FALSE) = TRUE",
-        tuple(found),
-    )
-    workers = {row["id"] for row in cursor.fetchall()}
-    return sorted(found | workers)
+    collected, level = set(found), set(found)
+    for _ in range(_ASSISTANT_HOME_WORKER_DEPTH):
+        if not level:
+            break
+        marks = ", ".join(["%s"] * len(level))
+        cursor.execute(
+            f"SELECT id FROM sessions WHERE parent_session_id IN ({marks}) "
+            "AND COALESCE(is_worker, FALSE) = TRUE AND COALESCE(hidden, FALSE) = TRUE",
+            tuple(level),
+        )
+        level = {row["id"] for row in cursor.fetchall()} - collected
+        collected |= level
+    # Every id named as a home is recorded, found or not: a chat it started
+    # can outlive it either way.
+    return sorted(homes), sorted(collected)
 
 
 def _retire_assistant_home(cursor) -> List[str]:
@@ -3114,7 +3128,11 @@ def _retire_assistant_home(cursor) -> List[str]:
       ``sdk_session_id``).
 
     Kept: spend history (``usage_log`` rows are unlinked, as a normal delete
-    does); chats a home started (their ``parent_session_id`` is cleared);
+    does, so on the upgrade day the homes' own spend so far stops counting
+    toward that day's limit once; later days are unaffected); chats a home
+    started (their ``parent_session_id`` is cleared, and the home ids are
+    recorded under ``RETIRED_ASSISTANT_HOMES_MARKER`` so
+    ``orchestration_limits`` still treats those chats as coordination jobs);
     every other session. Then the pointers to the homes are cleared
     (``assistant_state`` / ``assistant_account`` / ``assistant_runs``
     ``home_session_id``, the account's ``home_device_id`` / ``home_created_at``),
@@ -3132,7 +3150,11 @@ def _retire_assistant_home(cursor) -> List[str]:
     was applied.
     """
     applied: List[str] = []
-    ids = _assistant_home_ids(cursor)
+    homes, ids = _assistant_home_ids(cursor)
+    if homes:
+        recorded = set(json.loads(_get_marker(cursor, RETIRED_ASSISTANT_HOMES_MARKER) or "[]"))
+        if not set(homes) <= recorded:
+            _set_marker(cursor, RETIRED_ASSISTANT_HOMES_MARKER, json.dumps(sorted(recorded | set(homes))))
     if ids:
         marks = ", ".join(["%s"] * len(ids))
         params = tuple(ids)
