@@ -54,6 +54,12 @@ async function run(executable: string, args: string[], cwd: string, opts: BuildO
   } finally { await log.close(); }
 }
 
+/**
+ * The optional voice installer. -P keeps the script's folder (app/core) off
+ * sys.path, where app/core/platform.py would shadow the standard library (#429).
+ */
+export const VOICE_INSTALL = ['-P', 'app/core/voice_dependencies.py', '--install'];
+
 /** The files that decide the Python environment; desktop/scripts/runtime-contract.mjs hashes the same list. */
 export const PYTHON_INPUTS = ['requirements.lock', 'requirements-native.lock', 'requirements-voice.lock', 'fluid/pyproject.toml'];
 
@@ -71,7 +77,7 @@ export function pythonInstallSteps(): string[][] {
     // The signed source carries a metadata-corrected, hash-pinned pynput wheel.
     [...pip, '--find-links', 'desktop/vendor', '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', 'requirements-native.lock'],
     // This helper fails closed for voice, not for the app installation.
-    ['app/core/voice_dependencies.py', '--install'],
+    VOICE_INSTALL,
     [...pip, '--no-deps', '--no-build-isolation', './fluid'],
   ];
 }
@@ -81,7 +87,7 @@ export function pythonDependencyKey(source: string): Promise<string> { return fi
 
 async function installOptionalVoice(python: string, opts: BuildOptions): Promise<boolean> {
   try {
-    await run(python, ['app/core/voice_dependencies.py', '--install'], opts.source, opts, python);
+    await run(python, VOICE_INSTALL, opts.source, opts, python);
     return true;
   } catch {
     opts.progress('Optional ChatGPT voice libraries could not be installed; a later call or build can retry.');
@@ -110,7 +116,7 @@ async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
     const python = path.join(temporary, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
     let voiceInstalled = false;
     for (const args of pythonInstallSteps()) {
-      if (args[0] === 'app/core/voice_dependencies.py') voiceInstalled = await installOptionalVoice(python, opts);
+      if (args === VOICE_INSTALL) voiceInstalled = await installOptionalVoice(python, opts);
       else await run(python, args, opts.source, opts, python);
     }
     await fs.writeFile(path.join(temporary, '.base-complete'), key);
