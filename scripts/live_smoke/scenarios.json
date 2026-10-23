@@ -323,6 +323,14 @@
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
         },
         {
+          "id": "harness-basics.9",
+          "check": "Bounded update stops preserve usage and abort forced turns",
+          "kind": "owner",
+          "how": "On a disposable candidate install only, start a throwaway turn with provider usage and delayed cancellation cleanup plus several long-running background tasks. Stop the turn, repeat Stop while it unwinds, and confirm usage is booked. In a second turn, hold cleanup beyond the update grace and request Stop then update. Inspect the turn row, settlement notification, task records and elapsed stop time. Separately shut down the disposable install while a stop handler is delayed. Never restart or update a live worker for this check.",
+          "pass_when": "Repeated Stop does not cancel nonterminal cleanup or lose usage. A force-cancelled execution records aborted with stop_reason worker_update and notifies settlement exactly once; an already terminal row keeps its original reason. Background stops start concurrently and the force-stop phase stays within one grace budget regardless of task count. Shutdown returns within its single 25-second budget even with a delayed stop handler; the disposable update proceeds without a stale busy refusal.",
+          "past_bug": "#465: repeated stop cancelled usage booking, forced execute cancellation skipped terminal persistence and settlement callbacks, shutdown waited unboundedly before its timeout, and task force-stops accumulated per-task delays."
+        },
+        {
           "id": "harness-basics.10",
           "check": "Git read timeout containment and invalidation single-flight",
           "kind": "owner",
