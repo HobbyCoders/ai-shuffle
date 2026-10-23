@@ -1067,6 +1067,14 @@ def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
     from app.core.task_registry import task_registry
     from app.db import turns
 
+    if not task_registry.is_user_stopped(session_id) and (
+        _active_worker_background_work(session_id) or _worker_still_working(session_id)
+    ):
+        return None
+    # Read the report turn AFTER the idle probes, like the local dispatch path.
+    # A Monitor may finish and its wake may run during those probes. Keeping a
+    # pre-probe snapshot would report the old parking turn as completed even
+    # though the probes correctly observed that the newer turn had finished.
     latest = turns.get_latest_run_turn(session_id)
     if not latest:
         return None
@@ -1074,10 +1082,6 @@ def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
     if state not in ("parked", "completed", "aborted"):
         return None
     if turns.session_has_unsettled_turns(session_id):
-        return None
-    if not task_registry.is_user_stopped(session_id) and (
-        _active_worker_background_work(session_id) or _worker_still_working(session_id)
-    ):
         return None
     settled = {**latest, "_outcome": "completed" if state == "parked" else state}
     if state == "parked":

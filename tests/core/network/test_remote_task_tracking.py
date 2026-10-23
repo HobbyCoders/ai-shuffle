@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock
 import pytest
 from fluid.tools.registry import ToolCtx
 
-from app.core import agent_messaging, provider_agent_supervisor, remote_task, startup_reconcile
+from app.core import agent_messaging, provider_agent, provider_agent_supervisor, remote_task, startup_reconcile
 from app.core import swarm, task_dispatch, task_persistence, turn_scheduler
 from app.core.provider_agent_feed import get_feed_group, reset_feed_groups
 from app.core.task_registry import task_registry
-from app.db import background_tasks, database, remote_tasks, session_events
+from app.db import background_tasks, database, remote_tasks, session_events, turns
 from app.db.base import get_db
 from app.network import catalog, control
 from tests.core.network.harness import converge
@@ -204,9 +204,18 @@ def test_a_failed_child_settles_as_an_error(workers, monkeypatch, kicks):
         assert "<status>error</status>" in wakes()[0]["prompt"]
 
 
-def test_a_child_stopped_here_keeps_its_status_and_its_report_wakes_nobody(workers, monkeypatch, kicks):
+@pytest.mark.parametrize("parked", [False, True])
+def test_a_child_stopped_here_keeps_its_status_and_its_report_wakes_nobody(workers, monkeypatch, kicks, parked):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
+    if parked:
+        with a.active():
+            [turn] = all_turns(child)
+            assert turns.start_turn(turn["id"])
+            task_registry.start_task(child, "monitor", "shell", "background checks")
+            task_registry.mark_monitor_shell_task(child, "monitor")
+            assert turns.park_turn(turn["id"], ["monitor"])
+            assert not remote_task.owe_if_finished(child)
 
     async def no_local_kill(*args, **kwargs):
         raise AssertionError("a remote child has nothing to kill on this worker")
@@ -558,6 +567,91 @@ def test_provider_turn_waits_for_target_commit_after_admission(workers, monkeypa
         turn = await provider_turn(worker, "child")
         assert turn["id"] == (await producer)["id"]
         assert turn["prompt"] == "Dependency report."
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ending", ["immediate", "monitor", "monitor_probe_race"])
+def test_remote_swarm_reports_only_the_final_turn(workers, monkeypatch, kicks, ending):
+    """A Monitor park is not a report, even if its wake finishes during a probe."""
+    a, b, router = swarm_network(workers, monkeypatch)
+    final = "Finished the checks after collecting the background result."
+
+    async def scenario():
+        with b.active():
+            coordinator, key, published = await start_swarm(monkeypatch)
+            snapshot = await admitted(published, 0)
+            child = snapshot["tasks"][0]["worker_session_id"]
+            initial = await provider_turn(a, child)
+            if ending == "immediate":
+                body = await report_from_target(a, child, text=final)
+            else:
+                with a.active():
+                    assert turns.start_turn(initial["id"])
+                    session_events.append_events(child, [{
+                        "type": "assistant.text_delta", "turn_id": initial["id"],
+                        "payload": {"text": "Parked; I will collect the result when woken."},
+                    }])
+                    task_registry.start_task(child, "monitor", "shell", "background checks")
+                    task_registry.mark_monitor_shell_task(child, "monitor")
+                    assert turns.park_turn(initial["id"], ["monitor"])
+                    assert not remote_task.owe_if_finished(child)
+                    assert remote_tasks.get_child(child)["state"] == remote_tasks.RUNNING
+                assert run_as(a, remote_task.deliver_due) == 0
+                assert coordinator.swarms[key]["tasks"][0]["status"] == "running"
+                assert coordinator.swarms[key]["tasks"][1]["status"] == "queued"
+                assert sum(path.endswith("/task-start") for _, path in router.requests(UNRAID_URL)) == 1
+
+                async def wake_and_finish():
+                    task_registry.complete_task(child, "monitor", "completed")
+                    # Terminal shell status is not yet a published wake.
+                    assert not remote_task.owe_if_finished(child)
+                    await turn_scheduler.on_task_terminal(child, {
+                        "task_id": "monitor", "kind": "shell", "status": "completed",
+                        "summary": "Background checks passed.",
+                    })
+                    [wake] = turns.get_queued_turns(child)
+                    assert not remote_task.owe_if_finished(child)
+                    assert turns.start_turn(wake["id"])
+                    assert not remote_task.owe_if_finished(child)
+                    session_events.append_events(child, [{
+                        "type": "assistant.text_delta", "turn_id": wake["id"],
+                        "payload": {"text": final},
+                    }])
+                    assert turns.settle_turn(wake["id"], "completed")
+
+                if ending == "monitor_probe_race":
+                    # The sweep and Monitor watcher run independently. Pause the
+                    # sweep at its background-work probe while the wake runs to
+                    # completion; do not mock either the wake or report builder.
+                    probe = provider_agent._active_worker_background_work
+                    raced = False
+
+                    def finish_during_probe(sid):
+                        nonlocal raced
+                        if sid == child and not raced:
+                            raced = True
+                            asyncio.run(wake_and_finish())
+                        return probe(sid)
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(provider_agent, "_active_worker_background_work", finish_during_probe)
+                        assert run_as(a, lambda: asyncio.to_thread(remote_task.owe_if_finished, child))
+                    assert raced
+                else:
+                    run_as(a, wake_and_finish)
+                    with a.active():
+                        assert remote_task.owe_if_finished(child)
+                with a.active():
+                    body = remote_tasks.get_child(child)["report"]
+                assert run_as(a, remote_task.deliver_due) == 1
+            assert body["status"] == "completed" and body["report"] == final
+            snapshot = await admitted(published, 1)
+            assert snapshot["tasks"][0]["status"] == "completed"
+            assert snapshot["tasks"][0]["result"] == final
+            second = snapshot["tasks"][1]["worker_session_id"]
+            await report_from_target(a, second, text="Reviewed the final checks.")
+            await asyncio.wait_for(coordinator.jobs[key], 5)
 
     asyncio.run(scenario())
 
