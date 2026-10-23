@@ -20,6 +20,7 @@
 	import { workerRowNote } from '$lib/components/chat/runner-badge-menu';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 
 	const LOCAL_ROW_ID = '__local__';
 
@@ -165,7 +166,8 @@
 	}
 
 	function onWindowClick(e: MouseEvent) {
-		if (open && wrapRef && !wrapRef.contains(e.target as Node)) open = false;
+		const target = e.target as Node;
+		if (open && wrapRef && !wrapRef.contains(target) && !menuRef?.contains(target)) open = false;
 	}
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && open) closeMenu(true);
@@ -197,7 +199,17 @@
 		<ChevronDown size={12} strokeWidth={1.8} class="runs-on-chev" aria-hidden="true" />
 	</button>
 	{#if open}
-		<div class="runs-on-menu" role="menu" tabindex="-1" aria-label="Where this session runs" bind:this={menuRef} onkeydown={onMenuKeydown}>
+		<!-- Floats to <body>: the agent card is its own stacking context, so an
+		     in-place menu painted under the composer below the card. -->
+		<div
+			class="runs-on-menu"
+			role="menu"
+			tabindex="-1"
+			aria-label="Where this session runs"
+			bind:this={menuRef}
+			onkeydown={onMenuKeydown}
+			use:floatingMenu={{ anchor: wrapRef, align: 'end' }}
+		>
 			<WorkerMenuList
 				items={rows}
 				role="menuitemradio"
@@ -241,11 +253,8 @@
 	.runs-on :global(.runs-on-chev) { color: var(--subtle-foreground); transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1); }
 	.runs-on.open :global(.runs-on-chev) { transform: rotate(180deg); }
 	.runs-on-menu:focus { outline: none; }
+	/* Position, z-index and the viewport cap come from floatingMenu. */
 	.runs-on-menu {
-		position: absolute;
-		top: calc(100% + 6px);
-		right: 0;
-		z-index: 60;
 		min-width: 240px;
 		max-width: min(320px, calc(100vw - 24px));
 		padding: 4px;
@@ -255,7 +264,9 @@
 		box-shadow: var(--shadow-l);
 		animation: runs-on-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
+	.runs-on-menu:global([data-placement='top']) { animation-name: runs-on-in-up; }
 	@keyframes runs-on-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+	@keyframes runs-on-in-up { from { opacity: 0; transform: translateY(4px) scale(0.98); } }
 	@media (prefers-reduced-motion: reduce) {
 		.runs-on, .runs-on :global(.runs-on-chev) { transition: none; }
 		.runs-on-menu { animation: none; }

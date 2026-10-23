@@ -17,6 +17,7 @@
 	import { assistantState } from '$lib/stores/assistant';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { Settings2 } from 'lucide-svelte';
 
 	interface Props {
@@ -31,6 +32,11 @@
 	let { sheetMode = false, variant = 'chip' }: Props = $props();
 
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
+	// The card's menu floats to <body> (floatingMenu): the agent card is its own
+	// stacking context, so an in-place menu painted under the composer below it.
+	let cardNameRef = $state<HTMLButtonElement | null>(null);
+	let dropdownRef = $state<HTMLDivElement | null>(null);
+	const floating = $derived(variant === 'card' && !sheetMode);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 
 	// The sheet uses a distinct shared id: its CSS-hidden composer counterpart
@@ -89,7 +95,8 @@
 	}
 
 	function handleClickOutside(e: MouseEvent) {
-		if (showProfileDropdown && profileDropdownRef && !profileDropdownRef.contains(e.target as Node)) {
+		const target = e.target as Node;
+		if (showProfileDropdown && profileDropdownRef && !profileDropdownRef.contains(target) && !dropdownRef?.contains(target)) {
 			closeProfileDropdown();
 		}
 	}
@@ -114,6 +121,7 @@
 <div class="selector-wrapper" class:sheet-mode={sheetMode} class:card-variant={variant === 'card'} bind:this={profileDropdownRef}>
 	{#if variant === 'card' && !assistant}
 	<button
+		bind:this={cardNameRef}
 		type="button"
 		class="card-name {profileUnset ? 'unset' : ''}"
 		class:open={showProfileDropdown}
@@ -166,7 +174,14 @@
 	{/if}
 
 	{#if showProfileDropdown && !assistant}
-		<div class="selector-dropdown" role="menu" aria-label="Agent selection">
+		<div
+			class="selector-dropdown"
+			class:card-menu={variant === 'card'}
+			role="menu"
+			aria-label="Agent selection"
+			bind:this={dropdownRef}
+			use:floatingMenu={{ anchor: cardNameRef, enabled: floating }}
+		>
 			<GroupedSelector
 				bind:this={groupedSelector}
 				items={$profiles}
@@ -366,11 +381,15 @@
 		transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 	.card-name.open .card-name-chev { transform: rotate(180deg); }
-	/* The card sits above the composer: its menu opens downward. */
-	.card-variant .selector-dropdown {
-		bottom: auto;
-		top: calc(100% + 6px);
+	/* The card sits above the composer: its menu floats to <body>
+	   (floatingMenu owns its position) and opens downward, or upward when it
+	   flips. Styled by its own class — once moved it is no longer inside
+	   .card-variant. */
+	.selector-dropdown.card-menu {
 		animation-name: dropdown-fade-down;
+	}
+	.selector-dropdown.card-menu:global([data-placement='top']) {
+		animation-name: dropdown-fade-in;
 	}
 	@keyframes dropdown-fade-down {
 		from { opacity: 0; transform: translateY(-4px); }
