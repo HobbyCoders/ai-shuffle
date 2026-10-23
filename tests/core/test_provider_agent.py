@@ -41,46 +41,62 @@ def test_voice_permission_binding_wins_over_historical_turn(monkeypatch):
 
 
 @pytest.mark.parametrize("source", ["binding", "profile"])
-@pytest.mark.parametrize("session_mode, expected", [
-    ("chat", "default"),
-    ("code", "bypassPermissions"),
-    ("voice", "bypassPermissions"),
+@pytest.mark.parametrize("session_mode", ["chat", "code", "voice"])
+@pytest.mark.parametrize("configured, expected", [
+    ("bypassPermissions", {"chat": "bypassPermissions", "code": "bypassPermissions", "voice": "bypassPermissions"}),
+    ("auto", {"chat": "auto", "code": "auto", "voice": "auto"}),
+    ("default", {"chat": "default", "code": "default", "voice": "default"}),
+    # A no-project chat has no Accept Edits: it runs, and passes on, Ask.
+    ("acceptEdits", {"chat": "default", "code": "acceptEdits", "voice": "acceptEdits"}),
 ])
 def test_caller_permission_fallback_without_live_pool(
-    monkeypatch, source, session_mode, expected,
+    monkeypatch, source, session_mode, configured, expected,
 ):
     from app.core.session_pool import get_session_pool
     from app.db import database
 
     monkeypatch.setattr(get_session_pool(), "peek", lambda _: None)
     monkeypatch.setattr(database, "get_profile", lambda _: {
-        "config": {"permission_mode": "bypassPermissions"},
+        "config": {"permission_mode": configured},
     })
     caller = {
         "id": "caller-without-live-state",
         "mode": session_mode,
-        "permission_mode": "bypassPermissions" if source == "binding" else None,
+        "permission_mode": configured if source == "binding" else None,
         "profile_id": "caller-profile",
     }
 
-    assert pa._caller_permission_mode(caller) == expected
+    assert pa._caller_permission_mode(caller) == expected[session_mode]
 
 
 @pytest.mark.parametrize("live_mode", ["bypassPermissions", "auto", "default"])
-def test_chat_caller_in_bypass_still_starts_workers_on_ask(monkeypatch, live_mode):
-    """#371 step 4 lets a no-project chat run in Auto or Bypass itself; its
-    Task workers still start on Ask, live pool state or not."""
+@pytest.mark.parametrize("session_mode", ["chat", None])
+def test_chat_caller_passes_its_live_mode_to_workers(monkeypatch, live_mode, session_mode):
+    """#486 (owner decision, replacing #415/#416): a no-project chat's Task
+    and Swarm workers start in the chat's current mode, as a project
+    caller's do. The live mode wins over the stored binding."""
     from types import SimpleNamespace
 
     from app.core.session_pool import get_session_pool
 
     live = SimpleNamespace(is_connected=True, callback_refs={"permission_mode": live_mode})
     monkeypatch.setattr(get_session_pool(), "peek", lambda _: live)
-    caller = {"id": "chat-caller", "mode": "chat", "permission_mode": live_mode, "profile_id": None}
+    caller = {"id": "chat-caller", "mode": session_mode, "permission_mode": "default", "profile_id": None}
 
-    assert pa._caller_permission_mode(caller) == "default"
-    # A project caller in the same state still passes its live mode on.
-    assert pa._caller_permission_mode({**caller, "mode": None}) == live_mode
+    assert pa._caller_permission_mode(caller) == live_mode
+
+
+def test_chat_caller_is_capped_by_its_own_ceiling(monkeypatch):
+    """A chat in Bypass under a stored Auto ceiling starts workers in Auto."""
+    from app.core.session_pool import get_session_pool
+    from app.db import turns
+
+    monkeypatch.setattr(get_session_pool(), "peek", lambda _: None)
+    monkeypatch.setattr(turns, "get_latest_turn", lambda _: None)
+    caller = {"id": "capped-chat", "mode": "chat", "permission_mode": "bypassPermissions",
+              "permission_ceiling": "auto", "profile_id": None}
+
+    assert pa._caller_permission_mode(caller) == "auto"
 
 
 def _provider(

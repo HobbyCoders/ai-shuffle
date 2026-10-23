@@ -916,6 +916,11 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     2. else, for a NULL binding, the caller AGENT's ``config.permission_mode``
        — the same rule ``session_modes.turn_permission_mode`` applies.
 
+    A no-project (chat) caller passes its mode on the same way: a chat in
+    Bypass starts its workers in Bypass, one in Auto in Auto (owner decision,
+    #486, replacing the #415/#416 rule that started them on Ask). Paid
+    generation, spending limits and new private-access grants still ask.
+
     A caller that is itself a worker is capped by its own ceiling. Retired
     ``plan`` settings are ignored. Returns ``None`` (no override — the worker
     runs at Ask) when nothing resolves.
@@ -924,18 +929,10 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
         return None
 
     from app.core.session_modes import (
-        normalize_session_mode,
         permission_ceiling,
         permission_mode_for_session_mode,
         strictest_permission_mode,
     )
-
-    # A no-project (chat) caller's workers always start on Ask, even when the
-    # owner has put the chat itself in Auto or Bypass (#371 step 4): a worker
-    # gets tools the chat's own ceiling never had. Same rule as a chat
-    # starter's StartSession children (session_orchestration).
-    if normalize_session_mode(caller_row.get("mode")) == "chat":
-        return "default"
 
     mode: Optional[str] = None
     session_id = caller_row.get("id")
