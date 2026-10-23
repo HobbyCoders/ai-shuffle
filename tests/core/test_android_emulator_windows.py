@@ -369,7 +369,8 @@ def test_acceleration_success_is_cached_until_binary_changes(windows, monkeypatc
     assert host.check_host(emulator_bin=binary, env={}).ok
     assert probe.call_count == 1
     revision = binary.stat()
-    os.utime(binary, ns=(revision.st_atime_ns, revision.st_mtime_ns + 1))
+    # NTFS keeps 100 ns ticks (FAT 2 s), so a 1 ns bump would not change mtime.
+    os.utime(binary, ns=(revision.st_atime_ns, revision.st_mtime_ns + 2_000_000_000))
     assert host.check_host(emulator_bin=binary, env={}).ok
     assert probe.call_count == 2
     other = tmp_path / "other-emulator.exe"

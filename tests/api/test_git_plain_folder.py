@@ -1,6 +1,7 @@
 """Plain project folders are positive non-repos, not unavailable checkouts."""
 import os
 import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -159,7 +160,8 @@ def test_damaged_markers_never_allow_parent_mutations(plain_project, monkeypatch
             (marker / "HEAD").write_text("not a head\n" if marker_kind == "garbage-head" else "ref: refs/heads/main\n")
         if marker_kind == "head-only":
             (marker / "refs").rmdir()
-    assert git_at(folder, "rev-parse", "--show-toplevel").stdout.strip() == str(parent)
+    # Git prints the top level with forward slashes on Windows; compare paths.
+    assert Path(git_at(folder, "rev-parse", "--show-toplevel").stdout.strip()) == parent
     sid = f"damaged-marker-{scope}-{marker_kind}"
     database.create_session(sid, "default", project_v2_id=project["id"])
     query = f"?session_id={sid}" if scope == "session" else "?worker_id=local" if scope == "worker" else ""

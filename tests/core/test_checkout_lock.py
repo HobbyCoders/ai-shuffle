@@ -117,10 +117,12 @@ def test_start_session_child_gets_its_own_worktree_and_cannot_switch_the_parents
     assert str(own) in note and "(branch 'parent-branch')" in note
 
     # Lock: the child's `checkout -b` in the parent's folder is refused, even
-    # while the parent is idle...
+    # while the parent is idle... Paths in commands are written with forward
+    # slashes, as the Bash tool asks: bash eats an unquoted Windows path's
+    # backslashes, so D:\t\parent would name a different folder.
     for command, cwd in (("git checkout -b fix/stable-channel-switch-back", parent),
-                         (f"cd {parent} && git checkout -b fix/stable-channel-switch-back", own),
-                         (f"git -C {parent} switch main", own)):
+                         (f"cd {parent.as_posix()} && git checkout -b fix/stable-channel-switch-back", own),
+                         (f"git -C {parent.as_posix()} switch main", own)):
         outcome = run_guarded(child_id, command, cwd)
         assert outcome.is_error
         assert "Refused" in outcome.text and "chat parent" in outcome.text
@@ -196,9 +198,9 @@ def test_other_branch_changes_in_a_foreign_checkout_are_refused(project, command
 def test_branch_ops_aimed_by_name_or_path_are_refused(project):
     pv2, base, parent = project
     chat("other", pv2)
-    denial = checkout_lock.tool_denial("other", "Bash", bash(f"git worktree remove {parent}"), str(base))
+    denial = checkout_lock.tool_denial("other", "Bash", bash(f"git worktree remove {parent.as_posix()}"), str(base))
     assert denial and "archives session parent" in denial
-    assert checkout_lock.tool_denial("other", "Bash", bash(f"git worktree move {parent} {parent}-moved"),
+    assert checkout_lock.tool_denial("other", "Bash", bash(f"git worktree move {parent.as_posix()} {parent.as_posix()}-moved"),
                                      str(base))
     assert checkout_lock.tool_denial("other", "Bash", bash("git branch -D parent-branch"), str(base))
     assert checkout_lock.tool_denial("other", "Bash", bash("git branch -f parent-branch main"), str(base))

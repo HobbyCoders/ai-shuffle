@@ -227,7 +227,9 @@ def _ignored_reason(path):
         if dependencies.intersection(relative.parts):
             return True
         target = Path(path) / relative
-        if target.is_symlink():
+        # A Windows junction is a directory link too: never count its target
+        # as this checkout's disposable cache.
+        if target.is_symlink() or (hasattr(target, "is_junction") and target.is_junction()):
             return False
         if target.is_dir():
             if target.name in disposable_dirs:

@@ -28,8 +28,10 @@ def run_check(tmp_path, missing=(), args=(), empty=()):
                 (path / "fixture-package").mkdir()
         else:
             path.write_text("{}")
-    function = match.group().replace("/opt/ai-tools", str(tmp_path / "ai-tools"))
-    function = function.replace("/opt/browser-mcp", str(tmp_path / "browser-mcp"))
+    # Forward slashes: the function expands these paths unquoted, and bash
+    # would eat a Windows path's backslashes (D:\t\x becomes D:tx).
+    function = match.group().replace("/opt/ai-tools", (tmp_path / "ai-tools").as_posix())
+    function = function.replace("/opt/browser-mcp", (tmp_path / "browser-mcp").as_posix())
     script = 'set -e\nnpm() { touch npm-called; return 99; }\n' + function + '\nrequire_bundled_tools "$@"'
     result = subprocess.run([shutil.which("bash"), "-c", script, "--", *args],
                             cwd=tmp_path, capture_output=True, text=True, timeout=10)

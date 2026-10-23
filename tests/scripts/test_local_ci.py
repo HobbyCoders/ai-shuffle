@@ -152,7 +152,10 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, press
         assert len(coverage_notes) == 1
         assert "LOCAL_CI_CONTAINER_PG=1" in coverage_notes[0]
         assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
-    assert env["PATH"] == ("/test/pg/bin:" if pg_source else "") + "/test/original-path"
+    # The pg_ctl folder comes back in the host's path form (\test\pg\bin on
+    # Windows) and PATH entries join with the host's separator.
+    pg_bin = {"path": str(Path("/test/pg/bin/pg_ctl").parent), "smoke": "/test/pg/bin"}.get(pg_source)
+    assert env["PATH"] == (pg_bin + os.pathsep if pg_bin else "") + "/test/original-path"
     if ctx.mode != "full":
         assert any("Container" in note and "full" in note for note in ctx.notes)
     elif not pg_source:

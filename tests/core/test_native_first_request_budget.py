@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -36,7 +37,11 @@ TOOL_ROWS_BUDGET = 10_000
 # The latter contains host paths, so measure its real producers with fixed
 # path inputs rather than making a whole-request ceiling depend on the host.
 # Together these retain the previous 14.3k ceiling without a path-length margin.
-FIRST_REQUEST_BUDGET = 13_800
+# The prefix's host facts are pinned per platform (_pin_host). A Windows host
+# also carries its Git Bash notes in the Bash tool and the shell line: ~155
+# tokens measured (JSON path 13,694 pinned to Linux, 13,849 to Windows).
+WINDOWS_GUIDANCE_BUDGET = 160
+FIRST_REQUEST_BUDGET = {"linux": 13_800, "windows": 13_800 + WINDOWS_GUIDANCE_BUDGET}
 TURN_REMINDERS_BUDGET = 500
 # The breakdown before the first turn prices everything the first request
 # carries except the turn itself: the user's text, the host's note appended to
@@ -48,6 +53,7 @@ TURN_REMINDERS_BUDGET = 500
 # path they alone came to 3.1% on Windows. What remains is chars/4 rounding
 # between whole parts and the request's pieces: ~0.2% measured.
 REPORT_TOLERANCE = 0.01
+_THIS_HOST = "windows" if sys.platform == "win32" else "linux"
 
 _CHUNKS = [
     StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
@@ -231,10 +237,43 @@ def _rows(reported) -> dict[str, int]:
     return {c["name"]: c["tokens"] for c in reported["categories"]}
 
 
+_HOSTS = {
+    # sys.platform, OS line, shell
+    "linux": ("linux", "Linux 6.8.0", "posix", "/bin/bash"),
+    "windows": ("win32", "Windows 11", "git-bash", r"C:\Program Files\Git\bin\bash.exe"),
+}
+_WORKER = ("Worker: TestWorker (device dev_test, on the host). "
+           "Your shell, files and tools run on this worker.")
+
+
+def _pin_host(monkeypatch, host: str) -> None:
+    """Render the prefix's host facts for ``host``, whatever runs the test.
+
+    The cached prefix names the platform, the OS, the shell (with its path)
+    and the worker, and on Windows the Bash tool adds its Git Bash notes.
+    Left to the real host, the same tree priced ~150 tokens more on Windows
+    than on Linux, so a budget set on one failed on the other. Each budget
+    now covers one platform's real producers on every machine.
+    """
+    import app.core.provider.harness_adapter as ha
+    import fluid.context.environment as environment
+    import fluid.tools.builtins.bash as bash
+    from fluid.tools.shell import ShellInfo, describe
+
+    platform, os_line, shell_name, shell_path = _HOSTS[host]
+    shell = ShellInfo(name=shell_name, path=shell_path, argv_prefix=(shell_path, "-c"))
+    monkeypatch.setattr(environment, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(environment, "_os_version", lambda: os_line)
+    monkeypatch.setattr(environment, "describe_shell", lambda: describe(shell))
+    monkeypatch.setattr(bash, "HOST_IS_WINDOWS", host == "windows")
+    monkeypatch.setattr(ha, "_worker_identity_text", lambda: _WORKER)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("host", sorted(_HOSTS))
 @pytest.mark.parametrize("code_mode", [True, False], ids=["code_mode", "json_tools"])
 async def test_default_profile_first_request_stays_under_budget(
-    monkeypatch, tmp_path, code_mode
+    monkeypatch, tmp_path, code_mode, host
 ):
     import fluid.context.runtime_facts as runtime
     import fluid.state as state
@@ -244,6 +283,7 @@ async def test_default_profile_first_request_stays_under_budget(
     # path inputs: scratch repeats its directory, and runtime facts names both
     # executables. The long-path test below still drives their real variable
     # paths and checks the priced prefix independently.
+    _pin_host(monkeypatch, host)
     monkeypatch.setattr(state, "scratch_dir", lambda ctx: Path("/harness/scratch/session"))
     monkeypatch.setattr(runtime, "sys", SimpleNamespace(executable="/venv/bin/python"))
     which = runtime.shutil.which
@@ -253,11 +293,16 @@ async def test_default_profile_first_request_stays_under_budget(
     _engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
+    # The pinned host is the one rendered, whatever machine runs the test.
+    windows = host == "windows"
+    assert ("Platform: win32\n" in request.system) is windows
+    prefix = (request.system or "") + json.dumps(request.tools)
+    assert ("Git Bash, not PowerShell" in prefix) is windows
     rows = _rows(reported)
     tool_rows = rows.get("System tools", 0) + rows.get("MCP tools", 0)
     assert tool_rows <= TOOL_ROWS_BUDGET, rows
     priced = _priced_before_the_turn(request, "hello")
-    assert priced <= FIRST_REQUEST_BUDGET, (priced, rows)
+    assert priced <= FIRST_REQUEST_BUDGET[host], (priced, rows)
     reminders = _request_tokens(request) - priced
     assert reminders <= TURN_REMINDERS_BUDGET, reminders
 
@@ -289,6 +334,7 @@ async def test_reported_breakdown_matches_the_first_request(
         monkeypatch.setattr(runtime, "shutil", SimpleNamespace(
             which=lambda name: pytest_path if name == "pytest" else which(name),
         ))
+    _pin_host(monkeypatch, _THIS_HOST)
     _engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
@@ -309,7 +355,7 @@ async def test_reported_breakdown_matches_the_first_request(
         whole = _request_tokens(request)
         assert abs(reported["totalTokens"] - whole) > whole * 0.03
     actual = _priced_before_the_turn(request, "hello")
-    assert actual <= FIRST_REQUEST_BUDGET, (actual, _rows(reported))
+    assert actual <= FIRST_REQUEST_BUDGET[_THIS_HOST], (actual, _rows(reported))
     assert abs(reported["totalTokens"] - actual) <= actual * REPORT_TOLERANCE, (
         reported["totalTokens"], actual, _request_tokens(request), _rows(reported),
     )
