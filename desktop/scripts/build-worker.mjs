@@ -261,7 +261,8 @@ async function installPython() {
 	run(py, [...pip, '--find-links', path.join(repoDir, 'desktop/vendor'), '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
 	let optionalVoiceInstalled = false;
 	try {
-		run(py, [path.join(repoDir, 'app/core/voice_dependencies.py'), '--install'], { env, cwd: repoDir });
+		// -P keeps app/core off sys.path: its platform.py would shadow the stdlib (#429).
+		run(py, ['-P', path.join(repoDir, 'app/core/voice_dependencies.py'), '--install'], { env, cwd: repoDir });
 		optionalVoiceInstalled = true;
 	} catch {
 		log('Optional ChatGPT voice libraries unavailable; leaving the dependency fingerprint incomplete for retry.');

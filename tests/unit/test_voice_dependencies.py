@@ -170,3 +170,50 @@ async def test_unsupported_system_never_retries_install_on_call_start(monkeypatc
     monkeypatch.setattr(deps, "install", install)
     assert await deps.ensure_available() == (False, deps.UNAVAILABLE)
     install.assert_not_called()
+
+
+def _installer_layout(tmp_path):
+    """A source tree with app/core/platform.py next to the script and no voice lock."""
+    from pathlib import Path
+    core = tmp_path / "app" / "core"
+    core.mkdir(parents=True)
+    for name in ("voice_dependencies.py", "platform.py"):
+        (core / name).write_bytes((Path(deps.__file__).parent / name).read_bytes())
+    return core / "voice_dependencies.py"
+
+
+def _run_as_installers_do(tmp_path, *flags):
+    import subprocess
+    import sys
+    script = _installer_layout(tmp_path)
+    return subprocess.run([sys.executable, *flags, str(script.relative_to(tmp_path)), "--install"],
+                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
+
+
+def test_installers_run_the_script_without_app_core_shadowing_platform(tmp_path):
+    """#429: every installer runs this file directly. -P keeps app/core off sys.path."""
+    result = _run_as_installers_do(tmp_path, "-P")
+    assert "Traceback" not in result.stderr, result.stderr
+    # platform_reason() ran with the stdlib module; the missing lock then stops the install.
+    assert result.returncode == 1
+    assert deps.UNAVAILABLE in result.stdout
+
+
+def test_running_the_file_without_safe_path_would_shadow_platform(tmp_path):
+    """The failure the -P flag prevents, so the test above cannot pass vacuously."""
+    result = _run_as_installers_do(tmp_path)
+    assert "has no attribute 'system'" in result.stderr
+
+
+def test_every_installer_passes_safe_path_to_the_voice_script():
+    import re
+    from pathlib import Path
+    root = Path(deps.__file__).resolve().parents[2]
+    sources = ["docker/application_updates.py", "desktop/scripts/build-worker.mjs",
+               "desktop/src/main/source-build.ts", "run_local.py"]
+    for source in sources:
+        calls = [line for line in (root / source).read_text().splitlines()
+                 if "app/core/voice_dependencies.py" in line and "--install" in line]
+        assert calls, source
+        for line in calls:
+            assert re.search(r"""['"]-P['"],.*app/core/voice_dependencies\.py""", line), (source, line)

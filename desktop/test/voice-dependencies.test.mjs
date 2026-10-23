@@ -23,7 +23,7 @@ async function fixture(t, failMain = false) {
     calls.push(args);
     const child = new EventEmitter();
     if (args[0] === '-m' && args[1] === 'venv') mkdirSync(args[2], { recursive: true });
-    const voice = args[0] === 'app/core/voice_dependencies.py';
+    const voice = args[1] === 'app/core/voice_dependencies.py';
     const failed = voice ? ++voiceAttempts === 1 : failMain && args.includes('requirements.lock');
     setImmediate(() => child.emit('exit', failed ? 1 : 0));
     return child;
@@ -53,7 +53,7 @@ test('a failed optional install keeps the base usable but never stamps complete;
   const before = f.calls.length;
   assert.equal(await f.pythonRuntime(f.opts), key);
   assert.equal(f.calls.length, before + 1, 'retry only optional libraries, not the whole environment');
-  assert.equal(f.calls.at(-1)[0], 'app/core/voice_dependencies.py');
+  assert.deepEqual([...f.calls.at(-1)], ['-P', 'app/core/voice_dependencies.py', '--install']);
   assert.equal(await fs.readFile(path.join(target, '.complete'), 'utf8'), key);
   const completed = f.calls.length;
   await f.pythonRuntime(f.opts);
@@ -84,6 +84,8 @@ for (const failedVoice of [false, true]) {
     };
     const result = await vm.runInNewContext(producer + '\ninstallPython()', context);
     assert.equal(result.optionalVoiceInstalled, !failedVoice);
+    // -P: run as a file, app/core/platform.py would otherwise shadow the stdlib (#429).
+    assert.deepEqual([...calls.find(args => args.some(arg => arg.endsWith('voice_dependencies.py')))], ['-P', path.join('/fake/repo', 'app/core/voice_dependencies.py'), '--install']);
     assert.ok(calls.some(args => args.includes('--no-build-isolation')), 'main Fluid install must continue');
     assert.match(text, /pythonDependencies: python\.optionalVoiceInstalled === false \? null :/);
   });

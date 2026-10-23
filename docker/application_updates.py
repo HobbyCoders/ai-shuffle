@@ -1130,7 +1130,8 @@ class ContainerUpdates:
         self.run_build(pip + ["--require-hashes", "-r", "requirements.lock"], source, env)
         # Optional media failure must not block an otherwise valid app update.
         try:
-            self.run_build([str(python), "app/core/voice_dependencies.py", "--install"], source, env)
+            # -P keeps app/core off sys.path: its platform.py would shadow the stdlib (#429).
+            self.run_build([str(python), "-P", "app/core/voice_dependencies.py", "--install"], source, env)
         except UpdateError:
             # Optional media failure must not prevent the base app update.
             # The call-start path can retry from this source's hash-pinned lock.

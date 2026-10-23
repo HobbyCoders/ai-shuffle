@@ -14,7 +14,7 @@
   "'DESK-02: a failed first boot stays blocked until a newer download or installer supersedes it'": "9b735e13cccfe13c660838527f2890a05fc804bf78ec85a224621afbef4b1696",
   "'Linux retry API rejection never forgets a migrated revision or launches older source/bundled code'": "b51a5cab18a0e50d51a8aad3bc0afa5d43ec038c18e8fd9ad9281bf957e0edc5",
   "'Linux startup drops only incomplete unselected downloads, validates healthy code and permits a real re-download'": "0f9a95e0871f6791acb3a1ad5e4ebb887c581693c7426322c548f39ac560f64c",
-  "'Python dependencies install only from the hash-pinned locks, like the container updater'": "2645bdffab8c2bba4c6c9c53ebbc3ff832f4613540d4f037343f70c2415c95d5",
+  "'Python dependencies install only from the hash-pinned locks, like the container updater'": "77b14f3c383e6fd2d96e88b40dc493472b21707f7c07578c315020a0e6f155da",
   "'UI downloads stay staged even with a legacy launcher until explicit install is approved'": "93f321487e0314525f57445e2a77be50387ae358d01a9126de90e14383d7cffb",
   "'a blocked launch can run the newest failed build again, never an older one'": "d314c2ceb8c31c4c958e3497669be1f90d30fef74f03bc7a16d54b792d1301ee",
   "'a compatibility preflight failure never writes booting or blocks the next installed launch'": "54ef73cb640be0a8d24ab3de0bfd8d8872821e0dfe778e7816bf28d254a101b1",
