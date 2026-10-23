@@ -352,8 +352,8 @@ def issue_token(*, device_id: str, challenge: str, signature: str,
         elif settings.network_require_token_binding or (store.get_member(device_id) or {}).get("token_binding_required"):
             # Old callers display only the first 300 detail characters. Keep the
             # receiving worker's repair actionable without exposing other URLs.
-            detail = ("Endpoint binding is required. Update the calling worker, or set "
-                      "NETWORK_TOKEN_BINDING_ENABLED=false on this worker and restart. No re-pairing needed.")
+            detail = ("Endpoint binding is required. Update the calling worker and repair its advertised addresses. "
+                      "No re-pairing needed.")
             _warn_binding_required(device_id, detail)
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
     # The member's key signed a challenge issued to this address: it keeps

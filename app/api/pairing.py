@@ -148,7 +148,8 @@ async def exchange_grant(
     _exchange_limiter.check(client_ip)
 
     session_token = pairing.generate_controller_session()
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
+    expire_days = await run_sync(lambda: settings.session_expire_days)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=expire_days)
     token_hash = await run_sync(pairing.hash_pairing_code, body.code)
     result = await run_sync(
         database.exchange_grant_for_client,
@@ -174,7 +175,7 @@ async def exchange_grant(
         httponly=True,
         secure=settings.cookie_secure,
         samesite="lax",
-        max_age=settings.session_expire_days * 24 * 60 * 60,
+        max_age=expire_days * 24 * 60 * 60,
     )
     client = _public_client(result["client"])
     return {

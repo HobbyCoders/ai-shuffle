@@ -486,8 +486,8 @@ def test_direct_phone_deletion_revokes_derived_cookie(setup):
 
 
 def _verdict_settings(monkeypatch, ttl, grace):
-    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_verify_ttl_seconds', ttl)
-    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_grace_seconds', grace)
+    monkeypatch.setattr(type(account_hub.settings), 'mobile_account_hub_verify_ttl_seconds', property(lambda self, value=ttl: value))
+    monkeypatch.setattr(type(account_hub.settings), 'mobile_account_hub_grace_seconds', property(lambda self, value=grace: value))
 
 
 def test_verdict_reused_within_ttl(setup, monkeypatch):

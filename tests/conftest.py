@@ -720,8 +720,8 @@ def live_hub_verdicts(monkeypatch):
         from app.core import account_hub
         from app.core.config import settings
         account_hub.reset_verification_cache()
-        monkeypatch.setattr(settings, "mobile_account_hub_verify_ttl_seconds", 0.0)
-        monkeypatch.setattr(settings, "mobile_account_hub_grace_seconds", 0.0)
+        monkeypatch.setattr(type(settings), 'mobile_account_hub_verify_ttl_seconds', property(lambda self, value=0.0: value))
+        monkeypatch.setattr(type(settings), 'mobile_account_hub_grace_seconds', property(lambda self, value=0.0: value))
     except Exception:
         pass
     yield

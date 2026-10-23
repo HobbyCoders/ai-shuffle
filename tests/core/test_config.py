@@ -138,7 +138,8 @@ class TestSettingsFromEnvironment:
                     assert settings.log_level == "DEBUG"
                     assert settings.service_name == "test-service"
                     assert settings.version == "1.0.0"
-                    assert settings.session_expire_days == 7
+                    # Retired behaviour env values only enter through the startup importer.
+                    assert settings.session_expire_days == 30
                     assert settings.cookie_secure is False
 
     def test_local_mode_env_var_true(self):

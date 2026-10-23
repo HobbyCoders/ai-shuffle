@@ -13,7 +13,7 @@ from tests.api.test_terminals_api import ctx, client, owner, MEMBER_PAIRED, wsc,
 
 @pytest.fixture
 def peer(ctx, monkeypatch):
-    monkeypatch.setattr(settings, "network_peer_terminals", True)
+    monkeypatch.setattr(type(settings), 'network_peer_terminals', property(lambda self, value=True: value))
     monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda device:
         SimpleNamespace(kind="worker", status="active") if device == "source" else None))
     # Deliberately malicious source: its own assertion must never grant access.
@@ -151,13 +151,13 @@ async def test_recipient_expiry_and_explicit_revoke_close_terminal(peer, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_pending_expiry_and_disabled_probe(peer):
+async def test_pending_expiry_and_disabled_probe(peer, monkeypatch):
     lease = "pending-lease-123456789012345"
     pending = await relay.handle({"op": "request", "lease": lease}, "source")
     relay._approvals[("source", lease)]["expires"] = 0
     response = owner(peer).post(f"/api/v1/terminals/peer-requests/{pending['request_id']}/approve")
     assert response.status_code == 403
-    settings.network_peer_terminals = False
+    monkeypatch.setattr(type(settings), "network_peer_terminals", property(lambda self: False))
     assert (await relay.handle({"op": "probe"}, "source"))["reason_code"] == "peer_terminals_disabled"
 
 

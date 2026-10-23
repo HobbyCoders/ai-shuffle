@@ -21,8 +21,8 @@ from tests.core.network.test_token_binding import post, request_body
 def setup(workers, monkeypatch):
     monkeypatch.setattr(managed_connection, "status", lambda: {"status": "connected", "url": "https://tunnel.example"})
     monkeypatch.setattr(settings, "cluster_advertise_url", "http://192.168.50.20:8000")
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
-    monkeypatch.setattr(settings, "network_require_token_binding", False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
+    monkeypatch.setattr(type(settings), 'network_require_token_binding', property(lambda self, value=False: value))
     monkeypatch.setattr(lan, "owner_addresses", lambda: [])
     server, peer = workers("server"), workers("peer")
     with server.active():

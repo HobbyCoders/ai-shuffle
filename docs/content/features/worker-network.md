@@ -69,35 +69,22 @@ authorities and drops those addresses instead of advertising/dialing them;
 a rate-limited warning advises using punycode. This also affects existing primary
 and peer addresses, not just new aliases saved through Settings.
 
-`NETWORK_TOKEN_BINDING_ENABLED=false` is the explicit rollback switch. Disabled
-workers send legacy proofs and do not enforce endpoint allowlists or stored
-binding pins. `NETWORK_REQUIRE_TOKEN_BINDING` has no effect in this mode. This
-restores existing authentication, not relay protection; disable binding on the
-receiving peers too when rolling back a pinned worker (see rollback below).
+Endpoint binding is now mandatory internal policy, not an environment toggle.
+Legacy peers remain accepted until their authenticated binding support is pinned;
+there is no environment rollback that disables endpoint validation or ignores pins.
+Repair advertised addresses or upgrade an old caller rather than disabling the
+protection.
 
-There is **no Settings UI for either binding switch**. Set
-`NETWORK_TOKEN_BINDING_ENABLED=false` in the receiving worker's startup
-configuration, then restart that worker:
+The stricter requirement for even unpinned legacy peers is persisted owner policy:
+`network_require_token_binding` in `GET`/`PUT /api/v1/settings/owner-policy`.
+There is no UI for this advanced policy yet. For one compatibility release, an
+explicit old `NETWORK_REQUIRE_TOKEN_BINDING` env or selected `.env` value is
+adopted once only if no saved key exists. Explicit false is preserved; blank and
+absent values are not imported. Saved settings, including settings synced from a
+peer, win over later env edits. The legacy reader is removed next release.
 
-| Installation | Where to set the switch |
-|---|---|
-| Docker | The container environment, for example the Compose `environment:` section or your container manager's environment settings. Apply the changed environment by recreating/restarting the container. |
-| Windows desktop | `%APPDATA%\ai-shuffle-desktop\worker\.env` |
-| macOS desktop | `~/Library/Application Support/ai-shuffle-desktop/worker/.env` |
-| Linux desktop | `~/.config/ai-shuffle-desktop/worker/.env`, or `$XDG_CONFIG_HOME/ai-shuffle-desktop/worker/.env` when `XDG_CONFIG_HOME` is set |
-
-The desktop launcher passes that profile's file as `AI_SHUFFLE_ENV_FILE`.
-Custom/preview profiles may use another file: `_resolve_env_file` reads the
-existing file named by `AI_SHUFFLE_ENV_FILE` first, otherwise `.env` in the
-worker's working directory. Edit that selected file, not an in-app update's
-source directory or the worker data directory. Process environment values take
-precedence over `.env` entries. Fully quit and restart the desktop app after
-saving. `NETWORK_REQUIRE_TOKEN_BINDING` uses the same configuration location.
-
-When `NETWORK_TOKEN_BINDING_ENABLED=true`, this release sends both the legacy
-device-key proof and a versioned endpoint-bound proof on every token request;
-rejection never retries legacy-only. The following enforcement rules apply only
-with this rollout gate enabled.
+This release sends both the legacy device-key proof and a versioned
+endpoint-bound proof on every token request; rejection never retries legacy-only.
 The bound transcript is the canonical JSON array
 `["shuffle-device-token-bound-v1", challenge, server_device_id, canonical_base_endpoint]`.
 The server checks the endpoint against its current locally advertised tunnel and
@@ -119,7 +106,7 @@ dial is advertised. An invite, manual address or cached URL may differ from the
 advertised address (Docker port mappings, reverse proxies and hostname/IP aliases
 are common examples). Configure aliases on the receiving worker first, then
 upgrade it and restart it. An unadvertised alias is refused even before pinning
-and even with `NETWORK_REQUIRE_TOKEN_BINDING=false`. If an address changes later,
+and even with persisted `network_require_token_binding` set to `false`. If an address changes later,
 update the primary advertisement or add the still-reachable dial URL through
 **Advertised addresses** on the receiving worker; no re-pairing is needed.
 
@@ -170,23 +157,16 @@ pin. It survives restarts, membership generation changes and re-admission of the
 same identity. A new signing identity (new device id), a fresh network or recovery
 onto a fresh database starts without those local pins. Downgrading a pinned peer
 to an old release will fail token authentication while enforcement is enabled.
-For rollback, turn `NETWORK_TOKEN_BINDING_ENABLED=false` on **all receiving
-workers that pinned the rolled-back worker**, in each receiver's container
-environment or desktop `.env` file listed above, and restart them before
-disabling binding on that worker. There is no Settings UI for this rollback
-switch. Turning it off on just one worker restores inbound calls
-to that worker, but its outgoing legacy proofs still fail at enabled peers that
-pinned it. A network-wide opt-out restores both directions without deleting
-identity, aliases or pairing data. Pins are retained but ignored while disabled,
-and enforced again on re-enabling; disabling deliberately restores the legacy
-security posture. Repair advertisements before re-enabling the workers.
+There is no binding-disable rollback in this release. Keep the calling worker
+upgraded and repair its advertised dial address. Existing identities, aliases
+and pairing data do not need to be deleted.
 
 Old peers still work **before pinning**. During this rollout an intermediary that
 can redirect a peer's first connection can strip both the new proof and capability
 statement and relay legacy authentication. Old servers have the same exposure.
-Once all peers have binding enabled and their dial addresses configured, set
-`NETWORK_REQUIRE_TOKEN_BINDING=true` on each worker to reject even unpinned legacy
-requests (default: `false`, effective only with the rollout gate enabled). The follow-up
+Once all peers are upgraded and their dial addresses configured, set persisted
+`network_require_token_binding` to `true` through the owner-policy API to reject
+even unpinned legacy requests (default: `false`). The follow-up
 protocol release must remove legacy acceptance after the rolling-upgrade window;
 this compatibility release does not claim complete first-contact relay protection.
 Binding also does not encrypt plain-HTTP bearer tokens: use HTTPS or the sealed

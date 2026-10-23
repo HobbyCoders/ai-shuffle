@@ -21,8 +21,8 @@ def pair(workers, monkeypatch):
     join(server, peer)
     endpoints = ["https://server.example", "http://192.168.50.20:8000"]
     monkeypatch.setattr(engine, "_own_endpoints", lambda: list(endpoints))
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
-    monkeypatch.setattr(settings, "network_require_token_binding", False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
+    monkeypatch.setattr(type(settings), 'network_require_token_binding', property(lambda self, value=False: value))
     app = FastAPI()
     app.include_router(api.router)
     return server, peer, endpoints, TestClient(app)
@@ -130,7 +130,7 @@ def test_receiver_binding_refusal_names_device_and_rate_limits_warning(pair, mon
         warnings = [record for record in caplog.records if record.name == tokens.__name__]
         assert len(warnings) == 1
         assert peer.device_id in warnings[0].message
-        assert "NETWORK_TOKEN_BINDING_ENABLED=false" in warnings[0].message
+        assert "repair its advertised addresses" in warnings[0].message
         detail = response.json()["detail"]
         assert isinstance(detail, str) and len(detail) <= 300
         tokens._binding_refusal_at[peer.device_id] -= 301
@@ -191,11 +191,11 @@ async def test_mismatch_reason_reaches_peer_status_and_rate_limited_logs(pair, c
 def test_challenge_advertises_binding_only_while_enabled(pair, monkeypatch):
     server, peer, _, client = pair
     with server.active():
-        monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+        monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=False: value))
         reply = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": peer.device_id})
         assert reply.status_code == 200
         assert "token_binding" not in reply.json()
-        monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+        monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
         reply = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": peer.device_id})
         assert reply.json()["token_binding"] == 1
 
@@ -203,7 +203,7 @@ def test_challenge_advertises_binding_only_while_enabled(pair, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("binding", [False, True])
 async def test_a_new_token_keeps_the_stall_warning_and_clears_only_a_binding_refusal(binding, monkeypatch):
-    monkeypatch.setattr(settings, "network_token_binding_enabled", binding)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=binding: value))
     stall = "Sync with this worker is stalled: 3 changes are not arriving."
     link = transport.PeerLink("peer-device", ["https://peer.example"])
     link.sync_warning = link.last_error = stall
@@ -247,8 +247,8 @@ def test_owner_configured_alias_repairs_unadvertised_direct_endpoint(workers, mo
     monkeypatch.setattr(managed_connection, "status", lambda: {})
     monkeypatch.setattr(lan, "owner_addresses", lambda: [])
     monkeypatch.setattr(settings, "cluster_advertise_url", "http://192.168.50.20:8000")
-    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
-    monkeypatch.setattr(settings, "network_require_token_binding", False)
+    monkeypatch.setattr(type(settings), 'network_token_binding_enabled', property(lambda self, value=True: value))
+    monkeypatch.setattr(type(settings), 'network_require_token_binding', property(lambda self, value=False: value))
     server, peer = workers("server"), workers("peer")
     with server.active():
         engine.create_network("Test network")
@@ -345,7 +345,7 @@ def test_global_requirement_and_unsigned_description_cannot_pin(pair, monkeypatc
         body.update(version="999", capabilities={"token_binding_required": True}, token_binding_required=True)
         assert post(client, body).status_code == 200
         assert not store.get_member(peer.device_id)["token_binding_required"]
-        monkeypatch.setattr(settings, "network_require_token_binding", True)
+        monkeypatch.setattr(type(settings), 'network_require_token_binding', property(lambda self, value=True: value))
         assert post(client, request_body(client, server, peer)).status_code == 403
         assert post(client, request_body(client, server, peer, endpoints[0])).status_code == 200
 

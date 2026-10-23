@@ -109,7 +109,7 @@ def test_info_is_never_persisted(recorded):
 
 
 def test_setting_off_restores_error_only_capture(recorded, monkeypatch):
-    monkeypatch.setattr(settings, "error_log_capture_warnings", False)
+    monkeypatch.setattr(type(settings), 'error_log_capture_warnings', property(lambda self, value=False: value))
     handler = elh.ErrorLogDBHandler()
 
     handler.emit(_record(logging.WARNING))
@@ -180,7 +180,7 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
     5,000-row trim."""
     from app.db import error_logs
 
-    monkeypatch.setattr(settings, "error_log_max_warning_rows", 250)
+    monkeypatch.setattr(type(settings), 'error_log_max_warning_rows', property(lambda self, value=250: value))
     statements = []
 
     class _Cursor:
@@ -226,7 +226,7 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
 def test_warning_ceiling_of_zero_disables_the_trim(monkeypatch):
     from app.db import error_logs
 
-    monkeypatch.setattr(settings, "error_log_max_warning_rows", 0)
+    monkeypatch.setattr(type(settings), 'error_log_max_warning_rows', property(lambda self, value=0: value))
     statements = []
 
     class _Cursor:

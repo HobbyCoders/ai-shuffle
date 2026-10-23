@@ -643,6 +643,35 @@ async def delete_claude_cloud(token: str = Depends(require_admin)):
 
 
 # ============================================================================
+# Core owner policy (UI is added in the area follow-ups)
+# ============================================================================
+
+class OwnerPolicyUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    network_require_token_binding: Optional[bool] = None
+    network_peer_terminals: Optional[bool] = None
+    session_expire_days: Optional[int] = None
+
+
+@router.get("/owner-policy")
+async def get_owner_policy(token: str = Depends(require_auth)):
+    from app.core import owner_settings
+
+    return await run_sync(owner_settings.read)
+
+
+@router.put("/owner-policy")
+async def put_owner_policy(request: OwnerPolicyUpdate, token: str = Depends(require_admin)):
+    from app.core import owner_settings
+
+    try:
+        return await run_sync(lambda: owner_settings.write(request.model_dump(exclude_unset=True)))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid owner policy setting")
+
+
+# ============================================================================
 # Subscription loop guard
 # ============================================================================
 

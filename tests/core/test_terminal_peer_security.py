@@ -14,7 +14,7 @@ from app.network import control, engine, terminal_relay
 @pytest.mark.parametrize("https", [False, True])
 @pytest.mark.parametrize("operation", ["open", "read", "write", "resize", "close"])
 async def test_malicious_member_cannot_self_authorize(monkeypatch, enabled, https, operation):
-    monkeypatch.setattr(settings, "network_peer_terminals", enabled)
+    monkeypatch.setattr(type(settings), 'network_peer_terminals', property(lambda self, value=enabled: value))
     monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda device:
         SimpleNamespace(kind="worker", status="active")))
     # This is the exploit: the worker manufactures a lease AND answers its
@@ -42,8 +42,8 @@ async def test_malicious_member_cannot_self_authorize(monkeypatch, enabled, http
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_peer_policy_controls_capability_but_never_implies_authorization(monkeypatch, enabled):
-    assert Settings.model_fields["network_peer_terminals"].default is False
-    monkeypatch.setattr(settings, "network_peer_terminals", enabled)
+    assert Settings(_env_file=None).network_peer_terminals is False
+    monkeypatch.setattr(type(settings), 'network_peer_terminals', property(lambda self, value=enabled: value))
     monkeypatch.setattr(terminals, "supported", lambda: True)
     monkeypatch.setattr(terminal_targets.runners, "directory", lambda: {"runners": [{
         "id": "peer", "device_name": "Peer", "is_self": False, "online": True, "capabilities": {"terminal": 2},

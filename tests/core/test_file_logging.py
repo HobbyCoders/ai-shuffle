@@ -76,7 +76,10 @@ def fake_settings(tmp_path, monkeypatch):
             **overrides,
         }
         for name, value in fields.items():
-            monkeypatch.setattr(settings, name, value)
+            if name == "file_logging_enabled":
+                monkeypatch.setattr(type(settings), name, property(lambda self, value=value: value))
+            else:
+                monkeypatch.setattr(settings, name, value)
         return settings
 
     # Reset module singletons before AND clean up after so root logger stays clean.
@@ -204,7 +207,7 @@ def test_records_written_to_file_and_startup_banner(fake_settings, tmp_path):
     assert "a distinctive test log line" in content
 
 
-def test_disabled_via_env_flag(fake_settings, tmp_path):
+def test_disabled_handler_policy_for_isolated_callers(fake_settings, tmp_path):
     fake_settings(file_logging_enabled=False)
     path = file_logging.setup_file_logging()
     assert path is None

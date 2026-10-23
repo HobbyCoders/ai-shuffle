@@ -292,7 +292,8 @@ async def create_web_session(
     if client is None:
         raise HTTPException(status_code=401, detail="Mobile device credential changed; pair this device again")
     token = pairing.generate_controller_session()
-    expires_at = min(datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days),
+    expire_days = await run_sync(lambda: settings.session_expire_days)
+    expires_at = min(datetime.now(timezone.utc) + timedelta(days=expire_days),
                      key_expiry(device))
     from app.db.pairing import WebSessionReservationConflict
     try:

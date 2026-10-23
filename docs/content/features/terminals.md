@@ -57,8 +57,11 @@ exits, choose its target again to open a new one. SSH terminals accept
 single-line paste only, without pressing Enter.
 
 Peer-worker terminals are not available: they need owner authorization verified
-independently by the receiving worker. The `NETWORK_PEER_TERMINALS` setting is
-off by default; turning it on does not enable this unfinished feature. Enrolled
+independently by the receiving worker. The persisted `network_peer_terminals`
+owner policy is off by default; changing it does not replace recipient approval.
+For one release, an explicit legacy environment value is imported only if there
+is no saved policy. There is no UI for this policy yet; it is exposed through
+`GET`/`PUT /api/v1/settings/owner-policy`. Enrolled
 workers alone cannot authorize terminals, and peer targets are not offered.
 
 ## Pasting

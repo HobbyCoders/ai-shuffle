@@ -8,8 +8,10 @@ authorization). Tests: `tests/core/test_terminals.py`,
 
 Terminals support local Unix PTYs and Windows ConPTY and explicitly selected
 private-access SSH machine grants. **The peer-terminal backend is available;
-the terminal-panel UI integration is pending.** `NETWORK_PEER_TERMINALS` still
-defaults to `false` and must be enabled on both workers. It does not authorize
+the terminal-panel UI integration is pending.** Persisted `network_peer_terminals`
+owner policy still defaults to `false` and must be enabled on both workers through
+`GET`/`PUT /api/v1/settings/owner-policy`. Legacy env values are adopted once only
+when no saved key exists; later env edits do not override saved policy. It does not authorize
 a terminal: every new shell requires an explicit owner-authenticated approval
 directly on the receiving worker. No approval can be issued by peer control.
 

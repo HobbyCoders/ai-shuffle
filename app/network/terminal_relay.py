@@ -44,7 +44,7 @@ def availability():
     from app.core import terminals
     if not peer_targets_enabled():
         return {"available": False, "reason_code": "peer_terminals_disabled",
-                "reason": "Enable NETWORK_PEER_TERMINALS on both workers."}
+                "reason": "Enable peer terminals in owner policy on both workers."}
     if not terminals.supported():
         return {"available": False, "reason_code": "not_supported", "reason": "No usable PTY or shell on this worker."}
     return {"available": False, "reason_code": "recipient_approval_required",
