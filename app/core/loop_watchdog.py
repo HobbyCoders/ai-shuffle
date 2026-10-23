@@ -91,6 +91,7 @@ class LoopStallWatchdog:
         self._heartbeat_written_tick: Optional[float] = None
         self._heartbeat_last_write = float("-inf")
         self._heartbeat_failed = False
+        self._pending_heartbeat_warning: Optional[functools.partial] = None
         # Observability for tests / the resource monitor.
         self.stall_count = 0
         self.dump_count = 0
@@ -140,6 +141,10 @@ class LoopStallWatchdog:
                 # Inspect asyncio only on its owning loop; publish the count
                 # with the pong so the watchdog cannot log an older census.
                 self._recovery_task_count = len(asyncio.all_tasks(self._loop))
+            warning = self._pending_heartbeat_warning
+            self._pending_heartbeat_warning = None
+        if warning is not None:
+            warning()  # Logging happens only on the loop's existing ping callback.
 
     def _send_ping(self, now: float) -> None:
         with self._lock:
@@ -166,16 +171,15 @@ class LoopStallWatchdog:
             self._write_heartbeat(time.monotonic(), stopped_at=time.time())
 
     def _heartbeat_warning(self, message: str, *args: object, exc_info: bool = False) -> None:
-        # Never acquire a handler lock from heartbeat I/O: the frozen loop
-        # may be holding it. Queued warnings run only when the loop runs again.
+        # No logging or extra wakeup here: call_soon_threadsafe itself may log
+        # synchronously in asyncio debug mode if its wakeup socket is full.
+        # Keep only the latest notice; the existing loop-side pong drains it.
         warning = functools.partial(
             self._log.warning, message, *args,
             exc_info=sys.exc_info() if exc_info else None,
         )
-        try:
-            self._loop.call_soon_threadsafe(warning)
-        except RuntimeError:
-            pass  # The loop has closed; do not log from the watchdog at shutdown.
+        with self._lock:
+            self._pending_heartbeat_warning = warning
 
     def _boot_heartbeat(self) -> None:
         """All heartbeat filesystem work, including boot inspection, is off-loop."""

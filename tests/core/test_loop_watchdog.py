@@ -375,9 +375,12 @@ def test_boot_reports_stale_heartbeat(tmp_path, caplog, clean):
             # Boot time is only a bound for an unclean process end.
             import unittest.mock
             with unittest.mock.patch("app.core.loop_watchdog.time.time", return_value=last_tick + 30):
-                LoopStallWatchdog(loop)._boot_heartbeat()
+                restarted = LoopStallWatchdog(loop)
+                restarted._boot_heartbeat()
         if clean:
-            LoopStallWatchdog(loop)._boot_heartbeat()
+            restarted = LoopStallWatchdog(loop)
+            restarted._boot_heartbeat()
+        restarted._send_ping(time.monotonic())
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
@@ -392,7 +395,9 @@ def test_clean_shutdown_downtime_is_not_a_stall(tmp_path, caplog):
     }))
     loop = asyncio.new_event_loop()
     try:
-        LoopStallWatchdog(loop)._boot_heartbeat()
+        wd = LoopStallWatchdog(loop)
+        wd._boot_heartbeat()
+        wd._send_ping(time.monotonic())
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
@@ -421,6 +426,46 @@ def test_heartbeat_rate_limit_and_atomic_failure(tmp_path, monkeypatch):
         wd._write_heartbeat(5)
         assert path.read_bytes() == initial  # no partially overwritten record
         assert wd._heartbeat_failed
+    finally:
+        loop.close()
+
+
+def test_heartbeat_failure_uses_no_wakeup_and_logs_on_normal_ping(tmp_path, monkeypatch, caplog):
+    from unittest.mock import Mock
+
+    from app.core import loop_watchdog
+
+    loop = asyncio.new_event_loop()
+    loop.set_debug(True)
+    try:
+        wd = LoopStallWatchdog(loop)
+        wd._boot_heartbeat()
+        wd._pong()
+        wd._write_heartbeat(0)
+        wd._pong()
+        wakeup = Mock(wraps=loop.call_soon_threadsafe)
+        monkeypatch.setattr(loop, "call_soon_threadsafe", wakeup)
+
+        def fail_replace(*args):
+            raise OSError("heartbeat disk unavailable")
+
+        monkeypatch.setattr(loop_watchdog.os, "replace", fail_replace)
+        wd._write_heartbeat(5)
+        wakeup.assert_not_called()  # Even a failed debug-mode wakeup may log.
+        assert wd._pending_heartbeat_warning is not None
+        assert "Could not persist loop heartbeat" not in caplog.text
+
+        wd._send_ping(time.monotonic())  # Only the normal watchdog ping wakes the loop.
+        wakeup.assert_called_once_with(wd._pong)
+        loop.run_until_complete(asyncio.sleep(0))
+        assert wd._pending_heartbeat_warning is None
+        assert caplog.text.count("Could not persist loop heartbeat") == 1
+
+        # Repeated I/O failures remain rate-limited, with no growing queue.
+        wd._write_heartbeat(10)
+        assert wd._pending_heartbeat_warning is None
+        wakeup.assert_called_once_with(wd._pong)
+        assert caplog.text.count("Could not persist loop heartbeat") == 1
     finally:
         loop.close()
 
@@ -490,8 +535,10 @@ def test_bad_previous_heartbeat_is_nonfatal(tmp_path, caplog, record):
     (tmp_path / "loop-heartbeat.json").write_text(record)
     loop = asyncio.new_event_loop()
     try:
-        LoopStallWatchdog(loop)._boot_heartbeat()
+        wd = LoopStallWatchdog(loop)
+        wd._boot_heartbeat()
         assert "Could not read previous loop heartbeat" not in caplog.text
+        wd._send_ping(time.monotonic())
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
@@ -560,7 +607,9 @@ def test_killed_stalled_process_leaves_a_boot_readable_heartbeat(tmp_path, monke
     monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.02)
     loop = asyncio.new_event_loop()
     try:
-        LoopStallWatchdog(loop, threshold_s=0.05)._boot_heartbeat()
+        wd = LoopStallWatchdog(loop, threshold_s=0.05)
+        wd._boot_heartbeat()
+        wd._send_ping(time.monotonic())
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
