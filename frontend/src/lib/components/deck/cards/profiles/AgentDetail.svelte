@@ -10,9 +10,9 @@
 	 * reports.
 	 */
 	import { tick } from 'svelte';
-	import { Check, Copy, Download, House, LoaderCircle, Lock, RotateCcw, Trash2 } from 'lucide-svelte';
+	import { Check, Copy, Download, LoaderCircle, Lock, RotateCcw, Trash2 } from 'lucide-svelte';
 	import type { Profile } from '$lib/api/client';
-	import type { AvatarId } from '$lib/api/assistant';
+	import type { AvatarId } from '$lib/api/agent-identity';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
 	import type { SubagentDefault } from '$lib/api/subagentDefault';
 	import DetailPane from '$lib/components/settings/shell/DetailPane.svelte';
@@ -20,7 +20,7 @@
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import InlineConfirm from '$lib/components/settings/rows/InlineConfirm.svelte';
 	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import AgentProfileTab from './AgentProfileTab.svelte';
 	import AgentInstructionsTab from './AgentInstructionsTab.svelte';
@@ -47,7 +47,6 @@
 		/** Created in this visit (or still a draft): the template row shows. */
 		isNew: boolean;
 		avatar: AvatarId;
-		isAssistant: boolean;
 		isAdmin: boolean;
 		colorSupported: boolean;
 		folder: string;
@@ -79,7 +78,6 @@
 		onRemoveFromGroup: (profileId: string) => void;
 		onCreateGroup: (category: string, name: string) => void;
 		onDeleteGroup: (category: string, name: string) => void;
-		onOpenAssistant: (profileId: string) => void;
 		onRetryIdentity: () => void;
 		onDefaultModel: (model: string) => void | Promise<void>;
 		onDuplicate: () => void;
@@ -96,7 +94,6 @@
 		editingProfile,
 		isNew,
 		avatar,
-		isAssistant,
 		isAdmin,
 		colorSupported,
 		folder,
@@ -128,7 +125,6 @@
 		onRemoveFromGroup,
 		onCreateGroup,
 		onDeleteGroup,
-		onOpenAssistant,
 		onRetryIdentity,
 		onDefaultModel,
 		onDuplicate,
@@ -148,7 +144,7 @@
 	let deleteArmed = $state(false);
 	let restoreArmed = $state(false);
 
-	const kind = $derived(isAssistant ? 'Your assistant' : builtin ? 'Built-in' : 'Yours');
+	const kind = $derived(builtin ? 'Built-in' : 'Yours');
 	const updated = $derived.by(() => {
 		if (draft) return 'Not saved yet';
 		const at = editingProfile?.updated_at;
@@ -216,7 +212,6 @@
 
 {#snippet badges()}
 	{#if builtin}<span class="chip"><Lock />Built-in</span>{/if}
-	{#if isAssistant}<span class="chip prim"><House />Assistant</span>{/if}
 	{#if builtin && modified}<span class="chip warn">Modified</span>{/if}
 	{#if draft}<span class="chip">Draft</span>{/if}
 {/snippet}
@@ -310,7 +305,6 @@
 					{avatar}
 					{isAdmin}
 					{colorSupported}
-					{isAssistant}
 					{groups}
 					{identityError}
 					{onRetryIdentity}
@@ -319,7 +313,6 @@
 					{onRemoveFromGroup}
 					{onCreateGroup}
 					{onDeleteGroup}
-					{onOpenAssistant}
 				/>
 			{:else if current === 'prompt'}
 				<AgentInstructionsTab
@@ -426,10 +419,6 @@
 	.chip.warn {
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
-	}
-	.chip.prim {
-		background: var(--st-primary-soft);
-		color: var(--st-primary);
 	}
 	.agd :global(.st-dha .st-btn:not(.danger)) {
 		color: var(--st-mfg);

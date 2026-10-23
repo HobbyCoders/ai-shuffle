@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
-import { AVATARS } from '$lib/api/assistant';
+import { AVATARS } from '$lib/api/agent-identity';
 import AgentAvatar from './AgentAvatar.svelte';
 
 afterEach(cleanup);

@@ -10,14 +10,16 @@ import VoicePage from './VoicePage.svelte';
 import SecurityPage from './SecurityPage.svelte';
 import SystemPage from './SystemPage.svelte';
 import CloudPage from './CloudPage.svelte';
+import UsagePage from './UsagePage.svelte';
 
-export type PreferenceCategory = 'general' | 'archived' | 'voice' | 'cloud' | 'security' | 'system';
+export type PreferenceCategory = 'general' | 'archived' | 'voice' | 'usage' | 'cloud' | 'security' | 'system';
 export type CollectionCategory = Exclude<CategoryId, PreferenceCategory>;
 
 export const PREFERENCE_PAGES: Record<PreferenceCategory, Component> = {
 	general: GeneralPage,
 	archived: ArchivedChatsPage,
 	voice: VoicePage,
+	usage: UsagePage,
 	cloud: CloudPage,
 	security: SecurityPage,
 	system: SystemPage

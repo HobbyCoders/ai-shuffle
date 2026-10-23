@@ -116,18 +116,6 @@
 	import RunningTasksList from './RunningTasksList.svelte';
 	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
 
-	interface Props {
-		/**
-		 * The assistant's home. Its transcript is organized exactly like any chat
-		 * (same model, same WorkLogGroup folds, same `groupToolCalls` pref); only
-		 * the surroundings differ: running work sits beside the composer and
-		 * approvals are asked in words.
-		 */
-		assistantMode?: boolean;
-	}
-
-	let { assistantMode = false }: Props = $props();
-
 	/** Exhaustive keyed identity for every presentation-model variant. */
 	function displayItemKey(item: DisplayItem): string {
 		switch (item.kind) {
@@ -364,12 +352,13 @@
 	// Background tasks do NOT gate the dots — the main turn streams concurrently
 	// with running tasks, which have their own "Running N task" panel. See
 	// gap-indicator.ts for the full contract + tests.
-	// The approval the assistant is asking in words, if any (assistant_confirm).
+	// The approval the agent is asking in words, if any (assistant_confirm):
+	// any owner chat, answered with a typed or spoken yes or no.
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 
-	// The assistant's question in words stands in for the dots while it waits.
+	// The question in words stands in for the dots while it waits.
 	const showGapIndicator = $derived(
-		!(assistantMode && assistantQuestion)
+		!assistantQuestion
 		&& shouldShowGapIndicator(
 			$activeSession.messages,
 			$activeSession.isStreaming,
@@ -2047,7 +2036,7 @@
 			{/if}
 
 			<!-- Approval in words: the oldest in-conversation request is the
-			     assistant asking, answered with a plain yes or no in the message box.
+			     agent asking, answered with a plain yes or no in the message box.
 			     No card, no buttons. The request itself says so (assistant_confirm). -->
 			{#if assistantQuestion}
 				<div class="assistant-ask" data-permission-request={assistantQuestion.request.request_id}>
@@ -2086,11 +2075,9 @@
 			<!-- In-flight background work pinned to the history tail: agents (swarms
 			     as one expandable row) and shell tasks, grouped, each with stop and,
 			     for agents, its transcript. On a phone it is one row opening the full
-			     list. Renders nothing when nothing runs. -->
-			{#if !assistantMode}
-				<!-- The assistant's home shows its background work beside the composer instead. -->
-				<RunningTasksList sessionId={$activeSession.sessionId} variant="inline" />
-			{/if}
+			     list. Renders nothing when nothing runs. Chats this one started
+			     show beside the composer (BackgroundWorkStrip). -->
+			<RunningTasksList sessionId={$activeSession.sessionId} variant="inline" />
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->
 			<div

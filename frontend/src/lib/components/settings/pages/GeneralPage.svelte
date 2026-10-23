@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * General: Appearance, Conversation, Usage limits, Thinking and tools,
-	 * Region.
+	 * General: Appearance, Conversation, Thinking and tools, Region. Usage
+	 * limits moved to Settings > Usage.
 	 *
 	 * One registry entry (entries/general.ts) per `<SettingRow id>`. Every
 	 * control saves through its store (theme, chatPreferences,
@@ -23,7 +23,6 @@
 	import Switch from '../rows/Switch.svelte';
 	import { getEntry } from '$lib/settings/registry';
 	import ThemeStyleGrid from './editors/ThemeStyleGrid.svelte';
-	import LimitResumeRows from './LimitResumeRows.svelte';
 
 	type ThemeChoice = 'light' | 'dark' | 'system';
 	const THEME_OPTIONS: { value: ThemeChoice; label: string }[] = [
@@ -156,7 +155,6 @@
 			{@render chatRow(id, key)}
 		{/each}
 	</RowGroup>
-	<LimitResumeRows />
 	<RowGroup title="Thinking and tools">
 		{#each THINKING as [id, key] (id)}
 			{@render chatRow(id, key)}

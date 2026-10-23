@@ -1,6 +1,6 @@
 /**
  * The "Resume when the limit resets" and "Compact before resuming" switches
- * (#1831), as Settings > General > Usage limits shows them. One shared system
+ * (#1831), as Settings > Usage > Usage limits shows them. One shared system
  * setting that applies to every provider.
  */
 import { getErrorMessage } from '$lib/api/client';

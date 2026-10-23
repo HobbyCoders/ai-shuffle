@@ -9,8 +9,8 @@
 	import ConnectedWorkerBar from '../src/shell/ConnectedWorkerBar.svelte';
 	import MobilePromptDock from '../src/shell/MobilePromptDock.svelte';
 
-	let { permissions: initialPermissions, questions: initialQuestions, assistant, title }: {
-		permissions: PermissionRequestData[]; questions: UserQuestionData[]; assistant: boolean; title: string;
+	let { permissions: initialPermissions, questions: initialQuestions, title }: {
+		permissions: PermissionRequestData[]; questions: UserQuestionData[]; title: string;
 	} = $props();
 
 	// The fixture seeds the queue once; answers then remove items locally.
@@ -29,8 +29,8 @@
 	<ConnectedWorkerBar />
 	<header class="topbar">
 		<button type="button" class="icon-btn" aria-label="Open menu"><Menu size={22} /></button>
-		<div class="title"><strong>{title}</strong><span>{assistant ? 'Your assistant' : 'ai-shuffle'}</span></div>
-		{#if !assistant}<button type="button" class="git-btn" aria-label="Git: up to date"><CircleCheck size={16} />Up to date</button>{/if}
+		<div class="title"><strong>{title}</strong><span>ai-shuffle</span></div>
+		<button type="button" class="git-btn" aria-label="Git: up to date"><CircleCheck size={16} />Up to date</button>
 	</header>
 	<main class="chat-view">
 		<div class="transcript">
@@ -39,7 +39,7 @@
 			{/each}
 			<div class="tool-row"><b>Read</b><code>desktop/electron-builder.yml</code></div>
 			<div class="tool-row"><b>Grep</b><code>"linux" in desktop/</code></div>
-			{#if !assistant}<RunningTasksList sessionId={$activeSession.sessionId ?? null} />{/if}
+			<RunningTasksList sessionId={$activeSession.sessionId ?? null} />
 		</div>
 		<div class="input-slot input-wrapper">
 			<MobilePromptDock
@@ -51,7 +51,7 @@
 				onPermission={(d) => { answers.push(d); setTimeout(() => (permissions = permissions.filter((p) => p.request_id !== d.request_id)), 1000); }}
 				onQuestion={(d) => { answers.push(d); setTimeout(() => (questions = questions.filter((q) => q.request_id !== d.request_id)), 1000); }}
 			/>
-			<ChatInput compact assistantMode={assistant} onBrowserToggle={() => (browserOpen = !browserOpen)} {browserOpen} />
+			<ChatInput compact onBrowserToggle={() => (browserOpen = !browserOpen)} {browserOpen} />
 		</div>
 	</main>
 </div>

@@ -56,6 +56,8 @@ It depends on the model and on how much the agent reads.
 
 Start with a low monthly spend limit in your provider's console, work normally for a few days, check the usage page, and then set a limit you are comfortable with.
 
+AI Shuffle adds its own daily cap on background work that chats start, and a time limit per job, under **Settings → Usage → Spending**. Turns you type yourself are never counted or refused.
+
 ## When usage numbers are estimates
 
 The Stats page and the cost under each reply come from the token counts your provider reports. When a provider reports none, or you stop a reply early, AI Shuffle estimates them. Estimated amounts are marked **≈** under the reply and **est.** on the Stats page. They still count toward budgets and limits. Local models are always shown as free.

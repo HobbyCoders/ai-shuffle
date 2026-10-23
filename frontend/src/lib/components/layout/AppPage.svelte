@@ -244,17 +244,10 @@
 		// user last chose is the one that compose belongs in.
 		const followRestoredLane = () => { if (restoredMode) appMode.set(restoredMode, false); };
 
-		// A persisted empty composer is also an empty landing, not a selected work
-		// session. Default to Assistant once at startup, never as a reactive redirect:
-		// subsequent New conversation actions, drafts and restored sessions win.
-		// A deep link (see below) is an explicit destination; read it first so the
-		// landing never mounts Assistant only to be replaced a moment later.
+		// An empty landing is the new-session composer (handleNewSession below);
+		// a surviving draft keeps the composer it was typed in.
 		const hasDraft = hasComposerDraft($activeSession.draft);
-		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !layoutNewChatWon && !restoredSessionId && !hasDraft && !deepLinkSessionId &&
-			(!$activeView || ($activeView.type === 'session' && currentViewSessionId === null));
-		if (emptyOwnerLanding) {
-			layout.openFeaturePage('assistant');
-		} else if (!$activeView) {
+		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
 				layout.openChat(restoredSessionId);

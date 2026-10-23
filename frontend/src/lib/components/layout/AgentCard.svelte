@@ -12,14 +12,14 @@
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, profiles, profilesLoaded, projects } from '$lib/stores/app-data.svelte';
-	import { agentIdentities } from '$lib/stores/assistant';
+	import { agentIdentities } from '$lib/stores/agent-identities';
 	import { workerInstalls } from '$lib/stores/worker-presence';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { getDefaultModel, getModelLabel } from '$lib/constants/models';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
-	import { avatarColorToken } from '$lib/components/assistant/avatar-colors';
-	import type { AvatarId } from '$lib/api/assistant';
+	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
+	import { avatarColorToken } from '$lib/components/agents/avatar-colors';
+	import type { AvatarId } from '$lib/api/agent-identity';
 	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
 	import VoiceCallButton from '$lib/components/chat/VoiceCallButton.svelte';
 	import { runsOnVisible } from '$lib/components/chat/session-scope';

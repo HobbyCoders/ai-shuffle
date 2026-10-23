@@ -149,21 +149,18 @@ describe('projectRulesLane', () => {
 		hasProfile: true, hasAnyProfile: true, hasProject: false
 	};
 
-	it("lets the assistant's home send and attach without a project", () => {
-		// The home is stored as a code session with no project. Read as a code
-		// lane it refused every send with "Select a project first."
+	it('lets a no-project session send and attach on the chat lane', () => {
 		expect(evaluateSubmitGuards({ ...home, mode: 'code' })!.notice?.message).toBe('Select a project first.');
-		const lane = projectRulesLane('code', true);
-		expect(lane).toBe('chat');
+		const lane = projectRulesLane('chat');
 		expect(evaluateSubmitGuards({ ...home, mode: lane })).toBeNull();
-		expect(attachmentBlockReason(null, null, lane, 'home-session')).toBeNull();
+		expect(attachmentBlockReason(null, null, lane, 'chat-session')).toBeNull();
 	});
 
-	it('leaves ordinary sessions on their own lane', () => {
-		expect(projectRulesLane('code', false)).toBe('code');
-		expect(projectRulesLane('chat', false)).toBe('chat');
-		expect(projectRulesLane(undefined, false)).toBe('code');
-		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane('code', false) })).not.toBeNull();
+	it('leaves every session on its own lane', () => {
+		expect(projectRulesLane('code')).toBe('code');
+		expect(projectRulesLane('chat')).toBe('chat');
+		expect(projectRulesLane(undefined)).toBe('code');
+		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane('code') })).not.toBeNull();
 	});
 });
 

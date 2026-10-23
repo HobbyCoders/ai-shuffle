@@ -86,16 +86,11 @@
 		onSheetOpenChange?: (open: boolean) => void;
 		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
 		inertToolbar?: boolean;
-		/**
-		 * The assistant's home: voice, attach and the model picker only. No
-		 * permission or Away menu, effort tag or context ring.
-		 */
-		assistantMode?: boolean;
 		/** The start-a-call button, for a shell whose controls sheet carries it. */
 		callAction?: Snippet;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, assistantMode = false }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -200,8 +195,7 @@
 	const permissionPending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.permission);
 	const fastPending = $derived(!!$activeSession.sessionId && !!$activeSession.bindingUnhydrated?.fast);
 	const permissionValue = $derived(permissionPending ? null : effectiveAccessMode($activeSession.permissionModeOverride, accessContext));
-	// The assistant's home has no project by construction; see projectRulesLane.
-	const projectLane = $derived(projectRulesLane($activeSession.mode, assistantMode));
+	const projectLane = $derived(projectRulesLane($activeSession.mode));
 	// Attach survives into the chat lane. Its uploads skip the project endpoint
 	// for a shared workspace directory, and the chat ceiling carries a `Read`
 	// scoped to that directory, so an attached file is genuinely readable there.
@@ -459,8 +453,6 @@
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);
 	$effect(() => {
-		// The assistant's home has no effort pick to keep in range.
-		if (assistantMode) return;
 		const reconciled = reconcileModelEffort(effortValue, effortCapability);
 		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
 	});
@@ -498,7 +490,6 @@
 		>
 			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
 		</button>
-		{#if !assistantMode}
 			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef} data-decision="access">
 				<button
 					type="button"
@@ -569,7 +560,6 @@
 					</div>
 				{/if}
 			</div>
-		{/if}
 
 		<!-- Dictate / voice call, supplied by ChatInput — left of attach. -->
 		{@render voiceActions?.()}
@@ -590,7 +580,7 @@
 			</button>
 		{/if}
 
-		{#if terminal && !assistantMode}
+		{#if terminal}
 			<button
 				type="button"
 				class="dock-ico terminal-toggle-btn"
@@ -687,7 +677,6 @@
 			{/if}
 		</div>
 
-		{#if !assistantMode}
 		<div class="dock-pop-wrap desktop-controls" bind:this={effortWrapRef}>
 			<button
 				type="button"
@@ -731,7 +720,6 @@
 			<ContextUsageBar onOpenChange={onUsageOpenChange} />
 		</div>
 		{/if}
-		{/if}
 	</div>
 </div>
 
@@ -772,16 +760,15 @@
 	awayAvailable={!!awaySessionId}
 	awayBusy={!!(awaySessionId && awayMode.busy[awaySessionId])}
 	onToggleAway={toggleAway}
-	showCodeControls={!assistantMode}
-	showSetup={!assistantMode}
-	showEffort={!assistantMode}
-	{assistantMode}
+	showCodeControls
+	showSetup
+	showEffort
 	onUsageOpenChange={onUsageOpenChange}
 	{callAction}
 	{browserOpen}
-	onBrowserToggle={assistantMode ? undefined : onBrowserToggle}
+	{onBrowserToggle}
 	{onBrowserPreload}
-	terminal={assistantMode ? undefined : terminal}
+	{terminal}
 />
 {/if}
 

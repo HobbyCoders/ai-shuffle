@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * ProfileCard: the Agents page (#1825). A Settings-style collection page:
-	 * the agent list on the left (assistant, Yours, Built-in; search, an
+	 * the agent list on the left (Yours, Built-in; search, an
 	 * All / Yours / Built-in filter and a folder filter) and one agent's detail
 	 * on the right (AgentDetail). On a phone, or at 600px wide or less, they
 	 * are two steps with a back button (and Android Back).
@@ -18,7 +18,7 @@
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { updateAgentIdentity, assistantError, type AvatarId } from '$lib/api/assistant';
+	import { updateAgentIdentity, apiErrorText, type AvatarId } from '$lib/api/agent-identity';
 	import { getSubagentDefault, putSubagentDefault, type SubagentDefault } from '$lib/api/subagentDefault';
 	import {
 		STARTER_TEAM_ID,
@@ -27,7 +27,7 @@
 		listTeamTemplates,
 		type TeamTemplate
 	} from '$lib/api/teamTemplates';
-	import { refreshAssistant, assistantState, agentIdentities } from '$lib/stores/assistant';
+	import { refreshAgentIdentities, agentIdentities } from '$lib/stores/agent-identities';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -95,14 +95,14 @@
 	const STACK_WIDTH = 600;
 	const SELECTED_KEY = 'agents.selected';
 
-	// The list marks the personal assistant and shows each agent's avatar.
+	// The list shows each agent's avatar.
 	let identityError = $state('');
 	async function loadIdentities() {
 		identityError = '';
 		try {
-			await refreshAssistant();
+			await refreshAgentIdentities();
 		} catch (e) {
-			identityError = assistantError(e);
+			identityError = apiErrorText(e);
 		}
 	}
 	onMount(() => {
@@ -129,7 +129,6 @@
 	const folders = $derived((groups?.profiles?.groups ?? []).map((g) => g.name));
 	/** The agent API returns `avatar_color` (feat/subagent-default); without it the colour choice hides. */
 	const colorSupported = $derived(profiles.some((p) => Object.hasOwn(p, 'avatar_color')));
-	const assistantId = $derived($assistantState?.agent_id ?? null);
 
 	// Load data on mount
 	$effect(() => {
@@ -334,8 +333,7 @@
 			folder: folderFilter,
 			assignments,
 			folders,
-			selectedId,
-			assistantId
+			selectedId
 		})
 	);
 
@@ -449,9 +447,8 @@
 		return 'Chat only';
 	}
 
-	/** Right-hand meta on a list row: "Home" for the assistant, else the model. */
+	/** Right-hand meta on a list row: the agent's model. */
 	function metaOf(p: Profile): string {
-		if (p.id === assistantId) return 'Home';
 		const models =
 			viewMode === 'form' && editingProfile?.id === p.id ? profileForm.provider_models : profileModels(p);
 		const pinned = pinnedModel(models);
@@ -605,7 +602,7 @@
 		rememberSelection(null);
 	}
 
-	// Desktop opens on an agent: the deep link, the last one, the assistant, or the first.
+	// Desktop opens on an agent: the deep link, the last one, or the first.
 	let autoOpened = false;
 	$effect(() => {
 		if (autoOpened || loading || stacked || viewMode === 'form' || profiles.length === 0) return;
@@ -620,7 +617,6 @@
 			}
 			const first =
 				profiles.find((p) => p.id === stored) ??
-				profiles.find((p) => p.id === assistantId) ??
 				sections.yours[0] ??
 				sections.builtin[0] ??
 				profiles[0];
@@ -900,7 +896,7 @@
 			if (stacked) backToList();
 			return;
 		}
-		const order = [...sections.assistant, ...sections.yours, ...sections.builtin];
+		const order = [...sections.yours, ...sections.builtin];
 		const at = order.findIndex((p) => p.id === target.id);
 		try {
 			await dropPending();
@@ -1108,7 +1104,7 @@
 	$effect(() => {
 		if (!hasBuiltins && !loading && filter !== 'all') untrack(() => (filter = 'all'));
 	});
-	const noneOfYours = $derived(!profiles.some((p) => !p.is_builtin && p.id !== assistantId));
+	const noneOfYours = $derived(!profiles.some((p) => !p.is_builtin));
 	const emptyMessage = $derived(
 		offerStarterTeam && starterTeam && starterTeam.agents.length
 			? `Start blank, or install a starter team: ${new Intl.ListFormat('en', { type: 'conjunction' }).format(starterTeam.agents.map((a) => a.name))}.`
@@ -1216,7 +1212,6 @@
 						{editingProfile}
 						{isNew}
 						avatar={editingProfile ? avatarOf(editingProfile.id) : 'robot'}
-						isAssistant={!!editingProfile && editingProfile.id === assistantId}
 						isAdmin={$isAdminStore}
 						{colorSupported}
 						folder={openFolder}
@@ -1248,7 +1243,6 @@
 						onRemoveFromGroup={removeFromGroup}
 						onCreateGroup={createGroup}
 						onDeleteGroup={deleteGroup}
-						onOpenAssistant={(id) => layout.openFeaturePage('assistant', id)}
 						onRetryIdentity={loadIdentities}
 						onDefaultModel={(model) => saveSubagentDefault({ model })}
 						onDuplicate={duplicateAgent}

@@ -1,18 +1,18 @@
 <script lang="ts">
 	/**
-	 * AgentList: the list column of the Agents page. Sections: the personal
-	 * assistant (one pinned, tinted row), "Yours" and "Built-in". Each row is a
+	 * AgentList: the list column of the Agents page. Sections: "Yours" and
+	 * "Built-in". Each row is a
 	 * Settings ListItem: avatar, name with at most two chips (Draft,
 	 * Modified), one line of description, and the agent's model on the right.
 	 * Up/Down moves between rows. ProfileCard owns the search and filters and
 	 * passes the sections in.
 	 */
 	import type { Profile } from '$lib/api/client';
-	import type { AvatarId } from '$lib/api/assistant';
+	import type { AvatarId } from '$lib/api/agent-identity';
 	import { Plus } from 'lucide-svelte';
 	import ListItem from '$lib/components/settings/rows/ListItem.svelte';
 	import ListGroupLabel from '$lib/components/settings/rows/ListGroupLabel.svelte';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import type { AgentSections } from '$lib/components/deck/cards/profiles/agentList';
 
 	interface Props {
@@ -60,10 +60,10 @@
 	}: Props = $props();
 
 	const yoursCount = $derived(sections.yours.length + (draft ? 1 : 0));
-	const total = $derived(sections.assistant.length + sections.yours.length + sections.builtin.length);
+	const total = $derived(sections.yours.length + sections.builtin.length);
 </script>
 
-{#snippet row(p: Profile, pinned = false)}
+{#snippet row(p: Profile)}
 	<ListItem
 		id={p.id}
 		name={p.name}
@@ -71,10 +71,9 @@
 		meta={metaOf(p)}
 		selected={selectedId === p.id}
 		onselect={() => onSelect(p)}
-		variant={pinned ? 'pinned' : 'default'}
 	>
 		{#snippet lead()}
-			<AgentAvatar avatar={avatarOf(p.id)} size={pinned ? 36 : 32} color={colorOf(p)} neutral={p.is_builtin} />
+			<AgentAvatar avatar={avatarOf(p.id)} size={32} color={colorOf(p)} neutral={p.is_builtin} />
 		{/snippet}
 		{#snippet badges()}
 			{#if p.is_builtin && p.is_modified}<span class="chip warn">Modified</span>{/if}
@@ -97,11 +96,6 @@
 	</div>
 	<p class="st-vh" role="status">Loading agents</p>
 {:else}
-	{#if sections.assistant.length}
-		<ListGroupLabel label="Your assistant" />
-		{#each sections.assistant as p (p.id)}{@render row(p, true)}{/each}
-	{/if}
-
 	{#if showYours}
 		{#if yoursCount}
 			<ListGroupLabel label="Yours"><span class="c">{yoursCount}</span></ListGroupLabel>

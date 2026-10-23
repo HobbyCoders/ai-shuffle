@@ -121,9 +121,9 @@ export interface ComposerSheetProps {
 	fastPending?: boolean;
 	onToggleFast?: () => void;
 	showCodeControls?: boolean;
-	/** Agent, workspace, branch and runner selectors (off in the assistant's home). */
+	/** Agent, workspace, branch and runner selectors. */
 	showSetup?: boolean;
-	/** Effort and fast mode (off in the assistant's home). */
+	/** Effort and fast mode. */
 	showEffort?: boolean;
 	permissionOptions: ComposerControlOption[];
 	permissionValue: string | null;
@@ -138,8 +138,6 @@ export interface ComposerSheetProps {
 	awayAvailable?: boolean;
 	awayBusy?: boolean;
 	onToggleAway?: () => void;
-	/** The assistant's home: no agent, project, branch or worktree; effort is the model's own. */
-	assistantMode?: boolean;
 	/** The usage details opened or closed (the dock polls provider limits while open). */
 	onUsageOpenChange?: (open: boolean) => void;
 	/** The composer's start-a-call button, for the controls' action row. */

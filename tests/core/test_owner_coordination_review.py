@@ -38,7 +38,9 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
     assert not result.is_error, result.text
     child = json.loads(result.text)["session_id"]
     assert assistant_permissions.scope_for_session(child) is None
-    assert not away_mode.assistant_work(child)
+    # #371 step 5: Away-style question answering reaches every owner chat's
+    # started chats; it answers questions only and never widens permissions.
+    assert away_mode.assistant_work(child)
     # A chat starter runs on Ask whatever its binding says, so its child does too.
     expected = permission if project else "default"
     assert database.get_session(child)["permission_mode"] == expected

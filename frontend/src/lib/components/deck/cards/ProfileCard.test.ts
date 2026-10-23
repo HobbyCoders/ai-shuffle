@@ -11,7 +11,6 @@ const mocks = vi.hoisted(() => ({
 	put: vi.fn(),
 	post: vi.fn(),
 	del: vi.fn(),
-	getAssistant: vi.fn(),
 	getAgentIdentities: vi.fn(),
 	updateAgentIdentity: vi.fn(),
 	clearFeatureItemId: vi.fn(),
@@ -21,9 +20,8 @@ vi.mock('$lib/api/client', async (original) => ({
 	...(await original<typeof import('$lib/api/client')>()),
 	api: { get: mocks.get, put: mocks.put, post: mocks.post, delete: mocks.del }
 }));
-vi.mock('$lib/api/assistant', async (original) => ({
-	...(await original<typeof import('$lib/api/assistant')>()),
-	getAssistant: mocks.getAssistant,
+vi.mock('$lib/api/agent-identity', async (original) => ({
+	...(await original<typeof import('$lib/api/agent-identity')>()),
 	getAgentIdentities: mocks.getAgentIdentities,
 	updateAgentIdentity: mocks.updateAgentIdentity
 }));
@@ -43,7 +41,7 @@ vi.mock('$lib/api/toolSurface', async (original) => ({
 
 import ProfileCard from './ProfileCard.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
-import { assistantState, agentIdentities } from '$lib/stores/assistant';
+import { agentIdentities } from '$lib/stores/agent-identities';
 import type { Profile } from '$lib/api/client';
 
 let serverAvatar: string;
@@ -90,7 +88,6 @@ beforeEach(async () => {
 	serverAvatar = 'robot';
 	subagentDefault = null;
 	agents = [researcher(), designer()];
-	assistantState.set(null);
 	agentIdentities.set([]);
 	mocks.get.mockImplementation(async (path: string) => {
 		if (path === '/agents') return agents.map((a) => ({ ...a, config: { ...a.config, avatar_id: serverAvatar } }));
@@ -100,7 +97,6 @@ beforeEach(async () => {
 		}
 		return [];
 	});
-	mocks.getAssistant.mockResolvedValue(null);
 	mocks.getAgentIdentities.mockImplementation(async () => [{ id: 'agent', name: 'Researcher', avatar_id: serverAvatar }]);
 	mocks.updateAgentIdentity.mockImplementation(async (id, patch) => {
 		if (id === 'agent') serverAvatar = patch.avatar_id;

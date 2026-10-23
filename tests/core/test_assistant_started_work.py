@@ -1,5 +1,7 @@
-"""Work the owner's assistant starts with StartSession: report-back, named
-projects and Away-style handling. Ordinary chats keep today's behaviour."""
+"""Work an owner chat starts with StartSession: report-back, named projects
+and Away-style handling. Since #371 step 5 every owner chat's started chats
+get the Away-style handling the legacy assistant home's did; only the home's
+wider permission scope stays home-only."""
 import json
 from unittest.mock import AsyncMock
 
@@ -78,7 +80,7 @@ def wakes(session_id):
 
 
 # ---------------------------------------------------------------------------
-# Ordinary chats: unchanged
+# Ordinary chats: the same started-chat handling as the legacy home
 # ---------------------------------------------------------------------------
 
 async def test_ordinary_owner_start_session_reports_automatically(mock_db, monkeypatch):
@@ -94,8 +96,12 @@ async def test_ordinary_owner_start_session_reports_automatically(mock_db, monke
     new_id = result["session_id"]
     assert orch.started_by_owner(new_id) == "caller"
     assert orch.started_by_home(new_id) is None
-    assert not away_mode.answers_questions(new_id)
+    # Its approvals go to the starter, so its questions are answered for it.
     assert approvals.assistant_route(new_id).parent_session_id == "caller"
+    assert away_mode.answers_questions(new_id)
+    assert away_mode.turn_note(new_id) == away_mode.ASSISTANT_WORK_NOTE
+    # The starter itself is asked as usual.
+    assert not away_mode.answers_questions("caller")
     run(new_id, result["turn_id"], "Done.")
     await turn_scheduler.on_turn_settled(new_id, result["turn_id"], "completed")
     report.assert_awaited_once()
@@ -386,3 +392,18 @@ async def test_away_off_cancels_only_away_not_assistant_started_autonomy(home):
     assert approvals.assistant_route(new_id) is not None
     away_mode.record_context_delivery(new_id, note, "started-off")
     assert away_mode.turn_note(new_id) == away_mode.ASSISTANT_WORK_NOTE
+
+
+async def test_started_chat_without_a_live_starter_keeps_ordinary_questions(mock_db, monkeypatch):
+    """Answering questions for a chat needs somewhere its approvals are seen:
+    once the starter is archived, the started chat is asked as usual again."""
+    database.create_profile("agent", "Agent", None, {"model": "sonnet"})
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    chat("caller")
+    new_id = json.loads((await call("caller", "start", start_args())).text)["session_id"]
+    assert away_mode.answers_questions(new_id)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", ("caller",))
+    assert orch.approval_starter(new_id) is None
+    assert not away_mode.answers_questions(new_id)
+    assert away_mode.turn_note(new_id) is None

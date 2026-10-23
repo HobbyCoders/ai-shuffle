@@ -32,7 +32,7 @@ async function open(viewport, touch, query) {
 	const page = await context.newPage();
 	const errors = [];
 	page.on('pageerror', (e) => errors.push(e.message));
-	await page.goto(`${base}?${query}`);
+	await page.goto(`${base}${query ? `?${query}` : ""}`);
 	await page.getByRole('navigation', { name: 'Workspace' }).waitFor();
 	await page.locator('.scard').first().waitFor();
 	const cdp = touch ? await context.newCDPSession(page) : null;
@@ -70,12 +70,11 @@ async function longPress(page, cdp, locator, ms = 700) {
 
 async function desktop() {
 	const name = 'desktop';
-	const { context, page, errors } = await open({ width: 1440, height: 900 }, false, 'assistant=setup');
+	const { context, page, errors } = await open({ width: 1440, height: 900 }, false);
 	await shot(page, `${name}-initial`);
 
-	// Assistant not set up: the row opens its settings.
-	await page.getByRole('button', { name: 'Open your assistant' }).click();
-	assert.deepEqual(await log(page), ['open feature assistant'], `[${name}] assistant row opens setup`);
+	// No pinned assistant row: the ledger starts the column (#371 step 5).
+	assert.equal(await page.getByRole('button', { name: 'Open your assistant' }).count(), 0, `[${name}] no assistant row`);
 
 	// Rail destination opens its panel.
 	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Files' }).click();
@@ -131,13 +130,9 @@ async function desktop() {
 
 async function phone() {
 	const name = 'phone';
-	const { context, page, errors, cdp } = await open({ width: 390, height: 844 }, true, 'ui=mobile&assistant=ready');
+	const { context, page, errors, cdp } = await open({ width: 390, height: 844 }, true, 'ui=mobile');
 	await shot(page, `${name}-initial`);
-
-	// Assistant set up: the row opens the one chat, which never shows in the ledger.
-	assert.ok(!(await page.locator('.scard', { hasText: 'Assistant home' }).count()), `[${name}] home chat stays out of the ledger`);
-	await page.getByRole('button', { name: 'Open your assistant' }).tap();
-	assert.deepEqual(await log(page), ['open session home'], `[${name}] assistant row opens its chat`);
+	assert.equal(await page.getByRole('button', { name: 'Open your assistant' }).count(), 0, `[${name}] no assistant row`);
 
 	// Swipe right settles; swipe left archives.
 	await swipe(page, cdp, 'Fix the update check', 240);
@@ -171,7 +166,7 @@ async function phone() {
 	const customize = page.getByRole('dialog', { name: 'Customize the rail' });
 	await customize.waitFor();
 	await shot(page, `${name}-customize`);
-	assert.equal((await log(page)).at(-1), 'open session home', `[${name}] the long press does not also open Files`);
+	assert.notEqual((await log(page)).at(-1), 'open feature file-browser', `[${name}] the long press does not also open Files`);
 	await customize.getByRole('button', { name: 'Back' }).tap();
 	await customize.waitFor({ state: 'detached' });
 

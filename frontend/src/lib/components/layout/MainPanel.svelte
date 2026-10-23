@@ -54,10 +54,6 @@
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import ChatView from './ChatView.svelte';
-	import AssistantHome from '$lib/components/assistant/AssistantHome.svelte';
-	import { isAdmin } from '$lib/stores/auth.svelte';
-	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
-	import { assistantState, isAssistantHome, refreshAssistant } from '$lib/stores/assistant';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -133,7 +129,6 @@
 
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
-		'assistant': 'Assistant',
 		'settings': 'Settings',
 		'profile': 'Agents',
 		'project': 'Projects',
@@ -183,9 +178,7 @@
 		isBuildView ? 'build' : featurePanelKeyForView($activeView?.type)
 	);
 	/** True when the chat surface (not a feature panel) owns the canvas. */
-	const showAssistantSurface = $derived($activeView?.type === 'assistant');
-	const assistantAgentId = $derived(showAssistantSurface ? $activeView?.itemId ?? null : null);
-	const showChatSurface = $derived(featureKey === null && !showAssistantSurface);
+	const showChatSurface = $derived(featureKey === null);
 	let mountedPanels = $state<FeaturePanelKey[]>([]);
 
 	$effect(() => {
@@ -232,16 +225,6 @@
 	const activeTab = $derived(
 		$activeView?.type === 'session' ? $activeSession : null
 	);
-	// Assistant mode: the open chat is the assistant's home. Decided here, once,
-	// and passed down; the header, composer and transcript read only this flag.
-	const assistantMode = $derived(isAssistantHome(activeTab?.sessionId, $assistantState));
-	// The flag needs the assistant's state. The desktop sidebar loads it when it
-	// mounts, but the phone shell mounts its sidebar drawer only on first open,
-	// so a chat opened straight away would not know it is the built-in home
-	// (and would offer Rename / Fork / Delete). Load it here when it is missing.
-	$effect(() => {
-		if ($isAdmin && activeTab?.sessionId && !$assistantState) void refreshAssistant().catch(() => {});
-	});
 	const sessionBrowser = $derived(browserPanel.forSession(activeTab?.sessionId ?? null));
 
 
@@ -945,9 +928,7 @@
 	instance with its existing handlers.
 -->
 {#snippet downloadAction()}
-	<!-- The assistant's home keeps no transcript download, Git or swarm controls;
-	     the job chats it starts keep theirs. -->
-	{#if !assistantMode && $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
+	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
 		<ChatExportActions sessionId={activeTab.sessionId} />
 	{/if}
 {/snippet}
@@ -956,7 +937,7 @@
 	<!-- A running session without a project: the pill opens the one-way
 	     attach sheet (#371 step 4). It hides itself everywhere else. -->
 	{#if $activeView?.type === 'session' && activeTab?.sessionId}
-		<NoProjectPill {assistantMode} compact={!!header} />
+		<NoProjectPill compact={!!header} />
 	{/if}
 	<!-- Not in a subagent's chat: its requests and approvals show in its main
 	     chat's panel, labelled with the subagent. -->
@@ -972,7 +953,7 @@
 			<ChatAccess sessionId={activeTab.sessionId} />
 		{/key}
 	{/if}
-	{#if activeTab && !assistantMode && shouldShowHeaderGitActions({
+	{#if activeTab && shouldShowHeaderGitActions({
 		viewType: $activeView?.type,
 		hasProject: !!activeProject,
 		githubAuthenticated: $githubAuthenticated,
@@ -1042,14 +1023,10 @@
 	<div class="main-content">
 		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)} bind:clientWidth={chatColumnWidth}>
 		{#if $activeView}
-			{#if showAssistantSurface && $isAdmin}
-				<div class="assistant-surface">{#key `${$sessionOwnerBoundary}:${assistantAgentId ?? ''}`}<AssistantHome requestedAgentId={assistantAgentId} />{/key}</div>
-			{/if}
 			{#if showChatSurface}
 				<div class="chat-row">
 					<div class="chat-browser-underlay">
 					<ChatView
-						{assistantMode}
 						onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
 							? () => browserPanel.toggle(activeTab?.sessionId ?? null)
 							: undefined}
@@ -1144,7 +1121,6 @@
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
 <style>
-	.assistant-surface { height:100%; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	/* Keep composer popovers below the sibling side-panel overlay. */
 	.main-surface { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }

@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
-# The source of truth is frontend/src/lib/components/assistant/avatars/: one
+# The source of truth is frontend/src/lib/components/agents/avatars/: one
 # SVG per avatar and avatars.json for the order. The backend ships without the
 # frontend sources, so this copy stays here; tests/api/test_assistant_avatars.py
 # fails if it drifts from the manifest.

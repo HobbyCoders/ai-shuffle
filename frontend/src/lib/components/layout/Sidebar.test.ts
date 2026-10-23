@@ -91,7 +91,7 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.apiGet, post: mocks.apiPost },
 	getErrorMessage: (error: Error, fallback: string) => error?.message || fallback,
 }));
-vi.mock('$lib/api/assistant', () => ({ getAssistant: vi.fn().mockResolvedValue(null), getAgentIdentities: vi.fn().mockResolvedValue([]), openAssistant: vi.fn() }));
+vi.mock('$lib/api/agent-identity', () => ({ getAgentIdentities: vi.fn().mockResolvedValue([]) }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),
@@ -166,8 +166,6 @@ import { terminals } from '$lib/stores/terminals.svelte';
 import { TerminalApiError } from '$lib/api/terminals';
 import Sidebar from './Sidebar.svelte';
 import { platform } from '$lib/stores/platform.svelte';
-import { acceptAssistant, assistantState } from '$lib/stores/assistant';
-import type { AssistantState } from '$lib/api/assistant';
 
 function session(
 	id: string,
@@ -290,7 +288,6 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	platform.set('desktop');
-	assistantState.set(null);
 });
 
 // ── Filter sheet ────────────────────────────────────────────────────────────
@@ -1692,113 +1689,19 @@ describe('Sidebar unified conversation history', () => {
 	});
 });
 
-describe('Sidebar assistant row', () => {
-	const ready = {
-		configured: true,
-		status: 'ready',
-		home_session_id: 'home',
-		assistant_name: 'Juniper',
-		avatar_id: 'robot',
-	} as unknown as AssistantState;
-
-	afterEach(() => assistantState.set(null));
-
-	it('opens the assistant settings while it is not set up', async () => {
+describe('Sidebar without the retired assistant (#371 step 5)', () => {
+	it('shows no pinned assistant row, and the hidden old home stays out of every lane', async () => {
+		mocks.sessions.set([
+			session('home', 'Assistant home chat', null, true, true),
+			session('active', 'Active chat', 'visible-project', true),
+		]);
 		const onOpenFeature = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
-		const row = screen.getByRole('button', { name: 'Open your assistant' });
-		expect(row.textContent).toContain('Set up your assistant');
-		await fireEvent.click(row);
-		expect(onOpenFeature).toHaveBeenCalledWith('assistant');
-	});
-
-	it('opens its one conversation once set up, and keeps it out of every lane', async () => {
-		mocks.sessions.set([
-			session('home', 'Assistant home chat', null, true),
-			session('active', 'Active chat', 'visible-project', true),
-		]);
-		const onOpenSession = vi.fn();
-		const onOpenFeature = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenSession, onOpenFeature } });
-		acceptAssistant(ready);
 		await tick();
-
-		const row = screen.getByRole('button', { name: 'Open your assistant' });
-		expect(row.textContent).toContain('Juniper');
-		expect(cardIds()).toEqual(['active']);
-		await fireEvent.keyDown(row, { key: 'Enter' });
-		expect(onOpenSession).toHaveBeenCalledWith('home');
-		expect(onOpenFeature).not.toHaveBeenCalled();
-	});
-
-	it('opens the conversation without research sources, creating the home when there is none', async () => {
-		const { openAssistant } = await import('$lib/api/assistant');
-		vi.mocked(openAssistant).mockResolvedValue({ session_id: 'new-home', home_session_id: 'new-home' });
-		const onOpenSession = vi.fn();
-		const onOpenFeature = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenSession, onOpenFeature } });
-		acceptAssistant({ ...ready, status: 'no_sources', research_sources: 0, home_session_id: null } as unknown as AssistantState);
-		await tick();
-
-		const row = screen.getByRole('button', { name: 'Open your assistant' });
-		expect(row.textContent).not.toContain('Set up your assistant');
-		await fireEvent.click(row);
-		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('new-home'));
-		expect(openAssistant).toHaveBeenCalledTimes(1);
-		expect(onOpenFeature).not.toHaveBeenCalled();
-	});
-
-	it('opens an existing home directly even when no source is switched on', async () => {
-		const { openAssistant } = await import('$lib/api/assistant');
-		vi.mocked(openAssistant).mockClear();
-		const onOpenSession = vi.fn();
-		const onOpenFeature = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenSession, onOpenFeature } });
-		acceptAssistant({ ...ready, status: 'no_sources', research_sources: 0 } as unknown as AssistantState);
-		await tick();
-		await fireEvent.click(screen.getByRole('button', { name: 'Open your assistant' }));
-		expect(onOpenSession).toHaveBeenCalledWith('home');
-		expect(openAssistant).not.toHaveBeenCalled();
-		expect(onOpenFeature).not.toHaveBeenCalled();
-	});
-
-	it('marks the row current while its conversation is on screen', async () => {
-		mocks.activeView.set({ type: 'session' });
-		mocks.activeSession.set({ sessionId: 'home', isStreaming: false, activeTasks: [] });
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
-		acceptAssistant(ready);
-		await tick();
-		expect(screen.getByRole('button', { name: 'Open your assistant' }).getAttribute('aria-current')).toBe('page');
-		mocks.activeView.set(null);
-	});
-
-	it('offers no Rename, Fork or Delete for the built-in conversation', async () => {
-		mocks.sessions.set([
-			session('home', 'Assistant home chat', null, true),
-			session('active', 'Active chat', 'visible-project', true),
-		]);
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
-		acceptAssistant(ready);
-		await tick();
-
-		const row = screen.getByRole('button', { name: 'Open your assistant' });
-		expect(row.hasAttribute('aria-haspopup')).toBe(false);
-		await fireEvent.contextMenu(row);
-		await fireEvent.keyDown(row, { key: 'F2' });
-		await fireEvent.keyDown(row, { key: 'Delete' });
-		await tick();
-		expect(screen.queryByRole('menu')).toBeNull();
-		expect(screen.queryByRole('menuitem')).toBeNull();
-		for (const label of [/rename/i, /fork/i, /delete/i]) {
-			expect(screen.queryByRole('button', { name: label })).toBeNull();
-			expect(screen.queryByTitle(label)).toBeNull();
-		}
-		// The home chat never appears as an ordinary row that could carry them.
-		expect(cardIds()).toEqual(['active']);
-	});
-
-	it('does not expose the assistant to non-admins', () => {
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: false } });
 		expect(screen.queryByRole('button', { name: 'Open your assistant' })).toBeNull();
+		expect(document.body.textContent).not.toMatch(/Your ongoing conversation|Set up your assistant/);
+		expect(cardIds()).toEqual(['active']);
+		expect(onOpenFeature).not.toHaveBeenCalledWith('assistant');
 	});
 });
+

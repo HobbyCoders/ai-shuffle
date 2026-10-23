@@ -3,18 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 
 const mocks = vi.hoisted(() => ({ updateAgentIdentity: vi.fn() }));
-vi.mock('$lib/api/assistant', async (original) => ({
-	...(await original<typeof import('$lib/api/assistant')>()),
+vi.mock('$lib/api/agent-identity', async (original) => ({
+	...(await original<typeof import('$lib/api/agent-identity')>()),
 	updateAgentIdentity: mocks.updateAgentIdentity
 }));
 
 import AvatarPicker from './AvatarPicker.svelte';
-import { assistantState, agentIdentities } from '$lib/stores/assistant';
-import { AVATARS } from '$lib/api/assistant';
+import { agentIdentities } from '$lib/stores/agent-identities';
+import { AVATARS } from '$lib/api/agent-identity';
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	assistantState.set(null);
 	agentIdentities.set([{ id: 'agent', name: 'Researcher', avatar_id: 'robot' }]);
 	mocks.updateAgentIdentity.mockImplementation(async (id, patch) => ({ id, name: 'Researcher', ...patch }));
 });

@@ -134,10 +134,9 @@ export function sendButtonState(s: SendButtonInput): { disabled: boolean; title:
 }
 
 /**
- * The lane whose project rules a composer follows. The assistant's home is
- * stored as a code session, but it never has a project and shows no picker,
- * so it follows the chat lane: sends and attachments must not ask for one.
+ * The lane whose project rules a composer follows: the session's own mode,
+ * with a row that predates modes read as a code session.
  */
-export function projectRulesLane(mode: SessionMode | undefined, assistantHome: boolean): SessionMode {
-	return assistantHome ? 'chat' : (mode ?? 'code');
+export function projectRulesLane(mode: SessionMode | undefined): SessionMode {
+	return mode ?? 'code';
 }

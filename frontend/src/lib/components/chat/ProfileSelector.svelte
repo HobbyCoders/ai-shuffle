@@ -14,11 +14,7 @@
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { layout } from '$lib/stores/layout.svelte';
-	import { assistantState } from '$lib/stores/assistant';
-	import { isAdmin } from '$lib/stores/auth.svelte';
-	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
-	import { Settings2 } from 'lucide-svelte';
 
 	interface Props {
 		sheetMode?: boolean;
@@ -58,17 +54,6 @@
 				|| (hasNoAgents ? 'No agents' : 'Agent')
 	);
 	const profileUnset = $derived(!$activeSession.profile && !profilePending);
-
-	const assistant = $derived(
-		$isAdmin && $assistantState?.home_session_id && $assistantState.home_session_id === $activeSession.sessionId
-			? $assistantState
-			: null
-	);
-	const assistantName = $derived(assistant?.assistant_name?.trim() || 'Assistant');
-
-	function openAssistantSettings() {
-		if (assistant) layout.openFeaturePage('assistant', assistant.agent_id);
-	}
 
 	function createAgent() {
 		closeProfileDropdown();
@@ -120,7 +105,7 @@
 </script>
 
 <div class="selector-wrapper" class:sheet-mode={sheetMode} class:card-variant={variant === 'card'} bind:this={profileDropdownRef}>
-	{#if variant === 'card' && !assistant}
+	{#if variant === 'card'}
 	<button
 		bind:this={cardNameRef}
 		type="button"
@@ -138,18 +123,6 @@
 		<svg class="card-name-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 		</svg>
-	</button>
-	{:else if assistant}
-	<button
-		type="button"
-		class="ctx-chip context-selector-btn assistant-chip"
-		onclick={openAssistantSettings}
-		title="Assistant settings"
-		aria-label="{assistantName} settings"
-	>
-		<AgentAvatar avatar={assistant.avatar_id} size={sheetMode ? 22 : 16} />
-		<span class="ctx-chip-label selector-text">{assistantName}</span>
-		<Settings2 class="assistant-gear" size={sheetMode ? 15 : 12} strokeWidth={2} aria-hidden="true" />
 	</button>
 	{:else}
 	<button
@@ -174,7 +147,7 @@
 	</button>
 	{/if}
 
-	{#if showProfileDropdown && !assistant}
+	{#if showProfileDropdown}
 		<div
 			class="selector-dropdown"
 			class:card-menu={variant === 'card'}
@@ -277,25 +250,6 @@
 	@keyframes agent-pending {
 		0%, 100% { opacity: 0.5; }
 		50% { opacity: 1; }
-	}
-
-	/* The Assistant's chip: the avatar stands in for the person icon and a gear
-	   says the tap opens settings rather than a list. */
-	.assistant-chip {
-		gap: 6px;
-	}
-	.assistant-chip :global(.agent-avatar) {
-		border-radius: 30%;
-	}
-	.assistant-chip :global(.assistant-gear) {
-		flex: none;
-		color: var(--muted-foreground);
-	}
-	.assistant-chip:hover :global(.assistant-gear) {
-		color: var(--foreground);
-	}
-	.sheet-mode .assistant-chip :global(.assistant-gear) {
-		margin-left: auto;
 	}
 
 	.selector-icon {

@@ -1,7 +1,7 @@
 /**
- * The assistant's background work, as plain lines.
+ * A chat's background work, as plain lines.
  *
- * Built from what the home's view already receives: its running background
+ * Built from what the chat's view already receives: its running background
  * tasks (with the worker chat a Task card links to) and the chats it started
  * with StartSession that are still working. No task ids, agent names or model
  * names reach the line; only what the job is about and how long it has run.

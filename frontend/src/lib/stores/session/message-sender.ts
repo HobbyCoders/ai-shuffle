@@ -24,7 +24,6 @@ import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
-import { effortToSend } from '../assistant';
 import { sendableComposerBinding } from './composer-binding';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -206,8 +205,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		// are left out: the backend then keeps the row's value (#418).
 		const binding = sendableComposerBinding(_state);
 		if (binding.permissionMode) overrides.permission_mode = binding.permissionMode;
-		const effort = effortToSend(_state.sessionId, _state.effortLevelOverride);
-		if (effort) overrides.effort = effort;
+		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
 		// Always an explicit boolean. Omitting the key when fast mode is OFF made
 		// the backend fall back to the session row, which still held the earlier
 		// `true` — so turning fast mode off never reached the CLI. `false` is a

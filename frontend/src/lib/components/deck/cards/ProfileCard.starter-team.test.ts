@@ -17,9 +17,8 @@ vi.mock('$lib/api/client', async (original) => ({
 	...(await original<typeof import('$lib/api/client')>()),
 	api: { get: mocks.get, put: mocks.put, post: mocks.post, delete: mocks.del }
 }));
-vi.mock('$lib/api/assistant', async (original) => ({
-	...(await original<typeof import('$lib/api/assistant')>()),
-	getAssistant: async () => null,
+vi.mock('$lib/api/agent-identity', async (original) => ({
+	...(await original<typeof import('$lib/api/agent-identity')>()),
 	getAgentIdentities: async () => []
 }));
 vi.mock('$lib/stores/notifications', async (original) => ({
@@ -38,7 +37,7 @@ vi.mock('$lib/api/toolSurface', async (original) => ({
 
 import ProfileCard from './ProfileCard.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
-import { assistantState, agentIdentities } from '$lib/stores/assistant';
+import { agentIdentities } from '$lib/stores/agent-identities';
 import type { Profile } from '$lib/api/client';
 
 const INSTALL = '/agents/templates/starter-team/install';
@@ -81,7 +80,6 @@ beforeEach(async () => {
 	agents = [];
 	teamTemplates = [starter()];
 	installFails = false;
-	assistantState.set(null);
 	agentIdentities.set([]);
 	mocks.get.mockImplementation(async (path: string) => {
 		if (path === '/agents') return agents;

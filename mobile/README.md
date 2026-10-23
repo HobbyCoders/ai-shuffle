@@ -47,7 +47,7 @@ the "Connected to" bar, the docked prompts (permission, one-shot access,
 question), the composer with its quick bar and the Chat controls panel. Every
 request is answered inside the page. `tests/shoot-chat-controls.mjs` drives it
 at 390x844 in both themes (rest, pickers, panel, model page, keyboard up,
-sliding a prompt, Runs on while running, the assistant, Connected to, usage,
+sliding a prompt, Runs on while running, Connected to, usage,
 dragging the bar up) and writes screenshots to `tests/.shots`.
 
 ```sh
