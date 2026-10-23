@@ -1181,6 +1181,72 @@ class Compactor:
         """Tier 1 without the ladder above it — the ai-shuffle contract."""
         return not self.config.enabled and self.config.trim.enabled
 
+    # ── Frozen prefix (bounded live retention) ───────────────────────────
+
+    def frozen_prefix(
+        self, nodes: list[SessionNode]
+    ) -> tuple[str, frozenset[str]] | None:
+        """The prefix the newest checkpoint renders in place of, as
+        ``(end node id, anchor ids)``; None when no checkpoint covers one.
+
+        A checkpoint summary always starts at the root (``summary_region``),
+        and ``_render`` replaces root..end with its text plus the pinned
+        reminder chain the fold covers. No other rendered message reads a node
+        inside it: calls and their results share a turn, and a checkpoint ends
+        on a whole turn. So only the root, the end and the pinned-reminder
+        chain (from the newest full block on, what ``_PinScan`` reads) are
+        anchors; the rest of the prefix can leave a live session's memory and
+        stay durable in its store. See :meth:`window`.
+        """
+        if not nodes or not self._summaries:
+            return None
+        root = nodes[0].node_id
+        ends = {end for start, end in self._summaries if start == root}
+        if not ends:
+            return None
+        stop = max((i for i, n in enumerate(nodes) if n.node_id in ends), default=-1)
+        # stop == 1 is a window with no interior left: [root, end, tail...].
+        if stop < 1:
+            return None
+        headers = self.config.pinned_reminder
+        keep = {root, nodes[stop].node_id}
+        if headers:
+            # Any opened pinned header, terminated or not: a superset of what
+            # _reminder_blocks reads, so a host reading the same chain back
+            # (the # Memory bookkeeping) finds every node it would on the path.
+            # Both readers stop at the newest full block walking back, so the
+            # chain starts at the newest node with a complete full block;
+            # nodes before it never contribute and are not anchors.
+            markers = [_PIN_OPEN + header for header in headers]
+            marked = [
+                k for k in range(1, stop)
+                if nodes[k].message.role == "user"
+                and any(marker in nodes[k].message.pinned_text() for marker in markers)
+            ]
+            first = next(
+                (k for k in reversed(marked)
+                 if any(kind == "full" for kind, _ in _reminder_blocks(nodes[k], headers))),
+                0,
+            )
+            keep.update(nodes[k].node_id for k in marked if k >= first)
+        return nodes[stop].node_id, frozenset(keep)
+
+    def window(self, nodes: list[SessionNode]) -> list[SessionNode]:
+        """``nodes`` without the unrendered interior of :meth:`frozen_prefix`.
+
+        The view is byte-identical to the full path's under the same decided
+        state. Decisions made on the window ignore that interior, which the
+        checkpoint already hides (an untrimmed result or unconsumed image in
+        it is not in context). Idempotent: a window windows to itself, so a
+        store that keeps only the window serves the same list.
+        """
+        frozen = self.frozen_prefix(nodes)
+        if frozen is None:
+            return nodes
+        end, keep = frozen
+        stop = next(i for i, n in enumerate(nodes) if n.node_id == end)
+        return [n for n in nodes[:stop] if n.node_id in keep] + nodes[stop:]
+
     # ── Rendering (pure view; no promotion state is touched) ─────────────
 
     def view(self, nodes: list[SessionNode]) -> list[Message]:
@@ -3231,7 +3297,10 @@ class Compactor:
 
     # ── Stats (for the context-usage breakdown) ──────────────────────────
 
-    def stats(self, nodes: list[SessionNode]) -> dict[str, int]:
+    def stats(self, nodes: list[SessionNode], *, elided_chars: int = 0) -> dict[str, int]:
+        """``elided_chars``: raw chars of the frozen-prefix interior a
+        windowed ``nodes`` left out (see :meth:`window`), so reclaimed tokens
+        still measure the whole path."""
         self._settle_replay(nodes)
         index = {n.node_id: i for i, n in enumerate(nodes)}
         digests = sum(
@@ -3244,7 +3313,7 @@ class Compactor:
             for (s, e), k in self._digested.items()
             if k == EPOCH_STUB and s in index and e in index
         )
-        raw = sum(block_chars(b) for n in nodes for b in n.message.content)
+        raw = elided_chars + sum(block_chars(b) for n in nodes for b in n.message.content)
         rendered = sum(
             block_chars(b) for m in self._render(nodes) for b in m.content
         )
