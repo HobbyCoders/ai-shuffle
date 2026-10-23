@@ -153,6 +153,12 @@ export interface EnvOptions {
 	baseEnv?: NodeJS.ProcessEnv;
 	/** Computed by the app, never recovered from a delegated environment snapshot. */
 	updatePolicyFile?: string;
+	/**
+	 * The `version` of the signed source release the worker runs (its verified
+	 * release.json), passed as APP_VERSION like the container does. Absent for
+	 * the installer's built-in build, which reports app.__version__.
+	 */
+	appVersion?: string;
 	platform?: NodeJS.Platform;
 }
 
@@ -169,8 +175,10 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	// Like Node, bundled gh precedes host tools; agent subprocesses inherit it.
 	if (opts.runtime.mode === 'bundled') pathParts.push(path.join(opts.runtime.root, 'bin'));
 	if (base[pathKey]) pathParts.push(base[pathKey] as string);
+	// The backend reads its version from APP_VERSION or VERSION (app/core/config.py):
+	// only the verified release may set it, never an inherited variable.
 	for (const key of Object.keys(base)) {
-		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$|SHUFFLE_DESKTOP_LISTENER_TOKEN$)/i.test(key)) delete base[key];
+		if (/^(POSTGRES_|DATABASE_|PG|APP_VERSION$|VERSION$|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$|SHUFFLE_DESKTOP_LISTENER_TOKEN$)/i.test(key)) delete base[key];
 	}
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
@@ -210,6 +218,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 		...(opts.workspaceDir ? { WORKSPACE_DIR: opts.workspaceDir } : {}),
 		AI_SHUFFLE_ENV_FILE: opts.envFile,
 		...(opts.updatePolicyFile ? { SHUFFLE_UPDATE_POLICY_FILE: opts.updatePolicyFile } : {}),
+		...(opts.appVersion ? { APP_VERSION: opts.appVersion } : {}),
 		TOOLS_DIR: opts.runtime.toolsDir, BROWSER_MCP_ENTRY: opts.runtime.browserMcpEntry,
 		PYTHONPATH: opts.runtime.mode === 'bundled' ? opts.runtime.serverDir : path.join(opts.runtime.serverDir, 'fluid'),
 		PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', SHUFFLE_DESKTOP: '1'
@@ -386,6 +395,8 @@ export interface SupervisorOptions {
 	stateDir?: string;
 	baseEnv?: NodeJS.ProcessEnv;
 	updatePolicyFile?: string;
+	/** See EnvOptions.appVersion. */
+	appVersion?: string;
 	postgres: () => PostgresConfig | null;
 	readyTimeoutMs?: number;
 	/** Overall limit of one health probe; defaults to HEALTH_TOTAL_TIMEOUT_MS. */

@@ -171,6 +171,13 @@ async function main(): Promise<void> {
 			nodeBinDir: path.dirname(selected.node), toolsDir: path.join(selected.serverDir, 'tools'),
 			browserMcpEntry: path.join(selected.serverDir, 'browser-mcp/dist/index.js'), manifest: null
 		} : resolveRuntime({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, repoDir });
+		// A source update reports its signed release version (e.g. a nightly's -dev.N+g<sha>),
+		// as the container does; the installer's built-in build keeps app.__version__.
+		let appVersion: string | undefined;
+		if (selected) {
+			try { appVersion = (await managed!.updates.release(selected.revision)).version; }
+			catch (error) { console.error('Could not read the running release version', error); }
+		}
 		runtimeError = 'error' in resolved ? resolved.error : null;
 		supervisor =
 			'error' in resolved
@@ -179,6 +186,7 @@ async function main(): Promise<void> {
 						runtime: resolved,
 						baseEnv: managed?.subprocessEnv,
 						updatePolicyFile,
+						...(appVersion ? { appVersion } : {}),
 						logDir,
 						envFile: path.join(userData, 'worker', '.env'),
 						stateDir: path.join(userData, 'worker'),
