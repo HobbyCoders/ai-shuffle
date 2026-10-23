@@ -36,10 +36,12 @@
  aria-hidden="true">{@html drawings[known]}</span>
 
 <style>
- .agent-avatar { --c:var(--av, var(--primary)); display:inline-flex; flex:none; align-items:center; justify-content:center; color:var(--c); background:color-mix(in oklch,var(--c) 9%,var(--background)); border:1px solid color-mix(in oklch,var(--c) 22%,var(--border)); border-radius:28%; overflow:hidden; }
- .agent-avatar.neutral { border-style:dashed; background:color-mix(in oklch,var(--c) 8%,var(--background)); }
+ /* Mixed in oklab, not oklch: the light theme's background is oklch(0.995 0 0),
+    whose hue 0 would swing every tint toward pink/beige in a hue blend. */
+ .agent-avatar { --c:var(--av, var(--primary)); display:inline-flex; flex:none; align-items:center; justify-content:center; color:var(--c); background:color-mix(in oklab,var(--c) 9%,var(--background)); border:1px solid color-mix(in oklab,var(--c) 22%,var(--border)); border-radius:28%; overflow:hidden; }
+ .agent-avatar.neutral { border-style:dashed; background:color-mix(in oklab,var(--c) 8%,var(--background)); }
  .agent-avatar :global(svg) { width:86%; height:86%; }
- .agent-avatar :global(.shape) { fill:color-mix(in oklch,var(--c) 26%,var(--background)); stroke:currentColor; stroke-width:2; stroke-linejoin:round; }
+ .agent-avatar :global(.shape) { fill:color-mix(in oklab,var(--c) 26%,var(--background)); stroke:currentColor; stroke-width:2; stroke-linejoin:round; }
  .agent-avatar :global(.eyes) { stroke:var(--foreground); stroke-width:4; stroke-linecap:round; }
  .agent-avatar :global(.smile) { stroke:var(--foreground); stroke-width:2; stroke-linecap:round; }
  .agent-avatar :global(.ring) { fill:var(--background); stroke:currentColor; stroke-width:2; }
