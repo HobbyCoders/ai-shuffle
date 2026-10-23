@@ -102,6 +102,8 @@ def test_policy_pr_and_manual_selection_and_dependencies_are_unchanged():
         "python -m pip install PyYAML==6.0.3 pytest==9.1.1 httpx==0.27.2 cryptography==50.0.1",
         'python -m pytest -q -o addopts="" --confcutdir=tests/scripts '
         "tests/scripts/test_owner_publication_policy.py tests/scripts/test_edge_publication_gate.py",
+        # The push gate runs no suites: PRs carry the Android/docs parity checks.
+        "python scripts/ci/main_suite.py android-and-docs",
     ]
     expanded = [step["run"] for step in steps if step.get("if") == "inputs.main_suite == true"]
     assert expanded[0] == "pip install -r requirements.txt -r requirements-dev.txt && pip install -e ./fluid"

@@ -1,24 +1,23 @@
-"""Run the project's checks on this machine, before code leaves it.
+"""Run the project's checks on this machine.
 
-Before a push, run affected tests and the offline secret scan. Every pull
-request also runs the full hosted suites; nightly publication accepts a hosted
-main-suite pass or an owner-local attested full run on main.
+Tests run on GitHub CI: every pull request runs the full hosted suites, and
+nightly publication accepts a hosted main-suite pass or an owner-local
+attested full run on main. The pre-push hook (.githooks/pre-push, copied into
+git's hooks directory by install) runs no test suites. Before anything leaves
+this machine it runs the offline secret scan on every outgoing commit and on
+the working tree, then the update-reach policy for branch pushes.
 
-    python scripts/local_ci.py fast            # affected tests + offline scan (pre-push gate)
-    python scripts/local_ci.py check           # existing changed-suite checks + dependency audit
+    python scripts/local_ci.py install         # turn on the pre-push hook for this clone
+    python scripts/local_ci.py fast            # optional: affected tests + offline scan
+    python scripts/local_ci.py check           # optional: changed-suite checks + dependency audit
     python scripts/local_ci.py full            # every suite, and record the backend test map
     python scripts/local_ci.py full --attest   # on main: also post local/full-suite for edge publication
     python scripts/local_ci.py full --step --attest   # the same in resumable chunks of at most 40 minutes
-    python scripts/local_ci.py install         # turn on the pre-push hook for this clone
     python scripts/local_ci.py list            # what each suite runs and when
 
-A pass on a clean checkout is recorded against the commit's tree, so the
-pre-push hook (.githooks/pre-push, copied into git's hooks directory by
-install) lets that commit through without running
-the test suites again. The offline secret scan still runs on every push.
-Suites that need hardware this machine lacks (macOS, iOS, a
-Windows install when run elsewhere) are printed as not covered; the pass says
-so instead of claiming them.
+Suites that need hardware this machine lacks (macOS, iOS, a Windows install
+when run elsewhere) are printed as not covered; the pass says so instead of
+claiming them.
 """
 from __future__ import annotations
 
@@ -1102,7 +1101,7 @@ def cmd_check(args) -> int:
                                       "mode": mode, "suites": ran, "not_covered": skipped,
                                       "machine": machine(), "commit": revision, "at": time.time()})
     elif not clean:
-        print("Uncommitted changes: this pass is not recorded. Commit, then the pre-push hook re-runs it.")
+        print("Uncommitted changes: this pass is not recorded.")
     if args.attest:
         attest("success", f"{', '.join(ran)} passed on {machine()}", revision)
         print(f"Posted {ATTEST_CONTEXT} on {revision[:9]}; scheduled publication will recheck eligibility.")
@@ -1138,15 +1137,29 @@ def affected_suites(files: list[str]) -> list[Suite]:
     return selected
 
 
+def fetch_push_base(remote: str | None) -> str:
+    """Prefer a configured push remote's main, otherwise use the normal base."""
+    if remote and remote in git("remote").splitlines():
+        target = f"{remote}/main"
+        try:
+            fetch_base(target)
+        except Failure:
+            print("Push remote main unavailable; using the configured comparison base.")
+        else:
+            return target
+    target = resolve_base()
+    fetch_base(target)
+    return target
+
+
 def cmd_fast(args) -> int:
-    """Affected push gate, independent of full-run and attestation receipts."""
+    """Optional affected-test run. The push gate does not run or require it."""
     if args.attest or args.only:
         raise Failure("fast does not accept --attest or --only")
     python = choose_python()
     # Never consult pass records before this scan, even for an unchanged tree.
     security_check(python, audit=False)
-    remote = getattr(args, "_push_remote", None)
-    target = f"{remote}/main" if remote else resolve_base()
+    target = resolve_base()
     fetch_base(target)
     base = comparison_base(target, "HEAD")
     files = changed_files(base)
@@ -1183,11 +1196,11 @@ def cmd_fast(args) -> int:
     for note in skipped + ctx.notes:
         print(f"Not covered here: {note}")
     print(f"Affected checks passed: {', '.join(ran) or 'nothing to run'}")
-    if clean_checkout():
-        save_record(tree_of("HEAD"), {"security_gate": SECURITY_GATE_VERSION,
-                                     "mode": "fast", "base": base, "suites": ran,
-                                     "not_covered": skipped, "at": time.time()})
     return 0
+
+
+def is_pr_assets_ref(remote_ref: str) -> bool:
+    return remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/")
 
 
 def push_update_reach(revision: str, remote_ref: str) -> None:
@@ -1199,19 +1212,23 @@ def push_update_reach(revision: str, remote_ref: str) -> None:
 def cmd_pre_push(args) -> int:
     """Called by the pre-push hook with git's ref lines on stdin.
 
+    The push gate runs no test suites: every pull request runs them on GitHub
+    CI. It runs the offline secret scan on every outgoing ref, first and with
+    no cache, then a whole-tree scan and the live update-reach policy for
+    branch pushes. No pass record can skip any of these.
+
     The hook passes the remote being pushed to in PUSH_REMOTE_ENV, not as an
     argument: the installed hook is shared by every worktree of the clone,
     and an older checkout's local_ci.py would reject an unknown argument.
     """
     zero = "0" * 40
-    records = load_records()
-    head = git("rev-parse", "HEAD")
     # Consume hook-only inputs so nested Git checks cannot inherit this push.
     hook_version = os.environ.pop("LOCAL_CI_HOOK", None)
     remote_argument = os.environ.pop(PUSH_REMOTE_ENV, "")
     push_remote = (remote_argument or None) if hook_version == "4" else None
     # The scanner validates this against configured remotes before using
     # any tracking ref; a URL/path or unknown name scans all history.
+    branches = []
     for line in sys.stdin.read().splitlines():
         parts = line.split()
         if len(parts) != 4:
@@ -1220,65 +1237,26 @@ def cmd_pre_push(args) -> int:
         if local_sha == zero:
             continue  # ref deletions introduce no objects
         scan_push(local_sha, remote_sha, push_remote)
-        if remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/"):
-            revision_range = local_sha if remote_sha == zero else f"{remote_sha}..{local_sha}"
-            # Check both sides of every change, including merge parents and
-            # deleted entries. A final-tree-only check hides transient code/links.
-            raw = subprocess.check_output(
-                ["git", "log", "--format=", "--raw", "-z", "--root", "-m",
-                 "--no-renames", revision_range, "--"], cwd=ROOT)
-            entries = []
-            if remote_sha == zero:
-                tree = subprocess.check_output(
-                    ["git", "ls-tree", "-rz", local_sha, "--"], cwd=ROOT)
-                for record in tree.split(b"\0"):
-                    if record:
-                        metadata, path = record.split(b"\t", 1)
-                        entries.append((metadata.split()[0], path))
-            else:
-                # Rewinds/divergent pushes can restore files absent from the
-                # outgoing commit range. Compare the actual tips as well.
-                raw += subprocess.check_output(
-                    ["git", "diff-tree", "-r", "--raw", "-z", "--no-renames",
-                     remote_sha, local_sha, "--"], cwd=ROOT)
-            records_raw = raw.split(b"\0")
-            for index in range(0, len(records_raw) - 1, 2):
-                old_mode, new_mode = records_raw[index].split()[:2]
-                path = records_raw[index + 1]
-                entries.extend((mode, path) for mode in (old_mode[1:], new_mode)
-                               if mode != b"000000")
-            if all(mode in {b"100644", b"100755"}
-                   and b"README.md" not in path.split(b"/")[:-1]
-                   and (path == b"README.md" or
-                        path.endswith((b".png", b".jpg", b".jpeg", b".webp", b".gif")))
-                   for mode, path in entries):
-                print("pre-push: pr-assets image-only range accepted after secret scan")
-                continue
-        if not remote_ref.startswith("refs/heads/"):
-            continue  # tags get the secret scan, but not the test suites
-        record = records.get(tree_of(local_sha), {})
-        current = record.get("security_gate") == SECURITY_GATE_VERSION
-        if current and record.get("mode") == "fast":
-            # A pass selected against another remote/base is not this push's
-            # affected-test pass. The history scan above is never cached.
-            target = f"{push_remote}/main" if push_remote else resolve_base()
-            fetch_base(target)
-            current = record.get("base") == comparison_base(target, local_sha)
-        if current:
-            # A draft pass must not bypass newly-ready state or removed labels.
-            push_update_reach(local_sha, remote_ref)
-            continue
-        if local_sha != head or not clean_checkout():
-            print(f"pre-push: {local_sha[:9]} has no local check pass. Check out that commit with a clean "
-                  "tree and run `python scripts/local_ci.py fast`.", file=sys.stderr)
-            return 1
-        print(f"pre-push: running local checks for {local_sha[:9]} before it leaves this machine.")
-        args.command, args.attest, args.only = "fast", False, None
-        args._push_remote = push_remote
-        if cmd_fast(args):
-            print("pre-push: checks failed; nothing was pushed.", file=sys.stderr)
-            return 1
+        if remote_ref.startswith("refs/heads/"):
+            branches.append((local_sha, remote_ref))  # tags get the scan only
+    if not branches:
+        return 0
+    # The whole working tree as well, as `check` and `full` do; no network audits.
+    security_check(choose_python(), audit=False)
+    # pr-assets holds PR screenshots on its own (usually orphan) history and
+    # never merges, so it shares no base with main: the secret scans above
+    # cover it, and update-reach (a policy for code bound for main) does not.
+    branches = [(sha, ref) for sha, ref in branches if not is_pr_assets_ref(ref)]
+    if not branches:
+        print("pre-push: secret scan passed for pr-assets.")
+        return 0
+    # Refresh the push remote's main (the next new-branch scan boundary) or,
+    # for a URL or a remote without main, the configured comparison base.
+    fetch_push_base(push_remote)
+    for local_sha, remote_ref in branches:
+        # Labels and draft state are live policy, checked on every push.
         push_update_reach(local_sha, remote_ref)
+    print("pre-push: secret scan and update-reach passed; tests run in PR CI.")
     return 0
 
 

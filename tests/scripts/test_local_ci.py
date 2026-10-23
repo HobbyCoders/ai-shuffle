@@ -248,11 +248,14 @@ def push(monkeypatch, lines, *, head="h" * 40, clean=True, trees=None, check=0):
     monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(lines)))
     monkeypatch.setattr(local_ci, "git", lambda *args: head)
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: clean)
-    monkeypatch.setattr(local_ci, "scan_push", lambda *args: None)
-    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
     monkeypatch.setattr(local_ci, "tree_of", lambda sha: (trees or {}).get(sha, "t-" + sha))
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     ran = []
-    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: ran.append(args.command) or check)
+    monkeypatch.setattr(local_ci, "scan_push", lambda local, remote, target: ran.append(("scan", local)))
+    monkeypatch.setattr(local_ci, "security_check", lambda python, **kw: ran.append(("tree", kw["audit"])))
+    monkeypatch.setattr(local_ci, "fetch_push_base", lambda remote: ran.append(("fetch", remote)))
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda sha, ref: ran.append(("reach", sha, ref)))
+    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: pytest.fail("the push gate ran test suites"))
     result = local_ci.cmd_pre_push(local_ci.argparse.Namespace())
     return result, ran
 
@@ -261,25 +264,35 @@ def ref_line(sha, ref="refs/heads/topic"):
     return f"refs/heads/topic {sha} {ref} {'0' * 40}"
 
 
-def test_pre_push_trusts_a_recorded_tree(records, monkeypatch):
-    local_ci.save_record("t-" + "h" * 40, {"at": 1, "security_gate": local_ci.SECURITY_GATE_VERSION})
-    assert push(monkeypatch, [ref_line("h" * 40)]) == (0, [])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_pre_push_runs_scans_and_reach_never_tests(records, monkeypatch, recorded):
+    if recorded:
+        # A pass record (old or current) never replaces any push check.
+        local_ci.save_record("t-" + "h" * 40, {"at": 1, "mode": "fast",
+                                               "security_gate": local_ci.SECURITY_GATE_VERSION})
+    assert push(monkeypatch, [ref_line("h" * 40)]) == (0, [
+        ("scan", "h" * 40), ("tree", False), ("fetch", None), ("reach", "h" * 40, "refs/heads/topic")])
 
 
-def test_pre_push_runs_checks_for_a_clean_unrecorded_head(records, monkeypatch):
-    assert push(monkeypatch, [ref_line("h" * 40)]) == (0, ["fast"])
-    assert push(monkeypatch, [ref_line("h" * 40)], check=1) == (1, ["fast"])
+def test_pre_push_scans_every_ref_before_anything_else(records, monkeypatch):
+    lines = [ref_line("a" * 40), ref_line("b" * 40, ref="refs/heads/other")]
+    result, ran = push(monkeypatch, lines)
+    assert result == 0
+    assert ran[:2] == [("scan", "a" * 40), ("scan", "b" * 40)]
+    assert ran[2:] == [("tree", False), ("fetch", None),
+                       ("reach", "a" * 40, "refs/heads/topic"), ("reach", "b" * 40, "refs/heads/other")]
 
 
-def test_pre_push_refuses_what_it_cannot_check(records, monkeypatch):
-    # Not HEAD, or a dirty tree: the checks would not test what is pushed.
-    assert push(monkeypatch, [ref_line("x" * 40)]) == (1, [])
-    assert push(monkeypatch, [ref_line("h" * 40)], clean=False) == (1, [])
+def test_pre_push_allows_any_commit_or_dirty_tree_after_the_scan(records, monkeypatch):
+    # Nothing is tested locally, so a commit other than HEAD or uncommitted
+    # changes need no refusal: the scan covers every outgoing commit.
+    assert push(monkeypatch, [ref_line("x" * 40)])[0] == 0
+    assert push(monkeypatch, [ref_line("h" * 40)], clean=False)[0] == 0
 
 
-def test_pre_push_ignores_deletions_and_tags(records, monkeypatch):
+def test_pre_push_ignores_deletions_and_scans_tags_only(records, monkeypatch):
     lines = [ref_line("0" * 40), ref_line("x" * 40, ref="refs/tags/v1.0.0")]
-    assert push(monkeypatch, lines) == (0, [])
+    assert push(monkeypatch, lines) == (0, [("scan", "x" * 40)])
 
 
 @pytest.fixture
@@ -326,7 +339,7 @@ def asset_repo(tmp_path):
         git("commit", "-qm", "Add fixture")
         return git("rev-parse", "HEAD").stdout.strip()
 
-    def pre_push(local, remote="0" * 40, ref="refs/heads/pr-assets"):
+    def pre_push(local, remote="0" * 40, ref="refs/heads/topic"):
         return subprocess.run(
             [sys.executable, "scripts/local_ci.py", "pre-push"], cwd=repo, env=env,
             input=f"refs/heads/assets {local} {ref} {remote}\n",
@@ -336,158 +349,54 @@ def asset_repo(tmp_path):
     return repo, git, commit, pre_push
 
 
-@pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("ref", ["refs/heads/pr-assets", "refs/heads/pr-assets/2281"])
-def test_pre_push_accepts_image_only_range(asset_repo, existing, ref):
-    _, _, commit, pre_push = asset_repo
-    base = commit("README.md", "PR screenshots")
-    for extension in ("png", "jpg", "jpeg", "webp", "gif"):
-        tip = commit(f"screenshots/example.{extension}")
-    result = pre_push(tip, base if existing else "0" * 40, ref)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "pr-assets image-only range accepted after secret scan" in result.stdout
-    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
-    assert "running local checks" not in result.stdout
-
-
-@pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("name", ["code.py", "code.ts", "notes.md", "nested/README.md"])
-def test_pre_push_refuses_non_image_anywhere_in_range(asset_repo, existing, name):
-    _, git, commit, pre_push = asset_repo
-    base = commit("README.md")
-    commit(name)
-    # A clean final image-only tree is insufficient: all pushed commits count.
-    git("rm", "--", name)
-    git("commit", "-qm", "Remove non-image")
-    tip = commit("screenshot.png")
-    result = pre_push(tip, base if existing else "0" * 40)
-    assert result.returncode == 1
-    assert "has no local check pass" in result.stderr
-    assert "image-only range accepted" not in result.stdout
-
-
-def test_pre_push_asset_paths_are_not_trimmed(asset_repo):
-    _, _, commit, pre_push = asset_repo
-    tip = commit(" README.md")
-    assert pre_push(tip).returncode == 1
-
-
-def test_pre_push_existing_assets_checks_only_outgoing_range(asset_repo):
-    _, _, commit, pre_push = asset_repo
-    base = commit("old.py")
-    tip = commit("screenshot.png")
-    assert pre_push(tip, base).returncode == 0
-    # A new branch must inspect the root commit too, even if main knows it.
-    _, git, _, _ = asset_repo
-    git("update-ref", "refs/remotes/origin/main", base)
-    result = pre_push(tip)
-    assert result.returncode == 1
-    assert "has no local check pass" in result.stderr
-
-
-@pytest.mark.parametrize("divergent", [False, True])
-def test_pre_push_assets_refuses_restored_code(asset_repo, divergent):
-    _, git, commit, pre_push = asset_repo
-    ancestor = commit("code.py")
-    git("rm", "code.py")
-    remote = commit("remote.png")
-    local = ancestor
-    if divergent:
-        git("switch", "--detach", ancestor)
-        local = commit("local.png")
-    result = pre_push(local, remote)
-    assert result.returncode == 1
-    assert "has no local check pass" in result.stderr
-    assert "image-only range accepted" not in result.stdout
-
-
-@pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("deleted", [False, True])
-@pytest.mark.parametrize("mode", ["120000", "160000"])
-def test_pre_push_assets_refuses_nonregular_entries(asset_repo, existing, deleted, mode):
-    _, git, commit, pre_push = asset_repo
-    base = commit("README.md")
-    # Build real index entries without requiring OS symlink privileges. Gitlinks
-    # point at an actual commit; symlinks contain an ordinary target blob.
-    oid = base if mode == "160000" else git("hash-object", "-w", "--stdin", input="README.md").stdout.strip()
-    git("update-index", "--add", "--cacheinfo", f"{mode},{oid},evil.png")
-    git("commit", "-qm", "Add nonregular asset")
-    if deleted:
-        git("update-index", "--force-remove", "evil.png")
-        git("commit", "-qm", "Remove nonregular asset")
-    tip = git("rev-parse", "HEAD").stdout.strip()
-    result = pre_push(tip, base if existing else "0" * 40)
-    assert result.returncode == 1
-    assert "image-only range accepted" not in result.stdout
-
-
-@pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("name", ["evil.PNG", "README.md/evil.png"])
-def test_pre_push_assets_enforces_exact_filename_rules(asset_repo, existing, name):
-    _, _, commit, pre_push = asset_repo
-    base = commit("base.png")
-    tip = commit(name)
-    result = pre_push(tip, base if existing else "0" * 40)
-    assert result.returncode == 1
-    assert "has no local check pass" in result.stderr
-    assert "image-only range accepted" not in result.stdout
-
-
-@pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("mode", ["120000", "160000"])
-def test_pre_push_nonregular_assets_refused_after_successful_scan(asset_repo, existing, mode):
-    _, git, commit, pre_push = asset_repo
-    base = commit("README.md")
-    oid = base if mode == "160000" else git("hash-object", "-w", "--stdin", input="README.md").stdout.strip()
-    git("update-index", "--add", "--cacheinfo", f"{mode},{oid},evil.png")
-    git("commit", "-qm", "Add nonregular asset")
-    with_link = git("rev-parse", "HEAD").stdout.strip()
-    if existing:
-        # Deletions are not scanned as blobs, but their old modes still count.
-        git("update-index", "--force-remove", "evil.png")
-        git("commit", "-qm", "Delete nonregular asset")
-    else:
-        # The scanner excludes known main history on new refs. Asset validation
-        # must still inspect it, including gitlinks the blob scanner cannot read.
-        git("update-ref", "refs/remotes/origin/main", with_link)
-    tip = git("rev-parse", "HEAD").stdout.strip()
-    result = pre_push(tip, with_link if existing else "0" * 40)
-    assert result.returncode == 1
-    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
-    assert "has no local check pass" in result.stderr
-    assert "image-only range accepted" not in result.stdout
-
-
-def test_pre_push_asset_scan_failure_still_refuses(asset_repo):
+def test_pre_push_scan_failure_refuses_the_push(asset_repo):
     _, _, commit, pre_push = asset_repo
     tip = commit("README.md", "LOCAL_CI_TEST_SECRET")
     result = pre_push(tip)
     assert result.returncode == 1
     assert "local-ci-test" in result.stdout
-    assert "image-only range accepted" not in result.stdout
+    assert "LOCAL_CI_TEST_SECRET" not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("ref", ["refs/heads/topic", "refs/heads/pr-assets-other"])
-def test_pre_push_image_only_normal_ref_still_needs_checks(asset_repo, ref):
-    _, _, commit, pre_push = asset_repo
-    tip = commit("screenshot.png")
-    result = pre_push(tip, ref=ref)
-    assert result.returncode == 1
-    assert "has no local check pass" in result.stderr
-    assert "image-only range accepted" not in result.stdout
-
-
-def test_image_only_push_through_installed_hook(asset_repo, tmp_path):
+@pytest.mark.parametrize("ref", ["refs/heads/pr-assets", "refs/heads/topic"])
+def test_secret_added_then_removed_still_blocks_a_real_push(asset_repo, tmp_path, ref):
     _, git, commit, _ = asset_repo
     remote = tmp_path / "remote.git"
     git("init", "--bare", "-q", str(remote))
     commit("README.md")
-    for filename in ("first.png", "second.jpeg"):
-        tip = commit(filename)
-        result = git("push", str(remote), "HEAD:refs/heads/pr-assets", check=False)
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "image-only range accepted after secret scan" in result.stdout + result.stderr
-        assert git("ls-remote", str(remote), "refs/heads/pr-assets").stdout.split()[0] == tip
+    commit("notes.txt", "LOCAL_CI_TEST_SECRET")
+    git("rm", "-q", "notes.txt")
+    git("commit", "-qm", "Remove it again")
+    commit("screenshot.png")
+    result = git("push", str(remote), f"HEAD:{ref}", check=False)
+    assert result.returncode != 0
+    assert "local-ci-test" in result.stdout + result.stderr
+    assert git("ls-remote", str(remote)).stdout == ""
+
+
+def test_clean_orphan_pr_assets_push_is_accepted(asset_repo, tmp_path):
+    # The documented screenshot flow: an orphan pr-assets branch shares no
+    # history with main, so it gets the secret scans but not update-reach.
+    repo, git, commit, _ = asset_repo
+    remote = tmp_path / "remote.git"
+    git("init", "--bare", "-q", str(remote))
+    # The fixture's sentinel rule matches its own text in the whole-tree scan;
+    # a self-excluding regex keeps this clean push clean.
+    config = repo / ".gitleaks.toml"
+    config.write_text(config.read_text(encoding="utf-8").replace(
+        'regex = "LOCAL_CI_TEST_SECRET"', 'regex = "LOCAL_CI_TEST_SECRE[T]"'), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "Code history")
+    code_branch = git("branch", "--show-current").stdout.strip()
+    git("checkout", "-q", "--orphan", "pr-assets")
+    git("rm", "-rq", "--cached", ".")
+    commit("pr-123/screenshot.png")
+    # As documented: push it from the code checkout, not from the orphan tree.
+    git("checkout", "-q", "-f", code_branch)
+    result = git("push", str(remote), "pr-assets:refs/heads/pr-assets", check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "secret scan passed for pr-assets" in result.stdout + result.stderr
+    assert git("ls-remote", str(remote)).stdout != ""
 
 
 def test_windows_known_failures_list_is_well_formed():
@@ -524,6 +433,38 @@ def test_fast_unknown_area_defers_to_pr_ci():
     assert {suite.name for suite in local_ci.affected_suites([
         "new-area/config.json", "frontend/src/lib/api.ts",
     ])} == {"frontend", "mobile"}
+
+
+@pytest.mark.parametrize("remote", [None, "unknown", "https://example.invalid/repo.git"])
+def test_push_base_falls_back_for_non_remote_targets(monkeypatch, remote):
+    monkeypatch.setattr(local_ci, "git", lambda *args: "origin")
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "origin/main")
+    fetched = []
+    monkeypatch.setattr(local_ci, "fetch_base", fetched.append)
+    assert local_ci.fetch_push_base(remote) == "origin/main"
+    assert fetched == ["origin/main"]
+
+
+def test_push_base_prefers_the_configured_push_remote(monkeypatch):
+    monkeypatch.setattr(local_ci, "git", lambda *args: "origin\nfork")
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: pytest.fail("push remote has main"))
+    fetched = []
+    monkeypatch.setattr(local_ci, "fetch_base", fetched.append)
+    assert local_ci.fetch_push_base("fork") == "fork/main"
+    assert fetched == ["fork/main"]
+
+
+def test_push_base_falls_back_when_configured_remote_has_no_main(monkeypatch):
+    monkeypatch.setattr(local_ci, "git", lambda *args: "origin\nfork")
+    monkeypatch.setattr(local_ci, "resolve_base", lambda: "origin/main")
+    fetched = []
+    def fetch(target):
+        fetched.append(target)
+        if target == "fork/main":
+            raise local_ci.Failure("no main branch")
+    monkeypatch.setattr(local_ci, "fetch_base", fetch)
+    assert local_ci.fetch_push_base("fork") == "origin/main"
+    assert fetched == ["fork/main", "origin/main"]
 
 
 def test_fast_backend_unmapped_paths_defer_to_pr_ci(monkeypatch, tmp_path):
@@ -694,16 +635,9 @@ def test_fast_recorded_map_all_uses_name_matching_unless_shared_inputs(monkeypat
     assert local_ci.affected_backend_tests(context(["requirements.txt"])) == "all"
 
 
-@pytest.mark.parametrize("name,suite,note", [
-    ("docs/change.md", "docs", None),
-    ("new-area/config.json", "nothing to run",
-     "No local test mapping for new-area/config.json; covered by the full suite on PR CI"),
-])
-def test_fast_docs_and_unmapped_producing_path_through_real_hook(asset_repo, name, suite, note):
-    changed_path = name
-    repo, git, commit, pre_push = asset_repo
-    # This test commits the gate itself; the asset fixture's sentinel rule
-    # deliberately matches its own regex, so use the production config here.
+def gate_fixture(repo, git):
+    # This commits the gate itself; the fixture's sentinel rule deliberately
+    # matches its own regex, so use the production config here.
     (repo / ".gitleaks.toml").write_bytes((ROOT / ".gitleaks.toml").read_bytes())
     for name in ("scripts/ci/update_reach.py", "scripts/source_archive.py"):
         destination = repo / name
@@ -712,78 +646,62 @@ def test_fast_docs_and_unmapped_producing_path_through_real_hook(asset_repo, nam
     git("add", ".")
     git("commit", "-qm", "Gate fixture baseline")
     git("branch", "main")
+
+
+@pytest.mark.parametrize("target_kind", ["configured-remote", "url"])
+def test_real_push_falls_back_when_target_has_no_main(asset_repo, tmp_path, target_kind):
+    repo, git, commit, _ = asset_repo
+    gate_fixture(repo, git)
+    git("remote", "add", "compare", str(repo))
+    git("config", "local-ci.base", "compare/main")
+    remote = tmp_path / "publish.git"
+    git("init", "--bare", "-q", str(remote))
+    target = str(remote)
+    if target_kind == "configured-remote":
+        git("remote", "add", "publish", target)
+        target = "publish"
+    tip = commit("docs/change.md", "Documentation change")
+    for ref in ("docs-fixture", "docs-second"):
+        result = git("push", target, f"HEAD:refs/heads/{ref}", check=False)
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        # Every push scans again; none runs a test suite.
+        assert output.count("Secret scan (offline provider rules): 0 finding(s)") == 2
+        assert "update-reach passed; tests run in PR CI" in output
+        assert "Affected checks" not in output and "=== " not in output
+        assert git("ls-remote", str(remote), f"refs/heads/{ref}").stdout.split()[0] == tip
+
+
+@pytest.mark.parametrize("name", ["docs/change.md", "app/core/example.py", "new-area/config.json"])
+def test_real_hook_push_gate_runs_no_tests(asset_repo, name):
+    repo, git, commit, pre_push = asset_repo
+    gate_fixture(repo, git)
     git("remote", "add", "test", str(repo))
     git("config", "local-ci.base", "test/main")
-    tip = commit(changed_path, "Documentation or unmapped change")
-    result = pre_push(tip)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert f"Affected checks passed: {suite}" in result.stdout
-    assert list((repo / "app").rglob("*.pyc")), "fixture must exercise bytecode writes"
+    tip = commit(name, "value = 1\n")
+    for _ in range(2):
+        result = pre_push(tip)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.count("Secret scan (offline provider rules): 0 finding(s)") == 2
+        assert "Passed: every change" in result.stdout  # update-reach, live on every push
+        assert "Affected checks" not in result.stdout and "pytest" not in result.stdout
     assert git("status", "--porcelain").stdout == ""
-    if note:
-        assert note in result.stdout
-    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
-    # The real gate wrote the receipt, not a seeded fixture. It also scanned
-    # the outgoing commits again when that receipt was reused.
-    result = pre_push(tip)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
-    assert "Affected checks passed" not in result.stdout
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_fast_push_scan_precedes_cached_or_uncached_pass(records, monkeypatch, cached):
-    head = "h" * 40
-    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
-    monkeypatch.setattr(local_ci, "git", lambda *args: head)
-    monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
-    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
-    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
-    if cached:
-        local_ci.save_record("tree", {"mode": "fast", "base": "base",
-                                      "security_gate": local_ci.SECURITY_GATE_VERSION})
-    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
-    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
-    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "base")
-    calls = []
-    monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
-    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
-    assert local_ci.cmd_pre_push(local_ci.argparse.Namespace()) == 0
-    assert calls == (["scan"] if cached else ["scan", "fast"])
-
-
-@pytest.mark.parametrize("cached", [False, True])
-def test_fast_scan_failure_blocks_even_a_cached_pass(records, monkeypatch, cached):
+def test_scan_failure_blocks_even_a_recorded_tree(records, monkeypatch, cached):
     head = "h" * 40
     if cached:
         local_ci.save_record("tree", {"mode": "fast", "security_gate": local_ci.SECURITY_GATE_VERSION})
     monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
     monkeypatch.setattr(local_ci, "git", lambda *args: head)
     monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: pytest.fail("reach before scan"))
     def fail(*args):
         raise local_ci.Failure("scanner rejected range")
     monkeypatch.setattr(local_ci, "scan_push", fail)
     with pytest.raises(local_ci.Failure, match="scanner rejected"):
         local_ci.cmd_pre_push(local_ci.argparse.Namespace())
-
-
-def test_fast_cached_pass_for_another_base_reruns_affected_checks(records, monkeypatch):
-    head = "h" * 40
-    local_ci.save_record("tree", {"mode": "fast", "base": "old-base",
-                                  "security_gate": local_ci.SECURITY_GATE_VERSION})
-    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line(head)))
-    monkeypatch.setattr(local_ci, "git", lambda *args: head)
-    monkeypatch.setattr(local_ci, "tree_of", lambda sha: "tree")
-    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
-    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
-    monkeypatch.setattr(local_ci, "resolve_base", lambda: "test/main")
-    monkeypatch.setattr(local_ci, "fetch_base", lambda target: None)
-    monkeypatch.setattr(local_ci, "comparison_base", lambda *args: "new-base")
-    calls = []
-    monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
-    monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
-    assert local_ci.cmd_pre_push(local_ci.argparse.Namespace()) == 0
-    assert calls == ["scan", "fast"]
 
 
 def test_fast_explicit_runs_scan_on_every_invocation(monkeypatch):
@@ -987,11 +905,14 @@ def test_unavailable_gh_is_explained(monkeypatch, capsys, failure):
     assert "unavailable" in capsys.readouterr().out
 
 
-def test_cached_draft_pass_rechecks_reach_on_push(records, monkeypatch):
+def test_recorded_draft_pass_rechecks_reach_on_push(records, monkeypatch):
     local_ci.save_record("tree", {"security_gate": local_ci.SECURITY_GATE_VERSION})
     monkeypatch.setattr(local_ci, "git", lambda *a: "head")
     monkeypatch.setattr(local_ci, "tree_of", lambda *a: "tree")
     monkeypatch.setattr(local_ci, "scan_push", lambda *a: None)
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
+    monkeypatch.setattr(local_ci, "fetch_push_base", lambda remote: None)
     monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line("head")))
     calls = []
     def refuse(sha, ref):

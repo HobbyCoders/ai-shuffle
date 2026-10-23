@@ -44,7 +44,7 @@ REPOSITORY = "HobbyCoders/ai-shuffle"
 FINAL_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 OWNER_ID = "76577322"
 # Local full-suite passes the owner must have posted on the candidate before
-# tagging. CI does not test code; scripts/local_ci.py full --attest posts these.
+# tagging. PR CI is separate; scripts/local_ci.py full --attest posts these.
 REQUIRED_LOCAL = ("local/full-suite", "local/windows-suite")
 WINDOWS_CONTEXT = "local/windows-suite"
 EDGE_WORKFLOW = "Publish desktop source update"

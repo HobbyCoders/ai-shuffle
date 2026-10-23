@@ -313,19 +313,24 @@ def test_invalid_config_fails_closed(tmp_path):
         secret_scan.load_rules(tmp_path)
 
 
-def test_old_pass_cannot_skip_security_gate(tmp_path, monkeypatch):
+@pytest.mark.parametrize("record", [{"at": 1}, {"at": 1, "mode": "fast", "base": "base",
+                                                 "security_gate": local_ci.SECURITY_GATE_VERSION}])
+def test_no_pass_record_can_skip_the_push_scans(tmp_path, monkeypatch, record):
     monkeypatch.setattr(local_ci, "records_path", lambda: tmp_path / "passes.json")
-    local_ci.save_record("tree", {"at": 1})
+    local_ci.save_record("tree", record)
     monkeypatch.setattr(local_ci, "git", lambda *args: "head")
     monkeypatch.setattr(local_ci, "tree_of", lambda *args: "tree")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(sys, "stdin", io.StringIO("refs/heads/a head refs/heads/a remote\n"))
     calls = []
     monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append("scan"))
+    monkeypatch.setattr(local_ci, "security_check", lambda python, **kw: calls.append(("tree", kw["audit"])))
+    monkeypatch.setattr(local_ci, "fetch_push_base", lambda remote: None)
     monkeypatch.setattr(local_ci, "cmd_fast", lambda args: calls.append("fast") or 0)
-    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: calls.append("reach"))
     assert local_ci.cmd_pre_push(argparse.Namespace()) == 0
-    assert calls == ["scan", "fast"]
+    assert calls == ["scan", ("tree", False), "reach"]
 
 
 def test_check_security_steps_run_even_with_only(monkeypatch):
@@ -482,7 +487,7 @@ def test_actual_hook_refuses_missing_or_pre_security_checkout(legacy):
 
 def test_uncached_push_never_invokes_network_audits(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(local_ci, 'load_records', dict)
-    monkeypatch.setattr(local_ci, 'git', lambda *args: 'head')
+    monkeypatch.setattr(local_ci, 'git', lambda *args: 'public' if args == ('remote',) else 'head')
     monkeypatch.setattr(local_ci, 'tree_of', lambda *args: 'tree')
     monkeypatch.setattr(local_ci, 'clean_checkout', lambda: True)
     monkeypatch.setattr(local_ci, 'choose_python', lambda: sys.executable)

@@ -38,5 +38,10 @@ jobs:
       - run: python scripts/ci/test-cost-policy.py
       - if: inputs.main_suite != true
         run: python -m pytest -q -o addopts="" --confcutdir=tests/scripts tests/scripts/test_owner_publication_policy.py tests/scripts/test_edge_publication_gate.py
+      # The pre-push gate runs no test suites. Its Android CI-script, Play
+      # workflow, download-bridge and docs-copy checks run here on every PR;
+      # main-suite runs the same command in its android-and-docs job.
+      - if: inputs.main_suite != true
+        run: python scripts/ci/main_suite.py android-and-docs
       - if: inputs.main_suite == true
         run: python -m pytest -q -o addopts="" --confcutdir=tests/scripts tests/scripts/test_owner_publication_policy.py tests/scripts/test_edge_publication_gate.py tests/scripts/test_local_ci.py tests/scripts/test_local_ci_preflight.py tests/scripts/test_local_ci_stages.py tests/scripts/test_security_gate.py tests/scripts/test_cloud_split.py tests/scripts/test_main_suite_parity.py

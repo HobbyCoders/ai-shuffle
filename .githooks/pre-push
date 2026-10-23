@@ -1,8 +1,8 @@
 #!/bin/sh
 # LOCAL-CI-PRE-PUSH v4
-# Every outgoing ref gets an offline secret scan, even with a cached test pass.
-# Local checks before anything leaves this machine (scripts/local_ci.py).
-# CI does not test pull requests; this hook is where tests run.
+# The local push gate is the offline secret scan (scripts/local_ci.py): every
+# outgoing ref, every push, no cache. Branch pushes also get a working-tree
+# scan and the update-reach policy. Tests run on GitHub CI for every PR.
 # `python scripts/local_ci.py install` copies it into the clone's hooks
 # directory and keeps any earlier pre-push hook as pre-push.user.
 refs=$(cat)
@@ -17,7 +17,7 @@ fi
 if [ -f "$root/scripts/local_ci.py" ]; then
   python=""
   # The interpreter install recorded (git config local-ci.python), else the
-  # first one that can run the backend tests.
+  # first one with pytest and PyYAML (kept so installed v4 hooks still match).
   saved=$(git config --get local-ci.python)
   for candidate in "$LOCAL_CI_PYTHON" "$saved"; do
     if [ -n "$candidate" ] && "$candidate" -c "import pytest, yaml" >/dev/null 2>&1; then
