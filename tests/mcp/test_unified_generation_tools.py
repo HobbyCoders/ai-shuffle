@@ -100,22 +100,23 @@ UNATTENDED = RunContext(session_id="s", unattended=True, owner=True)
 
 
 @pytest.mark.parametrize("source", [None, "fal", "Fal.ai"])
-async def test_interactive_default_runs_settings_model_not_choose(monkeypatch, source):
+async def test_a_fal_lane_never_answers_for_a_generation_tool(monkeypatch, source):
+    # Main's unguarded fal handler would spend with no price, cap or
+    # confirmation; the generation tools always go through the guard (#379).
     tools, backend, legacy = lane_tools(monkeypatch, [candidate(), candidate(account="b")], INTERACTIVE)
     output = payload(await tools["generateImage"].handler({"prompt": "tree", **({"source": source} if source else {})}))
-    assert output == {"success": True, "lane": "settings"}
-    legacy.assert_awaited_once_with({"prompt": "tree"})
-    assert backend.calls == []
-    assert "Settings default (fal.ai fal-ai/flux-pro/v1.1-ultra)" in tools["generateImage"].description
+    assert output["status"] == "choose"
+    legacy.assert_not_awaited()
+    assert "Settings default" not in tools["generateImage"].description
 
 
 @pytest.mark.parametrize("args", [{"prompt": "tree"}, {"prompt": "tree", "model": "fal-ai/x"}, {"prompt": "tree", "source": "FAL"}])
-async def test_unattended_runs_keep_generation_on_the_settings_path(monkeypatch, args):
+async def test_unattended_runs_without_a_stored_choice_skip_instead_of_the_settings_path(monkeypatch, args):
     # Automations, worker/Task sessions, voice, hidden and API-key turns.
     tools, backend, legacy = lane_tools(monkeypatch, [candidate()], UNATTENDED)
     output = payload(await tools["generateImage"].handler(args))
-    assert output["lane"] == "settings"
-    assert legacy.await_args.args[0] == {k: v for k, v in args.items() if k != "source"}
+    assert output["status"] == "skipped" and output["reason"] == "no_stored_choice"
+    legacy.assert_not_awaited()
     assert backend.calls == []
 
 
@@ -126,19 +127,19 @@ async def test_unattended_new_parameters_still_skip_without_a_stored_choice(monk
     legacy.assert_not_awaited()
 
 
-async def test_named_fal_model_is_guarded_and_pinned_to_this_worker(monkeypatch):
-    here, peer = candidate(model="fal-ai/x"), replace(candidate(model="fal-ai/x"), worker="worker-b")
-    tools, backend, legacy = lane_tools(monkeypatch, [here, peer], INTERACTIVE)
+async def test_named_fal_model_is_guarded(monkeypatch):
+    tools, backend, legacy = lane_tools(monkeypatch, [candidate(model="fal-ai/x")], INTERACTIVE)
     output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": "fal-ai/x"}))
-    assert output["status"] == "completed" and output["choice"]["worker"] == "worker-a"
+    assert output["status"] == "completed" and output["choice"]["model"] == "fal-ai/x"
     legacy.assert_not_awaited()
 
 
-async def test_named_fal_model_the_guard_cannot_price_uses_the_previous_path(monkeypatch):
+async def test_named_fal_model_the_guard_cannot_price_is_refused_not_run_unguarded(monkeypatch):
     tools, backend, legacy = lane_tools(monkeypatch, [replace(candidate(model="fal-ai/x"), price=dict(UNKNOWN_PRICE))], INTERACTIVE)
     output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": "fal-ai/x"}))
-    assert output["lane"] == "settings"
-    legacy.assert_awaited_once_with({"prompt": "tree", "model": "fal-ai/x"})
+    assert output["status"] == "refused" and output["reason"] == "price_unavailable"
+    legacy.assert_not_awaited()
+    assert not any(c[0] in ("reserve", "execute") for c in backend.calls)
 
 
 @pytest.mark.parametrize("why", ["daily_cap", "confirmation", "chat"])
@@ -394,16 +395,14 @@ def _legacy(*names):
     return {name: SimpleNamespace(handler=AsyncMock(name=name)) for name in names}
 
 
-def test_builtin_fal_default_is_never_a_lane_and_migration_retires_saved_ones():
+def test_generation_tools_never_get_a_fal_lane():
     legacy = _legacy("generateImage", "generateVideo", "runFalModel", "searchModels")
-    lanes = sdk._settings_lanes(legacy, {}, True)
-    assert set(lanes) == {"runFalModel"}  # the built-in fal default no longer answers for the user
-    saved = {"IMAGE_MODEL": "fal-ai/flux/dev"}
-    assert set(sdk._settings_lanes(legacy, saved, True)) == {"generateImage", "runFalModel"}
-    assert set(sdk._settings_lanes(legacy, saved, True, migrated=True)) == {"runFalModel"}
-    assert set(sdk._settings_lanes(legacy, saved, False)) == set()
+    assert set(sdk._settings_lanes(legacy, {}, True)) == {"runFalModel"}
+    # A saved fal default is migrated into a remembered choice, never a lane.
+    assert set(sdk._settings_lanes(legacy, {"IMAGE_MODEL": "fal-ai/flux/dev"}, True)) == {"runFalModel"}
+    assert set(sdk._settings_lanes(legacy, {"IMAGE_MODEL": "fal-ai/flux/dev"}, False)) == set()
     # The ChatGPT-plan image setting is a provider rule (#1796), never migrated away.
-    plan = sdk._settings_lanes(legacy, {"IMAGE_MODEL": "chatgpt-subscription"}, False, migrated=True)
+    plan = sdk._settings_lanes(legacy, {"IMAGE_MODEL": "chatgpt-subscription"}, False)
     assert plan == {"generateImage": ("chatgpt", legacy["generateImage"].handler)}
 
 
@@ -455,9 +454,9 @@ async def test_unpriced_remembered_choice_never_runs_unguarded(monkeypatch, orig
     backend = FakeBackend([entry, candidate(account="account-b", model="model-b")])
     monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
     remembered = {"source": "fal", "account": entry.account, "model": "fal-ai/x", "options": {}, "origin": origin}
-    context = replace(UNATTENDED, unattended=unattended, remembered_choices={"image": remembered}, legacy_migrated=True)
+    context = replace(UNATTENDED, unattended=unattended, remembered_choices={"image": remembered})
     legacy = _legacy("generateImage", "runFalModel")
-    lanes = sdk._settings_lanes(legacy, {"IMAGE_MODEL": "fal-ai/x"}, True, migrated=True)
+    lanes = {"generateImage": ("fal", legacy["generateImage"].handler), **sdk._settings_lanes(legacy, {"IMAGE_MODEL": "fal-ai/x"}, True)}
     tools = {t.name: t for t in sdk._create_unified_tools(None, context, lanes=lanes, tool_env={"IMAGE_MODEL": "fal-ai/x"})}
     output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
     if unattended:
@@ -469,16 +468,39 @@ async def test_unpriced_remembered_choice_never_runs_unguarded(monkeypatch, orig
     assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
 
 
-async def test_server_passes_the_migration_flag_to_the_lanes(monkeypatch):
-    from app.core import fal_credential
+@pytest.mark.parametrize("unattended", [True, False])
+async def test_unreadable_choices_never_open_the_unguarded_fal_path(monkeypatch, unattended):
+    # A preference read failure (database, account service, identity) with a
+    # saved fal default: nothing runs unasked, and main's handler never runs.
+    from app.core import fal_credential, generation_choices
+    from app.services import generation_sources
+    backend = FakeBackend([candidate(model="fal-ai/x"), candidate(account="account-b", model="model-b")])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
     captured = []
     monkeypatch.setattr(sdk, "patch_sdk_server", lambda server, tools: server)
     monkeypatch.setattr(sdk, "create_tool_server", lambda **kw: captured.extend(kw["tools"]) or kw)
     monkeypatch.setattr(fal_credential, "is_enabled", lambda: True)
     monkeypatch.setattr(sdk, "_get_fal_api_key", lambda: "key")
-    seen = []
-    original = sdk._settings_lanes
-    monkeypatch.setattr(sdk, "_settings_lanes", lambda *a: seen.append(a[3]) or original(*a))
+    worker = SimpleNamespace(call=AsyncMock(return_value={"success": True}))
+    monkeypatch.setattr(sdk, "NodeWorker", lambda **kw: worker)
+    monkeypatch.setattr(generation_choices, "load", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("db down")))
+    choices = generation_choices.for_session({"id": "s"})
+    assert choices["unreadable"] is True and choices["remembered"] == {}
+    context = replace(UNATTENDED, unattended=unattended, choices_unreadable=choices["unreadable"])
     sdk.create_ai_tools_server({"image_generation": True}, "unused-tools-dir", tool_env={"IMAGE_MODEL": "fal-ai/x"},
-                               generation_context=replace(INTERACTIVE, legacy_migrated=True))
-    assert seen == [True]
+                               generation_context=context)
+    image = next(t for t in captured if t.name == "generateImage")
+    assert "Settings default" not in image.description
+    for args in ({"prompt": "tree"}, {"prompt": "tree", "model": "fal-ai/x"}):
+        output = payload(await image.handler(args))
+        if unattended:
+            assert output["status"] == "skipped" and output["reason"] == "choices_unreadable"
+            assert "could not be read" in output["message"]
+        elif "model" in args:
+            assert output["status"] == "completed"  # named and priced: the guard ran it
+        else:
+            assert output["status"] == "choose" and output["choices_unreadable"] is True
+    assert not any(c[0] == "execute" for c in backend.calls) or not unattended
+    worker.call.assert_not_awaited()  # main's fal handler never submitted anything
+
+

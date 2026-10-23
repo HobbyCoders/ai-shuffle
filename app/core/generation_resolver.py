@@ -29,6 +29,12 @@ REMEMBERED_MESSAGE = ("Used the user's remembered choice. They can change it fro
                       "in Settings > Default models, or by naming another source or model.")
 UNPRICED_SKIP_MESSAGE = ("Generation skipped: the user's saved choice has no known price right now, and nothing unpriced "
                          "runs unattended. They can pick a priced option again in Settings > Default models.")
+UNREADABLE_SKIP_MESSAGE = ("Generation skipped: the user's saved generation choices could not be read, so this "
+                           "unattended run has no known choice to use. Nothing was submitted.")
+UNREADABLE_CHOOSE_MESSAGE = (" The user's saved generation choices could not be read, so none was used; "
+                             "tell them briefly.")
+# Validates saved options alone when a remembered choice fails to prepare.
+_NEUTRAL_PROMPT = "A preview of this choice."
 # The chat shows a ``choose`` result as a choice card; the pick arrives as the
 # user's next message. Listing the options again in prose would duplicate it.
 CHOOSE_MESSAGE = ("The user sees these options as a choice card and can remember a pick. "
@@ -49,8 +55,10 @@ class RunContext:
     # fields above take precedence for callers that bind one kind.
     remembered_choices: dict | None = None
     last_choices: dict | None = None
-    # The saved Settings media defaults were migrated into remembered choices.
-    legacy_migrated: bool = False
+    # The account's saved choices could not be read (database, account service
+    # or identity failure). Nothing saved is known, so nothing runs unasked:
+    # an unattended run skips, an interactive one asks with the choice card.
+    choices_unreadable: bool = False
 
     def remembered_for(self, kind):
         return self.remembered_choice or (self.remembered_choices or {}).get(kind)
@@ -157,6 +165,13 @@ class Resolver:
         entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit)
         return result("catalog", options=[entry.view() for entry in entries])
 
+    async def _saved_options_valid(self, candidate, choice) -> bool:
+        try:
+            await self.backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, _NEUTRAL_PROMPT)
+        except ValueError:
+            return False
+        return True
+
     async def generate(self, kind: str, args: dict, context: RunContext, *, exclude_sources=()) -> dict:
         """``exclude_sources``: sources the caller's policy forbids for this call."""
         if kind not in KINDS:
@@ -167,6 +182,8 @@ class Resolver:
         remembered = context.remembered_for(kind)
         stored = context.job_choice or remembered
         from_memory = bool(remembered) and not context.job_choice
+        if context.unattended and not stored and context.choices_unreadable:
+            return result("skipped", reason="choices_unreadable", kind=kind, message=UNREADABLE_SKIP_MESSAGE)
         if context.unattended and not stored:
             return result("skipped", reason="no_stored_choice", kind=kind,
                           message="Generation skipped: this unattended run has no remembered or job-stored choice.")
@@ -232,6 +249,9 @@ class Resolver:
                 views = [c.view() for c in candidates[:4]]
                 if last and views and matches(candidates[0], last):
                     views[0]["label"] = "Same as last time"
+                if context.choices_unreadable:
+                    return result("choose", kind=kind, options=views, choices_unreadable=True,
+                                  message=CHOOSE_MESSAGE + UNREADABLE_CHOOSE_MESSAGE)
                 return result("choose", kind=kind, options=views, message=CHOOSE_MESSAGE)
             candidate = candidates[0]
             if not candidate.available or (candidate.source in ("chatgpt", "supergrok") and not candidate.verified):
@@ -245,8 +265,10 @@ class Resolver:
             try:
                 candidate = await self.backend.prepare(candidate, options, prompt)
             except ValueError:
-                # Saved options the model no longer declares.
-                if unasked and not context.unattended:
+                # Re-offer only when the SAVED options themselves no longer fit the
+                # model. A failure caused by this call's options or prompt is a
+                # refusal with its real message, as for any request.
+                if unasked and not context.unattended and not await self._saved_options_valid(candidate, choice):
                     return await reoffer("remembered_unavailable")
                 raise
             total = price_total(candidate.price)

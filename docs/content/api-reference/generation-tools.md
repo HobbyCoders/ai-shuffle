@@ -21,7 +21,9 @@ with a 15-second limit; a request pinned to this worker does not ask them. A
 malformed peer reply marks only that worker unavailable, and the fal catalog
 search is returned even when the priced lookup fails.
 
-Nothing that generates on the previous release stops working.
+Every generation that can spend money goes through the guard below: a known
+price, confirmation above the threshold and the daily cap. Nothing unpriced
+runs unasked.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -30,20 +32,22 @@ Nothing that generates on the previous release stops working.
   reported, never guessed.
 - **Saved Settings defaults.** A fal.ai model explicitly saved for image,
   video, audio or 3D generation in the previous Default models page is copied
-  into the account's remembered choices once, with its saved options. Until
-  that migration has run for the account, the saved model keeps running on the
-  previous configured-model path. Once migrated it is an ordinary remembered
-  choice and always goes through the guard below; it never falls back to the
-  previous unguarded path, because every such fallback would submit a fal job
-  with no known price. The built-in fal default is not a choice: with nothing
+  into the account's remembered choices once, with its saved options, before
+  the run starts. It is then an ordinary remembered choice and always goes
+  through the guard below. The previous unguarded fal path is never used for
+  these four tools, because it would submit a fal job with no known price,
+  cap or confirmation.
+- **Saved choices that cannot be read.** If the account's choices cannot be
+  read (database, account service or identity failure), nothing saved is
+  assumed and nothing runs unasked. An unattended run returns
+  `status: "skipped"`, `reason: "choices_unreadable"` with a report; an
+  interactive run returns `choose` with `choices_unreadable: true`. A named,
+  priced request still runs through the guard. The built-in fal default is not a choice: with nothing
   saved, the user is asked. The ChatGPT-plan image setting
   stays a provider rule and is not migrated. Chat mode has no Settings default.
 - **Named choices** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
-  daily cap. While an unmigrated saved Settings default is still in effect
-  (account preferences could not be read), a named fal model that cannot be
-  priced or resolved (unknown price, a model outside the text-to catalog,
-  undeclared inputs) runs on that Settings default path as before. A cap,
-  confirmation or chat-mode refusal never falls back. Outside chat mode, a guarded fal result run on this worker
+  daily cap. A named model the guard cannot price or resolve is refused, never
+  run on another path. Outside chat mode, a guarded fal result run on this worker
   also returns the workspace `file_path`, so `editImage` and `imageToVideo`
   can chain on it. A fal request from a peer or a chat with no saved session
   is refused before submission, so no worker-local path is ever returned.
@@ -92,7 +96,9 @@ The `choose` result also carries a `message` telling the agent the user sees
 a card and to wait for the reply. When the remembered choice is no longer
 available (its account or model is gone, its worker is unreachable, or its
 saved options are no longer declared), an interactive run returns `choose`
-with `remembered_unavailable: true` instead of refusing. When it has no known
+with `remembered_unavailable: true` instead of refusing. That happens only when the
+saved options themselves no longer fit; options or a prompt supplied in the
+call that the model rejects are refused with `reason: "invalid_request"`. When it has no known
 price, an interactive run returns `choose` with `remembered_unpriced: true`,
 so the user re-picks a priced option. An unattended run never submits an
 unpriced remembered choice: it returns `status: "skipped"`,
@@ -105,8 +111,7 @@ session identity and whether this is unattended. These are not agent-editable
 tool arguments. A job choice takes precedence over a remembered choice. With
 neither stored choice, an unattended run returns `status: "skipped"`,
 `reason: "no_stored_choice"` and a plain-language report, even if an agent
-supplies a source in its tool call (an unmigrated saved Settings default above
-is the exception). A result that ran the remembered choice has
+supplies a source in its tool call. A result that ran the remembered choice has
 `remembered: true`.
 
 ## Remembered choices

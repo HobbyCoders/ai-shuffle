@@ -89,13 +89,23 @@ def test_save_migrates_first_so_a_later_read_cannot_overwrite_the_pick():
     assert choices.load(OWNER)["remembered"]["image"]["model"] == "fal-ai/other"
 
 
-def test_for_session_never_raises(monkeypatch):
+def test_for_session_never_raises_and_marks_the_choices_unreadable(monkeypatch):
     from app.core import model_effort
 
     def broken(row):
         raise PermissionError("Worker owner identity is ambiguous")
     monkeypatch.setattr(model_effort, "_caller_preference_identity", broken)
-    assert choices.for_session({"id": "s"}) == {"remembered": {}, "last": {}, "migrated": False}
+    # Unreadable is never "nothing saved": the run then skips or asks (#379).
+    assert choices.for_session({"id": "s"}) == {"remembered": {}, "last": {}, "migrated": False, "unreadable": True}
+    monkeypatch.setattr(model_effort, "_caller_preference_identity", lambda row: OTHER)
+    monkeypatch.setattr(choices, "migrate", lambda identity: (_ for _ in ()).throw(RuntimeError("database down")))
+    assert choices.for_session({"id": "s"})["unreadable"] is True
+
+
+def test_query_options_carries_an_unreadable_read_into_the_run_context(monkeypatch):
+    from app.core import query_options
+    monkeypatch.setattr(choices, "for_session", lambda row: {"remembered": {}, "last": {}, "migrated": False, "unreadable": True})
+    assert query_options._generation_choices({"image_generation": True}, {"id": "s"}, None)["unreadable"] is True
 
 
 def test_for_session_reads_the_api_users_own_choices(monkeypatch):

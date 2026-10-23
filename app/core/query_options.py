@@ -1644,7 +1644,7 @@ def build_options_from_profile(
                                     owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
                                     chat_mode=session_mode == "chat",
                                     remembered_choices=choices["remembered"], last_choices=choices["last"],
-                                    legacy_migrated=choices["migrated"])
+                                    choices_unreadable=bool(choices.get("unreadable")))
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
         ai_tools_config=ai_tools_server_config,

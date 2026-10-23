@@ -177,8 +177,11 @@ def forget(identity: tuple[str, str], kind: str) -> bool:
 def for_session(session_row: Mapping[str, Any] | None) -> dict:
     """Choices of the account behind a session (its owner, or its API user).
 
-    Any failure (account service outage, ambiguous owner, database) returns no
-    choices and ``migrated=False``, so the Settings default keeps applying.
+    Any failure (account service outage, ambiguous owner, database, a failed
+    migration) returns no choices and ``unreadable=True``. That is never read
+    as "nothing saved": the run's generation tools then skip unattended steps
+    and ask interactively (``RunContext.choices_unreadable``). No saved
+    Settings default runs on main's unguarded fal path instead.
     """
     from app.core.model_effort import _caller_preference_identity
 
@@ -186,4 +189,4 @@ def for_session(session_row: Mapping[str, Any] | None) -> dict:
         return load(_caller_preference_identity(session_row))
     except Exception:  # noqa: BLE001 - never block a run on preference reads
         logger.warning("Could not read remembered generation choices", exc_info=True)
-        return {"remembered": {}, "last": {}, "migrated": False}
+        return {"remembered": {}, "last": {}, "migrated": False, "unreadable": True}

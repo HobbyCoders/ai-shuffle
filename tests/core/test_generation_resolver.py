@@ -160,6 +160,26 @@ async def test_unusable_remembered_choice_asks_again_interactively():
         assert output["status"] == "refused"
         assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
 
+    # Saved options are fine, but this call's own options are not: a refusal
+    # with the real message, not a silent re-offer of the card.
+    backend = Strict([candidate(), other])
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "options": {"steps": 99}},
+                                              replace(INTERACTIVE, remembered_choices={"image": candidate().choice()}))
+    assert output["status"] == "refused" and output["reason"] == "invalid_request"
+    assert output["error"] == "steps is out of range"
+    assert not any(call[0] in ("reserve", "execute") for call in backend.calls)
+
+
+async def test_unreadable_choices_skip_unattended_and_ask_interactively():
+    backend = FakeBackend([candidate(), candidate(account="account-b", model="model-b")])
+    output = await Resolver(backend).generate("image", {"prompt": "make it"}, RunContext(choices_unreadable=True))
+    assert output["status"] == "skipped" and output["reason"] == "choices_unreadable"
+    assert "could not be read" in output["message"]
+    output = await Resolver(backend).generate("image", {"prompt": "make it"}, replace(INTERACTIVE, choices_unreadable=True))
+    assert output["status"] == "choose" and output["choices_unreadable"] is True
+    assert "could not be read" in output["message"]
+    assert backend.calls == []
+
 
 async def test_remembered_choices_are_per_kind():
     a, b = candidate(), candidate(account="account-b", model="model-b")
