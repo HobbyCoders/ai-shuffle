@@ -995,8 +995,9 @@ export async function startCallForSession(sessionIdIn: string, options: { attach
 	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
 	try {
 		// Only an explicit call action creates a normal conversation's audio binding.
-		// Historical voice sessions and timed reconnects retain the secret endpoint.
-		cred = options.attach ? await prepareConversationCall(sessionIdIn) : await mintVoiceSecret(sessionIdIn);
+		// Historical voice sessions use the secret endpoint; starting a call there
+		// binds the current voice settings, while timed reconnects keep the call's.
+		cred = options.attach ? await prepareConversationCall(sessionIdIn) : await mintVoiceSecret(sessionIdIn, { newCall: true });
 		if (attempt !== generation) return;
 	} catch (e) {
 		if (attempt !== generation) return;

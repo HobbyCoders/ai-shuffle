@@ -268,6 +268,11 @@ class VoiceSecretResponse(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
+class VoiceSecretRequest(BaseModel):
+    # True when the user starts a call; reconnects of a running call omit it.
+    new_call: bool = False
+
+
 class VoiceCallRequest(BaseModel):
     """The ``call_id`` the client got back from OpenAI's WebRTC handshake.
 
@@ -1058,6 +1063,65 @@ def _check_attachable_conversation(row):
         raise HTTPException(403, "Background observation cannot acquire a voice surface.")
 
 
+def _call_in_progress(session_id: str) -> bool:
+    """Whether this session has a call running now (stream or WebRTC sideband).
+
+    Its reconnects (the secret refresh near the 60-minute wall, audio socket
+    restores) keep the binding the call started with.
+    """
+    from app.core import voice_bridge, voice_stream
+    stream = voice_stream.calls.get(session_id)
+    if stream is not None and not stream.closed:
+        return True
+    bridge = voice_bridge.registry.get(session_id)
+    return bool(bridge is not None and bridge.active)
+
+
+def _stored_binding(row: Dict[str, Any]) -> Dict[str, Any]:
+    config = row.get("voice_config") or {}
+    return json.loads(config) if isinstance(config, str) else dict(config)
+
+
+async def _bind_new_call(
+    row: Dict[str, Any], voice_settings: Dict[str, Any],
+    api_user: Optional[Dict[str, Any]], requested_provider_id: Optional[str] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Bind a call that is starting now to the current Settings → Voice choices.
+
+    ``voice_settings`` already carries the validated engine, the engine's
+    default voice when the saved one does not fit, and the GPT-Live-1.1
+    fallback. Returns ``(binding, provider_row, api_key)``; the caller stores
+    the binding so the rest of this call (reconnects included) reads it.
+    """
+    previous = _stored_binding(row)
+    model = voice_settings["voice_model"]
+    provider_row = await run_sync(
+        _resolve_provider_row, requested_provider_id, voice_settings.get("voice_provider_id"), api_user, model,
+    )
+    if model == CODEX_MODEL:
+        from app.core.voice_dependencies import ensure_available
+        available, reason = await ensure_available()
+        if not available:
+            raise HTTPException(400, reason)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
+        raise HTTPException(400, "The voice model does not belong to the selected provider.")
+    if model == LIVE_11_MODEL:
+        from app.core import voice_availability
+        if not await voice_availability.probe(provider_row["id"], api_key):
+            model = LIVE_MODEL  # Same voices and shared options.
+    binding = {
+        **previous,
+        "model": model,
+        "voice": voice_settings["voice_voice"],
+        "provider_id": provider_row["id"],
+        "options": voice_settings.get("voice_options", {}),
+        "greet": bool(previous.get("greet", False)),
+        "conversation_surface": row.get("mode") != "voice",
+    }
+    return binding, provider_row, api_key
+
+
 class VoiceAttachRequest(BaseModel):
     # Call funding only; never rebinds the conversation agent/text provider.
     provider_id: Optional[str] = None
@@ -1070,35 +1134,29 @@ async def prepare_voice_attachment(
 ):
     """Attach audio to an existing conversation without creating another history.
 
-    Same response/handshake as POST /sessions. Saved voice bindings are reused;
-    first attachment pins current voice settings independently of text bindings.
+    Same response/handshake as POST /sessions. Each new call binds the current
+    Settings → Voice engine, voice, provider and options (independently of the
+    chat's text bindings); a call already running keeps the binding it has.
     """
     voice_settings = await _require_voice_enabled()
     row = await run_sync(database.get_session, session_id)
     if not row:
         raise HTTPException(404, "Session not found.")
-    _check_voice_session_access(get_api_user_from_request(http_request), row)
+    api_user = get_api_user_from_request(http_request)
+    _check_voice_session_access(api_user, row)
     if row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
     _reject_when_capped(session_id)
-    config = row.get("voice_config")
-    if isinstance(config, str):
-        config = json.loads(config)
-    if not config:
-        config = {
-            "model": voice_settings["voice_model"], "voice": voice_settings["voice_voice"],
-            "provider_id": request.provider_id or voice_settings.get("voice_provider_id"),
-            "options": voice_settings.get("voice_options", {}), "greet": False,
-        }
-    elif request.provider_id and request.provider_id != config.get("provider_id"):
-        raise HTTPException(400, "This conversation already has a saved voice provider binding.")
-    api_user = get_api_user_from_request(http_request)
-    provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user, config["model"])
-    api_key = await _provider_api_key(provider_row, api_user=api_user)
-    if (config["model"] == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
-        raise HTTPException(400, "The voice model does not belong to the selected provider.")
-    config = {**config, "provider_id": provider_row["id"],
-              "conversation_surface": row.get("mode") != "voice"}
+    if _call_in_progress(session_id) and _stored_binding(row):
+        config = _stored_binding(row)
+        if request.provider_id and request.provider_id != config.get("provider_id"):
+            raise HTTPException(409, "A call is already running in this conversation. Hang up to change its provider.")
+        provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user, config["model"])
+        api_key = await _provider_api_key(provider_row, api_user=api_user)
+        config = {**config, "provider_id": provider_row["id"],
+                  "conversation_surface": row.get("mode") != "voice"}
+    else:
+        config, provider_row, api_key = await _bind_new_call(row, voice_settings, api_user, request.provider_id)
     secret, expires_at = "", None
     if transport_for(config["model"]) == "webrtc":
         body = await _mint_client_secret(api_key, config["model"], config["voice"], config.get("options"))
@@ -1115,6 +1173,7 @@ async def prepare_voice_attachment(
 async def mint_voice_session_secret(
     http_request: Request,
     session_id: str,
+    request: Optional[VoiceSecretRequest] = None,
     token: str = Depends(require_auth),
 ):
     """Re-mint the browser's realtime credential for an EXISTING voice session.
@@ -1124,17 +1183,23 @@ async def mint_voice_session_secret(
     a fresh secret, gets a new ``call_id``, and posts it to ``/call``, which
     replaces the sideband and reseeds context.
 
-    The session's own ``provider_id`` (stamped at creation) leads the provider
-    resolution, so a call keeps being funded by the row it started on.
+    Reconnects keep the stored binding, so a running call keeps its engine,
+    voice and funding row. ``new_call`` (the Start call button) with no call
+    running binds the current Settings → Voice choices, like POST /attach.
     """
     voice_settings = await _require_voice_enabled()
     api_user = get_api_user_from_request(http_request)
     session_row = await _require_voice_session(http_request, session_id)
     _reject_when_capped(session_id)
 
-    config = session_config(session_row, voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
-    api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if not (request and request.new_call) or _call_in_progress(session_id):
+        config = session_config(session_row, voice_settings)
+        provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
+        api_key = await _provider_api_key(provider_row, api_user=api_user)
+    else:
+        config, provider_row, api_key = await _bind_new_call(session_row, voice_settings, api_user)
+        from app.db.sessions import set_session_voice_binding
+        await run_sync(set_session_voice_binding, session_id, config)
 
     model = config["model"]
     client_secret, expires_at = "", None

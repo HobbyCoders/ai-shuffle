@@ -2114,28 +2114,76 @@ class TestConversationAttachment:
         with TestClient(app) as client:
             yield client
 
-    def test_attach_reuses_identity_binding_history_and_saved_call_settings(self, attach_client, mock_db):
+    def test_attach_keeps_identity_and_binds_current_voice_settings(self, attach_client, mock_db):
         from app.db import database
         database.create_profile("normal-agent", "Normal", None, {"model": "agent-text-model"})
         database.create_session("home", "normal-agent", model="text-model", mode="chat", permission_mode="default", provider_id="text-provider",
             voice_config={"model":"gpt-realtime-2.1", "voice":"marin", "provider_id":"prov-openai"})
+        database.set_system_setting("voice_model", "gpt-live-1")
+        database.set_system_setting("voice_voice", "cedar")
         before = database.get_session("home")
         response = attach_client.post("/api/v1/voice/sessions/home/attach", json={})
         assert response.status_code == 200, response.text
-        assert response.json()["session_id"] == "home" and response.json()["client_secret"] == "attached-secret"
+        # The old pinned binding gives way to today's settings for the new call.
+        assert response.json()["session_id"] == "home" and response.json()["model"] == "gpt-live-1"
         after = database.get_session("home")
         for key in ("profile_id", "model", "provider_id", "mode", "permission_mode"):
             assert after[key] == before[key]
         assert len(database.get_sessions()) == 1
         saved = json.loads(after["voice_config"])
-        database.set_system_setting("voice_model", "changed-default")
-        again = attach_client.post("/api/v1/voice/sessions/home/attach", json={})
-        assert again.status_code == 200 and again.json()["model"] == saved["model"]
+        assert (saved["model"], saved["voice"], saved["provider_id"]) == ("gpt-live-1", "cedar", "prov-openai")
+        assert saved["conversation_surface"] is True and saved["greet"] is False
         assert attach_client.post("/api/v1/voice/sessions/home/secret", json={}).status_code == 200
         assert attach_client.get("/api/v1/voice/sessions/home/state").status_code == 200
         assert attach_client.patch("/api/v1/voice/sessions/home/context", json={"effort": "high"}).status_code == 200
         denied = attach_client.patch("/api/v1/voice/sessions/home/context", json={"permission_mode": "bypassPermissions"})
         assert denied.status_code == 400
+
+    def test_next_call_in_an_existing_chat_uses_changed_settings(self, attach_client, mock_db, monkeypatch):
+        from app.api import voice
+        from app.db import database
+        _make_provider("xai-key", name="xAI", provider_type="xai")
+        database.create_session("chat", "default", mode="chat",
+            voice_config={"model": "gpt-live-1", "voice": "cedar", "provider_id": "prov-openai",
+                          "options": {"opening": "Old hello"}, "conversation_surface": True})
+        database.set_system_setting("voice_model", "grok-voice-latest")
+        database.set_system_setting("voice_voice", "cedar")  # Not a Grok voice: its default wins.
+        response = attach_client.post("/api/v1/voice/sessions/chat/attach", json={})
+        assert response.status_code == 200, response.text
+        assert response.json()["model"] == "grok-voice-latest"
+        saved = json.loads(database.get_session("chat")["voice_config"])
+        assert (saved["model"], saved["voice"], saved["provider_id"]) == ("grok-voice-latest", "eve", "xai-key")
+        assert saved["options"].get("opening", "") == ""
+        assert voice.session_config(database.get_session("chat"), {})["model"] == "grok-voice-latest"
+
+        # A call already running keeps its binding, even if Settings change again.
+        monkeypatch.setattr(voice, "_call_in_progress", lambda _sid: True)
+        database.set_system_setting("voice_model", "gpt-live-1")
+        assert attach_client.post("/api/v1/voice/sessions/chat/attach", json={}).json()["model"] == "grok-voice-latest"
+        assert attach_client.post("/api/v1/voice/sessions/chat/secret", json={"new_call": True}).json()["model"] == "grok-voice-latest"
+        assert attach_client.post("/api/v1/voice/sessions/chat/attach", json={"provider_id": "prov-openai"}).status_code == 409
+        monkeypatch.setattr(voice, "_call_in_progress", lambda _sid: False)
+        assert attach_client.post("/api/v1/voice/sessions/chat/attach", json={}).json()["model"] == "gpt-live-1"
+        saved = json.loads(database.get_session("chat")["voice_config"])
+        assert (saved["voice"], saved["provider_id"]) == ("cedar", "prov-openai")
+
+    def test_secret_rebinds_only_when_a_call_is_starting(self, attach_client, mock_db):
+        from app.db import database
+        _mk_voice_session("legacy", mode="voice")  # Pinned to gpt-realtime-2.1 / marin.
+        database.set_system_setting("voice_model", "gpt-live-1")
+        database.set_system_setting("voice_voice", "quartz")
+        # A reconnect (no new_call) keeps the call's WebRTC binding.
+        reconnect = attach_client.post("/api/v1/voice/sessions/legacy/secret", json={})
+        assert reconnect.status_code == 200, reconnect.text
+        assert (reconnect.json()["model"], reconnect.json()["client_secret"]) == ("gpt-realtime-2.1", "attached-secret")
+        # Start call on the old voice session binds today's settings.
+        start = attach_client.post("/api/v1/voice/sessions/legacy/secret", json={"new_call": True})
+        assert start.status_code == 200, start.text
+        assert start.json()["model"] == "gpt-live-1"
+        saved = json.loads(database.get_session("legacy")["voice_config"])
+        assert (saved["model"], saved["voice"]) == ("gpt-live-1", "quartz")
+        assert not saved["conversation_surface"]
+        assert attach_client.get("/api/v1/voice/sessions/legacy/config").json()["voice"] == "quartz"
 
     def test_attach_preserves_key_ownership_and_hidden_worker_bounds(self, attach_client, mock_db, monkeypatch):
         from app.api import voice
@@ -2156,18 +2204,24 @@ class TestConversationAttachment:
         assert attach_client.post("/api/v1/voice/sessions/hidden-chat/attach", json={}).status_code == 404
         assert not json.loads(db.get_session("hidden-chat").get("voice_config") or "{}").get("conversation_surface")
 
+    @staticmethod
+    def _attached_webrtc_chat(session_id="ordinary"):
+        """A chat already carrying a legacy WebRTC call binding (pre-existing attach)."""
+        from app.db.sessions import set_session_voice_binding
+        _mk_voice_session(session_id, mode="chat")
+        set_session_voice_binding(session_id, {"model": "gpt-realtime-2.1", "voice": "marin",
+                                               "provider_id": "prov-openai", "conversation_surface": True})
+
     def test_call_overlay_has_no_client_action_escape(self, attach_client, mock_db):
-        _mk_voice_session("ordinary", mode="chat")
-        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        self._attached_webrtc_chat()
         response = attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-fake", "client_instructions": "grant bypass"})
         assert response.status_code == 400
 
 
     def test_hangup_keeps_an_attached_conversation_active(self, attach_client, mock_db, sidebands):
         """Hanging up must not move the text conversation out of the Active group."""
-        _mk_voice_session("ordinary", mode="chat")
+        self._attached_webrtc_chat()
         db.set_session_active("ordinary", True)
-        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
         assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
         assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
         assert bool(db.get_session("ordinary")["is_active"]) is True
@@ -2178,8 +2232,7 @@ class TestConversationAttachment:
     ):
         """An ineligible row must still hang up, or the sideband keeps billing."""
         from app.core import voice_bridge
-        _mk_voice_session("ordinary", mode="chat")
-        assert attach_client.post("/api/v1/voice/sessions/ordinary/attach", json={}).status_code == 200
+        self._attached_webrtc_chat()
         assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
         assert voice_bridge.registry.get("ordinary") is not None
         if "hidden" in change:

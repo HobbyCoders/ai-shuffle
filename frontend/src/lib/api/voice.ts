@@ -330,7 +330,7 @@ export function createVoiceSession(body: VoiceSessionContext): Promise<VoiceSess
 	return api.post<VoiceSessionCreated>('/voice/sessions', body);
 }
 
-/** Pin a separate audio binding to a permitted conversation; never alter its text context. */
+/** Bind a new call to a permitted conversation using the current voice settings; never alter its text context. */
 export function prepareConversationCall(sessionId: string): Promise<VoiceSessionCreated> {
 	return api.post<VoiceSessionCreated>(`/voice/sessions/${encodeURIComponent(sessionId)}/attach`, {});
 }
@@ -339,10 +339,16 @@ export function prepareConversationCall(sessionId: string): Promise<VoiceSession
 // Call lifecycle (VW3 contract — graceful while unmerged)
 // ============================================================================
 
-/** Re-mint a client secret for an existing voice session. */
-export function mintVoiceSecret(sessionId: string): Promise<VoiceSecret | null> {
+/**
+ * Re-mint a client secret for an existing voice session. `newCall` marks a call
+ * the user is starting, which binds the current voice settings; reconnects of a
+ * running call leave it unset and keep the call's engine and voice.
+ */
+export function mintVoiceSecret(sessionId: string, opts: { newCall?: boolean } = {}): Promise<VoiceSecret | null> {
 	return optional('mint secret', () =>
-		api.post<VoiceSecret>(`/voice/sessions/${sessionId}/secret`)
+		opts.newCall
+			? api.post<VoiceSecret>(`/voice/sessions/${sessionId}/secret`, { new_call: true })
+			: api.post<VoiceSecret>(`/voice/sessions/${sessionId}/secret`)
 	);
 }
 

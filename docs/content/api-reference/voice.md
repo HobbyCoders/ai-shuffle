@@ -146,7 +146,7 @@ On a Realtime call the voice agent gets the app configuration tools only when th
 
 ### POST /api/v1/voice/sessions/{session_id}/secret
 
-Get a fresh client secret for an existing voice session, for example to rejoin it. The session keeps the model, voice and provider it was created with.
+Get a fresh client secret for an existing voice session. Without a body it refreshes the running call, which keeps the engine, voice and provider it started with. Send `{"new_call": true}` when you start a new call on the session: if no call is running, the call uses the current voice settings (engine, voice, provider and options), with the same fallbacks as a new session.
 
 **Auth:** Required. An API key can use it only on its own voice sessions (`403` otherwise).
 

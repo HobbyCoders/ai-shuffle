@@ -149,12 +149,17 @@ def model_details(model: str, options: dict | None = None) -> dict:
 
 
 def session_config(row: dict, settings: dict) -> dict:
-    """Old sessions use current defaults; new calls keep their creation binding."""
+    """The binding of the call in progress; current settings when there is none.
+
+    Each call start (POST /sessions, /attach, or /secret with no call running)
+    stores the current Settings → Voice choices as the binding, so everything
+    read during the call (audio socket, sideband, reconnects) stays on the
+    engine and voice the call began with even if Settings change mid-call.
+    """
     import json
     config = row.get("voice_config")
     if isinstance(config, str):
         config = json.loads(config)
-    # A pinned legacy binding must NOT acquire today's newly changed defaults.
     if config:
         return config
     return {

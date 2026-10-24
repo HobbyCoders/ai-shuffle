@@ -20,7 +20,7 @@ The **Dictation** settings on the same page, including the **Voice input hotkey*
 
 ## Start a call
 
-Choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer.
+Choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
 
 During a call, the call dock shows whether it is connected and who is speaking, how long the call has run, and buttons to:
 
