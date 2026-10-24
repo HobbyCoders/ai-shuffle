@@ -59,10 +59,9 @@ def create_schema(cursor):
         lease_until TIMESTAMPTZ, lease_owner TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(watch_id, event_key)
     )""")
-    from app.db.base import column_exists
-    for column, ddl in (("command_id","TEXT"),("admitted_at","TIMESTAMPTZ"),("lease_until","TIMESTAMPTZ"),("lease_owner","TEXT")):
-        if not column_exists(cursor, "watch_events", column):
-            cursor.execute(f"ALTER TABLE watch_events ADD COLUMN {column} {ddl}")
+    # Watches first ship with all columns above. Do not probe the hard-coded
+    # public schema and ALTER this new table: migrations also create private
+    # search_path schemas for atomic worker snapshots.
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_watch_events_pending ON watch_events(watch_id,status)")
 
 

@@ -11,15 +11,9 @@ def watchpg(pg,monkeypatch):
     from app.db import watches as store,watch_migration
     # Production helpers intentionally inspect public. This fixture gives each
     # test a private search_path; use identical real catalog queries there.
-    def column_exists(c,table,column):
-        c.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() "
-                  "AND table_name=%s AND column_name=%s",(table,column))
-        return c.fetchone() is not None
     def table_exists(c,table):
         c.execute("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=%s",(table,))
         return c.fetchone() is not None
-    from app.db import base
-    monkeypatch.setattr(base,'column_exists',column_exists)
     monkeypatch.setattr(watch_migration,'table_exists',table_exists)
     return pg
 
@@ -33,6 +27,7 @@ def test_real_watch_transactions_and_reopen(watchpg,monkeypatch):
     sql("INSERT INTO agents VALUES ('default')")
     with connect(False) as conn:
         store.create_schema(conn.cursor())
+        store.create_schema(conn.cursor())  # Reopening must be idempotent in a private search_path.
     wid = store.create(owner='admin',creating_session_id=None,worker_id='worker',agent_id='default',
         description='Reminder',source={'kind':'schedule','interval_seconds':60},filter={},action='alert',
         permissions={'tools':[],'read_only':True},daily_budget_usd=1)

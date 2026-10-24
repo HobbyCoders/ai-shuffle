@@ -80,6 +80,22 @@ def test_migration_preserves_paused_or_disabled_loop(owner,mail,state):
     assert row['status']=='paused' and 'paused or disabled' in row['reason']
 
 
+def test_missing_agent_aborts_instead_of_discarding_email_sources(owner,mail):
+    connector,_,_=mail
+    assistant.configure('watch-test',{'agent_id':None,'enabled':True})
+    with get_db() as conn:
+        c=conn.cursor()
+        legacy_schema(c)
+        c.execute("DELETE FROM agents WHERE id='default'")
+        c.execute('INSERT INTO assistant_sources VALUES (%s,%s,TRUE,NULL,NULL)',('watch-test',connector['id']))
+    with pytest.raises(ValueError,match='requires an owner agent'):
+        with get_db() as conn:
+            watch_migration.migrate(conn.cursor())
+    with get_db() as conn:
+        assert table_exists(conn.cursor(),'assistant_sources')
+    assert store.list_watches()==[]
+
+
 def test_disabled_or_non_email_sources_do_not_gain_permission(owner,mail):
     connector,_,_=mail
     assistant.configure('watch-test',{'agent_id':'watch-agent','enabled':True})

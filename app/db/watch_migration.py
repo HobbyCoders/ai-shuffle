@@ -31,7 +31,9 @@ def migrate(cursor):
         state = dict(cursor.fetchone() or {})
         agent = fallback or state.get('agent_id')
         if not agent:
-            continue
+            # Abort the startup transaction, retaining the source tables. A
+            # corrupt/missing owner agent must never silently discard opt-ins.
+            raise ValueError('Email watch migration requires an owner agent')
         wid = 'migrated-email-'+store.event_id(source['assistant_id'],source['connector_id'])
         bookmark = _json(source.get('watermark'),{}) or {}
         # Old unread cursors are carried, not mistaken for Gmail history ids.
