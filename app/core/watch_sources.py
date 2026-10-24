@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 from app.db import database, watches as store
 from app.db.async_database import run_sync
+from app.core import watch_values as values
 from app.db.base import get_db
 
 KINDS = ("connector", "github", "session", "usage", "schedule")
@@ -56,7 +57,7 @@ def validate(source, filter):
         if isinstance(interval, bool) or not isinstance(interval, int) or not 60 <= interval <= 31536000:
             raise ValueError("Schedule interval_seconds must be 60-31536000")
         if source.get("starts_at"):
-            store.at(source["starts_at"])
+            values.at(source["starts_at"])
     return source
 
 
@@ -64,7 +65,7 @@ def matches(filter, payload):
     for key in ("event_type", "state", "number"):
         if key in filter and payload.get(key) != filter[key]:
             return False
-    return str(filter.get("contains", "")).casefold() in store.encode(payload).casefold()
+    return str(filter.get("contains", "")).casefold() in values.encode(payload).casefold()
 
 
 def connector_allowed(watch):
@@ -160,7 +161,7 @@ async def github_poll(watch):
     # Issues endpoint includes PRs and supports updated-since. Filter the kind
     # locally. CI uses created>= plus overlapping updated snapshots.
     endpoint = f"repos/{source['repo']}/" + ("actions/runs" if resource == 'ci' else "issues")
-    since = store.at(cursor.get('since',watch['created_at'])).isoformat()
+    since = values.at(cursor.get('since',watch['created_at'])).isoformat()
     page = int(cursor.get('page',1))
     query = {"per_page":100,"page":page}
     if resource != 'ci':
@@ -183,11 +184,11 @@ async def github_poll(watch):
     # Keep the scan lower bound stable through all pages. Never jump to now:
     # CI can change an older run; retain the creation bound until it is terminal.
     if len(rows) == 100:
-        return events,{"since":str(since),"page":page+1,"high":cursor.get('high',str(store.now()))}
+        return events,{"since":str(since),"page":page+1,"high":cursor.get('high',str(values.now()))}
     if resource == 'ci':
         return events,{"since":str(since)}
-    high = cursor.get('high',str(store.now()))
-    return events,{"since":(store.at(high)-timedelta(seconds=60)).isoformat()}
+    high = cursor.get('high',str(values.now()))
+    return events,{"since":(values.at(high)-timedelta(seconds=60)).isoformat()}
 
 
 def session_poll(watch):
@@ -231,7 +232,7 @@ def session_poll(watch):
                     add(interaction['id'])
             elif state=='finished' and turn['state'] in ('completed','aborted'):
                 add(turn['id'])
-            elif state=='stuck' and turn['state'] in ('running','draining','interrupting') and store.at(session['updated_at']) < store.now()-timedelta(seconds=source.get('stuck_seconds',900)):
+            elif state=='stuck' and turn['state'] in ('running','draining','interrupting') and values.at(session['updated_at']) < values.now()-timedelta(seconds=source.get('stuck_seconds',900)):
                 add(turn['id'])
     return list(events.items()),cursor
 
@@ -283,10 +284,10 @@ async def poll(watch):
         return await run_sync(session_poll,watch)
     if kind == 'usage':
         return await usage_poll(watch)
-    due = store.at(cursor.get('next_at') or source.get('starts_at') or watch['created_at'])
+    due = values.at(cursor.get('next_at') or source.get('starts_at') or watch['created_at'])
     events = []
     for _ in range(100):
-        if due > store.now():
+        if due > values.now():
             break
         events.append((due.isoformat(),dict(event_type='schedule',scheduled_at=due.isoformat())))
         due += timedelta(seconds=source['interval_seconds'])
@@ -306,11 +307,11 @@ def record_connector(connector_id,event_type,payload):
     if event_type not in {t.id for t in get_connector_class(connector['type']).TRIGGERS}:
         return
     external_id = payload.get('message_id') or payload.get('event_id') or payload.get('id')
-    key = event_type+':'+str(external_id or hashlib.sha256(store.encode(payload).encode()).hexdigest())
+    key = event_type+':'+str(external_id or hashlib.sha256(values.encode(payload).encode()).hexdigest())
     event = dict(payload,event_type=event_type)
     # Limit untrusted input without breaking a JSON envelope.
-    if len(store.encode(event)) > 16000:
-        event = dict(event_type=event_type,data=store.encode(payload)[:12000],truncated=True)
+    if len(values.encode(event)) > 16000:
+        event = dict(event_type=event_type,data=values.encode(payload)[:12000],truncated=True)
     for watch in store.list_watches(worker_id=assistant_id()):
         if watch['status'] != 'active' or watch['source'] != dict(kind='connector',connector_id=connector_id):
             continue
