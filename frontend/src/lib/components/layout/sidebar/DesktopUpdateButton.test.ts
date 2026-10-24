@@ -526,6 +526,42 @@ describe('manual check from the host', () => {
   await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates', { action:'check' }));
   expect(notice.info).not.toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'Update in progress' }));
  });
+ it('waits for a worker that refused because it is already checking', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime:true });
+  try {
+   const idleSelf = { ...worker, phase:'idle', version:null };
+   const busyPeer = { ...peer, phase:'checking', version:null };
+   api.get.mockResolvedValue({ ...state, update_all_workers:true, workers:[idleSelf, busyPeer] });
+   api.post.mockResolvedValue({ scope:'all', sent:'check', results:[
+    { device_id:'peer', device_name:'ServerWorker', accepted:false, reason:'An update is already in progress' },
+    { device_id:'local', device_name:'Current worker', accepted:true, reason:'Request queued' }] });
+   render(DesktopUpdateButtonHarness);
+   await waitFor(() => expect(canCheck()).toBe('yes'));
+   await fireEvent.click(screen.getByRole('button', { name:'Manual check' }));
+   await waitFor(() => expect(api.post).toHaveBeenCalled());
+   // This worker has long settled idle; the peer's own check is still running.
+   await vi.advanceTimersByTimeAsync(12000);
+   expect(notice.info).not.toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'No updates found' }));
+   api.get.mockResolvedValue({ ...state, update_all_workers:true, workers:[idleSelf, { ...peer, phase:'available', version:'abc123' }] });
+   await vi.advanceTimersByTimeAsync(4000);
+   await waitFor(() => expect(notice.info).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'Update found' })));
+  } finally { vi.useRealTimers(); }
+ });
+ it('says it is still checking when a worker never answers within the limit', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime:true });
+  try {
+   api.get.mockResolvedValue(idle);
+   render(DesktopUpdateButtonHarness);
+   await waitFor(() => expect(canCheck()).toBe('yes'));
+   api.get.mockResolvedValue({ ...idle, workers:[{ ...idle.workers[0], request_pending:true }] });
+   await fireEvent.click(screen.getByRole('button', { name:'Manual check' }));
+   await waitFor(() => expect(api.post).toHaveBeenCalled());
+   await vi.advanceTimersByTimeAsync(60000);
+   expect(notice.info).not.toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'No updates found' }));
+   await vi.advanceTimersByTimeAsync(35000);
+   await waitFor(() => expect(notice.info).toHaveBeenCalledWith(expect.stringContaining('Still checking'), expect.objectContaining({ title:'Checking for updates' })));
+  } finally { vi.useRealTimers(); }
+ });
  it('waits for an idle worker before saying nothing was found', async () => {
   vi.useFakeTimers({ shouldAdvanceTime:true });
   try {

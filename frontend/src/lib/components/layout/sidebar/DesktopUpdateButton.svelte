@@ -308,10 +308,12 @@
 		return true;
 	}
 	/** Remember a request's refusals: not-sent rows are not the worker's refusal, so they only show as the receipt. */
-	function keepReceipt(result: Receipt) {
+	function keepReceipt(result: Receipt, check = false) {
 		receipt = receiptText(receiptRows(result.results));
 		receiptHeld = false;
-		refusals = Object.fromEntries(result.results.filter(w => !w.accepted && !notSent(w) && w.device_id).map(w => [w.device_id!, w.reason]));
+		// A refused check holds nothing back (app/core/update_workers.py _dispatch): a worker already
+		// checking refuses it, and its own result must still show.
+		refusals = check ? {} : Object.fromEntries(result.results.filter(w => !w.accepted && !notSent(w) && w.device_id).map(w => [w.device_id!, w.reason]));
 	}
 	/** "Restart when work finishes" or "Stop running work and restart". */
 	async function restartLater(mode: 'when_idle' | 'stop') {
@@ -394,7 +396,7 @@
 	function schedule() {
 		clearTimeout(pollTimer); pollTimer = undefined;
 		if (!active || document.hidden) return;
-		const moving = pending || waiting || downloading || manualCheckAt > 0 || Date.now() < watchUntil;
+		const moving = pending || waiting || downloading || (manualCheckAt > 0 && Date.now() - manualCheckAt < CHECK_TIMEOUT_MS) || Date.now() < watchUntil;
 		pollTimer = setTimeout(refresh, moving ? FAST_POLL_MS : IDLE_POLL_MS);
 	}
 	async function refresh() {
@@ -471,8 +473,10 @@
 		let settled = true;
 		for (const w of next.workers) {
 			if (!w.online || (!next.update_all_workers && w.is_self === false)) continue;
-			if (checkAsked && !checkAsked.has(w.device_id)) continue;
+			// A worker already checking refuses a second check ("already in progress"),
+			// but its check can still find an update: wait for it either way.
 			if (w.phase === 'checking' || w.request_pending) { checkSeen.add(w.device_id); settled = false; continue; }
+			if (checkAsked && !checkAsked.has(w.device_id)) continue;
 			if (!checkSeen.has(w.device_id) && !OUTCOME_PHASES.has(w.phase) && elapsed < CHECK_IDLE_SETTLE_MS) settled = false;
 		}
 		return settled;
@@ -531,12 +535,12 @@
 		try {
 			const result = await api.post<Receipt>('/settings/application-updates', { action: requestedAction });
 			if (!active) return null;
+			const sentAction = typeof result.sent === 'string' ? result.sent : requestedAction;
 			// Keep only refusals: accepted work shows up in each worker's live phase.
-			keepReceipt(result);
+			keepReceipt(result, sentAction === 'check');
 			if (!result.results.some(w => w.accepted)) installRequested = false;
 			// The server sent less than asked (a check instead of an install): nothing restarts,
 			// so never wait on startup, and say why whether or not this request was announced.
-			const sentAction = typeof result.sent === 'string' ? result.sent : requestedAction;
 			if (sentAction !== requestedAction || result.held) {
 				installRequested = false;
 				const why = result.held?.replace(/\.+$/, '') || 'Nothing was installed';
