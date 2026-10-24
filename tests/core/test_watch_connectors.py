@@ -166,7 +166,7 @@ async def test_channel_scope_and_unmatched_cursor(
 
 @pytest.mark.asyncio
 async def test_slack_page_boundary_preserves_high_watermark() -> None:
-    from app.core.watch_connector_sources import poll
+    from app.core.connectors.watch_history import poll
 
     sdk = FakeSlack()
     sdk.messages = [{"ts": f"{n:05}", "text": "message"} for n in range(1, 206)]

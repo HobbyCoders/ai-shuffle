@@ -1,10 +1,10 @@
-"""Replayable connector reads; Telegram uses the connector's durable receive journal."""
+"""Host-side messaging watch reads through the native or isolated connector interface."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from app.db import watches as store
+from app.db.async_database import run_sync
 
 
 async def poll(
@@ -17,55 +17,9 @@ async def poll(
     if allowed and channel_id not in {str(item) for item in allowed}:
         raise PermissionError("Watch channel is no longer allowed by the connector")
     if kind == "telegram":
-        from app.db.async_database import run_sync
-
         return await run_sync(store.connector_page, instance.connector_id, channel_id, cursor)
-    if kind == "slack":
-        client = instance._web_client
-        if client is None:
-            raise ValueError("Slack is offline")
-        if not cursor:
-            return [], {"after": str(datetime.now(timezone.utc).timestamp())}
-        args = dict(channel=channel_id, oldest=cursor["after"], inclusive=False, limit=100)
-        if cursor.get("page"):
-            args["cursor"] = cursor["page"]
-        page = await client.conversations_history(**args)
-        messages = page.get("messages", [])
-        high = max([cursor.get("high", cursor["after"])] + [m["ts"] for m in messages])
-        next_page = (page.get("response_metadata") or {}).get("next_cursor")
-        if page.get("has_more") and not next_page:
-            raise ValueError("Slack history is truncated without a replay cursor")
-        checkpoint = (
-            {"after": cursor["after"], "page": next_page, "high": high}
-            if next_page else {"after": high}
-        )
-        return [
-            ("message_received:" + channel_id + ":" + m["ts"], dict(
-                event_type="message_received", message_id=m["ts"],
-                platform_chat_id=channel_id, platform_user_id=m.get("user", ""),
-                text=str(m.get("text", ""))[:12000],
-            )) for m in messages
-        ], checkpoint
-    from discord import Object
-
-    client = instance._client
-    if client is None:
-        raise ValueError("Discord is offline")
-    channel = client.get_channel(int(channel_id)) or await client.fetch_channel(int(channel_id))
-    guilds = instance.config.get("guild_ids")
-    guild_id = str(getattr(getattr(channel, "guild", None), "id", ""))
-    if guilds and guild_id not in {str(g) for g in guilds}:
-        raise PermissionError("Watch guild is no longer allowed by the connector")
-    if not cursor:
-        # A snowflake boundary avoids a race between approval and the first message.
-        boundary = (int(datetime.now(timezone.utc).timestamp() * 1000) - 1420070400000) << 22
-        return [], {"after": str(boundary)}
-    messages = [m async for m in channel.history(
-        limit=100, after=Object(id=int(cursor["after"])), oldest_first=True
-    )]
-    return [
-        ("message_received:" + channel_id + ":" + str(m.id), dict(
-            event_type="message_received", message_id=str(m.id), platform_chat_id=channel_id,
-            platform_user_id=str(m.author.id), text=str(m.content)[:12000],
-        )) for m in messages
-    ], {"after": str(messages[-1].id) if messages else cursor["after"]}
+    try:
+        events, checkpoint = await instance.poll_watch(source, cursor)
+    except (AttributeError, RuntimeError) as exc:
+        raise ValueError("Update the connector package to enable durable watch history") from exc
+    return [(key, payload) for key, payload in events], checkpoint

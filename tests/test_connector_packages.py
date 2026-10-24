@@ -7,6 +7,82 @@ from app.core import connector_packages as packages
 from app.core.connectors import get_connector_class
 from app.core.connectors.base import ConnectorStatus
 
+
+
+@pytest.mark.asyncio
+async def test_watch_history_roundtrips_through_isolated_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    from app.core.connectors import package_proxy
+    from app.core.watch_connector_sources import poll
+
+    # The fake SDK is inside a real isolated worker process. No vendor service,
+    # installed connector package or native SDK is contacted.
+    source = (
+        'from typing import Any\n'
+        'from app.core.connectors.base import ConnectorStatus\n'
+        'from app.core.connectors.watch_history import poll\n'
+        '\n'
+        '\n'
+        'class FakeSDK:\n'
+        '    async def conversations_history(self, **kwargs: Any) -> dict[str, Any]:\n'
+        '        return {"messages": [{"ts": "200", "text": "important"}]\n'
+        '                if kwargs["oldest"] < "200" else []}\n'
+        '\n'
+        '\n'
+        'class FakeConnector:\n'
+        '    def __init__(self, connector_id: str, connector_type: str,\n'
+        '                 config: dict[str, Any], **kwargs: Any) -> None:\n'
+        '        self.connector_id = connector_id\n'
+        '        self.connector_type = connector_type\n'
+        '        self.config = config\n'
+        '        self._web_client = FakeSDK()\n'
+        '        self.status = ConnectorStatus.CONNECTED\n'
+        '\n'
+        '    async def connect(self) -> bool:\n'
+        '        return True\n'
+        '\n'
+        '    async def disconnect(self) -> None:\n'
+        '        pass\n'
+        '\n'
+        '    def get_context_instructions(self, channel: str) -> str:\n'
+        '        return ""\n'
+        '\n'
+        '    async def poll_watch(self, source: dict[str, Any], cursor: dict[str, Any]) -> Any:\n'
+        '        return await poll(self.connector_type, self, source, cursor)\n'
+    )
+    (tmp_path / "fake_watch.py").write_text(source, encoding="utf-8")
+    helper = Path(packages.__file__).with_name("connectors") / "watch_history.py"
+    (tmp_path / "watch_history.py").write_bytes(helper.read_bytes())
+    spec = {
+        "module": "fake_watch", "class": "FakeConnector", "files": {
+            filename: hashlib.sha256((tmp_path / filename).read_bytes()).hexdigest()
+            for filename in ("fake_watch.py", "watch_history.py")
+        }
+    }
+    monkeypatch.setattr(package_proxy, "interpreter", lambda _: Path(sys.executable))
+    cls = package_proxy.proxy_class("slack", tmp_path, spec)
+    instance = cls("fake-watch", "slack", {}, AsyncMock(), AsyncMock())
+    try:
+        assert await instance.connect()
+        assert not hasattr(instance, "_web_client")
+        events, cursor = await poll("slack", instance, {"channel_id": "test"}, {"after": "100"})
+        assert events[0][0] == "message_received:test:200"
+        assert cursor == {"after": "200"}
+        replay, checkpoint = await poll("slack", instance, {"channel_id": "test"}, cursor)
+        assert replay == [] and checkpoint == cursor
+    finally:
+        await instance.disconnect()
+
+
+def test_watch_helpers_are_shipped_in_verified_packages() -> None:
+    for kind in ("slack", "discord"):
+        assert "watch_history.py" in packages.CATALOG["packages"][kind]["files"]
+        packages._verify(packages._SOURCE_DIR, kind)
+    packages._verify(packages._SOURCE_DIR, "telegram")
+
+
 @pytest.fixture
 def local_package(monkeypatch):
     # Use the real bundled-source path. Only expensive runtime setup is stubbed;
