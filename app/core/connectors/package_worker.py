@@ -18,7 +18,8 @@ _WRITE_LOCK = threading.Lock()
 _REPLIES = {}
 _REPLY_LOCK = threading.Lock()
 MAX_FRAME = 2_000_000
-METHODS = {"poll_watch", "connect", "disconnect", "send_message", "send_permission_prompt", "send_notification",
+METHODS = {"poll_watch", "connect", "disconnect", "send_message",
+           "send_permission_prompt", "send_notification",
            "send_typing_indicator", "send_ack_reaction", "mark_as_read", "execute_action", "execute_tool",
            "get_action_availability", "request_action_approval", "handle_webhook_payload", "handle_webhook_activity"}
 

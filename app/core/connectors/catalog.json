@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "revision": "2590a994851d2b38d717f85ac74606249da2ea48",
+  "revision": "08eba7024d6666b2843fca30eb33ff685fb8771c",
   "packages": {
     "telegram": {
       "module": "telegram",
       "class": "TelegramConnector",
       "files": {
-        "telegram.py": "7c425b29734c5bed2dc58fb6cc967f173d684c64e50d24f1ba7c3468d8ce74ad",
+        "telegram.py": "bada89362c7110f59cf03639cf09aca0acd37e66fb2808f79aaaad2992ffe08f",
         "telegram_actions.py": "6a14a672d0ae8a797b4d8874a7fe4fd0dbfbd2928088624a4dccf1758927ae72"
       }
     },
@@ -14,8 +14,9 @@
       "module": "discord_connector",
       "class": "DiscordConnector",
       "files": {
-        "discord_connector.py": "a4767f37b1eebcf3d7be6e65a1e470280365f80753693ad764fdb624d40a4d4d",
-        "discord_actions.py": "8cac0e3d12fd760a6ba9ccce7229e44d8eacdb53c33c3ac00d40401db284f7aa"
+        "discord_connector.py": "87931fb5e6f1b010e3e3c81c3b264779672e88e98095665f26e501893df07a0c",
+        "discord_actions.py": "8cac0e3d12fd760a6ba9ccce7229e44d8eacdb53c33c3ac00d40401db284f7aa",
+        "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
     },
     "whatsapp": {
@@ -37,8 +38,9 @@
       "module": "slack",
       "class": "SlackConnector",
       "files": {
-        "slack.py": "47339c7ede2350b90bcfae1d49e2ff6743f10b3663b54b79fd6e7c168871b884",
-        "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb"
+        "slack.py": "446667b2ad29e61227033edaa705c458ac72bac9a13dd6990bb96d212721a3ee",
+        "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb",
+        "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
     },
     "line": {
@@ -142,5 +144,5 @@
     ]
   },
   "sdk": 1,
-  "release": "60f4c35b2f961e18"
+  "release": "c9cf29382ac0ab9a"
 }
