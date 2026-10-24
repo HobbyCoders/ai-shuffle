@@ -470,7 +470,7 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
-          "id": "harness-basics.14",
+          "id": "harness-basics.25",
           "check": "Large native cold-resume memory retention",
           "kind": "owner",
           "how": "On a disposable Linux/glibc candidate install only, grow a native session beyond 8 MiB of durable message JSON using streaming turns and tool results, then compact it. Repeatedly detach/reconnect that session and complete a turn, at least 60 seconds apart, with three clients attached. Sample fixed-process anonymous RSS, retained nodes, compaction residency, subscriber and task counts for 30 minutes after warm-up. Open old history and a fork ending before a checkpoint. Do not restart or instrument an installed worker.",
