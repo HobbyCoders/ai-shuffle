@@ -740,6 +740,17 @@ async def test_the_allowed_chat_rule_refuses_other_senders(
         on_trigger=connector_manager._handle_trigger,
     ))
     provider.script(Messages.text("hello friend"))
+    from app.db import watches as journal
+
+    # Opt in before ingress so bounded retention preserves this test's unread update.
+    _, initial_cursor = journal.connector_page(connector_id, "100", {})
+    journal.create(
+        owner="admin", creating_session_id=None, worker_id="source", agent_id=agent,
+        description="allowed Telegram chat", source={"kind": "connector",
+        "connector_id": connector_id, "channel_id": "100"}, filter={}, action="alert",
+        permissions={"read_only": True, "tools": []}, daily_budget_usd=1,
+        cursor=initial_cursor,
+    )
 
     def _update(chat_id: int, text: str) -> SimpleNamespace:
         return SimpleNamespace(
@@ -758,11 +769,9 @@ async def test_the_allowed_chat_rule_refuses_other_senders(
     await asyncio.wait_for(asyncio.gather(*bot._chat_tasks), RUN_BUDGET)
     assert [m.text for m in bot.sent] == ["hello friend"]
     assert len(provider.requests) == 1
-    from app.db import watches as journal
-
-    events, _ = journal.connector_page(connector_id, "100", {"seq": 0})
+    events, _ = journal.connector_page(connector_id, "100", initial_cursor)
     assert [payload["text"] for _, payload in events] == ["hi"]
-    assert journal.connector_page(connector_id, "999", {"seq": 0})[0] == []
+    assert journal.connector_page(connector_id, "999", initial_cursor)[0] == []
 
 
 async def test_a_connector_without_a_key_is_refused_before_any_model_call(

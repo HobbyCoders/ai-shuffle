@@ -11,16 +11,17 @@
  *
  *   node scripts/build-mobile-ui.mjs                  build mobile/, then copy it
  *   node scripts/build-mobile-ui.mjs --with-frontend  `npm run build`: the desktop
- *        UI's `vite build` and the mobile build, at the same time when there is
- *        memory for both (each takes about 3.5 GB), one after the other otherwise
+ *        UI's `vite build`, then the mobile build
  *   node scripts/build-mobile-ui.mjs --copy           `postbuild`: copy the
  *        finished mobile/build into build/mobile
  *
  * The two builds write disjoint outputs (frontend/build and frontend/.svelte-kit,
- * mobile/build and mobile/.svelte-kit). Both only read the shared node_modules and
- * frontend/.svelte-kit/tsconfig.json, which `svelte-kit sync` writes before this
- * runs. The copy waits for both, because the desktop UI's adapter replaces
- * frontend/build when its build finishes.
+ * mobile/build and mobile/.svelte-kit), but mobile reads the frontend's generated
+ * tsconfig for its shared sources and Vite config. SvelteKit rewrites that file
+ * during desktop config resolution AND in postbuild analysis/prerender workers,
+ * even after a CLI sync. Finish desktop before starting mobile so none of those
+ * writes can race mobile's reads. The copy waits for both, because the desktop
+ * UI's adapter replaces frontend/build when its build finishes.
  *
  * A missing mobile/ directory or a failed build fails the frontend build: a
  * worker without /mobile/ leaves the apps with nothing to show. Set
@@ -28,7 +29,6 @@
  */
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, rmSync } from 'node:fs';
-import os from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,45 +37,33 @@ const mobileRoot = join(frontendRoot, '..', 'mobile');
 const output = join(frontendRoot, 'build', 'mobile');
 const built = join(mobileRoot, 'build');
 
-/** Free memory needed to run both vite builds at once: about 3.5 GB each, plus headroom. */
-export const PARALLEL_MIN_AVAILABLE = 8 * 1024 ** 3;
-
-/** Available memory, within a container's limit where Node can see one. */
-export function availableMemory() {
-	return typeof process.availableMemory === 'function' ? process.availableMemory() : os.freemem();
-}
-
-export function buildInParallel(available = availableMemory()) {
-	return available >= PARALLEL_MIN_AVAILABLE;
-}
-
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
-/** Run one build step; `children` lets a failing sibling stop it. */
-function run(command, args, cwd, children = new Set()) {
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @param {string} cwd
+ * @returns {Promise<void>}
+ */
+function run(command, args, cwd) {
 	return new Promise((done, fail) => {
 		const child = spawn(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' && command === npm });
-		children.add(child);
-		child.once('error', (error) => { children.delete(child); fail(error); });
+		child.once('error', fail);
 		child.once('exit', (code, signal) => {
-			children.delete(child);
 			if (code === 0) done();
 			else fail(new Error(`${[command, ...args].join(' ')} (in ${cwd}) failed (${signal ?? code})`));
 		});
 	});
 }
 
-/** Run builds together; the first failure stops the others and fails the whole build. */
-async function together(steps) {
-	const children = new Set();
-	const results = steps.map((step) => step(children));
-	try {
-		await Promise.all(results);
-	} catch (error) {
-		for (const child of children) child.kill();
-		await Promise.allSettled(results);
-		throw error;
-	}
+/**
+ * Keep every desktop sync (including postbuild workers) ahead of mobile's reads.
+ * @param {() => Promise<void>} frontend
+ * @param {() => Promise<void>} mobile
+ */
+export async function buildUIs(frontend, mobile) {
+	await frontend();
+	await mobile();
 }
 
 function requireMobile() {
@@ -96,9 +84,10 @@ function copy() {
 	console.log('[build-mobile-ui] copied mobile/build -> frontend/build/mobile');
 }
 
+/** @param {string} mode */
 async function main(mode) {
 	const skip = process.env.SHUFFLE_SKIP_MOBILE_UI === '1';
-	const frontend = (children) => run(process.execPath, [join(frontendRoot, 'node_modules', 'vite', 'bin', 'vite.js'), 'build'], frontendRoot, children);
+	const frontend = () => run(process.execPath, [join(frontendRoot, 'node_modules', 'vite', 'bin', 'vite.js'), 'build'], frontendRoot);
 	if (skip) {
 		console.warn('[build-mobile-ui] SHUFFLE_SKIP_MOBILE_UI=1 — skipped; this build has no /mobile/ for the phone apps.');
 		if (mode === 'with-frontend') await frontend();
@@ -109,19 +98,13 @@ async function main(mode) {
 	// Links mobile/node_modules to this package's node_modules: one Svelte runtime.
 	await run(npm, ['run', 'deps'], mobileRoot);
 	console.log('[build-mobile-ui] building mobile/ (served by the worker at /mobile/)');
-	const mobile = (children) => run(npm, ['run', 'build'], mobileRoot, children);
+	const mobile = () => run(npm, ['run', 'build'], mobileRoot);
 	if (mode !== 'with-frontend') {
 		await mobile();
 		return copy();
 	}
-	if (buildInParallel()) {
-		console.log('[build-mobile-ui] building the desktop and phone UIs at the same time');
-		await together([frontend, mobile]);
-	} else {
-		console.log('[build-mobile-ui] building the desktop UI, then the phone UI (not enough free memory for both at once)');
-		await frontend();
-		await mobile();
-	}
+	console.log('[build-mobile-ui] building the desktop UI, then the phone UI (shared generated tsconfig)');
+	await buildUIs(frontend, mobile);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -1,6 +1,9 @@
 """Real disposable PostgreSQL contracts for #580; never use the worker database."""
 from __future__ import annotations
 
+import os
+import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -35,6 +38,66 @@ def private_pool(
         yield pool
     finally:
         pool.closeall()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.get_blocking cannot inspect Windows sockets")
+@pytest.mark.parametrize("default_timeout", [None, 0.0, 0.25])
+@pytest.mark.parametrize("expire", [False, True])
+def test_bounded_commit_preserves_libpq_socket_mode(
+    private_db: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    default_timeout: float | None, expire: bool,
+) -> None:
+    conn = lifecycle.pg_connect(private_db)
+    conn.autocommit = False
+    # Keep a descriptor alive after bounded_commit closes an expired connection,
+    # so the expiry/disarm path's shared flags can still be inspected.
+    observer = socket.dup(conn.fileno())
+    original_timeout = socket.getdefaulttimeout()
+    modes = [os.get_blocking(observer)]
+    assert modes == [False]  # libpq uses nonblocking I/O even for synchronous connections.
+    monkeypatch.setattr(commit_deadline, "COMMIT_TIMEOUT_SECONDS", 0.1 if expire else 5.0)
+    try:
+        socket.setdefaulttimeout(default_timeout)
+        if expire:
+            with pytest.raises(psycopg2.OperationalError):
+                with commit_deadline.bounded_commit(conn):
+                    modes.append(os.get_blocking(observer))
+                    conn.cursor().execute("SELECT pg_sleep(5)")
+            assert conn.closed
+        else:
+            conn.cursor().execute("SELECT 1")
+            with commit_deadline.bounded_commit(conn):
+                modes.append(os.get_blocking(observer))
+                conn.commit()
+        modes.append(os.get_blocking(observer))
+        assert modes == [False, False, False]  # Before arm, armed, and after disarm/expiry.
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+        socket.close(observer)
+        conn.close()
+
+
+def test_large_result_after_bounded_commit(private_db: dict[str, Any]) -> None:
+    conn = lifecycle.pg_connect(private_db)
+    conn.autocommit = False
+    # An independent shutdown bounds even a libpq ClientRead stall after the
+    # server finished the query (statement_timeout cannot interrupt that stall).
+    transport = socket.socket(fileno=socket.dup(conn.fileno()))
+    deadline = threading.Timer(5.0, transport.shutdown, args=(socket.SHUT_RDWR,))
+    try:
+        conn.cursor().execute("SELECT 1")
+        with commit_deadline.bounded_commit(conn):
+            conn.commit()
+        deadline.start()
+        with conn.cursor() as cur:
+            cur.execute("SELECT repeat('x', 5000000) AS payload")
+            assert len(cur.fetchone()["payload"]) == 5_000_000
+    finally:
+        deadline.cancel()
+        if deadline.ident is not None:
+            deadline.join()
+        transport.close()
+        conn.close()
 
 
 def test_managed_server_defaults_bound_queries_and_idle_transactions(

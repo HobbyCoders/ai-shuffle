@@ -364,31 +364,47 @@ class TestStartConnector:
         first.disconnect.assert_awaited_once()
         second.disconnect.assert_not_awaited()
 
-    async def test_concurrent_starts_leave_one_live_client(self, mgr, db, not_enrolled, fake_registry, monkeypatch):
-        """Two starts racing past the registry check both connect; whichever
-        registers second must disconnect the one it displaces."""
+    async def test_concurrent_starts_leave_one_live_client(
+        self, mgr: ConnectorManager, db: SimpleNamespace, not_enrolled: None,
+        fake_registry: None, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The receive fence serializes starts before either builds a second client."""
         db.get_connector.return_value = connector_row()
-        both_connecting = asyncio.Event()
-        entered = []
+        connecting = asyncio.Event()
+        release = asyncio.Event()
+        second_started = asyncio.Event()
+        entered: list[FakeConnector] = []
 
-        async def slow_connect(self):
+        async def slow_connect(self: FakeConnector) -> bool:
             entered.append(self)
-            if len(entered) == 2:
-                both_connecting.set()
-            await both_connecting.wait()
+            connecting.set()
+            await release.wait()
             self._status = ConnectorStatus.CONNECTED
             return True
 
+        async def start_second() -> bool:
+            second_started.set()
+            return await mgr.start_connector("c1")
+
         monkeypatch.setattr(FakeConnector, "connect", slow_connect)
-        results = await asyncio.wait_for(
-            asyncio.gather(mgr.start_connector("c1"), mgr.start_connector("c1")), timeout=10,
-        )
-        assert results == [True, True]
-        live = mgr.get_running_instance("c1")
-        assert len(FakeConnector.instances) == 2 and live in FakeConnector.instances
-        (orphan,) = [i for i in FakeConnector.instances if i is not live]
-        orphan.disconnect.assert_awaited_once()
-        live.disconnect.assert_not_awaited()
+        tasks = [asyncio.create_task(mgr.start_connector("c1"))]
+        try:
+            await asyncio.wait_for(connecting.wait(), timeout=10)
+            tasks.append(asyncio.create_task(start_second()))
+            await asyncio.wait_for(second_started.wait(), timeout=10)
+            assert entered == FakeConnector.instances and len(entered) == 1
+            assert not tasks[1].done()
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+            assert results == [True, True]
+            assert FakeConnector.instances == entered and len(entered) == 1
+            live = mgr.get_running_instance("c1")
+            assert live is entered[0]
+            live.disconnect.assert_not_awaited()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +583,7 @@ def turns(monkeypatch):
 
     t = SimpleNamespace(
         submit=AsyncMock(return_value="turn-1"),
-        idle=AsyncMock(return_value=True),
+        idle=AsyncMock(return_value={"id": "turn-1", "state": "completed"}),
         outcome=MagicMock(return_value={"error": None}),
         text=MagicMock(return_value="Here is your answer."),
         real_outcome=turn_outcome.final_turn_outcome,
@@ -575,7 +591,7 @@ def turns(monkeypatch):
         broadcast=AsyncMock(),
     )
     monkeypatch.setattr(turn_manager, "submit_async", t.submit)
-    monkeypatch.setattr(turn_manager, "wait_session_idle", t.idle)
+    monkeypatch.setattr(turn_manager, "wait_settled", t.idle)
     monkeypatch.setattr(turn_outcome, "final_turn_outcome", t.outcome)
     monkeypatch.setattr(turn_outcome, "extract_final_assistant_text", t.text)
     monkeypatch.setattr(sync_engine, "broadcast_user_session_created", t.broadcast)
@@ -612,6 +628,9 @@ class TestIncomingMessage:
         ai_session = created["session_id"]
         routed.update_connector_session_ai_session.assert_called_once_with("cs-1", ai_session)
         turns.broadcast.assert_awaited_once()
+        turns.idle.assert_awaited_once_with("turn-1", timeout=3600)
+        turns.outcome.assert_called_once_with(ai_session, "turn-1")
+        turns.text.assert_called_once_with(ai_session, "turn-1")
 
         args, kwargs = turns.submit.await_args
         assert args == (ai_session, "connector")
@@ -711,7 +730,7 @@ class TestIncomingMessage:
 
     async def test_turn_not_settling_sends_fallback(self, mgr, routed, not_enrolled, turns):
         inst = running(mgr)
-        turns.idle.return_value = False
+        turns.idle.return_value = None
         await mgr.handle_incoming_message(incoming())
         assert [m.text for m in inst.sent] == ["I couldn't generate a response."]
         turns.outcome.assert_not_called()

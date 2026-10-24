@@ -333,6 +333,17 @@ describe('Chat controls panel', () => {
 		expect(cell(/^All chat controls$/)).toBeTruthy();
 	});
 
+	it('keeps the row with no live watch while a worker is chosen for new ones (#565)', async () => {
+		const get = api.get.bind(api);
+		vi.spyOn(api, 'get').mockImplementation(((path: string, options?: unknown) =>
+			path === '/watches'
+				? Promise.resolve({ watches: [], preferred_worker_id: 'dev_laptop' })
+				: get(path, options as never)) as typeof api.get);
+		activeSession.setDraft('');
+		render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		expect(await within(panel()).findByRole('button', { name: 'Watches: Where new watches run. Open the list' })).toBeTruthy();
+	});
+
 	it('carries Call, Browser and Export as actions, and no stash button', async () => {
 		const onBrowserToggle = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle }) });

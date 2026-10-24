@@ -692,7 +692,11 @@ def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:
     returned) rather than aborted mid-flight. Returns the aborted turn row on
     success, else ``None``.
     """
-    return turns.remove_queued_turn(turn_id)
+    row = turns.remove_queued_turn(turn_id)
+    if row is not None:
+        from app.core.start_admission import admission
+        admission.cancel(turn_id)
+    return row
 
 
 def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None, source=None):

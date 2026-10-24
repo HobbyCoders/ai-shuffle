@@ -22,6 +22,36 @@ Ask in plain words, for example "have a reviewer check this change while you wri
 
 A subagent working on code gets its own copy of the project on its own branch, so it never edits the files you are working on. Its commits come back for you or the main agent to review.
 
+## When a worker is busy
+
+When database pressure persists, new turns (including Task, Swarm and StartSession
+work) stay **Queued** instead of claiming a run lease. The parent's task summary
+also says **Queued**. Already-running turns and lease renewals are independent.
+Starts resume automatically, one at a time, when pressure clears. Stop or removing
+a queued message cancels it; accepted work is not discarded on queue overflow.
+Remote work is admitted on the worker that executes it, not the sending worker.
+
+The defaults hold starts after 2 seconds of pressure: 85% ordinary-pool usage,
+pool/event-write waiters, long-held transactions, or recent mean DB hold/acquisition
+latency of at least 0.5 seconds. Recovery needs 3 seconds below 75% of that usage
+threshold with no waiters or slow operations, then spaces starts by 0.5 seconds.
+The worker polls counters every 0.25 seconds, without querying the database.
+At most 128 starts wait in memory (FIFO, one per session). Overflow or a 300-second
+admission wait leaves the durable turn queued and schedules another attempt after
+5 seconds; retried overflow joins the tail. Existing hard job/synchronous wait
+limits still apply. The provider first-frame watchdog starts counting only after
+a turn leaves the queue. One snapshot checks for any queued work and no live turn,
+so a newer removed message cannot hide an older waiting start. Queue reads and
+status notices race idle completion and the watchdog budget; unavailable or overdue
+observations do not suspend the watchdog or exempt a live provider.
+
+Administrators can tune `DB_START_UTILIZATION` (0.85),
+`DB_START_LATENCY_SECONDS` (0.5), `DB_START_SUSTAIN_SECONDS` (2),
+`DB_START_RECOVERY_SECONDS` (3), `DB_START_INTERVAL_SECONDS` (0.5),
+`DB_START_POLL_SECONDS` (0.25), `DB_START_MAX_WAITERS` (128), and
+`DB_START_WAIT_SECONDS` (300), then restart the candidate worker. These do not
+increase pool capacity or allow starts to borrow lease-reserved connections.
+
 ## Checkout setup and review commits
 
 Local coding workers receive a receipt with their actual base commit, an existing Python interpreter (the project's `.venv`/`venv`, otherwise the worker interpreter), and ready-to-run `Monitor` inputs for `npm ci` in each checkout-local package folder with a lockfile. SvelteKit packages also run `npx svelte-kit sync`. Dependencies and credentials are never copied or linked. An interpreter's presence is not proof that every test dependency is installed; do not install packages into the parent's environment.
@@ -100,15 +130,60 @@ mail). A durable bell notification reports the missing history interval and any 
 snapshot before the watch resumes. This is bounded recovery, not a guarantee that all mail
 from the expired interval can be reconstructed. Other API failures do not reset the bookmark.
 
-Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI, session states (stuck, waiting on you, finished), usage/credit thresholds, or a plain interval schedule. Messaging watches name an explicit channel/chat ID within the connector's allowlist. Slack reads channel history with a saved page/high-water cursor; Discord reads oldest-first message history after a saved message ID. Both require the bot's history permissions. Telegram polls a durable journal populated by the existing bot receiver. It commits each update to the journal before acknowledging the next one, retrying persistence failures instead of silently dropping messages. Chat execution then runs in a bounded, tracked background task, leaving the receiver free for approval buttons and other chats; stopping the connector cancels those tasks. If chat capacity is full, it replies with a busy notice while preserving the journaled observation. Journal writes and cursor reads are serialized per connector to prevent concurrent commits from skipping messages: the Bot API exposes no chat-history API, so messages that Telegram never delivered to the receiver (including updates expired during downtime) cannot be recovered. Telegram's journal is worker-local; moving those watches is explicitly refused rather than skipping messages. Installed first-party Slack, Discord and Telegram connector packages must be updated to the bundled watch-capable release before creating watches; older packages fail explicitly. Stop their connections before updating the package, then reconnect.
+Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI, session states (stuck, waiting on you, finished), usage/credit thresholds, or a plain interval schedule. Messaging watches name an explicit channel/chat ID within the connector's allowlist. Slack reads channel history with a saved page/high-water cursor; Discord reads oldest-first message history after a saved message ID. Both require the bot's history permissions. Telegram polls a durable journal populated by the existing bot receiver. It commits each update to the journal before acknowledging the next one, retrying persistence failures instead of silently dropping messages. Chat execution then runs in a bounded, tracked background task, leaving the receiver free for approval buttons and other chats; stopping the connector cancels those tasks. If chat capacity is full, it replies with a busy notice while preserving the journaled observation. Journal writes and cursor reads are serialized per connector to prevent concurrent commits from skipping messages: the Bot API exposes no chat-history API, so messages that Telegram never delivered to the receiver (including updates expired during downtime) cannot be recovered. Telegram's journal uses the bounded retention and fenced transfer rules below. Installed first-party Slack, Discord and Telegram connector packages must be updated to the bundled watch-capable release before creating watches; older packages fail explicitly. Stop their connections before updating the package, then reconnect.
 
 The agent asks one confirmation sentence covering the source/filter, executing worker, read-only access, action and daily cap; your yes authorizes it. Placement prefers an available worker advertising `always_on`, then an available Linux server. You can override `worker_id` when creating a watch. `PUT /api/v1/watches/preference` with `{"worker_id":"<network worker ID>"}` designates your preferred worker; `null` clears it. This preference and display-only watch metadata sync across your worker network. An unavailable designated worker fails explicitly without silently falling back to a sleeping desktop. Connectors and grants must already belong to the executing worker; credentials are never moved by watch placement.
 
-Use `CreateWatch` with `move_watch_id` and `worker_id`, or owner-only `PATCH /api/v1/watches/{id}` with `worker_id`, to move a watch. Moving freezes the old executor before transferring the saved cursor, pending events and dedupe/accounting history. In-flight deliveries must finish first. A failed or ambiguous network transfer stays fenced; retry the same move, never resume the old executor. Transfers over 10,000 events or 3 MiB fail explicitly. Pause/Stop and listing route to the executing worker; synced rows remain display-only and never create a second executor.
+Workers publish `desktop` from the desktop launcher's markers, not from their OS or an
+attached display. Electron desktop installs (including Linux) default to `always_on: false`;
+container and headless server installs default to `true`. A sleeping Linux desktop is not
+an automatic watch target. On the intended worker, authenticated
+`GET /api/v1/settings/worker-availability` shows `worker_id`, `desktop`, effective `always_on`
+and `always_on_override`. Owner-only `PUT /api/v1/settings/worker-availability` with
+`{"always_on":true}` or `{"always_on":false}` overrides that worker; `{"always_on":null}`
+restores its detected default. Overrides sync as per-worker settings, not a fleet-wide
+default, and are advertised on the next presence refresh. An explicit `false` excludes
+that worker from automatic placement, even if it runs Linux; you can still choose it
+explicitly. A Settings UI control for this availability override is a follow-up; use the
+API for now.
+
+Use `CreateWatch` with `move_watch_id` and `worker_id`, or owner-only `PATCH /api/v1/watches/{id}` with `worker_id`, to move a watch. Moving freezes the old executor before transferring the saved cursor, pending events and dedupe/accounting history. In-flight deliveries must finish first. Once export commits, a failed or ambiguous network transfer stays fenced; retry the same move, never resume the old executor. Prerequisite rejections before export do not fence the receivers. Transfers over 10,000 events or 3 MiB fail explicitly. Pause/Stop and listing route to the executing worker; synced rows remain display-only and never create a second executor.
+
+In the running-tasks panel, each watch names the worker it runs on, with **Always on**, **Server** or **May sleep**, and whether that worker is online. With a second worker, **Move** lists the other workers; an offline one is shown but cannot be picked. While a move runs, the row says so and Pause, Stop and Move wait. A refused move shows the reason with **Try again**. A move with no answer reads **not confirmed**, never as moved, and offers **Retry move**. If the list then shows the watch on its new worker, the panel asks that worker to confirm the move, so the old worker records that it finished. That confirmation never moves the watch itself: if a newer move has taken it elsewhere, it is refused and the note clears. It reads **Moved** only when the confirmation comes back. A watch left fenced reads **Move unfinished** on every device until you retry it. A watch whose worker is offline shows its last synced state, and its controls wait until that worker is back. The **New watches** control in the Watches heading sets or clears the preferred worker. It stays available with no watches: the list keeps a Watches entry while a worker is chosen, and the full list offers it whenever you have a second worker. It names the worker automatic placement would pick, and says plainly when the chosen worker is offline.
 
 The app polls with plain code and saves bookmarks; it does not run a model while nothing matches. A live creating chat receives a real read-only turn, including when its watch executes on another worker. Authenticated peer delivery retains the same event command across retries and restarts; the creating worker rechecks the executor's current grant, deadline and budget before unattended work. Receipts are not executable watch leases. If the creating worker is offline, chat delivery waits durably rather than running against its mirror, while the bell retains bounded event details without waiting for inference. After the creator is settled or archived, an alert uses a tool-free cheap-model summary and a linked notification; an investigation starts a short no-project chat and notifies you without reactivating the creator. The event's durable bell notification is shared with your network workers using an idempotent outbox, including offline peers after reconnect. Pending notifications and dedupe/accounting history survive watch transfers. Notifications stay in the bell even when no device supports push. Push transport is best-effort, not an exactly-once delivery guarantee.
 
 Ask “what are you watching?”, “pause that watch”, or “stop it” to list and control watches. Stop is permanent. Settling the creating chat does not stop its watches. Daily admission caps include in-flight reservations; actual reported costs are recorded after execution, so these are not provider-side billing caps. Floods, repeated failures and end dates pause watches with a reason. Read-only scope is enforced even in Bypass; requests for more access are left as questions for you in the resulting chat.
+### Telegram journal retention and moves
+
+Each connector retains at most 1,000 received journal entries (at most 16,000 bytes each).
+Entries are removed only after every active or paused watch cursor has passed them. If a
+cursor would hold the journal above that limit, that watch is explicitly paused with
+“Telegram journal retention exceeded; create a new watch to opt in again”. Its old cursor
+cannot be resumed or silently rebased; a new watch requires a fresh confirmation. Message-ID
+high-water marks contain no message text and prevent compacted Telegram replays from creating
+new observations. Unwatched content is discarded immediately; hourly maintenance also cleans
+old/idle journals. Deleting a connector removes its journal content and high-water marks,
+invalidates pending transfer snapshots, expires its watches and keeps only a content-free
+receive fence against late callbacks.
+
+Before moving a Telegram watch, stop and disable the connection on **both** workers. Provision
+the same connector ID and bot credential independently on the destination, with the watched
+chat allowlisted and its original agent grant available there. Credentials are never copied.
+The connector must have no other active/paused non-expired watches: moving one bot receiver
+cannot silently strand another watch. Do not run two `getUpdates` consumers for the same bot.
+
+Prerequisite checks do not fence either receiver. A rejected destination leaves the source
+restartable and allows choosing another target. Export commits the source fence with its
+snapshot; only then does import fence the destination. The move exports the unread chat tail with
+the cursor, pending events and dedupe history, and rebases that tail to destination sequence
+numbers in a single import transaction. Only after import commits does the destination enable
+and start its receiver. The old receiver stays fenced across restarts and ambiguous network
+failures. Retry the same move after acknowledgement loss; do not re-enable the source or
+start a second consumer as recovery. Completed transfer snapshots discard their message
+content. Messages Telegram never delivered, including expired updates during downtime,
+cannot be reconstructed: Telegram has no chat-history API.
+
 ### Working record and fresh coordinating chats
 
 AI Shuffle keeps an owner working record outside any one conversation: goals, decisions, pending items, what needs you, and finished reports. Ask the agent to add a decision or pending item, list the record, or resolve an item using **WorkingRecord**. An open report means finished but not yet acknowledged in the record; simply reading a summary does not acknowledge it, and this is separate from the notification bell's read state. Records and acknowledgements follow your owner account across paired workers. Remote session state is the last known snapshot and can be stale while a worker is offline.

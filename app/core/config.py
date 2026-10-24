@@ -289,6 +289,15 @@ class Settings(BaseSettings):
     # Database endpoints come only from the private managed supervisor descriptor.
     db_pool_min: ClassVar[int] = 2  # Internal managed defaults, not environment knobs
     db_pool_max: ClassVar[int] = 32  # Includes two slots reserved for lease maintenance
+    # New-turn admission only: existing pumps and reserved lease slots never wait here.
+    db_start_utilization: float = Field(default=0.85, gt=0, le=1)
+    db_start_latency_seconds: float = Field(default=0.5, gt=0)
+    db_start_sustain_seconds: float = Field(default=2.0, ge=0)
+    db_start_recovery_seconds: float = Field(default=3.0, ge=0)
+    db_start_interval_seconds: float = Field(default=0.5, gt=0)
+    db_start_poll_seconds: float = Field(default=0.25, gt=0)
+    db_start_max_waiters: int = Field(default=128, ge=1)
+    db_start_wait_seconds: float = Field(default=300.0, gt=0)
     # Several thread pools share this pool: the asyncio default executor,
     # AnyIO sync dependencies, and Git workers. Agents borrow connections for
     # short operations rather than holding one for their entire turn.

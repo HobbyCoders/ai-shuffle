@@ -210,6 +210,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
     def pressure_stats(self):
         with self._pressure_lock:
             stats = dict(self._pressure)
+            stats["ordinary_capacity"] = self.maxconn - self._reserved
             stats["oldest_hold_seconds"] = (
                 time.monotonic() - min(self._held_since.values())
                 if self._held_since else 0.0
@@ -716,18 +717,46 @@ def get_turn_db() -> Iterator[_PgDictConnection]:
 # Bound concurrent self-owned event transactions before they borrow a DB slot.
 # Four fsync writers leave the ordinary pool and lease reservation available.
 _event_write_slots = threading.BoundedSemaphore(4)
+_event_pressure_lock = threading.Lock()
+_event_waiting: Dict[object, float] = {}
+_event_active: Dict[object, float] = {}
+
+
+def event_pressure_stats() -> Dict[str, float]:
+    """Non-DB snapshot, including writers waiting BEFORE pool checkout."""
+    now = time.monotonic()
+    with _event_pressure_lock:
+        return {
+            "waiting": len(_event_waiting),
+            "active": len(_event_active),
+            "oldest_wait_seconds": now - min(_event_waiting.values(), default=now),
+            "oldest_write_seconds": now - min(_event_active.values(), default=now),
+        }
 
 
 @contextmanager
 def get_event_db() -> Iterator[_PgDictConnection]:
     """Backpressure event commits without holding a scarce pooled connection."""
-    if not _event_write_slots.acquire(timeout=_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS):
-        raise psycopg2.pool.PoolError("event write admission deadline exceeded")
+    ticket = object()
+    with _event_pressure_lock:
+        _event_waiting[ticket] = time.monotonic()
+    acquired = False
     try:
+        acquired = _event_write_slots.acquire(timeout=_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS)
+        with _event_pressure_lock:
+            _event_waiting.pop(ticket, None)
+            if acquired:
+                _event_active[ticket] = time.monotonic()
+        if not acquired:
+            raise psycopg2.pool.PoolError("event write admission deadline exceeded")
         with get_turn_db() as conn:
             yield conn
     finally:
-        _event_write_slots.release()
+        with _event_pressure_lock:
+            _event_waiting.pop(ticket, None)
+            _event_active.pop(ticket, None)
+        if acquired:
+            _event_write_slots.release()
 
 
 @contextmanager

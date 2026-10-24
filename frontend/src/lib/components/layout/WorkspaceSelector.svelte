@@ -386,11 +386,16 @@
 		padding-left: 2px;
 		animation: add-row-in 420ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
 	}
+	/* The button keeps its one-line label on narrow screens; the hint wraps. */
+	.add-variant {
+		flex: none;
+	}
 	.add-project {
 		display: inline-flex;
 		align-items: center;
 		gap: 7px;
 		height: 34px;
+		white-space: nowrap;
 		padding: 0 11px 0 9px;
 		border: 1px solid transparent;
 		border-radius: calc(var(--radius, 10px) * 0.9);
@@ -418,7 +423,7 @@
 		transform: rotate(-6deg) scale(1.06);
 	}
 	.add-project:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.add-project-hint { font-size: 12px; color: var(--subtle-foreground); }
+	.add-project-hint { min-width: 0; font-size: 12px; color: var(--subtle-foreground); }
 	.add-project-hint b { font-weight: 550; color: var(--muted-foreground); }
 	/* Below the composer: the list opens downward from the row's left edge. */
 	.add-variant .picker-dropdown {

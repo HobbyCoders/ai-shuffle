@@ -1,6 +1,8 @@
 """Unit tests for app/db/turns.py — the durable turn queue + live-turn state
 machine (v2 core, Phase 2)."""
 
+from sqlite3 import Connection
+
 import pytest
 
 from app.db import turns
@@ -41,6 +43,103 @@ def test_enqueue_assigns_increasing_positions_and_reads_back(mock_db):
     assert len(turns.get_queued_turns("s1")) == 3
 
 
+@pytest.mark.parametrize("newer_writer", ["enqueue", "at_front", "adhoc"])
+def test_latest_turn_uses_insert_order_when_created_at_ties(
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch, newer_writer: str,
+) -> None:
+    from types import SimpleNamespace
+
+    # Reverse lexical UUID order so the old timestamp/id lookup MUST be wrong.
+    ids = iter(["z-first", "a-second"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
+    first = turns.enqueue_turn("timestamp-tie", "user", command_id="shared")
+    if newer_writer == "adhoc":
+        second = turns.record_adhoc_turn("timestamp-tie", "api")
+    else:
+        second = turns.enqueue_turn(
+            "timestamp-tie", "user", at_front=newer_writer == "at_front", command_id="shared",
+        )
+    mock_db.execute(
+        "UPDATE turns SET created_at=? WHERE session_id=?",
+        ("2026-01-01 00:00:00", "timestamp-tie"),
+    )
+    assert turns.get_turn(first["id"])["created_at"] == turns.get_turn(second["id"])["created_at"]
+    assert turns.get_latest_turn("timestamp-tie")["id"] == second["id"]
+    assert turns.get_latest_run_turn("timestamp-tie")["id"] == second["id"]
+    assert turns.get_turn_by_command("timestamp-tie", "shared")["id"] == first["id"]
+    if newer_writer == "at_front":
+        assert turns.pop_ready("timestamp-tie")["id"] == second["id"]
+
+
+def test_queue_position_ties_use_insert_order(
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    ids = iter(["z-first", "a-second"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
+    first = turns.enqueue_turn("position-tie", "user", payload={"agent_message_reply_to": "owner"})
+    second = turns.enqueue_turn("position-tie", "user", payload={"agent_message_reply_to": "owner"})
+    mock_db.execute(
+        "UPDATE turns SET created_at=?, position=1 WHERE session_id=?",
+        ("2026-01-01 00:00:00", "position-tie"),
+    )
+    assert [row["id"] for row in turns.get_queued_turns("position-tie")] == [
+        first["id"], second["id"],
+    ]
+    assert turns.pop_ready("position-tie")["id"] == first["id"]
+    reply = turns.latest_reply_to_turn("position-tie", "owner", before_position=2)
+    assert reply["id"] == second["id"]
+
+    # The other position-based history readers must agree too, not fall back
+    # to the older row's lexically greater UUID on a tie.
+    import json
+    from app.core.config import settings
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        for row, stopped in ((first, False), (second, True)):
+            payload = {
+                "terminal_task_stop": stopped,
+                "working_directory_failure": {"instance_id": settings.effective_instance_id},
+            }
+            cur.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+        assert turns._task_stop(cur, "position-tie") is True
+        assert turns._cwd_failure(cur, "position-tie")[0]["id"] == second["id"]
+
+
+def test_legacy_read_order_is_preserved_by_lazy_initialization(
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    ids = iter(["z-legacy-first", "a-legacy-newer", "m-assigned-newest"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
+    first = turns.enqueue_turn("lazy-legacy", "user", command_id="shared")
+    removed = turns.enqueue_turn("lazy-legacy", "user", command_id="shared")
+    turns.remove_queued_turn(removed["id"])
+    mock_db.execute(
+        "UPDATE turns SET insert_order=0, created_at=? WHERE session_id=?",
+        ("2026-01-01 00:00:00", "lazy-legacy"),
+    )
+    assert turns.get_latest_turn("lazy-legacy")["id"] == removed["id"]
+    assert turns.get_latest_run_turn("lazy-legacy")["id"] == removed["id"]
+    assert turns.get_turn_by_command("lazy-legacy", "shared")["id"] == first["id"]
+    newer = turns.enqueue_turn("lazy-legacy", "queue", at_front=True)
+    assert [turns.get_turn(row["id"])["insert_order"] for row in (first, removed, newer)] == [
+        1, 2, 3,
+    ]
+    assert turns.get_latest_turn("lazy-legacy")["id"] == newer["id"]
+    assert turns.get_turn_by_command("lazy-legacy", "shared")["id"] == first["id"]
+
+
 def test_enqueue_persists_optional_fields(mock_db):
     t = turns.enqueue_turn(
         "s1",
@@ -65,6 +164,25 @@ def test_enqueue_persists_optional_fields(mock_db):
     assert got["command_id"] == "cmd-1"
     assert got["parent_turn_id"] == "turn-parent"
     assert got["instance_id"] == "inst-1"
+
+
+@pytest.mark.parametrize("live_state", ["running", "interrupting", "draining"])
+def test_waiting_to_start_snapshot_ignores_terminal_rows_not_live_turns(
+    mock_db: object, live_state: str,
+) -> None:
+    assert not turns.session_waiting_to_start("waiting-snapshot")
+    first = turns.enqueue_turn("waiting-snapshot", "worker", prompt="first")
+    removed = turns.enqueue_turn("waiting-snapshot", "user", prompt="remove me")
+    assert turns.remove_queued_turn(removed["id"])
+    assert turns.session_waiting_to_start("waiting-snapshot")
+    assert not turns.session_waiting_to_start("other-session")
+    turns.start_turn(first["id"], run_id="run-snapshot")
+    turns.enqueue_turn("waiting-snapshot", "user", prompt="queued followup")
+    if live_state in ("interrupting", "draining"):
+        turns.interrupt_turn("waiting-snapshot", "stop")
+    if live_state == "draining":
+        turns.escalate_to_draining(first["id"])
+    assert not turns.session_waiting_to_start("waiting-snapshot")
 
 
 def test_session_has_unsettled_turns_counts_every_non_terminal_state(mock_db):

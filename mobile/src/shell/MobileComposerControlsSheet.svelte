@@ -113,14 +113,20 @@
 	// they get the row but not the Controls badge, which means work running now.
 	const liveWatches = $derived($watches.list.filter((w) => w.status !== 'stopped').length);
 	const pausedWatches = $derived($watches.list.filter((w) => w.status === 'paused').length);
+	// A worker chosen for new watches stays changeable with no watch live (#565).
+	const preferenceOnly = $derived(!runningTasks.length && !liveWatches && !!$watches.preferredWorkerId);
 	const runSummary = $derived(
 		runningTasks.length
 			? [taskSummary(runningTasks), liveWatches ? watchCount(liveWatches) : ''].filter(Boolean).join(' · ')
-			: pausedWatches
+			: preferenceOnly
+				? 'Where new watches run'
+				: pausedWatches
 				? `${pausedWatches} paused`
 				: 'Watching for changes'
 	);
-	const runHead = $derived(runningTasks.length ? `${runningTasks.length} running` : watchCount(liveWatches));
+	const runHead = $derived(
+		runningTasks.length ? `${runningTasks.length} running` : preferenceOnly ? 'Watches' : watchCount(liveWatches)
+	);
 	const chatTitle = $derived($activeSession.title?.trim() || 'New chat');
 	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
 
@@ -704,7 +710,7 @@
 					</div>
 				{:else}
 					<div class="mcp-stack">
-						{#if runningTasks.length || liveWatches}
+						{#if runningTasks.length || liveWatches || preferenceOnly}
 							<button type="button" class="tile run-row" onclick={openRunningTasks} aria-label={`${runHead}: ${runSummary}. Open the list`}>
 								<span class="run-ic"><Activity size={18} aria-hidden="true" /></span>
 								<span class="run-copy"><b>{runHead}</b><small>{runSummary}</small></span>

@@ -32,6 +32,7 @@ def owner_session(session_id: str) -> dict[str, Any]:
 def prepare(
     session_id: str | None, data: dict[str, Any], *,
     _session: dict[str, Any] | None = None, _worker: str | None = None,
+    _allow_stopped_connector: bool = False,
 ) -> dict[str, Any]:
     from app.core.assistant_service import assistant_id
 
@@ -84,7 +85,7 @@ def prepare(
         ends_at=ends_at,
     )
     if source["kind"] == "connector" and worker == assistant_id():
-        sources.connector_allowed(row)
+        sources.connector_allowed(row, allow_stopped=_allow_stopped_connector)
     return row
 
 
@@ -137,10 +138,10 @@ async def create_from_conversation(session_id: str, data: dict[str, Any]) -> dic
         data = dict(existing, worker_id=data["worker_id"], permissions={
             "tools": existing["permissions"]["tools"]
         })
-    row = await run_sync(prepare, session_id, data)
+    row = await run_sync(prepare, session_id, data, _allow_stopped_connector=bool(move_id))
     target = row["worker_id"]
     if not watch_placement.local(target):
-        await watch_placement.call(target, "validate", row=row)
+        await watch_placement.call(target, "validate", row=row, stopped_connector=bool(move_id))
     worker_name = await run_sync(watch_placement.label, target)
     sentence = ("Move this existing watch? " if move_id else "") + confirmation(row, worker_name)
 
@@ -162,7 +163,9 @@ async def create_from_conversation(session_id: str, data: dict[str, Any]) -> dic
     if not isinstance(decision, PermissionResultAllow):
         raise PermissionError("Watch not created: owner confirmation was not granted")
     # Grants and ownership may have changed while the owner was answering.
-    row = await run_sync(prepare, session_id, dict(data, worker_id=target))
+    row = await run_sync(
+        prepare, session_id, dict(data, worker_id=target), _allow_stopped_connector=bool(move_id),
+    )
     if move_id:
         return {"watch": await watch_placement.move(move_id, target)}
     if not watch_placement.local(target):
