@@ -134,7 +134,8 @@ def test_migration_failure_preserves_mode_policy(
     settings = SimpleNamespace(effective_data_dir=tmp_path)
     account = SimpleNamespace(pw_uid=41002, pw_gid=41002)
     if mode == "required":
-        with pytest.raises(runtime.RuntimeFailure, match="required agent isolation: startup refused"):
+        message = "required agent isolation: startup refused"
+        with pytest.raises(runtime.RuntimeFailure, match=message):
             runtime.isolate(settings, account)
         assert calls == []
     else:
