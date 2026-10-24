@@ -952,6 +952,10 @@
 		.ajc-acts .ajc-btn {
 			flex: 1;
 			justify-content: center;
+			min-height: 44px;
+		}
+		.ajc-link {
+			min-height: 44px;
 		}
 		.ajc-picker {
 			margin-left: 0;

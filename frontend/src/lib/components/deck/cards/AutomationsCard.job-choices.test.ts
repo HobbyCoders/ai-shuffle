@@ -67,7 +67,7 @@ const created: Automation = {
 	max_cost_per_run: null, max_cost_per_day: null, max_cost_total: null, max_runs_per_day: null,
 	total_cost_used: 0, is_enabled: false, status: 'idle', last_run_at: null,
 	last_error: null, run_count: 0, failure_count: 0, requires_approval: false,
-	model: null, provider_id: null, created_at: '', updated_at: '', budget_ok: true, message: ''
+	model: null, provider_id: null, created_at: '', updated_at: ''
 };
 const FAL_OPTION = {
 	source: 'fal', account: 'fal-ai', worker: 'worker-b', model: 'fal-ai/flux/dev', kind: 'image',
