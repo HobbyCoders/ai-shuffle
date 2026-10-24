@@ -497,6 +497,14 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.pg-fast-shutdown-pressure",
+          "check": "PostgreSQL finishes a dirty FAST shutdown under bounded write pressure",
+          "kind": "owner",
+          "how": "Use only a disposable candidate container and synthetic volumes, never a live worker or database. Give Docker 120 seconds of stop grace. Run the checkpoint lab's two same-volume writers (each overwrites 32 MiB and fsyncs for at most 240 seconds), create and update its 32768-row checkpoint_probe table, and stop the container while both writers remain active. Repeat three times. Record checkpoint write/sync/total durations, container exit status and the next startup's recovery log; verify every committed row after restart. Separately inject a stuck postmaster only in a disposable fixture to exercise the 60-second deadline fence.",
+          "pass_when": "All three dirty shutdowns finish cleanly within the 60-second PostgreSQL budget and 120-second container grace, with pressure still active, no forced-stop failure and no crash recovery on restart. Committed rows survive. A stuck postmaster is still forcibly stopped and reported as a failure with recovery descriptors retained; exceeding the real deadline is never skipped as a lab precondition.",
+          "past_bug": "#533: the 30-second FAST deadline killed a shutdown checkpoint that needed slightly longer under same-volume fsync pressure."
+        },
+        {
           "id": "harness-basics.34",
           "check": "Required Docker isolation refuses before root writes",
           "kind": "owner",
@@ -650,6 +658,14 @@
           "how": "Use disposable candidate workers ServerWorker and DesktopWorker with one owner-approved, verified Included image account held only by DesktopWorker. On ServerWorker create a disabled throwaway automation and PUT its exact account/worker/model/options to /api/v1/generation/jobs/{automation_id}/choices/image; GET it back. Leave remembered image choices empty or deliberately different. With the disposable cap admitting the request, trigger one scheduled run on ServerWorker with a prompt that calls generateImage without naming source/model/worker. Inspect the scheduler-created session's automation_id, structured generation result, both workers' submission activity and the resulting session artifact. Restore the disposable choices and remove only the throwaway automation/session afterward. No API-key or fal generation is authorized by this check.",
           "pass_when": "The real unattended run uses the saved job choice despite the absent or different remembered choice. Result source/account/model/options and holding worker match the read-back binding; exactly one Included submission occurs on DesktopWorker, none on ServerWorker or another source. Current cap and schema admission run before submission, and the generated artifact is readable from the run session. A fixture that only injects RunContext.job_choices is not a pass.",
           "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
+        },
+        {
+          "id": "harness-basics.pytest-scratch-refill",
+          "check": "Pytest teardown reports a late basetemp writer without losing the result",
+          "kind": "owner",
+          "how": "In a disposable candidate checkout on each worker, run PYTHONPATH=fluid pytest tests/scripts/test_local_ci_stages.py::test_kill_mid_stage_resumes_from_the_heartbeat tests/scripts/test_test_scratch.py -o addopts= -q. The crash regression checks that its heartbeat writer stops and signal handlers are restored without releasing the crash receipt. The late-writer regression starts a real child to refill basetemp between the cleanup scan and rmdir, once and repeatedly, for passing and failing child sessions. Do not restart the installed app or clean unrelated scratch.",
+          "pass_when": "All scratch regressions pass. A transient refill that is removed within three retries warns and preserves the child's own test exit status. A persistent leftover still makes the child session fail, even when all its tests passed. Diagnostics identify the owner and bounded leftover entries; an available ownership receipt is restored for the reaper. Receipt or listing errors are reported without replacing the original cleanup failure. Serial, xdist, explicit basetemp and standalone Fluid ownership checks still pass.",
+          "past_bug": "#570: backend-security passed every test then exited 1 when a directory refilled during pytest session scratch cleanup."
         },
         {
           "id": "harness-basics.32",

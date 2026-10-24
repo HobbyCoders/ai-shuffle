@@ -88,7 +88,7 @@ class Check:
         if volume not in self.workspaces:
             self.workspaces[volume] = self.volume()
         args = ["run", "-d", "--name", name, "--network", network,
-                "--stop-timeout", "90", "--shm-size", "256m",
+                "--stop-timeout", "120", "--shm-size", "256m",
                 "--mount", f"type=volume,src={volume},dst=/data",
                 "--mount", f"type=volume,src={self.workspaces[volume]},dst=/workspace",
                 "-e", "START_CHROME=" + ("1" if chrome else "0")]
@@ -111,7 +111,7 @@ class Check:
         compose_file.write_text(json.dumps({
             "services": {"ai-shuffle": {
                 "image": self.image, "container_name": name,
-                "network_mode": "none", "stop_grace_period": "90s", "shm_size": "256m",
+                "network_mode": "none", "stop_grace_period": "120s", "shm_size": "256m",
                 "environment": {"START_CHROME": "0"},
                 "volumes": ["data:/data", "workspace:/workspace"],
             }},
@@ -148,7 +148,7 @@ class Check:
         assert not self.state(container)["OOMKilled"], "Container was OOM-killed"
 
     def stop(self, container):
-        self.docker("stop", "--time", "90", container, timeout=100)
+        self.docker("stop", "--time", "120", container, timeout=130)
         self.exited(container, success=True)
 
     def sql(self, container, query, uid="99:100", *, admin=False):
