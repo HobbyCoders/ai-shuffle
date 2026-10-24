@@ -17,9 +17,9 @@
           "check": "Creating-chat delivery and shared durable watch notifications",
           "kind": "owner",
           "two_worker": true,
-          "how": "Use disposable DesktopWorker and ServerWorker candidates only. From an active owner chat on DesktopWorker confirm a schedule watch on ServerWorker. Observe its real event reach that chat under a read-only ceiling. Drop the delivery acknowledgement after admission, restart only the candidates and retry the same event command. Pause the watch and revoke a connector grant during delivery; lower the owner budget on each worker in turn. Settle the creator, disconnect it, let an event accrue, reconnect it and verify a durable linked notification without reactivation. Lose a notification acknowledgement, move the finished watch with its pending notification outbox, replay the old event and compare command and notification IDs on both devices. Also run durable-watches.two-worker-placement. Stop watches and archive throwaway chats; retain private receipts, not screenshots.",
-          "pass_when": "One event command produces at most one creator turn and one bell row per worker across retries, restart and transfer. No executable watch leases are mirrored. Both workers recheck current revocations, deadlines and budgets; peer loss fails closed. Settled/offline creators stay settled while reports arrive durably after reconnect. Tests alone do not claim this real-provider smoke passed.",
-          "past_bug": "#566: remote watch results remained on the executing worker."
+          "how": "Use disposable DesktopWorker and ServerWorker candidates only. From an active owner chat on DesktopWorker confirm a schedule watch on ServerWorker. Observe its real event reach that chat under a read-only ceiling. With no local creator mirror on ServerWorker, verify no lifecycle notice falsely claims that active chat was settled. Disconnect the creator and verify unknown state stays neutral. Drop the delivery acknowledgement after admission, restart only the candidates and retry the same event command. Pause the watch and revoke a connector grant during delivery; lower the owner budget on each worker in turn. Settle the creator, disconnect it, let an event accrue, reconnect it and verify a durable linked notification without reactivation. Lose a notification acknowledgement, move the finished watch with its pending notification outbox, replay the old event and compare command and notification IDs on both devices. Also run durable-watches.two-worker-placement. Stop watches and archive throwaway chats; retain private receipts, not screenshots.",
+          "pass_when": "One event command produces at most one creator turn and one bell row per worker across retries, restart and transfer. No executable watch leases are mirrored. Both workers recheck current revocations, deadlines and budgets; peer loss fails closed. Settled/offline creators stay settled while reports arrive durably after reconnect. Missing or foreign creator mirrors never imply settlement; lifecycle notices require authoritative local ownership and settled/archived state. Tests alone do not claim this real-provider smoke passed.",
+          "past_bug": "#566: remote watch results remained on the executing worker. #595: a missing remote creator mirror falsely implied settlement."
         },
         {
           "id": "durable-watches.gmail-package-history",
@@ -45,6 +45,23 @@
           "how": "On a disposable candidate, configure real bots in throwaway allowed channels. In an owner chat request one matching-message watch per connector, confirm the worker and scope, and record watch/event/cursor IDs privately. Send a nonmatching message and then matching messages. Restart only the candidate after checkpoint and repeat a poll. For Slack exercise a multi-page backlog; for Discord use more than 100 messages. Revoke each grant, then pause and stop all watches. For Telegram compare a duplicate received message ID with a second distinct ID. Interrupt candidate journal persistence, verify the receiver holds its update acknowledgement until commit and resumes without loss. While a Telegram turn is still running, answer its destructive-action approval and send a message in another allowed chat; verify polling dispatches both before the original turn goes idle. Record the receiver-downtime limitation rather than claiming chat-history recovery.",
           "pass_when": "Idle/nonmatching polls make no model calls, matching messages report once across restart/pages, saved progress advances over nonmatches, channel restrictions and revocation fail closed, and Pause/Stop prevent new reports. Telegram replay covers only durably received updates; no real connector smoke is claimed without private producing-path receipts.",
           "past_bug": "#554: declared messaging triggers had no replayable watch producer."
+        },
+        {
+          "id": "durable-watches.telegram-journal-retention",
+          "check": "Telegram slow-cursor retention and content cleanup",
+          "kind": "owner",
+          "how": "On a disposable candidate with a fake Telegram receiver, create a fast active watch and a paused slow watch on the same connector. Produce 1000 distinct fake messages while checkpointing only the fast watch, then one more. Inspect journal counts, both cursors and the slow watch reason. Attempt to resume the expired cursor, replay compacted message IDs, stop all watches and delete only the disposable connector. Repeat on an upgraded candidate with a pre-existing journal; run hourly maintenance once. Export an unread tail without importing it, delete only its disposable connector, and inspect the pending transfer snapshot for message text. Never use production credentials or a real Telegram account for the flood.",
+          "pass_when": "The slow paused cursor retains its unread rows up to the cap. Exceeding the cap explicitly expires it without advancing its cursor or silently resuming; rows never exceed 1000 per connector after ingress. Fast cursors continue, compacted replay produces no duplicate reports, unwatched/consumed content is removed and connector deletion leaves no message content. Record actual receipts; automated PostgreSQL tests alone are not a real-worker smoke pass.",
+          "past_bug": "#587: Telegram receive journals retained every message forever."
+        },
+        {
+          "id": "durable-watches.telegram-journal-transfer",
+          "check": "Stopped-receiver Telegram hand-over with rebased unread tail",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use two disposable candidate workers and fake Telegram receivers only. Provision the same fake bot credential and connector ID independently, with matching chat allowlists and agent grants. Make one watch, checkpoint the first fake update and leave two unread. Stop and disable both connections before moving. Ensure there are no other active or paused watches on that connector. Give the destination unrelated old journal sequence numbers. Move the watch, interrupt once after export and once after import acknowledgement, and retry the identical move. Restart the disposable source and attempt a replay on both sides. Also try different credentials, a revoked grant, another watch and a running receiver. After a definite destination rejection, restart and stop the source receiver, then move to another independently provisioned disposable target. Move a remote watch into the chat's local worker through owner confirmation while its connector is disabled; repeat with its grant revoked during confirmation.",
+          "pass_when": "Unsafe preconditions fail closed. The source receive/checkpoint fence precedes destination startup; unread stable event keys and processed-event dedupe survive a sequence rebase. Only the destination starts after atomic import, reports new/unread updates once and resumes exactly after processed progress. Ambiguous transfers never reopen the old receiver; retry preserves cursor and outbox. No Telegram history recovery or real-provider pass is claimed.",
+          "past_bug": "#567: worker-local Telegram sequence cursors could not move safely."
         },
         {
           "id": "durable-watches.two-worker-placement",
@@ -696,6 +713,14 @@
           "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
         },
         {
+          "id": "harness-basics.branch-preview-remote-access",
+          "check": "Disposable branch preview admits a remote browser only with its access link",
+          "kind": "owner",
+          "how": "In a fresh branch checkout build the frontend and run python -m app.preview stamp. Under Monitor run python -m app.preview run --port 18080 --host 0.0.0.0 --browser-host <worker-IP> --ttl-seconds 300, using the IP reachable by the agent browser. Check the named port without a cookie and with a forged token; then open the printed preview-access link in the agent browser and load the stamped app. Confirm owner/protected sockets remain loopback-only. Let the TTL expire and check that the app and disposable PostgreSQL stop. Never copy installed worker data, keys or credentials.",
+          "pass_when": "The remote browser reaches the stamped branch app through the printed link. Missing/forged tokens are refused; only the new disposable access session grants a cookie, normal preview mutation/transport limits remain enforced, and the named port is not an unauthenticated owner listener. TTL teardown closes the app and cluster; a missing build or unexecuted browser path is not a pass.",
+          "past_bug": "#582: the Linux preview bound loopback, disabled its token-only listener and offered no access link for a remote agent browser."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",
@@ -772,6 +797,14 @@
           "how": "On a disposable candidate worker with synthetic data and an already configured verified subscription, create throwaway native chat and automation sessions permitting only GenerateNativeImage and GenerateNativeVideo. Do not enter credentials or approve a paid submission. With no remembered/job pick, call each alias and inspect its structured result and provider-request logs. Repeat with an unreadable synthetic job choice, then a valid saved choice and an already-exceeded synthetic daily cap. Check image Included pricing and the exact verified video estimate. Archive only the throwaway sessions. Run the focused no-provider registry tests for the approved confirmation retry; never use this smoke row to authorize a real generation charge.",
           "pass_when": "Both interactive aliases return choose with the unified price/choice envelope; both unattended aliases skip without a saved choice or with unreadable choices. A valid saved choice still refuses an exhausted cap, including Included images, with zero provider submissions. Above-threshold calls require the unified one-use confirmation receipt before reserve/submission. Exact approved retries and job choices are covered by the no-provider test. Alias choice-card rendering is tracked separately and must not be inferred from JSON alone.",
           "past_bug": "#545: raw native registrations submitted without resolver admission or generation_budget.reserve."
+        },
+        {
+          "id": "harness-basics.native-generation-alias-cards",
+          "check": "Native generation aliases render the existing choice card and saved-choice line",
+          "kind": "browser",
+          "how": "On a disposable candidate worker with an already configured verified subscription and no remembered image/video pick, start a throwaway native chat on that account's model and ask for an image with GenerateNativeImage, then a video with GenerateNativeVideo. Pick an option on each card without approving any above-threshold spend, and read the reply the card sends. Remember an Included image choice and ask again. Add a throwaway MCP server exposing a tool named GenerateNativeImage that returns a choose envelope and call it. Repeat the views at a phone width. Archive only the throwaway chat and remove the throwaway server.",
+          "pass_when": "Both alias choose results show the same choice card as generateImage/generateVideo, with each option's price. The reply calls the same alias again with the exact selected source, model, worker and options. A remembered run shows the saved-choice line with Ask me next time and Change. The third-party tool renders as an ordinary tool row, never a choice card. No provider submission or charge occurs without an approved pick.",
+          "past_bug": "#550: generationToolKind knew only the unified names, so alias choose results rendered as raw JSON instead of the choice card."
         },
         {
           "id": "harness-basics.native-owner-pass",

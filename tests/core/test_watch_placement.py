@@ -424,7 +424,7 @@ async def test_confirm_only_never_starts_a_transfer(
         stale = await client.patch(path, json={"worker_id": "ServerWorker", "confirm": True})
         assert stale.status_code == 409
         assert "nothing was moved" in stale.json()["detail"]
-        assert not {"validate", "export", "import", "complete"} & set(operations)
+        assert not {"prepare_export", "validate", "export", "import", "complete"} & set(operations)
         # confirm without a worker is refused too.
         bare = await client.patch(path, json={"status": "paused", "confirm": True})
         assert bare.status_code == 409

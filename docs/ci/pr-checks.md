@@ -379,8 +379,19 @@ unmarked trees.
 For a disposable Linux preview, build the frontend, run
 `python -m app.preview stamp`, then use
 `python -m app.preview run --port 18080 --ttl-seconds 3600` under a Monitor task.
-It creates its own HOME, data directory and PostgreSQL without inheriting
-credentials. Keep the launcher alive: parent loss, task termination, Ctrl-C or
+The default bind is loopback. For an agent browser on another host, use
+`python -m app.preview run --port 18080 --host 0.0.0.0 --browser-host <worker-IP>
+--ttl-seconds 3600` (on one line). `--browser-host` is the concrete IP reachable
+by that browser, not `0.0.0.0`; it is required for wildcard binds. Open the
+printed `/api/v1/auth/preview-access?token=...` link once, then stay on that port.
+The named port is token-only: requests without a live preview cookie are refused,
+and existing preview mutation/transport limits still apply. Owner and protected
+listeners stay on separate loopback-only ports even with `--host 0.0.0.0`.
+It creates its own HOME, data directory, PostgreSQL and hidden access session
+without inheriting credentials, keys, sessions or data from the installed worker.
+The access token expires with the requested TTL; teardown removes its disposable
+key and database. A preview listener bind failure refuses startup rather than
+printing an unusable link. Keep the launcher alive: parent loss, task termination, Ctrl-C or
 TTL expiry closes the app and cluster. The TTL is capped at four hours. Raw
 `AI_SHUFFLE_PREVIEW=1 python -m app.main` remains a caller-managed instance;
 this command cannot adopt or terminate somebody else's existing preview.

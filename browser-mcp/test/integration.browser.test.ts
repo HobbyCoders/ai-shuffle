@@ -710,8 +710,42 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(session.refs.isKnown(all.at(-1)!)).toBe(true);
     });
     it("does not resample a mature plain page across repeated actions", async () => {
-      await load('<button>Plain</button><label>Name<input></label>');
+      const page = await load('<button>Plain</button><label>Name<input></label>');
       const target = await ref("Plain"), field = await ref("Name");
+      // Observe the actual sampling scheduler, not CDP/runner wall-clock speed.
+      // Settle polling also uses setTimeout, but only after sampling is false.
+      await page.evaluate((key) => {
+        const w = window as unknown as Record<string, unknown>;
+        const schedule = window.setTimeout.bind(window);
+        w.sampleWaits = 0;
+        window.setTimeout = ((handler, delay, ...args) => {
+          if ((w[key] as { sampling?: boolean } | undefined)?.sampling) {
+            w.sampleWaits = Number(w.sampleWaits) + 1;
+          }
+          return schedule(handler, delay, ...args);
+        }) as typeof window.setTimeout;
+      }, WATCH_KEY);
+      // Positive control: exercise the watcher's captured sampling scheduler.
+      // Do not require a fresh install to finish within its 100ms window just
+      // to prove the instrument works on an overloaded runner.
+      await session.beginWatch(false, false);
+      await page.evaluate(async (key) => {
+        const state = (window as unknown as Record<string, unknown>)[key] as {
+          sampling: boolean; schedule: typeof window.setTimeout;
+        };
+        state.sampling = true;
+        try { await new Promise<void>(resolve => state.schedule(resolve, 0)); }
+        finally { state.sampling = false; }
+      }, WATCH_KEY);
+      expect(await page.evaluate(() => (window as unknown as { sampleWaits: number }).sampleWaits)).toBe(1);
+      await session.beginWatch(true, false);
+      await page.evaluate(async (key) => {
+        const w = window as unknown as Record<string, unknown>;
+        const state = w[key] as { observedSince: number };
+        // Wait for the baseline's defined 100ms maturity, not a dispatch bound.
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, 100 - (Date.now() - state.observedSince))));
+        w.sampleWaits = 0;
+      }, WATCH_KEY);
       for (const input of [
         { kind: "click", ref: target }, { kind: "click", ref: target },
         { kind: "fill", ref: field, value: "name" }, { kind: "type", ref: field, value: "x" },
@@ -719,7 +753,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       ] as const) {
         const result = body(await runAct(session, input));
         expect(result).toMatchObject({ ok: true, text_churn_ignored: false });
-        expect(result.timings.dispatch_ms).toBeLessThan(90);
+        expect(await page.evaluate(() => (window as unknown as { sampleWaits: number }).sampleWaits)).toBe(0);
       }
     });
     it("does not ignore a newly started ticker that has never mutated before dispatch", async () => {

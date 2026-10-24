@@ -170,11 +170,19 @@ def test_same_listener_port_is_rejected():
 
 
 @pytest.mark.parametrize("override,expected", [(None, 8001), ("18001", 18001)])
-def test_supervisor_selects_protected_port_without_changing_trust(monkeypatch, override, expected):
+@pytest.mark.parametrize("preview_host", [None, "0.0.0.0"])
+def test_supervisor_selects_protected_port_without_changing_trust(
+    monkeypatch: pytest.MonkeyPatch, override: str | None, expected: int,
+    preview_host: str | None,
+) -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
     from app import serve
 
+    if preview_host is None:
+        monkeypatch.delenv("SHUFFLE_PREVIEW_HOST", raising=False)
+    else:
+        monkeypatch.setenv("SHUFFLE_PREVIEW_HOST", preview_host)
     if override is None:
         monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
     else:
@@ -197,7 +205,11 @@ def test_supervisor_selects_protected_port_without_changing_trust(monkeypatch, o
     monkeypatch.setattr(uvicorn, "Server", server)
     serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
     # Local, protected, then the agent browser's preview-only listener.
-    assert binds == [("127.0.0.1", 18000), ("127.0.0.1", expected), ("127.0.0.1", 18002)]
+    assert binds == [
+        ("127.0.0.1", 18000), ("127.0.0.1", expected),
+        (preview_host or "127.0.0.1", 18002),
+    ]
+    assert preview_access._listener_host == (preview_host or "127.0.0.1")
     config = server.call_args.args[0]
     assert config.proxy_headers is False
     assert config.app.local_port == 18000
