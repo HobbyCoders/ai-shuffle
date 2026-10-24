@@ -456,7 +456,8 @@ async def answered_elsewhere(session_id: str, row: Dict[str, Any], decision: str
     try:
         payload = row.get("payload") or {}
         confirm = payload.get(SUBTYPE)
-        if not isinstance(confirm, dict) or not payload.get(PARKED_KEY) or payload.get("provider_agent"):
+        if (not isinstance(confirm, dict) or not payload.get(PARKED_KEY)
+                or payload.get("provider_agent")):
             return
         if decision == "allow":
             allow_once(session_id, payload.get("tool_name") or "", payload.get("tool_input"))
@@ -522,9 +523,9 @@ def _outcome_text(answer: Any) -> Optional[str]:
 def expired_note(action: str) -> str:
     """The wake an expired parked request sends the agent (plain text: it is
     the wake turn's own prompt)."""
-    return (f"The approval request expired without a yes or no from the owner: {action}. The call "
-            "was answered \"Not run yet\" earlier and was never run. Do not run it unless the owner "
-            "asks for it again.")
+    return (f"The approval request expired without a yes or no from the owner: {action}. "
+            "The call was answered \"Not run yet\" earlier and was never run. Do not run it "
+            "unless the owner asks for it again.")
 
 
 async def on_expired(rows: Iterable[Dict[str, Any]]) -> int:
@@ -545,8 +546,8 @@ async def on_expired(rows: Iterable[Dict[str, Any]]) -> int:
             if (row.get("kind") != PERMISSION_KIND or not isinstance(confirm, dict)
                     or not payload.get(PARKED_KEY) or payload.get("provider_agent")):
                 continue
-            await _wake(row["session_id"], expired_note(confirm.get("action") or confirm.get("question")
-                                                        or "the call"),
+            action = confirm.get("action") or confirm.get("question") or "the call"
+            await _wake(row["session_id"], expired_note(action),
                         command_id=f"approval-expired-{row['id']}")
             woken += 1
         except Exception:  # noqa: BLE001 — one wake never stops the sweep
@@ -581,7 +582,8 @@ def context_note(session_id: Optional[str]) -> Optional[str]:
         if item["decision"] == "approved":
             lines.append(f"The owner answered yes, so the app approved this one request: {item['question']}")
         elif item["decision"] == "declined":
-            lines.append(f"The owner answered no, so the app declined this request: {item['question']}")
+            lines.append("The owner answered no, so the app declined this request: "
+                         f"{item['question']}")
     try:
         pending = pending_requests(session_id)
     except Exception:  # noqa: BLE001 — the note is best-effort

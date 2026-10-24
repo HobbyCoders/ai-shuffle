@@ -14,7 +14,11 @@ owner's message into the placeholder result is covered in fluid's
 ``tests/unit/test_deny_carries_steer.py``.
 """
 import asyncio
+import sqlite3
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock
+
+import pytest
 from uuid import uuid4
 
 from app.core import assistant_confirm as confirm
@@ -44,22 +48,25 @@ from tests.core.test_assistant_started_work import home, quiet_scheduler  # noqa
 from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
 OTHER = "Instead, explain what that command would change"
+# (home session id, its first turn id), from the ``home`` fixture.
+Home = Tuple[str, str]
 
 
-def _own_call(home_id, command="gh pr merge 12"):
+def _own_call(home_id: str, command: str = "gh pr merge 12") -> "asyncio.Task[Any]":
     """One of the owner chat's OWN calls asking for approval (production entry)."""
     kwargs = dict(request_id=f"perm-{home_id}-{uuid4().hex[:8]}", session_id=home_id,
                   profile_id="assistant-agent", tool_name="Bash", tool_input={"command": command},
                   broadcast_func=AsyncMock())
-    return asyncio.create_task(approvals.route_permission(kwargs, ph.permission_handler.request_permission))
+    request = ph.permission_handler.request_permission
+    return asyncio.create_task(approvals.route_permission(kwargs, request))
 
 
-def _steers(monkeypatch, only=None):
+def _steers(monkeypatch: pytest.MonkeyPatch, only: Optional[str] = None) -> List[List[str]]:
     """Record each hand-over of queued messages to a chat's engine, with the
     queued rows at that moment; with ``only``, just that chat's."""
     calls = []
 
-    async def steer(session_id):
+    async def steer(session_id: str) -> int:
         if only is None or session_id == only:
             calls.append([row["prompt"] for row in turns.get_queued_turns(session_id)])
         return 1
@@ -68,15 +75,16 @@ def _steers(monkeypatch, only=None):
     return calls
 
 
-def _wakes(home_id):
+def _wakes(home_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source='wakeup' ORDER BY position",
-                       (home_id,))
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source='wakeup' "
+                       "ORDER BY position", (home_id,))
         return [turns._row(row) for row in cursor.fetchall()]
 
 
-async def _parked(home_id, monkeypatch, command="gh pr merge 12"):
+async def _parked(home_id: str, monkeypatch: pytest.MonkeyPatch,
+                  command: str = "gh pr merge 12") -> Dict[str, Any]:
     """An own call answered "not run yet" by the owner's other message."""
     _steers(monkeypatch)
     task = _own_call(home_id, command)
@@ -87,7 +95,9 @@ async def _parked(home_id, monkeypatch, command="gh pr merge 12"):
     return request
 
 
-async def test_another_message_lets_the_waiting_call_go_and_keeps_the_card(home, monkeypatch):  # noqa: F811
+async def test_another_message_lets_the_waiting_call_go_and_keeps_the_card(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     home_id, _ = home
     steers = _steers(monkeypatch)
     task = _own_call(home_id)
@@ -110,7 +120,9 @@ async def test_another_message_lets_the_waiting_call_go_and_keeps_the_card(home,
     assert "Not run yet" in away_mode.turn_note(home_id)
 
 
-async def test_more_messages_neither_answer_nor_release_twice(home, monkeypatch):  # noqa: F811
+async def test_more_messages_neither_answer_nor_release_twice(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     home_id, _ = home
     request = await _parked(home_id, monkeypatch)
     steers = _steers(monkeypatch)
@@ -122,7 +134,9 @@ async def test_more_messages_neither_answer_nor_release_twice(home, monkeypatch)
     assert _answers(home_id) == [] and _outcomes(home_id) == [] and _wakes(home_id) == []
 
 
-async def test_parallel_own_calls_are_all_let_go(home, monkeypatch):  # noqa: F811
+async def test_parallel_own_calls_are_all_let_go(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     """Each parallel call blocks the loop: all of them get the placeholder,
     and both cards stay, asked one at a time."""
     home_id, _ = home
@@ -138,7 +152,9 @@ async def test_parallel_own_calls_are_all_let_go(home, monkeypatch):  # noqa: F8
     assert [item["parked"] for item in confirm.pending_requests(home_id)] == [True, True]
 
 
-async def test_a_later_yes_admits_exactly_that_call_once(home, monkeypatch):  # noqa: F811
+async def test_a_later_yes_admits_exactly_that_call_once(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     home_id, _ = home
     request = await _parked(home_id, monkeypatch)
     turn_id = await owner_says(home_id, "yes")
@@ -173,7 +189,9 @@ async def test_a_later_yes_admits_exactly_that_call_once(home, monkeypatch):  # 
     assert isinstance(await asyncio.wait_for(third, 12.0), PermissionResultDeny)
 
 
-async def test_a_later_no_declines_and_says_so(home, monkeypatch):  # noqa: F811
+async def test_a_later_no_declines_and_says_so(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     home_id, _ = home
     request = await _parked(home_id, monkeypatch)
     turn_id = await owner_says(home_id, "no")
@@ -190,7 +208,9 @@ async def test_a_later_no_declines_and_says_so(home, monkeypatch):  # noqa: F811
     assert isinstance(await asyncio.wait_for(again, 12.0), PermissionResultDeny)
 
 
-async def test_an_expiry_wakes_the_agent_once(home, monkeypatch):  # noqa: F811
+async def test_an_expiry_wakes_the_agent_once(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     home_id, _ = home
     monkeypatch.setattr(confirm, "TTL_SECONDS", 1)
     await _parked(home_id, monkeypatch)
@@ -207,7 +227,9 @@ async def test_an_expiry_wakes_the_agent_once(home, monkeypatch):  # noqa: F811
     assert len(_wakes(home_id)) == 1
 
 
-async def test_an_expiry_of_a_call_still_waiting_needs_no_wake(home, monkeypatch):  # noqa: F811
+async def test_an_expiry_of_a_call_still_waiting_needs_no_wake(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     """Unchanged: a call still waiting gets "timed out" itself."""
     home_id, _ = home
     monkeypatch.setattr(confirm, "TTL_SECONDS", 1)
@@ -220,19 +242,24 @@ async def test_an_expiry_of_a_call_still_waiting_needs_no_wake(home, monkeypatch
     assert _wakes(home_id) == []
 
 
-async def test_an_answer_from_elsewhere_wakes_the_agent(home, monkeypatch):  # noqa: F811
+async def test_an_answer_from_elsewhere_wakes_the_agent(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     """A voice call or another device answers the parked request: no owner
     message carries the outcome, so a wake does, and a yes still admits the
     call once."""
     home_id, _ = home
     request = await _parked(home_id, monkeypatch)
-    await ph.permission_handler.respond(request["request_id"], home_id, "allow", broadcast_func=AsyncMock())
+    await ph.permission_handler.respond(request["request_id"], home_id, "allow",
+                                        broadcast_func=AsyncMock())
     [wake] = _wakes(home_id)
     assert wake["prompt"].startswith("The owner approved this request: run `gh pr merge 12`.")
     assert confirm.take_approved_once(home_id, "Bash", {"command": "gh pr merge 12"})
 
 
-async def test_a_plain_yes_or_no_with_nothing_else_is_unchanged(home, monkeypatch):  # noqa: F811
+async def test_a_plain_yes_or_no_with_nothing_else_is_unchanged(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     home_id, _ = home
     steers = _steers(monkeypatch)
     task = _own_call(home_id)
@@ -253,7 +280,9 @@ async def test_a_plain_yes_or_no_with_nothing_else_is_unchanged(home, monkeypatc
     assert steers == [] and _wakes(home_id) == []
 
 
-async def test_a_started_chats_request_is_not_let_go(home, monkeypatch):  # noqa: F811
+async def test_a_started_chats_request_is_not_let_go(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
     """A started chat's (or worker's) call blocks its own loop, not this one:
     the owner's other message reaches the home as usual and the call keeps
     waiting for the yes or no."""
@@ -270,7 +299,7 @@ async def test_a_started_chats_request_is_not_let_go(home, monkeypatch):  # noqa
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
 
 
-def test_the_one_shot_admit_is_exact_and_single():
+def test_the_one_shot_admit_is_exact_and_single() -> None:
     confirm.allow_once("s1", "Bash", {"command": "ls", "timeout": 5})
     assert not confirm.take_approved_once("s2", "Bash", {"command": "ls", "timeout": 5})
     assert not confirm.take_approved_once("s1", "Bash", {"command": "ls"})
@@ -280,10 +309,11 @@ def test_the_one_shot_admit_is_exact_and_single():
     assert not confirm.take_approved_once("s1", "Bash", {"command": "ls", "timeout": 5})
 
 
-async def test_mark_parked_only_touches_a_pending_row(mock_db):
+async def test_mark_parked_only_touches_a_pending_row(mock_db: sqlite3.Connection) -> None:
     row = interactions.create_interaction("s1", "permission", {"request_id": "r1"}, 60)
     assert interactions.mark_interaction_parked(row["id"])
-    assert interactions.get_interaction(row["id"])["payload"] == {"request_id": "r1", "parked": True}
+    payload = interactions.get_interaction(row["id"])["payload"]
+    assert payload == {"request_id": "r1", "parked": True}
     assert interactions.mark_interaction_parked(row["id"])  # idempotent
     interactions.answer_interaction(row["id"], {"decision": "deny"})
     other = interactions.create_interaction("s1", "permission", {"request_id": "r2"}, 60)

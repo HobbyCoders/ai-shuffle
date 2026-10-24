@@ -14,6 +14,7 @@ import asyncio
 from types import SimpleNamespace
 
 from fluid.context.steering import STEER_CLOSE, STEER_OPEN
+from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.delegated_proto import HookCallbackRequest
 from fluid.events import PermissionRequest, RespondPermission, SteerDelivered, ToolResult
 from fluid.events.ops import AgentMessage, Interrupt, Steer, UserTurn
@@ -98,7 +99,7 @@ def _permission_reply(frames: list[dict]) -> dict:
 
 
 async def test_delegated_deny_carries_the_waiting_user_steer() -> None:
-    async def on_prompt(loop, event):
+    async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
         await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
         await loop.submit(RespondPermission(
             request_id=event.request_id, decision="deny", message=PLACEHOLDER,
@@ -122,7 +123,7 @@ async def test_delegated_deny_carries_the_waiting_user_steer() -> None:
 
 async def test_delegated_allow_leaves_the_steer_for_the_tool_boundary() -> None:
     """Unchanged: an allowed call runs, and its PostToolUse answer carries it."""
-    async def on_prompt(loop, event):
+    async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
         await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
         await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
 
@@ -134,7 +135,7 @@ async def test_delegated_allow_leaves_the_steer_for_the_tool_boundary() -> None:
 
 
 async def test_delegated_deny_after_a_stop_carries_nothing() -> None:
-    async def on_prompt(loop, event):
+    async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
         await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
         await loop.submit(Interrupt())
         await loop.submit(RespondPermission(
