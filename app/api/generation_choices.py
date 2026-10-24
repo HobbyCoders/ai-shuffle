@@ -137,12 +137,17 @@ async def catalog(request: Request, kind: Optional[str] = None, source: Optional
     kinds = [_kind(kind)] if kind else list(generation_choices.KINDS)
     limit = max(1, min(limit, 50))
     resolver = Resolver(Sources(None, _context(request)))
-    catalogs = await asyncio.gather(*(resolver.catalog(k, source=source, model=model, query=query, limit=limit)
-                                     for k in kinds))
+    catalogs = await asyncio.gather(*(
+        resolver.catalog(k, source=source, model=model, query=query, limit=limit)
+        for k in kinds
+    ))
     entries = []
     for result in catalogs:
         for entry in result.get("options", []):
-            status = "unavailable" if not entry["available"] else "unpriced" if price_total(entry["price"]) is None else "available"
+            status = (
+                "unavailable" if not entry["available"] else
+                "unpriced" if price_total(entry["price"]) is None else "available"
+            )
             entries.append({**entry, "status": status})
     saved = await run_sync(lambda: generation_choices.favourites(_identity(request)))
     return {"entries": entries, "favourites": saved, "kinds": kinds, "limit": limit}
@@ -168,7 +173,7 @@ async def delete_favourite(kind: str, request: Request,
     return {"kind": kind, "favourite": None}
 
 
-async def _job(job_id: str):
+async def _job(job_id: str) -> str:
     from uuid import UUID
     from app.db import database
 

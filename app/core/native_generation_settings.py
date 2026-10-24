@@ -86,7 +86,7 @@ def capabilities(kind):
     return {"image": image, "video": video}
 
 
-def image_default(kind):
+def image_default(kind: str) -> dict[str, str | None] | None:
     from app.core.native_image_verification import verified
 
     record = verified(kind)
@@ -140,7 +140,9 @@ def _validated_stored_groups(kind, data, defaults):
 
 def _load_with_status(provider_id):
     _, kind = _account(provider_id)
-    defaults = NativeGenerationSettings(image=image_default(kind), video=_VIDEO_DEFAULT if kind == "grok" else None)
+    defaults = NativeGenerationSettings(
+        image=image_default(kind), video=_VIDEO_DEFAULT if kind == "grok" else None,
+    )
     raw = database.get_system_setting(f"native_generation:{provider_id}")
     if raw is not None:
         try:

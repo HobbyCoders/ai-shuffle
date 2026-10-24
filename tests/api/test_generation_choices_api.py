@@ -1,17 +1,21 @@
 """Choice-card API: remembered picks per account, Settings options and live quotes."""
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import generation_choices as api
+from app.core.generation_resolver import Candidate
 from tests.core.test_generation_resolver import FakeBackend, candidate
 
 IDENTITY = ("account", "origin#owner")
 
 
-def test_catalog_lists_status_price_and_worker_with_independent_favourite(client, monkeypatch):
+def test_catalog_lists_status_price_and_worker_with_independent_favourite(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.services import generation_sources
     from app.core.generation_resolver import INCLUDED_PRICE, UNKNOWN_PRICE
     entries = [replace(candidate(source="chatgpt", account="plan"), price=dict(INCLUDED_PRICE)),
@@ -40,7 +44,9 @@ def test_catalog_lists_status_price_and_worker_with_independent_favourite(client
 
 
 
-def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(client, monkeypatch):
+def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from unittest.mock import AsyncMock
     from app.core import fal_credential, native_generation_settings as native
     from app.core.generation_resolver import INCLUDED_PRICE
@@ -51,35 +57,49 @@ def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(cli
             {"id": "unverified-api", "provider_type": "openai", "auth_mode": "api_key"}]
     monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)
     monkeypatch.setattr(model_providers, "list_usable_model_providers", lambda: rows)
-    monkeypatch.setattr(database, "get_model_provider", lambda account, **kw: next(r for r in rows if r["id"] == account))
+    monkeypatch.setattr(
+        database, "get_model_provider",
+        lambda account, **kw: next(r for r in rows if r["id"] == account),
+    )
     native.save("local-plan", native.NativeGenerationSettings(image=None, video=None))
-    peer = replace(candidate(source="supergrok", account="peer-plan"), worker="worker-b", price=dict(INCLUDED_PRICE))
+    peer = replace(
+        candidate(source="supergrok", account="peer-plan"),
+        worker="worker-b", price=dict(INCLUDED_PRICE),
+    )
     monkeypatch.setattr(generation, "catalog", AsyncMock(return_value=[peer]))
     data = client.get("/api/v1/generation/catalog?kind=image").json()
     entries = {row["account"]: row for row in data["entries"]}
     assert entries["local-plan"]["verified"] and entries["local-plan"]["status"] == "unavailable"
     assert entries["local-plan"]["price"] == INCLUDED_PRICE
     assert entries["local-plan"]["worker"] == "worker-a"
-    assert entries["unverified-api"]["status"] == "unavailable" and not entries["unverified-api"]["verified"]
-    assert entries["peer-plan"]["status"] == "available" and entries["peer-plan"]["worker"] == "worker-b"
+    assert (entries["unverified-api"]["status"] == "unavailable"
+            and not entries["unverified-api"]["verified"])
+    assert (entries["peer-plan"]["status"] == "available"
+            and entries["peer-plan"]["worker"] == "worker-b")
 
 
-def test_catalog_forwards_filters_and_collects_every_kind(client, monkeypatch):
+def test_catalog_forwards_filters_and_collects_every_kind(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.services import generation_sources
     calls = []
 
     class Backend(FakeBackend):
-        async def catalog(self, kind, **kw):
+        async def catalog(self, kind: str, **kw: Any) -> list[Candidate]:
             calls.append((kind, kw))
             return []
 
     monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: Backend([]))
     data = client.get("/api/v1/generation/catalog?source=openai&model=m&query=cat&limit=3").json()
     assert data["kinds"] == ["image", "video", "audio", "3d"]
-    assert calls == [(k, {"source": "openai", "model": "m", "query": "cat", "limit": 3}) for k in data["kinds"]]
+    assert calls == [
+        (k, {"source": "openai", "model": "m", "query": "cat", "limit": 3}) for k in data["kinds"]
+    ]
 
 
-def test_job_writer_binds_real_session_to_unattended_tool(client, monkeypatch):
+def test_job_writer_binds_real_session_to_unattended_tool(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import asyncio
     import json
     from uuid import uuid4
@@ -91,13 +111,17 @@ def test_job_writer_binds_real_session_to_unattended_tool(client, monkeypatch):
     client.app.dependency_overrides[api.require_admin] = lambda: "owner"
     monkeypatch.setattr(model_effort, "_caller_preference_identity", lambda row: IDENTITY)
     job_id = str(uuid4())
-    database.create_automation(job_id, "Draw", "interval", {"seconds": 3600}, "default", prompt="Draw a tree")
+    database.create_automation(
+        job_id, "Draw", "interval", {"seconds": 3600}, "default", prompt="Draw a tree",
+    )
     entry = candidate()
     pick = entry.choice()
     route = f"/api/v1/generation/jobs/{job_id}/choices/image"
     response = client.put(route, json=pick)
     assert response.status_code == 200 and response.json()["choice"] == pick
-    assert client.get(f"/api/v1/generation/jobs/{job_id}/choices").json()["choices"] == {"image": pick}
+    assert client.get(f"/api/v1/generation/jobs/{job_id}/choices").json()["choices"] == {
+        "image": pick,
+    }
     assert client.get("/api/v1/generation/choices").json()["remembered"] == {}
     database.create_session("run", "default", automation_id=job_id)
     row = database.get_session("run")
@@ -107,7 +131,9 @@ def test_job_writer_binds_real_session_to_unattended_tool(client, monkeypatch):
     assert context.job_choices == {"image": pick}
     backend = FakeBackend([entry])
     monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: backend)
-    tool = next(t for t in ai_tools_sdk._create_unified_tools(None, context) if t.name == "generateImage")
+    tool = next(
+        t for t in ai_tools_sdk._create_unified_tools(None, context) if t.name == "generateImage"
+    )
     # Tool arguments cannot replace the trusted job binding in unattended runs.
     output = asyncio.run(tool.handler({"prompt": "tree", "model": "other", "source": "xai"}))
     assert json.loads(output["content"][0]["text"])["status"] == "completed"
@@ -115,10 +141,12 @@ def test_job_writer_binds_real_session_to_unattended_tool(client, monkeypatch):
     assert client.delete(route).status_code == 200
     assert generation_choices.load_job(IDENTITY, job_id) == {}
     assert client.put(route, json={"source": "fal", "model": "m"}).status_code == 422
-    assert client.put(f"/api/v1/generation/jobs/{uuid4()}/choices/image", json=pick).status_code == 404
+    assert client.put(
+        f"/api/v1/generation/jobs/{uuid4()}/choices/image", json=pick,
+    ).status_code == 404
 
 
-def test_job_choices_require_owner_even_for_preference_writers(client):
+def test_job_choices_require_owner_even_for_preference_writers(client: TestClient) -> None:
     from uuid import uuid4
     route = f"/api/v1/generation/jobs/{uuid4()}/choices/image"
     assert client.put(route, json={"source": "fal", "model": "x"}).status_code == 403

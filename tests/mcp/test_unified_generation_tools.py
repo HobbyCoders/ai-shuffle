@@ -165,7 +165,9 @@ async def test_chat_mode_has_no_settings_default(monkeypatch):
 @pytest.mark.parametrize("unattended", [False, True])
 @pytest.mark.parametrize("unreadable", [False, True])
 @pytest.mark.parametrize("empty_catalog", [False, True])
-async def test_chatgpt_setting_never_bypasses_choice_or_admission(monkeypatch, unattended, unreadable, empty_catalog):
+async def test_chatgpt_setting_never_bypasses_choice_or_admission(
+    monkeypatch: pytest.MonkeyPatch, unattended: bool, unreadable: bool, empty_catalog: bool,
+) -> None:
     env = {"IMAGE_MODEL": "chatgpt-subscription"}
     entries = [] if empty_catalog else [candidate(source="chatgpt", account="plan-a")]
     context = replace(INTERACTIVE, unattended=unattended, choices_unreadable=unreadable)
@@ -183,7 +185,9 @@ async def test_chatgpt_setting_never_bypasses_choice_or_admission(monkeypatch, u
 
 @pytest.mark.parametrize("cap", [False, True])
 @pytest.mark.parametrize("unattended", [False, True])
-async def test_chatgpt_included_choice_checks_cap_before_execution(monkeypatch, cap, unattended):
+async def test_chatgpt_included_choice_checks_cap_before_execution(
+    monkeypatch: pytest.MonkeyPatch, cap: bool, unattended: bool,
+) -> None:
     from app.core.generation_resolver import INCLUDED_PRICE
     entry = replace(candidate(source="chatgpt", account="plan-a"), price=dict(INCLUDED_PRICE))
     context = replace(INTERACTIVE, unattended=unattended, remembered_choice=entry.choice())
@@ -200,9 +204,13 @@ async def test_chatgpt_included_choice_checks_cap_before_execution(monkeypatch, 
 
 
 
-async def test_chatgpt_choice_card_model_id_can_be_submitted_through_guard(monkeypatch):
+async def test_chatgpt_choice_card_model_id_can_be_submitted_through_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.core.generation_resolver import INCLUDED_PRICE
-    entry = replace(candidate(source="chatgpt", account="plan-a", model="default"), price=dict(INCLUDED_PRICE))
+    entry = replace(
+        candidate(source="chatgpt", account="plan-a", model="default"), price=dict(INCLUDED_PRICE),
+    )
     tools, backend, legacy = lane_tools(monkeypatch, [entry], INTERACTIVE, lane="chatgpt",
                                         tool_env={"IMAGE_MODEL": "chatgpt-subscription"})
     output = payload(await tools["generateImage"].handler({"prompt": "tree", **entry.choice()}))
@@ -364,7 +372,9 @@ async def test_plan_image_default_choose_card_never_offers_fal(monkeypatch):
 @pytest.mark.parametrize("configured,model", [("chatgpt-subscription", "chatgpt-subscription"),
                                               ("chatgpt-subscription/gpt-image-1", "chatgpt-subscription/gpt-image-1"),
                                               ("chatgpt-subscription/gpt-image-1", "gpt-image-1")])
-async def test_unresolved_legacy_plan_model_is_not_a_handler_bypass(monkeypatch, configured, model):
+async def test_unresolved_legacy_plan_model_is_not_a_handler_bypass(
+    monkeypatch: pytest.MonkeyPatch, configured: str, model: str,
+) -> None:
     env = {"IMAGE_MODEL": configured}
     tools, backend, legacy = lane_tools(monkeypatch, [], INTERACTIVE, lane="chatgpt", tool_env=env, names=("generateImage",))
     output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": model}))

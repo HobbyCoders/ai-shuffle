@@ -700,7 +700,8 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         # The verified native ChatGPT route calls its provider-default image
         # model "default". Accept the card's exact ID, then let the resolver
         # check account, schema, Included pricing and admission.
-        if request.get("model") not in (None, "", "default") and normalize_source(request.get("source")) in (None, "chatgpt"):
+        if (request.get("model") not in (None, "", "default")
+                and normalize_source(request.get("source")) in (None, "chatgpt")):
             return sub.refusal(request["model"], configured_image)
         return None
 

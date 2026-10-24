@@ -9,11 +9,13 @@ from app.db import database
 from app.db.async_database import run_sync
 
 
-def http_client():
+def http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=120, follow_redirects=False)
 
 
-async def generate(account, source, prompt, options):
+async def generate(
+    account: str, source: str, prompt: str, options: native.NativeImageSettings,
+) -> tuple[list[dict[str, str]], str | None]:
     error = "API image generation did not confirm an image. No retry or other provider was used."
     try:
         # Recheck before reading a credential or opening a connection.
@@ -40,11 +42,14 @@ async def generate(account, source, prompt, options):
         else:
             payload.update(resolution=options.size, aspect_ratio="1:1", response_format="b64_json")
         async with http_client() as client:
-            response = await client.post(endpoint, headers={"Authorization": "Bearer " + token}, json=payload)
+            response = await client.post(
+                endpoint, headers={"Authorization": "Bearer " + token}, json=payload,
+            )
         if response.status_code != 200:
             return [], error
         data = response.json().get("data")
-        if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0].get("b64_json"), str):
+        if (not isinstance(data, list) or len(data) != 1
+                or not isinstance(data[0].get("b64_json"), str)):
             return [], error
         # The shared artifact writer validates the PNG/JPEG bytes before publication.
         return [{"result": data[0]["b64_json"], "status": "completed"}], None

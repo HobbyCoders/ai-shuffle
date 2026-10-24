@@ -22,10 +22,13 @@ class Verification:
     usd_per_million_input_tokens: str
     input_token_overhead: int = 1024
 
-    def settings(self):
-        return {"model": self.model, "size": self.size, "quality": self.quality, "format": self.format}
+    def settings(self) -> dict[str, str | None]:
+        return {
+            "model": self.model, "size": self.size,
+            "quality": self.quality, "format": self.format,
+        }
 
-    def price(self, prompt=None):
+    def price(self, prompt: str | None = None) -> dict[str, str]:
         amount = Decimal(self.usd_per_image)
         input_rate = Decimal(self.usd_per_million_input_tokens)
         if (not self.evidence.strip() or not amount.is_finite() or amount <= 0
@@ -35,7 +38,10 @@ class Verification:
         # the actual prompt. No token estimate can turn an unknown rate into free.
         tokens = len(prompt.encode("utf-8")) if prompt is not None else 32000 * 4
         amount += input_rate * Decimal(tokens + self.input_token_overhead) / Decimal(1000000)
-        return {"currency": "USD", "unit": "item", "amount": str(amount), "total": str(amount), "status": "estimated"}
+        return {
+            "currency": "USD", "unit": "item", "amount": str(amount),
+            "total": str(amount), "status": "estimated",
+        }
 
 
 # Official images/generations only; no custom gateway or subscription fallback.
@@ -44,7 +50,7 @@ ENDPOINTS = {"openai": "https://api.openai.com/v1/images/generations",
              "xai": "https://api.x.ai/v1/images/generations"}
 
 
-def verified(kind):
+def verified(kind: str) -> Verification | None:
     record = VERIFIED_API_IMAGES.get(kind) if kind in ENDPOINTS else None
     if record:
         record.price()  # An incomplete review must fail closed.

@@ -112,7 +112,8 @@ class Sources:
                 combination = stored.model_dump() if stored else combination
                 if model and combination["model"] != model:
                     continue
-                if query and query.casefold() not in f"{name} {account} {combination['model']}".casefold():
+                if (query and query.casefold()
+                        not in f"{name} {account} {combination['model']}".casefold()):
                     continue
                 # Plan images carry no per-item charge on the verified route.
                 price = dict(INCLUDED_PRICE) if kind == "image" and name in ("chatgpt", "supergrok") else dict(UNKNOWN_PRICE)
@@ -122,10 +123,13 @@ class Sources:
                 if name == "supergrok" and kind == "video":
                     from app.core.provider.native_video import estimate_price
                     price = estimate_price(native.NativeVideoSettings(**combination))
-                entries.append(Candidate(name, account, worker, combination["model"], kind, True,
-                                         options={k: v for k, v in combination.items() if k != "model"},
-                                         schema=capability, price=price, available=stored is not None,
-                                         reason=None if stored else "Disabled in this account's Native generation settings."))
+                entries.append(Candidate(
+                    name, account, worker, combination["model"], kind, True,
+                    options={k: v for k, v in combination.items() if k != "model"},
+                    schema=capability, price=price, available=stored is not None,
+                    reason=None if stored else
+                    "Disabled in this account's Native generation settings.",
+                ))
             elif not model or source:
                 # Unsupported accounts are visible in discovery, but must not
                 # invent a match for a model explicitly named on another source.
@@ -195,7 +199,9 @@ class Sources:
             raise ValueError("Unsupported or not yet verified subscription combination.") from None
         if candidate.source in ("openai", "xai"):
             from app.core.native_image_verification import verified
-            return replace(candidate, options=options, price=verified(candidate.source).price(prompt))
+            return replace(
+                candidate, options=options, price=verified(candidate.source).price(prompt),
+            )
         return replace(candidate, options=options)
 
     async def reserve(self, candidate, context):
@@ -291,7 +297,9 @@ class Sources:
             items, warning = await supergrok_images.generate(candidate.account, prompt, NativeImageSettings(**options))
         elif candidate.source in ("openai", "xai"):
             from app.core.provider import api_images
-            items, warning = await api_images.generate(candidate.account, candidate.source, prompt, NativeImageSettings(**options))
+            items, warning = await api_images.generate(
+                candidate.account, candidate.source, prompt, NativeImageSettings(**options),
+            )
         else:
             from fluid.messages import Message, Text
             from fluid.providers.base import ProviderRequest

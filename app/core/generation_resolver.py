@@ -267,10 +267,16 @@ class Resolver:
                                   message=CHOOSE_MESSAGE + UNREADABLE_CHOOSE_MESSAGE)
                 return result("choose", kind=kind, options=views, message=CHOOSE_MESSAGE)
             candidate = candidates[0]
-            if not candidate.available or (candidate.source in ("chatgpt", "supergrok", "openai", "xai") and not candidate.verified):
+            if (not candidate.available or (
+                candidate.source in ("chatgpt", "supergrok", "openai", "xai")
+                and not candidate.verified
+            )):
                 if unasked and not context.unattended:
                     return await reoffer("remembered_unavailable")
-                return result("refused", price=candidate.price, reason="unavailable", error=candidate.reason or "Native combination is not verified.")
+                return result(
+                    "refused", price=candidate.price, reason="unavailable",
+                    error=candidate.reason or "Native combination is not verified.",
+                )
             supplied = args.get("options", {})
             if not isinstance(supplied, dict):
                 return result("refused", error="options must be an object.")
