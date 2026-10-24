@@ -342,6 +342,66 @@ New clients accept either signed name on that lane, but stable still accepts
 only stable. Remove the alias only after the compatibility release has reached
 workers that used it.
 
+### Runtime overlay acceptance
+
+`OVERLAYS` in `docker/update_contract.py` stays empty until a candidate runtime
+passes `scripts/release/overlay_acceptance.py` on a disposable container of
+the image, once per architecture (linux-x86_64 and linux-aarch64). The
+contract has no per-architecture switch: `validate()` refuses a required
+capability whose overlays do not cover both, so one architecture passing
+enables nothing. The harness drives the image's own updater and supervisor
+against a private PostgreSQL 16 cluster and a throwaway signing key; nothing
+is published. Its three paths run on one install:
+
+- **apply**: download, pin checks, unpack, build on the overlay interpreter,
+  activation through the supervisor's restart path, `/health/ready` on that
+  interpreter, then a cold restart with the network off that starts it again
+  from the re-verified overlay, with the hand-over supervisor on it too;
+- **rollback**: an overlay with an injected first-start defect is rolled back
+  automatically: the database copy is put back, the failed release's write is
+  gone and the previous release runs on its own overlay again;
+- **refuse**: a PostgreSQL major, an overlay for the other architecture only,
+  an overlay binary for another processor and an image without
+  `runtime-overlays-v1` are all refused before activation, with the user's
+  message, and the running release keeps answering.
+
+Run it as appuser in a disposable container of the image under test (for
+arm64 on an x86-64 host, an `--platform linux/arm64` container through QEMU).
+Mount the harness and the candidate archive, for example a relocatable
+python-build-standalone `install_only` build for that architecture:
+
+```bash
+python3 -I /harness/overlay_acceptance.py --overlay /harness/python.tar.gz \
+    --capability python-3.13 --executable python/bin/python3
+```
+
+It prints a JSON report and exits 0 only when every path passed. The report
+includes the descriptor to pin (`sha256`, `size`, and an `unpacked_size` that
+counts every decompressed byte, tar headers included; the updater bounds the
+whole stream). The stand-in application uses only the standard library, and
+the build skips `pip install ./fluid` alone, so a passing run proves the
+runtime path, not that the real application's dependencies install on that
+interpreter. Check that separately before pinning a Python overlay.
+`OVERLAY_ACCEPTANCE=1 pytest tests/scripts/test_overlay_acceptance.py` runs
+every path on a host with PostgreSQL 16, using the test's own interpreter as
+the overlay.
+
+The boundary for installs already in the field: a release with overlays
+requires `runtime-overlays-v1`, so every image built before that capability
+(and every image still reporting only the base-1 runtime string) shows "Needs
+a newer Docker image" and keeps its version. Those installs need one image
+update first; after it, overlay releases arrive in-app. PostgreSQL majors and
+operating-system or C library changes always need a new image.
+
+Updaters before #194 unpacked overlay files with the unpack time, so a
+Python overlay rewrote its own `.pyc` files on first use and launch-time
+verification then refused it. The activation was refused safely (the running
+version kept going), but no Python overlay could ever start. The fix travels
+in the updater source, which source-supervisor images run after a hand-over.
+Publish the first overlay release only after an ordinary release with that
+fix has reached installs. The acceptance run against an image's own
+`/app/docker` shows whether its baked updater qualifies.
+
 ## Cutting a release
 
 This section was written for the 0.8.19 candidate, the first protected stable

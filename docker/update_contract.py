@@ -62,7 +62,9 @@ REQUIRES = ("base-1",)
 # What a coming release will require. Images without it say so in advance.
 RECOMMENDS = ()
 # Reviewed, hash-pinned tar archives for a release needing a newer runtime.
-# Keep empty until both architectures pass real runtime/rollback acceptance.
+# Keep empty until both architectures pass real runtime/rollback acceptance:
+# scripts/release/overlay_acceptance.py on a disposable container of each
+# (docs/ci/release-channels.md). validate() has no per-architecture switch.
 # Each entry: kind (python/node/chromium/tools), capability (kind-version),
 # platform (linux-x86_64/linux-aarch64), HTTPS url, sha256, size, unpacked_size,
 # executable (relative to archive root), optional library_path. Python must be
