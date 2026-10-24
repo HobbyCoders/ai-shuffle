@@ -544,21 +544,21 @@ async def submit_async(
     held: Optional[Dict[str, Any]] = None
     if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):
         # The owner's own message is the only thing that can answer a question
-        # the assistant is waiting on (app/core/assistant_confirm). The request
+        # the assistant is waiting on (app/core/owner_confirm). The request
         # is settled now, so the job that asked never waits on this chat's
         # queue. The turn still runs, so the assistant sees the reply, and it
         # carries the outcome: session_runtime writes it right after the
         # owner's message, so the transcript reads request, answer, outcome
         # (#484) however long the turn waits to start.
-        from app.core import assistant_confirm
+        from app.core import owner_confirm
 
-        answered = await assistant_confirm.on_owner_message(session_id, prompt)
-        if answered is not None and answered.get("decision") == assistant_confirm.HELD:
+        answered = await owner_confirm.on_owner_message(session_id, prompt)
+        if answered is not None and answered.get("decision") == owner_confirm.HELD:
             # Not an answer: the requests stay pending, and the calls this chat
             # waits on are let go once this message is queued (#523).
             held, answered = answered, None
         if answered is not None:
-            payload = {**(payload or {}), assistant_confirm.ANSWER_KEY: answered}
+            payload = {**(payload or {}), owner_confirm.ANSWER_KEY: answered}
     window_pin: Dict[str, int] = {}
     reactivated: dict[str, Any] = {}
     try:
@@ -583,9 +583,9 @@ async def submit_async(
         if answered is not None:
             # No turn will record the owner's message now, but the request was
             # settled: keep its outcome in the transcript all the same.
-            from app.core import assistant_confirm
+            from app.core import owner_confirm
 
-            await assistant_confirm.record_answer(session_id, answered)
+            await owner_confirm.record_answer(session_id, answered)
         raise
     finally:
         if reactivated:
@@ -593,9 +593,9 @@ async def submit_async(
     if held is not None:
         # The message is durably queued now, so the waiting call's release
         # can hand it to the engine before answering the call "not run yet".
-        from app.core import assistant_confirm
+        from app.core import owner_confirm
 
-        await assistant_confirm.park(session_id, held.get("park") or ())
+        await owner_confirm.park(session_id, held.get("park") or ())
     if not no_kick:
         _kick(session_id)
     if window_pin:

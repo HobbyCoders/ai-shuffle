@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi.encoders import jsonable_encoder
 
+from app.core.owner_compat import REMOTE_USAGE_ACTION
 from app.db import network as store
 from app.db.async_database import run_sync
 from app.network import engine, membership, runners, transport
@@ -463,7 +464,7 @@ def _generation_handler():
 
 
 def _remote_usage_handler():
-    from app.core.assistant_limits import handle_remote_usage
+    from app.core.spending_limits import handle_remote_usage
     return handle_remote_usage
 
 
@@ -575,7 +576,7 @@ _LAZY_HANDLERS = {
     "task-message": _task_message_handler,
     "task-approval": _task_approval_handler,
     "task-approval-answer": _task_approval_answer_handler,
-    "remote-usage": _remote_usage_handler,
+    REMOTE_USAGE_ACTION: _remote_usage_handler,
     "generation": _generation_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,

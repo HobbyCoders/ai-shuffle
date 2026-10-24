@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core import assistant_confirm as confirm
+from app.core import owner_confirm as confirm
 from app.core import away_mode, session_orchestration as orch, turn_manager
 from app.core import provider_agent_approvals as approvals
 from app.core import permission_handler as ph

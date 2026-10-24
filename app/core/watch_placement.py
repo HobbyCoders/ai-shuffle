@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.core.assistant_service import assistant_id
+from app.core.owner_services import assistant_id
 from app.db import database
 from app.db import watches as store
 from app.db.async_database import run_sync

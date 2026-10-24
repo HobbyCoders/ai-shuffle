@@ -60,7 +60,7 @@ _INTEGRITY_ERRORS = (psycopg2.IntegrityError, sqlite3.IntegrityError)
 TERMINAL_STATES = ("completed", "aborted", "parked")
 
 # Birth identity read from the original turn by remote_task, loop_guard,
-# session_orchestration, model_override and assistant_limits. A compatible
+# session_orchestration, model_override and spending_limits. A compatible
 # wake replaces attempt input, not who launched the work or what it owes.
 # Keep this explicit: merging the entire old payload would replay attachments,
 # question answers, task_ids and other per-attempt state. Original values win

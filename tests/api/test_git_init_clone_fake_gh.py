@@ -83,7 +83,7 @@ def _without_git_identity(monkeypatch):
 def test_init_without_identity_creates_a_commit_even_for_an_empty_folder(env, monkeypatch, empty):
     _without_git_identity(monkeypatch)
     target = _project(env, "p-init", "no-identity", {} if empty else {"readme.md": "keep me\n"})
-    from app.db import assistant
+    from app.db import owner_state as assistant
     monkeypatch.setattr(assistant, "get_account", lambda: None)
 
     response = env.client.post("/api/v1/projects/p-init/git/init", json={})
@@ -108,7 +108,7 @@ def test_init_uses_owner_profile_only_for_missing_git_identity_fields(env, monke
     if email:
         git(target, "config", "--global", "user.email", email)
     original_config = git(target, "config", "--global", "--list")
-    from app.db import assistant
+    from app.db import owner_state as assistant
     monkeypatch.setattr(assistant, "get_account", lambda: {
         "introduction": {"detected": {"preferred_name": "Detected Owner"}, "corrections": {"preferred_name": "Profile Owner"}}
     })
@@ -135,7 +135,7 @@ def test_init_empty_folder_with_an_existing_identity_still_creates_initial_commi
 def test_init_uses_the_corrected_owner_name_without_persisting_it(env, monkeypatch):
     _without_git_identity(monkeypatch)
     target = _project(env, "p-init", "owner-name", {})
-    from app.db import assistant
+    from app.db import owner_state as assistant
     monkeypatch.setattr(assistant, "get_account", lambda: {
         "introduction": {"detected": {"preferred_name": "Detected Owner"}, "corrections": {"preferred_name": "Profile Owner"}}
     })

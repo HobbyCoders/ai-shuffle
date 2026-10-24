@@ -4,7 +4,7 @@
  * (resume after a provider's usage limit resets, #1831).
  *
  * UsagePage.svelte renders one `<SettingRow id>` per entry. Spending defaults
- * match the server's (app/db/assistant_limits.py); Usage limits defaults match
+ * match the server's (app/db/spending_limits.py); Usage limits defaults match
  * the server's one pair of switches for every provider.
  */
 import type { SettingEntry } from '../types';

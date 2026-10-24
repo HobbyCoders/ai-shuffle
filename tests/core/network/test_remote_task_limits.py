@@ -12,12 +12,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.core import assistant_limits as limits, assistant_service as service
+from app.core import spending_limits as limits, owner_services as service
 from app.core import provider_agent_supervisor, remote_task, session_orchestration as orch
 from app.core import turn_manager
 from app.core.provider_agent_feed import reset_feed_groups
 from app.core.task_registry import task_registry
-from app.db import assistant as store, assistant_limits as limits_db, database, remote_tasks, turns
+from app.db import owner_state as store, spending_limits as limits_db, database, remote_tasks, turns
 from app.db.base import get_db
 from app.network import control
 from tests.core.network.test_remote_task_control import (

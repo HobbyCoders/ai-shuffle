@@ -386,12 +386,12 @@ def _assistant_confirm(
     target: Optional[str], kwargs: Dict[str, Any], route: Optional[WorkerApprovalRoute],
 ) -> Optional[Dict[str, Any]]:
     """The ``assistant_confirm`` marker when the prompt lands on an owner chat:
-    the owner answers it in the conversation (app/core/assistant_confirm).
+    the owner answers it in the conversation (app/core/owner_confirm).
     None for every other session. Never raises."""
     if not target:
         return None
     try:
-        from app.core import assistant_confirm
+        from app.core import owner_confirm
         from app.core.session_orchestration import is_owner_session
 
         if not is_owner_session(target):
@@ -403,7 +403,7 @@ def _assistant_confirm(
             # A background job (Task worker) under the owner chat: its question
             # names the job, so it is not mistaken for the current request.
             job = route.display_label
-        return assistant_confirm.marker(
+        return owner_confirm.marker(
             kwargs.get("tool_name") or "", kwargs.get("tool_input"),
             chat_title=chat,
             chat_session_id=route.worker_session_id if route is not None else None,

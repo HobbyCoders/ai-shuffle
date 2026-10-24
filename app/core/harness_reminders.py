@@ -50,13 +50,13 @@ HARNESS_REMINDER_OPENERS = (
     # The pre-#371-step-5 wording, still in older transcripts.
     "The owner's assistant started this chat.",
     "Your final reply goes back to the owner's assistant automatically",
-    # app.core.assistant_confirm note lines
+    # app.core.owner_confirm note lines
     "The owner answered yes, so the app approved",
     "The owner answered no, so the app declined",
     # The pre-#523 wording, still in older transcripts.
     "The app declined this request",
     "Waiting for the owner's decision.",
-    # app.core.assistant_confirm.engine_note, on the owner's yes or no
+    # app.core.owner_confirm.engine_note, on the owner's yes or no
     "The owner approved this request:",
     "The owner declined this request:",
     # fluid native lane: ledger, notes, runtime facts, environment, catalog

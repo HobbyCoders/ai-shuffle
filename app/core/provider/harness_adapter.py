@@ -786,7 +786,7 @@ class HarnessAdapter(ProviderAdapter):
             # carry the owner's waiting message on a deny; a deny from Stop,
             # settle or a timeout carries nothing (#523). Plain attribute, so
             # an older fluid without the behaviour ignores it.
-            from app.core.assistant_confirm import deny_carries_steers
+            from app.core.owner_confirm import deny_carries_steers
 
             self._engine.deny_carries_steers = deny_carries_steers
         else:
@@ -1393,7 +1393,7 @@ class HarnessAdapter(ProviderAdapter):
         if proactive is not None:
             opts.extra["assistant_proactive"] = proactive
         # Owner coordination chats: the app asks the owner for high-risk
-        # calls on every seam below (app.core.assistant_permissions).
+        # calls on every seam below (app.core.background_permissions).
         assistant_scope = getattr(sdk_options, "aih_assistant_scope", None)
         if assistant_scope:
             opts.extra["assistant_scope"] = dict(assistant_scope)
@@ -1696,7 +1696,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._options is not None:
             proactive = self._options.extra.get("assistant_proactive")
             if proactive is not None:
-                from app.core.assistant_service import assert_proactive_allowed
+                from app.core.owner_services import assert_proactive_allowed
                 await asyncio.to_thread(
                     assert_proactive_allowed, proactive,
                     self._options.extra.get("app_session_id"),
@@ -2361,7 +2361,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         if self._options is not None and self._options.extra.get("assistant_proactive") is not None:
-            from app.core.assistant_service import assert_proactive_allowed
+            from app.core.owner_services import assert_proactive_allowed
             await asyncio.to_thread(assert_proactive_allowed,
                                     self._options.extra["assistant_proactive"],
                                     self._options.extra.get("app_session_id"))
@@ -3073,7 +3073,7 @@ class HarnessAdapter(ProviderAdapter):
 
     def _owner_needed(self, tool_name: str, tool_input: Any, spec_risk: Optional[str] = None) -> bool:
         """Whether this call in an owner's-assistant session needs the owner's yes."""
-        from app.core.assistant_permissions import needs_owner
+        from app.core.background_permissions import needs_owner
 
         mode = effective_permission_mode(self.permission_mode, delegated=self._is_delegated)
         return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk,
@@ -3087,12 +3087,12 @@ class HarnessAdapter(ProviderAdapter):
         thread), so a subagent never spends the main chat's one-shot pass.
 
         The approver routes it to the assistant's conversation, where only
-        the owner's firm yes approves it (``app.core.assistant_confirm``).
+        the owner's firm yes approves it (``app.core.owner_confirm``).
         With no approver attached nobody can be asked, so it is denied.
         """
         from types import SimpleNamespace
 
-        from app.core.assistant_permissions import ASK_REASON, NO_OWNER_DENIAL
+        from app.core.background_permissions import ASK_REASON, NO_OWNER_DENIAL
 
         if self._can_use_tool is None:
             return NO_OWNER_DENIAL
@@ -3151,7 +3151,7 @@ class HarnessAdapter(ProviderAdapter):
         allow: Optional[bool] = None
         message: Optional[str] = None
         if self._owner_needed(self._permission_tool_name(ev.name), ev.input):
-            from app.core.assistant_permissions import NO_OWNER_DENIAL
+            from app.core.background_permissions import NO_OWNER_DENIAL
 
             allow, message = False, NO_OWNER_DENIAL
         elif bypass_refuses(self.permission_mode, ev.reason_type, ev.classifier_approvable):
@@ -3201,7 +3201,7 @@ class HarnessAdapter(ProviderAdapter):
         allow = True
         message: Optional[str] = None
         if self._owner_needed(self._permission_tool_name(ev.name), ev.input, getattr(ev, "risk", None)):
-            from app.core.assistant_permissions import NO_OWNER_DENIAL
+            from app.core.background_permissions import NO_OWNER_DENIAL
 
             allow, message = False, NO_OWNER_DENIAL
         elif self.permission_mode != "bypassPermissions":
@@ -3278,7 +3278,7 @@ class HarnessAdapter(ProviderAdapter):
                     tool_use_id=ev.tool_use_id, agent_id=None,
                     delegated=self._is_delegated,
                     # A high-risk call in an owner's-assistant session goes to
-                    # the owner whatever the mode (app.core.assistant_permissions).
+                    # the owner whatever the mode (app.core.background_permissions).
                     assistant_owner=self._owner_needed(tool_name, ev.input, getattr(ev, "risk", None)),
                     # The CLI's reason for asking: the approver refuses a
                     # safety check under Bypass and shows the reason under Ask.
@@ -5152,7 +5152,7 @@ class HarnessAdapter(ProviderAdapter):
         async def guarded_dispatch(
             name: str, input: Dict[str, Any], ctx: Optional[ToolCtx] = None, **kwargs: Any,
         ) -> ToolOutcome:
-            from app.core.assistant_permissions import has_own_consent
+            from app.core.background_permissions import has_own_consent
 
             denial = None
             if not native and self._owner_needed(name, input):
@@ -5160,7 +5160,7 @@ class HarnessAdapter(ProviderAdapter):
                 denial = await self._ask_owner(name, input, agent_id=agent_id)
             elif has_own_consent(name) and self.permission_mode != "bypassPermissions":
                 # The tool's own card or grant is the owner's consent
-                # (assistant_permissions.OWN_CONSENT_TOOLS); a saved Deny still
+                # (background_permissions.OWN_CONSENT_TOOLS); a saved Deny still
                 # wins, as it does over every mode short of Bypass.
                 try:
                     if await self._saved_rule_decision(name, input) == "deny":
@@ -6012,7 +6012,7 @@ def _assistant_scope(options: Optional[SessionOptions]) -> Optional[Dict[str, An
 
 class _AssistantPermissionEngine(PermissionEngine):
     """The native engine for the owner's assistant: its mode (Bypass), except
-    that a high-risk call asks (``app.core.assistant_permissions``). The ask
+    that a high-risk call asks (``app.core.background_permissions``). The ask
     reaches the app's approver, which puts it to the owner past any mode or
     saved rule. A deny from a rule still wins."""
 
@@ -6021,7 +6021,7 @@ class _AssistantPermissionEngine(PermissionEngine):
         self.assistant_scope = scope
 
     def decide(self, spec, input, *, cwd=None):
-        from app.core.assistant_permissions import needs_owner
+        from app.core.background_permissions import needs_owner
         from fluid.permissions.engine import Verdict
 
         verdict = super().decide(spec, input, cwd=cwd)

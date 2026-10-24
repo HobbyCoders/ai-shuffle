@@ -114,7 +114,7 @@ def _admit(session_id: str, settled: dict[str, Any], terminal: dict[str, Any]) -
         turn = turns.enqueue_turn(successor_id, source, prompt=prompt, command_id=command_id,
                                   profile_id=row["profile_id"], parent_turn_id=settled.get("id"),
                                   payload=payload, _conn=conn)
-        from app.core.assistant_limits import _job_minutes
+        from app.core.spending_limits import _job_minutes
         now = datetime.now(UTC)
         cur.execute("SELECT prior_work_ms FROM coordinator_handoffs WHERE successor_session_id=%s", (session_id,))
         inherited = cur.fetchone()

@@ -7,7 +7,7 @@ from datetime import timedelta
 import pytest
 
 from app.core import watch_manager
-from app.db import assistant, database, turns, watch_migration, watches as store
+from app.db import owner_state as assistant, database, turns, watch_migration, watches as store
 from app.db.base import get_db, table_exists
 from tests.core.test_watches import owner, mail  # noqa: F401
 

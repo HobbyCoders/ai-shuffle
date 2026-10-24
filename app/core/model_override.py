@@ -785,7 +785,7 @@ async def _ask_owner(session_id: str, profile_id: Optional[str], *, model: str,
     if isinstance(result, PermissionResultAllow) or getattr(result, "behavior", None) == "allow":
         return APPROVED
     message = str(getattr(result, "message", "") or "")
-    from app.core.assistant_confirm import NOT_RUN_YET
+    from app.core.owner_confirm import NOT_RUN_YET
 
     if message == NOT_RUN_YET:
         # The owner sent another message instead of answering; the request

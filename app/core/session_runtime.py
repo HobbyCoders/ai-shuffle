@@ -488,7 +488,7 @@ _REDELIVERY_NOTE = (
 def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
     """The engine-facing text of a turn the caller started in a voice call, or
     of the owner's yes or no to an approval whose call was answered "not run
-    yet" (``assistant_confirm.engine_note``).
+    yet" (``owner_confirm.engine_note``).
 
     The voice guidance is appended to that turn's own message, the way the
     per-turn environment note is, so the system prompt (the provider's cached
@@ -500,7 +500,7 @@ def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
         return prompt
     # The owner's yes or no to a request whose call was answered "not run
     # yet": the agent learns the outcome with the owner's own words (#523).
-    from app.core.assistant_confirm import engine_note
+    from app.core.owner_confirm import engine_note
 
     approval = engine_note(payload)
     if approval:
@@ -1331,7 +1331,7 @@ class SessionRuntime:
         finally:
             # A one-shot approval pass lives only as long as the turn it was
             # armed for, however the turn ends (done, Stop, settle).
-            from app.core import assistant_confirm as _confirm
+            from app.core import owner_confirm as _confirm
 
             _confirm.drop_passes(sid, self.turn_id)
             # Deregister ourselves as the live runtime (self-guarded so a fresh
@@ -1391,7 +1391,7 @@ class SessionRuntime:
         if proactive is not None or override_proactive is not None:
             if proactive != override_proactive:
                 raise ValueError("Proactive turn provenance differs between payload and overrides")
-            from app.core.assistant_service import assert_proactive_allowed
+            from app.core.owner_services import assert_proactive_allowed
             await asyncio.to_thread(assert_proactive_allowed, proactive, self.session_id)
             turn_overrides["_assistant_proactive"] = proactive
         from app.core.turn_scheduler import current_task_frames
@@ -1472,9 +1472,9 @@ class SessionRuntime:
             if not resume and not already_recorded:
                 # The owner's message answered an approval in words: its outcome
                 # goes right after the message it came from (#484).
-                from app.core import assistant_confirm
+                from app.core import owner_confirm
 
-                await assistant_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
+                await owner_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
             completion_frames, prompt = await refresh_completion_prompt()
             if completion_frames:
                 # The wake turn is the claimed completions' delivery point, so this
@@ -1560,7 +1560,7 @@ class SessionRuntime:
             # The owner's yes to a call that was let go "not run yet" (or a
             # wake carrying a yes given elsewhere) admits that call once, in
             # this turn only (#523).
-            from app.core import assistant_confirm as _confirm
+            from app.core import owner_confirm as _confirm
 
             _confirm.arm_pass(self.session_id, self.turn.get("payload"), self.turn_id)
             async for event in _stream_to_websocket_impl(
@@ -1892,7 +1892,7 @@ class SessionRuntime:
                     await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
                     # Armed only once the engine took the message: a steer that
                     # failed leaves the pass for the turn the row runs in.
-                    from app.core import assistant_confirm as _confirm
+                    from app.core import owner_confirm as _confirm
 
                     _confirm.arm_pass(self.session_id, row.get("payload"), self.turn_id)
             except NotImplementedError:
@@ -2355,9 +2355,9 @@ class SessionRuntime:
                     return
                 # An approval answered in words: its outcome follows the
                 # message, wherever the message lands (#484).
-                from app.core import assistant_confirm
+                from app.core import owner_confirm
 
-                await assistant_confirm.after_owner_message(self.session_id, row.get("payload"))
+                await owner_confirm.after_owner_message(self.session_id, row.get("payload"))
                 await self._persist_user_message(
                     content, profile_id=profile_id, source=row.get("source") or "user",
                 )

@@ -67,7 +67,7 @@ async def test_unattended_cannot_save_its_own_choice_even_with_confirmation() ->
 
 @pytest.mark.parametrize("action", ["get", "remember", "forget", "other", None])
 def test_permission_level_requires_host_approval_for_writes(action: str | None) -> None:
-    from app.core import assistant_permissions as permissions
+    from app.core import background_permissions as permissions
 
     name = "mcp__app-config__generationPreferences"
     assert permissions.declared(name)

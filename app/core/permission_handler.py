@@ -85,7 +85,7 @@ class PermissionRequest:
     provider_agent: Optional[Dict[str, Any]] = None
 
     # Set ONLY on a prompt the owner answers in the assistant's conversation
-    # (see app/core/assistant_confirm): ``{question, chat_session_id?}``.
+    # (see app/core/owner_confirm): ``{question, chat_session_id?}``.
     assistant_confirm: Optional[Dict[str, Any]] = None
 
     # Request lifecycle state: "pending" | "deferred"
@@ -214,8 +214,8 @@ class PermissionHandler:
                 saved rule would decide it (the first computer-use grant in a
                 session).
             assistant_confirm: ``{question, ...}`` when the owner answers
-                this in the assistant's conversation (app/core/assistant_confirm);
-                the row then waits ``assistant_confirm.TTL_SECONDS``.
+                this in the assistant's conversation (app/core/owner_confirm);
+                the row then waits ``owner_confirm.TTL_SECONDS``.
             safety_check: the claude CLI asks because of a safety check
                 only a person may pass; a switch to Bypass never releases it.
 
@@ -387,7 +387,7 @@ class PermissionHandler:
         # owner answers it "not run yet" instead of holding that message (#523).
         own_confirm = assistant_confirm is not None and provider_agent is None
         if own_confirm:
-            from app.core import assistant_confirm as confirm_flow
+            from app.core import owner_confirm as confirm_flow
 
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
@@ -435,7 +435,7 @@ class PermissionHandler:
             payload["safety_check"] = True
         ttl_seconds = PERMISSION_TTL_SECONDS
         if assistant_confirm is not None:
-            from app.core.assistant_confirm import TTL_SECONDS as ttl_seconds
+            from app.core.owner_confirm import TTL_SECONDS as ttl_seconds
         row = await asyncio.to_thread(
             interactions.create_interaction,
             session_id, PERMISSION_KIND, payload, ttl_seconds,
@@ -745,13 +745,13 @@ class PermissionHandler:
             for emit_id, _rid, emit_answer in resolved_emits
         ]
         if settled:
-            from app.core import assistant_confirm
+            from app.core import owner_confirm
             from app.db import interactions as interactions_db
 
             for settled_id, settled_decision in settled:
                 answered = await run_sync(interactions_db.get_interaction, settled_id)
-                if assistant_confirm.is_released(answered):
-                    await assistant_confirm.answered_elsewhere(
+                if owner_confirm.is_released(answered):
+                    await owner_confirm.answered_elsewhere(
                         session_id, answered, settled_decision,
                     )
 

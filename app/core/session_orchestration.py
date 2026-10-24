@@ -1716,7 +1716,7 @@ def _link_remote_chat(sender_id, session_id, device_id, title):
     """Count a chat made on another worker against the owner's spending limit
     when a coordination chat (or one of its jobs) asked for it. Never raises."""
     try:
-        from app.core.assistant_service import link_remote_job
+        from app.core.owner_services import link_remote_job
         link_remote_job(sender_id, session_id, device_id, "chat", title)
     except Exception:  # noqa: BLE001 — the chat exists either way
         log.warning("Could not link remote chat %s to the assistant's limits", session_id, exc_info=True)

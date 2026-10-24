@@ -7,9 +7,9 @@ from __future__ import annotations
 from typing import Any
 import pytest
 
-from app.core import assistant_service as service
+from app.core import owner_services as service
 from app.core.config import settings
-from app.db import assistant as store, database
+from app.db import owner_state as store, database
 from app.network import engine, session_active
 from tests.core.network.harness import converge, join
 

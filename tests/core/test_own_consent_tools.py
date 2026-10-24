@@ -1,7 +1,7 @@
 """Tools that put their own consent in front of the owner are not gated twice (#527).
 
 In an owner chat, a high-risk call waits for the owner's typed yes
-(``assistant_permissions``). Some tools already ask the owner themselves: the
+(``background_permissions``). Some tools already ask the owner themselves: the
 private access card, a grant the owner approved, the broker's one-shot card,
 the screen-access card. Asking a yes/no before those was a second gate for one
 decision. ``OWN_CONSENT_TOOLS`` lists them; the gate stands aside when their
@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import assistant_permissions as ap
+from app.core import background_permissions as ap
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 from app.core.chat_access import AccessDenied
 from app.core.provider import harness_adapter as ha
@@ -278,6 +278,6 @@ async def test_ordinary_tools_still_get_their_permission_prompt_in_ask_mode(tmp_
 
 
 def test_the_screen_access_card_reads_plainly_in_words():
-    from app.core import assistant_confirm
-    assert assistant_confirm.describe(REQUEST_ACCESS, {"apps": ["Notepad", "Edge"]}) == (
+    from app.core import owner_confirm
+    assert owner_confirm.describe(REQUEST_ACCESS, {"apps": ["Notepad", "Edge"]}) == (
         "control Notepad, Edge on this computer")

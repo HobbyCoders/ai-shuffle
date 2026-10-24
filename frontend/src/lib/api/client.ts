@@ -533,7 +533,7 @@ export interface PermissionRequest {
 	created_at?: string;
 	/**
 	 * Set when the assistant asks for this approval in its conversation instead
-	 * of on a card (app/core/assistant_confirm.py). The owner answers yes or no
+	 * of on a card (app/core/owner_confirm.py). The owner answers yes or no
 	 * in the message box; `chat_session_id` names the started chat that asked.
 	 */
 	assistant_confirm?: { question?: string | null; chat_session_id?: string | null } | null;

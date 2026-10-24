@@ -1,17 +1,17 @@
 """Durable budget and confirmation-producing paths, on the isolated test DB."""
 import pytest
 
-from app.core import assistant_limits, generation_budget
+from app.core import spending_limits, generation_budget
 from app.core.generation_confirmations import Confirmations
 
 
 def test_generation_reservations_use_existing_cap_and_count_in_status():
-    assert assistant_limits.status()["spent_today_usd"] == 0
+    assert spending_limits.status()["spent_today_usd"] == 0
     assert generation_budget.reserve("19.95")
-    assert assistant_limits.status()["spent_today_usd"] == 19.95
+    assert spending_limits.status()["spent_today_usd"] == 19.95
     assert not generation_budget.reserve("0.06")
     assert generation_budget.reserve("0.05")
-    assert assistant_limits.status()["limit_reached"]
+    assert spending_limits.status()["limit_reached"]
     assert not generation_budget.reserve("0.01")
 
 
@@ -19,7 +19,7 @@ def test_generation_reservations_use_existing_cap_and_count_in_status():
 def test_invalid_reservation_cannot_change_budget(amount):
     with pytest.raises(ValueError):
         generation_budget.reserve(amount)
-    assert assistant_limits.status()["spent_today_usd"] == 0
+    assert spending_limits.status()["spent_today_usd"] == 0
 
 
 async def test_confirmation_survives_tool_server_rebuild_and_is_one_use():
@@ -73,8 +73,8 @@ def test_budget_does_not_round_off_small_reservations():
 def test_reported_overrun_is_counted_even_if_it_crosses_the_cap():
     assert generation_budget.reserve("19.99")
     generation_budget.record_overrun("0.04")
-    assert assistant_limits.status()["spent_today_usd"] == 20.03
-    assert assistant_limits.status()["limit_reached"]
+    assert spending_limits.status()["spent_today_usd"] == 20.03
+    assert spending_limits.status()["limit_reached"]
     assert not generation_budget.reserve("0.01")
     with pytest.raises(ValueError):
         generation_budget.record_overrun("-1")

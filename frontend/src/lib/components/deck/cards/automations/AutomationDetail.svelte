@@ -11,9 +11,9 @@
 	import AutomationJobChoices from './AutomationJobChoices.svelte';
 	import type { Profile } from '$lib/api/client';
 
-	/** The assistant's built-in agent is left out of /agents (app/db/assistant.py),
-	 *  so its absence from that list does not mean it was removed. */
-	const ASSISTANT_AGENT_ID = 'builtin_assistant';
+	/** Mixed-version tombstone only: older peers may send this retired ID.
+	 * Never treat it as a live/selectable agent; the API rejects it with 410. */
+	const RETIRED_AGENT_ID = 'builtin_assistant';
 
 	interface Props {
 		automation: Automation;
@@ -61,7 +61,7 @@
 
 	const agentMissing = $derived(
 		profiles !== null &&
-			automation.profile_id !== ASSISTANT_AGENT_ID &&
+			automation.profile_id !== RETIRED_AGENT_ID &&
 			!profiles.some((p) => p.id === automation.profile_id)
 	);
 

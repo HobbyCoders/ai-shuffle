@@ -1271,9 +1271,9 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
 
 
 def test_the_owner_prompt_reads_as_one_question_in_the_assistant():
-    from app.core import assistant_confirm
+    from app.core import owner_confirm
 
-    question = assistant_confirm.question(mo.PROMPT_TOOL, {
+    question = owner_confirm.question(mo.PROMPT_TOOL, {
         "model": "prov:lane:astra", "model_switch": "start pinned on GPT-6 Astra (Lane) instead of Opus"})
     assert question == ("Do you authorize me to start pinned on GPT-6 Astra (Lane) instead of Opus? "
                         "Please answer yes or no.")

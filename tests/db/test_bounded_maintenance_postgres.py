@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import pytest
 
-from app.db import (assistant, auth, automations, background_tasks, database,
+from app.db import (owner_state as assistant, auth, automations, background_tasks, database,
                     error_logs, fluid_events, git_ops, interactions, mobile_tools,
                     network, retention, session_events, upload_blobs)
 from app.core import startup_reconcile

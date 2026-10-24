@@ -366,8 +366,8 @@ def test_a_message_to_a_child_declared_offline_says_so(workers, monkeypatch):
 
 
 def test_spend_after_the_notice_is_still_counted_when_the_worker_returns(workers, monkeypatch):
-    from app.core import assistant_limits as limits, assistant_service as service
-    from app.db import assistant as store
+    from app.core import spending_limits as limits, owner_services as service
+    from app.db import owner_state as store
     from tests.core.network.test_remote_task_limits import book, make_coordinator, refresh, spent, started_child
 
     a, b, router = network(workers, monkeypatch)

@@ -20,7 +20,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "fluid")]
 def measure_identity_snapshot() -> dict[str, int]:
     from fluid.codemode.skills import SkillStore
 
-    from app.core.assistant_introduction import remember_identity
+    from app.core.owner_introduction import remember_identity
     from app.core.memory_reminder import plan_memory_note
 
     with TemporaryDirectory(prefix="owner-identity-measure-") as directory:

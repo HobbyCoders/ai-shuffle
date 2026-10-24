@@ -15,7 +15,7 @@ import pytest
 from fastapi.encoders import jsonable_encoder
 
 from app.core import (
-    assistant_service,
+    owner_services,
     turn_manager,
     watch_delivery,
     watch_manager,
@@ -66,7 +66,7 @@ def peers(
     monkeypatch.setattr(base, "get_connection", connect)
     monkeypatch.setattr(database, "get_connection", connect)
     monkeypatch.setattr(base, "_close_connection", lambda conn: conn.close())
-    monkeypatch.setattr(assistant_service, "assistant_id", lambda: names[current.get()])
+    monkeypatch.setattr(owner_services, "assistant_id", lambda: names[current.get()])
     monkeypatch.setattr(placement, "assistant_id", lambda: names[current.get()])
     monkeypatch.setattr(runners, "self_device_id", current.get)
 
@@ -297,14 +297,14 @@ async def test_forged_identity_and_both_budgets_refuse(
         await watch_delivery.handle(
             {"operation": "deliver", "watch_id": wid, "event_id": event["id"]}, "dev_wrong"
         )
-    from app.core import assistant_limits
+    from app.core import spending_limits
 
     for blocked in ("ServerWorker", "DesktopWorker"):
 
         def status(worker: str = blocked) -> dict[str, bool]:
-            return {"limit_reached": assistant_service.assistant_id() == worker}
+            return {"limit_reached": owner_services.assistant_id() == worker}
 
-        monkeypatch.setattr(assistant_limits, "status", status)
+        monkeypatch.setattr(spending_limits, "status", status)
         with pytest.raises(ValueError, match="budget"):
             await watch_delivery.handle(
                 {"operation": "deliver", "watch_id": wid, "event_id": event["id"]}, "dev_server"
@@ -346,17 +346,17 @@ async def test_remote_watch_booked_usage_counts_on_both_workers(
     monkeypatch: pytest.MonkeyPatch,
     legacy_instance: bool,
 ) -> None:
-    from app.core import assistant_limits
+    from app.core import spending_limits
     from app.core.query_persistence import usage_settlement_key
     from app.db import analytics
-    from app.db import assistant_limits as limits_db
+    from app.db import spending_limits as limits_db
 
     sid = peers["session"]["id"]
     if legacy_instance:
         from types import SimpleNamespace
 
         monkeypatch.setattr(
-            assistant_service,
+            owner_services,
             "_network",
             lambda: SimpleNamespace(device_id=runners.self_device_id()),
         )
@@ -384,7 +384,7 @@ async def test_remote_watch_booked_usage_counts_on_both_workers(
         key = usage_settlement_key(sid, booked)
         assert analytics.settle_turn_usage(sid, key, model="test", cost_usd=cost)
         assert not analytics.settle_turn_usage(sid, key, model="test", cost_usd=cost)
-    state = assistant_limits.status()
+    state = spending_limits.status()
     assert state["spent_today_usd"] == 2.25  # Never the owner's unrelated $9 turn.
     assert state["limit_reached"]
     with pytest.raises(ValueError, match="budget"):
@@ -399,8 +399,8 @@ async def test_remote_watch_booked_usage_counts_on_both_workers(
                 "UPDATE sessions SET instance_id=%s,owner_device_id=%s WHERE id=%s",
                 ("DesktopWorker", "dev_server", sid),
             )
-        assert not assistant_service._owned_here(database.get_session(sid))
-        assert assistant_limits.status()["spent_today_usd"] == 0
+        assert not owner_services._owned_here(database.get_session(sid))
+        assert spending_limits.status()["spent_today_usd"] == 0
         with base.get_db() as conn:
             conn.cursor().execute(
                 "UPDATE sessions SET instance_id=%s,owner_device_id=%s WHERE id=%s",
@@ -410,11 +410,11 @@ async def test_remote_watch_booked_usage_counts_on_both_workers(
         await watch_manager.WatchManager().run_once()
         await watch_manager.WatchManager().run_once()
         assert store.events(wid, ("delivered",))[0]["cost_usd"] == 2.25
-        assert assistant_limits.status()["spent_today_usd"] == 2.25
-        assert assistant_limits.status()["limit_reached"]
+        assert spending_limits.status()["spent_today_usd"] == 2.25
+        assert spending_limits.status()["limit_reached"]
         snapshot = store.export_watch(wid, "dev_desktop")
     await placement.call("dev_desktop", "import", snapshot=snapshot, source="dev_server")
-    assert assistant_limits.status()["spent_today_usd"] == 2.25  # No transfer double-booking.
+    assert spending_limits.status()["spent_today_usd"] == 2.25  # No transfer double-booking.
 
 
 @pytest.mark.asyncio

@@ -331,9 +331,9 @@ def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str
     """Count the child against the owner's spending limit when a coordination
     chat (or one of its jobs) started it. Blocking; never raises."""
     try:
-        from app.core import assistant_service
+        from app.core import owner_services
 
-        assistant_service.link_remote_job(caller_session_id, worker_id, device_id, "task", label)
+        owner_services.link_remote_job(caller_session_id, worker_id, device_id, "task", label)
     except Exception:  # noqa: BLE001 — the child runs either way
         logger.warning("remote_task: could not link %s to the assistant's limits", worker_id, exc_info=True)
 
@@ -341,10 +341,10 @@ def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str
 def _forget_job(worker_id: str) -> None:
     """Undo :func:`_link_job` for a child that provably never started. Blocking; never raises."""
     try:
-        from app.core import assistant_service
-        from app.db import assistant as assistant_store
+        from app.core import owner_services
+        from app.db import owner_state as assistant_store
 
-        assistant_store.forget_remote_job(assistant_service.assistant_id(), worker_id)
+        assistant_store.forget_remote_job(owner_services.assistant_id(), worker_id)
     except Exception:  # noqa: BLE001
         logger.debug("remote_task: could not forget the link of %s", worker_id, exc_info=True)
 
@@ -397,11 +397,11 @@ async def dispatch_remote(
     if ctx is None:
         return {"ok": False, "error": (
             f"This worker is not part of a worker network; omit worker to run it here; {NOT_DISPATCHED}.")}
-    from app.core import assistant_limits
+    from app.core import spending_limits
 
     # The owner's daily spending limit, as for a local worker. Not a
     # NOT_DISPATCHED refusal: running it here instead is refused too.
-    refusal = await asyncio.to_thread(assistant_limits.start_refusal, caller_session_id)
+    refusal = await asyncio.to_thread(spending_limits.start_refusal, caller_session_id)
     if refusal:
         return {"ok": False, "error": refusal}
 
@@ -2059,7 +2059,7 @@ async def notice_offline(dispatch: Mapping[str, Any], since: str, *, unknown_sta
     may still be running the child: its report is still accepted later and
     wakes the caller again (``handle_task_report``), a message to it is
     refused with a plain reason while the worker stays away, and its spend is
-    still collected when it is back (``assistant_limits.refresh_remote``).
+    still collected when it is back (``spending_limits.refresh_remote``).
     ``unknown_start`` instead ends a held uncertain Swarm admission whose
     reachable target still knows no child, with :data:`UNCONFIRMED_START_REASON`.
     True when this call sent the notice.
@@ -2591,10 +2591,10 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     if len(text) > MAX_MESSAGE_CHARS:
         return {"text": (f"Could not deliver to {who}: the message is {len(text)} characters; another "
                          f"worker takes at most {MAX_MESSAGE_CHARS}."), "is_error": True}
-    from app.core import assistant_limits
+    from app.core import spending_limits
 
     # The assistant's daily spending limit (S11): that worker cannot see it.
-    refusal = await asyncio.to_thread(assistant_limits.message_refusal, worker_id)
+    refusal = await asyncio.to_thread(spending_limits.message_refusal, worker_id)
     if refusal:
         return {"text": f"Could not deliver to {who}: {refusal}", "is_error": True}
     known = dispatch.get("completion_id")
@@ -2679,10 +2679,10 @@ async def _reopen_locked(dispatch: Mapping[str, Any], completion_id: str) -> boo
     owner = dispatch["owner_session_id"]
     if not await asyncio.to_thread(remote_tasks.reopen_dispatch, worker_id, completion_id):
         return False
-    from app.core import assistant_limits
+    from app.core import spending_limits
 
     # Running again: its spend is collected again even if it had aged out.
-    await asyncio.to_thread(assistant_limits.wake_remote_job, worker_id)
+    await asyncio.to_thread(spending_limits.wake_remote_job, worker_id)
     for session_id in dict.fromkeys((root, owner)):
         await task_registry.ensure_hydrated(session_id)
     record = task_registry.get_task(root, worker_id, durable=True)

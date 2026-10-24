@@ -468,12 +468,12 @@ def _proxy_tag(request: _Request, route) -> Dict[str, Any]:
 def _confirm_marker(request: _Request, route) -> Optional[Dict[str, Any]]:
     """The ``assistant_confirm`` marker when the root is an owner chat. Never raises."""
     try:
-        from app.core import assistant_confirm
+        from app.core import owner_confirm
         from app.core.session_orchestration import is_owner_session
 
         if not is_owner_session(request.root_session_id):
             return None
-        return assistant_confirm.marker(request.tool_name, request.tool_input,
+        return owner_confirm.marker(request.tool_name, request.tool_input,
                                         chat_title=route.label,
                                         chat_session_id=request.worker_session_id)
     except Exception:  # noqa: BLE001 — an ordinary card is the fallback
@@ -492,7 +492,7 @@ def _ttl_for(confirm: Optional[Dict[str, Any]]) -> int:
     from app.core import permission_handler
 
     if confirm is not None:
-        from app.core.assistant_confirm import TTL_SECONDS
+        from app.core.owner_confirm import TTL_SECONDS
 
         return int(TTL_SECONDS)
     return int(permission_handler.PERMISSION_TTL_SECONDS)

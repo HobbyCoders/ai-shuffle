@@ -51,7 +51,7 @@ it("shows today's spend against the limit, read from the limits record", async (
 	const meter = screen.getByRole('meter', { name: 'Spent today' });
 	expect(meter.getAttribute('aria-valuetext')).toMatch(/4\.50 of .*20/);
 	expect(meter.getAttribute('data-state')).toBe('ok');
-	expect(String(vi.mocked(fetch).mock.calls[0][0])).toMatch(/\/assistant\/limits$/);
+	expect(String(vi.mocked(fetch).mock.calls[0][0])).toMatch(/\/owner\/limits$/);
 });
 
 it('asks before turning the cap off, then sends the confirmation', async () => {

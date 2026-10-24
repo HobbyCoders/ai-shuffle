@@ -171,8 +171,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 		return json(subagentDefault);
 	}
 	if (path === '/assistant') return json({ agent_id: 'juniper', home_session_id: 'h1', configured: true, enabled: true, status: 'ready', research_sources: 2, agent: identities[0] });
-	if (path === '/assistant/agents') return json(identities);
-	const identity = path.match(/^\/assistant\/agents\/([^/]+)\/identity$/);
+	if (path === '/owner/agents') return json(identities);
+	const identity = path.match(/^\/owner\/agents\/([^/]+)\/identity$/);
 	if (identity) {
 		const id = decodeURIComponent(identity[1]);
 		const row = identities.find((i) => i.id === id) ?? { id, name: id, avatar_id: 'robot' };

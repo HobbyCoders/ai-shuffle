@@ -15,7 +15,7 @@ from app.core import (
     watches,
     watch_sources as sources,
     watch_manager as manager,
-    assistant_service,
+    owner_services,
     turn_manager,
 )
 from app.core.config import settings
@@ -707,7 +707,7 @@ async def test_retention_runs_without_legacy_account_and_cancels_worker(
     owner: dict[str, Any], monkeypatch: MonkeyPatch
 ) -> None:
     import asyncio
-    from app.db import assistant as owner_store
+    from app.db import owner_state as owner_store
     from app.core import orchestration_limits
 
     assert owner_store.get_account() is None
@@ -732,7 +732,7 @@ async def test_retention_runs_without_legacy_account_and_cancels_worker(
     async def slow_poll() -> None:
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(assistant_service, "detection_wanted", lambda: False)
+    monkeypatch.setattr(owner_services, "detection_wanted", lambda: False)
     monkeypatch.setattr(owner_store, "retention_sweep", retention)
     monkeypatch.setattr(orchestration_limits, "enforce", AsyncMock())
     loop = manager.WatchManager()
@@ -754,7 +754,7 @@ async def test_retention_runs_without_legacy_account_and_cancels_worker(
 async def test_live_watch_accounts_only_its_turns_in_project_chat(
     owner: dict[str, Any], tmp_path: Path, stopped: bool
 ) -> None:
-    from app.core import assistant_limits
+    from app.core import spending_limits
     from app.core.query_persistence import usage_settlement_key
     from app.db import session_events
 
@@ -790,7 +790,7 @@ async def test_live_watch_accounts_only_its_turns_in_project_chat(
             }
         ],
     )
-    measured = assistant_limits._measure(
+    measured = spending_limits._measure(
         limits={"spend_limit_enabled": False, "job_limit_enabled": False}
     )
     assert measured["spent"] == pytest.approx(0.4)

@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from app.core.owner_compat import OWNER_COLLECTION
+
 MODE_SHARED = "shared"
 MODE_OWNER_ORDERED = "owner_ordered"
 
@@ -193,13 +195,12 @@ _register(Collection(
     notes="Profiles and their MCP definitions."))
 
 _register(Collection(
-    name="assistant", table="assistant_account", keys=("id",),
+    name=OWNER_COLLECTION, table="assistant_account", keys=("id",),
     fields=("id", "agent_id", "enabled", "paused", "sources", "introduction", "home_session_id",
             "home_device_id", "home_created_at", "assistant_name", "avatar_id", "created_at", "updated_at"),
-    json_fields=("sources", "introduction"), resource="assistant", priority=21,
-    notes="The owner's assistant research account: its built-in agent, introduction and source opt-ins. The name, "
-          "avatar and home fields are retired (#371) and stay only for older peers. Research runs, events and source "
-          "watermarks stay on the worker that runs them."))
+    json_fields=("sources", "introduction"), resource=OWNER_COLLECTION, priority=21,
+    notes="Owner introduction/account compatibility. Historical name, avatar, home and source "
+          "fields stay for old peers only; they never create a home or research runner."))
 
 _register(Collection(
     name="model_providers", table="model_providers", keys=("id",),

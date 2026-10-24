@@ -209,7 +209,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
     async def update_subagent(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
-        from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+        from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("subagent_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")
 
@@ -287,7 +287,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
     async def delete_subagent(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
-        from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+        from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("subagent_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")
 

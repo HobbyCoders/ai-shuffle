@@ -8,9 +8,9 @@ import uuid
 
 import pytest
 
-from app.core import assistant_service as service
+from app.core import owner_services as service
 from app.core.config import settings
-from app.db import assistant as store, database
+from app.db import owner_state as store, database
 from app.db.base import get_db, table_exists
 
 

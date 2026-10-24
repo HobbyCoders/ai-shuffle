@@ -1,6 +1,6 @@
 """Owner coordination admission and spending enforcement.
 
-Accounting and the limits API use assistant_limits' storage, day boundaries
+Accounting and the limits API use spending_limits' storage, day boundaries
 and remote cumulative-cost protocol.
 """
 import json
@@ -33,7 +33,7 @@ def tracked_roles(now=None):
     principals and ancestry are read in bounded batches (one pass per
     ancestry level), never one query per session.
     """
-    from app.core import assistant_limits as accounting
+    from app.core import spending_limits as accounting
     from app.db.base import get_db
     start = accounting.day_window(now)[1]
     with get_db() as conn:
@@ -74,7 +74,7 @@ class _Batch(_Reads):
     """The same inputs for many sessions, preloaded with bounded queries."""
 
     def __init__(self, ids):
-        from app.core import assistant_limits as accounting
+        from app.core import spending_limits as accounting
         self.rows, self.starts, self.principals, self.memo = {}, {}, {}, {}
         self.principals_ok = True
         self._retired = _retired_homes()
@@ -183,7 +183,7 @@ def role(session_id):
 
 
 def start_refusal(session_id):
-    from app.core import assistant_limits as accounting
+    from app.core import spending_limits as accounting
     try:
         if role(session_id) is None:
             return None
@@ -201,7 +201,7 @@ def assert_can_start(session_id):
 
 
 def turn_refusal(session_id, source=None, *, payload=None):
-    from app.core import assistant_limits as accounting
+    from app.core import spending_limits as accounting
     try:
         kind = role(session_id)
         if kind is None or accounting._person_input(source, payload):
@@ -221,7 +221,7 @@ def turn_refusal(session_id, source=None, *, payload=None):
 
 async def enforce(now=None):
     """Stop work past the limits. Never raises."""
-    from app.core import turn_manager, assistant_limits as accounting
+    from app.core import turn_manager, spending_limits as accounting
     from app.db.async_database import run_sync
     try:
         observed = await accounting.refresh_remote(now)

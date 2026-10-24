@@ -10,7 +10,7 @@ pump and recorder stubbed (the harness from ``test_steering_delivery_flows``).
 
 from unittest.mock import AsyncMock, patch
 
-from app.core import assistant_confirm, session_runtime
+from app.core import owner_confirm, session_runtime
 from app.db import turns as turns_db
 from tests.core.test_steering_delivery_flows import (  # noqa: F401  (autouse fixture)
     _clean_module_state,
@@ -28,13 +28,13 @@ def _answer(request_id, decision="approved"):
 def _outcomes_logged_into(log):
     async def _record(session_id, answer):
         log.append(("outcome", answer["request_id"], answer["decision"]))
-    return patch.object(assistant_confirm, "record_answer", new=AsyncMock(side_effect=_record))
+    return patch.object(owner_confirm, "record_answer", new=AsyncMock(side_effect=_record))
 
 
 async def test_the_outcome_follows_the_owner_message_that_starts_a_turn(mock_db):
     sid = _seed_session("confirm-order-1")
     turn = turns_db.enqueue_turn(sid, "user", prompt="yes",
-                                 payload={assistant_confirm.ANSWER_KEY: _answer("perm-a")})
+                                 payload={owner_confirm.ANSWER_KEY: _answer("perm-a")})
     events = [{"type": "chunk", "content": "Thanks, it is going ahead."}, {"type": "done", "metadata": {}}]
 
     with _pump_env(_pump(events)) as env:
@@ -52,9 +52,9 @@ async def test_the_outcome_follows_the_owner_message_steered_into_a_running_turn
     sid = _seed_session("confirm-order-2")
     live = turns_db.enqueue_turn(sid, "user", prompt="the live one")
     yes = turns_db.enqueue_turn(sid, "user", prompt="yes",
-                                payload={assistant_confirm.ANSWER_KEY: _answer("perm-a")})
+                                payload={owner_confirm.ANSWER_KEY: _answer("perm-a")})
     no = turns_db.enqueue_turn(sid, "user", prompt="no",
-                               payload={assistant_confirm.ANSWER_KEY: _answer("perm-b", "declined")})
+                               payload={owner_confirm.ANSWER_KEY: _answer("perm-b", "declined")})
     events = [
         {"type": "tool_use", "id": "t1", "name": "Bash"},
         {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
@@ -81,7 +81,7 @@ async def test_a_message_already_in_the_transcript_does_not_repeat_its_outcome(m
     message and outcome were recorded the first time."""
     sid = _seed_session("confirm-order-3")
     turn = turns_db.enqueue_turn(sid, "user", prompt="yes", payload={
-        assistant_confirm.ANSWER_KEY: _answer("perm-a"), "user_message_already_recorded": True})
+        owner_confirm.ANSWER_KEY: _answer("perm-a"), "user_message_already_recorded": True})
 
     with _pump_env(_pump([{"type": "done", "metadata": {}}])) as env:
         with _outcomes_logged_into(env["log"]):

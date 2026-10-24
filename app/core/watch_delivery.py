@@ -10,7 +10,7 @@ import asyncio
 import time
 from typing import Any
 
-from app.core import assistant_service, watch_values, watches
+from app.core import owner_services, watch_values, watches
 from app.core import watch_placement as placement
 from app.db import database, turns
 from app.db import watch_delivery as delivery
@@ -43,11 +43,11 @@ def assert_allowed(
     session = watches.owner_session(session_id)
     if session_id != body["watch"]["creating_session_id"] or not session.get("is_active"):
         raise ValueError("Remote watch creator was settled")
-    if assistant_service.session_stopped(session_id):
+    if owner_services.session_stopped(session_id):
         raise ValueError("Remote watch creator was stopped")
-    from app.core import assistant_limits
+    from app.core import spending_limits
 
-    if assistant_limits.status()["limit_reached"]:
+    if spending_limits.status()["limit_reached"]:
         raise ValueError("Owner budget reached")
     # No stale cached permission: peer loss, revocation, expiry and transfer
     # all fail closed. Never import an executable watch or its delivery lease.
@@ -88,9 +88,9 @@ async def handle(body: dict[str, Any], sender: str) -> dict[str, Any]:
         if not watch or not event or await run_sync(delivery.origin, watch["id"]) != sender:
             raise PermissionError("Not the creating worker")
         await run_sync(watches.assert_allowed, watches.metadata(watch, event))
-        from app.core import assistant_limits
+        from app.core import spending_limits
 
-        if (await run_sync(assistant_limits.status))["limit_reached"]:
+        if (await run_sync(spending_limits.status))["limit_reached"]:
             raise ValueError("Executor budget reached")
         return {"watch": watch, "event": event}
     if operation != "deliver":
@@ -132,12 +132,12 @@ async def handle(body: dict[str, Any], sender: str) -> dict[str, Any]:
     )
     watch, event = answer["watch"], answer["event"]
     session = await run_sync(watches.owner_session, watch["creating_session_id"])
-    from app.core import assistant_limits, turn_manager
+    from app.core import spending_limits, turn_manager
 
-    if (await run_sync(assistant_limits.status))["limit_reached"]:
+    if (await run_sync(spending_limits.status))["limit_reached"]:
         raise ValueError("Creator budget reached")
     if not session.get("is_active") or await run_sync(
-        assistant_service.session_stopped, session["id"]
+        owner_services.session_stopped, session["id"]
     ):
         return {"fallback": True}
     saved = await run_sync(delivery.receive, event["id"], sender, answer)
@@ -160,7 +160,7 @@ async def handle(body: dict[str, Any], sender: str) -> dict[str, Any]:
         "watch",
         prompt=prompt,
         profile_id=watch["agent_id"],
-        instance_id=assistant_service.assistant_id(),
+        instance_id=owner_services.assistant_id(),
         command_id=event["id"],
         overrides={"max_turns": 3, "_assistant_proactive": meta},
         payload={"_assistant_proactive": meta},
@@ -178,8 +178,8 @@ async def destination(watch: dict[str, Any]) -> str | None:
     if not sid:
         return None
     session = await run_sync(database.get_session, sid)
-    if session and assistant_service._owned_here(session):
-        target = await run_sync(placement.canonical, assistant_service.assistant_id())
+    if session and owner_services._owned_here(session):
+        target = await run_sync(placement.canonical, owner_services.assistant_id())
     else:
         for peer in (await run_sync(runners.directory))["runners"]:
             if peer["is_self"] or not peer["online"]:
@@ -279,7 +279,7 @@ def save_report(event_id: str, report: dict[str, Any]) -> None:
 
 async def flush() -> None:
     """Bound work and retry an unavailable target once, not once per report."""
-    worker = assistant_service.assistant_id()
+    worker = owner_services.assistant_id()
     stamp = time.monotonic()
     excluded = [
         target

@@ -4,7 +4,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from app.db import assistant as store
+from app.db import owner_state as store
 
 AVATARS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "components" / "agents" / "avatars"
 SVG = "{http://www.w3.org/2000/svg}"

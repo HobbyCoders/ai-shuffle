@@ -17,8 +17,8 @@ import asyncio
 import pytest
 
 from app.core import (
-    assistant_confirm,
-    assistant_service,
+    owner_confirm,
+    owner_services,
     permission_handler as permission_module,
     provider_agent,
     provider_agent_approvals as approvals,
@@ -51,13 +51,13 @@ def clean_state(monkeypatch):
     relay.reset()
     approvals.reset_routes()
     provider_agent.reset_worker_sessions()
-    assistant_confirm.reset()
+    owner_confirm.reset()
     permission_handler.clear_session_rules("caller")  # the handler is process-wide
     yield
     relay.reset()
     approvals.reset_routes()
     provider_agent.reset_worker_sessions()
-    assistant_confirm.reset()
+    owner_confirm.reset()
     permission_handler.clear_session_rules("caller")
 
 
@@ -263,7 +263,7 @@ def test_the_starter_chat_answers_in_conversation(workers, monkeypatch, proxies,
     async def say_yes(row):
         confirm = row["payload"]["assistant_confirm"]
         assert "df -h /mnt/user" in confirm["question"] and "on ServerWorker" in confirm["question"]
-        assert (await assistant_confirm.on_owner_message("caller", "yes"))["decision"] == "approved"
+        assert (await owner_confirm.on_owner_message("caller", "yes"))["decision"] == "approved"
     _, result = round_trip(a, b, proxies, held, ask_kwargs(child), say_yes)
     assert isinstance(result, PermissionResultAllow)
 
@@ -638,8 +638,8 @@ def test_a_child_resumed_by_a_message_asks_the_parent_and_reports_only_its_own(
 
 def test_a_limit_stop_withdraws_the_childs_open_prompt(workers, monkeypatch, proxies, held):
     """The daily limit stops the child through the S8 path, so its prompt goes too."""
-    from app.core import assistant_limits as limits
-    from app.db import assistant_limits as limits_db
+    from app.core import spending_limits as limits
+    from app.db import spending_limits as limits_db
     from tests.core.network.test_remote_task_limits import book, make_coordinator, set_limits, started_child
     a, b, _ = network(workers, monkeypatch)
     make_coordinator(b, "caller")

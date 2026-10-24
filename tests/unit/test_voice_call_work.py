@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core import voice_approval, voice_progress, voice_status, voice_stream
-from app.core.assistant_confirm import NO, UNCLEAR, YES
+from app.core.owner_confirm import NO, UNCLEAR, YES
 from app.core.voice_approval import SpokenApprovals, classify_spoken_answer
 
 
@@ -19,9 +19,9 @@ from app.core.voice_approval import SpokenApprovals, classify_spoken_answer
 # ---------------------------------------------------------------------------
 
 def test_spoken_answers_use_the_shared_typed_answer_check():
-    from app.core import assistant_confirm
+    from app.core import owner_confirm
     for text in ("Yes.", "Yep, go ahead.", "No thanks", "I guess", "you decide", "Check the logs first"):
-        assert classify_spoken_answer(text) == assistant_confirm.classify(text)
+        assert classify_spoken_answer(text) == owner_confirm.classify(text)
 
 
 @pytest.mark.parametrize("text", ["Yes.", "yeah", "Yep, go ahead.", "Yes please", "Sure.", "Do it, thanks",
@@ -620,15 +620,15 @@ async def test_voice_delegations_are_marked_as_not_the_owners_own_words(monkeypa
 
 @pytest.mark.asyncio
 async def test_spoken_answer_to_the_assistants_question_is_recorded_like_a_typed_one(monkeypatch):
-    from app.core import assistant_confirm
+    from app.core import owner_confirm
     desk, calls, _ = _desk(monkeypatch)
     recorded = []
 
     async def record(session_id, answer):
         recorded.append((session_id, answer["request_id"], answer["question"], answer["decision"]))
 
-    monkeypatch.setattr(assistant_confirm, "record_answer", record)
-    assistant_confirm.reset()
+    monkeypatch.setattr(owner_confirm, "record_answer", record)
+    owner_confirm.reset()
     desk.offer({"request_id": "req-c", "tool_name": "Bash",
                 "assistant_confirm": {"question": "Do you authorize me to run `pytest`? Please answer yes or no."}})
     assert "Do you authorize me to run" in desk.current.summary
@@ -636,8 +636,8 @@ async def test_spoken_answer_to_the_assistants_question_is_recorded_like_a_typed
     await desk.hear("yes")
     assert calls[0]["decision"] == "allow"
     assert recorded == [("s", "req-c", "Do you authorize me to run `pytest`? Please answer yes or no.", "approved")]
-    assert "approved this one request" in assistant_confirm.context_note("s")
-    assistant_confirm.reset()
+    assert "approved this one request" in owner_confirm.context_note("s")
+    owner_confirm.reset()
 
 
 # ---------------------------------------------------------------------------

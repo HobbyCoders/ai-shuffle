@@ -177,39 +177,39 @@ async def test_limit_role_scan_is_batched_at_400_sessions(owner, monkeypatch):
 
 
 def test_limits_off_skip_the_role_scan(owner, monkeypatch):
-    from app.core import orchestration_limits, assistant_limits, assistant_service
-    from app.db import assistant_limits as limits_db
+    from app.core import orchestration_limits, spending_limits, owner_services
+    from app.db import spending_limits as limits_db
 
     def scan(now=None):
         raise AssertionError("no coordination role scan while both limits are off")
     monkeypatch.setattr(orchestration_limits, "tracked_roles", scan)
     chat("coord", mode="chat")
-    limits_db.update(assistant_service.assistant_id(), {"spend_limit_enabled": False, "job_limit_enabled": False})
-    assert assistant_limits.status()["limit_reached"] is False
-    assert assistant_limits.plan()[1] == []
-    limits_db.update(assistant_service.assistant_id(), {"job_limit_enabled": True})
+    limits_db.update(owner_services.assistant_id(), {"spend_limit_enabled": False, "job_limit_enabled": False})
+    assert spending_limits.status()["limit_reached"] is False
+    assert spending_limits.plan()[1] == []
+    limits_db.update(owner_services.assistant_id(), {"job_limit_enabled": True})
     with pytest.raises(AssertionError, match="no coordination role scan"):
-        assistant_limits.status()
+        spending_limits.status()
 
 
 async def test_job_time_limit_applies_to_coordination_jobs(owner):
-    from app.core import orchestration_limits, assistant_limits, assistant_service
-    from app.db import assistant_limits as limits_db, turns
+    from app.core import orchestration_limits, spending_limits, owner_services
+    from app.db import spending_limits as limits_db, turns
     _project(owner)
     chat("coord", mode="chat")
     child = await _start("coord", project="Project")
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (10 * 60000, child))
     assert orchestration_limits.role(child) == "job"
-    limits_db.update(assistant_service.assistant_id(), {"job_limit_enabled": False})
+    limits_db.update(owner_services.assistant_id(), {"job_limit_enabled": False})
     assert orchestration_limits.turn_refusal(child, "unpark") is None
-    limits_db.update(assistant_service.assistant_id(), {"job_limit_enabled": True, "max_job_minutes": 5})
+    limits_db.update(owner_services.assistant_id(), {"job_limit_enabled": True, "max_job_minutes": 5})
     assert "background job passed" in orchestration_limits.turn_refusal(child, "unpark")
     [turn] = turns.get_queued_turns(child)
     assert turns.start_turn(turn["id"])
     from tests.core.test_assistant_limits import book
     book(child, 0.01)
-    assert [(sid, reason) for sid, _tid, reason, _ in assistant_limits.plan()[1]] == [(child, "job_time")]
+    assert [(sid, reason) for sid, _tid, reason, _ in spending_limits.plan()[1]] == [(child, "job_time")]
     # The coordinator itself is never stopped for job time.
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id='coord'", (10 * 60000,))
@@ -256,7 +256,7 @@ def test_legacy_projectless_code_row_gets_coordination_ceiling(owner: Path) -> N
 
 
 async def test_project_starter_work_is_not_coordination_spending(owner):
-    from app.core import orchestration_limits, assistant_limits
+    from app.core import orchestration_limits, spending_limits
     from tests.core.test_assistant_limits import book
     database.create_project("proj", "Project", None, str(owner))
     chat("starter", project_id="proj")
@@ -266,12 +266,12 @@ async def test_project_starter_work_is_not_coordination_spending(owner):
     child = json.loads(result.text)["session_id"]
     book(child, 4)
     assert orchestration_limits.role(child) is None
-    assert assistant_limits.status()["spent_today_usd"] == 0
+    assert spending_limits.status()["spent_today_usd"] == 0
 
 
 def test_owner_typed_spend_and_live_turns_are_exempt_but_away_is_not(owner):
-    from app.core import assistant_limits as limits, orchestration_limits, assistant_service
-    from app.db import turns, assistant_limits as limits_db
+    from app.core import spending_limits as limits, orchestration_limits, owner_services
+    from app.db import turns, spending_limits as limits_db
     from app.core.query_persistence import usage_settlement_key
     row, _ = chat("coordinator", mode="chat")
     for human, cost in ((True, 50), (False, 3)):
@@ -280,7 +280,7 @@ def test_owner_typed_spend_and_live_turns_are_exempt_but_away_is_not(owner):
         key = usage_settlement_key(row["id"], turn)
         from app.db.analytics import settle_turn_usage
         assert settle_turn_usage(row["id"], key, cost_usd=cost)
-    limits_db.update(assistant_service.assistant_id(), {"spend_limit_enabled": True, "daily_spend_limit_usd": 2})
+    limits_db.update(owner_services.assistant_id(), {"spend_limit_enabled": True, "daily_spend_limit_usd": 2})
     assert limits.status()["spent_today_usd"] == 3
     assert orchestration_limits.turn_refusal(row["id"], "user", payload={"question_answer_human_input": True}) is None
     assert orchestration_limits.turn_refusal(row["id"], "user", payload={"question_answer_human_input": False})

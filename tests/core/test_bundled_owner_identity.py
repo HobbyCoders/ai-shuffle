@@ -14,7 +14,7 @@ from fluid.store.base import MemoryStore
 from fluid.tools.mcp.bundled_server import _socket_rpc
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
-from app.core import assistant_confirm as confirm
+from app.core import owner_confirm as confirm
 from app.core.permission_handler import PermissionHandler
 from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.provider.types import PermissionRequestEvent, SessionOptions

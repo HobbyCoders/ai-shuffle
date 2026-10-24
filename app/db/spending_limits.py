@@ -3,7 +3,7 @@
 One worker-local row per runner (the same id as ``assistant_state``): a daily
 spending limit for coordination chats and everything they start, and a
 run-time limit for one background job. Only the owner-only limits API writes
-it (``/api/v1/assistant/limits``); no model-facing tool does.
+it (``/api/v1/owner/limits``); no model-facing tool does.
 
 ``assistant_limit_stops`` remembers each turn the limits stopped, so a turn is
 stopped once.

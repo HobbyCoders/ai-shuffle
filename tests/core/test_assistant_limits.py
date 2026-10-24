@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core import assistant_limits as limits, assistant_service as service, session_orchestration as orch
-from app.db import assistant as store, assistant_limits as limits_db, database, turns
+from app.core import spending_limits as limits, owner_services as service, session_orchestration as orch
+from app.db import owner_state as store, spending_limits as limits_db, database, turns
 from app.db.base import get_db
 from tests.db.test_assistant_store import assistant_fixture
 
@@ -294,12 +294,12 @@ def test_no_model_facing_tool_can_change_the_limits():
         tree = ast.parse(source)
         imported = {alias.asname or alias.name for node in ast.walk(tree)
                     if isinstance(node, (ast.Import, ast.ImportFrom))
-                    for alias in node.names if "assistant_limits" in (getattr(node, "module", "") or "") + alias.name}
+                    for alias in node.names if "spending_limits" in (getattr(node, "module", "") or "") + alias.name}
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in writers and isinstance(node.value, ast.Name):
                 assert node.value.id not in imported, f"{path} writes the assistant limits"
     # The only writer is the owner-only API.
-    api = (ROOT / "app" / "api" / "assistant.py").read_text(encoding="utf-8")
+    api = (ROOT / "app" / "api" / "owner_services.py").read_text(encoding="utf-8")
     assert "dependencies=[Depends(require_admin)]" in api and "limits_db.update" in api
 
 

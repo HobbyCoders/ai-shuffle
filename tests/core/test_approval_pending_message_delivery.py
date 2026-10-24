@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 from uuid import uuid4
 
-from app.core import assistant_confirm as confirm
+from app.core import owner_confirm as confirm
 from app.core import away_mode, interaction_sweeper, session_runtime
 from app.core import permission_handler as ph
 from app.core import provider_agent_approvals as approvals

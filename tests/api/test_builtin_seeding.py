@@ -39,8 +39,8 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
     assert worker_refusal("retirement-open", "unrelated-agent") is None
     # The assistant's connector authorization reads the raw junction table,
     # rather than database.get_api_user. It must stay restricted too.
-    from app.db.assistant import connector_grant_available
-    with patch("app.db.assistant.owner_connector", return_value=True), database.get_db() as conn:
+    from app.db.owner_state import connector_grant_available
+    with patch("app.db.owner_state.owner_connector", return_value=True), database.get_db() as conn:
         assert not connector_grant_available(conn, {"api_user_id": "retirement-only"}, "unrelated-agent")
         assert connector_grant_available(conn, {"api_user_id": "retirement-mixed"}, "retirement-other")
         assert connector_grant_available(conn, {"api_user_id": "retirement-open"}, "unrelated-agent")

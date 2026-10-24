@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import assistant_permissions as ap
-from app.core import assistant_service as service
+from app.core import background_permissions as ap
+from app.core import owner_services as service
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
 from app.core.provider import harness_adapter as ha
 from app.core.provider.types import SessionOptions
@@ -49,7 +49,7 @@ def _builtin_tool_names():
 
 def test_every_builtin_tool_declares_a_level():
     missing = sorted(name for name in _builtin_tool_names() if not ap.declared(name))
-    assert missing == [], f"Declare a risk level in assistant_permissions.TOOL_LEVELS for: {missing}"
+    assert missing == [], f"Declare a risk level in background_permissions.TOOL_LEVELS for: {missing}"
 
 
 def test_an_undeclared_tool_asks_and_a_failing_rule_asks(monkeypatch):

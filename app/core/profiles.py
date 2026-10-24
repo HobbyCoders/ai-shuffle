@@ -184,7 +184,7 @@ def _seed_default_templates():
 def preserve_profile_presentation(existing_config, config, raw_config=None):
     """Editor replacement keeps fields its typed schema does not represent."""
     from app.core.models import ProfileConfig
-    from app.core.assistant_service import AVATAR_PRESETS
+    from app.core.owner_services import AVATAR_PRESETS
     result = {key: value for key, value in (existing_config or {}).items()
               if key not in ProfileConfig.model_fields and key != "allowed_tools"}
     result.update(config)
