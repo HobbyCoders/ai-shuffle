@@ -151,6 +151,41 @@ async def create_watch(peers: dict[str, Any]) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stale_mirror", "offline"),
+    [(False, False), (True, False), (False, True)],
+    ids=["missing-mirror", "stale-settled-mirror", "unreachable-owner"],
+)
+async def test_remote_creator_state_is_not_inferred_from_local_mirror(
+    peers: dict[str, Any],
+    stale_mirror: bool,
+    offline: bool,
+) -> None:
+    sid = peers["session"]["id"]
+    wid = await create_watch(peers)
+    peers["faults"]["offline"] = offline
+    with peers["on"]("dev_server"):
+        if stale_mirror:
+            database.create_session(
+                sid,
+                "watch-agent",
+                mode="chat",
+                is_active=False,
+                target_instance_id="DesktopWorker",
+            )
+        else:
+            assert database.get_session(sid) is None
+        await watch_manager.WatchManager().run_once()
+        event = store.events(wid)[0]  # Real schedule polling/admission still runs.
+        assert notifications.get_notification("admin", "watch-survives-" + wid) is None
+        assert not store.get(wid)["creator_notified"]
+    assert database.get_session(sid)["is_active"]
+    if not offline:
+        turn = turns.get_turn_by_command(sid, event["id"])
+        assert turn and turn["source"] == "watch"
+
+
+@pytest.mark.asyncio
 async def test_active_creator_ack_loss_restart_and_transfer(peers: dict[str, Any]) -> None:
     wid = await create_watch(peers)
     peers["faults"]["lose_deliver"] = True
