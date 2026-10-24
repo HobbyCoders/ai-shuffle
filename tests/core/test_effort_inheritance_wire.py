@@ -3,6 +3,10 @@
 Only transport, checkout provisioning and worker completion are replaced; effort
 resolution, persistence, dispatch, adapter, loop and serializer remain real.
 """
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from sqlite3 import Connection
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,7 +34,9 @@ CHILD_ROUTES = [
 
 
 @pytest.fixture
-def child_runtime(mock_db, monkeypatch, tmp_path):
+def child_runtime(
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> Iterator[None]:
     from app.core import config, preference_identity, turn_manager, worker_checkout
 
     monkeypatch.setattr(config.settings, "fluid_projects_dir", str(tmp_path / "state"))
@@ -41,7 +47,7 @@ def child_runtime(mock_db, monkeypatch, tmp_path):
         "usage": {}, "error": None, "interrupted": False, "terminal_found": True})
     monkeypatch.setattr(pa, "final_assistant_text", lambda _: "offline completion")
 
-    async def submit(session_id, source, **kwargs):
+    async def submit(session_id: str, source: str, **kwargs: Any) -> str:
         # Persist the producer's exact overrides, without starting a scheduler
         # or replacing them with an expected effort fixture at the consumer.
         row = turns.record_adhoc_turn(session_id, source, prompt=kwargs["prompt"],
@@ -58,8 +64,20 @@ def child_runtime(mock_db, monkeypatch, tmp_path):
 @pytest.mark.parametrize("kind,model,catalog,levels,default", CHILD_ROUTES)
 @pytest.mark.parametrize("pick", [None, *EFFORT_LEVELS])
 @pytest.mark.parametrize("source", ["session", "turn", "spawn", "remembered"])
-async def test_child_inheritance_to_transport(child_runtime, mock_db, monkeypatch,
-        tmp_path, record_property, kind, model, catalog, levels, default, pick, source):
+async def test_child_inheritance_to_transport(
+    child_runtime: None,
+    mock_db: Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    record_property: Callable[[str, object], None],
+    kind: str,
+    model: str,
+    catalog: tuple[str, ...] | None,
+    levels: tuple[str, ...],
+    default: str | None,
+    pick: str | None,
+    source: str,
+) -> None:
     from app.core import claude_auth_mode
 
     monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_SUBSCRIPTION)
