@@ -101,122 +101,6 @@ def connector_allowed(watch: dict[str, Any]) -> dict[str, Any]:
     return connector
 
 
-def gmail_poll(
-    instance: Any, cursor: dict[str, Any]
-) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
-    """Gmail history is a replayable cursor, unlike an unread snapshot.
-
-    Expired history (HTTP 404) fails/pause rather than silently rebasing and
-    losing mail. One API page per pass; the page token is durable too.
-    """
-    sdk = instance.build_thread_client()
-    if sdk is None:
-        raise ValueError("Gmail is not connected")
-    users = sdk.users()
-    if "legacy_seen_ids" in cursor:
-        history_id = cursor.get("history_id") or str(
-            users.getProfile(userId="me").execute()["historyId"]
-        )
-        args = dict(
-            userId="me",
-            q=(
-                ("after:" + str(cursor["legacy_after"]))
-                if cursor.get("legacy_after")
-                else "is:unread"
-            ),
-            maxResults=100,
-            labelIds=[
-                s.strip()
-                for s in str(instance.config.get("labels", "INBOX")).split(",")
-                if s.strip()
-            ],
-        )
-        if cursor.get("legacy_page_token"):
-            args["pageToken"] = cursor["legacy_page_token"]
-        page = users.messages().list(**args).execute()
-        events = []
-        for item in page.get("messages", []):
-            mid = str(item["id"])
-            if mid in cursor["legacy_seen_ids"]:
-                continue
-            message = (
-                users.messages()
-                .get(userId="me", id=mid, format="metadata", metadataHeaders=["From", "Subject"])
-                .execute()
-            )
-            headers = {
-                h["name"].lower(): h.get("value", "")
-                for h in message.get("payload", {}).get("headers", [])
-            }
-            events.append(
-                (
-                    "email_received:" + mid,
-                    dict(
-                        event_type="email_received",
-                        message_id=mid,
-                        sender=headers.get("from", ""),
-                        subject=headers.get("subject", ""),
-                        snippet=str(message.get("snippet", ""))[:4000],
-                    ),
-                )
-            )
-        checkpoint = {"history_id": history_id}
-        if page.get("nextPageToken"):
-            checkpoint.update(
-                legacy_seen_ids=cursor["legacy_seen_ids"], legacy_page_token=page["nextPageToken"]
-            )
-            if cursor.get("legacy_after"):
-                checkpoint["legacy_after"] = cursor["legacy_after"]
-        return events, checkpoint
-    if not cursor.get("history_id"):
-        profile = users.getProfile(userId="me").execute()
-        return [], {"history_id": str(profile["historyId"])}
-    args = dict(
-        userId="me",
-        startHistoryId=cursor["history_id"],
-        historyTypes=["messageAdded"],
-        maxResults=100,
-    )
-    if cursor.get("page_token"):
-        args["pageToken"] = cursor["page_token"]
-    page = users.history().list(**args).execute()
-    labels = {
-        s.strip() for s in str(instance.config.get("labels", "INBOX")).split(",") if s.strip()
-    }
-    messages = {}
-    for history in page.get("history", []):
-        for added in history.get("messagesAdded", []):
-            msg = added["message"]
-            if not labels or labels.intersection(msg.get("labelIds", [])):
-                messages[str(msg["id"])] = msg
-    events = []
-    for mid in messages:
-        msg = (
-            users.messages()
-            .get(userId="me", id=mid, format="metadata", metadataHeaders=["From", "Subject"])
-            .execute()
-        )
-        headers = {
-            h["name"].lower(): h.get("value", "") for h in msg.get("payload", {}).get("headers", [])
-        }
-        events.append(
-            (
-                "email_received:" + mid,
-                dict(
-                    event_type="email_received",
-                    message_id=mid,
-                    subject=headers.get("subject", ""),
-                    sender=headers.get("from", ""),
-                    snippet=str(msg.get("snippet", ""))[:4000],
-                ),
-            )
-        )
-    next_cursor = {"history_id": str(page.get("historyId", cursor["history_id"]))}
-    if page.get("nextPageToken"):
-        next_cursor = {"history_id": cursor["history_id"], "page_token": page["nextPageToken"]}
-    return events, next_cursor
-
-
 async def gh_api(endpoint: str) -> Any:
     # No shell, no model, no source-supplied executable/flags, and no credentials in logs.
     from fluid.tools.child_env import scrub_child_env
@@ -456,8 +340,6 @@ async def poll(watch: dict[str, Any]) -> tuple[list[tuple[str, dict[str, Any]]],
         instance = await connector_manager.get_running_connector(connector["id"])
         if instance is None:
             raise ValueError("Connector is offline")
-        if connector["type"] == "gmail":
-            return await run_sync(gmail_poll, instance, cursor)
         from app.core.watch_connector_sources import poll as connector_poll
 
         return await connector_poll(connector["type"], instance, source, cursor)
