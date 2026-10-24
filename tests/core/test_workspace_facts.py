@@ -66,6 +66,8 @@ def test_card_names_the_facts_that_are_true_here(tmp_path, monkeypatch):
     # Branch preview command, the vite config name, the pg_shim caveat.
     assert "python -m app.preview stamp" in card and "AI_SHUFFLE_PREVIEW=1" in card
     assert "python -m app.preview run --port 18080" in card
+    assert "--host 0.0.0.0 --browser-host <worker-IP>" in card
+    assert "printed access" in card and "named port requires its token" in card
     assert "Do not daemonize" in card and "TTL expires" in card
     assert "frontend/vite.config.js" in card and "no vite.config.ts" in card
     assert "pg_shim" in card and "SET" in card
