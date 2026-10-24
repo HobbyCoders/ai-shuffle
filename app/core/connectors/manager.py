@@ -46,6 +46,7 @@ class ConnectorManager:
         self._connectors: Dict[str, BaseConnector] = {}
         self._registered_at: Dict[str, float] = {}  # connector_id -> time.monotonic()
         self._lock = asyncio.Lock()
+        self._receiver_locks: dict[str, asyncio.Lock] = {}
         self._event_relay = None
 
     # ------------------------------------------------------------------
@@ -146,7 +147,15 @@ class ConnectorManager:
 
         logger.info("All connectors shut down")
 
+    def receiver_lock(self, connector_id: str) -> asyncio.Lock:
+        """Serialize receiver startup with a Telegram journal transfer fence."""
+        return self._receiver_locks.setdefault(connector_id, asyncio.Lock())
+
     async def start_connector(self, connector_id: str) -> bool:
+        async with self.receiver_lock(connector_id):
+            return await self._start_connector(connector_id)
+
+    async def _start_connector(self, connector_id: str) -> bool:
         """Instantiate, connect, and register a single connector.
 
         Idempotent for a live client: starting a connector that is already
@@ -194,6 +203,11 @@ class ConnectorManager:
                 return None
 
             connector_type = connector_row["type"]
+            if connector_type == "telegram":
+                from app.db.watch_journal import receiver_allowed
+
+                if not receiver_allowed(connector_id):
+                    return None
             config = connector_row.get("config", {}) or {}
 
             # Decrypt sensitive configuration fields
@@ -314,6 +328,11 @@ class ConnectorManager:
             row = database.get_connector(connector_id)
             if not row:
                 return False
+            if row["type"] == "telegram":
+                from app.db.watch_journal import receiver_allowed
+
+                if not receiver_allowed(connector_id):
+                    return False
             return ownership.decide_connector(row) in (None, "start")
         except Exception:
             logger.exception("Network ownership unavailable; stopping connector %s", connector_id)
