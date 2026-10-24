@@ -91,6 +91,58 @@ def test_default_override_and_unavailable(
     assert policy.is_shared_setting_key("watch_directory:ServerWorker")
 
 
+def test_published_capabilities_drive_linux_desktop_server_and_override(
+    owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch
+) -> None:
+    from app.core import runner_capabilities as rc
+    from app.core import desktop_listener
+
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(desktop_listener, "configured", lambda: False)
+    monkeypatch.delenv("SHUFFLE_LAUNCHER_VERSION", raising=False)
+    listing = runners.directory()
+    desktop, server = listing["runners"]
+    desktop["platform"] = "linux"
+    monkeypatch.setenv("SHUFFLE_DESKTOP", "1")
+    desktop["capabilities"] = rc.detect_capabilities()
+    monkeypatch.setattr(settings, "local_mode", False)
+    server["capabilities"] = rc.detect_capabilities()
+    monkeypatch.setattr(runners, "directory", lambda: listing)
+    assert placement.resolve() == "dev_server"
+    server["capabilities"]["always_on"] = False
+    with pytest.raises(ValueError, match="No always-on"):
+        placement.resolve()
+    server["online"] = False
+    with pytest.raises(ValueError, match="No always-on"):
+        placement.resolve()
+
+    # Exercise the real settings producer, not hand-seeded presence fields.
+    from app.core import worker_availability
+
+    monkeypatch.setattr(settings, "local_mode", True)
+    worker_availability.save(True)
+    desktop["capabilities"] = rc.detect_capabilities()
+    assert desktop["capabilities"]["desktop"] is True
+    assert placement.resolve() == "DesktopWorker"
+    worker_availability.save(False)
+    desktop["capabilities"] = rc.detect_capabilities()
+    with pytest.raises(ValueError, match="No always-on"):
+        placement.resolve()
+
+
+def test_standalone_linux_desktop_is_not_automatic(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from app.core import runner_capabilities as rc
+
+    monkeypatch.setattr(runners, "directory", lambda: {"runners": []})
+    monkeypatch.setattr(rc, "detect_capabilities", lambda: {
+        "os": "linux", "desktop": True, "always_on": False,
+    })
+    with pytest.raises(ValueError, match="No always-on"):
+        placement.resolve()
+
+
 @pytest.mark.asyncio
 async def test_remote_create_list_controls_and_creator_offline(
     owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch

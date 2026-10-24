@@ -134,6 +134,19 @@ Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI
 
 The agent asks one confirmation sentence covering the source/filter, executing worker, read-only access, action and daily cap; your yes authorizes it. Placement prefers an available worker advertising `always_on`, then an available Linux server. You can override `worker_id` when creating a watch. `PUT /api/v1/watches/preference` with `{"worker_id":"<network worker ID>"}` designates your preferred worker; `null` clears it. This preference and display-only watch metadata sync across your worker network. An unavailable designated worker fails explicitly without silently falling back to a sleeping desktop. Connectors and grants must already belong to the executing worker; credentials are never moved by watch placement.
 
+Workers publish `desktop` from the desktop launcher's markers, not from their OS or an
+attached display. Electron desktop installs (including Linux) default to `always_on: false`;
+container and headless server installs default to `true`. A sleeping Linux desktop is not
+an automatic watch target. On the intended worker, authenticated
+`GET /api/v1/settings/worker-availability` shows `worker_id`, `desktop`, effective `always_on`
+and `always_on_override`. Owner-only `PUT /api/v1/settings/worker-availability` with
+`{"always_on":true}` or `{"always_on":false}` overrides that worker; `{"always_on":null}`
+restores its detected default. Overrides sync as per-worker settings, not a fleet-wide
+default, and are advertised on the next presence refresh. An explicit `false` excludes
+that worker from automatic placement, even if it runs Linux; you can still choose it
+explicitly. A Settings UI control for this availability override is a follow-up; use the
+API for now.
+
 Use `CreateWatch` with `move_watch_id` and `worker_id`, or owner-only `PATCH /api/v1/watches/{id}` with `worker_id`, to move a watch. Moving freezes the old executor before transferring the saved cursor, pending events and dedupe/accounting history. In-flight deliveries must finish first. Once export commits, a failed or ambiguous network transfer stays fenced; retry the same move, never resume the old executor. Prerequisite rejections before export do not fence the receivers. Transfers over 10,000 events or 3 MiB fail explicitly. Pause/Stop and listing route to the executing worker; synced rows remain display-only and never create a second executor.
 
 In the running-tasks panel, each watch names the worker it runs on, with **Always on**, **Server** or **May sleep**, and whether that worker is online. With a second worker, **Move** lists the other workers; an offline one is shown but cannot be picked. While a move runs, the row says so and Pause, Stop and Move wait. A refused move shows the reason with **Try again**. A move with no answer reads **not confirmed**, never as moved, and offers **Retry move**. If the list then shows the watch on its new worker, the panel asks that worker to confirm the move, so the old worker records that it finished. That confirmation never moves the watch itself: if a newer move has taken it elsewhere, it is refused and the note clears. It reads **Moved** only when the confirmation comes back. A watch left fenced reads **Move unfinished** on every device until you retry it. A watch whose worker is offline shows its last synced state, and its controls wait until that worker is back. The **New watches** control in the Watches heading sets or clears the preferred worker. It stays available with no watches: the list keeps a Watches entry while a worker is chosen, and the full list offers it whenever you have a second worker. It names the worker automatic placement would pick, and says plainly when the chosen worker is offline.

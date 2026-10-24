@@ -31,21 +31,23 @@ def resolve(requested: str | None = None) -> str:
                 return assistant_id() if row["is_self"] else row["id"]
         raise ValueError("Preferred watch worker is not an active network member")
     candidates = [row for row in rows if row["online"] and (
-        row["capabilities"].get("always_on") or (
+        row["capabilities"].get("always_on", (
             str(row.get("platform", "")).lower() == "linux"
             and not row["capabilities"].get("desktop", False)
-        )
+        ))
     )]
     if candidates:
         chosen = sorted(candidates, key=lambda row: (
             not row["capabilities"].get("always_on", False), row["id"]
         ))[0]
         return assistant_id() if chosen["is_self"] else chosen["id"]
-    # Standalone Linux servers can run continuously. Desktop owners must choose
-    # explicitly rather than silently creating a watch that sleeps with them.
-    import sys
-    if not rows and sys.platform == "linux":
-        return assistant_id()
+    # A standalone worker has no network directory. Apply the same launch-kind
+    # and owner override rules, including on Linux Electron desktops.
+    if not rows:
+        from app.core.runner_capabilities import detect_capabilities
+
+        if detect_capabilities().get("always_on", False):
+            return assistant_id()
     raise ValueError("No always-on worker is available; explicitly choose worker_id")
 
 
