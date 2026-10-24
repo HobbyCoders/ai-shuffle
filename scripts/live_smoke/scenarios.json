@@ -646,7 +646,6 @@
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
         },
         {
-
           "id": "harness-basics.9",
           "check": "Bounded update stops preserve usage and abort forced turns",
           "kind": "owner",
