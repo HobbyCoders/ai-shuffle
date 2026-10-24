@@ -973,7 +973,8 @@ class Synthesizer:
                 # not be assigned to whichever project happens to run next.
                 self._project = project or "legacy:unassigned"
                 try:
-                    text, group_usage = await self._complete(self._prompt(group), self._synthesis_system(group))
+                    prompt, system, workflow_entries = self._synthesis_input(group)
+                    text, group_usage = await self._complete(prompt, system)
                 except (SynthesisIncomplete, SynthesisProviderError) as exc:
                     for key, value in exc.usage.items():
                         usage[key] = usage.get(key, 0) + value
@@ -988,7 +989,7 @@ class Synthesizer:
                     usage[key] = usage.get(key, 0) + value
                 if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
                     return []
-                changed.extend(await self._apply(text, group))
+                changed.extend(await self._apply(text, group, workflow_entries=workflow_entries))
                 done.add(project)
         finally:
             self._project = original_project
@@ -1548,6 +1549,38 @@ class Synthesizer:
             lines.append("(no model-guidance file exists for this model yet)")
         return lines
 
+    def _synthesis_input(self, entries: list[dict]) -> tuple[str, str, list[dict]]:
+        """Add review-only evidence without replaying consumed memory inputs.
+
+        The main cursor and per-project call budget are unchanged. Historical
+        evidence uses only spare request space; it cannot crowd out new work.
+        """
+        from fluid.codemode.workflows import WorkflowProposals, repeated_evidence
+        prompt = self._prompt(entries)
+        if not any(e.get("kind") == "user" and
+                   e.get("text", "").strip().lower().startswith("workflow accepted: ")
+                   for e in entries):
+            return prompt, _SYNTH_SYSTEM, []
+        try:
+            forgotten = self._store._facts.snapshot().get("forgotten_before", 0)
+            retained = [e for e in self._store.journal_entries()
+                        if e.get("ts", 0) > forgotten and e.get("project") == self._project]
+            excluded = {r["name"] for r in WorkflowProposals(self._store).list()
+                        if r["project"] == self._project}
+            evidence = repeated_evidence(retained, entries, self._project, excluded)
+        except (ValueError, OSError):
+            return prompt, _SYNTH_SYSTEM, []
+        if not evidence:
+            return prompt, _SYNTH_SYSTEM, []
+        historical = [e for e in evidence if e not in entries]
+        if historical:
+            extra = "\n\n## Retained workflow evidence (review only; not new facts or Python helpers)\n"
+            extra += "\n".join(self._journal_lines(historical)[1:])
+            if len(prompt) + len(extra) > self._prompt_limit:
+                return prompt, _SYNTH_SYSTEM, []
+            prompt += extra
+        return prompt, self._synthesis_system(evidence), evidence
+
     def _synthesis_system(self, entries: list[dict]) -> str:
         # Ordinary fact/helper passes pay no prose-workflow prompt overhead.
         # Two distinct user-accepted episodes must exist before proposals can
@@ -1672,7 +1705,8 @@ Never claim a workflow is installed because it was proposed."""
                 errors.append(f"supersession: {exc}")
         return changed
 
-    async def _apply(self, text: str, entries: list[dict] | None = None) -> list[str]:
+    async def _apply(self, text: str, entries: list[dict] | None = None, *,
+                     workflow_entries: list[dict] | None = None) -> list[str]:
         """Parse the model's output, verify candidates, apply what passes.
 
         Candidates that fail static validation OR the verification kernel
@@ -1684,7 +1718,9 @@ Never claim a workflow is installed because it was proposed."""
         stamped with the provenance :func:`memory_provenance` derives from
         it, and the ones that only tool output supports are listed on
         ``last_held``. Without a slice (a direct call) provenance is left
-        alone.
+        alone. ``workflow_entries`` carries separately validated retained
+        episodes solely for prose proposals; memory provenance still sees only
+        this pass's new slice.
         """
         changed: list[str] = []
         errors: list[str] = []
@@ -1757,7 +1793,9 @@ Never claim a workflow is installed because it was proposed."""
                 if len(match.group(1)) > 8000:
                     raise ValueError("workflow proposal exceeds output bound")
                 proposal = WorkflowProposals(self._store).propose(
-                    json.loads(match.group(1)), entries or [], self._project, cwd=self._workflow_cwd,
+                    json.loads(match.group(1)),
+                    (entries or []) if workflow_entries is None else workflow_entries,
+                    self._project, cwd=self._workflow_cwd,
                 )
                 if proposal["status"] == "pending":
                     changed.append(f"workflow-proposal:{proposal['id']}")
