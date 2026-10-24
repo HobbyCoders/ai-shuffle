@@ -184,7 +184,9 @@ that differs from the remembered choice, it returns `status: "skipped"` and
 `reason: "named_choice_differs_from_stored"` before any catalog lookup or submission.
 The owner must select the named choice; tool arguments never replace the stored one.
 A job's own stored choice is the owner's binding for that job: an unattended job run
-uses it whatever the call names, and the result has `job_choice: true`.
+uses it whatever source, account, model or worker the call names (declared options in
+the call still apply, under the same price, confirmation and cap checks), and the
+result has `job_choice: true`.
 A matching named choice keeps the normal pricing, confirmation and daily-cap checks.
 
 ## Remembered choices

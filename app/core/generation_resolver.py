@@ -27,8 +27,8 @@ SOURCE_ALIASES = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgp
 DO_NOT_RETRY = "Do not call again without the user's go-ahead."
 REMEMBERED_MESSAGE = ("Used the user's remembered choice. They can change it from this result in the chat, "
                       "in Settings > Default models, or by naming another source or model.")
-JOB_CHOICE_MESSAGE = ("Used this job's stored choice. Unattended runs ignore the source or model named in the call; "
-                      "the owner changes a job's choice in its settings.")
+JOB_CHOICE_MESSAGE = ("Used this job's stored choice. Unattended runs ignore any source, account, model or worker "
+                      "named in the call; declared options in the call still apply.")
 UNPRICED_SKIP_MESSAGE = ("Generation skipped: the user's saved choice has no known price right now, and nothing unpriced "
                          "runs unattended. They can pick a priced option again in Settings > Default models.")
 UNREADABLE_SKIP_MESSAGE = ("Generation skipped: the user's saved generation choices could not be read, so this "
