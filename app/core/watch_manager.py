@@ -13,6 +13,7 @@ from app.db import database, notifications, turns, watches as store
 from app.db.async_database import run_maintenance, run_sync
 from app.core import watch_values as values
 from app.db.base import get_db
+from app.network.control import RunnerUnreachable
 
 logger = logging.getLogger(__name__)
 LIMIT_INTERVAL_SECONDS = 15
@@ -77,6 +78,10 @@ async def notify(
 ) -> None:
     # The bell is the durable exactly-once report. Push is a best-effort
     # transport; mark attempted before sending so reboot cannot double-push.
+    from app.core.watch_delivery import share
+
+    session_id = session_id or watch.get("creating_session_id")
+    await share(event["id"], watch["description"], message, session_id)
     nid = "watch-" + event["id"]
     await run_sync(
         notifications.create_notification,
@@ -201,6 +206,8 @@ class WatchManager:
             for watch in rows:
                 try:
                     await self._run_watch(watch)
+                except RunnerUnreachable:
+                    logger.info("Watch %s delivery awaits its peer", watch["id"])
                 except Exception as exc:
                     logger.warning("Watch %s failed: %s", watch["id"], type(exc).__name__)
                     # Do not put provider stderr/credentials in the owner's panel.
@@ -218,6 +225,11 @@ class WatchManager:
                         await self._status_notice(current)
 
             await run_sync(publish)
+        # Peer I/O must not hold up another reconciliation pass's polling or
+        # delivery admission. The dispatcher also bounds each pass and peer.
+        from app.core.watch_delivery import flush
+
+        await flush()
 
     async def _status_notice(self, watch: dict[str, Any]) -> None:
         await run_sync(
@@ -308,6 +320,10 @@ class WatchManager:
             await run_sync(store.release_delivery, event["id"], self._lease_token)
 
     async def _deliver_claimed(self, watch: dict[str, Any], event: dict[str, Any]) -> None:
+        from app.core.watch_delivery import deliver
+
+        if await deliver(watch, event, self._lease_token):
+            return
         # Resolve stable turn command before attempting any dispatch. A crash
         # between submission and recording can never create a second turn.
         turn = (

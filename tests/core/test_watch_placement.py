@@ -109,19 +109,30 @@ async def test_remote_create_list_controls_and_creator_offline(
     assert (await placement.rows())[0]["worker_id"] == "ServerWorker"
     assert (await placement.change(wid, "paused"))["status"] == "paused"
     await placement.change(wid, "active")
-    # No creator row exists at all in the server's database. The executing
-    # worker still detects, reports and checkpoints without contacting it.
-    monkeypatch.setattr(manager, "summarize", AsyncMock(return_value=("Reminder", 0.001)))
+    # No creator row exists in the executor database. Explicitly disconnect
+    # the creating peer: retain its real event command, never run a mirror.
+    rpc = control.call
+
+    async def offline(device: str, action: str, body: dict[str, Any]) -> dict[str, Any]:
+        if device == "dev_desktop":
+            raise control.RunnerUnreachable("Creating worker is offline")
+        return await rpc(device, action, body)
+
+    monkeypatch.setattr(control, "call", offline)
+    summary = AsyncMock(return_value=("Reminder", 0.001))
+    monkeypatch.setattr(manager, "summarize", summary)
     monkeypatch.setattr(manager, "notify", AsyncMock())
     with network("ServerWorker"):
         assert database.get_session(owner["id"]) is None
         await manager.WatchManager().run_once()
-        event = store.events(wid, ("delivered",))[0]
-        assert event["status"] == "delivered"
+        event = store.events(wid, ("admitted",))[0]
+        assert not event["turn_id"]
         cursor = store.get(wid)["cursor"]
         await manager.WatchManager().run_once()
-        assert len(store.events(wid, ("delivered",))) == 1
+        assert [row["id"] for row in store.events(wid, ("admitted",))] == [event["id"]]
         assert store.get(wid)["cursor"] == cursor
+        assert store.get(wid)["failures"] == 0
+    summary.assert_not_awaited()
     assert (await placement.change(wid, "stopped"))["status"] == "stopped"
     assert (await placement.change(wid, "active"))["status"] == "stopped"
 

@@ -188,6 +188,10 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
     from app.core import watch_sources, watches
 
     operation = body.get("operation")
+    if operation in ("deliver", "authorize", "report", "report_read", "locate"):
+        from app.core.watch_delivery import handle
+
+        return await handle(body, from_device)
     if operation == "list":
         return {"watches": await run_sync(watches.panel_rows)}
     if operation == "status":
@@ -215,7 +219,10 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
         cursor: dict[str, Any] = {}
         if row["source"]["kind"] == "connector":
             _, cursor = await watch_sources.poll(dict(row, cursor={}))
-        wid = await run_sync(store.create, **row, cursor=cursor, watch_id=body["watch_id"])
+        wid = await run_sync(
+            store.create, **row, cursor=cursor, watch_id=body["watch_id"],
+            creating_device_id=from_device,
+        )
         return {"watch": await run_sync(store.get, wid)}
     if operation == "prepare_export":
         watch = await run_sync(store.get, body["watch_id"])

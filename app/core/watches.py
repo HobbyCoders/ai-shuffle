@@ -177,7 +177,12 @@ async def create_from_conversation(session_id: str, data: dict[str, Any]) -> dic
     cursor = {}
     if row["source"]["kind"] == "connector":
         _, cursor = await sources.poll(dict(row, cursor={}))
-    wid = await run_sync(store.create, **row, cursor=cursor)
+    wid = await run_sync(
+        store.create, **row, cursor=cursor,
+        creating_device_id=await run_sync(
+            watch_placement.canonical, watch_placement.assistant_id()
+        ),
+    )
     return dict(
         watch=await run_sync(store.get, wid), confirmation="Watching " + row["description"] + "."
     )
@@ -204,6 +209,10 @@ def assert_allowed(
         or meta.get("read_only") is not True
     ):
         raise ValueError("Invalid watch provenance")
+    if meta.get("delivery_device"):
+        from app.core.watch_delivery import assert_allowed as remote_allowed
+
+        return remote_allowed(meta, session_id)
     watch = store.get(meta.get("watch_id"))
     if not watch or watch["status"] != "active":
         raise ValueError("Watch is paused or stopped")
