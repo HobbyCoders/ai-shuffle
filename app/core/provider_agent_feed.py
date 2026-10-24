@@ -335,6 +335,21 @@ class WorkerFeed:
             "tool_use_id": self.task_id,
         })
 
+    async def queued(self, waiting: bool) -> None:
+        """Reuse the task chip/summary; queue notices are not provider progress."""
+        if getattr(self, "_queue_notice", False) == waiting:
+            return
+        self._queue_notice = waiting
+        summary = "Queued" if waiting else (self.label or "")
+        from app.core.task_registry import task_registry
+        await asyncio.to_thread(
+            task_registry.update_task, self.parent_session_id, self.task_id, summary=summary,
+        )
+        await self._emit({
+            "type": "task_progress", "task_id": self.task_id,
+            "status": "running", "summary": summary, "tool_use_id": self.task_id,
+        })
+
     async def completed(
         self,
         status: str,

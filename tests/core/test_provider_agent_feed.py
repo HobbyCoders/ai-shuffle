@@ -394,6 +394,22 @@ class TestRunningTaskFrame:
         assert running[0]["payload"]["task_id"] == WORKER
         assert running[0]["payload"]["tool_use_id"] == WORKER
 
+    def test_queued_notice_reuses_task_summary_without_provider_progress(self, db: object) -> None:
+        f = _feed()
+
+        async def run() -> None:
+            await f.started()
+            await f.queued(True)
+            await f.queued(True)
+            await f.queued(False)
+
+        asyncio.run(run())
+        rows = self._running()
+        assert [r["payload"]["summary"] for r in rows] == ["reviewer", "Queued", "reviewer"]
+        assert f.frames_forwarded == 0
+        assert f.provider_progress == 0
+        assert {r["payload"]["task_id"] for r in rows} == {WORKER}
+
     def test_running_frame_describes_the_worker_by_its_label(self, db):
         """``description`` is what the reducer stores as the Task's subject."""
         f = _feed()
