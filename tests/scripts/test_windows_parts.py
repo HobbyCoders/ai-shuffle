@@ -138,7 +138,7 @@ def write(path: Path, text: str) -> Path:
     return path
 
 
-def test_temporary_pytest_suite_does_not_load_parent_conftest(tmp_path):
+def test_temporary_pytest_suite_does_not_load_parent_conftest(tmp_path: Path) -> None:
     # A fixture outside the checkout must not import unrelated ancestor config.
     # This also models a temporary directory on a different Windows drive.
     (tmp_path / "conftest.py").write_text("raise AssertionError('outside fixture root')\n")
@@ -147,7 +147,10 @@ def test_temporary_pytest_suite_does_not_load_parent_conftest(tmp_path):
     tests = write(suite / "test_isolated.py", """
 from pathlib import Path
 
-def test_root(pytestconfig):
+import pytest
+
+
+def test_root(pytestconfig: pytest.Config) -> None:
     assert pytestconfig.rootpath == Path(__file__).parent
 """)
     result = subprocess.run(pytest_command(tests), env={**os.environ, **local_ci.python_env()},

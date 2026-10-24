@@ -514,7 +514,7 @@ async def test_finalizing_tick_after_local_ttl_exits_quietly(mock_db, monkeypatc
     now = [100.0]
     sleeps = []
 
-    async def sleep(delay):
+    async def sleep(delay: float) -> None:
         sleeps.append(delay)
         now[0] += delay
 
