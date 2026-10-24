@@ -67,6 +67,18 @@ def test_docker_bundles_one_supported_postgres_major():
     assert "pg_trgm.control" in image
 
 
+@pytest.mark.parametrize(
+    "compose_path", ["docker-compose.yml", "docs/install/compose/compose.yaml"],
+)
+def test_container_stop_grace_covers_ordered_shutdown(compose_path: str) -> None:
+    compose = (ROOT / compose_path).read_text()
+    grace = int(re.search(r"(?m)^    stop_grace_period: (\d+)s$", compose).group(1))
+    assert grace == 120
+    # App and browser each have TERM + KILL waits, then PG FAST + KILL.
+    assert grace > 30 + 5 + 5 + 5 + 60 + 5
+    assert "--stop-timeout 120" in (ROOT / "Dockerfile").read_text()
+
+
 def test_docker_supervisor_owns_signals_and_persistent_storage():
     image = (ROOT / "Dockerfile").read_text()
     assert 'ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]' in image
