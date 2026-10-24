@@ -30,6 +30,7 @@ def world(mock_db, tmp_path):
     target = clone(origin, tmp_path / "target")
     caller = tmp_path / "caller"
     git(base, "worktree", "add", "-b", "caller", str(caller))
+    git(caller, "branch", "--set-upstream-to=origin/main")
     fresh = commit(seed, "new.txt", "new main work\n")
     git(seed, "push", "origin", "main")
     project = projects_v2.upsert_project("local:fresh-base", name="Fresh base")
@@ -45,6 +46,68 @@ def world(mock_db, tmp_path):
 
 def prepare(w, **kwargs):
     return worker_checkout.prepare_worker_checkout(w["row"], "fresh-test", "coder", **kwargs)
+
+
+
+
+@pytest.mark.parametrize("tracks_default", [False, True])
+def test_non_default_caller_only_refreshes_when_tracking_default(world, tracks_default):
+    w = world
+    git(w["caller"], "switch", "-c", "hotfix/1.2")
+    checkouts.upsert_checkout(w["project"]["id"], LOCAL_ME, str(w["caller"]), branch="hotfix/1.2")
+    database.set_session_branch("parent", "hotfix/1.2", w["project"]["id"])
+    w["row"] = database.get_session("parent")
+    if tracks_default:
+        git(w["caller"], "branch", "--set-upstream-to=origin/main")
+    checkout = prepare(w)
+    assert checkout.base_commit == (w["fresh"] if tracks_default else w["old"])
+    assert git(w["caller"], "rev-parse", "HEAD") == w["old"]
+
+
+def test_explicit_base_does_not_fetch(world, monkeypatch):
+    monkeypatch.setattr(git_fork_base, "fetch_base", lambda *a, **kw: pytest.fail("Explicit base must not fetch"))
+    assert prepare(world, base_commit=world["old"]).base_commit == world["old"]
+
+
+def test_chat_fetch_has_longer_deadline(world, monkeypatch):
+    from app.core import checkout_transfer
+    run = checkout_transfer._run
+    timeouts = []
+
+    def observed(cwd, *args, **kwargs):
+        if args[0] == "fetch":
+            timeouts.append(kwargs["timeout"])
+        return run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(checkout_transfer, "_run", observed)
+    path = checkout_manager.ensure_checkout(world["project"], "chore/chat-deadline",
+        create_new_branch=True, provision_runtime=False)
+    assert path
+    assert timeouts == [60]
+
+
+def test_remote_hotfix_does_not_negotiate_fresh_default(world, monkeypatch):
+    w = world
+    git(w["caller"], "branch", "--unset-upstream")
+    state = worker_checkout.publish_worker_branch(w["row"], "remote-hotfix", "coder", fresh_base=True)
+    assert state.pushed, state.reason
+    assert state.base_policy is None
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda _: TARGET))
+    received = worker_checkout.receive_worker_branch(state.to_wire(), "remote-hotfix")
+    assert received.checkout.base_commit == w["old"]
+
+
+def test_missing_dispatch_keeps_branch_with_honest_reason(world):
+    w = world
+    state = worker_checkout.publish_worker_branch(w["row"], "missing-dispatch", "coder", fresh_base=True)
+    assert state.pushed, state.reason
+    block = dict(mode=worker_checkout.REMOTE_BRANCH, branch=state.branch,
+                 base=w["fresh"], head=w["fresh"], commits=0)
+    outcome = worker_checkout.fetch_worker_commits(w["row"], "missing-dispatch", block)
+    assert not outcome["released"]
+    assert "dispatch" in outcome["reason"].lower()
+    assert "moved past" not in outcome["reason"]
+    assert git(w["origin"], "rev-parse", state.branch) == w["old"]
 
 
 def test_behind_caller_gets_fresh_default_without_touching_caller(world):
@@ -73,7 +136,7 @@ def test_explicit_base_wins_even_when_caller_is_only_behind(world):
     assert checkout.base_commit == world["old"]
     assert git(checkout.path, "rev-parse", "HEAD") == world["old"]
     assert "Explicit base_commit." in checkout.instructions()
-    assert git(world["caller"], "rev-parse", "origin/main") == world["fresh"]
+    assert git(world["caller"], "rev-parse", "origin/main") == world["old"]
 
 
 @pytest.mark.parametrize("timeout", [False, True])

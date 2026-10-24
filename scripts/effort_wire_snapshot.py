@@ -6,9 +6,10 @@ Run from the repository root with the development/test dependencies installed::
     # Make a tuning change, run again with --output /tmp/effort-after.json, then:
     diff -u /tmp/effort-before.json /tmp/effort-after.json
 
-Runs only tests/core/test_effort_wire.py. Real session/profile option building,
-adapters, loops and serializers produce HTTP bodies against MockTransport; the
-CLI route records the real argv builder's effort flag without spawning Claude.
+Runs only tests/core/test_effort_wire.py and test_effort_inheritance_wire.py.
+Real session/profile option building, child dispatch, adapters, loops and
+serializers produce HTTP bodies against MockTransport; the CLI route records
+the real argv builder's effort flag without spawning Claude.
 The JSON is sorted, contains synthetic tuning parameters only, and is written
 only after ALL route assertions pass. No timings, credentials, paths or prompts.
 
@@ -49,8 +50,9 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     capture = Capture()
-    test = Path(__file__).resolve().parents[1] / "tests/core/test_effort_wire.py"
-    status = pytest.main([str(test), "-q", "-o", "addopts="], plugins=[capture])
+    root = Path(__file__).resolve().parents[1] / "tests" / "core"
+    tests = [root / name for name in ("test_effort_wire.py", "test_effort_inheritance_wire.py")]
+    status = pytest.main([*(str(test) for test in tests), "-q", "-o", "addopts="], plugins=[capture])
     if status:
         return int(status)
     if not capture.records:

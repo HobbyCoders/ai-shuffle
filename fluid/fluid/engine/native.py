@@ -96,6 +96,7 @@ from fluid.context.compaction import (
     Promotion,
     describe_promotions,
 )
+from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
 from fluid.context.trim import (
@@ -109,6 +110,7 @@ from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    AssistantTextSanitized,
     BlockStart,
     BlockStop,
     CacheMissAlert,
@@ -1965,7 +1967,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             sid = self._session_id if await self.store.get_session(self._session_id) else None
         if sid is not None:
             nodes = await self._context_path(sid)
-            history = repair_dangling_tool_calls(self._compactor.view(nodes))
+            history = sanitize_assistant_history(repair_dangling_tool_calls(self._compactor.view(nodes)))
             # ``stats`` prices the compacted render unconditionally (the intake
             # stub is a stateless view policy inside ``Compactor._render``), so
             # with context rewriting disabled it would report reclaimed tokens
@@ -2038,7 +2040,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             stored_end = None  # re-evict at whatever the compactor renders now
         if frozen is None:
             self._elided.pop(sid, None)
-            return nodes
+            return self._sanitize_context_nodes(nodes)
         end, keep = frozen
         windowed = self._compactor.window(nodes)
         kept = {node.node_id for node in windowed}
@@ -2050,7 +2052,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         evict = getattr(self.store, "evict_prefix", None)
         if callable(evict) and stored_end != end:
             await evict(sid, end, keep)
-        return windowed
+        return self._sanitize_context_nodes(windowed)
+
+    @staticmethod
+    def _sanitize_context_nodes(nodes: list[SessionNode]) -> list[SessionNode]:
+        # Sanitize legacy assistant prose BEFORE extractive digests can move it
+        # into a user-role summary. Leave the durable audit tree untouched.
+        messages = sanitize_assistant_history([node.message for node in nodes])
+        return [replace(node, message=message) if message is not node.message else node
+                for node, message in zip(nodes, messages)]
 
     async def _measured_next_prompt(
         self, sid: str, nodes: list[SessionNode]
@@ -3733,7 +3743,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     promotions.append(summary)
             if promotions:
                 rendered = self._compactor.view(nodes)
-            history = repair_dangling_tool_calls(rendered)
+            history = sanitize_assistant_history(repair_dangling_tool_calls(rendered))
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
                 # current model+account cannot decrypt; render without them
@@ -5347,8 +5357,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                     "signature": "", "tool_name": None, "tool_use_id": None,
                 }
 
+        message = self._assemble_message(blocks, request.model)
+        cleaned = sanitize_assistant_history([message])[0]
+        if cleaned is not message:
+            await self._emit(AssistantTextSanitized(session_id=sid, turn_id=turn_id))
         return _CallResult(
-            message=self._assemble_message(blocks, request.model),
+            message=cleaned,
             tool_uses=tool_uses,
             usage=usage_totals,
             stop_reason=stop_reason,
