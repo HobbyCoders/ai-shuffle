@@ -52,6 +52,16 @@
  * when the server has already spoken about the queue since the send began, and
  * an × carries the same client command id as its send. A cancellation stays
  * visible until its verdict; queue snapshots cannot hide it before that verdict.
+ *
+ * Switching sessions (#524)
+ * -------------------------
+ * The bubbles of a session the user leaves are PARKED here, keyed by session,
+ * and handed back the moment the user returns, so they never blink out while
+ * the return `watch_session` snapshot is in flight. They are a projection, not
+ * a second authority: an available snapshot still replaces them, and a
+ * transcript `message.user` carrying an entry's command id retires it. An
+ * `unavailable` snapshot (the executing worker could not be read) is not an
+ * empty queue, so parked bubbles stay up, marked stale, until one that is.
  */
 
 import type { ChatMessage, PendingPeerMessage } from '../types';
@@ -100,6 +110,8 @@ export function newLocalPendingId(): string {
 interface Delivery {
 	content: string;
 	seq: number;
+	/** The delivered command, when the receipt carries one: it then answers only its own bubble. */
+	commandId?: string;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
 }
@@ -115,6 +127,18 @@ const deliveredTurnIds = new Set<string>();
 /** Entry ids already retired — sticky, so a stale snapshot cannot resurrect them. */
 const prunedIds = new Set<string>();
 let deliveries: Delivery[] = [];
+/**
+ * Command ids answered by HISTORY replayed into this feed, with the server time
+ * of the answering `message.user` (NaN when unknown). Replay order says nothing
+ * about when a bubble was first seen, so these are matched by identity and
+ * server clock instead: a backend re-queue (an interrupted steer, run again)
+ * keeps its command id but is a fresh row created AFTER that receipt.
+ */
+const replayedCommands = new Map<string, number>();
+/** Most sessions parked at once; the oldest falls back to its snapshot alone. */
+const MAX_PARKED_SESSIONS = 50;
+/** Session id → the pending bubbles it showed when the user left it. */
+const parked = new Map<string, PendingEntry[]>();
 // Keep an unresolved cancellation visible even if a queue-cleared frame wins
 // the race with its verdict. No text matching or expiring local-id map.
 interface CancellationState {
@@ -147,6 +171,23 @@ function resetState(next: string | null): void {
 	deliveredTurnIds.clear();
 	prunedIds.clear();
 	deliveries = [];
+	replayedCommands.clear();
+}
+
+/** A bubble no server snapshot has described yet: this tab's own echo. */
+function isOptimistic(entry: PendingEntry): boolean {
+	return entry.id === entry.clientMessageId || isLocalPendingId(entry.id);
+}
+
+/** Has replayed history already answered this bubble's command? */
+function answeredByHistory(entry: PendingEntry): boolean {
+	if (!entry.clientMessageId) return false;
+	const answeredAt = replayedCommands.get(entry.clientMessageId);
+	if (answeredAt === undefined) return false;
+	// An echo cannot be a re-queue (those only exist server-side). A server row
+	// is consumed when it predates the receipt on the SAME (server) clock.
+	if (isOptimistic(entry)) return true;
+	return Number.isFinite(answeredAt) && Number.isFinite(entry.queuedAt) && entry.queuedAt < answeredAt;
 }
 
 /** Bind feed observations to a session; cancellation transactions are separate. */
@@ -168,7 +209,45 @@ export const pendingQueue = {
 	 * reserved for discarding the entire client store (e.g. test isolation). */
 	reset(id: string | null = null, clearCancellations = false): void {
 		resetState(id);
-		if (clearCancellations) cancellations.clear();
+		if (clearCancellations) {
+			cancellations.clear();
+			parked.clear();
+		}
+	},
+
+	/**
+	 * Keep the bubbles of a session being left (#524). Statuses ride along; the
+	 * cancellation transaction they mirror is session-scoped already.
+	 */
+	park(id: string | null, entries: PendingEntry[]): void {
+		if (!id) return;
+		parked.delete(id);
+		if (entries.length === 0) return;
+		parked.set(id, entries.map(e => ({ ...e })));
+		while (parked.size > MAX_PARKED_SESSIONS) {
+			const oldest = parked.keys().next().value;
+			if (oldest === undefined) break;
+			parked.delete(oldest);
+		}
+	},
+
+	/**
+	 * The bubbles to show the instant a session is re-opened, before its queue
+	 * snapshot lands. Withdrawn entries stay gone; everything else waits for the
+	 * server to say it was consumed or cancelled.
+	 */
+	unpark(id: string | null): PendingEntry[] {
+		if (!id) return [];
+		const entries = parked.get(id);
+		parked.delete(id);
+		if (!entries) return [];
+		const { withdrawn } = cancellationState(id);
+		return entries.filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
+	},
+
+	/** Test/diagnostic hook: the bubbles parked for a session. */
+	parkedFor(id: string): PendingEntry[] {
+		return parked.get(id) ?? [];
 	},
 
 	/** Consume confirmed withdrawals only when their own composer is mounted. */
@@ -217,14 +296,20 @@ export const pendingQueue = {
 		id: string | null,
 		content: string,
 		turnId?: string,
-		live = true
+		live = true,
+		commandId?: string,
+		createdAt?: string
 	): void {
 		useSession(id);
 		if (turnId) deliveredTurnIds.add(turnId);
-		if (!live) return;
+		if (!live) {
+			// The command id is an exact handle, unlike text, so history may use it.
+			if (commandId) replayedCommands.set(commandId, createdAt ? Date.parse(createdAt) : NaN);
+			return;
+		}
 		const text = normalize(content);
-		if (!text) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null });
+		if (!text && !commandId) return;
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, ...(commandId ? { commandId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.
@@ -282,12 +367,22 @@ export const pendingQueue = {
 			}
 			// #588: a drained queue row runs as the turn its id names.
 			if (deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)) continue;
+			// #524: replayed history already carries this bubble's receipt.
+			if (answeredByHistory(entry)) {
+				prunedIds.add(entry.id);
+				continue;
+			}
 			// First sighting stamps the entry; an entry we meet for the first time
 			// here can never be older than a delivery, so it is never content-pruned.
 			const bornAt = stamp(entry.id);
 			const text = normalize(entry.content);
+			// A receipt that names its command answers that bubble only — never an
+			// identical-text sibling sent under another command id.
+			const answers = (d: Delivery) => d.commandId && entry.clientMessageId
+				? d.commandId === entry.clientMessageId
+				: d.content === text;
 			const delivery = deliveries.find(
-				(d) => d.matchedEntryId === null && d.content === text && bornAt < d.seq
+				(d) => d.matchedEntryId === null && bornAt < d.seq && answers(d)
 			);
 			if (delivery) {
 				delivery.matchedEntryId = entry.id;

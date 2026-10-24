@@ -12,7 +12,7 @@ import { isSwarmActive, type SwarmSnapshot, type SwarmTask } from '$lib/utils/sw
 import { linkedTranscripts, transcriptForTask } from '$lib/utils/background-work';
 import { taskModel, type TaskModel } from '$lib/utils/task-model';
 
-export type RunFilter = 'all' | 'agents' | 'shell';
+export type RunFilter = 'all' | 'agents' | 'shell' | 'watches';
 export type RowState = 'running' | 'stopping' | 'stopped';
 
 export interface SwarmMemberRow {
@@ -188,6 +188,7 @@ function compareRows(a: RunRow, b: RunRow): number {
 
 export function matchesFilter(row: RunRow, filter: RunFilter): boolean {
 	if (filter === 'all') return true;
+	if (filter === 'watches') return false;
 	return filter === 'agents' ? row.kind === 'agent' : row.kind === 'shell';
 }
 
@@ -272,4 +273,131 @@ const MEMBER_STATE: Record<SwarmTask['status'], string> = {
 
 export function memberStateLabel(status: SwarmTask['status']): string {
 	return MEMBER_STATE[status] ?? status;
+}
+
+// ── Watches (#371 step 3) ────────────────────────────────────────────────────
+// A watch is the owner's, not one chat's: every panel lists all of them. It
+// is a row with what it watches, when it last fired and what it has cost,
+// with Pause (or Resume) and Stop. Stop is terminal, so it confirms first.
+
+export type WatchRowState = 'active' | 'paused' | 'stopping' | 'stopped';
+
+export interface WatchListRow {
+	type: 'watch';
+	key: string;
+	id: string;
+	name: string;
+	state: WatchRowState;
+	/** Why it paused itself; only kept while paused. */
+	reason: string | null;
+	lastFiredAt: number | null;
+	costUsd: number;
+	dailyBudgetUsd: number | null;
+	/** The chat that made it, which it fires into. */
+	sessionId: string | null;
+	canPause: boolean;
+	canResume: boolean;
+	canStop: boolean;
+}
+
+export interface WatchSource {
+	id: string;
+	what?: string | null;
+	description?: string | null;
+	status: string;
+	reason?: string | null;
+	last_fired_at?: string | null;
+	cost_usd?: number | null;
+	daily_budget_usd?: number | null;
+	creating_session_id?: string | null;
+	can_pause?: boolean;
+	can_stop?: boolean;
+}
+
+export const watchKey = (id: string) => `watch:${id}`;
+
+/**
+ * Rows for the watches the panel shows: every one not stopped, plus any the
+ * owner stopped from this panel (they read "Stopped" until the list closes).
+ * Order is the server's (oldest first), so rows keep their place.
+ */
+export function buildWatchRows(
+	list: readonly WatchSource[],
+	{ stopping, stoppedHere }: { stopping?: ReadonlySet<string>; stoppedHere?: ReadonlySet<string> } = {}
+): WatchListRow[] {
+	const rows: WatchListRow[] = [];
+	for (const w of list) {
+		const key = watchKey(w.id);
+		const stopped = w.status === 'stopped';
+		if (stopped && !stoppedHere?.has(w.id)) continue;
+		const paused = w.status === 'paused';
+		const state: WatchRowState = stopped ? 'stopped' : stopping?.has(key) ? 'stopping' : paused ? 'paused' : 'active';
+		const cost = Number(w.cost_usd);
+		const budget = Number(w.daily_budget_usd);
+		rows.push({
+			type: 'watch',
+			key,
+			id: w.id,
+			name: plain(w.what) || plain(w.description) || 'Watch',
+			state,
+			reason: paused ? plain(w.reason) || null : null,
+			lastFiredAt: time(w.last_fired_at),
+			costUsd: Number.isFinite(cost) && cost > 0 ? cost : 0,
+			dailyBudgetUsd: Number.isFinite(budget) && budget > 0 ? budget : null,
+			sessionId: w.creating_session_id || null,
+			canPause: state === 'active' && w.can_pause !== false,
+			canResume: state === 'paused' && w.can_stop !== false,
+			canStop: (state === 'active' || state === 'paused') && w.can_stop !== false
+		});
+	}
+	return rows;
+}
+
+export function matchesWatchQuery(row: WatchListRow, query: string): boolean {
+	const q = query.trim().toLowerCase();
+	if (!q) return true;
+	return [row.name, row.reason ?? '', row.state].join(' ').toLowerCase().includes(q);
+}
+
+export function visibleWatches(rows: readonly WatchListRow[], filter: RunFilter, query: string): WatchListRow[] {
+	if (filter !== 'all' && filter !== 'watches') return [];
+	return rows.filter((row) => matchesWatchQuery(row, query));
+}
+
+/** "1 watch", "3 watches". */
+export function watchCount(n: number): string {
+	return `${n} ${n === 1 ? 'watch' : 'watches'}`;
+}
+
+/** "2 watches", "2 watches · 1 paused"; stopped rows are not counted. */
+export function watchSummary(rows: readonly WatchListRow[]): string {
+	const live = rows.filter((r) => r.state !== 'stopped');
+	if (!live.length) return '';
+	const paused = live.filter((r) => r.state === 'paused').length;
+	return paused ? `${watchCount(live.length)} · ${paused} paused` : watchCount(live.length);
+}
+
+/** "Fired just now", "Fired 5m ago", "Fired 2h ago", "Fired 3d ago", "Not fired yet". */
+export function formatFired(lastFiredAt: number | null, now: number): string {
+	if (lastFiredAt === null) return 'Not fired yet';
+	const secs = Math.max(0, Math.floor((now - lastFiredAt) / 1000));
+	if (secs < 45) return 'Fired just now';
+	const mins = Math.max(1, Math.round(secs / 60));
+	if (mins < 60) return `Fired ${mins}m ago`;
+	const hours = Math.floor(mins / 60);
+	if (hours < 24) return `Fired ${hours}h ago`;
+	return `Fired ${Math.floor(hours / 24)}d ago`;
+}
+
+/** "$0.00", "<$0.01", "$1.24", "$12.50". */
+export function formatWatchCost(usd: number): string {
+	if (!(usd > 0)) return '$0.00';
+	if (usd < 0.01) return '<$0.01';
+	return `$${usd.toFixed(2)}`;
+}
+
+/** The cost line's tooltip: the total, and the daily cap when there is one. */
+export function watchCostTitle(row: Pick<WatchListRow, 'costUsd' | 'dailyBudgetUsd'>): string {
+	const spent = `${formatWatchCost(row.costUsd)} spent in total`;
+	return row.dailyBudgetUsd ? `${spent} · daily cap ${formatWatchCost(row.dailyBudgetUsd)}` : spent;
 }

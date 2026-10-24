@@ -1700,6 +1700,9 @@ def create_builtin_tools_server(
     from app.mcp.sdk_compat import patch_sdk_server
 
     all_tools: list = []
+    from app.core.watches import tools as watch_tools
+
+    all_tools.extend(watch_tools(session_id))
 
     # Native Android tools are visible in NORMAL sessions. Identity comes only
     # from this runtime session id, never from model-supplied account/admin flags.
@@ -1772,7 +1775,6 @@ def create_builtin_tools_server(
         all_tools.extend(build_emulator_tools(tool, cwd=cwd))
     except Exception:  # noqa: BLE001 — the emulator never blocks a session
         logger.warning("emulator tool registration failed", exc_info=True)
-
 
     # ------------------------------------------------------------------
     # ScheduleWakeup — pause + resume session after a delay
@@ -2993,6 +2995,9 @@ def create_builtin_tools_server(
 
     all_tools.append(hand_off_session_tool)
 
+    from app.mcp.working_record_tools import build_tools as build_working_record_tools
+    all_tools.extend(build_working_record_tools(tool, is_admin=is_admin, session_id=session_id))
+
     # Plugins: find one, check one, install one switched off for the owner
     # to review and enable in Settings (app/mcp/plugin_tools.py).
     try:
@@ -3079,9 +3084,14 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ArchiveSession",
         "mcp__builtins__HandOffSession",
         "mcp__builtins__WorktreeReport",
+        "mcp__builtins__WorkingRecord",
         "mcp__builtins__ListAgents",
         "mcp__builtins__SendMessage",
         "mcp__builtins__NotifyDevices",
+        "mcp__builtins__CreateWatch",
+        "mcp__builtins__ListWatches",
+        "mcp__builtins__PauseWatch",
+        "mcp__builtins__StopWatch",
         "mcp__builtins__CronCreate",
         "mcp__builtins__CronList",
         "mcp__builtins__CronDelete",

@@ -169,7 +169,7 @@ The default port binding is `127.0.0.1:8000`. To deliberately share the local li
 
 **Updating an older installation:** this release requires managed embedded PostgreSQL. It does not automatically import an existing external database. Keep a non-managed installation on its existing release with its data, configuration, and protected backups until a tested migration is available. Do not use `down -v` or remove retained volumes. Follow [backup and recovery](../../docs/RESTORE.md).
 
-Retain the `ai-shuffle-data:/data` volume, workspace, and authentication/settings/browser volumes. The data volume includes PostgreSQL, identity, and credential keys. Compose allows 90 seconds for shutdown; use at least that timeout with other container launchers. The runtime owns database credentials and its private descriptor; external database connection settings are not supported.
+Retain the `ai-shuffle-data:/data` volume, workspace, and authentication/settings/browser volumes. The data volume includes PostgreSQL, identity, and credential keys. Compose allows 120 seconds for shutdown; use at least that timeout with other container launchers. The runtime owns database credentials and its private descriptor; external database connection settings are not supported.
 
 ### Android
 

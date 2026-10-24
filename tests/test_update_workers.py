@@ -801,6 +801,63 @@ def test_refusals_hold_restart_until_a_later_install_completes(setup):
     asyncio.run(scenario())
 
 
+def test_a_refused_check_never_hides_the_peers_own_result(setup):
+    """A peer already checking refuses a second check; the update it finds must still show."""
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "checking", "version": None,
+            "running_version": A, "checked_at": time.time()}
+
+    async def call(_device, _kind, body, **kwargs):
+        if body["operation"] == "status":
+            return dict(peer)
+        return {"accepted": False, "reason": "An update is already in progress"}
+
+    remote.side_effect = call
+    fleet._refusals["peer"] = "Busy with active sessions; retry when finished"
+
+    async def scenario():
+        result = await fleet.dispatch("check")
+        assert any(row["device_id"] == "peer" and row["accepted"] is False for row in result["results"])
+        assert fleet._refusals == {}
+        peer.update(phase="available", version=B[:12])
+        state = await fleet.snapshot(fresh=True)
+        row = next(row for row in state["workers"] if row["device_id"] == "peer")
+        assert row["role"] == "available"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["checking", "downloading", None])
+def test_a_download_refused_mid_check_never_hides_the_update_found(
+        setup: tuple, phase: str | None) -> None:
+    """#519: a peer that was checking refuses a download; the update it then finds must show."""
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "checking", "version": None,
+            "running_version": A, "checked_at": time.time()}
+
+    async def call(_device: str, _kind: str, body: dict, **kwargs: object) -> dict:
+        if body["operation"] == "status":
+            return dict(peer)
+        refusal = {"accepted": False, "reason": fleet.IN_PROGRESS_REASON}
+        # None: an older peer that does not say its phase; the reason alone tells.
+        return {**refusal, "phase": phase} if phase else refusal
+
+    remote.side_effect = call
+    updates.desktop_exchange({"phase": "available", "version": B[:12], "running_version": A})
+
+    async def scenario() -> None:
+        result = await fleet.dispatch("download")
+        refused = [row for row in result["results"] if row["accepted"] is False]
+        assert "peer" in [row["device_id"] for row in refused]
+        assert "peer" not in fleet._refusals
+        peer.update(phase="available", version=B[:12])
+        state = await fleet.snapshot(fresh=True)
+        row = next(row for row in state["workers"] if row["device_id"] == "peer")
+        assert row["role"] == "available" and not row["label"].startswith("Refused")
+    asyncio.run(scenario())
+
+
 def test_container_status_reports_when_the_feed_was_checked(setup, monkeypatch, tmp_path):
     import json
     import os

@@ -212,3 +212,71 @@ describe('pendingQueue — session scoping', () => {
 		expect(pendingQueue.reconcile(SID, rows)).toBe(rows);
 	});
 });
+
+describe('pendingQueue — parked per session (#524)', () => {
+	const CMD = 'client-' + 'c'.repeat(32);
+
+	it('hands a left session its bubbles back once, and keeps sessions apart', () => {
+		const a = [{ id: 'turn-q', clientMessageId: CMD, content: 'later', queuedAt: 1 }];
+		pendingQueue.park('A', a);
+		pendingQueue.park('B', []);
+		expect(pendingQueue.unpark('B')).toEqual([]);
+		const back = pendingQueue.unpark('A');
+		expect(back).toEqual(a);
+		expect(back[0]).not.toBe(a[0]); // a copy, not the live row
+		expect(pendingQueue.unpark('A')).toEqual([]);
+	});
+
+	it('survives the feed resets a switch performs, but not a full store reset', () => {
+		pendingQueue.park('A', [row('turn-q', 'later')]);
+		pendingQueue.reset(null);
+		pendingQueue.reset('B');
+		expect(pendingQueue.parkedFor('A')).toHaveLength(1);
+		pendingQueue.reset(null, true);
+		expect(pendingQueue.parkedFor('A')).toEqual([]);
+	});
+
+	it('never hands back a bubble whose withdrawal was confirmed while parked', () => {
+		const entry = { id: 'turn-q', clientMessageId: CMD, content: 'nvm', queuedAt: 1 };
+		pendingQueue.park('A', [entry, row('turn-r', 'keep')]);
+		pendingQueue.requestRemoval('A', entry);
+		pendingQueue.applyRemovalVerdict('A', CMD, 'withdrawn');
+		expect(pendingQueue.unpark('A').map(e => e.id)).toEqual(['turn-r']);
+	});
+
+	it('bounds how many sessions it remembers, dropping the oldest', () => {
+		for (let i = 0; i < 55; i++) pendingQueue.park(`s-${i}`, [row(`t-${i}`, 'x')]);
+		expect(pendingQueue.parkedFor('s-0')).toEqual([]);
+		expect(pendingQueue.parkedFor('s-54')).toHaveLength(1);
+	});
+});
+
+describe('pendingQueue — command-id receipts (#524)', () => {
+	const ONE = 'client-' + '1'.repeat(32);
+	const TWO = 'client-' + '2'.repeat(32);
+
+	it('a live receipt answers only the bubble with its command id, not an identical-text sibling', () => {
+		const rows = [
+			{ id: 'turn-1', clientMessageId: ONE, content: 'yes', queuedAt: 1 },
+			{ id: 'turn-2', clientMessageId: TWO, content: 'yes', queuedAt: 2 },
+		];
+		authoritative(rows);
+		pendingQueue.noteDelivered(SID, 'yes', 'turn-live', true, TWO);
+		expect(pendingQueue.reconcile(SID, rows).map(r => r.id)).toEqual(['turn-1']);
+	});
+
+	it('replayed history retires an echo or an older server row by command id, never by text', () => {
+		const echo = { id: ONE, clientMessageId: ONE, content: 'go', queuedAt: Date.now() };
+		const server = { id: 'turn-2', clientMessageId: TWO, content: 'go', queuedAt: Date.parse('2026-10-24T12:00:00Z') };
+		const plain = row('turn-3', 'go');
+		pendingQueue.noteDelivered(SID, 'go', 'turn-live', false, ONE, '2026-10-24T12:00:01Z');
+		pendingQueue.noteDelivered(SID, 'go', 'turn-live', false, TWO, '2026-10-24T12:00:01Z');
+		expect(pendingQueue.reconcile(SID, [echo, server, plain])).toEqual([plain]);
+	});
+
+	it('a replayed receipt with no server time does not retire a server row', () => {
+		const server = { id: 'turn-2', clientMessageId: TWO, content: 'go', queuedAt: 5 };
+		pendingQueue.noteDelivered(SID, 'go', 'turn-live', false, TWO);
+		expect(pendingQueue.reconcile(SID, [server])).toEqual([server]);
+	});
+});

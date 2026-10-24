@@ -30,6 +30,9 @@ _peer_status = {}
 # left behind, so restart waits until a new request reaches it.
 _refusals = {}
 _refusals_at = 0.0
+# A worker's refusal while its own check or download runs. Settings and the
+# sidebar wait for that worker's result rather than showing this as final.
+IN_PROGRESS_REASON = "An update is already in progress"
 # Containers check their feed on their own only once a day, so a worker that has
 # not checked since another one found an update is sent a check: at most once
 # per DISCOVERY_SECONDS per worker, never while an action or install is running.
@@ -386,7 +389,7 @@ def local_action(action, request_id, mode=None, *, busy_rows=None):
     elif not state["supported"]:
         reason = "Updater unavailable; install a release with update support"
     elif state["phase"] in ("checking", "downloading"):
-        reason = "An update is already in progress"
+        reason = IN_PROGRESS_REASON
     elif state["phase"] == "image-required":
         reason = "A newer runtime release is required"
     elif action == "download" and state["phase"] == "ready":
@@ -810,8 +813,14 @@ async def _dispatch(action, mode=None, scope=None):
     if not await run_sync(updates.allowed):
         raise UpdateNotSent("Application updates are disabled in Account settings")
     result = await _send(action, mode, scope)
-    refused = {row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
-               if not row.get("accepted") and row.get("device_id")}
+    # A refused check holds nothing back: the usual reason is a check or download
+    # already running there, whose own result must still show. Disabled or
+    # unsupported workers are already excluded by their status. The same goes
+    # for a download or install refused by a worker that was checking or
+    # downloading at the time (#519): what it then finds is its answer.
+    refused = {} if result.get("sent", action) == "check" else {
+        row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
+        if not row.get("accepted") and row.get("device_id") and not _preparing_refusal(row)}
     _refusals.clear()
     _refusals.update(refused)
     _refusals_at = time.time()
@@ -820,6 +829,12 @@ async def _dispatch(action, mode=None, scope=None):
                     result.get("sent", action), mode, result.get("scope"), row["device_name"],
                     "accepted" if row.get("accepted") else "refused", row.get("reason"))
     return result
+
+
+def _preparing_refusal(row: dict) -> bool:
+    """A refusal only because a check or download was already running on that worker."""
+    preparing = row.get("phase") in ("checking", "downloading")
+    return preparing or row.get("reason") == IN_PROGRESS_REASON
 
 
 async def _in_scope(scope):

@@ -15,7 +15,10 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+
+if TYPE_CHECKING:
+    from app.core.generation_resolver import RunContext
 
 from app.core.agent_types import AgentOptions
 
@@ -763,6 +766,26 @@ def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
     return generation_choices.for_session(caller)
 
 
+def _generation_context(
+    ai_tools_config: dict[str, Any], session_row: dict[str, Any] | None,
+    api_user_id: str | None, *, session_id: str | None,
+    unattended: bool, chat_mode: bool = False, native_generation: bool = False,
+) -> "RunContext":
+    from app.core.generation_resolver import RunContext
+
+    # Native-only grants still need the same saved choices, without enabling
+    # any additional MCP tools on the session's permitted surface.
+    choice_config = dict(ai_tools_config)
+    if native_generation:
+        choice_config["image_generation"] = True
+    choices = _generation_choices(choice_config, session_row, api_user_id)
+    return RunContext(session_id=session_id, unattended=unattended,
+                      owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
+                      chat_mode=chat_mode, remembered_choices=choices["remembered"],
+                      last_choices=choices["last"], job_choices=choices.get("job"),
+                      choices_unreadable=bool(choices.get("unreadable")))
+
+
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
 REMOVED_PROVIDER_MESSAGE = (
     "The AI provider this chat was using has been removed. "
@@ -1118,6 +1141,14 @@ def build_options_from_profile(
             final_system_prompt["append"] = current_append + "\n\n" + APP_CONFIG_SYSTEM_PROMPT
         else:
             final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
+
+    if owner_coordinator and session_id:
+        from app.core.working_record import summary as working_summary
+        record_context = working_summary(session_id, owner_row=_binding_row)
+        if isinstance(final_system_prompt, dict):
+            final_system_prompt["append"] = final_system_prompt.get("append", "") + "\n\n" + record_context
+        else:
+            final_system_prompt += "\n\n" + record_context
 
     # ── The session's own run binding ───────────────────────────────────────
     #
@@ -1638,13 +1669,15 @@ def build_options_from_profile(
     # above follows the raw config plus this permitted set, so every attached
     # tool can reach its key.)
     ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
-    from app.core.generation_resolver import RunContext
-    choices = _generation_choices(ai_tools_server_config, session_row, api_user_id)
-    generation_context = RunContext(session_id=session_id, unattended=not _is_interactive_run(overrides, session_row),
-                                    owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
-                                    chat_mode=session_mode == "chat",
-                                    remembered_choices=choices["remembered"], last_choices=choices["last"],
-                                    choices_unreadable=bool(choices.get("unreadable")))
+    generation_context = _generation_context(
+        ai_tools_server_config, session_row, api_user_id, session_id=session_id,
+        unattended=not _is_interactive_run(overrides, session_row),
+        chat_mode=session_mode == "chat",
+        native_generation=any(
+            tool_permitted(name, access.allowed, access.disallowed)
+            for name in ("GenerateNativeImage", "GenerateNativeVideo")
+        ),
+    )
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
         ai_tools_config=ai_tools_server_config,
@@ -1678,6 +1711,7 @@ def build_options_from_profile(
                 is_admin=True,
                 project_id=project.get("id") if project else None,
                 project_dir=working_dir,
+                generation_preferences_writable=not generation_context.unattended,
             )
             if app_config_srv:
                 mcp_servers_dict["app-config"] = app_config_srv
@@ -1931,6 +1965,7 @@ def build_options_from_profile(
     # instead of failing with a missing-credential 401. Always stamped (None for
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
+    options.aih_generation_context = generation_context
     options.aih_automatic_workflows = True
     # A user-selected input window is fixed when the provider loop connects.
     # The harness adapter uses this for native-loop compaction/usage accounting;

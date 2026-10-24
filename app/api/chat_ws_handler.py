@@ -24,7 +24,7 @@ from app.core.permission_handler import permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_payload import client_view
 from app.core.session_title import derive_session_title
-from app.core.sync_engine import sync_engine
+from app.core.sync_engine import invalidate_queue_snapshot, queue_snapshot_epoch, sync_engine
 # The origin socket reuses sync_engine's bounded-queue writer.
 from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
@@ -137,8 +137,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
     positions (the legacy numbering convention) so the float ``turns.position``
     never leaks to the wire. ``id``←turn id (the ``query_queued`` ack carries the
     same turn id, so FE-held ids match for remove), ``content``←prompt,
-    ``created_at``←ISO. The row shape matches ``queued_messages`` so the frontend
-    needs zero changes.
+    ``created_at``←ISO. Valid client command ids are exposed as both
+    ``command_id`` and ``client_message_id`` for snapshot reconciliation.
     """
     rows: List[Dict[str, Any]] = []
     pos = 0
@@ -150,7 +150,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
             created = created.isoformat()
         rows.append({
             "id": turn["id"],
-            **({"client_message_id": turn["command_id"]} if _valid_client_message_id(turn.get("command_id")) else {}),
+            **({"command_id": turn["command_id"], "client_message_id": turn["command_id"]}
+               if _valid_client_message_id(turn.get("command_id")) else {}),
             "session_id": session_id,
             "content": turn.get("prompt") or "",
             "profile_id": turn.get("profile_id"),
@@ -170,7 +171,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
         held_at = held.get("held_at")
         rows.append({
             "id": held.get("id"),
-            **({"client_message_id": held["command_id"]} if _valid_client_message_id(held.get("command_id")) else {}),
+            **({"command_id": held["command_id"], "client_message_id": held["command_id"]}
+               if _valid_client_message_id(held.get("command_id")) else {}),
             "session_id": session_id,
             "content": held.get("prompt") or "",
             "profile_id": held.get("profile_id"),
@@ -476,7 +478,7 @@ class ChatWebSocketHandler:
         user_id: str,
         api_user_id: Optional[str],
         trusted_principal: Optional[dict] = None,
-    ):
+    ) -> None:
         self.websocket = websocket
         self.device_id = device_id
         self.user_id = user_id
@@ -486,6 +488,8 @@ class ChatWebSocketHandler:
         # Mutable connection state (formerly nonlocal variables)
         self.current_session_id: Optional[str] = None
         self.connection_healthy: bool = True
+        self._queue_watch_generation: int = 0
+        self._queue_watch_task: Optional[asyncio.Task[None]] = None
 
         # (interrupt_pending_sessions and stopped_sessions are now module-level
         # sets so the flag is visible across handler instances / devices.)
@@ -812,6 +816,7 @@ class ChatWebSocketHandler:
             logger.error(f"Chat WebSocket error: {e}")
 
         finally:
+            await self._cancel_queue_watch()
             # A writer task must never outlive its connection. ``aclose``
             # cancels AND awaits it, so nothing is left pending on a socket that
             # is going away. Frames still queued at this point are dropped —
@@ -2048,6 +2053,9 @@ class ChatWebSocketHandler:
         if not await self._authorize_mobile_session(session_id):
             return
 
+        if self.current_session_id != session_id:
+            await self._cancel_queue_watch()
+
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
             await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
@@ -2210,6 +2218,9 @@ class ChatWebSocketHandler:
         if not await self._authorize_mobile_session(session_id):
             return
 
+        # Invalidate even a same-session re-watch before any registration awaits.
+        await self._cancel_queue_watch()
+
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
             await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
@@ -2227,23 +2238,80 @@ class ChatWebSocketHandler:
         # they remain in the DB and still fire when the turn
         # ends. Mirror the queue_updated event emitted by the
         # queue_message / remove / clear handlers.
+        self._queue_watch_task = asyncio.create_task(
+            self._hydrate_watch_queue(session_id, self._queue_watch_generation)
+        )
+
+    async def _cancel_queue_watch(self) -> None:
+        """Invalidate old replies and reap this connection's hydration task."""
+        self._queue_watch_generation += 1
+        task = self._queue_watch_task
+        self._queue_watch_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _hydrate_watch_queue(self, session_id: str, generation: int) -> None:
+        """Read queue state without holding up subsequent inbound frames."""
+        epoch = queue_snapshot_epoch(session_id)
+        while True:
+            revision = epoch.revision
+            snapshot = await self._read_watch_queue(session_id)
+            # A slow reply must not overwrite a later watch or queue mutation.
+            if (self.current_session_id != session_id
+                    or self._queue_watch_generation != generation):
+                return
+            if epoch.revision != revision:
+                continue
+            # send_json only enqueues: no yield between the epoch check and send.
+            await self.send_json({
+                "type": "sync",
+                "event_type": "queue_updated",
+                "session_id": session_id,
+                "data": snapshot,
+            })
+            return
+
+    async def _read_watch_queue(self, session_id: str) -> Dict[str, Any]:
+        """Build an owner-checked snapshot for one hydration attempt."""
+        from app.network import control
+
+        # A mirror has no executable turns. Read through the same authenticated
+        # owner relay as remote sends, never mistake our empty table for its queue.
+        owner = None
         try:
-            watch_queue = await run_sync(_v2_queue_view, session_id)
-            peer_queue = await run_sync(_v2_peer_queue_view, session_id)
+            row = await run_sync(database.get_session, session_id)
+            if row is None:
+                raise LookupError("Unknown session")
+            owner = control.owner_of(row)
+            if owner:
+                snapshot = await control.call(owner, "queue-view", {"session_id": session_id})
+                if (snapshot.get("queue_status") != "available"
+                        or not isinstance(snapshot.get("queued_messages"), list)
+                        or not isinstance(snapshot.get("pending_peer_messages"), list)):
+                    raise ValueError("Owner did not return a queue snapshot")
+            else:
+                snapshot = {
+                    "queued_messages": await run_sync(_v2_queue_view, session_id),
+                    "pending_peer_messages": await run_sync(_v2_peer_queue_view, session_id),
+                    "queue_status": "available",
+                }
+            current = await run_sync(database.get_session, session_id)
+            if current is None or control.owner_of(current) != owner:
+                raise ValueError("Queue owner changed during watch")
         except Exception as exc:
             logger.warning(
                 f"[Queue] Failed to load queued messages for "
                 f"{session_id} on watch: {exc}"
             )
-            # Unknown state is not an empty queue; keep existing pending rows
-            # until hydration succeeds or a real delivery event reconciles them.
-            return
-        await self.send_json({
-            "type": "sync",
-            "event_type": "queue_updated",
-            "session_id": session_id,
-            "data": {"queued_messages": watch_queue, "pending_peer_messages": peer_queue},
-        })
+            # Deliberately OMIT both arrays: unavailable is not an authoritative
+            # empty snapshot. Clients retain cached chips and can re-watch to retry.
+            snapshot = {"queue_status": "unavailable"}
+        snapshot["queue_owner_device_id"] = owner
+        return snapshot
 
     # ------------------------------------------------------------------
     # handle_close_session
@@ -2258,6 +2326,7 @@ class ChatWebSocketHandler:
         old_session_id = self.current_session_id
         if old_session_id and not await self._may_act_on_session(old_session_id):
             return
+        await self._cancel_queue_watch()
         if old_session_id:
             await sync_engine.unregister_device(self.device_id, old_session_id, self.websocket)
             # Broadcast to other devices that this session was closed
@@ -2519,6 +2588,8 @@ class ChatWebSocketHandler:
         while streaming, so the broadcast alone would not reach it). Same wire
         shape as the legacy ``queued_messages`` path — the frontend is unchanged.
         """
+        # Also invalidate when this socket is not currently registered for sync.
+        invalidate_queue_snapshot(session_id)
         queue = await run_sync(_v2_queue_view, session_id)
         peer_queue = await run_sync(_v2_peer_queue_view, session_id)
         await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peer_queue)

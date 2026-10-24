@@ -1,4 +1,8 @@
 """Owner-chat orchestration with the built-in agent and real peer queue steering."""
+from __future__ import annotations
+from typing import Any
+from pathlib import Path
+from pytest import MonkeyPatch
 from unittest.mock import AsyncMock
 import pytest
 
@@ -19,7 +23,9 @@ def test_only_visible_chats_accept_voice_attachment(assistant_fixture):
         _check_attachable_conversation(hidden)
 
 
-def test_start_makes_a_normal_unlinked_session_without_replacing_agent(assistant_fixture):
+def test_start_makes_a_normal_unlinked_session_without_replacing_agent(
+    assistant_fixture: Any,
+) -> None:
     home = assistant_fixture["id"]
     database.set_session_active(home, True)
     turn = turns.enqueue_turn(home, "user", prompt="Coordinate", profile_id="assistant-agent")
@@ -32,7 +38,9 @@ def test_start_makes_a_normal_unlinked_session_without_replacing_agent(assistant
     assert reply["session_id"] == home
     from app.db import assistant as store
     # Started work is no longer recorded as assistant activity.
-    assert store.get_activity(service.assistant_id()) == []
+    from app.db.watches import list_watches
+
+    assert list_watches() == []
 
 
 async def test_peer_message_joins_safe_boundary_with_non_user_attribution(mock_db, monkeypatch):
@@ -93,7 +101,10 @@ def test_proactive_payload_cannot_steer_into_foreground(mock_db):
     queued = turns.enqueue_turn(row["id"], "agent_message", prompt="external", profile_id="agent", payload={"_assistant_proactive": {"version": 1}})
     assert not runtime._steer_eligible(queued)
 
-async def test_task_worker_producer_is_not_linked_as_assistant_activity(assistant_fixture, monkeypatch, tmp_path):
+
+async def test_task_worker_producer_is_not_linked_as_assistant_activity(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
     from app.core import provider_agent, turn_manager
     home = assistant_fixture["id"]
     from app.core import project_resolver
@@ -116,4 +127,6 @@ async def test_task_worker_producer_is_not_linked_as_assistant_activity(assistan
     created = database.get_session(worker.session_id)
     assert created["is_worker"] and created["parent_session_id"] == home
     from app.db import assistant as store
-    assert store.get_activity(service.assistant_id()) == []
+    from app.db.watches import list_watches
+
+    assert list_watches() == []

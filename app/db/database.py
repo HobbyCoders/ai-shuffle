@@ -7,6 +7,8 @@ domain-specific modules in ``app.db.*`` so that existing callers like
 
 Only schema initialisation and maintenance helpers live here directly.
 """
+from __future__ import annotations
+from typing import Any
 
 import hashlib
 import json
@@ -616,7 +618,7 @@ def _migrate_task_assignment_owner(cursor, migrations_applied):
         migrations_applied.append("background_tasks_assignment_owner")
 
 
-def _run_column_migrations(cursor):
+def _run_column_migrations(cursor: Any) -> None:
     """Run idempotent column migrations.
 
     These migrations run on EVERY startup to ensure columns exist,
@@ -634,6 +636,9 @@ def _run_column_migrations(cursor):
     create_assistant_schema(cursor)
     from app.db.assistant_limits import create_schema as create_assistant_limits_schema
     create_assistant_limits_schema(cursor)
+    from app.db.watches import create_schema as create_watches_schema
+
+    create_watches_schema(cursor)
 
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):
@@ -2176,7 +2181,6 @@ def _run_column_migrations(cursor):
     if not column_exists(cursor, "composer_suggestions", "activity_revision"):
         cursor.execute("ALTER TABLE composer_suggestions ADD COLUMN activity_revision BIGINT NOT NULL DEFAULT -1")
 
-
     # One-time seed: carry every existing queued_messages row into turns as a
     # source='queue' queued turn, preserving order via position. queued_messages
     # is left in place, frozen (dropped in a later deletion PR). Deterministic
@@ -2698,6 +2702,11 @@ def _run_column_migrations(cursor):
     migrations_applied.extend(_retire_fal_billing_key(cursor))
     migrations_applied.extend(_retire_secret_named_observations(cursor))
     migrations_applied.extend(_retire_assistant_home(cursor))
+    from app.db.watch_migration import migrate as migrate_email_watches
+
+    migrations_applied.extend(migrate_email_watches(cursor))
+    from app.db.working_record import create_schema as create_working_record_schema
+    create_working_record_schema(cursor)
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -3430,14 +3439,14 @@ def migrations_fingerprint() -> str:
     """
     import hashlib
 
-    from app.db import schema_postgres, mobile_hub, network, assistant
+    from app.db import schema_postgres, mobile_hub, network, assistant, working_record
     from app.core import owner_auth
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
     # The hub and owner helpers also define tables used during encryption init.
     # Include their sources and the network schema so upgrades cannot skip new DDL.
-    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant):
+    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant, working_record):
         path = getattr(module, "__file__", None)
         if not path:
             return ""

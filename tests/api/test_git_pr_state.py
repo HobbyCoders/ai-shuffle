@@ -15,6 +15,8 @@ resolved checkout, plus GitHub's lazy ``mergeable`` verdict. Coverage:
 """
 
 import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 from contextlib import ExitStack
@@ -68,9 +70,7 @@ def _clear_pr_cache():
 @pytest.fixture
 def mock_git_service():
     m = MagicMock()
-    m.get_status.return_value = {
-        "is_git_repo": True, "is_clean": True, "current_branch": "feat/x"
-    }
+    m.get_current_branch.return_value = "feat/x"
     return m
 
 
@@ -183,7 +183,7 @@ class TestPrStateEndpoint:
         assert data["open_pr"]["mergeable"] is None
 
     def test_not_a_repo_degrades(self, pr_client, mock_git_service):
-        mock_git_service.get_status.return_value = {"is_git_repo": False}
+        mock_git_service.get_current_branch.return_value = None
         data = pr_client.get("/api/v1/projects/p1/git/pr-state").json()
         assert data == {
             "current_branch": None,
@@ -429,3 +429,123 @@ class TestSidebarRecovery:
             response = pr_client.get("/api/v1/projects/p1/git/pr-state?session_id=s")
             assert response.status_code == 200
             schedule.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delay_second", [False, True])
+async def test_cancelled_poll_and_invalidation_do_not_poison_shared_refresh(
+    pr_app: FastAPI, mock_git_service: MagicMock, mock_github_service: MagicMock,
+    monkeypatch: pytest.MonkeyPatch, delay_second: bool,
+) -> None:
+    import asyncio
+    import threading
+    import httpx
+
+    entered = asyncio.Event()
+    joined = asyncio.Event()
+    allow_second = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_shield = asyncio.shield
+    original_run_git = gitops.run_git
+    waiters: list[asyncio.Task[Any]] = []
+    branch_reads = 0
+
+    def shield(flight: asyncio.Task[Any]) -> asyncio.Future[Any]:
+        if flight in gitops._pr_state_refreshes.values():
+            waiters.append(flight)
+            if len(waiters) == 2:
+                joined.set()
+        return original_shield(flight)
+
+    async def run_git(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        nonlocal branch_reads
+        if function is mock_git_service.get_current_branch:
+            branch_reads += 1
+            if branch_reads == 2 and delay_second:
+                await allow_second.wait()
+        return await original_run_git(function, *args, **kwargs)
+
+    def pulls(*args: Any, **kwargs: Any) -> list[SimpleNamespace]:
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        return [_pr()]
+
+    monkeypatch.setattr(gitops, "git_service", mock_git_service)
+    monkeypatch.setattr(gitops, "github_service", mock_github_service)
+    monkeypatch.setattr(gitops, "check_project_access", MagicMock())
+    monkeypatch.setattr(gitops, "get_working_dir_async", AsyncMock(return_value="/wd"))
+    monkeypatch.setattr(gitops, "run_git", run_git)
+    monkeypatch.setattr(gitops.asyncio, "shield", shield)
+    mock_github_service.list_pulls.side_effect = pulls
+    transport = httpx.ASGITransport(app=pr_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = asyncio.create_task(client.get("/api/v1/projects/p1/git/pr-state"))
+        second = asyncio.create_task(client.get("/api/v1/projects/p1/git/pr-state"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            allow_second.set()
+            # Task creation is not a join: the second poll may still be awaiting git.
+            await asyncio.wait_for(joined.wait(), 2)
+            assert waiters[0] is waiters[1]
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert not waiters[0].done()  # cancellation must not reach the shared flight
+            gitops._invalidate_pr_state_cache("/wd")
+            release.set()
+            response = await asyncio.wait_for(second, 2)
+            assert response.json()["open_pr"]["number"] == 7
+            assert not gitops._pr_state_cache  # invalidated flight cannot repopulate it
+            assert mock_github_service.list_pulls.call_count == 1
+            assert (await client.get("/api/v1/projects/p1/git/pr-state")).status_code == 200
+            assert mock_github_service.list_pulls.call_count == 2
+            assert gitops._pr_state_cache
+        finally:
+            allow_second.set()
+            release.set()
+            await asyncio.gather(first, second, *waiters, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_poll_after_invalidation_caches_new_flight_before_old_one_finishes(
+    pr_app: FastAPI, mock_git_service: MagicMock, mock_github_service: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+    import httpx
+
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def pulls(*args: Any, **kwargs: Any) -> list[SimpleNamespace]:
+        if not entered.is_set():
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+            return [_pr(number=7)]
+        return [_pr(number=8)]
+
+    monkeypatch.setattr(gitops, "git_service", mock_git_service)
+    monkeypatch.setattr(gitops, "github_service", mock_github_service)
+    monkeypatch.setattr(gitops, "check_project_access", MagicMock())
+    monkeypatch.setattr(gitops, "get_working_dir_async", AsyncMock(return_value="/wd"))
+    mock_github_service.list_pulls.side_effect = pulls
+    transport = httpx.ASGITransport(app=pr_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        old = asyncio.create_task(client.get("/api/v1/projects/p1/git/pr-state"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            gitops._invalidate_pr_state_cache("/wd")
+            fresh = await asyncio.wait_for(client.get("/api/v1/projects/p1/git/pr-state"), 2)
+            assert fresh.json()["open_pr"]["number"] == 8
+            assert mock_github_service.list_pulls.call_count == 2
+            release.set()
+            assert (await asyncio.wait_for(old, 2)).json()["open_pr"]["number"] == 7
+            cached = await client.get("/api/v1/projects/p1/git/pr-state")
+            assert cached.json()["open_pr"]["number"] == 8
+            assert mock_github_service.list_pulls.call_count == 2
+        finally:
+            release.set()
+            await asyncio.gather(old, return_exceptions=True)

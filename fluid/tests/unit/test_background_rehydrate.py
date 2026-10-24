@@ -119,14 +119,14 @@ async def test_rehydrate_reads_the_log_once(monkeypatch) -> None:
     store = await _store_with(_sub("a", "started"))
     loop = _loop(store)
     reads = 0
-    real = background_mod.iter_events
+    real = background_mod.iter_events_of_class
 
     def counting(*args, **kwargs):
         nonlocal reads
         reads += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(background_mod, "iter_events", counting)
+    monkeypatch.setattr(background_mod, "iter_events_of_class", counting)
     await _rehydrate(loop)
     await _rehydrate(loop)
     assert reads == 1

@@ -6,21 +6,26 @@ acceptance receipts ground repeated successful work, but never grant approval.
 """
 from __future__ import annotations
 
+from collections.abc import Collection
 import hashlib
 import json
+from typing import Any
+
+from fluid.codemode.workflow_loss import load_loss, session_lost
 from pathlib import Path
 import re
 import time
 
 from fluid.codemode.transactions import file_transaction
 from fluid.codemode.skills import project_key_for
-from fluid.context.instructions import discover_skills
+from fluid.context.instructions import discover_skills, parse_frontmatter
 from fluid.context.screening import looks_like_secret, screen_findings
 
 MAX_PROPOSALS = 32  # includes rejected/promoted records; fail closed, never erase audit
 MAX_DOCUMENT_BYTES = 256 * 1024
 MAX_CONTENT_CHARS = 4000
 MAX_EVIDENCE_ENTRIES = 16
+MAX_CONTEXT_WORKFLOWS = 2
 _NAME = re.compile(r"[a-z][a-z0-9-]{0,47}")
 
 
@@ -31,6 +36,11 @@ def _hash(value):
 def _screen(text):
     if looks_like_secret(text) or screen_findings(text):
         raise ValueError("Workflow content/evidence failed secret or injection screening")
+    # Learned procedures must generalize locations, not retain a worker's or
+    # owner's private filesystem layout (including locations in evidence).
+    if re.search(r"(?<![\w./])/(?!/)[\w.-]+(?:/[\w.-]+)*|"
+                 r"[A-Za-z]:[\\/]|~[/\\]|\\\\|file://", text):
+        raise ValueError("Workflow content/evidence contains an absolute/private path")
 
 
 def _content(body):
@@ -46,11 +56,22 @@ def _content(body):
     # Frontmatter cannot declare permissions, hooks, commands or tool grants.
     if "!`" in workflow or re.search(r"(?mi)^---\s*$|allowed-tools:|hooks:", workflow):
         raise ValueError("Executable substitutions and capability metadata are not workflows")
+    if not re.match(r"\s*1[.)]\s+", workflow) or "```" in workflow:
+        raise ValueError("Workflow must be numbered prose, not executable code")
+    # This is a conservative proposal filter, not a permission engine. Even an
+    # approved skill confers no access; normal host tool gates still apply.
+    if re.search(r"(?i)auto[- ]?approv|bypass.{0,30}(permission|approval|denial)|"
+                 r"--no-verify|disable.{0,30}(safety|secret scan)|"
+                 r"(ignore|circumvent).{0,30}(denial|permission|approval)", workflow):
+        raise ValueError("Workflow cannot weaken tool or approval gates")
     _screen(description + "\n" + workflow)
     return f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n\n{workflow.strip()}\n"
 
 
-def _evidence(entries, sessions, name, project):
+def _evidence(
+    entries: list[dict[str, Any]], sessions: list[str], name: str, project: str,
+    *, lost: int = 0,
+) -> list[dict[str, Any]]:
     if not isinstance(sessions, list) or len(sessions) != 2 or any(not isinstance(s, str) or not s for s in sessions) or len(set(sessions)) != 2:
         raise ValueError("Cite exactly two distinct successful sessions")
     for entry in entries:
@@ -60,9 +81,13 @@ def _evidence(entries, sessions, name, project):
                 raise ValueError("Corrected or rejected workflow cannot be promoted")
     evidence = []
     for session in sessions:
+        if session_lost(lost, project, session):
+            raise ValueError("Workflow session has incomplete or unverifiable journal evidence")
         rows = [e for e in entries if e.get("session") == session and e.get("project") == project]
         if not rows or len(rows) > MAX_EVIDENCE_ENTRIES:
             raise ValueError("Workflow evidence is missing or exceeds the review bound")
+        if rows[0].get("kind") != "user":
+            raise ValueError("Workflow episode has no opening user request (possibly reaped)")
         # Complete bounded episodes are retained, not a model-selected snippet
         # that can hide a subsequent correction. User text is never tool output.
         accepted = f"workflow accepted: {name}"
@@ -88,6 +113,43 @@ def _evidence(entries, sessions, name, project):
             raise ValueError("Each workflow session needs successful execution, completion and explicit user acceptance")
         evidence.append({"session": session, "sha256": _hash(rows), "entries": rows})
     return evidence
+
+
+def repeated_evidence(
+    entries: list[dict[str, Any]], current: list[dict[str, Any]], project: str,
+    excluded: Collection[str] = (), *, lost: int,
+) -> list[dict[str, Any]]:
+    """Complete retained episodes for at most two newly accepted workflows.
+
+    Reuse the bounded journal tail, not another persistent copy of session
+    content. Reaped/forgotten or incomplete episodes fail closed. Current user
+    receipts trigger the lookup; ordinary turns never replay historical text.
+    """
+    names = []
+    for row in current:
+        if row.get("kind") != "user" or row.get("project") != project:
+            continue
+        match = re.fullmatch(r"workflow accepted: ([a-z][a-z0-9-]{0,47})",
+                             row.get("text", "").strip().lower())
+        if match and match[1] not in excluded and match[1] not in names:
+            names.append(match[1])
+    selected = []
+    for name in names[:MAX_CONTEXT_WORKFLOWS]:
+        sessions = []
+        for row in entries:
+            if (row.get("project") == project and row.get("kind") == "user"
+                    and row.get("text", "").strip().lower() == f"workflow accepted: {name}"
+                    and row.get("session") and row["session"] not in sessions):
+                sessions.append(row["session"])
+        try:
+            evidence = _evidence(entries, sessions[-2:], name, project, lost=lost)
+        except ValueError:
+            continue
+        for episode in evidence:
+            for row in episode["entries"]:
+                if row not in selected:
+                    selected.append(row)
+    return selected
 
 
 class WorkflowProposals:
@@ -125,7 +187,8 @@ class WorkflowProposals:
         content = _content(body)
         if cwd is not None:
             self._deduplicate(cwd, body["name"], body["description"])
-        evidence = _evidence(entries, body["evidence_sessions"], body["name"], project)
+        evidence = _evidence(entries, body["evidence_sessions"], body["name"], project,
+                             lost=load_loss(self.store.root))
         identity = {"owner": self.owner, "project": project, "content": content}
         proposal_id = _hash(identity)
         with file_transaction(self.lock):
@@ -175,10 +238,21 @@ class WorkflowProposals:
             if _hash({k: row[k] for k in ("owner", "project", "content")}) != proposal_id:
                 raise ValueError("Workflow content changed since proposal")
             # Revalidate original producer evidence, including later corrections.
-            evidence = _evidence(self.store.journal_entries(), [e["session"] for e in row["evidence"]], row["name"], row["project"])
+            evidence = _evidence(
+                self.store.journal_entries(), [e["session"] for e in row["evidence"]],
+                row["name"], row["project"], lost=load_loss(self.store.root),
+            )
             if evidence != row["evidence"]:
                 raise ValueError("Workflow evidence changed; do not promote stale proposals")
-            _screen(row["content"])
+            fields, workflow = parse_frontmatter(row["content"])
+            canonical = _content({"name": row["name"], "description": row["description"],
+                                  "workflow": workflow,
+                                  "evidence_sessions": [e["session"] for e in evidence]})
+            if (
+                fields != {"name": row["name"], "description": row["description"]}
+                or canonical != row["content"]
+            ):
+                raise ValueError("Workflow content no longer matches its validated schema")
             self._deduplicate(cwd, row["name"], row["description"])
             root = Path(cwd).resolve() / ".fluid" / "skills"
             # No symlinked scope, no overwrites (including unindexed directories).

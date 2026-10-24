@@ -1,5 +1,7 @@
 """Production source adapters with fake credentials, schema and provider I/O."""
 from dataclasses import replace
+from pathlib import Path
+from typing import Any, NoReturn
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +13,86 @@ from app.services.generation_sources import Sources
 from app.services.fal_schema import ModelSchema, ParamField
 
 CONTEXT = RunContext(session_id="session", unattended=False, owner=True)
+
+
+@pytest.mark.parametrize("source,account,model,size,quality,fmt", [
+    ("openai", "api-a", "test-image", "1024x1024", "low", "png"),
+    ("xai", "api-b", "test-imagine", "1k", None, "jpeg"),
+])
+async def test_verified_api_table_drives_catalog_settings_pricing_and_submission(
+    backend: Sources, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    source: str, account: str, model: str, size: str, quality: str | None, fmt: str,
+) -> None:
+    import base64
+    from app.core import (
+        artifact_store,
+        native_image_verification as verification,
+        native_generation_settings as native,
+    )
+    from app.core.provider import api_images
+    from app.db import database
+    from tests.core.test_native_image_tool import png
+
+    record = verification.Verification(model, size, quality, fmt, "0.02", "mock probe only", "5")
+    monkeypatch.setitem(verification.VERIFIED_API_IMAGES, source, record)
+    row = {"id": account, "provider_type": source, "auth_mode": "api_key", "enabled": True,
+           "base_url": verification.ENDPOINTS[source].rsplit("/images/", 1)[0],
+           "auth_token": "fake-api-key"}
+    monkeypatch.setattr(database, "get_model_provider", lambda *a, **kw: row)
+    entry = (await backend.local_catalog("image", source=account, prompt="tree"))[0]
+    assert entry.verified and entry.available and entry.price == record.price("tree")
+    assert native.load(account).image.model_dump() == record.settings()
+    calls = []
+
+    def send(request: httpx.Request) -> httpx.Response:
+        import json
+        calls.append(json.loads(request.content))
+        assert str(request.url) == verification.ENDPOINTS[source]
+        assert request.headers["Authorization"] == "Bearer fake-api-key"
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+
+    monkeypatch.setattr(
+        api_images, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(send)),
+    )
+    monkeypatch.setattr(backend, "reserve", AsyncMock(return_value=True))
+    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", tmp_path / "artifacts")
+    output = await Resolver(backend).generate(
+        "image", {"prompt": "tree", "source": account}, CONTEXT,
+    )
+    assert output["status"] == "completed" and output["price"] == record.price("tree")
+    assert len(calls) == 1 and calls[0]["model"] == model and calls[0]["n"] == 1
+    # No unverified option can reach transport, and explicit disabling wins.
+    output = await Resolver(backend).generate("image", {"prompt": "tree", "source": account,
+                                                       "options": {"size": "unverified"}}, CONTEXT)
+    assert output["status"] == "refused" and len(calls) == 1
+    native.save(account, native.NativeGenerationSettings(image=None, video=None))
+    output = await Resolver(backend).generate(
+        "image", {"prompt": "tree", "source": account}, CONTEXT,
+    )
+    assert output["status"] == "refused" and len(calls) == 1
+
+
+async def test_api_images_unverified_never_reads_credentials_or_opens_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import native_generation_settings as native
+    from app.core.provider import api_images
+    from app.db import database
+
+    def forbidden(*a: Any, **kw: Any) -> NoReturn:
+        pytest.fail("No credential/transport access is allowed without verification")
+
+    monkeypatch.setattr(database, "get_model_provider", forbidden)
+    monkeypatch.setattr(api_images, "http_client", forbidden)
+    for source in ("openai", "xai"):
+        items, warning = await api_images.generate(
+            "api", source, "tree",
+            native.NativeImageSettings(
+                model="unverified", size="auto", quality="auto", format="png",
+            ),
+        )
+        assert items == [] and "not yet verified" in warning
+
 PRICE = {"currency": "USD", "unit": "item", "amount": "0.05", "total": "0.05", "status": "estimated"}
 
 
@@ -211,7 +293,9 @@ async def test_missing_settings_row_keeps_provider_defaults_including_supergrok_
 
 async def test_unreadable_settings_json_disables_video_but_keeps_verified_image(backend):
     store("plan-b", "{not json")
-    assert await backend.local_catalog("video", source="plan-b") == []
+    disabled = await backend.local_catalog("video", source="plan-b")
+    assert len(disabled) == 1 and disabled[0].verified and not disabled[0].available
+    assert disabled[0].price["total"] == "0.02"
     image = await backend.local_catalog("image", source="plan-b")
     assert [e.options for e in image] == [{"size": "1k", "quality": None, "format": "jpeg"}]
 
@@ -220,7 +304,9 @@ async def test_stored_null_video_is_never_offered(backend):
     import json
     from app.core.native_generation_settings import capabilities
     store("plan-b", json.dumps({"image": capabilities("grok")["image"]["verified_combination"], "video": None}))
-    assert await backend.local_catalog("video", source="plan-b") == []
+    disabled = await backend.local_catalog("video", source="plan-b")
+    assert len(disabled) == 1 and disabled[0].verified and not disabled[0].available
+    assert disabled[0].price["total"] == "0.02"
     assert await backend.local_catalog("image", source="plan-b") != []
 
 
