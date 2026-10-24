@@ -6,6 +6,7 @@ worker's HTTP API, and the client's own wire behaviour is checked against
 """
 import json
 import threading
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -528,6 +529,10 @@ def test_tiny_png_is_valid(tmp_path):
 def test_real_scenarios_validate_and_markdown_is_generated():
     data = scenarios.load()
     rows = scenarios.rows(data)
+    # Sorted insertion spreads additions across the catalog instead of one append point.
+    for suite in data["suites"]:
+        ids_in_suite = [row["id"] for row in suite["rows"]]
+        assert ids_in_suite == sorted(ids_in_suite), "insert new rows in ID order"
     assert data["defaults"]["token_cap"] == 600000
     ids = {r["id"] for r in rows}
     assert {"two-worker-smoke.9", "harness-basics.3"} <= ids
@@ -538,17 +543,58 @@ def test_real_scenarios_validate_and_markdown_is_generated():
 
 
 @pytest.mark.parametrize("row, msg", [
-    ({"id": "x", "check": "x", "kind": "robot"}, "kind"),
-    ({"id": "x", "check": "x", "kind": "script", "steps": [{"op": "jump"}]}, "unknown op"),
-    ({"id": "x", "check": "x", "kind": "script", "steps": [{"op": "message", "session": "a", "prompt": "p"}]},
-     "no earlier step"),
-    ({"id": "x", "check": "x", "kind": "browser", "steps": [{"op": "workers"}]}, "only script"),
-    ({"id": "x", "check": "x", "kind": "script", "steps": [{"op": "start", "prompt": "p", "typo": 1}]},
-     "does not take"),
+    ({"id": "t.bad-row", "check": "x", "kind": "robot"}, "kind"),
+    ({"id": "t.bad-row", "check": "x", "kind": "script", "steps": [{"op": "jump"}]}, "unknown op"),
+    ({"id": "t.bad-row", "check": "x", "kind": "script",
+      "steps": [{"op": "message", "session": "a", "prompt": "p"}]}, "no earlier step"),
+    ({"id": "t.bad-row", "check": "x", "kind": "browser", "steps": [{"op": "workers"}]}, "only script"),
+    ({"id": "t.bad-row", "check": "x", "kind": "script",
+      "steps": [{"op": "start", "prompt": "p", "typo": 1}]}, "does not take"),
 ])
 def test_validate_rejects_bad_rows(row, msg):
     with pytest.raises(scenarios.ScenarioError, match=msg):
         scenarios.validate(_data(row))
+
+
+@pytest.mark.parametrize("rid", ["t.14", "t.15", "t.pr521-merged-catalog", "t.stable-slug"])
+def test_load_accepts_numeric_and_named_ids(tmp_path: Path, rid: str) -> None:
+    path = tmp_path / "scenarios.json"
+    path.write_text(json.dumps(_data(_script(rid))), encoding="utf-8")
+    assert scenarios.rows(scenarios.load(path))[0]["id"] == rid
+
+
+@pytest.mark.parametrize("rid", ["t", "t.", "t.Bad", "t.bad_slug", "t.12-new", "t.a.b"])
+def test_validate_rejects_malformed_ids(rid: str) -> None:
+    with pytest.raises(scenarios.ScenarioError, match="number-or-slug"):
+        scenarios.validate(_data(_script(rid)))
+
+
+@pytest.mark.parametrize("rid", ["t.14", "t.shared-slug"])
+@pytest.mark.parametrize("separate_suites", [False, True])
+def test_render_check_rejects_merged_duplicate_ids(
+    tmp_path: Path, rid: str, separate_suites: bool,
+) -> None:
+    # Each independently authored branch is valid. A clean JSON merge is not
+    # necessarily valid: check the combined catalog, including across suites.
+    left, right = _script(rid), _script(rid, prompt="a different scenario")
+    scenarios.validate(_data(left))
+    scenarios.validate(_data(right))
+    merged = _data(left, right)
+    if separate_suites:
+        merged = _data(left)
+        merged["suites"].append({"name": "another", "rows": [right]})
+    path = tmp_path / "merged.json"
+    path.write_text(json.dumps(merged), encoding="utf-8")
+    with pytest.raises(scenarios.ScenarioError, match="duplicated"):
+        cli.main(["render", "--check", "--scenarios", str(path)])
+
+
+def test_named_row_runs_and_is_recorded_without_renumbering(tmp_path: Path) -> None:
+    rid = "t.parallel-addition"
+    result, path = _run(FakeWorker(), _data(_script(rid)), tmp_path)
+    assert result["rows"][0]["id"] == rid
+    assert result["rows"][0]["status"] == "pass"
+    assert results.read(path)["rows"][0]["id"] == rid
 
 
 # -- gate --------------------------------------------------------------------
