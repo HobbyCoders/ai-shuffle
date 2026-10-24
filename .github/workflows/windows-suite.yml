@@ -108,10 +108,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-desktop-${{ matrix.shard }}
+          name: windows-desktop-${{ matrix.shard }}-a${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/inventory.json
             ${{ runner.temp }}/desktop.tap
+          if-no-files-found: error
           retention-days: 7
 
   desktop-gate:
@@ -139,8 +140,13 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
-          pattern: windows-desktop-*
-          path: ${{ runner.temp }}/desktop-evidence
+          pattern: windows-desktop-*-a*
+          path: ${{ runner.temp }}/desktop-attempts
+      - name: Select latest attempt per desktop shard
+        env:
+          SOURCE: ${{ runner.temp }}/desktop-attempts
+          EVIDENCE: ${{ runner.temp }}/desktop-evidence
+        run: python scripts/ci/shard_evidence.py --prefix windows-desktop --count 3 --source "$SOURCE" --destination "$EVIDENCE"
       - name: Prove desktop shard inventory union
         env:
           EVIDENCE: ${{ runner.temp }}/desktop-evidence

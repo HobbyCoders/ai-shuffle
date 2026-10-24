@@ -105,7 +105,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-shard-${{ matrix.shard }}
+          name: backend-shard-${{ matrix.shard }}-a${{ github.run_attempt }}
           path: |
             reports/
             backend-results/
@@ -424,8 +424,10 @@ jobs:
       - name: Download successful shard receipts
         uses: actions/download-artifact@v4
         with:
-          pattern: backend-shard-*
-          path: shard-results
+          pattern: backend-shard-*-a*
+          path: shard-attempts
+      - name: Select latest attempt per backend shard
+        run: python scripts/ci/shard_evidence.py --prefix backend-shard --count 4 --source shard-attempts --destination shard-results
       - name: Fail closed on incomplete coverage
         if: always()
         env:
