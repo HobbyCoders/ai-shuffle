@@ -338,6 +338,14 @@
       "intro": "Single-worker checks of the turn loop.",
       "rows": [
         {
+          "id": "harness-basics.native-generation-admission",
+          "check": "Native generation aliases cannot bypass unified admission",
+          "kind": "owner",
+          "how": "On a disposable candidate worker with synthetic data and an already configured verified subscription, create throwaway native chat and automation sessions permitting only GenerateNativeImage and GenerateNativeVideo. Do not enter credentials or approve a paid submission. With no remembered/job pick, call each alias and inspect its structured result and provider-request logs. Repeat with an unreadable synthetic job choice, then a valid saved choice and an already-exceeded synthetic daily cap. Check image Included pricing and the exact verified video estimate. Archive only the throwaway sessions. Run the focused no-provider registry tests for the approved confirmation retry; never use this smoke row to authorize a real generation charge.",
+          "pass_when": "Both interactive aliases return choose with the unified price/choice envelope; both unattended aliases skip without a saved choice or with unreadable choices. A valid saved choice still refuses an exhausted cap, including Included images, with zero provider submissions. Above-threshold calls require the unified one-use confirmation receipt before reserve/submission. Exact approved retries and job choices are covered by the no-provider test. Alias choice-card rendering is tracked separately and must not be inferred from JSON alone.",
+          "past_bug": "#545: raw native registrations submitted without resolver admission or generation_budget.reserve."
+        },
+        {
           "id": "harness-basics.1",
           "check": "First message not lost",
           "kind": "script",
