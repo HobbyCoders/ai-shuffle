@@ -3,6 +3,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -458,7 +459,15 @@ class Killed(BaseException):
     """An uncatchable stop (SIGKILL, TerminateProcess): no handler or finally runs."""
 
 
-def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, capsys):
+def test_kill_mid_stage_resumes_from_the_heartbeat(
+    gate: tuple[list[Any], argparse.Namespace], monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import signal
+    import threading
+
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+    original_threads = set(threading.enumerate())
     calls, args = gate
     args.budget = 40
     sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
@@ -467,16 +476,23 @@ def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, 
     assert step(args) == 0  # security, two batches, then fluid would not fit
     beat = ci.records_path().with_name("full-stages.beat")
 
-    def killed(ctx):
+    def killed(ctx: ci.Context) -> None:
         sim.now[0] += 44 * MINUTE  # the Monitor gives up first
         last = json.loads(beat.read_text())
-        beat.write_text(json.dumps({**last, "beat": stages._wall()}))  # the heartbeat thread's last write
+        # Model the last durable write before the process dies.
+        beat.write_text(json.dumps({**last, "beat": stages._wall()}))
         raise Killed()
 
     real_fluid, real_stop = ci.SUITES[1].run, stages._Heartbeat.stop
     monkeypatch.setattr(ci.SUITES[1], "run", killed)
-    monkeypatch.setattr(stages._Heartbeat, "stop", lambda self: None)  # a killed process cleans nothing
-    monkeypatch.setattr(stages, "_restore_signals", lambda previous: None)
+
+    def crash_stop(heartbeat: stages._Heartbeat) -> None:
+        # SIGKILL leaves the receipt unreleased, but also stops every real thread.
+        # A no-op here leaked a writer that recreated tmp_path every 30 seconds.
+        heartbeat._stop.set()
+        heartbeat._thread.join()
+
+    monkeypatch.setattr(stages._Heartbeat, "stop", crash_stop)
     with pytest.raises(Killed):
         step(args)
     left = _state()
@@ -488,6 +504,18 @@ def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, 
     assert "split it into shards of 6 and 6" in outputs[0]
     assert sorted(sim.fluid_ran) == sorted(sim.fluid_costs)
     assert calls.count("success") == 1
+    assert signal.getsignal(signal.SIGTERM) is original_sigterm
+    leaked = [thread for thread in threading.enumerate()
+              if thread not in original_threads and thread.name == "local-ci-heartbeat"]
+    try:
+        assert not leaked, "simulated SIGKILL left real scratch-writing heartbeat threads"
+    finally:
+        # Quiesce even an unfixed test, without changing its simulated crash receipt.
+        # The fixed stop mock above owns these threads before reaching this assertion.
+        for thread in leaked:
+            heartbeat = thread._target.__self__
+            heartbeat._stop.set()
+            thread.join(timeout=5)
 
 
 

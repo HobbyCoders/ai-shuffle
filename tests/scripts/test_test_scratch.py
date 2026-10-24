@@ -1,5 +1,6 @@
 """Scratch belongs to one invocation, including its failed/parallel children."""
 import configparser
+import errno
 import os
 import subprocess
 import sys
@@ -255,3 +256,94 @@ def test_explicit_basetemp_is_caller_owned(tmp_path, parallel):
     assert Path(record.read_text()).is_relative_to(requested)
     assert requested.is_dir()
     assert not (requested.parent / ".ai-shuffle-scratch-owner").exists()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_pytest_cleanup_reports_late_writes(tmp_path: Path, persistent: bool) -> None:
+    """A real late writer at rmdir is visible without turning passed tests red."""
+    import shutil
+    import textwrap
+
+    record = tmp_path / "scratch-owner"
+    (tmp_path / "conftest.py").write_text(textwrap.dedent(f"""
+        import os
+        from pathlib import Path
+        import threading
+        import pytest
+
+        def pytest_sessionfinish(session: pytest.Session) -> None:
+            base = Path(session.config.option.basetemp)
+            Path({str(record)!r}).write_text(str(base.parent))
+            original = os.rmdir
+            refills = 0
+
+            def late_write() -> None:
+                (base / "late-heartbeat").write_text("late write")
+
+            def rmdir(path: str, *, dir_fd: int | None = None) -> None:
+                nonlocal refills
+                if Path(path).name == "pytest" and ({persistent!r} or refills == 0):
+                    refills += 1
+                    writer = threading.Thread(target=late_write)
+                    writer.start()
+                    writer.join(timeout=5)
+                    assert not writer.is_alive()
+                original(path, dir_fd=dir_fd)
+
+            os.rmdir = rmdir
+        """), encoding="utf-8")
+    (tmp_path / "test_pass.py").write_text(
+        "from pathlib import Path\ndef test_pass(tmp_path: Path) -> None: pass\n",
+        encoding="utf-8",
+    )
+    command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
+               str(tmp_path / "test_pass.py"), "--rootdir", str(tmp_path),
+               "--confcutdir", str(tmp_path), "-q"]
+    result = subprocess.run(
+        command, cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    owner = Path(record.read_text())
+    try:
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        assert "1 passed" in output
+        assert "scratch cleanup raced with a late writer" in output
+        if persistent:
+            assert "leftover" in output
+            assert owner.is_dir()
+            from app.core.temp_scratch import MARKER
+            if os.name == "posix" and Path("/proc/self/stat").exists():
+                assert (owner / MARKER).is_file()
+        else:
+            assert not owner.exists()
+    finally:
+        if owner.exists():
+            shutil.rmtree(owner)
+
+
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO])
+def test_scratch_cleanup_does_not_hide_other_errors(error_number: int, tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+    from app.core.temp_scratch import _cleanup_scratch
+
+    directory = MagicMock(name="owned-scratch")
+    directory.name = str(tmp_path)
+    directory.cleanup.side_effect = OSError(error_number, "cleanup failure")
+    with pytest.raises(OSError) as caught:
+        _cleanup_scratch(directory, None, warn_on_cleanup_race=True)
+    assert caught.value.errno == error_number
+    directory.cleanup.assert_called_once_with()
+
+
+def test_non_pytest_scratch_cleanup_still_fails_on_a_writer(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+    from app.core.temp_scratch import _cleanup_scratch
+
+    directory = MagicMock(name="owned-scratch")
+    directory.name = str(tmp_path)
+    directory.cleanup.side_effect = OSError(errno.ENOTEMPTY, "late writer")
+    with pytest.raises(OSError) as caught:
+        _cleanup_scratch(directory, None, warn_on_cleanup_race=False)
+    assert caught.value.errno == errno.ENOTEMPTY
+    directory.cleanup.assert_called_once_with()

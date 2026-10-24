@@ -1,9 +1,12 @@
 """Stdlib-only ownership receipt shared by checks and the app's scratch reaper."""
+import errno
 import json
 import os
 import signal
 import tempfile
 import time
+import warnings
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -40,13 +43,51 @@ def cleanup_on_sigterm(*, handler=None):
             signal.signal(signal.SIGTERM, previous)
 
 
+def _cleanup_scratch(
+    directory: tempfile.TemporaryDirectory[str], receipt: str | None,
+    *, warn_on_cleanup_race: bool,
+) -> None:
+    for attempt in range(3):
+        try:
+            directory.cleanup()
+            return
+        except OSError as exc:
+            if not warn_on_cleanup_race or exc.errno != errno.ENOTEMPTY:
+                raise
+            if attempt == 2:
+                # rmtree may have removed the marker before a late write refilled it.
+                # Keep the ownership receipt so the dead-owner reaper can recover it.
+                if receipt is not None:
+                    (Path(directory.name) / MARKER).write_text(receipt, encoding="utf-8")
+                warnings.warn(
+                    "scratch cleanup raced with a late writer; "
+                    f"leftover after 3 attempts: {directory.name}",
+                    RuntimeWarning, stacklevel=2,
+                )
+                return
+            warnings.warn(
+                "scratch cleanup raced with a late writer; "
+                f"retrying removal: {directory.name}",
+                RuntimeWarning, stacklevel=2,
+            )
+            time.sleep(0.05)
+
+
 @contextmanager
-def scratch_directory(prefix, *, root=None):
+def scratch_directory(
+    prefix: str, *, root: str | Path | None = None, warn_on_cleanup_race: bool = False,
+) -> Iterator[str]:
     if prefix not in PREFIXES:
         raise ValueError("Scratch prefix is not allowlisted")
-    with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as directory:
+    directory = tempfile.TemporaryDirectory(prefix=prefix, dir=root)
+    receipt = None
+    try:
         if os.name == "posix" and Path("/proc/self/stat").exists():
-            receipt = {"version": 1, "pid": os.getpid(), "start": process_identity(os.getpid()),
-                       "created": time.time(), "uid": os.getuid()}
-            (Path(directory) / MARKER).write_text(json.dumps(receipt), encoding="utf-8")
-        yield directory
+            receipt = json.dumps({
+                "version": 1, "pid": os.getpid(), "start": process_identity(os.getpid()),
+                "created": time.time(), "uid": os.getuid(),
+            })
+            (Path(directory.name) / MARKER).write_text(receipt, encoding="utf-8")
+        yield directory.name
+    finally:
+        _cleanup_scratch(directory, receipt, warn_on_cleanup_race=warn_on_cleanup_race)
