@@ -14,6 +14,57 @@ from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 pytestmark = requires_real_pg
 
 
+@pytest.mark.parametrize("table", ["session_events", "fluid_session_events"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_import_progress_counts_only_committed_rows(chat, monkeypatch, table, fail):
+    data = snapshot(events=401 if table == "session_events" else 0, nodes=0,
+                    transcript=401 if table == "fluid_session_events" else 0)
+    data["_prepare_history"] = True
+    observed = []
+
+    class Timing(handoff._Timing):
+        def rows(self, completed, total):
+            super().rows(completed, total)
+            if self.snapshot()["step"] != "install_history." + table:
+                return
+            # A second connection sees only committed chunks, not the writer's
+            # uncommitted rows. Exercise the real producer, not seeded counts.
+            with base.get_db() as conn:
+                cur = conn.cursor()
+                if table == "session_events":
+                    cur.execute("SELECT COALESCE(SUM(jsonb_array_length(rows)),0) AS n "
+                                "FROM handoff_history_chunks WHERE token=%s AND table_name=%s",
+                                (data["token"], table))
+                else:
+                    cur.execute("SELECT count(*) AS n FROM fluid_session_events WHERE session_id=("
+                                "SELECT sdk_session_id FROM handoff_history_chunks "
+                                "WHERE token=%s AND table_name='')", (data["token"],))
+                assert cur.fetchone()["n"] == completed
+            observed.append((completed, total))
+
+    timing = data["_timing"] = Timing("import", chat)
+    original = handoff._HistoryCursor.execute
+
+    def execute(cur, sql, *args, **kwargs):
+        result = original(cur, sql, *args, **kwargs)
+        if fail and observed == [(0, 401), (200, 401)] and sql.startswith("INSERT INTO "):
+            raise RuntimeError("injected rollback before progress")
+        return result
+
+    monkeypatch.setattr(handoff._HistoryCursor, "execute", execute)
+    if fail:
+        with pytest.raises(RuntimeError, match="injected rollback"):
+            handoff.install_history(chat, data, "/tmp/handoff-lab")
+        assert observed == [(0, 401), (200, 401)]
+    else:
+        handoff.install_history(chat, data, "/tmp/handoff-lab")
+        assert observed == [(0, 401), (200, 401), (400, 401), (401, 401)]
+    timing.waiting("owner_commit")
+    assert "rows_completed" not in timing.snapshot()
+    assert "rows_total" not in timing.snapshot()
+    handoff._discard_history(chat, data["token"])
+
+
 def test_incremental_events_skip_unchanged_and_update_changed(chat):
     data = snapshot()
     first_sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
