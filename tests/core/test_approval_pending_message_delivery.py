@@ -252,6 +252,67 @@ async def test_the_pass_lives_only_for_its_turn_and_only_replaces_the_ask(
         "tool_name": "Bash", "tool_input": {"command": "ls"}, "interaction_id": "i-2"}}, "turn-2")
     confirm.drop_passes(home_id, "turn-2")
     assert not confirm.take_approved_once(home_id, "Bash", {"command": "ls"})
+    # Dropped unspent (its turn ended first), it arms again where the message
+    # lands next; once spent, never again.
+    unspent = {confirm.PASS_KEY: {
+        "tool_name": "Bash", "tool_input": {"command": "ls"}, "interaction_id": "i-2"}}
+    assert confirm.arm_pass(home_id, unspent, "turn-3")
+    assert confirm.take_approved_once(home_id, "Bash", {"command": "ls"})
+    assert not confirm.arm_pass(home_id, unspent, "turn-4")
+
+
+async def test_a_steered_yes_arms_its_pass_only_once_the_engine_took_it(
+    mock_db: sqlite3.Connection,
+) -> None:
+    """A steer the engine refused leaves the pass for the turn the row runs in."""
+    from tests.core.test_steering_delivery_flows import (
+        _Adapter,
+        _live_runtime,
+        _NoSteeringAdapter,
+        _pooled,
+        _start_live,
+    )
+
+    sid = "pass-steer-1"
+    _live_runtime(sid, _start_live(sid))
+    turns.enqueue_turn(sid, "user", prompt="yes", payload={confirm.PASS_KEY: {
+        "tool_name": "Bash", "tool_input": {"command": "ls"}, "interaction_id": "i-steer"}})
+    try:
+        with _pooled(_NoSteeringAdapter()):
+            assert await session_runtime.try_steer_pending(sid) == 0
+        assert not confirm.take_approved_once(sid, "Bash", {"command": "ls"})
+        with _pooled(_Adapter()):
+            assert await session_runtime.try_steer_pending(sid) == 1
+        assert confirm.take_approved_once(sid, "Bash", {"command": "ls"})
+    finally:
+        session_runtime._live_runtimes.pop(sid, None)
+
+
+async def test_a_release_from_elsewhere_before_the_typed_yes_is_reported(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """The typed yes read the request before another device's message let
+    its call go: the answer is judged on the row as answered, so the yes
+    still tells the agent to run it again and carries the pass."""
+    home_id, _ = home
+    _steers(monkeypatch)
+    task = _own_call(home_id)
+    [request] = await _pending(home_id)
+    real = confirm.pending_requests
+
+    def read_then_release(session_id: str) -> List[Dict[str, Any]]:
+        items = real(session_id)
+        # Another device parks and the waiter releases, right after this read.
+        assert interactions.mark_interaction_parked(request["interaction_id"])
+        assert interactions.mark_interaction_released(request["interaction_id"])
+        return items
+
+    monkeypatch.setattr(confirm, "pending_requests", read_then_release)
+    turn_id = await owner_says(home_id, "yes")
+    monkeypatch.setattr(confirm, "pending_requests", real)
+    answer = turns.get_turn(turn_id)["payload"][confirm.ANSWER_KEY]
+    assert answer["released"] is True and answer["pass"]["tool_name"] == "Bash"
+    task.cancel()
 
 
 async def test_a_yes_that_reaches_the_waiter_first_runs_the_call_once(
@@ -393,8 +454,11 @@ async def test_an_expiry_reports_only_a_call_its_waiter_released(mock_db: sqlite
 def test_only_the_placeholder_and_a_persons_no_carry_the_message() -> None:
     assert confirm.deny_carries_steers(confirm.NOT_RUN_YET)
     assert confirm.deny_carries_steers(ph.OWNER_DENIAL)
+    from app.core.session_settlement import SETTLED_DENIAL
+
     for message in ("Request cancelled", "Permission request timed out", "Denied by saved rule",
-                    "Owner away", ""):
+                    "Owner away", "", SETTLED_DENIAL, f"{ph.OWNER_DENIAL}: settled",
+                    f"{confirm.NOT_RUN_YET} (late)"):
         assert not confirm.deny_carries_steers(message)
 
 

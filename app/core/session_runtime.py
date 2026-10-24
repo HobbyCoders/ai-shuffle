@@ -1872,10 +1872,12 @@ class SessionRuntime:
                     steer_id = (command_id if isinstance(command_id, str)
                                 and command_id.startswith("client-") else row_id)
                     self._steer_ids[row_id] = steer_id
+                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
+                    # Armed only once the engine took the message: a steer that
+                    # failed leaves the pass for the turn the row runs in.
                     from app.core import assistant_confirm as _confirm
 
                     _confirm.arm_pass(self.session_id, row.get("payload"), self.turn_id)
-                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not

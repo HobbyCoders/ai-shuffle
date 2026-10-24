@@ -241,9 +241,10 @@ _answering_in_chat: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # turn ends however it ends (done, Stop, settle). Armed on the install that runs
 # the turn, from the durable turn payload.
 _passes: Dict[str, List[Dict[str, Any]]] = {}
-# home session id -> interaction ids already armed once (a re-delivered message
-# never re-arms a spent pass).
-_armed: Dict[str, Deque[str]] = {}
+# home session id -> interaction ids whose pass was spent (a re-delivered
+# message never re-arms it; one that was armed but never spent, because its
+# turn ended or its steer failed, arms again where the message lands next).
+_spent: Dict[str, Deque[str]] = {}
 
 
 def _canonical(tool_input: Any) -> str:
@@ -263,19 +264,25 @@ def _pass_of(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def arm_pass(session_id: Optional[str], payload: Optional[Dict[str, Any]],
              turn_id: Optional[str]) -> bool:
-    """Arm the pass ``payload`` carries for ``turn_id``, once per approval.
+    """Arm the pass ``payload`` carries for ``turn_id``, until it is spent.
 
-    Called when that payload's message reaches the engine: at turn start, or
-    when it is steered into the running turn ``turn_id``. True when armed now.
+    Called once that payload's message reached the engine: at turn start, or
+    after it was steered into the running turn ``turn_id``. A pass already
+    spent never arms again; one still armed moves to ``turn_id``. True when
+    armed now.
     """
     granted = _pass_of(payload)
     if not session_id or not turn_id or not granted or not granted.get("interaction_id"):
         return False
-    seen = _armed.setdefault(session_id, deque(maxlen=64))
-    if granted["interaction_id"] in seen:
+    interaction_id = granted["interaction_id"]
+    if interaction_id in _spent.get(session_id, ()):
         return False
-    seen.append(granted["interaction_id"])
-    _passes.setdefault(session_id, []).append({
+    entries = _passes.setdefault(session_id, [])
+    for entry in entries:
+        if entry["interaction_id"] == interaction_id:
+            entry["turn_id"] = turn_id
+            return False
+    entries.append({
         "tool_name": granted.get("tool_name") or "",
         "input": _canonical(granted.get("tool_input")),
         "interaction_id": granted["interaction_id"], "turn_id": turn_id,
@@ -311,6 +318,7 @@ def take_approved_once(session_id: Optional[str], tool_name: str, tool_input: An
             del entries[index]
             if not entries:
                 _passes.pop(session_id or "", None)
+            _spent.setdefault(session_id or "", deque(maxlen=64)).append(entry["interaction_id"])
             return True
     return False
 
@@ -328,13 +336,14 @@ def is_released(row: Optional[Dict[str, Any]]) -> bool:
 def deny_carries_steers(message: str) -> bool:
     """Whether a denial may carry the owner's waiting message to the model.
 
-    Only the "not run yet" placeholder and the owner's own no do: a deny from
-    Stop, settle, a timeout or a cancelled prompt ends or abandons the turn,
-    so a message folded into it would be receipted and then never answered.
+    Only the exact "not run yet" placeholder and the exact text of a person's
+    no do: a deny from Stop, settle (``session_settlement.SETTLED_DENIAL``), a
+    timeout or a cancelled prompt ends or abandons the turn, so a message
+    folded into it would be receipted and then never answered.
     """
     from app.core.permission_handler import OWNER_DENIAL
 
-    return message.startswith(NOT_RUN_YET) or message.startswith(OWNER_DENIAL)
+    return message in (NOT_RUN_YET, OWNER_DENIAL)
 
 
 def _stamp(value: Any) -> Optional[str]:
@@ -496,17 +505,15 @@ async def on_owner_message(session_id: Optional[str], text: Optional[str]) -> Op
             return None  # Answered elsewhere or lapsed meanwhile.
         outcome = "approved" if allow else "declined"
         answer = _answer(request, outcome)
-        if request.get("parked"):
-            # Read the row as answered: ``released`` is there only if the
-            # waiter let the call go before this answer won (both writes are
-            # guarded on ``pending``). Otherwise the waiter got the answer and
-            # the call runs or is denied as usual.
-            from app.db import interactions
+        # Decide from the row as answered, never from the read before it: a
+        # park and release from another device can land in between.
+        # ``released`` is there only if the waiter let the call go before this
+        # answer won (both writes are guarded on ``pending``); otherwise the
+        # waiter got the answer and the call runs or is denied as usual.
+        from app.db import interactions
 
-            row = await asyncio.to_thread(interactions.get_interaction, request["interaction_id"])
-            answer["released"] = is_released(row)
-        else:
-            answer["released"] = False
+        row = await asyncio.to_thread(interactions.get_interaction, request["interaction_id"])
+        answer["released"] = is_released(row)
         if answer["released"]:
             # Nobody waits on this row: the agent hears the answer on the
             # owner's own message (engine_note), and a yes admits that exact
@@ -704,4 +711,4 @@ def reset() -> None:
     """Forget in-process state (tests only)."""
     _outcomes.clear()
     _passes.clear()
-    _armed.clear()
+    _spent.clear()

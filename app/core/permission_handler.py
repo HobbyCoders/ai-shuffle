@@ -736,22 +736,23 @@ class PermissionHandler:
         # An owner-chat approval whose call was let go "not run yet" has no
         # waiter: the agent is told (#523). That covers the row answered here
         # and every sibling a remembered rule just answered with it. Each is
-        # read back as answered, so only a call its waiter really released
-        # counts (assistant_confirm.answered_elsewhere).
-        parked = [(row["id"], decision)] if payload.get("parked") else []
-        parked += [
+        # read back as answered and judged on ``released`` alone (a park and
+        # release from another device may land after the read above), so only
+        # a call its waiter really let go counts.
+        settled = [(row["id"], decision)] if payload.get("assistant_confirm") else []
+        settled += [
             (emit_id, (emit_answer or {}).get("decision"))
             for emit_id, _rid, emit_answer in resolved_emits
         ]
-        if parked:
+        if settled:
             from app.core import assistant_confirm
             from app.db import interactions as interactions_db
 
-            for parked_id, parked_decision in parked:
-                answered = await run_sync(interactions_db.get_interaction, parked_id)
-                if assistant_confirm.is_parked(answered):
+            for settled_id, settled_decision in settled:
+                answered = await run_sync(interactions_db.get_interaction, settled_id)
+                if assistant_confirm.is_released(answered):
                     await assistant_confirm.answered_elsewhere(
-                        session_id, answered, parked_decision,
+                        session_id, answered, settled_decision,
                     )
 
         return {
