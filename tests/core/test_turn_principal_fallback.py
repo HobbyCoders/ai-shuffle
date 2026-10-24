@@ -328,7 +328,7 @@ async def test_connector_turn_runs_as_the_connectors_key(seeded, monkeypatch):
     monkeypatch.setattr(ownership, "enrolled", lambda: False)
     database.create_connector("c1", "discord", "Chat", {}, [], api_user_id="u1", is_active=True)
     captured = _capture_submit(monkeypatch)
-    monkeypatch.setattr(turn_manager, "wait_session_idle", AsyncMock(return_value=False))
+    monkeypatch.setattr(turn_manager, "wait_settled", AsyncMock(return_value=None))
 
     await ConnectorManager().handle_incoming_message(IncomingMessage(
         connector_id="c1", platform_chat_id="chat-1", platform_user_id="p1",
