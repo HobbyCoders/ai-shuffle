@@ -379,7 +379,7 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
-          "id": "harness-basics.14",
+          "id": "harness-basics.31",
           "check": "Phone attach sheet swipe and in-chat card style",
           "kind": "owner",
           "how": "On the Android app, open a no-project chat and tap the project pill to open 'Attach a project'. Pull the sheet down a little and let go; pull it fast, hold still for a second, then let go; flick it down. With more projects than fit, scroll the project list up and down, starting with a small downward wobble. Then, in a light and a dark theme, trigger one approval asked in words and one generation choice card.",
