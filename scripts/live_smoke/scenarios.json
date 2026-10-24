@@ -476,6 +476,14 @@
           "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
           "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
           "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
+        },
+        {
+          "id": "harness-basics.approval-pending-message-delivery",
+          "check": "A message sent while an approval waits reaches the agent and the card stays open",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat in Bypass, on a Claude CLI model and again on a native-provider model: ask the agent to run a harmless command that needs your approval (for example `git push --dry-run` in a throwaway repository). While its yes/no card waits, type \"Instead, tell me what that command would change\". Then answer the card yes. Repeat, answering no, and once more leaving it until the 15-minute approval time runs out. Finally ask for a command and answer it yes with nothing else sent. Never use a production repository.",
+          "pass_when": "The other message is answered in the same turn without a yes or no; the transcript shows the call as not run yet and the card still waiting. A later yes is followed by the agent running exactly that command once, with no second card; a later no and an expiry are each reported to the agent, which does not run the command. A plain yes with nothing else sent runs the command as before. No message stays unsent while a card waits.",
+          "past_bug": "#523: in owner chats every other message stayed queued and unsent until the pending approval was answered yes or no."
         }
       ]
     }

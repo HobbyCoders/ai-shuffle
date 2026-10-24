@@ -404,7 +404,7 @@ async def test_approval_survives_lost_process_memory_and_away_mode(world, monkey
     monkeypatch.setattr(permission_handler, "request_permission",
                         PermissionHandler.request_permission.__get__(permission_handler))
 
-    async def owner_answers(interaction_id, session_id, timeout):
+    async def owner_answers(interaction_id, session_id, timeout, **_wait):
         row = interactions.get_interaction(interaction_id)
         result = await permission_handler.respond(row["payload"]["request_id"], session_id, "allow")
         assert result["resolved"]
@@ -452,7 +452,7 @@ async def test_remembered_answer_approves_only_its_own_model(world, monkeypatch,
                         PermissionHandler.request_permission.__get__(permission_handler))
     monkeypatch.setattr("app.services.push_notification.fire_and_forget_notify", lambda **kw: None)
 
-    async def wait_for_answer(interaction_id, session_id, timeout):
+    async def wait_for_answer(interaction_id, session_id, timeout, **_wait):
         for _ in range(500):
             row = interactions.get_interaction(interaction_id)
             if row["state"] != "pending":

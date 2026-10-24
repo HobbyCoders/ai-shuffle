@@ -379,6 +379,18 @@ class PermissionHandler:
         from app.core import interaction_wait
         from app.db import interactions
 
+        # This chat's own call in an owner chat (not a worker's redirected
+        # prompt): the owner answers it in words, and another message from the
+        # owner answers it "not run yet" instead of holding that message (#523).
+        own_confirm = assistant_confirm is not None and provider_agent is None
+        if own_confirm:
+            from app.core import assistant_confirm as confirm_flow
+
+            if confirm_flow.take_approved_once(session_id, tool_name, tool_input):
+                # The owner said yes after this exact call was answered "not
+                # run yet": that yes admits it once, without asking again.
+                return PermissionResultAllow(updated_input=tool_input)
+
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
         rule = None if skip_saved_rules else self._check_rules(
@@ -500,10 +512,21 @@ class PermissionHandler:
             if state and state.is_connected:
                 await self.resolve_mode_permissions(session_id, state)
         result_row = await interaction_wait.await_interaction(
-            interaction_id, session_id, float(ttl_seconds)
+            interaction_id, session_id, float(ttl_seconds),
+            release=confirm_flow.is_parked if own_confirm else None,
         )
 
         state = (result_row or {}).get("state")
+        if own_confirm and state == "pending" and confirm_flow.is_parked(result_row):
+            # The owner sent another message while this call waited. The card
+            # stays pending and answerable; the call is let go now with a
+            # placeholder result, so the owner's message reaches the model. It
+            # is handed to the engine FIRST, so the engine folds it into this
+            # very result (#523).
+            from app.core import session_runtime
+
+            await session_runtime.try_steer_pending(session_id)
+            return PermissionResultDeny(message=confirm_flow.NOT_RUN_YET)
         if result_row is None or state in ("expired", "pending"):
             # Timed out — durably expired, or the local deadline lapsed with the
             # row still pending. Dismiss the modal + deny.
@@ -693,6 +716,12 @@ class PermissionHandler:
             await interaction_events.emit_interaction_answered(
                 session_id, emit_interaction_id, emit_request_id, emit_answer,
             )
+        if payload.get("parked"):
+            # An owner-chat approval whose call was answered "not run yet":
+            # nobody waits on this row, so the agent is told (#523).
+            from app.core import assistant_confirm
+
+            await assistant_confirm.answered_elsewhere(session_id, row, decision)
 
         return {
             "resolved": True,

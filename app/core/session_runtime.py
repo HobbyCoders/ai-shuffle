@@ -486,7 +486,9 @@ _REDELIVERY_NOTE = (
 
 
 def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
-    """The engine-facing text of a turn the caller started in a voice call.
+    """The engine-facing text of a turn the caller started in a voice call, or
+    of the owner's yes or no to an approval whose call was answered "not run
+    yet" (``assistant_confirm.engine_note``).
 
     The voice guidance is appended to that turn's own message, the way the
     per-turn environment note is, so the system prompt (the provider's cached
@@ -494,7 +496,16 @@ def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
     it: the stores and the transcript keep the row's prompt.
     """
     payload = payload or {}
-    if not prompt or not payload.get("voice_delegation"):
+    if not prompt:
+        return prompt
+    # The owner's yes or no to a request whose call was answered "not run
+    # yet": the agent learns the outcome with the owner's own words (#523).
+    from app.core.assistant_confirm import engine_note
+
+    approval = engine_note(payload)
+    if approval:
+        prompt = f"{prompt}\n\n{approval}"
+    if not payload.get("voice_delegation"):
         return prompt
     instructions = payload.get("voice_instructions")
     if not isinstance(instructions, str) or not instructions.strip():

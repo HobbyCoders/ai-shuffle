@@ -268,6 +268,41 @@ def mark_interaction_requeued(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def mark_interaction_parked(interaction_id: str) -> bool:
+    """Stamp ``parked: true`` into a still-pending interaction's payload.
+
+    An owner-chat approval whose waiting call was answered "not run yet"
+    (``app.core.assistant_confirm``, #523): the row stays pending and
+    answerable, and its waiter (any install) sees the stamp on its next read
+    and lets the call go. Read-modify-write in Python (not a JSONB ``||``) so the
+    SQLite test shim stays compatible; the UPDATE is guarded on ``pending``.
+    True when the row is pending and now carries the stamp.
+    """
+    session_id = None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT session_id, payload FROM pending_interactions "
+            "WHERE id=%s AND state='pending'",
+            (interaction_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        payload = dict(_parse_json(row["payload"]) or {})
+        if payload.get("parked"):
+            return True
+        payload["parked"] = True
+        cursor.execute(
+            "UPDATE pending_interactions SET payload=%s WHERE id=%s AND state='pending'",
+            (json.dumps(payload), interaction_id),
+        )
+        if cursor.rowcount > 0:
+            session_id = row["session_id"]
+    notify_session_write(session_id, "pending_interactions")
+    return session_id is not None
+
+
 def has_detached_handoff_question(session_id: str, handoff_id: str, *, pending_only: bool = False) -> bool:
     """Pending or target-resolved cards own the handoff's continuation.
 
