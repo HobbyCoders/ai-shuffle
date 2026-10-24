@@ -405,7 +405,7 @@ async def test_search_models_keeps_main_fal_discovery_without_pricing_everything
     context = RunContext(session_id="s", unattended=False, owner=False, api_user_id="u")
     source = generation_sources.Sources(None, context)
     source.fal_key = AsyncMock(return_value="k")
-    source.fal_price = AsyncMock()
+    source.fal_price = AsyncMock(return_value=dict(UNKNOWN_PRICE))
     monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: source)
     monkeypatch.setattr(sdk, "_get_fal_api_key", lambda: "k")
     tools = {t.name: t for t in sdk._create_unified_tools(None, context)}
@@ -477,7 +477,7 @@ async def test_malformed_peer_catalog_keeps_main_fal_discovery(monkeypatch):
     context = RunContext(session_id="s", unattended=False, owner=True)
     source = generation_sources.Sources(None, context)
     source.fal_key = AsyncMock(return_value="k")
-    source.fal_price = AsyncMock()
+    source.fal_price = AsyncMock(return_value=dict(UNKNOWN_PRICE))
     monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: source)
     monkeypatch.setattr(sdk, "_get_fal_api_key", lambda: "k")
     monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")

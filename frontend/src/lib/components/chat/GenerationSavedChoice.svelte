@@ -50,13 +50,16 @@
 </p>
 
 <style>
+	/* A note under its tool row: indented to the row's name, the row's muted
+	   type, and the question tray's quiet text actions. */
 	.gsc {
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
-		gap: 4px 10px;
-		margin: 2px 0 6px 26px;
-		font-size: 11.5px;
+		gap: 2px 10px;
+		margin: 0 0 6px;
+		padding: 0 8px 0 31px;
+		font-size: 0.6875rem;
 		line-height: 1.45;
 		color: var(--muted-foreground);
 	}
@@ -64,7 +67,7 @@
 		flex: none;
 		width: 12px;
 		height: 12px;
-		color: var(--primary);
+		color: var(--subtle-foreground, var(--muted-foreground));
 	}
 	.gsc-text {
 		flex: 1 1 220px;
@@ -72,7 +75,7 @@
 	}
 	.gsc strong {
 		color: var(--foreground);
-		font-weight: 600;
+		font-weight: 500;
 	}
 	.gsc-price {
 		margin-left: 6px;
@@ -82,7 +85,7 @@
 	}
 	.gsc-error {
 		display: block;
-		color: var(--warning, var(--foreground));
+		color: var(--warning, var(--destructive));
 	}
 	.gsc-actions {
 		display: inline-flex;
@@ -95,17 +98,16 @@
 		background: none;
 		color: var(--muted-foreground);
 		font: inherit;
+		font-weight: 500;
 		cursor: pointer;
-		text-decoration: underline;
-		text-decoration-color: color-mix(in oklch, currentColor 35%, transparent);
-		text-underline-offset: 3px;
+		transition: color 0.15s ease;
 	}
 	button:hover:not(:disabled) {
 		color: var(--foreground);
 	}
 	button:disabled {
-		opacity: 0.5;
-		cursor: default;
+		opacity: 0.45;
+		cursor: not-allowed;
 	}
 	button:focus-visible {
 		outline: 2px solid var(--ring, var(--foreground));
@@ -113,10 +115,15 @@
 	}
 	@media (max-width: 480px) {
 		.gsc {
-			margin-left: 0;
+			padding-left: 8px;
 		}
 		button {
 			min-height: 44px;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		button {
+			transition: none;
 		}
 	}
 </style>
