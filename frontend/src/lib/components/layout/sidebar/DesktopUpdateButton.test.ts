@@ -562,6 +562,32 @@ describe('manual check from the host', () => {
    await waitFor(() => expect(notice.info).toHaveBeenCalledWith(expect.stringContaining('Still checking'), expect.objectContaining({ title:'Checking for updates' })));
   } finally { vi.useRealTimers(); }
  });
+ // #519: reads that keep failing must not keep the 2 s poll going, nor let a
+ // read that works minutes later bring a late "No updates found".
+ it('ends the check on time when every read after the click fails, then polls at the idle rate', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime:true });
+  try {
+   api.get.mockResolvedValue(idle);
+   render(DesktopUpdateButtonHarness);
+   await waitFor(() => expect(canCheck()).toBe('yes'));
+   await fireEvent.click(screen.getByRole('button', { name:'Manual check' }));
+   await waitFor(() => expect(api.post).toHaveBeenCalled());
+   api.get.mockRejectedValue(new Error('restarting'));
+   await vi.advanceTimersByTimeAsync(60000);
+   expect(notice.info).not.toHaveBeenCalledWith(expect.stringContaining('Still checking'), expect.anything());
+   await vi.advanceTimersByTimeAsync(35000);
+   expect(notice.info).toHaveBeenCalledWith(expect.stringContaining('Still checking'), expect.objectContaining({ title:'Checking for updates' }));
+   // The check is over: the next read waits the idle minute, not 2 s.
+   const timedOut = api.get.mock.calls.length;
+   await vi.advanceTimersByTimeAsync(50000);
+   expect(api.get).toHaveBeenCalledTimes(timedOut);
+   api.get.mockResolvedValue(idle);
+   await vi.advanceTimersByTimeAsync(15000);
+   expect(api.get).toHaveBeenCalledTimes(timedOut + 1);
+   expect(notice.info).not.toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'No updates found' }));
+   expect(notice.info.mock.calls.filter(([text]) => String(text).includes('Still checking'))).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+ });
  it('waits for an idle worker before saying nothing was found', async () => {
   vi.useFakeTimers({ shouldAdvanceTime:true });
   try {

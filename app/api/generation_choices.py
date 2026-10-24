@@ -6,6 +6,7 @@ nothing is reserved or submitted here.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +21,7 @@ from app.db.async_database import run_sync
 router = APIRouter(prefix="/api/v1/generation", tags=["Generation choices"])
 
 _QUOTE_PROMPT = "A preview of this choice."
+_SAVE_QUOTE_TIMEOUT_SECONDS = 2
 
 
 class ChoiceBody(BaseModel):
@@ -96,7 +98,29 @@ async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
             remember=body.remember, origin=body.origin))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"kind": kind, "choice": choice, "remembered": body.remember}
+    # Report a fresh server-side quote, never a client-supplied price. Failure
+    # to quote does not lose the owner's pick or imply it is free.
+    from app.core.generation_resolver import UNKNOWN_PRICE
+    try:
+        quoted = await asyncio.wait_for(
+            quote(QuoteRequest(kind=kind, choice=body.choice), request, token=token),
+            timeout=_SAVE_QUOTE_TIMEOUT_SECONDS)
+    except TimeoutError:
+        quoted = {"ok": False, "error": "The saved choice's quote timed out. Its worker or provider may be unavailable."}
+    except Exception:  # noqa: BLE001 - optional provider quote must not lose a saved pick
+        quoted = {"ok": False, "error": "A fresh quote for this saved choice is unavailable right now."}
+    eligible = bool(quoted.get("ok") and quoted.get("priced"))
+    quote_error = quoted.get("error")
+    if not quoted.get("ok"):
+        skip_reason = "stored_choice_unavailable"
+        warning = (quote_error or "This saved choice is unavailable right now.") + " Unattended runs will skip it."
+    else:
+        skip_reason = "stored_choice_unpriced"
+        warning = "This saved choice has no verified price. Unattended runs will skip it until a price is available."
+    return {"kind": kind, "choice": choice, "remembered": body.remember,
+            "price": quoted.get("price") or dict(UNKNOWN_PRICE), "priced": eligible, "quote_error": quote_error,
+            "unattended_skip_reason": None if eligible else skip_reason,
+            "warning": None if eligible else warning}
 
 
 @router.delete("/choices/{kind}")
@@ -174,16 +198,12 @@ async def delete_favourite(kind: str, request: Request,
 
 
 async def _job(job_id: str) -> str:
-    from uuid import UUID
-    from app.db import database
-
+    # Automations are owner-only (the routes require admin); preference values
+    # remain scoped to the authenticated caller's identity, never a supplied one.
     try:
-        canonical = str(UUID(job_id))
+        return await run_sync(generation_choices.validate_job_id, job_id)
     except ValueError:
         raise HTTPException(404, "Unknown job.") from None
-    if await run_sync(database.get_automation, canonical) is None:
-        raise HTTPException(404, "Unknown job.")
-    return canonical
 
 
 @router.get("/jobs/{job_id}/choices")
