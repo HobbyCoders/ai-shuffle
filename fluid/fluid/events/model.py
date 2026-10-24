@@ -697,6 +697,16 @@ class ContinualUpdate(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AssistantTextSanitized(Event):
+    """Model-authored control lookalikes were quoted before storage/replay.
+
+    Visible, nonterminal diagnostic. Never carries the original model text.
+    """
+
+    message: str = "Model-authored control markers were quoted; no host message was delivered."
+
+
+@dataclass(frozen=True, kw_only=True)
 class HookEvent(Event):
     """A configured hook spoke: ``level`` is ``"deny"`` (a hook blocked a
     call or a prompt; the model sees the same reason as an error ToolResult),
@@ -755,7 +765,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
         ContextCompaction, ContextCompacting, Usage, RateLimit, ProviderRetry, ProviderAlive,
-        SubagentEvent, HookEvent,
+        SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,
     )
