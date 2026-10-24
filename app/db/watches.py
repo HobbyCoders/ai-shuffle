@@ -27,6 +27,9 @@ def parse(row: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def create_schema(cursor: Any) -> None:
+    from app.db.watch_delivery import create_schema as delivery_schema
+
+    delivery_schema(cursor)
     cursor.execute("""CREATE TABLE IF NOT EXISTS watches (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, creating_session_id TEXT,
         worker_id TEXT NOT NULL, agent_id TEXT NOT NULL, description TEXT NOT NULL,
@@ -81,6 +84,7 @@ def create(
     watch_id: str | None = None,
     cursor: Any = None,
     status: str = "active",
+    creating_device_id: str | None = None,
     conn: Any = None,
 ) -> str:
     from contextlib import nullcontext
@@ -110,6 +114,10 @@ def create(
                 status,
             ),
         )
+        if creating_device_id:
+            from app.db.watch_delivery import set_origin
+
+            set_origin(c, wid, creating_device_id)
     return wid
 
 
@@ -139,7 +147,15 @@ def export_watch(wid: str, target: str) -> dict[str, Any]:
             raise ValueError("Wait for in-flight deliveries to finish before moving this watch")
         if len(rows) > 10000:
             raise ValueError("Watch history is too large for a single transfer")
-        snapshot = dict(watch=watch, events=rows, token=str(uuid.uuid4()), target=target)
+        from app.db.watch_delivery import origin
+
+        c.execute(
+            "SELECT o.* FROM watch_notification_outbox o JOIN watch_events e "
+            "ON e.id=o.event_id WHERE e.watch_id=%s", (wid,),
+        )
+        reports = [dict(row) for row in c.fetchall()]
+        snapshot = dict(watch=watch, events=rows, token=str(uuid.uuid4()), target=target,
+                        creating_device_id=origin(wid), reports=reports)
         if len(encode(snapshot).encode()) > 3 * 1024 * 1024:
             raise ValueError("Watch history exceeds the transfer payload limit")
         c.execute(
@@ -184,7 +200,8 @@ def import_watch(
             c.execute("DELETE FROM watches WHERE id=%s", (wid,))
             c.execute("DELETE FROM watch_transfers WHERE watch_id=%s", (wid,))
         create(
-            **row, watch_id=wid, cursor=original["cursor"], status=original["status"], conn=conn
+            **row, watch_id=wid, cursor=original["cursor"], status=original["status"], conn=conn,
+            creating_device_id=snapshot.get("creating_device_id"),
         )
         c.execute(
             "UPDATE watches SET cost_usd=%s,last_fired_at=%s,created_at=%s,reason=%s "
@@ -207,6 +224,16 @@ def import_watch(
                 "INSERT INTO watch_events (" + ",".join(fields) + ") VALUES ("
                 + ",".join(["%s"] * len(fields)) + ")",
                 tuple(encode(event[f]) if f == "payload" else event[f] for f in fields),
+            )
+        event_ids = {event["id"] for event in snapshot["events"]}
+        for report in snapshot.get("reports", []):
+            if report["event_id"] not in event_ids:
+                raise ValueError("Invalid transfer report")
+            c.execute(
+                "INSERT INTO watch_notification_outbox(event_id,target,body,acknowledged) "
+                "VALUES (%s,%s,%s,%s) ON CONFLICT(event_id,target) DO NOTHING",
+                (report["event_id"], report["target"], encode(report["body"]),
+                 report["acknowledged"]),
             )
         c.execute(
             "INSERT INTO watch_transfers (watch_id,token,target,snapshot,completed) "
@@ -449,7 +476,7 @@ def reserve(wid: str, eid: str, reserve_usd: float, *, max_per_hour: int = 20) -
         return True
 
 
-def renew_admission(eid: str, token: str) -> dict | None:
+def renew_admission(eid: str, token: str) -> dict[str, Any] | None:
     """Renew only a provably undispatched event, retaining its command and reservation."""
     with get_db() as conn:
         c = conn.cursor()
@@ -470,7 +497,10 @@ def renew_admission(eid: str, token: str) -> dict | None:
             or event.get("turn_id")
             or event.get("summary_attempted")
             or event.get("summary")
-            or (event.get("notification_sent") and event.get("route") != "investigate")
+            or (
+                event.get("notification_sent")
+                and event.get("route") not in ("investigate", "remote")
+            )
             or event.get("cost_usd") is not None
         ):
             return None
