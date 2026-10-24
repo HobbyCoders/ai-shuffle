@@ -599,7 +599,8 @@ def _chat_http_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
 
 
 def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
-    # Ask and Accept Edits show the access card on every request. Bypass shows
+    # Ask and Accept Edits show the access card on every request a saved
+    # Allow rule doesn't already cover. Bypass shows
     # it on the session's first grant only, and the delegated CLI's Auto
     # classifier may approve without a prompt, so there the gate stays.
     return mode not in ("bypassPermissions", "auto")
@@ -611,8 +612,9 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #: permission step with UI shouldn't also require a yes/no to even call it",
 #: #527).
 #: So the owner gate stands aside for a call its own consent covers in the
-#: session's mode, and still asks where that mode skips it. A saved Deny rule
-#: still wins (``harness_adapter`` checks it at dispatch), and nothing here
+#: session's mode, and still asks where that mode skips it. Outside Bypass a
+#: saved Deny rule still wins (``harness_adapter`` checks it at dispatch);
+#: Bypass skips saved rules for these tools as for every tool. Nothing here
 #: grants access: the card, the grant's scope, its expiry and Away mode decide.
 #:
 #: * RequestChatAccess: the private access card, in every mode. The owner
@@ -623,7 +625,7 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #:   one-shot card, outside Bypass. In Bypass the grant card promises no repeat
 #:   approval, so the owner gate asks as before.
 #: * computer-use request_access: the screen-access card on every request in
-#:   Ask and Accept Edits. In Bypass and Auto the gate stays, and the approver
+#:   Ask and Accept Edits (a saved Allow rule skips it, as in other chats). In Bypass and Auto the gate stays, and the approver
 #:   shows that same card instead of a yes/no (``query_engine``).
 #:
 #: AskUser/AskUserQuestion are low already (questions never pass the gate).

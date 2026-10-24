@@ -2443,8 +2443,9 @@ async def _stream_to_websocket_impl(
                             not cu_access.is_granted(_sid)
                             and not await run_sync(is_dedicated_desktop)
                         )
-                        # The owner gate asks in every mode of an owner chat
-                        # (above), and past saved rules, with this card.
+                        # In Bypass and Auto the owner gate asks with this card,
+                        # past saved rules (_owner_asks). In Ask and Accept Edits
+                        # this card is the approval and saved rules apply.
                         if _perm_mode == "bypassPermissions" and not first_use and not _owner_asks:
                             return PermissionResultAllow()
                         apps = tool_input.get("apps") or []
