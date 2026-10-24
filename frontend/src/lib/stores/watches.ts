@@ -176,13 +176,20 @@ async function move(id: string, target: string, confirming = false): Promise<Wat
 	setMove(id, { target, phase: 'pending', message: null, confirming });
 	let phase: WatchMove['phase'];
 	try {
-		await moveWatch(id, target);
+		await moveWatch(id, target, confirming);
 		phase = 'moved';
 		markMoved(id, target);
 	} catch (error) {
 		const failure = moveFailure(error);
 		phase = failure.phase;
-		setMove(id, { target, ...failure, confirming });
+		if (confirming && failure.phase === 'failed') {
+			// Refused confirm: the watch is not on `target` any more (a newer
+			// move took it elsewhere) and nothing was moved. The row says where
+			// it is now; this attempt has nothing left to report.
+			setMove(id, null);
+		} else {
+			setMove(id, { target, ...failure, confirming });
+		}
 	}
 	await (inflight ?? Promise.resolve()).then(refresh);
 	return phase;
@@ -203,11 +210,13 @@ function markMoved(id: string, target: string) {
 /**
  * The list shows the watch on the target of a move whose answer was lost or
  * refused. The import may have committed while the old worker's transfer
- * receipt is still open; a later move back would then be refused. Seeing the
- * row there is not enough: send the same move once more. The server
- * reconciles the old worker's receipt on that idempotent retry and answers
- * with the row, and only that answer reads "Moved". If it fails again the
- * note stays (with Retry), and no further automatic attempt is made.
+ * receipt is still open; a later move back would then leave it fenced.
+ * Seeing the row there is not enough: send a confirm-only move. The server
+ * closes the old worker's receipt when the watch is on the target and never
+ * starts a transfer, so a stale list cannot pull it back from a newer move
+ * (that is refused, and the note clears). Only its answer reads "Moved". If
+ * it cannot be reached the note stays (with Retry), and no further automatic
+ * attempt is made.
  */
 function reconcileMove(id: string): Promise<WatchMove['phase']> | null {
 	const current = get(state).moves[id];

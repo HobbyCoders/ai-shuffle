@@ -86,7 +86,7 @@ describe('watches store', () => {
 		expect(api.moveWatch).toHaveBeenCalledTimes(1);
 		answer(row('a', 'active', { worker_id: 'ServerWorker' }));
 		expect(await pending).toBe('moved');
-		expect(api.moveWatch).toHaveBeenCalledWith('a', 'dev_server');
+		expect(api.moveWatch).toHaveBeenCalledWith('a', 'dev_server', false);
 		expect(get(watches).moves.a.phase).toBe('moved');
 		expect(api.listWatches).toHaveBeenCalledTimes(2);
 		await vi.advanceTimersByTimeAsync(MOVED_NOTE_MS);
@@ -127,7 +127,9 @@ describe('watches store', () => {
 		const confirming = watches.reconcileMove('a');
 		expect(get(watches).moves.a).toMatchObject({ phase: 'pending', confirming: true });
 		expect(api.moveWatch).toHaveBeenCalledTimes(2);
-		expect(api.moveWatch).toHaveBeenLastCalledWith('a', 'dev_server');
+		// The automatic step is confirm-only: it can never start a transfer.
+		expect(api.moveWatch).toHaveBeenNthCalledWith(1, 'a', 'dev_server', false);
+		expect(api.moveWatch).toHaveBeenLastCalledWith('a', 'dev_server', true);
 		answer(row('a', 'active', { placement_device_id: 'dev_server' }));
 		expect(await confirming).toBe('moved');
 		expect(get(watches).moves.a.phase).toBe('moved');
@@ -143,9 +145,22 @@ describe('watches store', () => {
 		expect(get(watches).moves.a).toMatchObject({ phase: 'uncertain', confirming: true });
 		expect(watches.reconcileMove('a')).toBeNull();
 		expect(api.moveWatch).toHaveBeenCalledTimes(2);
-		// The owner's own Retry starts a fresh attempt.
+		// The owner's own Retry starts a fresh attempt, as a real move.
 		api.moveWatch.mockResolvedValueOnce(row('a'));
 		expect(await watches.move('a', 'dev_server')).toBe('moved');
+		expect(api.moveWatch).toHaveBeenLastCalledWith('a', 'dev_server', false);
+	});
+
+	it('a refused confirm (the watch moved on since) clears the note and moves nothing', async () => {
+		await watches.refresh();
+		api.moveWatch.mockRejectedValueOnce({ status: 503 });
+		await watches.move('a', 'dev_server');
+		api.moveWatch.mockRejectedValueOnce({ status: 409, detail: 'Watch is no longer on that worker; nothing was moved' });
+		expect(await watches.reconcileMove('a')).toBe('failed');
+		expect(api.moveWatch).toHaveBeenCalledTimes(2);
+		expect(api.moveWatch).toHaveBeenLastCalledWith('a', 'dev_server', true);
+		expect(get(watches).moves.a).toBeUndefined();
+		expect(watches.reconcileMove('a')).toBeNull();
 	});
 
 	it('classifies only a 409 as a refusal', () => {

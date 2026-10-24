@@ -395,7 +395,7 @@ describe('RunningTasksList watches', () => {
 			expect(within(picker).queryByRole('radio', { name: /DesktopWorker/ })).toBeNull();
 			await fireEvent.click(within(picker).getByRole('radio', { name: /ServerWorker/ }));
 			await fireEvent.click(screen.getByRole('button', { name: 'Move to ServerWorker' }));
-			expect(mocks.moveWatch).toHaveBeenCalledWith('w1', 'dev_server');
+			expect(mocks.moveWatch).toHaveBeenCalledWith('w1', 'dev_server', false);
 			const pending = await screen.findByTestId('watch-move');
 			expect(pending.textContent).toContain('Moving to ServerWorker');
 			expect(pending.textContent).not.toContain('Moved');
@@ -423,7 +423,7 @@ describe('RunningTasksList watches', () => {
 			mocks.moveWatch.mockResolvedValueOnce(watch('w1'));
 			await fireEvent.click(within(box).getByRole('button', { name: 'Retry move' }));
 			expect(mocks.moveWatch).toHaveBeenCalledTimes(2);
-			expect(mocks.moveWatch).toHaveBeenLastCalledWith('w1', 'dev_server');
+			expect(mocks.moveWatch).toHaveBeenLastCalledWith('w1', 'dev_server', false);
 		});
 
 		it('an unanswered move later listed on its target is re-sent, and reads Moved only on that answer', async () => {
@@ -441,9 +441,9 @@ describe('RunningTasksList watches', () => {
 			await fireEvent.click(moveTo(rowOf('Watch w1')));
 			await fireEvent.click(screen.getByRole('radio', { name: /^ServerWorker/ }));
 			await fireEvent.click(screen.getByRole('button', { name: 'Move to ServerWorker' }));
-			// The same move goes again by itself, so the old worker's receipt is closed.
+			// A confirm-only move goes by itself, so the old worker's receipt is closed.
 			await waitFor(() => expect(mocks.moveWatch).toHaveBeenCalledTimes(2));
-			expect(mocks.moveWatch).toHaveBeenLastCalledWith('w1', 'dev_server');
+			expect(mocks.moveWatch).toHaveBeenLastCalledWith('w1', 'dev_server', true);
 			const note = screen.getByTestId('watch-move');
 			expect(note.textContent).toContain('Confirming the move to ServerWorker');
 			expect(note.textContent).not.toContain('Moved');
@@ -518,7 +518,7 @@ describe('RunningTasksList watches', () => {
 			expect(within(row).queryByText('Paused: Transfer pending')).toBeNull();
 			expect(within(row).queryByRole('button', { name: /Resume watch|Pause watch|Stop watch|^Move watch/ })).toBeNull();
 			await fireEvent.click(within(box).getByRole('button', { name: 'Retry move' }));
-			expect(mocks.moveWatch).toHaveBeenCalledWith('w1', 'dev_server');
+			expect(mocks.moveWatch).toHaveBeenCalledWith('w1', 'dev_server', false);
 		});
 
 		it('says where new watches run and changes it; an offline worker cannot be picked', async () => {

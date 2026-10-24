@@ -325,8 +325,8 @@ async def test_listing_confirmed_move_is_reconciled_before_reverse_move(
 
     The destination committed the import, so the listing already shows the
     watch there, but the source's transfer receipt is still open. Treating
-    the listing as success would leave a reverse move refused; the panel's
-    automatic re-send of the same PATCH closes the receipt first.
+    the listing as success would leave a reverse move fenced; the panel's
+    automatic confirm-only PATCH closes the receipt first.
     """
     import httpx
     from fastapi import FastAPI
@@ -361,14 +361,72 @@ async def test_listing_confirmed_move_is_reconciled_before_reverse_move(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         unknown = await client.patch(path, json={"worker_id": "ServerWorker"})
         assert unknown.status_code == 503
-        listed = [r for r in (await client.get("/api/v1/watches")).json()["watches"] if r["id"] == wid]
+        listing = (await client.get("/api/v1/watches")).json()["watches"]
+        listed = [r for r in listing if r["id"] == wid]
         assert listed and listed[0]["worker_id"] == "ServerWorker"
         assert not receipt_completed()
         # What the panel sends when the listing shows the watch on its target.
-        confirmed = await client.patch(path, json={"worker_id": "ServerWorker"})
+        confirmed = await client.patch(path, json={"worker_id": "ServerWorker", "confirm": True})
         assert confirmed.status_code == 200, confirmed.text
         assert receipt_completed()
     with network("ServerWorker"):
         returned = await placement.move(wid, "DesktopWorker")
         assert returned["worker_id"] == "DesktopWorker"
     assert store.get(wid)["worker_id"] == "DesktopWorker"
+
+
+@pytest.mark.asyncio
+async def test_confirm_only_never_starts_a_transfer(
+    owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch
+) -> None:
+    """A stale confirm cannot undo a newer move (#565 review).
+
+    Browser 1 lost the import answer of DesktopWorker -> ServerWorker. Browser
+    2 retried that move and then moved the watch back. Browser 1's listing is
+    stale and still shows ServerWorker, so it sends its confirm-only PATCH:
+    that must be refused without exporting or importing anything.
+    """
+    import httpx
+    from fastapi import FastAPI
+    from app.api import watches as api
+    from app.api.auth import require_admin
+
+    watch = make_watch(owner, worker_id="DesktopWorker")
+    wid = watch["id"]
+    dispatch = placement.call
+    lost = False
+    operations: list[str] = []
+
+    async def call(worker_id: str, operation: str, **body: Any) -> dict[str, Any]:
+        nonlocal lost
+        operations.append(operation)
+        result = await dispatch(worker_id, operation, **body)
+        if operation == "import" and not lost:
+            lost = True
+            raise control.MaybeApplied("import answer lost")
+        return result
+
+    monkeypatch.setattr(placement, "call", call)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[require_admin] = lambda: {"id": "admin"}
+    path = f"/api/v1/watches/{wid}"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.patch(path, json={"worker_id": "ServerWorker"})).status_code == 503
+        # Browser 2: retries the move (closing the receipt), then moves it back.
+        assert (await client.patch(path, json={"worker_id": "ServerWorker"})).status_code == 200
+        with network("ServerWorker"):
+            assert (await placement.move(wid, "DesktopWorker"))["worker_id"] == "DesktopWorker"
+        assert store.get(wid)["worker_id"] == "DesktopWorker"
+        operations.clear()
+        # Browser 1's automatic confirm, from its stale view of ServerWorker.
+        stale = await client.patch(path, json={"worker_id": "ServerWorker", "confirm": True})
+        assert stale.status_code == 409
+        assert "nothing was moved" in stale.json()["detail"]
+        assert not {"validate", "export", "import", "complete"} & set(operations)
+        # confirm without a worker is refused too.
+        bare = await client.patch(path, json={"status": "paused", "confirm": True})
+        assert bare.status_code == 409
+    assert store.get(wid)["worker_id"] == "DesktopWorker"
+    assert store.get(wid)["status"] == "active"

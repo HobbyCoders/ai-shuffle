@@ -21,6 +21,9 @@ class WatchStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["paused", "stopped", "active"] | None = None
     worker_id: str | None = None
+    # With worker_id: only finish a move that already landed there (409 if
+    # the watch is elsewhere); never starts a transfer.
+    confirm: bool = False
 
 
 class WatchPreference(BaseModel):
@@ -60,8 +63,11 @@ async def update_watch(watch_id: str, body: WatchStatus) -> Any:
     try:
         if (body.worker_id is None) == (body.status is None):
             raise ValueError("Supply either status or worker_id")
+        if body.confirm and not body.worker_id:
+            raise ValueError("confirm needs worker_id")
         row = (
-            await watch_placement.move(watch_id, body.worker_id) if body.worker_id
+            await watch_placement.move(watch_id, body.worker_id, confirm_only=body.confirm)
+            if body.worker_id
             else await watch_placement.change(watch_id, body.status)
         )
     except (ValueError, ControlRefused) as exc:

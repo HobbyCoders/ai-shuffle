@@ -64,9 +64,16 @@ export function setWatchStatus(id: string, status: WatchStatus): Promise<WatchRo
 	return api.patch(`/watches/${encodeURIComponent(id)}`, { status });
 }
 
-/** Move a watch to another worker. Resolves with the destination's row. */
-export function moveWatch(id: string, workerId: string): Promise<WatchRow> {
-	return api.patch(`/watches/${encodeURIComponent(id)}`, { worker_id: workerId });
+/**
+ * Move a watch to another worker. Resolves with the destination's row.
+ *
+ * `confirmOnly` finishes a move that already landed on `workerId` (closing
+ * the old worker's transfer receipt) and never starts a transfer: it is
+ * refused with 409 when the watch is anywhere else.
+ */
+export function moveWatch(id: string, workerId: string, confirmOnly = false): Promise<WatchRow> {
+	const body = confirmOnly ? { worker_id: workerId, confirm: true } : { worker_id: workerId };
+	return api.patch(`/watches/${encodeURIComponent(id)}`, body);
 }
 
 /** Where new watches run: a worker id, or `null` for automatic. */
