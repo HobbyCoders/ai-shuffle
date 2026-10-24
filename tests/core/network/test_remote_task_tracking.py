@@ -7,6 +7,7 @@ import asyncio
 import concurrent.futures
 import copy
 from datetime import datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -421,13 +422,17 @@ def test_a_local_task_keeps_its_shape_and_nothing_is_checked(workers, monkeypatc
 
 # --- remote Swarm: real dispatcher, signed control and report producer -----------
 
-def swarm_network(workers, monkeypatch):
+def swarm_network(workers: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
     a, b, router = network(workers, monkeypatch)
     for worker in (a, b):
         with worker.active():
             from app.db import mobile_tool_identity
             mobile_tool_identity.init_schema()
-            database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+            # #553: these report/routing fixtures have no coding project. Use
+            # an observation-only helper instead of relying on the legacy shell.
+            database.create_profile("helper", "Helper", None, {
+                "model": "sonnet", "tool_selection_mode": "custom", "allowed_tools": ["Read"],
+            })
             from app.network import engine
             engine.publish_presence(capabilities={"remote_task": 1})
     converge([a, b])

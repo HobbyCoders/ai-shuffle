@@ -1,5 +1,9 @@
 """Retained owner identity and ordinary chat behavior after research retirement."""
 
+import ast
+from pathlib import Path
+from typing import Any
+
 import pytest
 from app.core import assistant_service as service, task_registry
 from app.db import database, turns
@@ -49,3 +53,39 @@ def test_stop_latch_and_durable_stop_are_honored(assistant_fixture):
     assert service.session_stopped(sid)
     turns.enqueue_turn(sid, "user", prompt="user continued")
     assert not service.session_stopped(sid)
+
+
+def test_retired_service_cannot_seed_a_home_or_research_agent() -> None:
+    for name in (
+        "ensure_home", "ensure_agent", "AGENT_NAME", "AGENT_DESCRIPTION", "AGENT_CONFIG",
+        "register_proactive_guard", "proactive_guard_available",
+    ):
+        assert not hasattr(service, name), name
+
+
+def test_no_production_imports_reintroduce_retired_research_services() -> None:
+    app = Path(__file__).resolve().parents[2] / "app"
+    retired = {
+        "app.core.assistant_manager", "app.core.assistant_research",
+        "app.core.assistant_brief", "app.db.assistant_sources",
+    }
+    for path in app.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            imported: list[str] = []
+            if isinstance(node, ast.Import):
+                imported = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported = [node.module, *(node.module + "." + a.name for a in node.names)]
+            assert not retired.intersection(imported), str(path)
+
+
+def test_legacy_dedicated_metadata_is_not_live_identity_policy(assistant_fixture: Any) -> None:
+    before = database.get_profile("assistant-agent")
+    config = {**before["config"], "assistant_dedicated": True, "avatar_id": "spark"}
+    database.update_profile("assistant-agent", config=config)
+    identity = next(a for a in service.agent_identities() if a["id"] == "assistant-agent")
+    assert identity["dedicated"] is False
+    assert identity["avatar_id"] == "spark"
+    service.update_agent_identity("assistant-agent", name="Ordinary agent")
+    assert database.get_profile("assistant-agent")["config"] == config

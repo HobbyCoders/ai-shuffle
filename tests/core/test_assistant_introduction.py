@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from pytest import MonkeyPatch
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -120,25 +121,36 @@ async def test_manager_pass_reads_the_running_gmail_address_not_mail(
     assert introduction()["email"] == "ada@example.com"
 
 
-def test_builtin_agent_gets_default_tools_and_every_enabled_plugin(assistant_fixture, monkeypatch, tmp_path):
-    """A research turn on the built-in agent loads the install's plugins like any agent."""
+def test_ordinary_project_agent_gets_default_tools_and_enabled_plugins(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch, tmp_path: Path,
+) -> None:
+    """#557: plugin defaults belong to ordinary agents, not a retired research agent."""
     from app.core import mcp_config, plugin_service
     from app.core.query_options import build_options_from_profile
     plugin_dir = tmp_path / "helper"
     (plugin_dir / ".claude-plugin").mkdir(parents=True)
     (plugin_dir / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     installed = tmp_path / "installed_plugins.json"
-    installed.write_text(json.dumps({"plugins": {"helper@market": [{"installPath": str(plugin_dir)}]}}), encoding="utf-8")
+    installed.write_text(
+        json.dumps({"plugins": {"helper@market": [{"installPath": str(plugin_dir)}]}}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(plugin_service, "get_plugin_service", lambda: SimpleNamespace(
         INSTALLED_FILE=installed, get_enabled_plugins=lambda: {"helper@market": True, "off@market": False}))
-    agent = database.get_profile(service.AGENT_ID)
+    agent = database.create_profile("ordinary-agent", "Agent", None, {
+        "tool_selection_mode": "all", "agent_invoke_mode": "all",
+    })
     config = agent["config"]
-    assert config["tool_selection_mode"] == "all" and config["agent_invoke_mode"] == "all"
     assert "enabled_plugins" not in config and "setting_sources" not in config
-    run = database.create_session("research-run", service.AGENT_ID, is_active=True)
+    database.create_project("plugin-project", "Project", None, str(tmp_path))
+    run = database.create_session(
+        "project-run", "ordinary-agent", project_id="plugin-project", is_active=True,
+    )
     options, _ = build_options_from_profile(agent, session_id=run["id"])
     assert {"type": "local", "path": str(plugin_dir)} in (options.plugins or [])
-    assert mcp_config._build_plugins_list(config.get("enabled_plugins"), config.get("setting_sources")) == options.plugins
+    assert mcp_config._build_plugins_list(
+        config.get("enabled_plugins"), config.get("setting_sources"),
+    ) == options.plugins
 
 
 def test_a_source_that_cannot_answer_keeps_its_last_value():

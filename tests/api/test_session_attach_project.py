@@ -5,6 +5,7 @@ Issue #371 step 4. The attach turns the row into an ordinary project session
 touch: one that already has a project, a busy one, one run by another worker.
 """
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -379,3 +380,56 @@ def test_the_owner_and_an_owner_paired_phone_may_attach(routed):
     assert response.status_code == 200, response.text
     assert response.json()["permission_mode"] == "default"
     assert db.get_session("attach-chat")["project_id"] == "attach-proj"
+
+
+@pytest.mark.parametrize("mode", [None, "code"])
+@pytest.mark.parametrize("permission", [None, "acceptEdits", "bypassPermissions", "auto"])
+def test_a_late_legacy_peer_row_can_attach_after_migrations_are_current(
+    routed: tuple[Any, str], mode: str | None, permission: str | None,
+) -> None:
+    """#553 review: startup is complete before the old-peer row is materialized."""
+    from app.db.base import get_db
+    from app.network import engine, policy
+
+    app, owner_token = routed
+    db.init_database()
+    fingerprint = db.get_system_setting(db.MIGRATIONS_FINGERPRINT_KEY)
+    assert fingerprint == db.migrations_fingerprint()
+    incoming = {
+        **db.get_session("attach-chat"), "id": "late-owner", "mode": mode,
+        "permission_mode": permission,
+    }
+    assert db.get_session("late-owner") is None
+    with get_db() as conn:
+        row = engine.materialize(
+            conn.cursor(), policy.collection("sessions"), "late-owner", incoming,
+        )
+        assert row["mode"] == "chat"
+    db.add_session_message("late-owner", "user", "preserved peer history")
+    assert db.get_session("late-owner")["permission_mode"] == permission
+
+    # A later old-peer edit must not put it back on a stored code surface.
+    with get_db() as conn:
+        engine.materialize(
+            conn.cursor(), policy.collection("sessions"), "late-owner", incoming,
+        )
+    assert incoming["mode"] == mode  # Local projection never rewrites the peer payload.
+    assert db.get_system_setting(db.MIGRATIONS_FINGERPRINT_KEY) == fingerprint
+    assert db.get_session("late-owner")["mode"] == "chat"
+
+    client = _client(
+        app, host="127.0.0.1:8000", peer="127.0.0.1", cookies={"session": owner_token},
+    )
+    visible = client.get("/api/v1/sessions/late-owner")
+    assert visible.status_code == 200, visible.text
+    assert visible.json()["mode"] == "chat"  # NoProjectPill's actual serialized input.
+    response = client.post(
+        "/api/v1/sessions/late-owner/attach-project", json={"project_id": "attach-proj"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["permission_mode"] == "default"
+    attached = db.get_session("late-owner")
+    assert attached["project_id"] == "attach-proj"
+    assert attached["mode"] is None
+    assert attached["permission_mode"] == "default"
+    assert db.get_session_messages("late-owner")[0]["content"] == "preserved peer history"

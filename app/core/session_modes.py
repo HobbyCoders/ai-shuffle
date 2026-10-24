@@ -184,8 +184,25 @@ def session_mode_of(session_row: Optional[Mapping[str, Any]]) -> str:
 
 
 def runtime_session_mode(row: Optional[Mapping[str, Any]]) -> str:
-    """Step 1 widens stored chat rows only; legacy code rows migrate in step 4."""
-    return session_mode_of(row)
+    """Confine ordinary projectless legacy rows, including rows arriving from old peers.
+
+    Storage migration supplies the same mode to clients (and the attach-project
+    affordance). This fallback closes the window before migration/sync. It grants
+    no owner authority: orchestration still checks the authenticated principal.
+    API, delegated, automation and hidden rows retain their existing policy.
+    """
+    mode = session_mode_of(row)
+    if row and mode == "code" and not any(
+        row.get(key) for key in (
+            "project_id", "project_v2_id", "api_user_id", "is_worker",
+            "parent_session_id", "automation_id", "hidden",
+        )
+    ):
+        from app.core.session_orchestration import is_owner_session
+
+        if is_owner_session(row):
+            return "chat"
+    return mode
 
 
 def storage_session_mode(mode: Any) -> Optional[str]:
