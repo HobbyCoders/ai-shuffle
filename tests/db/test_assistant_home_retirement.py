@@ -63,7 +63,7 @@ def _start_marker(sid, sender):
 def _legacy_install(cursor: Any) -> None:
     """What an older build left: homes, their links and the retired columns."""
     db.create_profile(
-        AGENT, service.AGENT_NAME, service.AGENT_DESCRIPTION, service.AGENT_CONFIG, is_builtin=True
+        AGENT, "Legacy agent", "Retired", {}, is_builtin=True
     )
     cursor.execute(
         """CREATE TABLE assistant_runs (

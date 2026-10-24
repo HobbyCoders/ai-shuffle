@@ -80,13 +80,16 @@ class UnifiedSubagentItem(BaseModel):
 
 
 def _refuse_assistant_agent(*agent_ids: str) -> None:
-    """403 for the assistant's built-in agent: the app defines it, owners do not edit it."""
+    """Mixed-version tombstone: an old peer's retired ID is not a live agent.
+
+    This does not reserve a conversation or protect a hidden home from deletion.
+    """
     from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
 
     if ASSISTANT_AGENT_ID in agent_ids:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="The assistant's built-in agent cannot be changed or deleted",
+            status_code=status.HTTP_410_GONE,
+            detail="This agent ID is retired",
         )
 
 
