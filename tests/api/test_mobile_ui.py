@@ -66,7 +66,7 @@ def test_no_build_installs_nothing(tmp_path):
     assert TestClient(app).get("/mobile/").status_code == 404
 
 
-def test_the_frontend_build_emits_the_phone_ui():
+def test_the_frontend_build_emits_the_phone_ui() -> None:
     """Every install path copies frontend/build into app/static, so the build must produce build/mobile."""
     import json
     from pathlib import Path
@@ -74,8 +74,9 @@ def test_the_frontend_build_emits_the_phone_ui():
     scripts = json.loads((root / "frontend/package.json").read_text())["scripts"]
     assert "build-mobile-ui.mjs --with-frontend" in scripts["build"]
     assert "build-mobile-ui.mjs --copy" in scripts["postbuild"]
-    # The phone build may run beside the desktop one only when memory allows both.
+    # The tested sequencer keeps every desktop config rewrite ahead of the phone build.
     builder = (root / "frontend/scripts/build-mobile-ui.mjs").read_text()
-    assert "PARALLEL_MIN_AVAILABLE" in builder and "await frontend();\n\t\tawait mobile();" in builder
+    assert "await buildUIs(frontend, mobile);" in builder
+    assert "await frontend();\n\tawait mobile();" in builder
     assert "paths" in (root / "mobile/svelte.config.js").read_text()
     assert "base: '/mobile'" in (root / "mobile/svelte.config.js").read_text()
