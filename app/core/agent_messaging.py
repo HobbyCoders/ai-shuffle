@@ -658,6 +658,32 @@ async def _finish_displaced_continuations(session_id, settled):
             )
 
 
+def _continuation_has_followup(session_id, settled):
+    """A task-result wake continues this round, unlike a new user/peer turn.
+
+    Probe before reading/persisting the report, as for remote children. Include
+    the latest executed turn: a wake can finish during the probe, and the old
+    callback must still not deliver its interim text after that final report.
+    """
+    from app.core import provider_agent
+    from app.db import turns as turns_db
+
+    if provider_agent._active_worker_background_work(session_id):
+        return True
+    candidates = [
+        *turns_db.get_queued_turns(session_id),
+        turns_db.get_live_turn(session_id),
+        turns_db.get_latest_run_turn(session_id),
+    ]
+    for turn in candidates:
+        while turn and turn.get("source") == "unpark":
+            parent_id = turn.get("parent_turn_id")
+            if parent_id == settled["id"]:
+                return True
+            turn = turns_db.get_turn(parent_id) if parent_id else None
+    return False
+
+
 async def finish_message_resume(session_id, settled, outcome):
     """Complete a resumed worker through the same parent wake gate as Task."""
     from app.core import provider_agent, turn_scheduler
@@ -694,6 +720,9 @@ async def finish_message_resume(session_id, settled, outcome):
 
     async with turn_scheduler.message_resume_lock(session_id):
         record = supervisor.get_worker(owner, session_id)
+        if (not ((record and record.torn_down) or task_registry.is_user_stopped(session_id))
+                and await asyncio.to_thread(_continuation_has_followup, session_id, settled)):
+            return  # The result wake, not this interim note, owes the report.
         # Read only this turn's report: an interrupted continuation must never
         # report the previous successful turn as its new result.
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)

@@ -315,6 +315,22 @@
           "past_bug": "#1957: Monitor copied the full server environment; Python key writers had no Windows ACL restriction. OS-user isolation remains a separate owner decision."
         },
         {
+          "id": "harness-basics.14",
+          "check": "Delegated queued questions are successful tool results",
+          "kind": "owner",
+          "how": "In a throwaway delegated Claude chat on a candidate worker, request a question through the native AskUserQuestion bridge while independent work continues. Inspect the canonical tool.result event and stored ToolResultBlock, answer the posted card, and let the answer wake the chat. Separately attempt an invalid question and deny an ordinary permission request. Archive only the throwaway chat.",
+          "pass_when": "The successfully posted queued result has is_error false in both canonical events and stored history, the card is answerable, and the owner answer reaches the next turn exactly once. Validation failures and genuine permission denials retain is_error true.",
+          "past_bug": "#493: the CLI denial used to defer native questions leaked is_error true into successful queued results."
+        },
+        {
+          "id": "harness-basics.15",
+          "check": "Local SendMessage waits for its Monitor-result wake",
+          "kind": "owner",
+          "how": "On a candidate worker, start and finish a disposable local Task, then continue it through SendMessage. Have that continuation launch a short Monitor and end with an interim waiting note as the Monitor finishes. Repeat until logs show an undelivered live notification falling back to a queued unpark wake. Hold the wake before it finishes and inspect the parent's notifications and TaskGet; then allow the worker to consume the Monitor result and finish. Also queue an unrelated owner turn after a separate completed continuation. Archive only the throwaway chats.",
+          "pass_when": "No completed parent notification or dependent-work release occurs while the Monitor wake is queued or running, and TaskGet remains running. Only the post-wake final report is delivered once. A genuinely completed continuation followed by unrelated owner work still reports its own round once, without reporting the owner's later text.",
+          "past_bug": "#494: a local continuation sent completed for its interim waiting note before its queued Monitor-result wake ran."
+        },
+        {
           "id": "harness-basics.6",
           "check": "Delegated prompt respects CLI-spelling tool blocks",
           "kind": "owner",

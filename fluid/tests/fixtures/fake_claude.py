@@ -191,6 +191,9 @@ def turn_tool(sid: str, *, question: bool = False) -> None:
     tid = "toolu_fake_1"
     tool_name = "AskUserQuestion" if question else "mcp__fluid_bundled__get_weather"
     args = {"questions": [{"question": "Which region?"}]} if question else {"city": "Paris"}
+    question_result = os.environ.get("FAKE_CLAUDE_QUESTION_RESULT")
+    if question and question_result == "invalid":
+        args = {"questions": []}
     emit(assistant_frame(
         sid, [{"type": "tool_use", "id": tid, "name": tool_name, "input": args}], "tool_use",
     ))
@@ -215,11 +218,12 @@ def turn_tool(sid: str, *, question: bool = False) -> None:
     if question:
         response = resp.get("response", {}).get("response", {}) if resp else {}
         assert response.get("behavior") == "deny"
-        queued = json.loads(response["message"])
-        assert queued["status"] == "queued" and queued["request_ids"]
+        if question_result != "invalid":
+            queued = json.loads(response["message"])
+            assert queued["status"] == "queued" and queued["request_ids"]
         emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
-            "type": "tool_result", "tool_use_id": tid,
-            "content": [{"type": "text", "text": response["message"]}], "is_error": True,
+            "type": "tool_result", "tool_use_id": "unrelated" if question_result == "different_id" else tid,
+            "content": [{"type": "text", "text": "permission denied" if question_result == "denied" else response["message"]}], "is_error": True,
         }]}})
         emit(assistant_frame(sid, [{"type": "text", "text": "Independent work completed."}], "end_turn", msg_id="msg_fake_2"))
     elif behavior == "allow":
