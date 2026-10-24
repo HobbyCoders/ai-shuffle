@@ -571,6 +571,14 @@
           "past_bug": "#580: stalled commits drained the pool and interrupted active turns."
         },
         {
+          "id": "harness-basics.migration-timeout-budget",
+          "check": "Offline database work outlives ordinary SQL deadlines",
+          "kind": "owner",
+          "how": "Disposable: large-history upgrade, maintenance, dump/restore and rollback.",
+          "pass_when": "Work finishes; maintenance is bounded; ordinary SQL limits return.",
+          "past_bug": "#580 review: short server defaults could cancel every boot migration."
+        },
+        {
           "id": "harness-basics.deferred-history-indexing",
           "check": "Deferred history indexing catches up without stalling live chats",
           "kind": "owner",
