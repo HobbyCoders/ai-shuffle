@@ -218,7 +218,12 @@ collection always starts from the actual tests, not the manifest. Unknown/new
 tests receive at least ten seconds or the maximum observed duration, and are
 never dropped. The initial seed is taken once from a complete
 successful PR CI run; subsequent refreshes accept only successful main CI Backend
-runs, downloading fresh artifacts rather than trusting a PR-controlled cache:
+runs, downloading fresh artifacts rather than trusting a PR-controlled cache.
+Artifacts are named `backend-shard-N-aATTEMPT`; refresh and the aggregate select
+the numerically latest attempt per shard before validating receipts and timings.
+A partial rerun retains earlier evidence only for shards that were not rerun.
+
+Refresh with:
 
 ```bash
 python -m scripts.ci.backend_shards --refresh RUN_ID --download-dir NEW_SCRATCH_DIR

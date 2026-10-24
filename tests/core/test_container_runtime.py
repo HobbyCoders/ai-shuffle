@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from unittest.mock import Mock
 
 import pytest
@@ -672,7 +672,9 @@ def _leaked(env):
     return sorted(k for k, v in env.items() if k in _SUPERVISOR_SECRETS or v in _SUPERVISOR_SECRETS.values())
 
 
-def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeypatch, tmp_path):
+def test_postgres_server_gets_only_its_own_environment(
+    settings_factory: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     """R13-1: PostgreSQL (and its forked backends) ran with every secret the
     supervisor holds, readable by same-uid processes in /proc/<pid>/environ."""
     _secret_environment(monkeypatch)
@@ -693,7 +695,9 @@ def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeyp
     assert args[0] == "postgres"
     # WAL settings ride on every start, so existing clusters get them too (#436).
     for setting in ("max_wal_size=4GB", "checkpoint_timeout=15min",
-                    "checkpoint_completion_target=0.9", "wal_compression=lz4"):
+                    "checkpoint_completion_target=0.9", "wal_compression=lz4",
+                    "statement_timeout=30s", "lock_timeout=5s",
+                    "idle_in_transaction_session_timeout=30s"):
         assert args[args.index(setting) - 1] == "-c"
     assert _leaked(env) == []
     assert "UNRELATED_APP_SETTING" not in env
@@ -1719,6 +1723,46 @@ def test_dump_stdout_is_binary_and_diagnostics_stay_on_stderr(settings_factory, 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "completed" in captured.err
+
+
+@pytest.mark.parametrize("operation", ["dump", "restore", "snapshot", "rollback", "drop-copy"])
+def test_offline_database_commands_exempt_sql_defaults_but_keep_process_deadlines(
+    settings_factory: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, operation: str,
+) -> None:
+    import io
+
+    db = runtime.Database(settings_factory())
+    db.url = "postgresql://u:synthetic@127.0.0.1/test"
+    db.socket = tmp_path
+    db.pg.mkdir(parents=True)
+    command = Mock(return_value="")
+    monkeypatch.setattr(db, "command", command)
+    snapshot = "ai_shuffle_rollback_" + "b" * 12
+    discard = "ai_shuffle_failed_" + "b" * 12
+    if operation == "dump":
+        db.dump(str(tmp_path / "new.dump"))
+        expected = 900
+    elif operation == "restore":
+        monkeypatch.setattr(db, "query", Mock(return_value="t"))
+        db.restore(io.BytesIO(b"synthetic dump"))
+        expected = 900
+    elif operation == "snapshot":
+        db.snapshot(snapshot)
+        expected = runtime.SNAPSHOT_TIMEOUT
+    elif operation == "rollback":
+        monkeypatch.setattr(db, "update_databases", Mock(return_value=[snapshot]))
+        db.restore_snapshot(snapshot, discard)
+        expected = 60
+    else:
+        db.drop_update_database(snapshot)
+        expected = 120
+    assert command.call_args.kwargs["timeout"] == expected
+    for call in command.call_args_list:
+        env = call.kwargs["env"]
+        assert env["PGOPTIONS"] == runtime.OFFLINE_SQL_OPTIONS
+        assert call.kwargs["timeout"] > 0
+    assert "PGOPTIONS" not in runtime.client_env(db.url)
 
 
 def test_direct_user_mismatch_is_clear(settings_factory, monkeypatch):
