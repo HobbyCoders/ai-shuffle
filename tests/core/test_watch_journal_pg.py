@@ -432,7 +432,9 @@ async def test_legacy_journal_compaction_keeps_replay_watermarks(
                       "VALUES ('bot',%s,%s)", ("message_received:123:" + str(number),
                       store.encode({"platform_chat_id": "123", "text": "legacy content"})))
     slow = workers.create()
-    journal.sweep()
+    from app.db.async_database import run_maintenance
+
+    await run_maintenance(journal.sweep)
     assert store.get(slow["id"])["cursor"]["expired"]
     _, baseline = store.connector_page("bot", "123", {})
     fresh = workers.create(cursor=baseline)
@@ -500,3 +502,14 @@ async def test_receiver_start_failure_retries_committed_import_once(
         events, _ = store.connector_page("bot", "123", result["cursor"])
         assert len(events) == 1
     assert workers.starts == ["target"]
+
+
+def test_cancelled_sweep_does_not_borrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    stop = threading.Event()
+    stop.set()
+
+    def unexpected_borrow() -> Any:
+        pytest.fail("cancelled journal maintenance borrowed a connection")
+
+    monkeypatch.setattr(journal, "get_db", unexpected_borrow)
+    journal.sweep(stop=stop)

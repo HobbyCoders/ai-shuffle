@@ -1,6 +1,7 @@
 """Bounded Telegram ingress with durable receiver fences and transferable tails."""
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.core.watch_values import encode
@@ -46,7 +47,7 @@ def consumers(c: Any, cid: str) -> list[dict[str, Any]]:
             and not row["cursor"].get("expired")]
 
 
-def trim(c: Any, cid: str) -> None:
+def trim(c: Any, cid: str, *, stop: threading.Event | None = None) -> None:
     """Expire laggards explicitly before deleting content they still needed."""
     state = lock(c, cid)
     c.execute("SELECT seq FROM watch_connector_inbox WHERE connector_id=%s "
@@ -67,6 +68,8 @@ def trim(c: Any, cid: str) -> None:
     from app.db.watches import parse
 
     while True:
+        if stop is not None and stop.is_set():
+            return
         c.execute("SELECT * FROM watch_connector_inbox WHERE connector_id=%s AND seq<=%s "
                   "ORDER BY seq LIMIT 1000", (cid, passed))
         batch = [parse(row) for row in c.fetchall()]
@@ -211,11 +214,21 @@ def purge(c: Any, cid: str) -> None:
               "WHERE connector_id=%s", (cid,))
 
 
-def sweep() -> None:
-    """Compact old installations and idle connectors even without new ingress."""
+def sweep(*, stop: threading.Event | None = None) -> None:
+    """Compact idle journals; cancellation prevents borrowing for another connector."""
+    from app.db.retention import set_timeout
+
+    if stop is not None and stop.is_set():
+        return
     with get_db() as conn:
         c = conn.cursor()
+        set_timeout(c)
         c.execute("SELECT DISTINCT connector_id FROM watch_connector_inbox")
         ids = [row["connector_id"] for row in c.fetchall()]
-        for cid in sorted(ids):
-            trim(c, cid)
+    for cid in sorted(ids):
+        if stop is not None and stop.is_set():
+            return
+        with get_db() as conn:
+            c = conn.cursor()
+            set_timeout(c)
+            trim(c, cid, stop=stop)
