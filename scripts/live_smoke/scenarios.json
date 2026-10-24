@@ -331,7 +331,7 @@
           "past_bug": "#1957: Monitor copied the full server environment; Python key writers had no Windows ACL restriction. OS-user isolation remains a separate owner decision."
         },
         {
-          "id": "harness-basics.14",
+          "id": "harness-basics.16",
           "check": "Delegated queued questions are successful tool results",
           "kind": "owner",
           "how": "In a throwaway delegated Claude chat on a candidate worker, request a question through the native AskUserQuestion bridge while independent work continues. Inspect the canonical tool.result event and stored ToolResultBlock, answer the posted card, and let the answer wake the chat. Separately attempt an invalid question and deny an ordinary permission request. Archive only the throwaway chat.",
@@ -339,7 +339,7 @@
           "past_bug": "#493: the CLI denial used to defer native questions leaked is_error true into successful queued results."
         },
         {
-          "id": "harness-basics.15",
+          "id": "harness-basics.17",
           "check": "Local SendMessage waits for its Monitor-result wake",
           "kind": "owner",
           "how": "On a candidate worker, start and finish a disposable local Task, then continue it through SendMessage. Have that continuation launch a short Monitor and end with an interim waiting note as the Monitor finishes. Repeat until logs show an undelivered live notification falling back to a queued unpark wake. Hold the wake before it finishes and inspect the parent's notifications and TaskGet; then allow the worker to consume the Monitor result and finish. Also queue an unrelated owner turn after a separate completed continuation. Archive only the throwaway chats.",
@@ -427,6 +427,14 @@
           "how": "On a disposable candidate install, prepare a project with 100 non-retired historical worktrees (sessions inactive for over three hours) and three active worktrees: one focused, one recently used, and one streaming. Restart only the disposable install to clear its in-memory status cache. Refresh the worktree list repeatedly and record actual git status reader calls and status_checked_at fields. Focus a previously unchecked historical checkout once, then leave it inactive. In a recently active but idle checkout, edit a tracked file outside an agent turn, wait for the file-event debounce, and refresh the list. Repeat after adding a directory and editing a file inside it. Open the same project in two clients focused on different checkouts and alternate polls, including requests with no focus; edit files in both checkouts. Stop renewing only one focus and confirm only its watch expires after the lease; finally leave the project and confirm all watches expire. Do not use production data or restart installed workers.",
           "pass_when": "Cold and repeated refreshes read only the three active checkouts, not the 100 historical ones. Unchecked rows retain null status and status_checked_at until focused; previously checked inactive rows retain their last status. Idle edits, including in new directories, appear with a newer status_checked_at after debounce without a turn-end hook. Native watches exclude nested worktrees and dependency trees. Concurrent clients retain independent per-path leases: another client's different or missing focus cannot cancel a live watch, and only unrenewed paths stop after expiry.",
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
+        },
+        {
+          "id": "harness-basics.18",
+          "check": "Monitor viewer disconnect preserves its running shell",
+          "kind": "owner",
+          "how": "On a real candidate worker, start a throwaway chat and a long-running Monitor shell that prints a marker and waits for an explicit release file in its disposable folder. As the authenticated owner, open the read-only Monitor viewer, wait for the marker and repeatedly disconnect and reconnect it at least 50 times while the worker is busy. Include abrupt WebSocket closes overlapping an owner-auth recheck. Reattach and inspect the same task's status/output after each disconnect. With a second owner login available for cleanup, revoke the viewer's owner session while attached and confirm the connection closes. Inspect worker logs for every connection, then release only the throwaway shell and archive its chat; do not stop or restart the worker.",
+          "pass_when": "Every disconnect and reconnect leaves the original shell running with the same task id and readable backlog. Revocation closes the viewer with code 4001 without stopping that shell. Worker logs contain no teardown exception, CancelledError or leaked Monitor connection task for these connections. The explicit release ends the shell normally; a missing log inspection or fewer than 50 disconnects is not a pass.",
+          "past_bug": "#402: a disconnect followed by ASGI cancellation during Monitor child-task cleanup propagated a child CancelledError through WebSocket teardown."
         }
       ]
     }
