@@ -230,10 +230,14 @@ def delete_connector(connector_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         from app.db.watch_journal import purge
+        from app.db.watches import lock_connector
 
-        purge(cursor, connector_id)
+        lock_connector(cursor, connector_id)
         cursor.execute("DELETE FROM connectors WHERE id = %s", (connector_id,))
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+        if deleted:
+            purge(cursor, connector_id)
+        return deleted
 
 
 def update_connector_event_dispatched(connector_id: str, success: bool) -> None:
