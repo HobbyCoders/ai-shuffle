@@ -36,6 +36,8 @@
 		Hand, LoaderCircle, Lock, Moon, ShieldOff, SlidersHorizontal, Sparkles, SquareTerminal, Zap
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { watches } from '$lib/stores/watches';
+	import { watchCount } from '$lib/components/chat/running-tasks';
 	import { notify } from '$lib/stores/notifications';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
@@ -107,6 +109,18 @@
 	const fastShown = $derived(fastSupported && !modelLocked);
 
 	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
+	// The owner's watches (#371) open the same list. They are long-lived, so
+	// they get the row but not the Controls badge, which means work running now.
+	const liveWatches = $derived($watches.list.filter((w) => w.status !== 'stopped').length);
+	const pausedWatches = $derived($watches.list.filter((w) => w.status === 'paused').length);
+	const runSummary = $derived(
+		runningTasks.length
+			? [taskSummary(runningTasks), liveWatches ? watchCount(liveWatches) : ''].filter(Boolean).join(' · ')
+			: pausedWatches
+				? `${pausedWatches} paused`
+				: 'Watching for changes'
+	);
+	const runHead = $derived(runningTasks.length ? `${runningTasks.length} running` : watchCount(liveWatches));
 	const chatTitle = $derived($activeSession.title?.trim() || 'New chat');
 	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
 
@@ -469,6 +483,10 @@
 	 * Hook-up point: render <RunningTasksList variant="sheet"> here instead.
 	 */
 	let tasksOpen = $state(false);
+	// Fresh watch counts while the panel is up (the chat's list also tracks).
+	$effect(() => {
+		if (open) return watches.track();
+	});
 
 	function openRunningTasks() {
 		closePanel();
@@ -686,10 +704,10 @@
 					</div>
 				{:else}
 					<div class="mcp-stack">
-						{#if runningTasks.length}
-							<button type="button" class="tile run-row" onclick={openRunningTasks} aria-label={`${runningTasks.length} running tasks. Open the list`}>
+						{#if runningTasks.length || liveWatches}
+							<button type="button" class="tile run-row" onclick={openRunningTasks} aria-label={`${runHead}: ${runSummary}. Open the list`}>
 								<span class="run-ic"><Activity size={18} aria-hidden="true" /></span>
-								<span class="run-copy"><b>{runningTasks.length} running</b><small>{taskSummary(runningTasks)}</small></span>
+								<span class="run-copy"><b>{runHead}</b><small>{runSummary}</small></span>
 								<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />
 							</button>
 						{/if}
