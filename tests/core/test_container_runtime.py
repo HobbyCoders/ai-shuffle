@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Any, Callable
 from unittest.mock import Mock
 
 import pytest
@@ -671,7 +672,9 @@ def _leaked(env):
     return sorted(k for k, v in env.items() if k in _SUPERVISOR_SECRETS or v in _SUPERVISOR_SECRETS.values())
 
 
-def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeypatch, tmp_path):
+def test_postgres_server_gets_only_its_own_environment(
+    settings_factory: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     """R13-1: PostgreSQL (and its forked backends) ran with every secret the
     supervisor holds, readable by same-uid processes in /proc/<pid>/environ."""
     _secret_environment(monkeypatch)
@@ -692,7 +695,9 @@ def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeyp
     assert args[0] == "postgres"
     # WAL settings ride on every start, so existing clusters get them too (#436).
     for setting in ("max_wal_size=4GB", "checkpoint_timeout=15min",
-                    "checkpoint_completion_target=0.9", "wal_compression=lz4"):
+                    "checkpoint_completion_target=0.9", "wal_compression=lz4",
+                    "statement_timeout=30s", "lock_timeout=5s",
+                    "idle_in_transaction_session_timeout=30s"):
         assert args[args.index(setting) - 1] == "-c"
     assert _leaked(env) == []
     assert "UNRELATED_APP_SETTING" not in env

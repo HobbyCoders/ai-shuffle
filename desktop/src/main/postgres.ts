@@ -135,7 +135,11 @@ export function walCompressionFor(platform: NodeJS.Platform): WalCompression {
  * docker/container_runtime.py WAL_SETTINGS.
  */
 export function walSettingArgs(walCompression: WalCompression): string[] {
-	return ['max_wal_size=4GB', 'checkpoint_timeout=15min', 'checkpoint_completion_target=0.9', `wal_compression=${walCompression}`].map((s) => `-c ${s}`);
+	return [
+		'max_wal_size=4GB', 'checkpoint_timeout=15min', 'checkpoint_completion_target=0.9',
+		`wal_compression=${walCompression}`, 'statement_timeout=30s', 'lock_timeout=5s',
+		'idle_in_transaction_session_timeout=30s'
+	].map((s: string): string => `-c ${s}`);
 }
 
 /**

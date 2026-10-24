@@ -88,7 +88,10 @@ RELAUNCH_WINDOW = 15 * 60.0
 # (#436). The PGDG postgresql-16 package is built with lz4. Keep in step with
 # walSettingArgs in desktop/src/main/postgres.ts.
 WAL_SETTINGS = ("max_wal_size=4GB", "checkpoint_timeout=15min",
-    "checkpoint_completion_target=0.9", "wal_compression=lz4")
+    "checkpoint_completion_target=0.9", "wal_compression=lz4",
+    # Per-start defaults also reach existing managed clusters. Maintenance may
+    # explicitly raise statement_timeout; lease transactions set shorter limits.
+    "statement_timeout=30s", "lock_timeout=5s", "idle_in_transaction_session_timeout=30s")
 
 
 def _rollback_name(name, kind):

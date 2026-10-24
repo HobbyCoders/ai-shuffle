@@ -33,7 +33,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from app.db.base import get_db, rows_to_list
+from app.db.base import get_db, get_event_db, rows_to_list
 
 # Same Postgres-illegal code-point scrub the Postgres session store applies at its
 # own JSON boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
@@ -115,7 +115,7 @@ def append_events(
 
     n = len(events)
     # With a caller-owned transaction, the caller also sends the post-commit wake.
-    with (get_db() if _conn is None else nullcontext(_conn)) as conn:
+    with (get_event_db() if _conn is None else nullcontext(_conn)) as conn:
         cursor = conn.cursor()
 
         # 1. Fence check — reject a stale/superseded runner before writing.

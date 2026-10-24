@@ -31,8 +31,8 @@ from psycopg2.extras import Json
 
 from app.core import api_user_scope, artifact_access
 from app.db import session_recall
-from app.db.async_database import run_sync
-from app.db.base import get_db
+from app.db.async_database import run_sync, run_event_write
+from app.db.base import get_db, get_turn_db, get_event_db
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
@@ -398,7 +398,7 @@ def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool
         # the transformed content, rather than persisting stale offsets.
         pinned = _scrub_pg_illegal(scrub_url_credentials(node.message.pinned_text()))
         message = Message.from_dict(message).pin_context(pinned).to_dict()
-    with get_db() as conn:
+    with get_turn_db() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO fluid_session_nodes "
@@ -425,7 +425,7 @@ def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
 
 
 def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> None:
-    with get_db() as conn:
+    with get_turn_db() as conn:
         conn.cursor().execute(
             "UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s",
             (cli_session_id, session_id),
@@ -436,7 +436,7 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
     # One transaction for consecutive reconstructible deltas and their barrier.
     payloads = [(e.seq, _scrub_pg_illegal(scrub_url_credentials(event_to_dict(e))))
                 for e in events]
-    with get_db() as conn:
+    with get_event_db() as conn:
         cur = conn.cursor()
         for seq, payload in payloads:
             cur.execute(
@@ -1598,7 +1598,7 @@ class PgFluidStore:
         self._events.pop(session_id, None)
         self._event_floor.pop(session_id, None)
         self._event_bytes.pop(session_id, None)
-        await run_sync(_append_events_sync, session_id, events)
+        await run_event_write(_append_events_sync, session_id, events)
         self._pending_events.pop(session_id, None)
         self._pending_since.pop(session_id, None)
         self._pending_bytes.pop(session_id, None)
