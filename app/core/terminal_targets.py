@@ -163,8 +163,10 @@ class PeerTerminal(StreamTerminal):
             raise TerminalError("peer_unavailable", "The terminal worker is unavailable or owner access expired.", 503) from exc
         if "error" in result:
             error = result["error"]
+            # Previous recipients omit the flag on retryable folder checks.
+            # Preserve that contract; newer peers explicitly distinguish races.
             raise TerminalError(error["code"], error["message"], error["status"],
-                                retryable=error.get("retryable") is True)
+                                retryable=error.get("retryable", error["code"] == "bad_folder") is True)
         return result
 
     async def pump(self):
