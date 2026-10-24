@@ -73,6 +73,11 @@ async def test_subagent_cannot_spend_main_pass(tmp_path: Path, source: str) -> N
                 "type": "assistant", "parent_tool_use_id": "task-559",
                 "message": {"content": [{"type": "tool_use", "id": "sub-call"}]},
             })
+        # An agent-less hook cannot turn unknown or stream-derived ancestry
+        # into a main-thread identity.
+        await loop._cli_pre_tool_use({
+            "tool_name": f"mcp__fluid_bundled__{name}", "tool_use_id": "sub-call",
+        }, "sub-call")
         denied = await _socket_rpc(loop._socket_path, {
             "op": "call", "name": name, "arguments": args,
             **({"tool_use_id": "sub-call"} if source != "missing-meta" else {}),
@@ -83,6 +88,10 @@ async def test_subagent_cannot_spend_main_pass(tmp_path: Path, source: str) -> N
         assert pass_armed and not ran
         expected = {"hook": "cli-agent-559", "stream": "delegated-parent:task-559"}
         assert identities == [expected.get(source, "delegated:unknown")]
+        loop._track_bridge_agents({
+            "type": "assistant", "parent_tool_use_id": None,
+            "message": {"content": [{"type": "tool_use", "id": "main-call"}]},
+        })
         await loop._cli_pre_tool_use({
             "tool_name": f"mcp__fluid_bundled__{name}", "tool_use_id": "main-call",
         }, "main-call")

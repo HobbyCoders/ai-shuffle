@@ -3638,10 +3638,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._bridge_serves(name):
             tid = data.get("tool_use_id") or tool_use_id
             agent = data.get("agent_id")
-            if isinstance(tid, str) and tid:
-                self._remember_bridge_agent(
-                    tid, agent if isinstance(agent, str) and agent else None,
-                )
+            # Missing hook agent_id is not proof of the main thread. Only a
+            # main assistant frame establishes that; older subagent hooks may
+            # omit the field entirely.
+            if isinstance(tid, str) and tid and isinstance(agent, str) and agent:
+                self._remember_bridge_agent(tid, agent)
             return {}
         specific: dict[str, Any] = {"hookEventName": "PreToolUse"}
         if self.hooks is not None:
