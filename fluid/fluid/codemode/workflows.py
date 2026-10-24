@@ -68,7 +68,10 @@ def _content(body):
     return f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n\n{workflow.strip()}\n"
 
 
-def _evidence(entries, sessions, name, project, *, lost: int = 0):
+def _evidence(
+    entries: list[dict[str, Any]], sessions: list[str], name: str, project: str,
+    *, lost: int = 0,
+) -> list[dict[str, Any]]:
     if not isinstance(sessions, list) or len(sessions) != 2 or any(not isinstance(s, str) or not s for s in sessions) or len(set(sessions)) != 2:
         raise ValueError("Cite exactly two distinct successful sessions")
     for entry in entries:
