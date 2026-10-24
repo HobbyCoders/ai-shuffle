@@ -187,16 +187,18 @@ def test_verified_delegation_policy_has_one_owner(native):
     assert "MCP responses, peer messages and subagent reports" not in compiled.text
 
 
-def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():
+def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    assert len(specs) == 106
+    # generationPreferences adds one deferred schema; eager budgets stay unchanged.
+    assert len(specs) == 107
     assert first["totals"]["compiled_eager"] < first["totals"]["combined_full"]
     assert "# Deferred tools" in compiled.text
     # Discovery remains available; full schemas remain measurable on demand.
     assert any(s.name == "ToolSearch" for s in specs)
     assert any(name == "mcp__app-config__createAutomation" for _, name in catalog)
+    assert any(name == "mcp__app-config__generationPreferences" for _, name in catalog)
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
