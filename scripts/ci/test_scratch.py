@@ -16,15 +16,14 @@ def _stop_session(signum, frame):
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_configure(config: pytest.Config) -> None:
+def pytest_configure(config):
     if hasattr(config, "workerinput") or config.option.basetemp is not None:
         return
     stack = ExitStack()
     config.add_cleanup(stack.close)
     stack.enter_context(cleanup_on_sigterm(handler=_stop_session))
     directory = stack.enter_context(scratch_directory(
-        "ai-shuffle-pytest-", root=os.environ.get("AI_SHUFFLE_TEST_SCRATCH_ROOT"),
-        warn_on_cleanup_race=True))
+        "ai-shuffle-pytest-", root=os.environ.get("AI_SHUFFLE_TEST_SCRATCH_ROOT")))
     # Keep ownership alive through all fixture/worker finalizers.
     config._shuffle_scratch = stack
     config.option.basetemp = directory + "/pytest"
