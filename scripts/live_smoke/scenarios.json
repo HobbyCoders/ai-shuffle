@@ -595,6 +595,30 @@
           "past_bug": "#380: every bounded startup walk restarted from the same prefix, so later root-owned home files were never repaired; review also caught advisory cursor writes before DATA_DIR mount validation."
         },
         {
+          "id": "harness-basics.pool-pressure-turn-finish",
+          "check": "Turn finish survives brief DB pool exhaustion",
+          "kind": "owner",
+          "how": "Disposable candidate only: finish 45 real sessions under >2s pool pressure.",
+          "pass_when": "All finish; leases renew; UI stays live; one pool stats log per burst.",
+          "past_bug": "#580: a 2s acquisition timeout became a failed worker ResultMessage."
+        },
+        {
+          "id": "harness-basics.db-stall-deadlines",
+          "check": "DB stalls are bounded without a worker restart",
+          "kind": "owner",
+          "how": "Disposable candidate only: stall a deferred commit/query under agent load.",
+          "pass_when": "Deadlines free slots; <=4 standalone event writers; no restart/retry.",
+          "past_bug": "#580: stalled commits drained the pool and interrupted active turns."
+        },
+        {
+          "id": "harness-basics.migration-timeout-budget",
+          "check": "Offline database work outlives ordinary SQL deadlines",
+          "kind": "owner",
+          "how": "Disposable: large-history upgrade, maintenance, dump/restore and rollback.",
+          "pass_when": "Work finishes; maintenance is bounded; ordinary SQL limits return.",
+          "past_bug": "#580 review: short server defaults could cancel every boot migration."
+        },
+        {
           "id": "harness-basics.deferred-history-indexing",
           "check": "Deferred history indexing catches up without stalling live chats",
           "kind": "owner",
