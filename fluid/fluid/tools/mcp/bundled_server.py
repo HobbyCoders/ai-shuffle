@@ -454,7 +454,10 @@ async def _gate_call(
     from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
     from fluid.permissions.engine import non_interactive_denial
 
-    identity = {"agent_id": ctx.extra.get("agent_id")}
+    # Keep the existing main-thread hook/observer payload contract. Only a
+    # non-main caller adds the optional field; its ctx overlay is unchanged.
+    agent_id = ctx.extra.get("agent_id")
+    identity = {"agent_id": agent_id} if agent_id is not None else {}
     hook_permission: str | None = None
     hook_reason: str | None = None
     if hooks is not None:
