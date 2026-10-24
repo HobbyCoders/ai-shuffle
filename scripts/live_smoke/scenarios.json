@@ -261,6 +261,15 @@
           "past_bug": "ChatGPT subscription voice offered only Cove although the subscription has 25 voices; an engine switch could keep the previous engine's provider pin."
         },
         {
+          "id": "harness-basics.generation-choice-safety",
+          "check": "Unified generation named-choice safety, quotes and catalog shape",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable account preferences and throwaway chats on two candidate workers; never alter the owner's choices or caps. Remember a fal choice for each tested kind, then make unattended calls through that kind's tool naming SuperGrok or a different fal model. Inspect catalog/submission logs. For matching probes use a declared endpoint priced above the confirmation threshold, never approve a paid retry, and call runFalModel from worker A with the kind's remembered fal choice pinned to worker B, then with its worker omitted. Run default searchModels and searchModels(source=supergrok) with a real subscription account. Compare searchModels for kling/v4/text-to-video with its default choice-card and interactive generateVideo quotes. With the same SuperGrok account on both workers, request choices from each and inspect holders. Compare compact and full_schema searchModels for a large fal schema including generate_audio. Save an unpriced model, then an unavailable-holder choice, through the choices API and inspect the warning and save latency. Archive throwaway chats and discard only disposable preferences.",
+          "pass_when": "Unattended names that differ from a remembered choice skip with named_choice_differs_from_stored before any catalog lookup or submission. Matching runFalModel calls reach the existing price/confirmation/cap decision on the remembered holder, without injecting worker A or switching sources; above-threshold probes skip without billing. Default and SuperGrok-filtered searchModels return subscription options and their allowed values without errors. The single search quote, choice card and generate quote show the same known default price (0.785 USD for the recorded Kling rate; use the current provider rate if changed). Each source/account/model/options tuple appears once, preferring the local holder, and different accounts/options remain separate. Default searchModels JSON is at most 32768 ASCII-escaped characters, truncation is explicit, full_schema returns the complete schema, and generate_audio stays boolean. An unpriced save returns stored_choice_unpriced and a skip warning; unavailable or timed-out quotes retain their error and return stored_choice_unavailable within the two-second quote budget. The pick is saved in both cases. No paid retry is approved. Missing provider/worker evidence is not a pass.",
+          "past_bug": "#512 silently replaced named unattended sources with stored choices; #513 masked prices and misreported unavailable saves; #514 duplicated holders, returned huge schemas and typed booleans as files. Review also caught subscription-schema crashes and runFalModel overriding remembered holders."
+        },
+        {
           "id": "two-worker-smoke.25",
           "check": "New voice session checks its explicit funding key",
           "kind": "owner",
@@ -309,9 +318,18 @@
           "check": "Sidebar Check for updates finds a peer's update like Settings does",
           "kind": "owner",
           "two_worker": true,
-          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking. Install nothing.",
-          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress (Settings may show that refusal on its own repeated click; see #519).",
-          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date."
+          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking, and do the same with Settings > System > Updates > Check for updates. Install nothing.",
+          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress. Settings' repeated click agrees: the peer's row says Checking until its check ends, then shows the update it found, never An update is already in progress.",
+          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date. #519: Settings still counted that refusal as the peer's answer."
+        },
+        {
+          "id": "two-worker-smoke.31",
+          "check": "A download refused mid-check does not hide the update the peer finds",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "With Update all workers on, use a pair where this worker already offers an update and the peer has not read its feed since it was published. Open Settings > System > Updates and click Check for updates, then within a few seconds, while the peer is still checking, click the top Download update button. Watch the button's tooltip rows until the peer's check ends. Install nothing (cancel or leave the staged download).",
+          "pass_when": "The peer refuses the download with An update is already in progress, but once its check ends its row reads Update available (or downloading or staged after another Download click), never Refused: An update is already in progress, and the button offers Download update again rather than holding the restart for the peer.",
+          "past_bug": "#519: a download refused because the peer was checking was recorded as a refusal, so the update that peer then found was labeled Refused and the restart waited for another click."
         }
       ]
     },
@@ -334,6 +352,14 @@
           "how": "On disposable native candidate + #535, park and approve the same offline call.",
           "pass_when": "Main rerun uses its pass once; another agent session needs its own yes.",
           "past_bug": "#559: CLI identity plumbing must not change native approval scope."
+        },
+        {
+          "id": "harness-basics.native-generation-admission",
+          "check": "Native generation aliases cannot bypass unified admission",
+          "kind": "owner",
+          "how": "On a disposable candidate worker with synthetic data and an already configured verified subscription, create throwaway native chat and automation sessions permitting only GenerateNativeImage and GenerateNativeVideo. Do not enter credentials or approve a paid submission. With no remembered/job pick, call each alias and inspect its structured result and provider-request logs. Repeat with an unreadable synthetic job choice, then a valid saved choice and an already-exceeded synthetic daily cap. Check image Included pricing and the exact verified video estimate. Archive only the throwaway sessions. Run the focused no-provider registry tests for the approved confirmation retry; never use this smoke row to authorize a real generation charge.",
+          "pass_when": "Both interactive aliases return choose with the unified price/choice envelope; both unattended aliases skip without a saved choice or with unreadable choices. A valid saved choice still refuses an exhausted cap, including Included images, with zero provider submissions. Above-threshold calls require the unified one-use confirmation receipt before reserve/submission. Exact approved retries and job choices are covered by the no-provider test. Alias choice-card rendering is tracked separately and must not be inferred from JSON alone.",
+          "past_bug": "#545: raw native registrations submitted without resolver admission or generation_budget.reserve."
         },
         {
           "id": "harness-basics.1",
@@ -366,6 +392,14 @@
           "how": "GET /api/v1/tools/surface; inspect available groups, without starting a model or subagent",
           "pass_when": "an available catalog group contains the exact Swarm tool name (bare or MCP-qualified); this checks availability, not Swarm workload execution",
           "steps": [{"op": "tool_catalog", "tools": ["Swarm"]}]
+        },
+        {
+          "id": "harness-basics.generation-real-automation-id-choices",
+          "check": "Real automation IDs accept pinned generation choices",
+          "kind": "owner",
+          "how": "On a disposable worker, POST an automation; save/read/clear its job choice.",
+          "pass_when": "auto-* ID works; a dry run binds the pick; API-user access is denied.",
+          "past_bug": "#558: UUID validation rejected every app-created automation ID."
         },
         {
           "id": "harness-basics.4",
@@ -546,6 +580,14 @@
           "past_bug": "The phone attach sheet could not be swiped closed, and the approval and generation choice cards used their own rails, tints and uppercase badges."
         },
         {
+          "id": "harness-basics.owner-detection-memory",
+          "check": "Detected owner identity reaches fresh native and delegated chats",
+          "kind": "owner",
+          "how": "Disposable worker: detect Ada; Recall in fresh chats; Remember Grace; redetect.",
+          "pass_when": "Grace wins; no duplicates or addresses; Git author stays unchanged.",
+          "past_bug": "#556: account detection did not feed ordinary owner memory."
+        },
+        {
           "id": "harness-basics.approval-self-gated-tools",
           "check": "Tools with their own consent card ask once in an owner chat",
           "kind": "owner",
@@ -610,6 +652,14 @@
           "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
           "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
           "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
+        },
+        {
+          "id": "harness-basics.approval-pending-message-delivery",
+          "check": "A message sent while an approval waits reaches the agent and the card stays open",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat in Bypass, on a Claude CLI model and again on a native-provider model: ask the agent to run a harmless command that needs your approval (for example `git push --dry-run` in a throwaway repository). While its yes/no card waits, type \"Instead, tell me what that command would change\". Then answer the card yes. Repeat, answering no, and once more leaving it until the 15-minute approval time runs out. Finally ask for a command and answer it yes with nothing else sent. Never use a production repository.",
+          "pass_when": "The other message is answered in the same turn without a yes or no; the transcript shows the call as not run yet and the card still waiting. A later yes is followed by the agent running exactly that command once, with no second card; a later no and an expiry are each reported to the agent, which does not run the command. A plain yes with nothing else sent runs the command as before. No message stays unsent while a card waits.",
+          "past_bug": "#523: in owner chats every other message stayed queued and unsent until the pending approval was answered yes or no."
         }
       ]
     }

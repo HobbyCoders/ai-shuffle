@@ -782,6 +782,13 @@ class HarnessAdapter(ProviderAdapter):
                 # defers none.
                 bridge_deferred=delegated_bridge_deferred(),
             )
+            # Only an owner chat's "not run yet" placeholder and a person's no
+            # carry the owner's waiting message on a deny; a deny from Stop,
+            # settle or a timeout carries nothing (#523). Plain attribute, so
+            # an older fluid without the behaviour ignores it.
+            from app.core.assistant_confirm import deny_carries_steers
+
+            self._engine.deny_carries_steers = deny_carries_steers
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
@@ -1328,6 +1335,9 @@ class HarnessAdapter(ProviderAdapter):
         # ``query_options.build_options_from_profile``).
         # It is what lets _build_provider_client authenticate a native leg from
         # the app's encrypted ``model_providers`` row.
+        generation_context = getattr(sdk_options, "aih_generation_context", None)
+        if generation_context is not None:
+            opts.extra["generation_context"] = generation_context
         provider_id = getattr(sdk_options, "aih_provider_id", None)
         if provider_id:
             opts.extra["provider_id"] = provider_id
@@ -2651,7 +2661,8 @@ class HarnessAdapter(ProviderAdapter):
 
         inner_cwd = inner is not None and _policy_accepts_cwd(inner)
 
-        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
+                         agent_id: Optional[str] = None) -> Optional[str]:
             # fluid's to_thread only builds this coroutine; it runs on the
             # loop. ``inner`` may read the database and run Git (the checkout
             # lock), so it runs in a thread.
@@ -2667,7 +2678,7 @@ class HarnessAdapter(ProviderAdapter):
                 return denial
             if self._owner_needed(name, tool_input):
                 # The CLI never prompts in Bypass, so the owner is asked here.
-                return await self._ask_owner(name, tool_input)
+                return await self._ask_owner(name, tool_input, agent_id=agent_id)
             if self.permission_mode == "bypassPermissions":
                 return None
             try:
@@ -3071,6 +3082,9 @@ class HarnessAdapter(ProviderAdapter):
     async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any], *,
                          agent_id: Optional[str] = None) -> Optional[str]:
         """Put a high-risk assistant call to the owner; None when approved.
+
+        ``agent_id`` names the CLI subagent making the call (None on the main
+        thread), so a subagent never spends the main chat's one-shot pass.
 
         The approver routes it to the assistant's conversation, where only
         the owner's firm yes approves it (``app.core.assistant_confirm``).
@@ -4941,9 +4955,9 @@ class HarnessAdapter(ProviderAdapter):
 
             register_builtins(registry)
             if self._provider_kind == "openai_responses":
-                # Step 1 of unified generation is additive: the session's own
-                # ChatGPT/SuperGrok plan keeps these tools, which honour the
-                # account's stored Native generation settings (#377).
+                # Keep existing native grants/discovery, but never register raw
+                # transports: aliases share the unified resolver's admission.
+                from app.core.provider.native_generation_aliases import make_alias
                 from app.core.native_generation_settings import capabilities, provider_kind
                 native_account = (options.extra or {}).get("provider_id")
                 native_caps = {}
@@ -4952,19 +4966,10 @@ class HarnessAdapter(ProviderAdapter):
                         native_caps = capabilities(provider_kind(_lookup_provider_row(native_account) or {}))
                     except ValueError:
                         pass  # Unknown/API-key accounts are not verified native media lanes.
-                if native_caps.get("image", {}).get("available"):
-                    from app.core.provider.native_images import SPEC, make_handler
-                    registry.register_builtin(SPEC, make_handler(
-                        lambda: self._engine, self._resolve_app_session_id,
-                        chat_mode=_session_mode(options) == "chat",
-                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
-                    ))
-                if native_caps.get("video", {}).get("available"):
-                    from app.core.provider.native_video import SPEC as VIDEO_SPEC, make_handler as video_handler
-                    registry.register_builtin(VIDEO_SPEC, video_handler(
-                        lambda: self._engine, self._resolve_app_session_id,
-                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
-                    ))
+                for kind in ("image", "video"):
+                    if native_caps.get(kind, {}).get("available"):
+                        spec, handler = make_alias(kind, options.extra.get("generation_context"))
+                        registry.register_builtin(spec, handler)
             builtins_registered = True
             logger.info(
                 "[HarnessAdapter] registered fluid builtin tools for native leg",
