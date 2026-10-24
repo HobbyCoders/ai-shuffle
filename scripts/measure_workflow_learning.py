@@ -72,5 +72,7 @@ if __name__ == "__main__":
     result = {"workflow_requests": measure()}
     if args.catalog:
         from scripts.measure_prompt_catalog import measure as catalog
-        result["owner_prefix"] = {"native": catalog(native=True), "delegated": catalog(native=False)}
+        result["owner_prefix"] = {
+            "native": catalog(native=True), "delegated": catalog(native=False),
+        }
     print(json.dumps(result, indent=2))

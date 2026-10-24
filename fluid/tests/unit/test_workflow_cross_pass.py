@@ -11,7 +11,10 @@ from .test_workflow_proposals import journal_success, output, propose
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["corrected", "rejected", "tool-receipt", "reaped", "forgotten", "foreign", "oversized", "no-room"])
+@pytest.mark.parametrize("failure", [
+    "corrected", "rejected", "tool-receipt", "reaped",
+    "forgotten", "foreign", "oversized", "no-room",
+])
 async def test_cross_pass_evidence_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
@@ -45,7 +48,9 @@ async def test_cross_pass_evidence_fails_closed(
     elif failure == "forgotten":
         cutoff = first[-1]["ts"]
         snapshot = store._facts.snapshot()
-        monkeypatch.setattr(store._facts, "snapshot", lambda: {**snapshot, "forgotten_before": cutoff})
+        monkeypatch.setattr(
+            store._facts, "snapshot", lambda: {**snapshot, "forgotten_before": cutoff},
+        )
     elif failure == "no-room":
         synth._prompt_limit = len(synth._prompt(current))
     monkeypatch.setattr(store, "journal_entries", lambda: all_entries)
@@ -109,8 +114,12 @@ async def test_pending_rejected_workflows_do_not_add_prompt_cost(tmp_path: Path)
 def test_workflow_prompt_allowances_and_no_duplicate_paragraphs(tmp_path: Path) -> None:
     from pathlib import Path
     import runpy
-    fixture = json.loads((Path(__file__).parents[1] / "fixtures/workflow_prompt_budget.json").read_text())
-    measure = runpy.run_path(str(Path(__file__).parents[3] / "scripts/measure_workflow_learning.py"))
+    fixture = json.loads(
+        (Path(__file__).parents[1] / "fixtures/workflow_prompt_budget.json").read_text(),
+    )
+    measure = runpy.run_path(
+        str(Path(__file__).parents[3] / "scripts/measure_workflow_learning.py"),
+    )
     for surface in ("native", "code", "delegated"):
         for repeated in (False, True):
             name = surface + ("_repeated" if repeated else "_ordinary")

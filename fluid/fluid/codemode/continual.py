@@ -1576,7 +1576,10 @@ class Synthesizer:
             return prompt, _SYNTH_SYSTEM, []
         historical = [e for e in evidence if e not in entries]
         if historical:
-            extra = "\n\n## Retained workflow evidence (review only; not new facts or Python helpers)\n"
+            extra = (
+                "\n\n## Retained workflow evidence "
+                "(review only; not new facts or Python helpers)\n"
+            )
             extra += "\n".join(self._journal_lines(historical)[1:])
             if len(prompt) + len(extra) > self._prompt_limit:
                 return prompt, _SYNTH_SYSTEM, []

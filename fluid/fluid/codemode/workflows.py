@@ -245,7 +245,10 @@ class WorkflowProposals:
             canonical = _content({"name": row["name"], "description": row["description"],
                                   "workflow": workflow,
                                   "evidence_sessions": [e["session"] for e in evidence]})
-            if fields != {"name": row["name"], "description": row["description"]} or canonical != row["content"]:
+            if (
+                fields != {"name": row["name"], "description": row["description"]}
+                or canonical != row["content"]
+            ):
                 raise ValueError("Workflow content no longer matches its validated schema")
             self._deduplicate(cwd, row["name"], row["description"])
             root = Path(cwd).resolve() / ".fluid" / "skills"
