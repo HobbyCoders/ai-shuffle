@@ -5,16 +5,16 @@ retired; watches own all background observation and its permission provenance.
 """
 
 from __future__ import annotations
-from typing import Any
 
 import json
 import logging
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from typing import Any
 
 from app.core import assistant_introduction as introductions
 from app.core.config import settings
-from app.db import assistant as store, database
+from app.db import assistant as store
+from app.db import database
 from app.db.base import get_db, row_to_dict
 
 logger = logging.getLogger(__name__)
@@ -63,12 +63,12 @@ def _publish() -> None:
     try:
         from app.network import engine
         engine.record_after_commit("assistant", store.ACCOUNT_ID)
-    except Exception:  # noqa: BLE001 - the scanner publishes it on its next pass
+    except Exception:  # The scanner publishes it on its next pass.
         logger.warning("Could not publish the owner account row", exc_info=True)
 
 
 def _seed(cursor: Any, local: Any) -> Any:
-    return dict(agent_id=local.get("agent_id"), introduction=local.get("introduction") or {})
+    return {"agent_id": local.get("agent_id"), "introduction": local.get("introduction") or {}}
 
 
 def _project(conn: Any, account: dict[str, Any]) -> None:
@@ -79,8 +79,12 @@ def _project(conn: Any, account: dict[str, Any]) -> None:
         cursor.execute("SELECT id FROM agents WHERE id=%s", (agent_id,))
         if not cursor.fetchone():
             agent_id = None  # The referenced historical identity has not synced yet.
-    values = dict(agent_id=agent_id, enabled=True, paused=False,
-                  introduction=account.get("introduction") or {})
+    values = {
+        "agent_id": agent_id,
+        "enabled": True,
+        "paused": False,
+        "introduction": account.get("introduction") or {},
+    }
     store.project(conn, assistant_id(), values, account.get("sources") or {})
 
 
@@ -204,9 +208,7 @@ def detection_wanted():
     """
     with get_db() as conn:
         account = store.get_account(conn)
-        if not account or not account.get("agent_id"):
-            return False
-        return True
+        return not (not account or not account.get("agent_id"))
 
 
 def apply_detection(

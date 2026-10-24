@@ -846,9 +846,14 @@ def test_heartbeat_failure_uses_no_wakeup_and_logs_on_normal_ping(tmp_path, monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("gate_stack_capture", [False, True], ids=["normal", "assertion-frame"])
 async def test_heartbeat_failure_cannot_block_durable_stall_dump(
-    tmp_path, monkeypatch, diagnostic_logs, caplog,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostic_logs: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
+    gate_stack_capture: bool,
+) -> None:
     from app.core import loop_watchdog
 
     monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.01)
@@ -861,9 +866,25 @@ async def test_heartbeat_failure_cannot_block_durable_stall_dump(
     log.addHandler(handler)
     inject_failure = threading.Event()
     write_failed = threading.Event()
+    handler_read_entered = threading.Event()
+    stacks_captured = threading.Event()
+    warning_logged = asyncio.Event()
+    warnings: list[logging.LogRecord] = []
+    # The dump includes source lines. A literal on the assertion's blocked frame
+    # can masquerade as a second warning in the final file count (#618).
+    warning_message = "Could not persist loop heartbeat"
     replace = loop_watchdog.os.replace
+    emit = handler.emit
 
-    def fail_replace(source, target):
+    def observed_emit(record: logging.LogRecord) -> None:
+        emit(record)
+        if record.levelno == logging.WARNING:
+            warnings.append(record)
+            warning_logged.set()  # The deferred warning runs on the loop thread.
+
+    monkeypatch.setattr(handler, "emit", observed_emit)
+
+    def fail_replace(source: Path, target: Path) -> None:
         if inject_failure.is_set():
             write_failed.set()
             raise OSError("heartbeat disk unavailable")
@@ -873,19 +894,39 @@ async def test_heartbeat_failure_cannot_block_durable_stall_dump(
     wd = LoopStallWatchdog(
         asyncio.get_running_loop(), threshold_s=0.08, ping_interval_s=0.01, log=log,
     )
+    format_stacks = wd.format_thread_stacks
 
-    def stall_while_holding_logging_lock():
+    def gated_stacks() -> str:
+        assert handler_read_entered.wait(2), "loop did not reach the locked-handler assertion"
+        try:
+            return format_stacks()  # Real stacks, including that assertion's source line.
+        finally:
+            stacks_captured.set()
+
+    def locked_handler_text() -> str:
+        if gate_stack_capture:
+            handler_read_entered.set()
+            assert stacks_captured.wait(2), "watchdog did not capture the assertion frame"
+        return handler_path.read_text()
+
+    if gate_stack_capture:
+        monkeypatch.setattr(wd, "format_thread_stacks", gated_stacks)
+
+    def stall_while_holding_logging_lock() -> None:
         handler.acquire()  # Held by the loop, not the watchdog's OS thread.
         try:
             inject_failure.set()
             wd._pong()  # A new successful tick must attempt persistence.
             assert write_failed.wait(2), "heartbeat failure was not exercised"
             deadline = time.monotonic() + 2
-            while "Event loop stalled for" not in freeze_path.read_text() and time.monotonic() < deadline:
+            while (
+                "Event loop stalled for" not in freeze_path.read_text()
+                and time.monotonic() < deadline
+            ):
                 time.sleep(0.01)
             assert "Event loop stalled for" in freeze_path.read_text()
             assert wd.stall_count == 1
-            assert "Could not persist loop heartbeat" not in handler_path.read_text()
+            assert warning_message not in locked_handler_text()
         finally:
             handler.release()
 
@@ -897,12 +938,13 @@ async def test_heartbeat_failure_cannot_block_durable_stall_dump(
             await asyncio.sleep(0.01)
         assert wd._heartbeat_written_tick is not None
         stall_while_holding_logging_lock()
-        await asyncio.sleep(0.1)  # Deferred warning now runs on the healthy loop.
+        await asyncio.wait_for(warning_logged.wait(), timeout=5)
     finally:
         wd.stop()
         log.removeHandler(handler)
         handler.close()
-    assert handler_path.read_text().count("Could not persist loop heartbeat") == 1
+    assert [record.getMessage() for record in warnings] == [warning_message]
+    assert handler_path.read_text().count(warning_message) == 1
 
 
 @pytest.mark.parametrize("record", ["not json", "null", '{"last_tick": "nan"}', '[]'])

@@ -896,6 +896,46 @@
     "reason": "System DBus address used by Chromium",
     "base_settings": true
   },
+  "DB_START_INTERVAL_SECONDS": {
+    "kind": "infra",
+    "reason": "Pace recovery admissions to avoid a burst of new database borrowers",
+    "base_settings": true
+  },
+  "DB_START_LATENCY_SECONDS": {
+    "kind": "infra",
+    "reason": "Database operation latency threshold for new-turn load shedding",
+    "base_settings": true
+  },
+  "DB_START_MAX_WAITERS": {
+    "kind": "infra",
+    "reason": "Bound the in-memory database-pressure admission working set",
+    "base_settings": true
+  },
+  "DB_START_POLL_SECONDS": {
+    "kind": "infra",
+    "reason": "Counter sampling cadence for database-pressure admission",
+    "base_settings": true
+  },
+  "DB_START_RECOVERY_SECONDS": {
+    "kind": "infra",
+    "reason": "Healthy database interval required before resuming new-turn admission",
+    "base_settings": true
+  },
+  "DB_START_SUSTAIN_SECONDS": {
+    "kind": "infra",
+    "reason": "Sustained database pressure interval before holding new turns",
+    "base_settings": true
+  },
+  "DB_START_UTILIZATION": {
+    "kind": "infra",
+    "reason": "Ordinary database-pool utilization threshold for holding new turns",
+    "base_settings": true
+  },
+  "DB_START_WAIT_SECONDS": {
+    "kind": "infra",
+    "reason": "Bound an in-memory admission wait before durable queued-work retry",
+    "base_settings": true
+  },
   "DISPLAY": {
     "kind": "infra",
     "reason": "X11 display address for host computer-use tools",

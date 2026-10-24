@@ -1423,6 +1423,133 @@ def test_idle_db_outage_preserves_watchdogs(monkeypatch, verdict):
     assert turn_manager._waiters == {}
 
 
+def test_queued_worker_delays_first_frame_but_not_hard_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import turn_manager
+    from app.db import turns
+
+    async def never_idle(*args: object, **kwargs: object) -> None:
+        await asyncio.Future()
+
+    monkeypatch.setattr(turn_manager, "wait_session_idle", never_idle)
+    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+    monkeypatch.setattr(turns, "session_waiting_to_start", lambda _: True)
+
+    async def run() -> None:
+        now = asyncio.get_running_loop().time()
+        assert await pa._await_worker_idle(
+            "queued-remote", None, first_frame_deadline=now,
+            wall_cap=pa._WallCap(now, 0.04),
+        ) == pa.WAIT_DEADLINE
+        monkeypatch.setattr(turns, "session_waiting_to_start", lambda _: False)
+        assert await pa._await_worker_idle(
+            "queued-remote", None, first_frame_deadline=now,
+        ) == pa.WAIT_NO_FIRST_FRAME
+        monkeypatch.setattr(turns, "session_waiting_to_start", lambda _: False)
+        assert await pa._await_worker_idle(
+            "live-with-followup", None, first_frame_deadline=now,
+        ) == pa.WAIT_NO_FIRST_FRAME
+
+    asyncio.run(run())
+
+
+def test_older_queued_turn_survives_newer_removed_followup(
+    mock_db: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import turn_manager
+    from app.db import turns
+
+    first = turns.enqueue_turn("queued-behind-aborted", "worker", prompt="work")
+    followup = turns.enqueue_turn("queued-behind-aborted", "user", prompt="follow up")
+    assert turns.remove_queued_turn(followup["id"])
+    assert turns.get_latest_turn("queued-behind-aborted")["id"] == followup["id"]
+    assert turns.get_turn(first["id"])["state"] == "queued"
+
+    async def never_idle(*args: object, **kwargs: object) -> None:
+        await asyncio.Future()
+
+    monkeypatch.setattr(turn_manager, "wait_session_idle", never_idle)
+    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+
+    async def run() -> None:
+        now = asyncio.get_running_loop().time()
+        assert await pa._await_worker_idle(
+            "queued-behind-aborted", None, first_frame_deadline=now,
+            wall_cap=pa._WallCap(now, 0.05),
+        ) == pa.WAIT_DEADLINE
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("blocked_stage", ["probe", "notice"])
+@pytest.mark.parametrize(
+    "verdict", [pa.WAIT_DEADLINE, pa.WAIT_RATE_LIMITED, pa.WAIT_NO_FIRST_FRAME, "idle"],
+)
+def test_queue_observation_cannot_delay_liveness(
+    monkeypatch: pytest.MonkeyPatch, blocked_stage: str, verdict: str,
+) -> None:
+    import threading
+    from types import SimpleNamespace
+    from app.core import turn_manager
+    from app.db import turns
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+        idle = asyncio.Event()
+        tripped = False
+
+        probes = 0
+
+        def probe(*args: object) -> bool:
+            nonlocal probes
+            probes += 1
+            if blocked_stage == "probe":
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(2)
+            return True
+
+        async def notice(queued: bool) -> None:
+            if blocked_stage == "notice":
+                entered.set()
+                await asyncio.Future()
+
+        async def wait_idle(*args: object, **kwargs: object) -> bool:
+            await idle.wait()
+            return True
+
+        monkeypatch.setattr(turn_manager, "wait_session_idle", wait_idle)
+        monkeypatch.setattr(turns, "session_waiting_to_start", probe)
+        monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+        monkeypatch.setattr(pa.rate_limit_breaker, "is_tripped", lambda _: tripped)
+        now = loop.time()
+        task = asyncio.create_task(pa._await_worker_idle(
+            "blocked-observer", "provider", feed=SimpleNamespace(queued=notice),
+            first_frame_deadline=now + 0.04 if verdict == pa.WAIT_NO_FIRST_FRAME else None,
+            wall_cap=pa._WallCap(now, 0.06) if verdict == pa.WAIT_DEADLINE else None,
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            if verdict == "idle":
+                idle.set()
+            elif verdict == pa.WAIT_RATE_LIMITED:
+                tripped = True
+            assert await asyncio.wait_for(task, 0.3) == (
+                None if verdict == "idle" else verdict
+            )
+            assert loop.time() - now < 0.3
+            assert probes == 1  # blocked observation never creates a query backlog
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_idle_db_outage_still_allows_cancellation(monkeypatch):
     from psycopg2.pool import PoolError
     from app.core import turn_manager

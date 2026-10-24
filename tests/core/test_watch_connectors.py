@@ -153,8 +153,8 @@ async def test_channel_scope_and_unmatched_cursor(
         }, "filter": {"contains": "important"},
     })
     _, cursor = await watch_sources.poll(dict(row, cursor={}))
-    await incoming(instance, sdk, cursor, "ordinary message")
     wid = store.create(**row, cursor=cursor)
+    await incoming(instance, sdk, cursor, "ordinary message")
     await manager.WatchManager().run_once()
     assert store.events(wid) == []
     assert store.get(wid)["cursor"] != cursor
@@ -185,9 +185,13 @@ async def test_slack_page_boundary_preserves_high_watermark() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("messaging", ["telegram"], indirect=True)
 async def test_telegram_durable_ingress_retries_before_offset_advance(
-    messaging: tuple[dict[str, Any], Any, Any], monkeypatch: MonkeyPatch
+    owner: dict[str, Any], messaging: tuple[dict[str, Any], Any, Any], monkeypatch: MonkeyPatch
 ) -> None:
     connector, instance, sdk = messaging
+    row = watches.prepare(owner["id"], {"description": "retain ingress", "source": {
+        "kind": "connector", "connector_id": connector["id"], "channel_id": "123",
+    }})
+    store.create(**row, cursor={"seq": 0})
     persist = store.record_connector_event
     attempts = 0
     acknowledged = False

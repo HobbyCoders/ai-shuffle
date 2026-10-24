@@ -7,6 +7,7 @@ import logging
 import secrets
 import time
 import uuid
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
@@ -46,7 +47,12 @@ class ConnectorManager:
         self._connectors: Dict[str, BaseConnector] = {}
         self._registered_at: Dict[str, float] = {}  # connector_id -> time.monotonic()
         self._lock = asyncio.Lock()
+        self._receiver_locks: dict[str, asyncio.Lock] = {}
         self._event_relay = None
+        # Waiters hold a strong reference; idle chats leave no permanent lock entry.
+        self._message_locks: weakref.WeakValueDictionary[
+            tuple[str, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -146,7 +152,15 @@ class ConnectorManager:
 
         logger.info("All connectors shut down")
 
+    def receiver_lock(self, connector_id: str) -> asyncio.Lock:
+        """Serialize receiver startup with a Telegram journal transfer fence."""
+        return self._receiver_locks.setdefault(connector_id, asyncio.Lock())
+
     async def start_connector(self, connector_id: str) -> bool:
+        async with self.receiver_lock(connector_id):
+            return await self._start_connector(connector_id)
+
+    async def _start_connector(self, connector_id: str) -> bool:
         """Instantiate, connect, and register a single connector.
 
         Idempotent for a live client: starting a connector that is already
@@ -194,6 +208,11 @@ class ConnectorManager:
                 return None
 
             connector_type = connector_row["type"]
+            if connector_type == "telegram":
+                from app.db.watch_journal import receiver_allowed
+
+                if not receiver_allowed(connector_id):
+                    return None
             config = connector_row.get("config", {}) or {}
 
             # Decrypt sensitive configuration fields
@@ -314,6 +333,11 @@ class ConnectorManager:
             row = database.get_connector(connector_id)
             if not row:
                 return False
+            if row["type"] == "telegram":
+                from app.db.watch_journal import receiver_allowed
+
+                if not receiver_allowed(connector_id):
+                    return False
             return ownership.decide_connector(row) in (None, "start")
         except Exception:
             logger.exception("Network ownership unavailable; stopping connector %s", connector_id)
@@ -611,12 +635,26 @@ class ConnectorManager:
     # ------------------------------------------------------------------
 
     async def handle_incoming_message(self, message: IncomingMessage) -> None:
+        """Serialize routing, session minting and reply delivery for one chat.
+
+        Polling and permission callbacks do not acquire this lock. Different
+        chats also remain concurrent. asyncio locks admit waiting messages FIFO.
+        """
+        key = (message.connector_id, message.platform_chat_id)
+        lock = self._message_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._message_locks[key] = lock
+        async with lock:
+            await self._handle_incoming_message(message)
+
+    async def _handle_incoming_message(self, message: IncomingMessage) -> None:
         """
         Process a message arriving from a platform connector.
 
         Resolves (or creates) a connector session and its linked AI session,
         enrols the message as a durable ``source=connector`` turn on the v2 turn
-        queue, waits for the session to drain, and sends the assistant's reply
+        queue, waits for that turn to settle, and sends the assistant's reply
         back through the connector.
 
         Going through the queue is what keeps a chatty channel safe: two
@@ -635,10 +673,9 @@ class ConnectorManager:
                 """Connector row + API user + session lookup/creation: contiguous
                 round trips, ONE thread hop.
 
-                Nothing between them awaits, and the "no session row yet →
-                create one" step is a read-decide-write that must not be split
-                across hops (two inbound messages racing on a fresh chat would
-                otherwise both decide to create the session). A result with
+                The chat FIFO covers this read-decide-write and the later AI
+                session mint/link, including intervening awaits. Batching these
+                reads saves hops; it is not itself a concurrency fence. A result with
                 ``refused`` means the connector has no API user (or that user
                 has no agent profile): the turn is refused rather than run on
                 some other profile.
@@ -854,10 +891,9 @@ class ConnectorManager:
             overrides["permission_mode"] = "default"
 
             try:
-                # Enqueue, then block until the session drains. If a turn is
-                # already live this one waits its place in the queue instead of
-                # starting a second loop against the same session.
-                await turn_manager.submit_async(
+                # Retain the durable identity: other intake paths can enqueue
+                # on this session too, so "latest answer" is never our receipt.
+                turn_id = await turn_manager.submit_async(
                     ai_session_id,
                     "connector",
                     prompt=message.text,
@@ -877,14 +913,12 @@ class ConnectorManager:
                         },
                     },
                 )
-                idle = await turn_manager.wait_session_idle(
-                    ai_session_id, timeout=3600
-                )
+                settled = await turn_manager.wait_settled(turn_id, timeout=3600)
             finally:
                 if typing_task:
                     typing_task.cancel()
 
-            if not idle:
+            if settled is None:
                 # The turn is durable and keeps running; only our wait gave up,
                 # so never interrupt here — just tell the channel.
                 logger.error(
@@ -897,8 +931,8 @@ class ConnectorManager:
                 # blocking reads back to back, so they share one hop.
                 def _read_outcome() -> Tuple[Dict[str, Any], str]:
                     return (
-                        turn_outcome.final_turn_outcome(ai_session_id),
-                        turn_outcome.extract_final_assistant_text(ai_session_id),
+                        turn_outcome.final_turn_outcome(ai_session_id, turn_id),
+                        turn_outcome.extract_final_assistant_text(ai_session_id, turn_id),
                     )
 
                 outcome, final_text = await run_sync(_read_outcome)

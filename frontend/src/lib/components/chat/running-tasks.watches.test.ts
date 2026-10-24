@@ -14,6 +14,24 @@ import {
 const base = { what: 'Inbox', last_fired_at: null, cost_usd: 0, can_pause: true, can_stop: true };
 
 describe('buildWatchRows', () => {
+	it('carries where a watch runs, and fences a row mid-move (#565)', () => {
+		const [placed, fenced] = buildWatchRows([
+			{ ...base, id: 'a', status: 'active', placement_device_id: 'dev_server', worker_id: 'ServerWorker' },
+			{ ...base, id: 'b', status: 'paused', reason: 'Transfer pending', placement_device_id: 'dev_desktop', worker_id: 'transfer:dev_server', can_pause: false }
+		]);
+		expect(placed).toMatchObject({ placementDeviceId: 'dev_server', workerId: 'ServerWorker', transferTo: null, canPause: true, canStop: true });
+		// A fenced row does not run; the server ignores Pause, Resume and Stop on it.
+		expect(fenced).toMatchObject({
+			state: 'paused',
+			transferTo: 'dev_server',
+			workerId: null,
+			reason: null,
+			canPause: false,
+			canResume: false,
+			canStop: false
+		});
+	});
+
 	it('keeps active and paused watches in server order and drops stopped ones', () => {
 		const rows = buildWatchRows([
 			{ ...base, id: 'a', status: 'active' },

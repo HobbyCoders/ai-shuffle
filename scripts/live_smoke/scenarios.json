@@ -13,6 +13,14 @@
       "intro": "Disposable candidate workers and throwaway channels only; never publish credentials or private receipts.",
       "rows": [
         {
+          "id": "durable-watches.connector-chat-fifo",
+          "check": "Concurrent connector messages keep one conversation and ordered replies",
+          "kind": "owner",
+          "how": "On a disposable candidate with Telegram, Discord and Slack bots in throwaway allowed chats, send two near-simultaneous first messages asking for distinct replies. While the first turn runs, send a third message, answer a pending connector-action approval and send a message in another chat. Compare inbound message IDs, queued turn IDs, linked AI session IDs and outbound reply targets privately. Repeat on an already-linked chat; archive only disposable sessions.",
+          "pass_when": "Each chat has one linked AI session; every message receives exactly its own turn's reply in arrival order, with no duplicated latest answer. Other chats and approval callbacks dispatch before the blocked turn settles. Missing real provider or channel receipts are not a pass.",
+          "past_bug": "#589: overlapping handlers read the session's latest reply and raced first-message AI-session minting."
+        },
+        {
           "id": "durable-watches.cross-worker-delivery",
           "check": "Creating-chat delivery and shared durable watch notifications",
           "kind": "owner",
@@ -30,12 +38,38 @@
           "past_bug": "#575: Gmail watches called a native SDK method absent from installed connector proxies."
         },
         {
+          "id": "durable-watches.panel-placement-controls",
+          "check": "Watch panel shows placement, owner preference and honest move states",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On two disposable candidates (DesktopWorker, ServerWorker), create one schedule watch on each from an owner chat. Open the running-tasks panel on a 1440px desktop and in the phone sheet at 375px: each row names its executing worker with Always on/Server/May sleep. Open New watches in the Watches heading: Automatic names the server it would pick; choose DesktopWorker, then clear it, and confirm the choice shows on the other worker. Stop the ServerWorker candidate: its row reads offline with Pause, Stop and Move disabled, and choosing it as the preference is offered only as disabled with a reason. Bring it back and Move the DesktopWorker watch to ServerWorker; watch the pending note, then the row naming ServerWorker. Repeat a move while the destination drops the connection after import (block its port briefly): the row must read not confirmed or Move unfinished, never Moved, until Retry move completes it. Try moving a Telegram watch and read the refusal reason. Never restart production workers.",
+          "pass_when": "Rows name the executing worker and tier on desktop and phone. The preference picker lists offline workers disabled with a reason and saves and clears through the synced setting. A move is reported as Moved only after the server answers with the row; unanswered or fenced moves stay as warnings with Retry move, refusals show the server's reason, and an offline worker's synced row never accepts Pause, Stop or Move.",
+          "past_bug": "#565: the watch panel had no placement indicator, preference picker or move control after placement shipped backend-only."
+        },
+        {
           "id": "durable-watches.real-connectors",
           "check": "Real Slack, Discord and Telegram watch cursors",
           "kind": "owner",
           "how": "On a disposable candidate, configure real bots in throwaway allowed channels. In an owner chat request one matching-message watch per connector, confirm the worker and scope, and record watch/event/cursor IDs privately. Send a nonmatching message and then matching messages. Restart only the candidate after checkpoint and repeat a poll. For Slack exercise a multi-page backlog; for Discord use more than 100 messages. Revoke each grant, then pause and stop all watches. For Telegram compare a duplicate received message ID with a second distinct ID. Interrupt candidate journal persistence, verify the receiver holds its update acknowledgement until commit and resumes without loss. While a Telegram turn is still running, answer its destructive-action approval and send a message in another allowed chat; verify polling dispatches both before the original turn goes idle. Record the receiver-downtime limitation rather than claiming chat-history recovery.",
           "pass_when": "Idle/nonmatching polls make no model calls, matching messages report once across restart/pages, saved progress advances over nonmatches, channel restrictions and revocation fail closed, and Pause/Stop prevent new reports. Telegram replay covers only durably received updates; no real connector smoke is claimed without private producing-path receipts.",
           "past_bug": "#554: declared messaging triggers had no replayable watch producer."
+        },
+        {
+          "id": "durable-watches.telegram-journal-retention",
+          "check": "Telegram slow-cursor retention and content cleanup",
+          "kind": "owner",
+          "how": "On a disposable candidate with a fake Telegram receiver, create a fast active watch and a paused slow watch on the same connector. Produce 1000 distinct fake messages while checkpointing only the fast watch, then one more. Inspect journal counts, both cursors and the slow watch reason. Attempt to resume the expired cursor, replay compacted message IDs, stop all watches and delete only the disposable connector. Repeat on an upgraded candidate with a pre-existing journal; run hourly maintenance once. Export an unread tail without importing it, delete only its disposable connector, and inspect the pending transfer snapshot for message text. Never use production credentials or a real Telegram account for the flood.",
+          "pass_when": "The slow paused cursor retains its unread rows up to the cap. Exceeding the cap explicitly expires it without advancing its cursor or silently resuming; rows never exceed 1000 per connector after ingress. Fast cursors continue, compacted replay produces no duplicate reports, unwatched/consumed content is removed and connector deletion leaves no message content. Record actual receipts; automated PostgreSQL tests alone are not a real-worker smoke pass.",
+          "past_bug": "#587: Telegram receive journals retained every message forever."
+        },
+        {
+          "id": "durable-watches.telegram-journal-transfer",
+          "check": "Stopped-receiver Telegram hand-over with rebased unread tail",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use two disposable candidate workers and fake Telegram receivers only. Provision the same fake bot credential and connector ID independently, with matching chat allowlists and agent grants. Make one watch, checkpoint the first fake update and leave two unread. Stop and disable both connections before moving. Ensure there are no other active or paused watches on that connector. Give the destination unrelated old journal sequence numbers. Move the watch, interrupt once after export and once after import acknowledgement, and retry the identical move. Restart the disposable source and attempt a replay on both sides. Also try different credentials, a revoked grant, another watch and a running receiver. After a definite destination rejection, restart and stop the source receiver, then move to another independently provisioned disposable target. Move a remote watch into the chat's local worker through owner confirmation while its connector is disabled; repeat with its grant revoked during confirmation.",
+          "pass_when": "Unsafe preconditions fail closed. The source receive/checkpoint fence precedes destination startup; unread stable event keys and processed-event dedupe survive a sequence rebase. Only the destination starts after atomic import, reports new/unread updates once and resumes exactly after processed progress. Ambiguous transfers never reopen the old receiver; retry preserves cursor and outbox. No Telegram history recovery or real-provider pass is claimed.",
+          "past_bug": "#567: worker-local Telegram sequence cursors could not move safely."
         },
         {
           "id": "durable-watches.two-worker-placement",
@@ -712,6 +746,14 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
+          "id": "harness-basics.db-pressure-start-admission",
+          "check": "Database pressure queues new starts without dropping running turns",
+          "kind": "owner",
+          "how": "On a disposable candidate worker with real providers only, keep native and delegated turns running, then hold ordinary pool borrowers or stall event commits beyond the admission sustain threshold. Launch Task, Swarm and StartSession work locally and to a disposable remote executor. Inspect queued turns and parent task summaries. Cancel one queued start, fill the 128-waiter working set and exceed its wait deadline. Release pressure and observe start timestamps. Do not modify an installed worker or its database.",
+          "pass_when": "Existing turns and reserved lease renewals remain responsive. New starts visibly stay Queued, duplicate kicks do not consume extra slots, cancellation removes waiting work, overflow/deadline retain durable queued turns, and recovery admits FIFO waiters at the configured spacing without a restart or burst. Remote admission uses executor pressure. Provider first-frame timing excludes queued time, but hard job deadlines and unavailable-read watchdogs still apply. Record actual provider, UI, lease and timing evidence; an unrun path is not a pass.",
+          "past_bug": "#583: new starts increased load during sustained database pressure instead of waiting for recovery."
+        },
+        {
           "id": "harness-basics.db-stall-deadlines",
           "check": "DB stalls are bounded without a worker restart",
           "kind": "owner",
@@ -796,6 +838,14 @@
           "how": "On disposable native candidate + #535, park and approve the same offline call.",
           "pass_when": "Main rerun uses its pass once; another agent session needs its own yes.",
           "past_bug": "#559: CLI identity plumbing must not change native approval scope."
+        },
+        {
+          "id": "harness-basics.new-session-add-project-phone",
+          "check": "New-session Add a project row fits a phone-width browser",
+          "kind": "browser",
+          "how": "In the web UI (not the Android app), open a new session with no project at 412x915 and again at 360x882. Read the 'Add a project' button and its 'Optional' hint under the composer, hover or focus the button, then open and close its project list.",
+          "pass_when": "The button label stays on one line inside its own outline and focus ring; only the hint wraps, beside the button. The project list opens below the row.",
+          "past_bug": "#607: on phone-width browsers the button shrank and its label wrapped onto two lines, spilling out of the 34px button."
         },
         {
           "id": "harness-basics.owner-detection-memory",

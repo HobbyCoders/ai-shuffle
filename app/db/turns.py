@@ -1523,6 +1523,24 @@ def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
     return _rows(rows)
 
 
+def session_waiting_to_start(session_id: str) -> bool:
+    """Queued work with no live turn, from ONE statement/snapshot.
+
+    Newer removed/terminal rows cannot hide an older queued start. The atomic
+    no-live check also prevents a queued follow-up from exempting a live provider
+    from its first-frame watchdog during the queued-to-running handoff.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM turns WHERE session_id=%s AND state='queued' "
+            "AND NOT EXISTS (SELECT 1 FROM turns live WHERE live.session_id=%s "
+            "AND live.state IN ('running','interrupting','draining')) LIMIT 1",
+            (session_id, session_id),
+        )
+        return cursor.fetchone() is not None
+
+
 def session_has_unsettled_turns(session_id: str) -> bool:
     """True iff the session has ANY turn row outside the terminal states
     (i.e. ``queued``, ``running``, ``interrupting`` or ``draining``) — the
