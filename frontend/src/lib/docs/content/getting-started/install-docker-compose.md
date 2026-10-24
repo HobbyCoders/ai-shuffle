@@ -428,7 +428,26 @@ Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=r
 
 **Valid values:** `off`, `on` and `required`. Values are trimmed and case-insensitive (`ON` and ` required ` work); empty or unset means `off`. Legacy spellings `1`, `true` and `yes` mean `on`; `0`, `false` and `no` mean `off`. Any other value, including `isolated` or a misspelling, **refuses container startup** with a message listing the valid values. This also applies to non-root container launches and maintenance commands; desktop and native installs ignore this container-only setting.
 
-The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
+The default is still **off**.
+
+- `on` retains the optional rollback-and-continue behavior above.
+- To deliberately opt out, set `off` and recreate the container.
+- Neither mode is a general-purpose sandbox or protection from denial of service.
+- Validate on disposable data before enabling isolation on retained volumes.
+
+The entrypoint validates the mode before home remapping, account changes or provider setup.
+
+In `required` mode, startup refuses before those writes if:
+
+- The container did not start as root.
+- Image isolation helpers are missing.
+- The service UID **or GID** is invalid or collides with the requested PUID/PGID.
+
+Direct supervisor launches repeat these checks before preparing mount roots.
+
+Passing preflight is not proof of isolation: migration or privilege-drop failures also stop startup.
+
+Only the successful split reports `required agent isolation established`.
 
 **Turn it off**
 

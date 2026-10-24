@@ -440,6 +440,14 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.34",
+          "check": "Required Docker isolation refuses before root writes",
+          "kind": "owner",
+          "how": "Run the disposable-image preflight matrix in agent-shell-isolation.md.",
+          "pass_when": "Bad starts leave sentinels unchanged; valid required starts isolated.",
+          "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
+        },
+        {
           "id": "harness-basics.26",
           "check": "Bounded home ownership repair progresses across persistent-volume restarts",
           "kind": "owner",
@@ -506,12 +514,36 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.approval-self-gated-tools",
+          "check": "Tools with their own consent card ask once in an owner chat",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
+          "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
+          "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
+        },
+        {
+          "id": "harness-basics.23",
+          "check": "Native wake provenance across context pruning and rewind/resume",
+          "kind": "owner",
+          "how": "On a disposable candidate install, start a throwaway native-provider chat. Produce ordinary user turns, a background-task wake and a peer-delivered turn, including assistant tool calls/results. Record their first persisted TurnStarted sources and node IDs using a read-only diagnostic that emits only synthetic IDs, sources, replay cursors and decoded-row counts. Compact enough history to prune those nodes from the live context, then rewind to each recorded user/wake/peer node and resume it. Repeat an unchanged context scan and append a fresh user turn after an assistant/tool exchange. Archive only the throwaway chat and remove only diagnostics created for this check; never restart or mutate the installed worker or dump prompts, credentials or provider payloads.",
+          "pass_when": "Returning nodes retain their FIRST TurnStarted source despite later resume events: user turns stay user-authored and wake/peer turns keep their original exemptions and wake-aware counting. Only re-entering pruned context replays provenance from zero. Unchanged context and newly appended turns keep the saved cursor and decode only newer matching events, not the historical prefix or large tool results. Examined-node and provenance bookkeeping are pruned to the active context plus nodes appended since its last scan. Missing live evidence is recorded as not_run, not pass.",
+          "past_bug": "#354 / #264 / PR #504: unbounded wake bookkeeping required pruning, but comparing all active context nodes with only TurnStarted-named nodes restarted full provenance replay on ordinary mixed-role turns."
+        },
+        {
           "id": "harness-basics.20",
           "check": "Monitor viewer disconnect preserves its running shell",
           "kind": "owner",
           "how": "On a real candidate worker, start a throwaway chat and a long-running Monitor shell that prints a marker and waits for an explicit release file in its disposable folder. As the authenticated owner, open the read-only Monitor viewer, wait for the marker and repeatedly disconnect and reconnect it at least 50 times while the worker is busy. Include abrupt WebSocket closes overlapping an owner-auth recheck. Reattach and inspect the same task's status/output after each disconnect. With a second owner login available for cleanup, revoke the viewer's owner session while attached and confirm the connection closes. Inspect worker logs for every connection, then release only the throwaway shell and archive its chat; do not stop or restart the worker.",
           "pass_when": "Every disconnect and reconnect leaves the original shell running with the same task id and readable backlog. Revocation closes the viewer with code 4001 without stopping that shell. Worker logs contain no teardown exception, CancelledError or leaked Monitor connection task for these connections. The explicit release ends the shell normally; a missing log inspection or fewer than 50 disconnects is not a pass.",
           "past_bug": "#402: a disconnect followed by ASGI cancellation during Monitor child-task cleanup propagated a child CancelledError through WebSocket teardown."
+        },
+        {
+          "id": "harness-basics.24",
+          "check": "Learned prose workflow across separately synthesized sessions",
+          "kind": "owner",
+          "how": "Use a disposable local-owner Fluid install and project, never the installed worker's skill store. Complete the same harmless fixture-summary workflow in two separate non-code sessions, confirming each completed result with the exact user receipt workflow accepted: fixture-summary. Let synthesis drain after each session. Inspect fluid workflows list/show in a separate owner terminal. Before approval verify a fresh session cannot discover the skill; attempt approval from a managed agent shell and verify refusal. In the owner terminal approve the exact reviewed digest, then start fresh native and delegated sessions, load Skill(fixture-summary), and summarize a new fixture result. In another disposable project repeat with workflow corrected: fixture-summary or reject the proposal before approval. Remove only these disposable installs/projects.",
+          "pass_when": "The second synthesis creates one pending, project-scoped proposal with two source session IDs, ordered successful steps and evidence hashes, without installing it or adding another synthesis call. Only separate interactive local-owner approval installs SKILL.md. Fresh native and delegated sessions discover/load it and use its Checked: format for the new result. Corrected/rejected, private-path, secret-bearing and duplicate workflows do not promote. API-owned stores remain fail-closed pending an authenticated approval surface; this is not a test of an app approval UI.",
+          "past_bug": "#206: separately consumed journal slices could not ground repeated prose workflow proposals, although same-slice synthesis and manual promotion tests passed."
         },
         {
           "id": "harness-basics.25",
