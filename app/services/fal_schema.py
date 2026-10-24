@@ -321,6 +321,10 @@ def _find_input_schema(openapi: dict) -> Optional[dict]:
 
 def _is_file_field(name: str, prop: dict) -> bool:
     """Heuristic: does this property expect an uploaded file / URL?"""
+    # Media-related names also occur on switches (generate_audio), counts
+    # and arrays. Only strings can be a single file/URL input.
+    if prop.get("type") not in (None, "string"):
+        return False
     fmt = prop.get("format")
     lname = name.lower()
     if any(hint in lname for hint in _FILE_NAME_HINTS):
@@ -339,7 +343,9 @@ def _normalize_field(name: str, prop: dict, required: bool, root: dict) -> Param
     json_type = prop.get("type")
     enum = prop.get("enum")
 
-    if isinstance(enum, list) and enum:
+    if json_type == "boolean":
+        ptype = "boolean"
+    elif isinstance(enum, list) and enum:
         ptype = "enum"
     elif _is_file_field(name, prop):
         ptype = "file"
@@ -347,8 +353,6 @@ def _normalize_field(name: str, prop: dict, required: bool, root: dict) -> Param
         ptype = "integer"
     elif json_type == "number":
         ptype = "number"
-    elif json_type == "boolean":
-        ptype = "boolean"
     elif json_type == "array":
         ptype = "array"
     else:
