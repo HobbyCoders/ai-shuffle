@@ -174,16 +174,12 @@ async def delete_favourite(kind: str, request: Request,
 
 
 async def _job(job_id: str) -> str:
-    from uuid import UUID
-    from app.db import database
-
+    # Automations are owner-only (the routes require admin); preference values
+    # remain scoped to the authenticated caller's identity, never a supplied one.
     try:
-        canonical = str(UUID(job_id))
+        return await run_sync(generation_choices.validate_job_id, job_id)
     except ValueError:
         raise HTTPException(404, "Unknown job.") from None
-    if await run_sync(database.get_automation, canonical) is None:
-        raise HTTPException(404, "Unknown job.")
-    return canonical
 
 
 @router.get("/jobs/{job_id}/choices")

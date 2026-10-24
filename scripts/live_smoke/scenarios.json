@@ -352,6 +352,14 @@
           "steps": [{"op": "tool_catalog", "tools": ["Swarm"]}]
         },
         {
+          "id": "harness-basics.generation-real-automation-id-choices",
+          "check": "Real automation IDs accept pinned generation choices",
+          "kind": "owner",
+          "how": "On a disposable worker, POST an automation; save/read/clear its job choice.",
+          "pass_when": "auto-* ID works; a dry run binds the pick; API-user access is denied.",
+          "past_bug": "#558: UUID validation rejected every app-created automation ID."
+        },
+        {
           "id": "harness-basics.4",
           "check": "Away off cancels compacted instructions",
           "kind": "owner",

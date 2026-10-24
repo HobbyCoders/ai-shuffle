@@ -229,17 +229,29 @@ def set_favourite(identity: tuple[str, str], kind: str, value: Any) -> dict | No
     return choice
 
 
-def _job_key(job_id: str, kind: str) -> str:
-    # Automation IDs are UUIDs in production. Bound length also prevents an
-    # arbitrary namespace/key from being smuggled through the preferences API.
-    from uuid import UUID
+def validate_job_id(job_id: str) -> str:
+    """Resolve an existing automation without allowing preference-key/path injection."""
+    import re
 
-    return f"generation.job.{UUID(job_id)}.{kind}"
+    from app.db import database
+
+    # This is a key-safety bound, not an automation ID format: production uses
+    # auto-xxxxxxxx, while imported/legacy definitions can have other safe IDs.
+    if not isinstance(job_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id) is None:
+        raise ValueError("Unknown job.")
+    if database.get_automation(job_id) is None:
+        raise ValueError("Unknown job.")
+    return job_id
+
+
+def _job_key(job_id: str, kind: str) -> str:
+    return f"generation.job.{job_id}.{kind}"
 
 
 def load_job(identity: tuple[str, str], job_id: str) -> dict:
     from app.db import database
 
+    job_id = validate_job_id(job_id)
     result = {}
     for kind in KINDS:
         raw = database.get_user_preference(*identity, _job_key(job_id, kind))
@@ -261,7 +273,7 @@ def save_job(identity: tuple[str, str], job_id: str, kind: str, value: Any) -> d
 
     if kind not in KINDS:
         raise ValueError("Unknown generation kind.")
-    key = _job_key(job_id, kind)
+    key = _job_key(validate_job_id(job_id), kind)
     if value is None:
         database.delete_user_preference(*identity, key)
         return None
