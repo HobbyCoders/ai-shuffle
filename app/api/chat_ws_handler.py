@@ -478,7 +478,7 @@ class ChatWebSocketHandler:
         user_id: str,
         api_user_id: Optional[str],
         trusted_principal: Optional[dict] = None,
-    ):
+    ) -> None:
         self.websocket = websocket
         self.device_id = device_id
         self.user_id = user_id
@@ -488,6 +488,8 @@ class ChatWebSocketHandler:
         # Mutable connection state (formerly nonlocal variables)
         self.current_session_id: Optional[str] = None
         self.connection_healthy: bool = True
+        self._queue_watch_generation: int = 0
+        self._queue_watch_task: Optional[asyncio.Task[None]] = None
 
         # (interrupt_pending_sessions and stopped_sessions are now module-level
         # sets so the flag is visible across handler instances / devices.)
@@ -814,6 +816,7 @@ class ChatWebSocketHandler:
             logger.error(f"Chat WebSocket error: {e}")
 
         finally:
+            await self._cancel_queue_watch()
             # A writer task must never outlive its connection. ``aclose``
             # cancels AND awaits it, so nothing is left pending on a socket that
             # is going away. Frames still queued at this point are dropped —
@@ -2050,6 +2053,9 @@ class ChatWebSocketHandler:
         if not await self._authorize_mobile_session(session_id):
             return
 
+        if self.current_session_id != session_id:
+            await self._cancel_queue_watch()
+
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
             await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
@@ -2212,6 +2218,9 @@ class ChatWebSocketHandler:
         if not await self._authorize_mobile_session(session_id):
             return
 
+        # Invalidate even a same-session re-watch before any registration awaits.
+        await self._cancel_queue_watch()
+
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
             await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
@@ -2229,12 +2238,28 @@ class ChatWebSocketHandler:
         # they remain in the DB and still fire when the turn
         # ends. Mirror the queue_updated event emitted by the
         # queue_message / remove / clear handlers.
+        self._queue_watch_task = asyncio.create_task(
+            self._hydrate_watch_queue(session_id, self._queue_watch_generation)
+        )
+
+    async def _cancel_queue_watch(self) -> None:
+        """Invalidate old replies and reap this connection's hydration task."""
+        self._queue_watch_generation += 1
+        task = self._queue_watch_task
+        self._queue_watch_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _hydrate_watch_queue(self, session_id: str, generation: int) -> None:
+        """Read queue state without holding up subsequent inbound frames."""
         from app.network import control
 
         # A mirror has no executable turns. Read through the same authenticated
         # owner relay as remote sends, never mistake our empty table for its queue.
-        generation = getattr(self, "_queue_watch_generation", 0) + 1
-        self._queue_watch_generation = generation
         owner = None
         try:
             row = await run_sync(database.get_session, session_id)
@@ -2289,6 +2314,7 @@ class ChatWebSocketHandler:
         old_session_id = self.current_session_id
         if old_session_id and not await self._may_act_on_session(old_session_id):
             return
+        await self._cancel_queue_watch()
         if old_session_id:
             await sync_engine.unregister_device(self.device_id, old_session_id, self.websocket)
             # Broadcast to other devices that this session was closed

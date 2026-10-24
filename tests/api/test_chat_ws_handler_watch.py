@@ -188,10 +188,17 @@ def _queue_frames(ws):
     ]
 
 
+async def _watch_and_hydrate(handler: cwh.ChatWebSocketHandler, data: dict) -> None:
+    """Wait for the independently scheduled snapshot in direct-handler tests."""
+    await handler.handle_watch_session(data)
+    if handler._queue_watch_task is not None:
+        await asyncio.wait_for(handler._queue_watch_task, 1)
+
+
 WATCH = {"type": "watch_session", "session_id": "sess-1"}
 
 
-async def test_same_principal_and_device_session_sockets_both_receive_events():
+async def test_same_principal_and_device_session_sockets_both_receive_events() -> None:
     """Exercise real registration through the chat handler, not only mocks."""
     from app.core.sync_engine import SyncEngine, SyncEvent
 
@@ -199,13 +206,13 @@ async def test_same_principal_and_device_session_sockets_both_receive_events():
     with _HandlerHarness() as h, patch.object(cwh, "sync_engine", engine):
         first, second = h.make_handler(), h.make_handler()
         try:
-            await first.handle_watch_session(dict(WATCH))
-            await second.handle_watch_session(dict(WATCH))
+            await _watch_and_hydrate(first, dict(WATCH))
+            await _watch_and_hydrate(second, dict(WATCH))
             first.websocket.sent.clear()
             second.websocket.sent.clear()
             await engine.broadcast_event(SyncEvent(
                 event_type="session_updated", session_id="sess-1", data={"title": "shared"}))
-            async def delivered(ws, count):
+            async def delivered(ws: _FakeWebSocket, count: int) -> None:
                 async with asyncio.timeout(2):
                     while len(ws.sent) < count:
                         await asyncio.sleep(0.001)
@@ -214,7 +221,7 @@ async def test_same_principal_and_device_session_sockets_both_receive_events():
             assert first.websocket.sent == second.websocket.sent
 
             # Switching the first tab only detaches its own old-session socket.
-            await first.handle_watch_session({"session_id": "sess-2"})
+            await _watch_and_hydrate(first, {"session_id": "sess-2"})
             first.websocket.sent.pop()  # Complete empty hydration for the new recipient.
             assert engine.get_device_count("sess-1") == 1
             await engine.broadcast_event(SyncEvent(
@@ -229,13 +236,13 @@ async def test_same_principal_and_device_session_sockets_both_receive_events():
 # ═══ A1. watch_session — happy path ════════════════════════════════════════════
 
 
-async def test_watch_session_registers_and_binds_current_session():
+async def test_watch_session_registers_and_binds_current_session() -> None:
     """Oracle: watch_session registers the device for sync broadcasts and binds
     current_session_id (proven both directly and via a follow-up
     get_pending_permissions, exactly like the closure oracle)."""
     with _HandlerHarness() as h:
         handler = h.make_handler()
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
         await handler.handle_get_pending_permissions({})
 
     # register_device awaited once with (device, session, THIS socket)
@@ -248,7 +255,7 @@ async def test_watch_session_registers_and_binds_current_session():
     )
 
 
-async def test_watch_session_refused_by_the_account_check():
+async def test_watch_session_refused_by_the_account_check() -> None:
     """Watching streams a chat's live frames and queued messages, so it is
     refused exactly as ``load_session`` is (``bind_session``, #1877): nothing
     is registered or bound and no queue snapshot is sent."""
@@ -260,7 +267,7 @@ async def test_watch_session_refused_by_the_account_check():
         # The real check, not the harness stub.
         handler._authorize_mobile_session = cwh.ChatWebSocketHandler._authorize_mobile_session.__get__(handler)
         h.queue_view.return_value = [{"id": "q1", "content": "secret queued text"}]
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
 
     assert bind.call_args.args[0] == "sess-1"
     h.sync.register_device.assert_not_awaited()
@@ -279,24 +286,24 @@ async def test_watch_session_is_in_dispatch_table():
     assert bound is not None and bound.__func__ is cwh.ChatWebSocketHandler.handle_watch_session
 
 
-async def test_watch_session_missing_session_id_is_noop():
+async def test_watch_session_missing_session_id_is_noop() -> None:
     """Closure guard: no session_id => nothing happens (no register, no frame)."""
     with _HandlerHarness() as h:
         handler = h.make_handler()
-        await handler.handle_watch_session({"type": "watch_session"})
+        await _watch_and_hydrate(handler, {"type": "watch_session"})
 
     h.sync.register_device.assert_not_awaited()
     assert handler.current_session_id is None
     assert h.ws.sent == []
 
 
-async def test_watch_session_restores_nonempty_queue():
+async def test_watch_session_restores_nonempty_queue() -> None:
     """Oracle: nonempty server-side queue is mirrored back as the same
     sync/queue_updated frame the queue_message handlers emit — and it goes
     through the class send_json, so the raw frame carries _seq."""
     with _HandlerHarness() as h:
         h.queue_view.return_value = [{"id": "q1", "content": "later"}]
-        await h.make_handler().handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(h.make_handler(), dict(WATCH))
 
     assert _queue_frames(h.ws) == [{
         "type": "sync",
@@ -308,13 +315,13 @@ async def test_watch_session_restores_nonempty_queue():
     assert h.ws.sent[0]["_seq"] == 1
 
 
-async def test_watch_session_queue_hydrates_from_v2_turns_view():
+async def test_watch_session_queue_hydrates_from_v2_turns_view() -> None:
     """Change-1 regression: watch_session must source the restore queue from the
     durable turns table via ``_v2_queue_view(session_id)`` — the legacy
     ``database.get_queued_messages`` path is deleted and must never be consulted."""
     with _HandlerHarness() as h:
         h.queue_view.return_value = [{"id": "t-1", "content": "later"}]
-        await h.make_handler().handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(h.make_handler(), dict(WATCH))
 
     h.queue_view.assert_called_once_with("sess-1")
     # The dead legacy queue source is never touched.
@@ -328,9 +335,9 @@ async def test_watch_session_queue_hydrates_from_v2_turns_view():
     }]
 
 
-async def test_watch_session_empty_queue_sends_complete_empty_snapshot():
+async def test_watch_session_empty_queue_sends_complete_empty_snapshot() -> None:
     with _HandlerHarness() as h:
-        await h.make_handler().handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(h.make_handler(), dict(WATCH))
 
     assert _queue_frames(h.ws) == [{
         "type": "sync", "event_type": "queue_updated", "session_id": "sess-1",
@@ -340,12 +347,12 @@ async def test_watch_session_empty_queue_sends_complete_empty_snapshot():
 
 
 @pytest.mark.parametrize("failed_view", ["queue_view", "peer_queue_view"])
-async def test_watch_session_queue_load_failure_reports_unavailable(failed_view):
+async def test_watch_session_queue_load_failure_reports_unavailable(failed_view: str) -> None:
     """Registration stands, but unknown queue state is explicitly not empty."""
     with _HandlerHarness() as h:
         getattr(h, failed_view).side_effect = RuntimeError("db down")
         handler = h.make_handler()
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
 
     h.sync.register_device.assert_awaited_once()
     assert handler.current_session_id == "sess-1"
@@ -355,12 +362,12 @@ async def test_watch_session_queue_load_failure_reports_unavailable(failed_view)
     assert _errors(h.ws) == []
 
 
-async def test_watch_session_switch_unregisters_old_session():
+async def test_watch_session_switch_unregisters_old_session() -> None:
     """Switching sessions unregisters the device from the previous one first."""
     with _HandlerHarness() as h:
         handler = h.make_handler()
         handler.current_session_id = "sess-old"
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
 
     h.sync.unregister_device.assert_awaited_once()
     assert h.sync.unregister_device.await_args.args == ("dev-1", "sess-old", h.ws)
@@ -368,13 +375,13 @@ async def test_watch_session_switch_unregisters_old_session():
     assert handler.current_session_id == "sess-1"
 
 
-async def test_watch_session_rewatch_same_session_does_not_unregister():
+async def test_watch_session_rewatch_same_session_does_not_unregister() -> None:
     """Re-watching the already-current session must NOT unregister it (the
     closure only unregisters when current != new)."""
     with _HandlerHarness() as h:
         handler = h.make_handler()
         handler.current_session_id = "sess-1"
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
 
     h.sync.unregister_device.assert_not_awaited()
     h.sync.register_device.assert_awaited_once()
@@ -383,7 +390,7 @@ async def test_watch_session_rewatch_same_session_does_not_unregister():
 # ═══ A2. watch_session — sibling sockets sharing a device ID ════════════════
 
 
-async def test_watch_session_duplicate_live_ws_registers_its_own_socket():
+async def test_watch_session_duplicate_live_ws_registers_its_own_socket() -> None:
     """A sibling tab registers its own socket without evicting the live one."""
     with _HandlerHarness() as h:
         h.sync.is_device_watching_session.return_value = True
@@ -392,7 +399,7 @@ async def test_watch_session_duplicate_live_ws_registers_its_own_socket():
             "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
         }
         handler = h.make_handler()
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
         await handler.handle_get_pending_permissions({})
 
     h.sync.register_device.assert_awaited_once_with("dev-1", "sess-1", h.ws)
@@ -401,7 +408,7 @@ async def test_watch_session_duplicate_live_ws_registers_its_own_socket():
     assert pend and pend[0]["session_id"] == "sess-1"
 
 
-async def test_watch_session_duplicate_live_ws_restores_its_queue():
+async def test_watch_session_duplicate_live_ws_restores_its_queue() -> None:
     """Each sibling tab needs its own queue hydration."""
     with _HandlerHarness() as h:
         h.sync.is_device_watching_session.return_value = True
@@ -410,13 +417,13 @@ async def test_watch_session_duplicate_live_ws_restores_its_queue():
             "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
         }
         h.queue_view.return_value = [{"id": "q1", "content": "later"}]
-        await h.make_handler().handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(h.make_handler(), dict(WATCH))
 
     assert _queue_frames(h.ws)
     h.queue_view.assert_called_once_with("sess-1")
 
 
-async def test_watch_session_dead_old_ws_is_replaced():
+async def test_watch_session_dead_old_ws_is_replaced() -> None:
     """Oracle: same device_id but the old socket is dead (page refresh): the
     new socket takes over — registration proceeds."""
     with _HandlerHarness() as h:
@@ -425,12 +432,12 @@ async def test_watch_session_dead_old_ws_is_replaced():
         h.sync._connections = {
             "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
         }
-        await h.make_handler().handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(h.make_handler(), dict(WATCH))
 
     h.sync.register_device.assert_awaited_once()
 
 
-async def test_watch_session_same_ws_rewatch_proceeds():
+async def test_watch_session_same_ws_rewatch_proceeds() -> None:
     """Closure: when the existing registration IS this very websocket, the
     re-watch proceeds normally (registration refresh, queue restore)."""
     with _HandlerHarness() as h:
@@ -440,7 +447,7 @@ async def test_watch_session_same_ws_rewatch_proceeds():
             "sess-1": {"dev-1": SimpleNamespace(websocket=h.ws)}
         }
         h.queue_view.return_value = [{"id": "q1", "content": "later"}]
-        await handler.handle_watch_session(dict(WATCH))
+        await _watch_and_hydrate(handler, dict(WATCH))
 
     h.sync.register_device.assert_awaited_once()
     assert _queue_frames(h.ws), "same-socket re-watch still restores the queue"

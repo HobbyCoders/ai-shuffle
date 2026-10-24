@@ -23,6 +23,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -248,7 +249,9 @@ def _queue_row(turn, session_id, position):
     }
 
 
-def _queue_frame(session_id, rows, *, watch=False):
+def _queue_frame(
+    session_id: str, rows: list[dict[str, Any]], *, watch: bool = False,
+) -> dict[str, Any]:
     return {
         "type": "sync",
         "event_type": "queue_updated",
@@ -575,13 +578,15 @@ async def test_load_session_switch_unregisters_the_previous_session(ws_env):
     ws_env.sync.unregister_device.assert_any_await("dev-1", first, conn.wire.ws)
 
 
-async def test_watch_session_sends_the_queue_as_the_documented_sync_frame(ws_env):
+async def test_watch_session_sends_the_queue_as_the_documented_sync_frame(
+    ws_env: SimpleNamespace,
+) -> None:
     sid = _make_session("sess-w")
     first = turns_db.enqueue_turn(sid, "user", prompt="one")
     turns_db.enqueue_turn(sid, "failover", prompt="internal, never a chip")
     second = turns_db.enqueue_turn(sid, "queue", prompt="two")
     async with _connect(ws_env) as conn:
-        replies = await conn.roundtrip({"type": "watch_session", "session_id": sid})
+        replies = await conn.expect({"type": "watch_session", "session_id": sid})
         assert replies == [
             _queue_frame(sid, [_queue_row(first, sid, 0), _queue_row(second, sid, 1)], watch=True)
         ]
@@ -593,10 +598,14 @@ async def test_watch_session_sends_the_queue_as_the_documented_sync_frame(ws_env
         assert conn.handler.current_session_id == sid
 
 
-async def test_watch_session_with_an_empty_queue_sends_complete_snapshot(ws_env):
+async def test_watch_session_with_an_empty_queue_sends_complete_snapshot(
+    ws_env: SimpleNamespace,
+) -> None:
     sid = _make_session("sess-w0")
     async with _connect(ws_env) as conn:
-        assert await conn.roundtrip({"type": "watch_session", "session_id": sid}) == [_queue_frame(sid, [], watch=True)]
+        assert await conn.expect({"type": "watch_session", "session_id": sid}) == [
+            _queue_frame(sid, [], watch=True)
+        ]
         assert conn.handler.current_session_id == sid
     ws_env.sync.register_device.assert_awaited_once_with("dev-1", sid, conn.wire.ws)
 
@@ -1636,13 +1645,15 @@ async def test_api_key_cannot_remove_a_chip_from_another_session(ws_env, monkeyp
     assert turns_db.get_turn(chip["id"])["state"] == "queued"
 
 
-async def test_api_key_acts_on_its_own_session(ws_env, monkeypatch):
+async def test_api_key_acts_on_its_own_session(
+    ws_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _api_env(monkeypatch, None)
     sid = _own_session("sess-own")
     row = _pending_permission(sid, "req-own")
     chip = turns_db.enqueue_turn(sid, "queue", prompt="mine")
     async with _connect(ws_env, api_user=API_USER) as conn:
-        assert await conn.roundtrip({"type": "watch_session", "session_id": sid}) == [
+        assert await conn.expect({"type": "watch_session", "session_id": sid}) == [
             _queue_frame(sid, [_queue_row(chip, sid, 0)], watch=True)]
         [pending] = await conn.roundtrip({"type": "get_pending_permissions"})
         assert [p["request_id"] for p in pending["pending"]] == ["req-own"]
