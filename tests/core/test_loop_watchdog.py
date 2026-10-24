@@ -320,37 +320,62 @@ def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_freeze_log(tm
     assert "threading.py" in text, "the bystander thread's stack is dumped too"
 
 @pytest.mark.asyncio
-async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch):
+@pytest.mark.parametrize("write_delay", [0, 0.3], ids=["normal-io", "delayed-io"])
+async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch, write_delay):
     from app.core import loop_watchdog
 
-    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.04)
+    # Rate limiting has its own test. Here every watchdog wakeup may write,
+    # so an unchanged heartbeat proves tick gating, not a short rate-limit gap.
+    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0)
     path = tmp_path / "loop-heartbeat.json"
     loop_thread = threading.get_ident()
     writers = []
     replace = loop_watchdog.os.replace
+    progressed = threading.Condition()
+    wakeups = 0
 
     def record_replace(source, target):
-        writers.append(threading.get_ident())
+        # Regression: persistence can finish after the old fixed 0.1 s window.
+        if write_delay:
+            time.sleep(write_delay)
         replace(source, target)
+        writers.append(threading.get_ident())
 
     monkeypatch.setattr(loop_watchdog.os, "replace", record_replace)
     wd = LoopStallWatchdog(asyncio.get_running_loop(), threshold_s=5, ping_interval_s=0.01)
+    write_heartbeat = wd._write_heartbeat
+
+    def completed_write(*args, **kwargs):
+        nonlocal wakeups
+        write_heartbeat(*args, **kwargs)
+        with progressed:
+            wakeups += 1
+            progressed.notify_all()
+
+    monkeypatch.setattr(wd, "_write_heartbeat", completed_write)
+
+    def wait_for(predicate):
+        with progressed:
+            assert progressed.wait_for(predicate, timeout=5), "watchdog did not progress"
+
     wd.start()
     try:
-        deadline = time.monotonic() + 5
-        while len(writers) < 2 and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
+        await asyncio.to_thread(wait_for, lambda: len(writers) >= 2)
         first_tick = json.loads(path.read_text())["last_tick"]
-        await asyncio.sleep(0.1)
+        await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick > first_tick)
         assert json.loads(path.read_text())["last_tick"] > first_tick
-        # Real loop stall: allow any pre-stall tick to flush, then prove that
-        # neither the record nor its mtime changes while the thread keeps waking.
-        _block_the_loop_for(0.1)
+        # Block the loop, but first drain its last answered tick. fsync/replace
+        # can take arbitrarily longer than 0.1 s without implying another pong.
+        with wd._lock:
+            final_tick = wd._last_tick
+        wait_for(lambda: wd._heartbeat_written_tick == final_tick)
         during = path.read_bytes(), path.stat().st_mtime_ns
-        _block_the_loop_for(0.1)
+        with progressed:
+            after_wakeups = wakeups + 3
+        wait_for(lambda: wakeups >= after_wakeups)
         assert (path.read_bytes(), path.stat().st_mtime_ns) == during
         stalled_tick = json.loads(during[0])["last_tick"]
-        await asyncio.sleep(0.15)
+        await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick > stalled_tick)
         assert json.loads(path.read_text())["last_tick"] > stalled_tick
     finally:
         wd.stop()

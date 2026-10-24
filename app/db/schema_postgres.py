@@ -111,6 +111,8 @@ def create_postgres_schema(cursor) -> None:
     # to this worker's database; nothing in them depends on other tables.
     from app.db.network import create_schema as create_network_schema
     create_network_schema(cursor)
+    from app.db.working_record import create_schema as create_working_record_schema
+    create_working_record_schema(cursor)
 
     # 1. Schema version
     # ------------------------------------------------------------------

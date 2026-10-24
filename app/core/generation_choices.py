@@ -86,8 +86,9 @@ def _local_worker() -> str:
 def legacy_choice(kind: str) -> dict | None:
     """The explicitly saved Settings media default for ``kind`` as a choice.
 
-    Only a saved fal.ai model qualifies. The ChatGPT-plan image setting is not
-    a fal choice; it keeps working as the Settings image provider (#1796).
+    Only a saved fal.ai model qualifies. A ChatGPT-plan setting does not bind
+    an account/model: the owner must deliberately choose its verified route.
+    The subscription-only/no-fal restriction is retained by the tool.
     """
     from app.api.settings_media import get_model_params
     from app.core.provider import subscription_images as sub
@@ -186,7 +187,86 @@ def for_session(session_row: Mapping[str, Any] | None) -> dict:
     from app.core.model_effort import _caller_preference_identity
 
     try:
-        return load(_caller_preference_identity(session_row))
+        identity = _caller_preference_identity(session_row)
+        result = load(identity)
+        if session_row and session_row.get("automation_id"):
+            result["job"] = load_job(identity, session_row["automation_id"])
+        return result
     except Exception:  # noqa: BLE001 - never block a run on preference reads
         logger.warning("Could not read remembered generation choices", exc_info=True)
         return {"remembered": {}, "last": {}, "migrated": False, "unreadable": True}
+
+
+def favourite_key(kind: str) -> str:
+    return "generation.favourite." + kind
+
+
+def favourites(identity: tuple[str, str]) -> dict:
+    """Catalog bookmarks, never an unattended/default generation choice."""
+    from app.db import database
+
+    result = {}
+    for kind in KINDS:
+        row = database.get_user_preference(*identity, favourite_key(kind))
+        choice = clean(row.get("value")) if row else None
+        if choice:
+            result[kind] = choice
+    return result
+
+
+def set_favourite(identity: tuple[str, str], kind: str, value: Any) -> dict | None:
+    from app.db import database
+
+    if kind not in KINDS:
+        raise ValueError("Unknown generation kind.")
+    if value is None:
+        database.delete_user_preference(*identity, favourite_key(kind))
+        return None
+    choice = clean(value)
+    if choice is None:
+        raise ValueError("A favourite needs a model and a source or account.")
+    database.set_user_preference(*identity, favourite_key(kind), choice)
+    return choice
+
+
+def _job_key(job_id: str, kind: str) -> str:
+    # Automation IDs are UUIDs in production. Bound length also prevents an
+    # arbitrary namespace/key from being smuggled through the preferences API.
+    from uuid import UUID
+
+    return f"generation.job.{UUID(job_id)}.{kind}"
+
+
+def load_job(identity: tuple[str, str], job_id: str) -> dict:
+    from app.db import database
+
+    result = {}
+    for kind in KINDS:
+        raw = database.get_user_preference(*identity, _job_key(job_id, kind))
+        if raw is not None:
+            choice = clean(raw.get("value"))
+            if choice is None or not choice.get("account") or not choice.get("worker"):
+                raise ValueError("Unreadable job generation choice.")
+            result[kind] = choice
+    return result
+
+
+def save_job(identity: tuple[str, str], job_id: str, kind: str, value: Any) -> dict | None:
+    """Pin a scheduled job's explicit account/model/holding-worker choice.
+
+    Does not change account preferences, last picks, or catalog favourites.
+    Admission, current schema/price and caps are rechecked on every run.
+    """
+    from app.db import database
+
+    if kind not in KINDS:
+        raise ValueError("Unknown generation kind.")
+    key = _job_key(job_id, kind)
+    if value is None:
+        database.delete_user_preference(*identity, key)
+        return None
+    choice = clean(value)
+    if choice is None or not choice.get("account") or not choice.get("worker"):
+        raise ValueError("A job choice must pin its account, worker and model.")
+    database.set_user_preference(*identity, key, choice)
+    return choice
