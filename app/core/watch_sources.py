@@ -34,11 +34,10 @@ def validate(source: dict[str, Any], filter: dict[str, Any]) -> dict[str, Any]:
         cls = get_connector_class(connector["type"])
         if not cls.TRIGGERS:
             raise ValueError("Unsupported: this connector exposes no events")
-        if connector["type"] != "gmail":
-            raise ValueError(
-                "Unsupported: Slack, Discord and Telegram declare triggers but do not yet emit"
-                " durable watch events"
-            )
+        if connector["type"] not in ("gmail", "slack", "discord", "telegram"):
+            raise ValueError("Unsupported: this connector exposes no replayable watch source")
+        if connector["type"] != "gmail" and not str(source.get("channel_id", "")).strip():
+            raise ValueError("Connector watches require an explicit channel_id")
     elif kind == "github":
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source.get("repo", "")):
             raise ValueError("GitHub repo must be owner/repo")
@@ -452,14 +451,16 @@ async def poll(watch: dict[str, Any]) -> tuple[list[tuple[str, dict[str, Any]]],
     kind = source["kind"]
     if kind == "connector":
         connector = await run_sync(connector_allowed, watch)
-        if connector["type"] != "gmail":
-            return [], cursor  # Durable callbacks; no pretend replay API.
         from app.core.connectors.manager import connector_manager
 
         instance = await connector_manager.get_running_connector(connector["id"])
         if instance is None:
             raise ValueError("Connector is offline")
-        return await run_sync(gmail_poll, instance, cursor)
+        if connector["type"] == "gmail":
+            return await run_sync(gmail_poll, instance, cursor)
+        from app.core.watch_connector_sources import poll as connector_poll
+
+        return await connector_poll(connector["type"], instance, source, cursor)
     if kind == "github":
         return await github_poll(watch)
     if kind == "session":
@@ -484,7 +485,7 @@ def record_connector(connector_id: str, event_type: str, payload: dict[str, Any]
         return
     # Gmail connector startup emits old unread messages, so callbacks only wake
     # the replayable history poll. Never admit those pre-opt-in messages.
-    if connector["type"] == "gmail":
+    if connector["type"] in ("gmail", "slack", "discord"):
         return
     from app.core.connectors.registry import get_connector_class
 
@@ -496,6 +497,9 @@ def record_connector(connector_id: str, event_type: str, payload: dict[str, Any]
         + ":"
         + str(external_id or hashlib.sha256(values.encode(payload).encode()).hexdigest())
     )
+    if connector["type"] == "telegram":
+        store.record_connector_event(connector_id, key, dict(payload, event_type=event_type))
+        return
     event = dict(payload, event_type=event_type)
     # Limit untrusted input without breaking a JSON envelope.
     if len(values.encode(event)) > 16000:

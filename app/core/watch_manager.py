@@ -191,6 +191,8 @@ class WatchManager:
         await run_sync(assistant_service.apply_detection, detected, unknown)
 
     async def run_once(self) -> None:
+        from app.core.watch_placement import publish
+
         async with self._lock:
             rows = await run_sync(store.list_watches, worker_id=assistant_service.assistant_id())
             for watch in rows:
@@ -211,6 +213,8 @@ class WatchManager:
                     current = await run_sync(store.get, watch["id"])
                     if current["status"] == "paused":
                         await self._status_notice(current)
+
+            await run_sync(publish)
 
     async def _status_notice(self, watch: dict[str, Any]) -> None:
         await run_sync(
@@ -360,6 +364,7 @@ class WatchManager:
             )
             live = (
                 creator
+                and assistant_service._owned_here(creator)
                 and creator.get("is_active")
                 and not await run_sync(assistant_service.session_stopped, creator["id"])
             )
