@@ -103,7 +103,7 @@ class LoopStallWatchdog:
 
     def start(self) -> None:
         """Start the watchdog thread. Must be called from the loop's thread."""
-        if self._thread is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
         self._loop_thread_id = threading.get_ident()
         self._stop.clear()
@@ -117,10 +117,37 @@ class LoopStallWatchdog:
         )
 
     def stop(self, join_timeout: float = 2.0) -> None:
+        """Request shutdown; retain a timed-out thread so it can be joined again."""
         self._stop.set()
         thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=join_timeout)
+        if thread is None or thread is threading.current_thread():
+            return
+        thread.join(timeout=join_timeout)
+        if thread.is_alive():
+            # Filesystem calls such as fsync cannot safely be cancelled in Python.
+            # Do not lose ownership or let start() clear the stop event underneath
+            # this thread. A later stop() can finish joining once I/O returns.
+            frame = sys._current_frames().get(thread.ident)
+            locations: list[str] = []
+            # traceback formatting consults linecache and can block on the same
+            # filesystem as the survivor. Read only in-memory frame metadata and
+            # bound the walk so shutdown never waits for source-file lookups.
+            for _ in range(32):
+                if frame is None:
+                    break
+                code = frame.f_code
+                locations.append(
+                    f'  File "{code.co_filename}", line {frame.f_lineno}, in {code.co_name}'
+                )
+                frame = frame.f_back
+            if frame is not None:
+                locations.append("  <older frames omitted>")
+            stack = "\n".join(locations) if locations else "<exited>"
+            self._log.warning(
+                "Event-loop stall watchdog did not stop within %.1fs; thread retained\n%s",
+                join_timeout, stack,
+            )
+            return
         self._thread = None
 
     @property

@@ -683,6 +683,20 @@ class TestSearchSessions:
         assert result == []
 
 
+def _captured_search_ctes(queries: list[str], expected: int) -> list[str]:
+    """Separate schema discovery from search SQL without ignoring unknown queries."""
+    searches = []
+    for sql in queries:
+        if sql.startswith("SELECT column_name FROM information_schema.columns "):
+            assert "table_schema = 'public'" in sql
+            assert "table_name = %s AND column_name = %s" in sql
+            continue
+        assert sql.lstrip().startswith("WITH title_matches AS ("), sql
+        searches.append(sql)
+    assert len(searches) == expected
+    return searches
+
+
 class TestSearchSessionsSql:
     """Always-on structural guard for the Postgres-native search SQL.
 
@@ -731,6 +745,7 @@ class TestSearchSessionsSql:
         captured = []
         cursor = MagicMock()
         cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = None  # Pre-upgrade schema discovery.
         cursor.execute.side_effect = lambda sql, params=None: captured.append(sql)
 
         with patch("app.db.sessions.get_db"), \
@@ -738,8 +753,7 @@ class TestSearchSessionsSql:
             from app.db import sessions as db_sessions
             db_sessions.search_sessions("react hooks")
 
-        assert captured, "search_sessions should have executed its query"
-        return captured[0]
+        return _captured_search_ctes(captured, expected=1)[0]
 
     def test_union_ctes_stay_column_symmetric(self):
         sql = self._captured_search_sql()
@@ -838,7 +852,8 @@ class TestSearchSessionsSql:
                 "react hooks", project_id="p1", api_user_id="u1"
             )
 
-        sql, params = captured[0]
+        sql = _captured_search_ctes([query for query, _ in captured], expected=1)[0]
+        params = next(params for query, params in captured if query == sql)
         assert "AND project_id = %s" in sql
         assert "AND api_user_id = %s" in sql
         # Trailing filter params appended after the CTE params in order.
@@ -854,17 +869,18 @@ class TestSearchSessionsPaginatedSql:
         captured = []
         cursor = MagicMock()
         cursor.fetchall.return_value = []
-        cursor.fetchone.return_value = {"cnt": 0}
         cursor.execute.side_effect = lambda sql, params=None: captured.append(sql)
+        cursor.fetchone.side_effect = lambda: (
+            None if captured[-1].startswith("SELECT column_name ") else {"cnt": 0}
+        )
 
         with patch("app.db.sessions.get_db"), \
              patch("app.db.sessions.get_cursor", return_value=cursor):
             from app.db import sessions as db_sessions
             db_sessions.search_sessions_paginated("react hooks")
 
-        assert captured, "search_sessions_paginated should have executed queries"
-        # Both count + data queries share the base CTE; assert on the data query.
-        return captured
+        # Preserve every structural assertion on BOTH count and data queries.
+        return _captured_search_ctes(captured, expected=2)
 
     def test_paginated_has_store_cte_and_match_count(self):
         for sql in self._captured_paginated_sql():

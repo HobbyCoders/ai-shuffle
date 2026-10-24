@@ -8,6 +8,7 @@
 		Trash2
 	} from 'lucide-svelte';
 	import AutomationRunHistory from './AutomationRunHistory.svelte';
+	import AutomationJobChoices from './AutomationJobChoices.svelte';
 	import type { Profile } from '$lib/api/client';
 
 	/** The assistant's built-in agent is left out of /agents (app/db/assistant.py),
@@ -155,6 +156,12 @@
 			</div>
 		</div>
 	{/if}
+
+	<!-- Pinned media generation choices: written as soon as they are picked or cleared. -->
+	<section class="auto-generation" aria-labelledby="auto-generation-{automation.id}" data-testid="automation-generation">
+		<h4 class="auto-generation-title" id="auto-generation-{automation.id}">Media generation</h4>
+		<AutomationJobChoices jobId={automation.id} mode="live" />
+	</section>
 
 	<!-- Action Steps -->
 	{#if automation.action_steps?.length}
@@ -317,6 +324,21 @@
 	.auto-stat-label {
 		font-size: var(--text-xs, 0.6875rem);
 		color: var(--text-tertiary, var(--muted-foreground));
+	}
+
+	.auto-generation {
+		display: grid;
+		gap: 8px;
+		padding: 14px 16px;
+		border-bottom: 1px solid var(--border-subtle, var(--border));
+		flex-shrink: 0;
+	}
+
+	.auto-generation-title {
+		margin: 0;
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 600;
+		color: var(--text-primary, var(--foreground));
 	}
 
 	/* Detail rows */

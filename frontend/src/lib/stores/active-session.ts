@@ -42,6 +42,7 @@ import { createSessionInit, setSkipRestore, bumpInitGeneration } from './session
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
+import { queueHydration } from './session/queue-hydration';
 import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } from './session/composer-binding';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
@@ -229,6 +230,12 @@ export interface ActiveSessionState {
 	deferredPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	queuedMessages: QueuedMessage[];
+	/**
+	 * #524: the executing worker could not confirm `queuedMessages` (its queue
+	 * read came back `unavailable`, or never came back). The bubbles are kept and
+	 * read as unconfirmed until an available snapshot lands. See queue-hydration.
+	 */
+	queueStale?: boolean;
 	pendingPeerMessages: PendingPeerMessage[];
 	/**
 	 * Currently-running background tasks (sub-agents + shell subprocesses) for
@@ -398,6 +405,7 @@ function defaultState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		queueStale: false,
 		pendingPeerMessages: [],
 		activeTasks: [],
 		draft: '',
@@ -539,7 +547,8 @@ const wsConn: WsConnection = createWsConnection({
 
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
-			wsConn.send({ type: 'watch_session', session_id: sessionId });
+			// The reconnect's queue snapshot is owed like a switch-in's (#524).
+			if (wsConn.send({ type: 'watch_session', session_id: sessionId })) queueHydration.watching(sessionId);
 
 			// Re-sync pending permission / AskUserQuestion modals for the ACTIVE
 			// session on every (re)connect. While the WS was down, the running
@@ -636,10 +645,18 @@ const switcher = createSessionSwitcher({
 
 const persistSession = switcher.persistSession;
 
+queueHydration.attach({
+	update: _update,
+	getState: () => _state,
+	wsSend: (data) => wsConn.send(data),
+	wsIsConnected: () => wsConn.isConnected(),
+});
+
 // ─── WebSocket helpers (delegated to wsConn) ─────────────────────────────────
 
 function disconnect() {
 	feedController.stop();
+	queueHydration.cancel();
 	// Torn down here (the destroy path) so no interval outlives the store. It is
 	// re-armed by onConnected on the next init()/connect.
 	stopFeedReconcile();

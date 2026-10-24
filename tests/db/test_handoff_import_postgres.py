@@ -379,6 +379,9 @@ def test_import_lab(chat, capsys):
         create_session_recall_text(conn.cursor())
         session_recall.install_objects(conn.cursor())
     session_recall.install_triggers()
+    if os.environ.get("HANDOFF_LAB_DEFERRED") == "1":
+        from tests.db.test_history_indexing_postgres import finish_migration
+        finish_migration()
     # Reproduce a receiver that already mirrors the owner's event stream.
     from psycopg2.extras import Json
     with base.get_db() as conn:
@@ -405,10 +408,16 @@ def test_import_lab(chat, capsys):
         cur = conn.cursor()
         cur.execute("SELECT pg_current_wal_insert_lsn() AS lsn")
         lsn = cur.fetchone()["lsn"]
+    from tests.db.history_index_lab import LiveInserts
+    sampler = LiveInserts()
+    sampler.start()
     start = time.monotonic()
-    with patch.object(network, "_insert_rows", insert):
-        handoff.install_history(chat, data, "/tmp/handoff-lab")
-    elapsed = time.monotonic() - start
+    try:
+        with patch.object(network, "_insert_rows", insert):
+            handoff.install_history(chat, data, "/tmp/handoff-lab")
+        elapsed = time.monotonic() - start
+    finally:
+        live_latency = sampler.finish()
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), %s) AS bytes", (lsn,))
@@ -416,10 +425,37 @@ def test_import_lab(chat, capsys):
     with capsys.disabled():
         print("HANDOFF_LAB " + json.dumps({"rows": sum(len(v) for v in data["history"].values()),
             "bytes": payload_bytes, "seconds": elapsed, "wal_bytes": wal,
+            "live_latency_seconds": live_latency,
+            "deferred": os.environ.get("HANDOFF_LAB_DEFERRED") == "1",
             "cold_receiver": os.environ.get("HANDOFF_LAB_COLD") == "1",
             "tables_seconds": measured, "publish_metrics": timing.steps,
             "import_metrics": data.get("_history_metrics"),
             "duplicate_node_index": os.environ.get("HANDOFF_LAB_DROP_DUPLICATE") != "1"}, sort_keys=True))
+    if os.environ.get("HANDOFF_LAB_DEFERRED") == "1":
+        from app.db import history_indexing
+        catchup_sampler = LiveInserts(offset=1_000_000)
+        catchup_sampler.start()
+        catchup_start = time.monotonic()
+        promoted = 0
+        try:
+            while time.monotonic() - catchup_start < 1200:
+                n = history_indexing.promote_batch()
+                promoted += n
+                if not n:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("catch-up exceeded the lab time budget")
+        finally:
+            catchup_latency = catchup_sampler.finish()
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), %s) AS bytes", (lsn,))
+            total_wal = int(cur.fetchone()["bytes"])
+        with capsys.disabled():
+            print("HANDOFF_CATCHUP_LAB " + json.dumps({"seconds": time.monotonic() - catchup_start,
+                  "promoted_rows": promoted, "total_import_and_catchup_wal": total_wal,
+                  "live_latency_seconds": catchup_latency}))
     if os.environ.get("HANDOFF_LAB_DROP_DUPLICATE") == "1":
         with base.get_db() as conn:
             create_session_recall_text(conn.cursor())

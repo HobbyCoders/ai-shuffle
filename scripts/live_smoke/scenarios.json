@@ -330,6 +330,15 @@
           "how": "With Update all workers on, use a pair where this worker already offers an update and the peer has not read its feed since it was published. Open Settings > System > Updates and click Check for updates, then within a few seconds, while the peer is still checking, click the top Download update button. Watch the button's tooltip rows until the peer's check ends. Install nothing (cancel or leave the staged download).",
           "pass_when": "The peer refuses the download with An update is already in progress, but once its check ends its row reads Update available (or downloading or staged after another Download click), never Refused: An update is already in progress, and the button offers Download update again rather than holding the restart for the peer.",
           "past_bug": "#519: a download refused because the peer was checking was recorded as a refusal, so the update that peer then found was labeled Refused and the restart waited for another click."
+        },
+        {
+          "id": "two-worker-smoke.32",
+          "check": "Remote pending message survives switching and is delivered once",
+          "kind": "browser",
+          "two_worker": true,
+          "how": "On desktop and mobile layouts, start a throwaway session executed on the peer worker and keep its agent busy in a foreground tool long enough to queue a unique instruction. Capture its client_message_id and accepted turn id. Switch to a different chat and back before the agent reads it, then reconnect/reload and repeat from a second tab. Inspect watch_session's sync/queue_updated frame from the viewing worker. Let the remote agent finish and acknowledge the unique instruction; correlate the owner turn/steer delivery receipt and model request with that command id. Re-watch after consumption. Repeat with a queued worker move and a message held for the move. Separately disconnect the executing worker while the message is pending, switch back, then restore the connection and re-watch. Archive only the throwaway sessions.",
+          "pass_when": "Before consumption exactly one pending chip returns on every viewer; available snapshots come from the executing owner and carry the same turn id, command_id and client_message_id, including held messages. The viewer creates no executable turn. The instruction reaches the model once, with one owner delivery/consumption and one transcript user entry, then the pending chip disappears and a later authoritative snapshot is empty. An unreachable owner produces queue_status=unavailable without queue arrays, never an authoritative-looking empty queue; restoring the owner and re-watching recovers the pending chip or confirms its delivery. Record receipt/model-boundary evidence as well as screenshots; display restoration alone is not a delivery pass.",
+          "past_bug": "#524: switching cleared the optimistic queue, then the viewing worker hydrated a remote session from its own empty turns table instead of the executing owner's durable queue."
         }
       ]
     },
@@ -337,6 +346,22 @@
       "name": "harness-basics",
       "intro": "Single-worker checks of the turn loop.",
       "rows": [
+        {
+          "id": "harness-basics.cli-subagent-owner-pass",
+          "check": "CLI bundled calls cannot spend the main chat approval",
+          "kind": "owner",
+          "how": "On disposable candidate + #535, park HandOffSession to an offline test worker.",
+          "pass_when": "Approve, then rerun via CLI subagent: asks with identity; main uses pass.",
+          "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
+        },
+        {
+          "id": "harness-basics.native-owner-pass",
+          "check": "Native owner approval retains its caller scope",
+          "kind": "owner",
+          "how": "On disposable native candidate + #535, park and approve the same offline call.",
+          "pass_when": "Main rerun uses its pass once; another agent session needs its own yes.",
+          "past_bug": "#559: CLI identity plumbing must not change native approval scope."
+        },
         {
           "id": "harness-basics.generation-conversation-preferences",
           "check": "Generation preferences can be read and edited in conversation without submission",
@@ -394,6 +419,14 @@
           "past_bug": "#558: UUID validation rejected every app-created automation ID."
         },
         {
+          "id": "generation-379.job-choice-editor",
+          "check": "Automation editor pins, clears and reads back generation job choices",
+          "kind": "browser",
+          "how": "On a disposable candidate worker (fixture accounts, no paid generation), create a paused automation in the Automations editor, pin an image choice under Media generation with Pin to this job, and Save. Reopen the editor and the detail view, then GET /api/v1/generation/jobs/{automation_id}/choices and GET /api/v1/generation/choices. Clear the pin in the detail view and read back again. Re-pin, start one run whose prompt names no source, and inspect only the run's generation context and result, approving no submission. Repeat the views at a phone width. Delete only the throwaway automation and archive its sessions.",
+          "pass_when": "The editor writes only the job-choice API (remembered choices and favourites unchanged) and the automation stays paused. Pin, replace and clear read back identically in the editor, the detail view and the API; the empty state reads \"Use remembered choice; otherwise skip and report\". The run's production context binds the job choice ahead of the remembered one. No provider submission, reservation or charge occurs.",
+          "past_bug": "#543: production read job choices but the automation editor had no UI for them."
+        },
+        {
           "id": "harness-basics.4",
           "check": "Away off cancels compacted instructions",
           "kind": "owner",
@@ -448,6 +481,14 @@
           "how": "In a disposable account/chat with fal configured, remember an image-to-video or edit model with a required image input and valid saved settings (including an object-valued image_size where supported). Invoke generation without naming a source/model, first omitting the image input and then passing a wrong-type image input. Inspect the structured tool results; do not retry with valid media or submit a paid generation. Restore the disposable preferences and archive the chat.",
           "pass_when": "Both calls return refused with reason invalid_request and the original input-validation error, not a choice card or remembered_unavailable. No reservation or provider submission occurs.",
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
+        },
+        {
+          "id": "harness-basics.watchdog-stop",
+          "check": "Watchdog retains ownership when bounded stop times out",
+          "kind": "owner",
+          "how": "On a disposable candidate, gate fsync/source reads; stop/start, release, stop.",
+          "pass_when": "Stop avoids source I/O, logs 32 frames max, retains ownership and rejoins.",
+          "past_bug": "#547: stop cleared a live thread handle while fsync was blocked."
         },
         {
           "id": "harness-basics.12",
@@ -528,6 +569,15 @@
           "how": "Disposable candidate only: stall a deferred commit/query under agent load.",
           "pass_when": "Deadlines free slots; <=4 standalone event writers; no restart/retry.",
           "past_bug": "#580: stalled commits drained the pool and interrupted active turns."
+        },
+        {
+          "id": "harness-basics.deferred-history-indexing",
+          "check": "Deferred history indexing catches up without stalling live chats",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use only disposable candidate workers and synthetic history, never an installed worker or its database. On that disposable receiver run python -m app.maintenance.history_indexing --apply; without this opt-in confirm no history migration starts. Let its concurrent index migration finish, then move a large synthetic chat while another named throwaway chat appends messages and searches a unique live marker. Inspect per-table timings, WAL and single-row latency. Confirm moved text can still be viewed while its history_index_state is pending. Restart only the disposable receiver part-way through catch-up. After catch-up, recall and session-list search must find native, delegated and mirrored markers including punctuation, literal percent/underscore and Unicode. Also move a legacy away-mode chat whose reminder exists only in a user node; check inheritance before catch-up. Repeat the concurrent migration with about one million synthetic events and a live writer. Remove only these disposable resources.",
+          "pass_when": "Moves do not synchronously maintain history GIN indexes; live messages remain searchable and do not inherit a shared GIN pending-list backlog. Both live and caught-up history search plans use their separate partial indexes, history GIN pending lists are separate and bounded to 1 MiB, and live edits move back to state 0, pending work resumes after restart without missing or duplicate hits, and away-mode inheritance reads pending history. Migration uses concurrent builds, short lock acquisition, preserves source row counts and does not rewrite the event heap. Record actual time, WAL, corpus shape and live insert latency; an unrun worker path is not a pass.",
+          "past_bug": "#295: bulk hand-off GIN maintenance stalled imports and live writes; a larger shared pending list moved the delay onto live chats."
         },
         {
           "id": "harness-basics.21",
