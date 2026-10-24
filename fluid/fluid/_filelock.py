@@ -14,18 +14,32 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+# The lock primitive is chosen once, from the module that imported. Reading
+# sys.platform per call would reach for fcntl on Windows whenever something
+# in the process (a test, a POSIX-only code path) reports another platform.
 if sys.platform == "win32":
     import msvcrt
+
+    def _lock_nb(fd: int) -> None:
+        # One byte at offset 0 of a fresh descriptor; Windows allows locking
+        # past the end of an empty file.
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+    def _release(fd: int) -> None:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 else:
     import fcntl
+
+    def _lock_nb(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _release(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _try_lock(fd: int) -> bool:
     try:
-        if sys.platform == "win32":
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_nb(fd)
     except OSError:
         return False
     return True
@@ -33,10 +47,7 @@ def _try_lock(fd: int) -> bool:
 
 def _unlock(fd: int) -> None:
     try:
-        if sys.platform == "win32":
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+        _release(fd)
     except OSError:
         pass
 

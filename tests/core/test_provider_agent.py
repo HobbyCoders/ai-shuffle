@@ -1423,6 +1423,17 @@ def test_idle_db_outage_preserves_watchdogs(monkeypatch, verdict):
     assert turn_manager._waiters == {}
 
 
+# Queued-worker waits. asyncio treats a timeout shorter than its clock step
+# (15.6 ms on Windows) as already due, so a shorter slice ends before the
+# queue observation can answer, and an unanswered observation never exempts
+# the first-frame deadline. The slice and the first-frame budget therefore
+# span several clock steps; the cap is past the budget, so only a queued
+# worker reaches it.
+_QUEUED_SLICE = 0.05
+_QUEUED_FIRST_FRAME = 0.25
+_QUEUED_WALL_CAP = 0.5
+
+
 def test_queued_worker_delays_first_frame_but_not_hard_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1433,14 +1444,15 @@ def test_queued_worker_delays_first_frame_but_not_hard_deadline(
         await asyncio.Future()
 
     monkeypatch.setattr(turn_manager, "wait_session_idle", never_idle)
-    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", _QUEUED_SLICE)
     monkeypatch.setattr(turns, "session_waiting_to_start", lambda _: True)
 
     async def run() -> None:
         now = asyncio.get_running_loop().time()
+        # Unqueued, the first-frame watchdog would fire well before the cap.
         assert await pa._await_worker_idle(
-            "queued-remote", None, first_frame_deadline=now,
-            wall_cap=pa._WallCap(now, 0.04),
+            "queued-remote", None, first_frame_deadline=now + _QUEUED_FIRST_FRAME,
+            wall_cap=pa._WallCap(now, _QUEUED_WALL_CAP),
         ) == pa.WAIT_DEADLINE
         monkeypatch.setattr(turns, "session_waiting_to_start", lambda _: False)
         assert await pa._await_worker_idle(
@@ -1481,13 +1493,13 @@ def test_older_queued_turn_survives_newer_removed_followup(
         await asyncio.Future()
 
     monkeypatch.setattr(turn_manager, "wait_session_idle", never_idle)
-    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", _QUEUED_SLICE)
 
     async def run() -> None:
         now = asyncio.get_running_loop().time()
         assert await pa._await_worker_idle(
-            "queued-behind-aborted", None, first_frame_deadline=now,
-            wall_cap=pa._WallCap(now, 0.05),
+            "queued-behind-aborted", None, first_frame_deadline=now + _QUEUED_FIRST_FRAME,
+            wall_cap=pa._WallCap(now, _QUEUED_WALL_CAP),
         ) == pa.WAIT_DEADLINE
 
     asyncio.run(run())
