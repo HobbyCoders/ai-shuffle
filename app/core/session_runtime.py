@@ -896,6 +896,23 @@ class SessionRuntime:
             await asyncio.to_thread(turns_db.remove_queued_turn, tid)
             return None
 
+        # Wait before DB reads/lease ownership. Re-read placement, archive and
+        # principal AFTER waiting: any of them may have changed while queued.
+        # Remote dispatch itself does not wait on the sending worker's gate.
+        from app.core import start_admission
+
+        admitted = await start_admission.admission.wait(
+            tid, sid, lambda: task_registry.stop_invalidated(sid, self._stop_generation),
+        )
+        if admitted != "ready":
+            if admitted == "deferred":
+                from app.core import turn_scheduler
+                turn_scheduler._kick_at_reset(sid, time.time())
+            return None
+        if task_registry.stop_invalidated(sid, self._stop_generation):
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            return None
+
         # 0. Placement gate. A session explicitly placed on ANOTHER
         #    runner must not be executed here even if this install's kick fired
         #    first — leave the turn queued for that runner's claim loop.

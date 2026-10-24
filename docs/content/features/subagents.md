@@ -22,6 +22,33 @@ Ask in plain words, for example "have a reviewer check this change while you wri
 
 A subagent working on code gets its own copy of the project on its own branch, so it never edits the files you are working on. Its commits come back for you or the main agent to review.
 
+## When a worker is busy
+
+When database pressure persists, new turns (including Task, Swarm and StartSession
+work) stay **Queued** instead of claiming a run lease. The parent's task summary
+also says **Queued**. Already-running turns and lease renewals are independent.
+Starts resume automatically, one at a time, when pressure clears. Stop or removing
+a queued message cancels it; accepted work is not discarded on queue overflow.
+Remote work is admitted on the worker that executes it, not the sending worker.
+
+The defaults hold starts after 2 seconds of pressure: 85% ordinary-pool usage,
+pool/event-write waiters, long-held transactions, or recent mean DB hold/acquisition
+latency of at least 0.5 seconds. Recovery needs 3 seconds below 75% of that usage
+threshold with no waiters or slow operations, then spaces starts by 0.5 seconds.
+The worker polls counters every 0.25 seconds, without querying the database.
+At most 128 starts wait in memory (FIFO, one per session). Overflow or a 300-second
+admission wait leaves the durable turn queued and schedules another attempt after
+5 seconds; retried overflow joins the tail. Existing hard job/synchronous wait
+limits still apply. The provider first-frame watchdog starts counting only after
+a turn leaves the queue; unavailable state reads do not suspend that watchdog.
+
+Administrators can tune `DB_START_UTILIZATION` (0.85),
+`DB_START_LATENCY_SECONDS` (0.5), `DB_START_SUSTAIN_SECONDS` (2),
+`DB_START_RECOVERY_SECONDS` (3), `DB_START_INTERVAL_SECONDS` (0.5),
+`DB_START_POLL_SECONDS` (0.25), `DB_START_MAX_WAITERS` (128), and
+`DB_START_WAIT_SECONDS` (300), then restart the candidate worker. These do not
+increase pool capacity or allow starts to borrow lease-reserved connections.
+
 ## Checkout setup and review commits
 
 Local coding workers receive a receipt with their actual base commit, an existing Python interpreter (the project's `.venv`/`venv`, otherwise the worker interpreter), and ready-to-run `Monitor` inputs for `npm ci` in each checkout-local package folder with a lockfile. SvelteKit packages also run `npx svelte-kit sync`. Dependencies and credentials are never copied or linked. An interpreter's presence is not proof that every test dependency is installed; do not install packages into the parent's environment.

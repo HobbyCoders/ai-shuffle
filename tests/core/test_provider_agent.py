@@ -1423,6 +1423,39 @@ def test_idle_db_outage_preserves_watchdogs(monkeypatch, verdict):
     assert turn_manager._waiters == {}
 
 
+def test_queued_worker_delays_first_frame_but_not_hard_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import turn_manager
+    from app.db import turns
+
+    async def never_idle(*args: object, **kwargs: object) -> None:
+        await asyncio.Future()
+
+    monkeypatch.setattr(turn_manager, "wait_session_idle", never_idle)
+    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+    monkeypatch.setattr(turns, "get_latest_turn", lambda _: {"state": "queued"})
+    monkeypatch.setattr(turns, "get_live_turn", lambda _: None)
+
+    async def run() -> None:
+        now = asyncio.get_running_loop().time()
+        assert await pa._await_worker_idle(
+            "queued-remote", None, first_frame_deadline=now,
+            wall_cap=pa._WallCap(now, 0.04),
+        ) == pa.WAIT_DEADLINE
+        monkeypatch.setattr(turns, "get_latest_turn", lambda _: {"state": "running"})
+        assert await pa._await_worker_idle(
+            "queued-remote", None, first_frame_deadline=now,
+        ) == pa.WAIT_NO_FIRST_FRAME
+        monkeypatch.setattr(turns, "get_latest_turn", lambda _: {"state": "queued"})
+        monkeypatch.setattr(turns, "get_live_turn", lambda _: {"state": "running"})
+        assert await pa._await_worker_idle(
+            "live-with-followup", None, first_frame_deadline=now,
+        ) == pa.WAIT_NO_FIRST_FRAME
+
+    asyncio.run(run())
+
+
 def test_idle_db_outage_still_allows_cancellation(monkeypatch):
     from psycopg2.pool import PoolError
     from app.core import turn_manager

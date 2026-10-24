@@ -234,6 +234,11 @@ async def test_event_backpressure_keeps_pool_capacity_free(
     try:
         assert await asyncio.to_thread(saturated.wait, 2)
         assert len(pool._used) == 4
+        pressure = base.event_pressure_stats()
+        assert pressure["active"] == 4
+        assert pressure["oldest_write_seconds"] > 0
+        from app.core.start_admission import snapshot
+        assert snapshot()["oldest"] >= pressure["oldest_write_seconds"]
         # Backpressured event producers hold no DB slot: an ordinary read can
         # still borrow one without using either lease-only reserved connection.
         # Even with 45 pending event writers, default-executor work dispatches.
@@ -244,6 +249,8 @@ async def test_event_backpressure_keeps_pool_capacity_free(
         await asyncio.gather(*tasks)
     assert peak == 4
     assert not pool._used
+    assert base.event_pressure_stats()["active"] == 0
+    assert base.event_pressure_stats()["waiting"] == 0
 
 
 def test_event_admission_timeout_never_borrows_a_connection(

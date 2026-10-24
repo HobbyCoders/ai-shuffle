@@ -1162,11 +1162,36 @@ async def _await_worker_idle(
     from app.core import turn_manager
 
     loop = asyncio.get_event_loop()
+    first_frame_budget = (
+        max(0.0, first_frame_deadline - loop.time())
+        if first_frame_deadline is not None else None
+    )
     waiter = asyncio.ensure_future(
         turn_manager.wait_session_idle(worker_session_id, timeout=float("inf"))
     )
     try:
         while True:
+            now = loop.time()
+            queued = False
+            if first_frame_budget is not None or feed is not None:
+                # The executor's durable state works across remote dispatch too.
+                # A failed read never exempts a stuck provider from its watchdog.
+                try:
+                    from app.db import turns
+                    def waiting_to_start() -> bool:
+                        # A queued FOLLOW-UP must not hide a stuck live provider.
+                        if turns.get_live_turn(worker_session_id) is not None:
+                            return False
+                        latest = turns.get_latest_turn(worker_session_id)
+                        return bool(latest and latest.get("state") == "queued")
+                    queued = await asyncio.to_thread(waiting_to_start)
+                except Exception:  # noqa: BLE001 — retain the existing deadlines
+                    pass
+                announce = getattr(feed, "queued", None)
+                if callable(announce):
+                    await announce(queued)
+            if queued and first_frame_budget is not None:
+                first_frame_deadline = loop.time() + first_frame_budget
             now = loop.time()
             if wall_cap is not None:
                 await wall_cap.refresh(now)
@@ -1193,6 +1218,7 @@ async def _await_worker_idle(
             now = loop.time()
             if (
                 first_frame_deadline is not None
+                and not queued
                 and now >= first_frame_deadline
                 and not await _worker_showed_progress(feed)
             ):

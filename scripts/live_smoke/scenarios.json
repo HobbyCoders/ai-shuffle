@@ -678,6 +678,14 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
+          "id": "harness-basics.db-pressure-start-admission",
+          "check": "Database pressure queues new starts without dropping running turns",
+          "kind": "owner",
+          "how": "On a disposable candidate worker with real providers only, keep native and delegated turns running, then hold ordinary pool borrowers or stall event commits beyond the admission sustain threshold. Launch Task, Swarm and StartSession work locally and to a disposable remote executor. Inspect queued turns and parent task summaries. Cancel one queued start, fill the 128-waiter working set and exceed its wait deadline. Release pressure and observe start timestamps. Do not modify an installed worker or its database.",
+          "pass_when": "Existing turns and reserved lease renewals remain responsive. New starts visibly stay Queued, duplicate kicks do not consume extra slots, cancellation removes waiting work, overflow/deadline retain durable queued turns, and recovery admits FIFO waiters at the configured spacing without a restart or burst. Remote admission uses executor pressure. Provider first-frame timing excludes queued time, but hard job deadlines and unavailable-read watchdogs still apply. Record actual provider, UI, lease and timing evidence; an unrun path is not a pass.",
+          "past_bug": "#583: new starts increased load during sustained database pressure instead of waiting for recovery."
+        },
+        {
           "id": "harness-basics.db-stall-deadlines",
           "check": "DB stalls are bounded without a worker restart",
           "kind": "owner",
