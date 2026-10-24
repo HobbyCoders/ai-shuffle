@@ -120,6 +120,47 @@ redirect, automatic retry or other-provider fallback is used for these API calls
 A table record is not evidence of access on every account: provider rejection
 still fails without a second submission. No paid probe is part of this change.
 
+## Conversational preferences
+
+Owner sessions with the app-config tools enabled can call
+`app-config.generationPreferences` with `action: "get"`, `"remember"` or `"forget"`.
+`get` returns remembered picks (optionally filtered by `kind`) without migrating
+legacy settings. Writes require a kind and `confirm: true` after the user's
+acknowledgment; `remember` also requires a `choice` using discovered source/account,
+model, worker and declared options. No caller-supplied preference identity is used.
+Only interactive owner turns can write: unattended runs (including automation,
+background, delegated, hidden and voice sessions) cannot save their own choices,
+even with `confirm: true`. Discovery callers default to read-only.
+
+An optional `job_id` targets an existing automation instead of the remembered pick.
+A job choice must pin account, worker and model. Read/remember/forget use the same
+store as the HTTP APIs and the production run context; favourites remain separate.
+Writes take effect in subsequent turns, not the current turn's already-bound context.
+Saving is not a quote, availability verification, generation or spend approval.
+Every execution still validates the stored choice, current price, confirmation and
+cap. API-user sessions do not get owner app-config tools; their existing scoped
+choices API is unchanged.
+
+## Pending API-image verification (disabled)
+
+`VERIFIED_API_IMAGES` stays empty. These are **probe candidates**, not verified
+capabilities or enabled table records. After owner approval, run each exactly once;
+record a named smoke-run ID, revision, sanitized account alias, actual model/options,
+decoded artifact/container/dimensions, usage/billing and reviewed conservative output
+and input USD rates. Only then propose a code-reviewed `Verification` record. An
+error or uncertain outcome must not trigger a retry or a different provider.
+
+| Named probe | Endpoint and exact candidate options | Planning allowance | Enablement |
+| --- | --- | --- | --- |
+| `generation-379.openai-image` | OpenAI `/v1/images/generations`; `gpt-image-2.5-sunburst-2026-09-08`, `size=1024x1024`, `quality=low`, `output_format=png`, `n=1` | About $0.10, including input; recheck current pricing and entitlement first | Pending owner OK and live evidence |
+| `generation-379.xai-image` | xAI `/v1/images/generations`; `grok-imagine-image`, `resolution=1k`, `aspect_ratio=1:1`, `response_format=b64_json`, `n=1` | About $0.02; recheck current pricing first | Pending owner OK and live evidence |
+
+The $0.12 combined planning allowance is not a guaranteed charge or permission to
+spend. Candidate IDs/rates come from the #507 probe plan and must be rechecked before
+submission. Public documentation is not account-specific capability evidence. Other
+models, sizes, formats, quality levels or API video routes need separate verification;
+no result may be extrapolated to an untested combination.
+
 ## Selection contract
 
 With no source/model or remembered/job choice, the tool returns `choose`.

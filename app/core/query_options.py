@@ -1702,6 +1702,7 @@ def build_options_from_profile(
                 is_admin=True,
                 project_id=project.get("id") if project else None,
                 project_dir=working_dir,
+                generation_preferences_writable=not generation_context.unattended,
             )
             if app_config_srv:
                 mcp_servers_dict["app-config"] = app_config_srv
