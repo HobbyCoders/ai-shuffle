@@ -14,6 +14,7 @@ vi.mock('$lib/stores/active-session', async () => {
 });
 
 import { generationChoices } from '$lib/stores/generation-choices.svelte';
+import { refreshWorkerPresence } from '$lib/stores/worker-presence';
 import GenerationChoiceCard from './GenerationChoiceCard.svelte';
 
 const PRICE = { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' };
@@ -117,6 +118,22 @@ describe('GenerationChoiceCard', () => {
 		expect((radios[2] as HTMLButtonElement).disabled).toBe(true);
 		expect(within(radios[2]).getByText(/No verified media schema/)).toBeTruthy();
 		expect(screen.getByRole('heading', { name: 'How should I make this image?' })).toBeTruthy();
+	});
+
+	it('names the worker holding an option that is not on this worker', async () => {
+		mocks.get.mockImplementation(async (url: string) =>
+			url === '/cluster/installs'
+				? { installs: [{ id: 'worker-b', device_id: 'worker-b', device_name: 'GamingPC', online: true }], self_instance_id: 'worker-a' }
+				: { remembered: {}, last: {}, migrated: true, worker: 'worker-a' }
+		);
+		await refreshWorkerPresence();
+		await generationChoices.load(true);
+		const sameOnPeer: GenerationOption = { ...FAL, worker: 'worker-b', label: undefined };
+		card({ options: [FAL, sameOnPeer, GROK] });
+		const radios = screen.getAllByRole('radio');
+		expect(radios[0].querySelector('.gcc-where')).toBeNull();
+		await waitFor(() => expect(radios[1].querySelector('.gcc-where')?.textContent).toBe('on GamingPC'));
+		expect(radios[2].querySelector('.gcc-where')?.textContent).toBe('on GamingPC');
 	});
 
 	it('moves the selection with the arrow keys, skipping unavailable options', async () => {
