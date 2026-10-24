@@ -74,6 +74,7 @@ async def test_owner_callback_rejects_plaintext_before_credential_lookup(monkeyp
 async def test_source_lease_has_independent_deadline(monkeypatch):
     from app.api import terminals as api
 
+    monkeypatch.setattr(type(settings), "network_peer_terminals", property(lambda _: True))
     monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda device:
         SimpleNamespace(kind="worker", status="active")))
     monkeypatch.setattr(api, "require_terminal_owner", lambda request: "owner")
