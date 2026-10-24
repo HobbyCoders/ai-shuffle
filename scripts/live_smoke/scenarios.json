@@ -275,6 +275,15 @@
           "how": "On a disposable worker, save the original Voice/provider settings. Pin an enabled OpenAI API-key provider for GPT Live 1, then disable that provider without deleting it. PUT /api/v1/settings/voice with only voice_voice set to Cedar (omit voice_model and voice_provider_id), reload Settings and read GET /api/v1/settings/voice. Repeat with only voice_max_call_minutes and then only voice_options changed. Re-enable the provider and start a throwaway call, checking GET /api/v1/voice/sessions/{id}/config. Repeat the unrelated saves with a disposable connected ChatGPT login pinned for the ChatGPT voice engine while that login genuinely needs reauthentication; restore it through the normal reconnect flow and check the next call. Do not invalidate a production login or request credentials in chat. Hang up, archive throwaway chats and restore the original settings.",
           "pass_when": "Every partial save succeeds and GET /api/v1/settings/voice retains the same voice_provider_id while the provider is disabled or needs reauthentication. Restoring eligibility does not require repinning: the next call config names the original provider. A voice-only save must preserve the pin, not merely call-length/options-only saves.",
           "past_bug": "#491: saving a voice choice while the pinned provider was disabled or needed reauthentication silently deleted the compatible provider preference."
+        },
+        {
+          "id": "two-worker-smoke.27",
+          "check": "Long hand-off reports committed import row counts",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Move a throwaway long chat (thousands of transcript events, including large tool results) to the other worker with HandOffSession. While it sends, inspect GET /api/v1/sessions/{id}/handoff on the source. Capture pending.progress across multiple polls in an install_history table step; archive the throwaway chat afterwards.",
+          "pass_when": "The progress has rows_completed and rows_total for the current import table; counts advance in committed chunks without exceeding the total. A new step clears the previous table's counts. Ownership and the complete transcript appear only after successful publication; a failed import does not replace the old mirror. Row counts are API evidence, not a claim that the current frontend renders them.",
+          "past_bug": "#295: importing a long chat spent minutes in install_history with no row-count progress, making the move look stuck."
         }
       ]
     },
