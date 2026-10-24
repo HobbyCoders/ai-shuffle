@@ -117,7 +117,7 @@ export function moveOptions(choices: readonly WorkerChoice[], currentId: string 
 
 /** What the preference row says, and whether new watches can be placed now. */
 export interface PreferenceSummary {
-	/** "Automatic · Unraid", "GamingPC", "GamingPC (offline)". */
+	/** "Automatic · ServerWorker", "LaptopWorker", "LaptopWorker (offline)". */
 	label: string;
 	/** The worker new watches go to now, or null when placement will refuse. */
 	effective: WorkerChoice | null;
@@ -163,7 +163,7 @@ export interface PickerOption {
 	/** Worker id; `null` is "automatic". */
 	id: string | null;
 	name: string;
-	/** A line under the name ("Picks Unraid now"). */
+	/** A line under the name ("Picks ServerWorker now"). */
 	detail?: string | null;
 	tier?: WorkerTier | null;
 	online?: boolean | null;

@@ -74,11 +74,11 @@ import type { Install } from '$lib/api/installs';
 function worker(id: string, name: string, over: Partial<Install> = {}): Install {
 	return { id, device_id: id, legacy_instance_id: name, device_name: name, base_url: null, platform: 'linux', version: null, capabilities: {}, last_seen: null, online: true, approved: true, ...over };
 }
-/** This desktop, an always-on-by-platform Linux server, and a gaming PC that is off. */
+/** This desktop, an always-on-by-platform Linux server, and a laptop that is off. */
 const NETWORK = [
 	worker('dev_desktop', 'DesktopWorker', { platform: 'windows', is_self: true }),
 	worker('dev_server', 'ServerWorker'),
-	worker('dev_gaming', 'GamingPC', { platform: 'windows', online: false })
+	worker('dev_laptop', 'LaptopWorker', { platform: 'windows', online: false })
 ];
 
 function watch(id: string, over: Partial<WatchRow> = {}): WatchRow {
@@ -366,13 +366,13 @@ describe('RunningTasksList watches', () => {
 
 		it('a watch on an offline worker is its synced copy: controls wait and say why', async () => {
 			mocks.installs = NETWORK;
-			serve([watch('w1', { placement_device_id: 'dev_gaming', worker_id: 'GamingPC' })]);
+			serve([watch('w1', { placement_device_id: 'dev_laptop', worker_id: 'LaptopWorker' })]);
 			render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
-			expect(await screen.findByText(/GamingPC is offline\. This is its last synced state/)).toBeTruthy();
+			expect(await screen.findByText(/LaptopWorker is offline\. This is its last synced state/)).toBeTruthy();
 			const row = rowOf('Watch w1');
 			const pause = within(row).getByRole('button', { name: 'Pause watch: Watch w1' }) as HTMLButtonElement;
 			expect(pause.disabled).toBe(true);
-			expect(pause.title).toBe('GamingPC is offline');
+			expect(pause.title).toBe('LaptopWorker is offline');
 			expect((within(row).getByRole('button', { name: 'Stop watch: Watch w1' }) as HTMLButtonElement).disabled).toBe(true);
 			expect((moveTo(row) as HTMLButtonElement).disabled).toBe(true);
 			await fireEvent.click(pause);
@@ -389,7 +389,7 @@ describe('RunningTasksList watches', () => {
 			await fireEvent.click(moveTo(rowOf('Watch w1')));
 			const picker = screen.getByRole('radiogroup', { name: 'Move Watch w1 to' });
 			// Every other worker is listed; the offline one says why it cannot be picked.
-			const gaming = within(picker).getByRole('radio', { name: /GamingPC/ }) as HTMLInputElement;
+			const gaming = within(picker).getByRole('radio', { name: /LaptopWorker/ }) as HTMLInputElement;
 			expect(gaming.disabled).toBe(true);
 			expect(within(picker).getByText('Offline')).toBeTruthy();
 			expect(within(picker).queryByRole('radio', { name: /DesktopWorker/ })).toBeNull();
@@ -469,7 +469,7 @@ describe('RunningTasksList watches', () => {
 			const group = screen.getByRole('radiogroup', { name: 'Where new watches run' });
 			expect((within(group).getByRole('radio', { name: /Automatic/ }) as HTMLInputElement).checked).toBe(true);
 			expect(within(group).getByText(/now ServerWorker/)).toBeTruthy();
-			const gaming = within(group).getByRole('radio', { name: /GamingPC/ }) as HTMLInputElement;
+			const gaming = within(group).getByRole('radio', { name: /LaptopWorker/ }) as HTMLInputElement;
 			expect(gaming.disabled).toBe(true);
 			expect(within(group).getByText(/Offline: cannot be chosen until it is back/)).toBeTruthy();
 			await fireEvent.click(within(group).getByRole('radio', { name: /DesktopWorker/ }));
@@ -480,13 +480,13 @@ describe('RunningTasksList watches', () => {
 
 		it('a preferred worker that is offline is a stated problem, not a silent fallback', async () => {
 			mocks.installs = NETWORK;
-			mocks.preferred = 'dev_gaming';
+			mocks.preferred = 'dev_laptop';
 			serve([watch('w1')]);
 			mocks.setWatchPreference.mockRejectedValueOnce({ status: 409, detail: 'Preferred watch worker is not an active network member' });
 			render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
-			const head = await screen.findByRole('button', { name: 'New watches run on: GamingPC (offline). Change' });
+			const head = await screen.findByRole('button', { name: 'New watches run on: LaptopWorker (offline). Change' });
 			await fireEvent.click(head);
-			expect(screen.getByText(/GamingPC is offline\. New watches are refused until it is back/)).toBeTruthy();
+			expect(screen.getByText(/LaptopWorker is offline\. New watches are refused until it is back/)).toBeTruthy();
 			await fireEvent.click(screen.getByRole('radio', { name: /^ServerWorker/ }));
 			expect(await screen.findByText('Preferred watch worker is not an active network member')).toBeTruthy();
 			expect(screen.getByRole('radiogroup', { name: 'Where new watches run' })).toBeTruthy();
