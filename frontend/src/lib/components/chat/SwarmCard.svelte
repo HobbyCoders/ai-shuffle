@@ -172,5 +172,5 @@
  @media (prefers-reduced-motion: reduce) { .swarm :global(.running-icon), .task[data-state='running'] .task-dot { animation: none; } }
  @media (max-width: 639px) { .heading, summary { min-height: 44px; } .text-button, .transcript-link { min-height: 44px; } .task-title { flex: 1; } .agent { flex: 0 1 70px; }
   /* A worker chip leaves no room for the agent label: the expanded body names it instead. */
-  .task:has(.worker) .agent { display: none; } .runs-on-agent { display: inline; } .worker { max-width: 104px; } }
+  .task:has(.worker) .agent { display: none; } .runs-on-agent { display: inline; } .worker { max-width: 112px; } }
 </style>
