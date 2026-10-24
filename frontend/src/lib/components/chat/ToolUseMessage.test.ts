@@ -110,6 +110,14 @@ describe('ToolUseMessage — posted AskUserQuestion', () => {
 		expect(screen.queryByText('Failed')).toBeNull();
 	});
 
+	it('shows the plain result, not the error pane, when expanded', async () => {
+		const { container } = renderTool({ result: posted });
+		await fireEvent.click(container.querySelector('.wlrow') as HTMLElement);
+
+		expect(container.textContent).toContain('Questions posted.');
+		expect(container.querySelector('.wl-pane pre.is-error')).toBeNull();
+	});
+
 	it('still fails a question call denied for another reason', () => {
 		const { container } = renderTool({ result: 'Questions must be a non-empty list' });
 
@@ -127,6 +135,15 @@ describe('isPostedQuestion', () => {
 		expect(isPostedQuestion('Bash', 'error', posted)).toBe(false);
 		expect(isPostedQuestion('AskUserQuestion', 'error', 'Questions posted.')).toBe(false);
 		expect(isPostedQuestion('AskUserQuestion', 'error', undefined)).toBe(false);
+	});
+
+	it('also matches an answer given for an away owner', () => {
+		const away =
+			"Owner is away — recommended default applied; list this decision in your final " +
+			"'Decisions made for you' table.\n- \"Pick one\" → A";
+		expect(isPostedQuestion('AskUserQuestion', 'error', away)).toBe(true);
+		expect(isPostedQuestion('Bash', 'error', away)).toBe(false);
+		expect(isPostedQuestion('AskUserQuestion', 'complete', away)).toBe(false);
 	});
 });
 

@@ -48,8 +48,9 @@
 	let { name, sessionId, input, partialInput, result, status: rawStatus, streaming = false, serverSide = false, screenshot, previewTitle }: Props = $props();
 
 	// The delegated Claude engine posts a question card and then has to deny the
-	// CLI's own AskUserQuestion call, so the result arrives flagged as an error.
-	// Posting worked, so the row shows it as complete.
+	// CLI's own AskUserQuestion call (an away owner's auto-answer goes back the
+	// same way), so the result arrives flagged as an error. The question was
+	// handled, so the row shows it as complete.
 	const status = $derived(isPostedQuestion(name, rawStatus, result) ? 'complete' : rawStatus);
 
 	const prefs = $derived(chatPreferences.current);
