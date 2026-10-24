@@ -21,6 +21,8 @@ def test_preview_environment_never_inherits_credentials(tmp_path, monkeypatch):
     env = preview_environment(tmp_path, 18880, 18881)
     assert "DATABASE_URL" not in env
     assert env["DATA_DIR"] == str(tmp_path / "data")
+    assert not Path(env["DATA_DIR"]).exists()
+    assert (tmp_path / ".branch-preview").read_text() == env["DATA_DIR"]
     assert Path(env["AI_SHUFFLE_ENV_FILE"]).read_text() == ""
     assert env["HOME"] == str(tmp_path / "home")
     assert env["LOCAL_MODE"] == "true"
@@ -231,7 +233,7 @@ def test_setup_bootstrap_requires_preview_and_disposable_data(
     monkeypatch.setenv("AI_SHUFFLE_PREVIEW", preview)
     data = Path(env["DATA_DIR"])
     if not disposable:
-        (data / ".branch-preview").unlink()
+        (data.parent / ".branch-preview").unlink()
     monkeypatch.setattr(settings, "data_dir", data)
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(preview_access, "_listener_port", 18880)
