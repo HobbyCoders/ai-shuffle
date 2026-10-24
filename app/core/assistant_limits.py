@@ -9,8 +9,8 @@ What counts
 -----------
 Owner coordination chats (``orchestration_limits.role``: a no-project owner
 chat) and every job they start: Task workers and the chats they start with
-StartSession, nested or not. Background research runs (``assistant_runs``)
-count too, from the moment each was admitted.
+StartSession, nested or not. Watch alert generation is charged from admission;
+watch investigation chats and live watch turns are charged through usage_log.
 
 Task workers and chats a coordination chat started on another worker count too
 (``assistant_remote_jobs``). That worker books their turns in its own
@@ -57,7 +57,9 @@ Enforcement
 * SendMessage to a Task child on another worker is refused at the limit
   (``message_refusal``), as the turn it would start is for a local child.
 """
+
 from __future__ import annotations
+from typing import Any
 
 import json
 import logging
@@ -170,11 +172,16 @@ def day_window(now=None):
 # What coordination work spent today
 # ---------------------------------------------------------------------------
 
-def _tracked(cursor, roles):
+
+def _tracked(cursor: Any, roles: dict[str, Any]) -> dict[str, Any]:
     """``{session_id: counted-from}`` for coordinators, their jobs and research runs."""
     tracked: dict = {sid: None for sid in roles}
-    cursor.execute("SELECT session_id, created_at FROM assistant_runs WHERE assistant_id=%s "
-                   "AND session_id IS NOT NULL", (assistant_id(),))
+    cursor.execute(
+        "SELECT e.session_id,e.created_at FROM watch_events e JOIN watches w ON w.id=e.watch_id "
+        "WHERE w.worker_id=%s AND e.session_id IS NOT NULL "
+        "AND e.route='investigate'",
+        (assistant_id(),),
+    )
     for row in cursor.fetchall():
         sid = row["session_id"]
         since = _utc(row["created_at"])
@@ -189,18 +196,47 @@ def _chunks(ids):
         yield ids[index:index + _CHUNK]
 
 
-def _booked(cursor, tracked, start, roles=None):
+def _watch_turns(cursor: Any) -> dict[str, set[str]]:
+    """Live deliveries count only their own turns, even after a watch stops."""
+    cursor.execute(
+        "SELECT e.session_id, COALESCE(e.turn_id,t.id) AS turn_id "
+        "FROM watch_events e JOIN watches w ON w.id=e.watch_id "
+        "LEFT JOIN turns t ON t.session_id=e.session_id "
+        "AND t.command_id=COALESCE(e.command_id,e.id) "
+        "WHERE w.worker_id=%s AND e.route='live' AND e.session_id IS NOT NULL",
+        (assistant_id(),),
+    )
+    tracked: dict[str, set[str]] = {}
+    for row in cursor.fetchall():
+        if row["turn_id"]:
+            tracked.setdefault(row["session_id"], set()).add(row["turn_id"])
+    return tracked
+
+
+def _booked(
+    cursor: Any,
+    tracked: dict[str, Any],
+    start: datetime,
+    roles: dict[str, Any] | None = None,
+    watch_turns: Any = None,
+) -> float:
     from app.db.analytics import _TURN_ID_LEN
     roles = roles or {}
     total = 0.0
     for chunk in _chunks(tracked):
         marks = ", ".join(["%s"] * len(chunk))
         # Same primary-key settlement join as analytics: [session, turn, attempt].
-        cursor.execute(f"SELECT ul.session_id, ul.cost_usd, ul.created_at, t.source, t.payload "
-                       "FROM usage_log ul LEFT JOIN turns t ON t.session_id=ul.session_id "
-                       f"AND t.id=substr(ul.settlement_key, length(ul.session_id)+6, {_TURN_ID_LEN}) "
-                       f"WHERE ul.session_id IN ({marks}) AND ul.created_at >= %s", (*chunk, start))
+        cursor.execute(
+            "SELECT ul.session_id, ul.cost_usd, ul.created_at, t.source, t.payload, t.id AS"
+            " turn_id FROM usage_log ul LEFT JOIN turns t ON t.session_id=ul.session_id AND"
+            f" t.id=substr(ul.settlement_key, length(ul.session_id)+6, {_TURN_ID_LEN}) WHERE"
+            f" ul.session_id IN ({marks}) AND ul.created_at >= %s",
+            (*chunk, start),
+        )
         for row in cursor.fetchall():
+            allowed = (watch_turns or {}).get(row["session_id"])
+            if allowed is not None and row["turn_id"] not in allowed:
+                continue
             kind = roles.get(row["session_id"])
             if kind and _person_input(row["source"], row["payload"]):
                 continue
@@ -263,7 +299,7 @@ def _remote_booked(cursor, start):
     return sum(max(0.0, float(row["cost_usd"] or 0)) for row in cursor.fetchall())
 
 
-def _measure(now=None, limits=None) -> dict:
+def _measure(now: datetime | None = None, limits: dict[str, Any] | None = None) -> dict:
     """Spend today plus what enforcement needs, from one connection.
 
     Coordination chats and their jobs only matter to a limit that is on, so
@@ -277,9 +313,36 @@ def _measure(now=None, limits=None) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         tracked = _tracked(cursor, roles)
+        # A project chat is not background work merely because it received a watch.
+        watch_turns = {sid: ids for sid, ids in _watch_turns(cursor).items() if sid not in tracked}
+        tracked.update({sid: None for sid in watch_turns})
         live = _live_turns(cursor, tracked) if tracked else []
-        spent = ((_booked(cursor, tracked, start, roles) + _in_flight(cursor, tracked, live, roles)) if tracked else 0.0)
+        live = [
+            turn
+            for turn in live
+            if turn["session_id"] not in watch_turns
+            or turn["id"] in watch_turns[turn["session_id"]]
+        ]
+        spent = (
+            (
+                _booked(cursor, tracked, start, roles, watch_turns)
+                + _in_flight(cursor, tracked, live, roles)
+            )
+            if tracked
+            else 0.0
+        )
         spent += _remote_booked(cursor, start)
+        cursor.execute(
+            "SELECT e.cost_usd,e.reserved_usd,e.status FROM watch_events e JOIN watches w ON"
+            " w.id=e.watch_id WHERE w.worker_id=%s AND e.route='alert' AND"
+            " COALESCE(e.admitted_at,e.created_at)>=%s",
+            (assistant_id(), start),
+        )
+        spent += sum(
+            float(r["cost_usd"] if r["cost_usd"] is not None else r["reserved_usd"])
+            for r in cursor.fetchall()
+            if r["status"] in ("admitted", "running", "delivered")
+        )
         from app.core.generation_budget import reserved
         spent += float(reserved(cursor, day))
     return dict(day=day, start=start, resets_at=resets_at, timezone=tz_name,
@@ -337,10 +400,13 @@ def _job_minutes(session, now):
     return worked / 60000.0
 
 
-def _created_by_assistant(cursor, session):
+def _created_by_assistant(cursor: Any, session: dict[str, Any]) -> bool:
     """Whether the research loop created ``session`` for its run."""
-    cursor.execute("SELECT MIN(created_at) AS linked FROM assistant_runs WHERE assistant_id=%s AND session_id=%s",
-                   (assistant_id(), session["id"]))
+    cursor.execute(
+        "SELECT MIN(e.created_at) AS linked FROM watch_events e JOIN watches w ON w.id=e.watch_id "
+        "WHERE w.worker_id=%s AND e.session_id=%s AND e.route='investigate'",
+        (assistant_id(), session["id"]),
+    )
     linked = _utc((row_to_dict(cursor.fetchone()) or {}).get("linked"))
     created = _utc(session.get("created_at"))
     return linked is not None and created is not None and created >= linked - CREATED_BY_ASSISTANT
@@ -355,7 +421,11 @@ def _job_over_time(session_id, minutes, now, *, coordination=False):
         session = row_to_dict(cursor.fetchone())
         if not session or not (coordination or _created_by_assistant(cursor, session)):
             return False
-        return _job_minutes(session, now) >= minutes
+        # The successor has its own display clock, but not a fresh job budget.
+        cursor.execute("SELECT prior_work_ms FROM coordinator_handoffs WHERE successor_session_id=%s", (session_id,))
+        receipt = row_to_dict(cursor.fetchone())
+        inherited = int(receipt["prior_work_ms"]) / 60000.0 if receipt else 0
+        return inherited + _job_minutes(session, now) >= minutes
 
 
 def _person_input(source, payload=None):

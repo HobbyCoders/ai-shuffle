@@ -140,6 +140,10 @@ def describe(tool_name: str, tool_input: Any) -> str:
     if isinstance(data.get("model_switch"), str) and data["model_switch"].strip():
         # app.core.model_override: "start ... on <model> instead of <model>".
         return _short(data["model_switch"], 240)
+    if name.endswith("computer-use__request_access"):
+        # The screen-access card itself, asked in words in an owner chat.
+        apps = [str(app) for app in data.get("apps") or [] if app]
+        return "control " + (_short(", ".join(apps), 120) if apps else "your screen") + " on this computer"
     if data.get("command"):
         return f"run `{_short(data['command'])}`"
     path = data.get("file_path") or data.get("path") or data.get("notebook_path")
