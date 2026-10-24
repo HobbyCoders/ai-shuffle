@@ -46,7 +46,7 @@
 	.gap { width: 8px; }
 	.cap {
 		display: grid; place-items: center; width: 30px; height: 38px; box-sizing: border-box;
-		border: 1px solid color-mix(in oklch, var(--primary) 34%, var(--border-strong)); border-bottom-width: 3px;
+		border: 1px solid color-mix(in oklab, var(--primary) 34%, var(--border-strong)); border-bottom-width: 3px;
 		border-radius: 7px; background: var(--code-bg); color: var(--foreground);
 		font: 700 19px/1 var(--font-mono); letter-spacing: 0;
 		box-shadow: inset 0 1px 0 color-mix(in oklch, var(--foreground) 6%, transparent);

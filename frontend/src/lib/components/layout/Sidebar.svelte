@@ -1095,7 +1095,7 @@
 	.sect.closed .chev { transform: rotate(-90deg); }
 	.sect.needs,
 	.sect.needs .n { color: var(--warning); }
-	.sect.needs .rule { background: color-mix(in oklch, var(--warning) 35%, var(--sidebar-border)); }
+	.sect.needs .rule { background: color-mix(in oklab, var(--warning) 35%, var(--sidebar-border)); }
 
 	.daylabel { padding: 10px 8px 5px; font-size: 11.5px; font-weight: 500; color: var(--subtle-foreground); }
 	.empty {
@@ -1138,8 +1138,8 @@
 		gap: 6px;
 		height: 52px;
 		padding: 0 8px;
-		background: color-mix(in oklch, var(--primary) 12%, var(--sidebar));
-		border-bottom: 1px solid color-mix(in oklch, var(--primary) 30%, var(--sidebar-border));
+		background: color-mix(in oklab, var(--primary) 12%, var(--sidebar));
+		border-bottom: 1px solid color-mix(in oklab, var(--primary) 30%, var(--sidebar-border));
 		transform: translateY(-100%);
 		transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 	}

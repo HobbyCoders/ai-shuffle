@@ -63,7 +63,7 @@
 	}
 	.extra[hidden] { display: none; }
 	.extra.open {
-		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
 		background: var(--card);
 	}
 	.extra-heading { margin: 0; font: inherit; }

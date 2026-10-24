@@ -169,8 +169,8 @@
 	.fwp-chip[aria-expanded='true'] { border-color: var(--ring); }
 	/* Another machine's files: a tinted rim so it is never mistaken for local. */
 	.fwp-chip.remote {
-		border-color: color-mix(in oklch, var(--primary) 55%, var(--border));
-		background: color-mix(in oklch, var(--primary) 9%, var(--card));
+		border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
+		background: color-mix(in oklab, var(--primary) 9%, var(--card));
 		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 10%, transparent);
 	}
 	.fwp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

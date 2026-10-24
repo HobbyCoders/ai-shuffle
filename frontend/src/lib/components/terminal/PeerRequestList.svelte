@@ -84,11 +84,11 @@
 
 <style>
 	.peer-requests { display: grid; grid-auto-rows: max-content; gap: 8px; padding: 10px; max-height: 60%; overflow-y: auto; flex-shrink: 0; overscroll-behavior: contain;
-		border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--primary) 4%, var(--background)); font-family: var(--font-sans); }
-	.req { position: relative; display: grid; gap: 10px; padding: 12px 14px; border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
+		border-bottom: 1px solid var(--border); background: color-mix(in oklab, var(--primary) 4%, var(--background)); font-family: var(--font-sans); }
+	.req { position: relative; display: grid; gap: 10px; padding: 12px 14px; border: 1px solid color-mix(in oklab, var(--primary) 30%, var(--border));
 		border-radius: var(--radius); background: var(--card); animation: req-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
 	.req::before { content: ''; position: absolute; inset: -1px auto -1px -1px; width: 3px; border-radius: var(--radius) 0 0 var(--radius); background: var(--primary); }
-	.req.approved { border-color: color-mix(in oklch, var(--success) 30%, var(--border)); }
+	.req.approved { border-color: color-mix(in oklab, var(--success) 30%, var(--border)); }
 	.req.approved::before { background: var(--success); }
 	.req-head { display: flex; gap: 10px; align-items: flex-start; }
 	.glyph { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 8px; color: var(--primary);
@@ -118,7 +118,7 @@
 	button:disabled { opacity: 0.45; cursor: not-allowed; }
 	.ghost { border: 1px solid var(--border-strong); background: transparent; color: var(--foreground); }
 	.ghost:hover:not(:disabled) { background: var(--hover-overlay); }
-	.ghost.danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 45%, var(--border-strong)); }
+	.ghost.danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, var(--border-strong)); }
 	.ghost.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 10%, transparent); }
 	.go { border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); }
 	.go:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, white); }

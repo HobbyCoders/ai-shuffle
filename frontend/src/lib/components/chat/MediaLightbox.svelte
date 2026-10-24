@@ -475,7 +475,7 @@
 	.gallery-thumbnail { background:none;padding:0;text-align:left;border:0;border-radius:8px;min-width:0;cursor:pointer; }
 	.thumbnail-image { display:flex;align-items:center;justify-content:center;padding:3px;border:1px solid transparent;border-radius:8px;background:var(--muted);color:var(--muted-foreground);aspect-ratio:1.27;overflow:hidden; }
 	.thumbnail-image img { width:100%;height:100%;object-fit:cover;border-radius:5px; }
-	.gallery-thumbnail[aria-pressed=true] .thumbnail-image { border-color:var(--primary);background:color-mix(in oklch,var(--primary) 15%,var(--muted)); }
+	.gallery-thumbnail[aria-pressed=true] .thumbnail-image { border-color:var(--primary);background:color-mix(in oklab,var(--primary) 15%,var(--muted)); }
 	.thumbnail-label { display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:5px 3px 0;font-size:10px;color:var(--muted-foreground); }
 	.gallery-thumbnail[aria-pressed=true] .thumbnail-label { color:var(--primary); }
 	.rail-help { display:flex;justify-content:space-between;margin-top:auto;padding:13px 16px;border-top:1px solid var(--border);font-size:10px;color:var(--muted-foreground); }
