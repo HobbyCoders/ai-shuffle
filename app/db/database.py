@@ -3445,8 +3445,10 @@ def migrations_fingerprint() -> str:
     """
     import hashlib
 
-    from app.db import schema_postgres, mobile_hub, network, assistant, working_record
-    from app.db import session_mode_migration
+    from app.db import (
+        schema_postgres, mobile_hub, network, assistant, working_record, watches, watch_delivery,
+        session_mode_migration,
+    )
     from app.core import owner_auth
 
     h = hashlib.sha256()
@@ -3454,8 +3456,8 @@ def migrations_fingerprint() -> str:
     # The hub and owner helpers also define tables used during encryption init.
     # Include their sources and the network schema so upgrades cannot skip new DDL.
     for module in (
-        sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network,
-        assistant, working_record, session_mode_migration,
+        sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant,
+        working_record, watches, watch_delivery, session_mode_migration,
     ):
         path = getattr(module, "__file__", None)
         if not path:
