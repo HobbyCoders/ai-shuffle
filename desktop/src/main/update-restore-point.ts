@@ -74,9 +74,11 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
 /** Audited Windows launchers that hash a ready point in prepareRollback before select.
  * Launcher 7 adds optional voice dependency installation; like launcher 6 it retains
  * the ColdClusterCopy factory and full ready-journal hash check. source-updates.test
- * exercises that factory against same-size file corruption.
+ * exercises that factory against same-size file corruption. Launcher 8 changes only the
+ * PostgreSQL start options and the Windows process-identity probe; the factory and
+ * ready-journal path are unchanged.
  * A new version is NOT trusted automatically: review its factory and ready-journal path. */
-export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7]);
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8]);
 
 /** Unknown handoffs and fenced recovery must keep full validation. */
 export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {

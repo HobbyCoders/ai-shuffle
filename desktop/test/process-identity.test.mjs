@@ -17,3 +17,10 @@ test('signal boundary refuses a reused start identity or different executable',a
  const result=await execWithIdentity(identity,process.execPath,['-e',"console.log('verified child')"]);
  assert.equal(result.code,0);assert.equal(result.stdout.trim(),'verified child');
 });
+test('the Windows probe defines its kernel32 imports in memory instead of compiling with Add-Type (#597)',async()=>{
+ const source=await fs.readFile(new URL('../dist/main/process-identity.js',import.meta.url),'utf8');
+ assert.doesNotMatch(source,/Add-Type -TypeDefinition/);assert.match(source,/DefinePInvokeMethod/);
+});
+test('the Windows probe fails closed for a process it cannot open',{skip:process.platform!=='win32'&&'Windows kernel handle probe'},async()=>{
+ await assert.rejects(readProcessIdentity(2147483644),/Cannot open process identity handle/);
+});

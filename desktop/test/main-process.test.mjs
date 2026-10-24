@@ -186,7 +186,7 @@ test('a source update starts its worker with its verified release version; the b
   assert.equal('appVersion' in builtIn.worker.options, false);
 });
 
-for (const launcher of [undefined, '3', 'unknown', '4', '5', '6', '7']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
+for (const launcher of [undefined, '3', 'unknown', '4', '5', '6', '7', '8']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false, async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const f = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', updates, application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } }, env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
   assert.deepEqual(f.errors, []);
@@ -207,7 +207,7 @@ test('direct source relaunch clears the previous launcher handoff proof', async 
   assert.equal(f.app.quits, 1);
 });
 
-for (const launcher of ['8', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
+for (const launcher of ['9', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
     async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
@@ -611,7 +611,7 @@ test('an update\'s first start gives its worker 10 minutes to become ready; othe
 	}
 });
 
-for (const launcher of ['4', '5', '6', '7']) test(`restarting with launcher ${launcher} copies the database for its restore point with the window saying so`, async () => {
+for (const launcher of ['4', '5', '6', '7', '8']) test(`restarting with launcher ${launcher} copies the database for its restore point with the window saying so`, async () => {
 	const R = 'b'.repeat(40);
 	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
 	const host = { executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe', userData: 'C:/Users/owner/AppData/Roaming/AI Shuffle', name: 'AI Shuffle' };

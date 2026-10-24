@@ -176,7 +176,7 @@ test('a fresh data directory gets initdb with a generated password, then a start
 
 	const starts = execs('pg_ctl').filter((c) => c.args.at(-1) === 'start');
 	assert.equal(starts.length, 1);
-	assert.deepEqual(starts[0].args, ['-D', DATA, '-l', path.join(LOGS, 'postgres.log'), '-w', '-t', '60', '-o', `-p 54321 -c listen_addresses=127.0.0.1 -c max_wal_size=4GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c wal_compression=pglz -k "${ROOT}"`, 'start']);
+	assert.deepEqual(starts[0].args, ['-D', DATA, '-l', path.join(LOGS, 'postgres.log'), '-w', '-t', '60', '-o', `-p 54321 -c listen_addresses=127.0.0.1 -c max_wal_size=4GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c wal_compression=pglz -c statement_timeout=30s -c lock_timeout=5s -c idle_in_transaction_session_timeout=30s -k "${ROOT}"`, 'start']);
 
 	const [createdb] = execs('createdb');
 	assert.deepEqual(createdb.args, ['-h', '127.0.0.1', '-p', '54321', '-U', 'ai_shuffle', 'ai_shuffle']);
@@ -208,6 +208,12 @@ test('an existing cluster with stored settings skips initdb, keeps its port and 
 	assert.equal(pg.connection().password, 'kept');
 	// createdb answering "already exists" is fine.
 	assert.equal(execs('createdb').length, 1);
+	// #591: an existing cluster gets the session timeouts on every start, without editing postgresql.conf.
+	const [start] = execs('pg_ctl').filter((c) => c.args.at(-1) === 'start');
+	const options = start.args[start.args.indexOf('-o') + 1].split(' ');
+	for (const setting of ['statement_timeout=30s', 'lock_timeout=5s', 'idle_in_transaction_session_timeout=30s']) {
+		assert.equal(options[options.indexOf(setting) - 1], '-c', `${setting} is passed as a server option`);
+	}
 });
 
 test('an existing cluster tolerates a database that already exists and fails on other createdb errors', async () => {
@@ -397,8 +403,8 @@ test('start while ready only checks the status when the server still runs', asyn
 
 test('pure helpers: pg_ctl arguments, socket directory, pid file, plans', () => {
 	assert.deepEqual(initdbArgs({ dataDir: 'D', pwfile: 'P' }), ['-D', 'D', '-U', POSTGRES_USER, '--pwfile=P', '--auth=scram-sha-256', '-E', 'UTF8', '--locale=C']);
-	assert.deepEqual(pgCtlStartArgs({ dataDir: 'D', logPath: 'L', port: 5000, socketDir: null }), ['-D', 'D', '-l', 'L', '-w', '-t', '60', '-o', '-p 5000 -c listen_addresses=127.0.0.1 -c max_wal_size=4GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c wal_compression=pglz', 'start']);
-	assert.deepEqual(pgCtlStartArgs({ dataDir: 'D', logPath: 'L', port: 5000, socketDir: '/a b', timeoutSec: 9, walCompression: 'lz4' }), ['-D', 'D', '-l', 'L', '-w', '-t', '9', '-o', '-p 5000 -c listen_addresses=127.0.0.1 -c max_wal_size=4GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c wal_compression=lz4 -k "/a b"', 'start']);
+	assert.deepEqual(pgCtlStartArgs({ dataDir: 'D', logPath: 'L', port: 5000, socketDir: null }), ['-D', 'D', '-l', 'L', '-w', '-t', '60', '-o', '-p 5000 -c listen_addresses=127.0.0.1 -c max_wal_size=4GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c wal_compression=pglz -c statement_timeout=30s -c lock_timeout=5s -c idle_in_transaction_session_timeout=30s', 'start']);
+	assert.deepEqual(pgCtlStartArgs({ dataDir: 'D', logPath: 'L', port: 5000, socketDir: '/a b', timeoutSec: 9, walCompression: 'lz4' }), ['-D', 'D', '-l', 'L', '-w', '-t', '9', '-o', '-p 5000 -c listen_addresses=127.0.0.1 -c max_wal_size=4GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c wal_compression=lz4 -c statement_timeout=30s -c lock_timeout=5s -c idle_in_transaction_session_timeout=30s -k "/a b"', 'start']);
 	assert.equal(walCompressionFor('win32'), 'lz4', 'the Windows bundle is built with lz4');
 	assert.equal(walCompressionFor('darwin'), 'pglz', 'unverified bundles get the codec every build accepts');
 	assert.equal(walCompressionFor('linux'), 'pglz');

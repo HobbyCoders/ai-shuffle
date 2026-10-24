@@ -127,7 +127,7 @@ export function walCompressionFor(platform: NodeJS.Platform): WalCompression {
 }
 
 /**
- * Checkpoint and WAL settings, passed on every start so existing clusters pick
+ * Checkpoint, WAL and session timeout settings, passed on every start so existing clusters pick
  * them up without editing postgresql.conf. The 1 GB / 5 minute defaults forced
  * a checkpoint every few seconds under load, and each checkpoint makes the next
  * write to every page log a full 8 KB page image; a large trigram GIN index
@@ -135,7 +135,12 @@ export function walCompressionFor(platform: NodeJS.Platform): WalCompression {
  * docker/container_runtime.py WAL_SETTINGS.
  */
 export function walSettingArgs(walCompression: WalCompression): string[] {
-	return ['max_wal_size=4GB', 'checkpoint_timeout=15min', 'checkpoint_completion_target=0.9', `wal_compression=${walCompression}`].map((s) => `-c ${s}`);
+	return [
+		'max_wal_size=4GB', 'checkpoint_timeout=15min', 'checkpoint_completion_target=0.9', `wal_compression=${walCompression}`,
+		// Bound long queries, lock waits and abandoned transactions that hold pooled
+		// connections (#580, #591). Maintenance may raise statement_timeout itself.
+		'statement_timeout=30s', 'lock_timeout=5s', 'idle_in_transaction_session_timeout=30s',
+	].map((s) => `-c ${s}`);
 }
 
 /**
