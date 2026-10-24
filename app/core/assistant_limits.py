@@ -41,8 +41,8 @@ recorded (Settings > General > Time zone), else UTC.
 Enforcement
 -----------
 * At the limit, new background work is refused (Task, StartSession,
-  MessageSession, research) and unattended turns in jobs do not start.
-* ``enforce`` runs on the assistant manager's loop: at the limit it stops the
+  MessageSession, watch investigations) and unattended turns in jobs do not start.
+* ``enforce`` runs on the watch manager's loop: at the limit it stops the
   live unattended turns of coordination work with the ordinary Stop path, and
   it stops a job that has worked longer than the job time limit. Turns a
   person started inside a job are left alone.

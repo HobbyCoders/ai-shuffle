@@ -15,9 +15,8 @@ from tests.core.network.harness import converge, join
 
 
 @pytest.fixture(autouse=True)
-def _per_worker_install_ids(monkeypatch):
+def _per_worker_install_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "instance_id", None)
-    monkeypatch.setattr(service, "_guard_version", 1)
 
 
 def settle(workers, rounds=3):

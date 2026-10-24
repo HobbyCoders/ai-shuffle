@@ -1086,8 +1086,8 @@
 		align-items: center;
 		gap: 8px;
 		border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklch, var(--destructive) 10%, var(--background));
-		border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border));
+		background: color-mix(in oklab, var(--destructive) 10%, var(--background));
+		border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
 		font-weight: 600;
 		color: var(--foreground);
 	}
@@ -1372,7 +1372,7 @@
 		justify-content: flex-end;
 		gap: 8px;
 		padding-right: 20px;
-		background: color-mix(in oklch, var(--destructive) 14%, var(--background));
+		background: color-mix(in oklab, var(--destructive) 14%, var(--background));
 		color: var(--destructive);
 		font-size: 0.8125rem;
 		font-weight: 600;
@@ -1416,7 +1416,7 @@
 		padding: 0 6px;
 		border-radius: 999px;
 		/* Mixed toward the text colour so small type passes AA on light themes. */
-		color: color-mix(in oklch, var(--warning) 72%, var(--foreground));
+		color: color-mix(in oklab, var(--warning) 72%, var(--foreground));
 		background: color-mix(in oklch, var(--warning) 14%, transparent);
 	}
 	.size-compact .state-chip { font-size: 0.625rem; padding: 0 5px; }
@@ -1494,7 +1494,7 @@
 		.size-compact.watch .row-meta { grid-area: meta; justify-self: start; }
 		.size-compact.watch .row-actions { grid-area: actions; }
 	}
-	.watch .paused-note { color: color-mix(in oklch, var(--warning) 72%, var(--foreground)); }
+	.watch .paused-note { color: color-mix(in oklab, var(--warning) 72%, var(--foreground)); }
 
 	/* Phone: the sheet is a full-height page. */
 	.rt-layer.mobile { align-items: stretch; justify-content: stretch; }

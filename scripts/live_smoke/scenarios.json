@@ -22,6 +22,14 @@
           "past_bug": "#566: remote watch results remained on the executing worker."
         },
         {
+          "id": "durable-watches.gmail-package-history",
+          "check": "Installed Gmail package history replay and explicit expiry gap",
+          "kind": "owner",
+          "how": "Use only an explicitly configured disposable Gmail mailbox and candidate worker. Install the candidate Gmail package normally. In an owner chat create and confirm a scoped mail watch. Send nonmatching and matching mail, including already-read messages. Exercise multiple history pages, restart the candidate after a checkpoint, revoke the grant, then pause and stop the watch. In a separate disposable watch use a genuinely expired historyId, inspect the bounded resync and durable gap notification, and repeat a poll. Keep mailbox and cursor receipts private; do not request credentials in chat or alter a production mailbox.",
+          "pass_when": "SDK and OAuth state stay in the package worker. Idle and nonmatching polls invoke no model; matching messages are reported once across pages/restart. History/page cursors advance only with committed events. An expired historyId causes at most one 100-message snapshot page in configured labels, anchored before the snapshot; a model-free durable notice reports the unrecoverable interval and any truncation before rebasing. Other HTTP failures do not rebase. Grant revocation and Pause/Stop fail closed. Without real disposable mailbox receipts this remains unverified, not a pass.",
+          "past_bug": "#575: Gmail watches called a native SDK method absent from installed connector proxies."
+        },
+        {
           "id": "durable-watches.real-connectors",
           "check": "Real Slack, Discord and Telegram watch cursors",
           "kind": "owner",
@@ -387,6 +395,14 @@
           "past_bug": "#543: production read job choices but the automation editor had no UI for them."
         },
         {
+          "id": "generation-379.save-warning",
+          "check": "Saved generation picks show the fresh price or the unattended-skip warning",
+          "kind": "browser",
+          "how": "On a disposable candidate worker (fixture accounts, no paid generation), remember a priced choice and an unpriced fal model in Settings, Default models, and pin each to a throwaway paused automation in its editor's detail view. Make one quote fail (stop the holding worker or provider) and save again. In a throwaway chat, pick an unpriced option on a generateImage choice card and approve nothing. Repeat at a phone width. Delete only the throwaway automation and archive the chat.",
+          "pass_when": "A priced save shows the server's fresh price. Unpriced, unavailable and timed-out saves keep the pick, say unattended runs will skip it (unpriced and unavailable named apart), and keep the card or job picker open; a collapsed chat card still says so. Saving sends no extra quote and makes no provider submission, reservation or charge.",
+          "past_bug": "#542: the UI ignored the save response, so an unpriced pick looked saved and runnable until unattended runs skipped it."
+        },
+        {
           "id": "harness-basics.1",
           "check": "First message not lost",
           "kind": "script",
@@ -712,6 +728,14 @@
           "past_bug": "#558: UUID validation rejected every app-created automation ID."
         },
         {
+          "id": "harness-basics.legacy-projectless-upgrade",
+          "check": "Legacy projectless owners gain the coordination ceiling and attach action",
+          "kind": "owner",
+          "how": "On a disposable candidate worker only, prepare synthetic old-version owner sessions with NULL and literal code modes, no project, and a short transcript. Include project-bound, API, worker, automation and foreign-principal controls. Upgrade and restart twice, then sync additional NULL/code rows from a synthetic old-version peer after startup has completed. For both a native provider and delegated Claude, resume each owner chat and inspect the real options/tool registry: read a registered-project file, request a shell or project write, then attach a disposable project while idle and send another turn. Never modify an installed worker database or publish private receipts.",
+          "pass_when": "Both restarts and later peer upserts preserve transcripts and identity controls. Ordinary projectless owner rows store chat, expose Attach project without a Git panel, permit registered-project reads and refuse shell/Edit/Write/Python with StartSession(project=...) guidance. Project-bound controls retain their checkout/full tools; API, worker, automation and foreign-principal policy is unchanged. Attach keeps history, resets access to Ask and restores the project surface on the next real turn. Record actual provider/tool and UI evidence; unexecuted upgrade steps are not a pass.",
+          "past_bug": "#553: deferred mode migration left legacy projectless owners on the code surface."
+        },
+        {
           "id": "harness-basics.migration-timeout-budget",
           "check": "Offline database work outlives ordinary SQL deadlines",
           "kind": "owner",
@@ -779,6 +803,14 @@
           "how": "In a disposable candidate checkout on each worker, run PYTHONPATH=fluid pytest tests/scripts/test_local_ci_stages.py::test_kill_mid_stage_resumes_from_the_heartbeat tests/scripts/test_test_scratch.py -o addopts= -q. The crash regression checks that its heartbeat writer stops and signal handlers are restored without releasing the crash receipt. The late-writer regression starts a real child to refill basetemp between the cleanup scan and rmdir, once and repeatedly, for passing and failing child sessions. Do not restart the installed app or clean unrelated scratch.",
           "pass_when": "All scratch regressions pass. A transient refill that is removed within three retries warns and preserves the child's own test exit status. A persistent leftover still makes the child session fail, even when all its tests passed. Diagnostics identify the owner and bounded leftover entries; an available ownership receipt is restored for the reaper. Receipt or listing errors are reported without replacing the original cleanup failure. Serial, xdist, explicit basetemp and standalone Fluid ownership checks still pass.",
           "past_bug": "#570: backend-security passed every test then exited 1 when a directory refilled during pytest session scratch cleanup."
+        },
+        {
+          "id": "harness-basics.retired-assistant-shared-services",
+          "check": "Retired home cleanup preserves ordinary identities and spending history",
+          "kind": "owner",
+          "how": "On a disposable candidate worker with synthetic legacy account/spend rows, upgrade and inspect agent identities, avatars, owner introduction/memory and Usage limits. Rename an ordinary agent and change its avatar, lower the spending limit, then finish a bounded real coordination job including a remote child when available. Replay its accounting receipt after restart. Delete an ordinary disposable chat and try the retired home/research routes. Keep all receipts private; no screenshots are needed.",
+          "pass_when": "Ordinary identity edits preserve all unrelated config, avatars and owner memory survive, and cumulative local/remote cost is charged once across restart/replay. No dedicated agent, protected home, home prompt or research runner appears. Retired routes remain unavailable; ordinary chat deletion succeeds. Historical assistant-prefixed shared endpoints still serve their documented owner-only functions until the atomic naming follow-up #561.",
+          "past_bug": "#557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
         },
         {
           "id": "harness-basics.watchdog-stop",

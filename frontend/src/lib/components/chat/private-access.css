@@ -160,7 +160,7 @@
 	padding: 0.5rem 0.625rem;
 	border-radius: 0.625rem;
 	border: 1px solid color-mix(in oklch, var(--destructive) 35%, transparent);
-	background: color-mix(in oklch, var(--destructive) 10%, var(--card));
+	background: color-mix(in oklab, var(--destructive) 10%, var(--card));
 	color: var(--destructive);
 	font-size: 0.75rem;
 	line-height: 1.45;
@@ -239,7 +239,7 @@
 }
 
 .pa-small-btn:hover { filter: brightness(1.1); }
-.pa-small-btn.danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 35%, var(--border)); }
+.pa-small-btn.danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 35%, var(--border)); }
 .pa-small-btn.danger.solid { background: var(--destructive); color: var(--destructive-foreground); border-color: transparent; }
 .pa-small-btn:disabled { opacity: 0.5; cursor: default; }
 .pa-small-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }

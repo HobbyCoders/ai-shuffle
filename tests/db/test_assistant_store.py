@@ -23,14 +23,13 @@ def owner_chat(title: Any = "Owner chat") -> Any:
 def assistant_fixture(monkeypatch: MonkeyPatch) -> Any:
     """Ordinary owner identity plus a legacy agent row for compatibility tests."""
     monkeypatch.setattr(settings, "instance_id", "assistant-test")
-    monkeypatch.setattr(service, "_guard_version", 0)
     database.create_profile("assistant-agent", "Helper", "custom", {"prompt": "Keep custom prompt", "model": "custom-model", "allowed_tools": ["Read"], "permission_mode": "bypassPermissions"}, mcp_tools=["keep-me"])
     # Loaded from an older install: never auto-created by the app any more.
     database.create_profile(
         service.AGENT_ID,
-        service.AGENT_NAME,
-        service.AGENT_DESCRIPTION,
-        service.AGENT_CONFIG,
+        "Legacy agent",
+        "Retired",
+        {},
         is_builtin=True,
     )
     with get_db() as conn:

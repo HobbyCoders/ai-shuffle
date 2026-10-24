@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), del: vi.fn() }));
 vi.mock('./client', () => ({ api: { get: mocks.get, put: mocks.put, delete: mocks.del } }));
 
-import { commitJobChoiceDraft, getJobChoices, saveJobChoice } from './generation-job-choices';
+import { commitJobChoiceDraft, getJobChoices, pinJobChoice, saveJobChoice } from './generation-job-choices';
 
 const JOB = '11111111-2222-4333-8444-555555555555';
 const CHOICE = { source: 'fal', account: 'fal-ai', worker: 'worker-b', model: 'fal-ai/flux/dev', options: {} };
@@ -26,6 +26,21 @@ describe('generation job choices API', () => {
 		mocks.put.mockResolvedValue({ choice: CHOICE });
 		await saveJobChoice(JOB, '3d', { ...CHOICE, origin: 'settings' });
 		expect(mocks.put).toHaveBeenCalledWith(`/generation/jobs/${JOB}/choices/3d`, CHOICE);
+	});
+
+	it('keeps the save-time quote on a pin, and the stored choice alone for a draft commit', async () => {
+		const quote = {
+			price: { currency: 'USD', unit: 'item', amount: null, total: null, status: 'unknown' },
+			priced: false,
+			quote_error: null,
+			unattended_skip_reason: 'stored_choice_unpriced',
+			warning: 'This saved choice has no verified price. Unattended runs will skip it until a price is available.'
+		};
+		mocks.put.mockResolvedValue({ job_id: JOB, kind: 'image', choice: CHOICE, ...quote });
+		expect(await pinJobChoice(JOB, 'image', CHOICE)).toEqual({ job_id: JOB, kind: 'image', choice: CHOICE, ...quote });
+		expect(await saveJobChoice(JOB, 'image', CHOICE)).toEqual(CHOICE);
+		const result = await commitJobChoiceDraft(JOB, { image: CHOICE }, () => 'failed');
+		expect(result.applied).toEqual({ image: CHOICE });
 	});
 
 	it('writes each staged kind and keeps only the failed ones for a retry', async () => {

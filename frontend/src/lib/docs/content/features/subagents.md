@@ -91,6 +91,15 @@ Chats started by an owner conversation report back automatically. If the startin
 
 ## Durable watches
 
+Gmail watches read history through the installed connector package, keeping OAuth and SDK
+state in its isolated process. Update the Gmail package to the bundled watch-capable release
+before using watches. The saved `historyId` and page token advance only when matching events
+are committed; idle and nonmatching polls use no model. If Gmail expires a history ID, the
+watch reads at most one page of 100 recent messages in the configured labels (including read
+mail). A durable bell notification reports the missing history interval and any truncated
+snapshot before the watch resumes. This is bounded recovery, not a guarantee that all mail
+from the expired interval can be reconstructed. Other API failures do not reset the bookmark.
+
 Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI, session states (stuck, waiting on you, finished), usage/credit thresholds, or a plain interval schedule. Messaging watches name an explicit channel/chat ID within the connector's allowlist. Slack reads channel history with a saved page/high-water cursor; Discord reads oldest-first message history after a saved message ID. Both require the bot's history permissions. Telegram polls a durable journal populated by the existing bot receiver. It commits each update to the journal before acknowledging the next one, retrying persistence failures instead of silently dropping messages. Chat execution then runs in a bounded, tracked background task, leaving the receiver free for approval buttons and other chats; stopping the connector cancels those tasks. If chat capacity is full, it replies with a busy notice while preserving the journaled observation. Journal writes and cursor reads are serialized per connector to prevent concurrent commits from skipping messages: the Bot API exposes no chat-history API, so messages that Telegram never delivered to the receiver (including updates expired during downtime) cannot be recovered. Telegram's journal is worker-local; moving those watches is explicitly refused rather than skipping messages. Installed first-party Slack, Discord and Telegram connector packages must be updated to the bundled watch-capable release before creating watches; older packages fail explicitly. Stop their connections before updating the package, then reconnect.
 
 The agent asks one confirmation sentence covering the source/filter, executing worker, read-only access, action and daily cap; your yes authorizes it. Placement prefers an available worker advertising `always_on`, then an available Linux server. You can override `worker_id` when creating a watch. `PUT /api/v1/watches/preference` with `{"worker_id":"<network worker ID>"}` designates your preferred worker; `null` clears it. This preference and display-only watch metadata sync across your worker network. An unavailable designated worker fails explicitly without silently falling back to a sleeping desktop. Connectors and grants must already belong to the executing worker; credentials are never moved by watch placement.

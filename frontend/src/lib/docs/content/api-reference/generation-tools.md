@@ -120,6 +120,8 @@ For scheduled automation jobs, owner-only
 `GET /api/v1/generation/jobs/{automation_id}/choices` returns `job_id` and a
 per-kind `choices` map. `PUT .../choices/{kind}` stores a choice directly;
 it must pin `account`, `worker` and `model` (and may include `source`, `options`).
+Its response adds the same save-time `price`, `priced`, `quote_error`,
+`unattended_skip_reason` and `warning` as a remembered pick (below).
 `DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
 protection as preferences. Job choices are account-scoped preferences, separate
 from favourites and remembered picks. A run session's stored `automation_id`
@@ -251,7 +253,10 @@ An unavailable account/model or failed quote reports `stored_choice_unavailable`
 with the quote's error in `quote_error` and the warning. The optional quote has a
 two-second timeout; a failed quote does not lose the saved pick. No price is inferred
 for an unpriced model, and saving never reserves or submits a generation. Frontend
-clients must display this warning after saving or remembering a pick.
+clients must display this warning after saving or remembering a pick: the chat
+choice card, Settings, Default models and the automation editor show the fresh
+price, or the warning and keep the card (or the job's picker) open so it stays
+in view. A collapsed chat card still says unattended runs will skip the pick.
 `DELETE /api/v1/generation/choices/{kind}` asks again next time.
 `GET /api/v1/generation/options/{kind}` lists priced options across accounts
 and `POST /api/v1/generation/quote` validates options against the model's

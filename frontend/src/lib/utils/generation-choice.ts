@@ -288,6 +288,74 @@ export function priceView(price: GenerationPrice | null | undefined, kind: Gener
 	};
 }
 
+// ── Save-time quote (#518 / #542) ─────────────────────────────────────
+
+/** Why unattended runs will skip a just-saved pick (app/api/generation_choices.py). */
+export type UnattendedSkipReason = 'stored_choice_unavailable' | 'stored_choice_unpriced';
+
+/**
+ * The fresh server-side quote a save reports: `PUT /generation/choices/{kind}`
+ * and `PUT /generation/jobs/{id}/choices/{kind}`. `priced` means unattended
+ * runs can use the pick; otherwise `warning` says why they will skip it. The
+ * pick is stored either way, and nothing was submitted or approved.
+ */
+export interface SaveQuote {
+	price: GenerationPrice;
+	priced: boolean;
+	quote_error: string | null;
+	unattended_skip_reason: UnattendedSkipReason | null;
+	warning: string | null;
+}
+
+export interface SaveOutcome {
+	/** `priced`: unattended runs can use it. `unpriced`: no verified price. `unavailable`: route or quote failed. */
+	state: 'priced' | 'unpriced' | 'unavailable';
+	/** Short label for the state, never colour alone. */
+	tag: string;
+	/** The fresh server price (`$0.04`, `Included`), or why there is none. */
+	figure: string;
+	note: string;
+	/** The server's sentence about unattended runs; null when they can use it. */
+	warning: string | null;
+}
+
+/**
+ * How to present a save response. Null when the response carries no quote
+ * (a staged draft, or a server older than #518): say nothing rather than guess.
+ */
+export function saveOutcome(result: Partial<SaveQuote> | null | undefined, kind: GenerationKind): SaveOutcome | null {
+	if (!result || typeof result.priced !== 'boolean') return null;
+	if (result.priced) {
+		const view = priceView(result.price, kind);
+		return { state: 'priced', tag: 'Priced', figure: view.figure, note: view.note, warning: null };
+	}
+	if (result.unattended_skip_reason === 'stored_choice_unavailable') {
+		return {
+			state: 'unavailable',
+			tag: 'Unavailable now',
+			figure: 'No quote',
+			note: 'could not be priced',
+			warning: result.warning || `${result.quote_error || 'This saved choice is unavailable right now.'} Unattended runs will skip it.`
+		};
+	}
+	return {
+		state: 'unpriced',
+		tag: 'No verified price',
+		figure: 'Unknown',
+		note: 'price unavailable',
+		warning: result.warning || 'This saved choice has no verified price. Unattended runs will skip it until a price is available.'
+	};
+}
+
+/** The quote a save reported, in the shape `POST /generation/quote` returns. */
+export function quoteFromSave(result: Partial<SaveQuote>): { ok: boolean; price?: GenerationPrice; priced?: boolean; error?: string } | null {
+	if (typeof result.priced !== 'boolean') return null;
+	if (result.unattended_skip_reason === 'stored_choice_unavailable') {
+		return { ok: false, error: result.quote_error || 'This choice is not available right now.' };
+	}
+	return { ok: true, price: result.price, priced: result.priced };
+}
+
 export function formatValue(value: unknown): string {
 	if (value === null || value === undefined || value === '') return 'default';
 	if (typeof value === 'boolean') return value ? 'on' : 'off';

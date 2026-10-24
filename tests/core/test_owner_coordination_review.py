@@ -1,5 +1,6 @@
 """Permission and accounting regressions from the step-1 security review."""
 import json
+from pathlib import Path
 
 import pytest
 from fluid.tools.registry import ToolCtx
@@ -238,14 +239,20 @@ def test_ordinary_turn_does_not_scan_other_principals(owner, monkeypatch):
     assert not any("SELECT * FROM sessions" in sql and "WHERE" not in sql for sql in queries)
 
 
-def test_legacy_code_row_keeps_code_ceiling(owner):
+def test_legacy_projectless_code_row_gets_coordination_ceiling(owner: Path) -> None:
+    # #553: preserving the code ceiling here pinned the deferred migration bug.
     from app.core import query_options
     from app.core.session_modes import runtime_session_mode
+    from app.core.tool_access import tool_permitted
+
     row, _ = chat("legacy")
-    assert runtime_session_mode(row) == "code"
-    options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=row["id"])
-    assert not options.aih_owner_coordinator
-    assert not options.aih_tool_allowlist or "Bash" in options.aih_tool_allowlist
+    assert runtime_session_mode(row) == "chat"
+    options, _ = query_options.build_options_from_profile(
+        database.get_profile("agent"), session_id=row["id"],
+    )
+    assert options.aih_owner_coordinator
+    for tool in ("Bash", "Edit", "Write", "run_python"):
+        assert not tool_permitted(tool, options.aih_tool_allowlist, options.disallowed_tools)
 
 
 async def test_project_starter_work_is_not_coordination_spending(owner):

@@ -245,7 +245,7 @@
 	}
 	.runs-on:hover, .runs-on.open { background: color-mix(in oklch, var(--muted) 82%, var(--foreground)); color: var(--foreground); }
 	.runs-on:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.runs-on.peer { background: color-mix(in oklch, var(--primary) 12%, var(--muted)); color: var(--primary); }
+	.runs-on.peer { background: color-mix(in oklab, var(--primary) 12%, var(--muted)); color: var(--primary); }
 	.runs-on-lbl { color: var(--subtle-foreground); }
 	.runs-on.peer .runs-on-lbl { color: inherit; opacity: 0.8; }
 	.runs-on-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--foreground); font-weight: 550; }

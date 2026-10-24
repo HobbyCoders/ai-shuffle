@@ -66,7 +66,7 @@
 <style>
 	.access-prompt-dock { padding: 0 0.75rem 0.625rem; }
 	:global(html[data-platform='desktop']) .access-prompt-dock { padding-right: 1.5rem; padding-left: 1.5rem; }
-	.access-prompt { max-width: 48rem; margin: 0 auto; border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); }
+	.access-prompt { max-width: 48rem; margin: 0 auto; border-color: color-mix(in oklab, var(--warning) 45%, var(--border)); }
 	.access-prompt .pa-head { padding: 0.625rem 0.75rem; }
 	.review { flex-shrink: 0; min-height: 44px; padding: 0 1rem; }
 	.review:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }

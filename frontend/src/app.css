@@ -111,7 +111,15 @@
 		--rose: oklch(0.70 0.175 20);
 		--blue: oklch(0.72 0.115 250);
 
-		/* Semantic colors (same hues as the accent set above) */
+		/* Semantic colors (same hues as the accent set above)
+
+		   Status tints: mix a status colour with a theme neutral in oklab,
+		   e.g. color-mix(in oklab, var(--warning) 9%, var(--card)). The
+		   neutrals carry an explicit hue at near-zero chroma (240 here, 0 in
+		   the light theme), and an oklch mix pulls the tint towards it: pink
+		   in light, blue-grey in dark (#599). oklch stays fine against
+		   transparent, white or black, and for a blend of two real hues.
+		   src/lib/themes/status-tints.test.ts enforces this. */
 		--destructive: oklch(0.70 0.175 20);
 		--destructive-foreground: oklch(0.18 0.045 20);
 		--success: oklch(0.76 0.15 155);
@@ -234,7 +242,7 @@
 		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
 		--input-bg-focus: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
 		--input-border: var(--border);
-		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
+		--input-border-hover: color-mix(in oklab, var(--border) 70%, var(--primary) 30%);
 
 		/* Typography - font families (can be overridden by theme presets) */
 		--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -389,7 +397,7 @@
 		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
 		--input-bg-focus: var(--background);
 		--input-border: var(--border);
-		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
+		--input-border-hover: color-mix(in oklab, var(--border) 70%, var(--primary) 30%);
 
 		/* Primary variations */
 		--primary-10: oklch(0.60 0.115 180 / 0.1);
