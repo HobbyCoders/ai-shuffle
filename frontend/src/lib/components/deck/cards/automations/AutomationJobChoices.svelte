@@ -556,10 +556,10 @@
 		align-items: flex-start;
 		gap: 10px;
 		padding: 10px 12px;
-		border: 1px solid color-mix(in oklch, var(--warning) 45%, var(--border));
+		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
 		border-left-width: 3px;
 		border-radius: 8px;
-		background: color-mix(in oklch, var(--warning) 9%, var(--card));
+		background: color-mix(in oklab, var(--warning) 9%, var(--card));
 		font-size: 12px;
 		line-height: 1.45;
 		color: var(--muted-foreground);
@@ -621,7 +621,7 @@
 		background: var(--primary);
 	}
 	.ajc-row[data-tier='remembered']::before {
-		background: color-mix(in oklch, var(--primary) 35%, var(--border));
+		background: color-mix(in oklab, var(--primary) 35%, var(--border));
 	}
 	.ajc-row[data-tier='unreadable']::before {
 		background: var(--warning);
@@ -695,7 +695,7 @@
 	}
 	.ajc-ladder li.on {
 		color: var(--foreground);
-		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
 		font-weight: 600;
 	}
@@ -735,7 +735,7 @@
 	}
 	.ajc-btn:hover:not(:disabled) {
 		background: var(--hover-overlay, var(--muted));
-		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
 	}
 	.ajc-btn:active:not(:disabled) {
 		transform: translateY(1px);
@@ -751,7 +751,7 @@
 	}
 	.ajc-btn[aria-expanded='true'] {
 		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, var(--card));
+		background: color-mix(in oklab, var(--primary) 8%, var(--card));
 	}
 	.ajc-btn.ghost {
 		background: transparent;
@@ -759,7 +759,7 @@
 	}
 	.ajc-btn.ghost:hover:not(:disabled) {
 		color: var(--destructive);
-		border-color: color-mix(in oklch, var(--destructive) 35%, var(--border));
+		border-color: color-mix(in oklab, var(--destructive) 35%, var(--border));
 		background: color-mix(in oklch, var(--destructive) 8%, transparent);
 	}
 	.ajc-btn.sm {
@@ -945,7 +945,7 @@
 		gap: 8px;
 		margin-left: 40px;
 		padding: 10px;
-		border: 1px dashed color-mix(in oklch, var(--primary) 35%, var(--border));
+		border: 1px dashed color-mix(in oklab, var(--primary) 35%, var(--border));
 		border-radius: 10px;
 		background: color-mix(in oklch, var(--primary) 3%, transparent);
 		animation: ajc-in 200ms ease-out both;

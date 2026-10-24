@@ -33,11 +33,7 @@ const HUELESS = new Set(['transparent', 'white', 'black', 'currentcolor']);
  * Files whose status tints are converted by another open pull request.
  * Each entry must still contain a polar mix, so a fixed file can't linger here.
  */
-const PENDING: Record<string, string> = {
-	// PR #600 edits this file and already mixes its own new rules in oklab;
-	// the older rules are converted once it lands (#605).
-	'frontend/src/lib/components/deck/cards/automations/AutomationJobChoices.svelte': '#605'
-};
+const PENDING: Record<string, string> = {};
 
 function* sourceFiles(dir: string): Generator<string> {
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
