@@ -243,7 +243,20 @@ Include in your PR description:
 A PR whose description says it was "not tried on real workers" also adds a
 row to `scripts/live_smoke/scenarios.json` that would catch the bug on
 the real workers, so the pre-release live smoke covers it (see
-[live-smoke.md](live-smoke.md)).
+[live-smoke.md](live-smoke.md)). New rows use a stable named ID such as
+`harness-basics.pr521-merged-catalog`, never the next free number. Keep all
+existing numeric IDs unchanged. Insert rows in lexicographic ID order within
+their suite (including legacy numeric IDs, so `.10` sorts before `.2`) rather
+than appending; the catalog test enforces this to reduce parallel-edit conflicts.
+Regenerate `docs/internal/live-smoke-scenarios.md` with
+`python -m scripts.live_smoke render`, then run it with `--check`.
+
+CI Backend runs `render --check` on every pull request, including drafts, with
+`actions/checkout`'s default merge ref (`refs/pull/<number>/merge`). Thus two
+branches that pass independently but introduce duplicate IDs when combined fail
+on the merged catalog, not just on the branch head. The full backend suite also
+loads and validates that catalog. Resolve any generated-table conflicts by
+keeping both source rows and regenerating, never by renumbering existing IDs.
 
 ### 3. PR Template
 
