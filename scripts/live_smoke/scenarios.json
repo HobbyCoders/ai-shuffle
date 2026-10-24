@@ -440,6 +440,14 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.34",
+          "check": "Required Docker isolation refuses before root writes",
+          "kind": "owner",
+          "how": "Run the disposable-image preflight matrix in agent-shell-isolation.md.",
+          "pass_when": "Bad starts leave sentinels unchanged; valid required starts isolated.",
+          "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
+        },
+        {
           "id": "harness-basics.26",
           "check": "Bounded home ownership repair progresses across persistent-volume restarts",
           "kind": "owner",
