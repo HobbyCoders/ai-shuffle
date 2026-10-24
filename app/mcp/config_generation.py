@@ -1,7 +1,6 @@
 """Conversational controls for the owner's remembered and job generation picks."""
 
 from typing import Any
-from uuid import UUID
 
 from app.mcp.config_helpers import _error, _tool_result
 
@@ -22,7 +21,7 @@ def _create_generation_tools(is_admin: bool, *, writable: bool = False) -> list[
             "properties": {
                 "action": {"type": "string", "enum": ["get", "remember", "forget"]},
                 "kind": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
-                "job_id": {"type": "string", "description": "Existing automation UUID."},
+                "job_id": {"type": "string", "description": "Existing automation ID."},
                 "choice": {
                     "type": "object",
                     "properties": {
@@ -56,16 +55,13 @@ def _create_generation_tools(is_admin: bool, *, writable: bool = False) -> list[
         def apply() -> dict:
             from app.core import generation_choices as choices
             from app.core.preference_identity import principal_preference_identity
-            from app.db import database
 
             # Same authenticated owner namespace as the Settings API and run context.
             # Never accept an identity/account principal supplied in tool arguments.
             identity = principal_preference_identity({"kind": "admin"})
             job_id = args.get("job_id")
             if job_id is not None:
-                job_id = str(UUID(job_id))
-                if database.get_automation(job_id) is None:
-                    raise ValueError("Unknown automation.")
+                job_id = choices.validate_job_id(job_id)
             if action == "get":
                 stored = (
                     choices.load_job(identity, job_id)
@@ -100,7 +96,7 @@ def _create_generation_tools(is_admin: bool, *, writable: bool = False) -> list[
             return _tool_result({"success": True, **await run_sync(apply)})
         except (ValueError, TypeError):
             return _error(
-                "Invalid choice or job: use a known automation UUID and a model "
+                "Invalid choice or job: use an existing automation ID and a model "
                 "with source/account; job choices also need account and worker."
             )
         except Exception:  # noqa: BLE001 - never expose identity/database internals

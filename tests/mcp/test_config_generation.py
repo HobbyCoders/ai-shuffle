@@ -3,7 +3,6 @@
 import json
 from typing import Any
 from unittest.mock import AsyncMock
-from uuid import uuid4
 
 import pytest
 
@@ -98,7 +97,19 @@ async def test_conversational_writer_binds_production_context_and_forget() -> No
 
 @pytest.mark.asyncio
 async def test_job_writer_is_bound_only_to_existing_automation() -> None:
-    job_id = str(uuid4())
+    from app.core.automation_service import create_automation
+
+    automation = await create_automation(
+        name="Fixture",
+        trigger_type="interval",
+        trigger_config={"seconds": 300},
+        profile_id="default",
+        prompt="hi",
+    )
+    job_id = automation["id"]
+    assert job_id.startswith("auto-")
+    assert not automation["is_enabled"]
+    assert (await call({"action": "get", "job_id": job_id}))["choices"] == {}
     args = {
         "action": "remember",
         "job_id": job_id,
@@ -106,15 +117,6 @@ async def test_job_writer_is_bound_only_to_existing_automation() -> None:
         "choice": PICK,
         "confirm": True,
     }
-    assert (await call(args))["success"] is False
-    database.create_automation(
-        automation_id=job_id,
-        name="Fixture",
-        trigger_type="interval",
-        trigger_config={"seconds": 300},
-        profile_id="default",
-        prompt="hi",
-    )
     assert (await call(args))["success"] is True
     assert context(job_id).job_choices == {"image": PICK}
     assert context().job_choices is None
@@ -128,6 +130,17 @@ async def test_job_writer_is_bound_only_to_existing_automation() -> None:
         "success"
     ]
     assert context(job_id).job_choices == {}
+
+
+@pytest.mark.parametrize("action", ["get", "remember", "forget"])
+@pytest.mark.parametrize("job_id", ["auto-ffffffff", "../auto-12345678", ""])
+@pytest.mark.asyncio
+async def test_job_actions_reject_missing_or_unsafe_automations(action: str, job_id: str) -> None:
+    result = await call(
+        {"action": action, "job_id": job_id, "kind": "image", "choice": PICK, "confirm": True}
+    )
+    assert result["success"] is False
+    assert choices.load(OWNER, run_migration=False)["remembered"] == {}
 
 
 @pytest.mark.parametrize(
