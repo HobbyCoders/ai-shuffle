@@ -21,6 +21,23 @@ with a 15-second limit; a request pinned to this worker does not ask them. A
 malformed peer reply marks only that worker unavailable, and the fal catalog
 search is returned even when the priced lookup fails.
 
+The same source/account/model/options on several workers is one option: a usable
+local holder is preferred, otherwise the holder is chosen by worker ID. Different
+accounts or options remain separate. A single quoted match exposes its price both
+on the option and at the top level; with several matches, read each option's price.
+Default options are resolved by the same pricing code used for generation. Prices
+that depend on missing call inputs (for example text length) remain unknown.
+
+`searchModels` returns compact schemas by default: declared field names, types,
+required flags, enums, defaults and numeric bounds, without descriptions or the
+raw OpenAPI document. Each schema is limited to 32 fields and 4 KiB, with individual
+values limited to 512 characters of JSON. Omitted values/fields set
+`schema.truncated: true`; oversized option defaults set `options_omitted: true`.
+The default response is at most 32 KiB of ASCII-escaped JSON; omitted results set
+`truncated: true` and match counts remain unchanged. Pass `full_schema: true` to
+request complete schemas and defaults. Choice cards still receive complete schemas.
+Media-related boolean switches such as `generate_audio` stay boolean, not file inputs.
+
 Every call to the four generation tools or `runFalModel`, including subscription
 images priced **Included**, goes through the guard below: a known price,
 confirmation above the threshold and the daily cap. Nothing unpriced is
@@ -46,7 +63,7 @@ submitted, including unattended calls.
   priced request still runs through the guard. The built-in fal default is not a choice: with nothing
   saved, the user is asked. The ChatGPT-plan image setting
   stays a provider rule and is not migrated. Chat mode has no Settings default.
-- **Named choices** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
+- **Named choices in interactive runs** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
   daily cap. A named model the guard cannot price or resolve is refused, never
   run on another path. Outside chat mode, a guarded fal result run on this worker
   also returns the workspace `file_path`, so `editImage` and `imageToVideo`
@@ -203,7 +220,15 @@ tool arguments. A job choice takes precedence over a remembered choice. With
 neither stored choice, an unattended run returns `status: "skipped"`,
 `reason: "no_stored_choice"` and a plain-language report, even if an agent
 supplies a source in its tool call. A result that ran the remembered choice has
-`remembered: true`.
+`remembered: true`. If an unattended call names a source, account, model or worker
+that differs from the remembered choice, it returns `status: "skipped"` and
+`reason: "named_choice_differs_from_stored"` before any catalog lookup or submission.
+The owner must select the named choice; tool arguments never replace the stored one.
+A job's own stored choice is the owner's binding for that job: an unattended job run
+uses it whatever source, account, model or worker the call names (declared options in
+the call still apply, under the same price, confirmation and cap checks), and the
+result has `job_choice: true`.
+A matching named choice keeps the normal pricing, confirmation and daily-cap checks.
 
 ## Remembered choices
 
@@ -219,7 +244,14 @@ preferences:
   copied. A remembered choice is never overwritten by the migration.
 
 `GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
-saves a pick (`remember: false` records only the last choice);
+saves a pick (`remember: false` records only the last choice). The save response
+includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
+choice cannot run unattended. An unpriced model reports `stored_choice_unpriced`.
+An unavailable account/model or failed quote reports `stored_choice_unavailable`,
+with the quote's error in `quote_error` and the warning. The optional quote has a
+two-second timeout; a failed quote does not lose the saved pick. No price is inferred
+for an unpriced model, and saving never reserves or submits a generation. Frontend
+clients must display this warning after saving or remembering a pick.
 `DELETE /api/v1/generation/choices/{kind}` asks again next time.
 `GET /api/v1/generation/options/{kind}` lists priced options across accounts
 and `POST /api/v1/generation/quote` validates options against the model's
