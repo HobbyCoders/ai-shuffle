@@ -6,6 +6,24 @@ from app.db import session_events as se
 from app.db import runs
 
 
+def test_swarm_projection_is_session_scoped_latest_and_first_publication_order(mock_db):
+    def event(key, status):
+        return {"type": "swarm.updated", "payload": {"swarm": {"id": key, "status": status}}}
+
+    se.append_events("s1", [event("b", "running"), {"type": "message.delta"},
+                            event("a", "running"), event("b", "completed")])
+    se.append_events("s2", [event("b", "failed")])
+    assert se.get_latest_swarm_snapshots("missing") == []
+    assert se.get_latest_swarm_snapshots("s1") == [
+        {"id": "b", "status": "completed"}, {"id": "a", "status": "running"},
+    ]
+    # A mirrored/late durable publication is immediately visible; no process
+    # cache or live coordinator masks it, and another session cannot leak in.
+    se.append_events("s1", [event("a", "cancelled")])
+    assert se.get_latest_swarm_snapshots("s1")[1] == {"id": "a", "status": "cancelled"}
+    assert se.get_latest_swarm_snapshots("s2") == [{"id": "b", "status": "failed"}]
+
+
 def test_seqs_start_at_one_and_are_contiguous(mock_db):
     fs1, ls1 = se.append_events("s1", [{"type": "a"}, {"type": "b"}])
     assert (fs1, ls1) == (1, 2)

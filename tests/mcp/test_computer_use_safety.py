@@ -170,7 +170,11 @@ def test_overlay_position_passes_signed_coordinates_to_win32(monkeypatch):
     user32.SetWindowPos.assert_called_once_with(123, -1, -1920, -1080, 1920, 1080, 0x50)
 
 
-def test_agent_cursor_drawn_at_physical_point_relative_to_active_display():
+def test_agent_cursor_drawn_at_physical_point_relative_to_active_display(monkeypatch):
+    # Geometry is independent of renderer scheduling. The click pulse lasts
+    # 0.8 s; a busy worker can be descheduled between record() and _draw().
+    monkeypatch.setattr(activity, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    monkeypatch.setattr(overlay, "time", SimpleNamespace(monotonic=lambda: 100.0))
     manager = overlay._OverlayManager()
     manager._canvas = MagicMock()
     geo = {"left": -1920, "top": -200, "width": 1920, "height": 1080}
@@ -178,6 +182,20 @@ def test_agent_cursor_drawn_at_physical_point_relative_to_active_display():
     manager._draw((-1920, -200, 1920, 1080), "Display 2", activity.snapshot())
     assert manager._canvas.create_polygon.call_args.args[:2] == (100, 50)
     manager._canvas.create_oval.assert_called_once()
+
+
+@pytest.mark.parametrize("age,pulse", [(0.0, True), (0.79, True), (0.8, False), (1.0, False)])
+def test_agent_click_pulse_expires_but_cursor_remains(monkeypatch, age, pulse):
+    clock = SimpleNamespace(monotonic=lambda: 0.0)
+    monkeypatch.setattr(activity, "time", clock)
+    monkeypatch.setattr(overlay, "time", clock)
+    activity.record(2, session_id="s", action="left_click", cursor=(-1820, -150))
+    clock.monotonic = lambda: age
+    manager = overlay._OverlayManager()
+    manager._canvas = MagicMock()
+    manager._draw((-1920, -200, 1920, 1080), "Display 2", activity.snapshot())
+    assert manager._canvas.create_polygon.call_args.args[:2] == (100, 50)
+    assert manager._canvas.create_oval.call_count == int(pulse)
 
 
 _FMODEL = {"id": 7, "title": "FModel - Archive", "app": "FModel", "display": 2,
