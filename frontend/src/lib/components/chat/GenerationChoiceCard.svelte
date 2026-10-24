@@ -1064,16 +1064,16 @@
 		border: 1px solid var(--border);
 		border-left: 2px solid var(--success, var(--foreground));
 		border-radius: var(--gcc-inner-radius);
-		background: color-mix(in oklch, var(--success, var(--muted)) 6%, var(--card));
+		background: color-mix(in oklab, var(--success, var(--muted)) 6%, var(--card));
 		font-size: 0.75rem;
 		line-height: 1.45;
 		animation: gcc-expand 0.2s ease-out both;
 	}
 	.gcc-saved[data-state='unpriced'],
 	.gcc-saved[data-state='unavailable'] {
-		border-color: color-mix(in oklch, var(--warning) 40%, var(--border));
+		border-color: color-mix(in oklab, var(--warning) 40%, var(--border));
 		border-left-color: var(--warning);
-		background: color-mix(in oklch, var(--warning) 8%, var(--card));
+		background: color-mix(in oklab, var(--warning) 8%, var(--card));
 	}
 	.gcc-saved-icon {
 		display: grid;
@@ -1110,7 +1110,7 @@
 	.gcc-saved-tag {
 		padding: 0 6px;
 		border-radius: 999px;
-		border: 1px solid color-mix(in oklch, var(--warning) 45%, var(--border));
+		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
 		font-size: 0.625rem;
 		font-weight: 600;
 		letter-spacing: 0.01em;
