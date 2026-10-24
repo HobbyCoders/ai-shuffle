@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.api import generation_choices as api
 from app.core.generation_resolver import Candidate
+from app.services.generation_sources import Sources as ProductionSources
 from tests.core.test_generation_resolver import FakeBackend, candidate
 
 IDENTITY = ("account", "origin#owner")
@@ -52,7 +53,10 @@ def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(
     from app.core.generation_resolver import INCLUDED_PRICE
     from app.db import database, model_providers
     from app.network import generation
+    from app.services import generation_sources
 
+    # The client fixture stubs Sources; this test exercises the production one.
+    monkeypatch.setattr(generation_sources, "Sources", ProductionSources)
     rows = [{"id": "local-plan", "provider_type": "chatgpt"},
             {"id": "unverified-api", "provider_type": "openai", "auth_mode": "api_key"}]
     monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)
@@ -175,6 +179,8 @@ def test_job_choices_require_owner_even_for_preference_writers(client: TestClien
 @pytest.fixture
 def client(mock_db, monkeypatch):
     from app.network import runners
+    from app.services import generation_sources
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: FakeBackend([]))
     monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
     monkeypatch.setattr(api, "request_preference_identity", lambda request: IDENTITY)
     app = FastAPI()
