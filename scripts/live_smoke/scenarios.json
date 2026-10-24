@@ -530,6 +530,14 @@
           "past_bug": "The phone attach sheet could not be swiped closed, and the approval and generation choice cards used their own rails, tints and uppercase badges."
         },
         {
+          "id": "harness-basics.owner-detection-memory",
+          "check": "Detected owner identity reaches fresh native and delegated chats",
+          "kind": "owner",
+          "how": "Disposable worker: detect Ada; Recall in fresh chats; Remember Grace; redetect.",
+          "pass_when": "Grace wins; no duplicates or addresses; Git author stays unchanged.",
+          "past_bug": "#556: account detection did not feed ordinary owner memory."
+        },
+        {
           "id": "harness-basics.approval-self-gated-tools",
           "check": "Tools with their own consent card ask once in an owner chat",
           "kind": "owner",
