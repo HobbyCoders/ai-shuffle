@@ -236,16 +236,27 @@ def migrate() -> bool:
         return True
 
 
-def promote_batch(*, rows: int = 8, byte_budget: int = 128_000) -> int:
+def promote_batch(
+    *, rows: int = 8, byte_budget: int = 128_000, seconds: float = 0.1,
+    can_work: Callable[[], bool] = lambda: True,
+) -> int:
     """Promote a bounded locked batch, atomically with its index updates.
 
     A single oversize source row is allowed to ensure forward progress. SKIP LOCKED
     and a short lock timeout avoid waiting behind live writers. The compact
-    projection has its own durable queue; events' existing update trigger may
-    promote their pieces early in the same transaction, which is safe.
+    projection has its own durable queue. Row, byte and elapsed-time budgets
+    apply to the entire call, not separately to every table. A statement already
+    executing cannot be preempted; recheck the foreground gate before each row.
     """
     count = 0
+    used = 0
+    limit = max(1, min(rows, 32))
+    deadline = time.monotonic() + seconds
     for table, (keys, payload) in TABLES.items():
+        if not can_work() or (count and time.monotonic() >= deadline):
+            return count
+        if count >= limit or used >= byte_budget:
+            return count
         with get_db() as conn:
             cur = conn.cursor()
             if not enabled(cur):
@@ -255,10 +266,11 @@ def promote_batch(*, rows: int = 8, byte_budget: int = 128_000) -> int:
             # An indexed queue, independent of table size or promotion progress.
             cur.execute(f"SELECT {keys}, pg_column_size({payload}) AS bytes FROM {table} "
                         f"WHERE {COLUMN} = 1 ORDER BY {keys} LIMIT %s FOR UPDATE SKIP LOCKED",
-                        (max(1, min(rows, 32)),))
+                        (limit - count,))
             candidates = cur.fetchall()
-            used = 0
             for row in candidates:
+                if not can_work() or (count and time.monotonic() >= deadline):
+                    return count
                 size = row["bytes"] or 0
                 if used and used + size > byte_budget:
                     break
@@ -286,7 +298,7 @@ def run_pass(
     while time.monotonic() < deadline:
         if not can_work():
             return False
-        if not promote_batch():
-            return True
+        if not promote_batch(can_work=can_work):
+            return can_work()
         time.sleep(pause)
     return False

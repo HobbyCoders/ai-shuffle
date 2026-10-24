@@ -3,6 +3,7 @@ import json
 import os
 import random
 import time
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -367,7 +368,7 @@ def chat():
 
 
 @pytest.mark.skipif(os.environ.get("HANDOFF_LAB") != "1", reason="opt-in 20k-row measurement")
-def test_import_lab(chat, capsys):
+def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     from app.db import network, session_recall
     from app.db.schema_postgres import create_session_recall_text
 
@@ -395,10 +396,20 @@ def test_import_lab(chat, capsys):
     if os.environ.get("HANDOFF_LAB_DROP_DUPLICATE") == "1":
         with base.get_db() as conn:
             conn.cursor().execute("DROP INDEX idx_fluid_recall_text_trgm")
+    from tests.db.history_index_lab import LiveInserts
+    idle_sampler = LiveInserts(offset=2_000_000)
+    idle_sampler.start()
+    try:
+        time.sleep(30)
+    finally:
+        idle_latency = idle_sampler.finish()
+    with capsys.disabled():
+        print("HANDOFF_IDLE_LAB " + json.dumps({"seconds": 30,
+              "live_latency_seconds": idle_latency}))
     measured = {}
     original = network._insert_rows
 
-    def insert(cur, table, *args, **kwargs):
+    def insert(cur: Any, table: str, *args: Any, **kwargs: Any) -> Any:
         start = time.monotonic()
         result = original(cur, table, *args, **kwargs)
         measured[table] = measured.get(table, 0) + time.monotonic() - start
@@ -408,7 +419,6 @@ def test_import_lab(chat, capsys):
         cur = conn.cursor()
         cur.execute("SELECT pg_current_wal_insert_lsn() AS lsn")
         lsn = cur.fetchone()["lsn"]
-    from tests.db.history_index_lab import LiveInserts
     sampler = LiveInserts()
     sampler.start()
     start = time.monotonic()

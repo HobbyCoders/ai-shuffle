@@ -711,6 +711,14 @@
           "past_bug": "#580: stalled commits drained the pool and interrupted active turns."
         },
         {
+          "id": "harness-basics.deferred-history-catchup-yield",
+          "check": "Experimental history catch-up yields within a globally bounded batch",
+          "kind": "owner",
+          "how": "On disposable candidate workers only, opt in to history indexing and import synthetic history. Start a foreground turn during catch-up and inspect promotion counts across every table. Restart the disposable receiver between source and projection promotion, then resume. Run the cold hand-off lab sequentially with an idle-only control and ordinary-index control; record insert acquisition, execute and commit timings, sample counts, median/p95/max, import/catch-up time and total WAL.",
+          "pass_when": "Catch-up stops before the next row when a foreground turn starts; the row, byte and time budgets span all tables in a call. State-only event promotion leaves projection text in its independent durable queue without deleting/reinserting it. Restart resumes both queues, live edits remain searchable, and no history pending-list flush runs on a live writer. Keep activation explicit until latency and total WAL acceptance is demonstrated; tests alone are not live acceptance.",
+          "past_bug": "#571: per-table budgets and state-only projection rewrites amplified background I/O while catch-up competed with live writes."
+        },
+        {
           "id": "harness-basics.deferred-history-indexing",
           "check": "Deferred history indexing catches up without stalling live chats",
           "kind": "owner",
