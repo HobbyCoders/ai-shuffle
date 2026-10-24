@@ -1,7 +1,8 @@
 <script lang="ts">
- import { ChevronDown, LoaderCircle, Check, X, CirclePause } from 'lucide-svelte';
+ import { ChevronDown, LoaderCircle, Check, X, CirclePause, Server } from 'lucide-svelte';
  import { swarms } from '$lib/stores/swarms';
- import { isSwarmActive, parseSwarm, resolveSwarm, swarmStages } from '$lib/utils/swarm';
+ import { sessions } from '$lib/stores/app-data.svelte';
+ import { isSwarmActive, parseSwarm, resolveSwarm, swarmStages, type SwarmTask } from '$lib/utils/swarm';
  import { openSubagentLink, sessionHref } from '$lib/services/session-navigation';
  let { sessionId, input, result, status, expanded = $bindable(false) }: {
   sessionId?: string | null; input?: Record<string, unknown>; result?: string;
@@ -20,6 +21,16 @@
  const stages = $derived(swarmStages(snapshot?.tasks ?? []));
  const refreshError = $derived($swarms.errors[owner ?? '']);
  const title = $derived(snapshot?.title || (typeof input?.title === 'string' ? input.title : 'Agent workflow'));
+ // The worker the coordinating chat runs on. Remote dispatch is the only path
+ // that records `task.worker`, so a task without one runs beside the chat.
+ const chatDevice = $derived.by(() => {
+  const row = $sessions.find(s => s.id === (snapshot?.session_id ?? owner));
+  return row?.owner_device_id || row?.instance_id || null;
+ });
+ const runsElsewhere = (task: SwarmTask) => {
+  const name = typeof task.worker?.name === 'string' ? task.worker.name.trim() : '';
+  return name && task.worker?.device_id !== chatDevice ? name : null;
+ };
  const workflowStatus = $derived(snapshot?.status ?? (status === 'error' ? 'failed' : status === 'running' ? 'starting' : 'unavailable'));
  $effect(() => { if (initial) swarms.receive(initial, owner ?? undefined); });
  $effect(() => { if (owner) void swarms.hydrate(owner); });
@@ -60,15 +71,20 @@
       {/if}
       <div class="tasks">
        {#each stage.tasks as task (task.id)}
+        {@const elsewhere = runsElsewhere(task)}
         <details class="task" data-state={task.status}>
          <summary>
           <span class="task-dot" aria-hidden="true"></span>
           <strong class="task-title" title={task.title || task.id}>{task.title || task.id}</strong>
           <span class="agent" title={task.agent}>{task.agent}</span>
+          {#if elsewhere}
+           <span class="worker" title={`Runs on ${elsewhere}`} data-testid="swarm-task-worker"><Server size={11} aria-hidden="true" /><span class="sr-only">{'Runs on '}</span><span class="worker-name">{elsewhere}</span></span>
+          {/if}
           <span class="state" data-state={task.status}>{task.status}</span>
           <ChevronDown size={13} class="task-chevron" aria-hidden="true" />
          </summary>
          <div class="task-body">
+          {#if elsewhere}<p class="runs-on">Runs on <strong>{elsewhere}</strong><span class="runs-on-agent">{` · ${task.agent}`}</span></p>{/if}
           {#if task.depends_on.length}<p class="dependencies">After: {task.depends_on.map(id => snapshot?.tasks.find(t => t.id === id)?.title || id).join(' · ')}</p>{/if}
           {#if task.status === 'blocked'}<p>Dependencies must complete before this task can start.</p>
           {:else if task.status === 'queued'}<p>Waiting for dependencies or an available agent.</p>
@@ -137,6 +153,10 @@
  .task[data-state='failed'] .task-dot, .task[data-state='blocked'] .task-dot { border-color: var(--rose); }
  .task-title { min-width: 0; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
  .agent { min-width: 0; flex: 1; font-size: 11px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .worker { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 10rem; flex: 0 1 auto; padding: 1px 6px 1px 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--scrim); color: var(--muted-foreground); font-size: 10.5px; line-height: 14px; }
+ .worker :global(svg) { flex: none; color: var(--subtle-foreground); }
+ .worker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .runs-on { color: var(--muted-foreground); } .runs-on strong { color: var(--foreground); font-weight: 600; } .runs-on-agent { display: none; }
  .task-body { margin: 2px 0 6px 11px; border-left: 1px solid var(--border); padding: 6px 10px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
  p { margin: 0 0 6px; } .dependencies, .muted { color: var(--muted-foreground); font-size: 12px; }
  pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 11px/1.7 var(--font-mono); max-height: 24rem; overflow: auto; margin: 6px 0; }
@@ -150,5 +170,7 @@
  .raw-result { margin: 0 8px 8px; }
  @keyframes spin { to { transform: rotate(360deg); } }
  @media (prefers-reduced-motion: reduce) { .swarm :global(.running-icon), .task[data-state='running'] .task-dot { animation: none; } }
- @media (max-width: 639px) { .heading, summary { min-height: 44px; } .text-button, .transcript-link { min-height: 44px; } .task-title { flex: 1; } .agent { flex: 0 1 70px; } }
+ @media (max-width: 639px) { .heading, summary { min-height: 44px; } .text-button, .transcript-link { min-height: 44px; } .task-title { flex: 1; } .agent { flex: 0 1 70px; }
+  /* A worker chip leaves no room for the agent label: the expanded body names it instead. */
+  .task:has(.worker) .agent { display: none; } .runs-on-agent { display: inline; } .worker { max-width: 112px; } }
 </style>

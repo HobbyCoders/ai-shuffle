@@ -481,6 +481,10 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         kick(session_id)
         return
 
+    from app.core.coordinator_handoff import on_session_rest
+    if await on_session_rest(session_id, settled, terminal, outcome):
+        return
+
     # (3) AUTO-CONTINUE — only when nothing is queued (a queued turn
     # resumes work on its own).
     if await _maybe_auto_continue(session_id, settled, terminal):
@@ -1979,7 +1983,8 @@ async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) ->
     ones Task completions use.
     """
     async with _terminal_delivery_lock(session_id):
-        from app.core.session_orchestration import defer_started_report
+        from app.core.session_orchestration import defer_started_report, record_started_report
+        await record_started_report(session_id, frame)
         if await defer_started_report(session_id, frame):
             return
         return await _on_task_terminal_locked(session_id, frame, started_session=True)
@@ -2064,6 +2069,11 @@ async def _on_task_terminal_locked(
         # An explicitly admitted follow-up has its own report; the old completed
         # Swarm must neither swallow it nor rerun its already-finished successors.
         from app.core.task_registry import task_registry
+
+        if (_frame_has_renderable_content(frame)
+                and (started_session or task_registry.is_own_background_task(session_id, task_id))):
+            from app.core.working_record import record_task_report
+            await asyncio.to_thread(record_task_report, session_id, frame)
 
         # STOP SEMANTICS. The user pressed Stop and has not messaged
         # this session since, so NOTHING here schedules a turn — not a task the

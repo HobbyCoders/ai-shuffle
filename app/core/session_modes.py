@@ -100,7 +100,7 @@ CHAT_MODE_ORCHESTRATION_TOOLS = [
 ]
 CHAT_MODE_APP_TOOLS = [
     "GetAppLogs", "GetAppErrors", "DeployStatus", "GetUsage", "NotifyDevices",
-    "ScheduleWakeup", "CronCreate", "CronList", "CronDelete",
+    "ScheduleWakeup", "CronCreate", "CronList", "CronDelete", "WorkingRecord",
 ]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
     *CHAT_MODE_BASIC_TOOL_SURFACE, "Glob", "Grep",

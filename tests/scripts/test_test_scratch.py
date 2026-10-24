@@ -55,7 +55,8 @@ def test_local_ci_pytest_scratch_does_not_nest_socket_paths(tmp_path):
         f"    pathlib.Path({str(record)!r}).write_text(str(path))\n"
     )
     local_ci.run([sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
-                  str(suite), "-n", "2", "-q"], env={"PYTHONPATH": str(ROOT)}, timeout=60)
+                  str(suite), "--rootdir", str(tmp_path), "--confcutdir", str(tmp_path),
+                  "-n", "2", "-q"], env={"PYTHONPATH": str(ROOT)}, timeout=60)
     path = Path(record.read_text())
     assert "ai-shuffle-ci-" not in str(path)
     assert not path.exists()
@@ -82,8 +83,9 @@ def test_pytest_owns_and_removes_basetemp(tmp_path, parallel, failure):
                      f"    __import__('pathlib').Path({str(record)!r}).write_text(str(tmp_path))\n"
                      f"    assert {not failure!r}\n")
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    # Do not scan ancestors/siblings of a fixture on another Windows drive.
     command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
-               str(suite), "-q"]
+               str(suite), "--rootdir", str(tmp_path), "--confcutdir", str(tmp_path), "-q"]
     if parallel:
         command += ["-n", "2"]
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60, check=False)
@@ -122,7 +124,8 @@ def test_sigterm_unwinds_owned_scratch(tmp_path, runner):
                          "    time.sleep(60)\n"
                          "def test_second():\n"
                          f"    pathlib.Path({str(second)!r}).touch()\n")
-        command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch", str(suite), "-q"]
+        command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch", str(suite),
+                   "--rootdir", str(tmp_path), "--confcutdir", str(tmp_path), "-q"]
         if runner == "pytest-xdist":
             # Keep both tests on one worker so the second is queued, not already
             # running independently when the controller receives SIGTERM.
@@ -239,7 +242,8 @@ def test_explicit_basetemp_is_caller_owned(tmp_path, parallel):
     suite.write_text("def test_payload(tmp_path):\n"
                      f"    __import__('pathlib').Path({str(record)!r}).write_text(str(tmp_path))\n")
     command = [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
-               str(suite), "--basetemp", str(requested), "-q"]
+               str(suite), "--rootdir", str(tmp_path), "--confcutdir", str(tmp_path),
+               "--basetemp", str(requested), "-q"]
     if parallel:
         command += ["-n", "2"]
     result = subprocess.run(

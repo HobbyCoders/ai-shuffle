@@ -4,7 +4,9 @@ import asyncio
 import os
 import shlex
 import subprocess
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
+
+import anyio
 
 import pytest
 
@@ -183,6 +185,66 @@ def test_monitor_disconnect_and_owner_revocation_do_not_stop_shell(shells, ctx, 
         assert close_code(ws) == 4001
     assert task.is_running()
     release.touch()
+
+
+async def test_monitor_disconnect_cleanup_survives_server_cancel_scope(monkeypatch):
+    """Disconnect wins first; server cancellation arrives while children drain."""
+    disconnected, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sent, finished = asyncio.Event(), asyncio.Event()
+    scopes = []
+    websocket = MagicMock()
+    websocket.accept = AsyncMock()
+
+    async def receive():
+        await disconnected.wait()
+        return {"type": "websocket.disconnect"}
+
+    async def send(*args):
+        sent.set()
+
+    async def guard(*args):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        cleaning.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            pass
+        # Task cancellation need not carry the enclosing AnyIO scope's message
+        # or exception context (e.g. an already-cancelled executor future).
+        raise asyncio.CancelledError("child cancellation")
+
+    websocket.receive = receive
+    monkeypatch.setattr(api, "authenticate_terminal_socket", AsyncMock(return_value="owner"))
+    monkeypatch.setattr(api, "_monitor_task", lambda *args: object())
+    monkeypatch.setattr(api, "_monitor_snapshot", lambda *args: {"finished": False})
+    monkeypatch.setattr(api, "_send_json", send)
+    monkeypatch.setattr(api, "_hold_authority", guard)
+
+    async def run():
+        with anyio.CancelScope() as scope:
+            scopes.append(scope)
+            await api.monitor_socket(websocket, "task", "session")
+        finished.set()
+
+    handler = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(sent.wait(), 2)
+        disconnected.set()
+        await asyncio.wait_for(cleaning.wait(), 2)
+        scopes[0].cancel()
+        # Deliver cancellation while gather() is draining the authority task,
+        # rather than relying on a 20 ms timer and TestClient thread scheduling.
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(handler, 2)
+        assert finished.is_set()
+    finally:
+        release.set()
+        handler.cancel()
+        await asyncio.gather(handler, return_exceptions=True)
 
 
 def test_monitor_snapshot_has_an_additional_character_bound(shells, monkeypatch):
