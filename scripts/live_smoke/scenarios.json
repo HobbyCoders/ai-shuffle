@@ -262,6 +262,22 @@
         },
         {
           "id": "two-worker-smoke.25",
+          "check": "New voice session checks its explicit funding key",
+          "kind": "owner",
+          "how": "On a disposable worker with two owner-configured OpenAI API-key providers A and B, confirm through real authenticated GET /v1/models/gpt-live-1.1 lookups that A has access and B returns 404; if that pair is unavailable, record not run rather than mocking access. Save the original Voice settings, then save GPT-Live-1.1 with provider A pinned and voice Cedar. POST /api/v1/voice/sessions with provider_id naming B and a valid composer model. Read the response and GET /api/v1/voice/sessions/{id}/config before any attach or secret new_call request can rebind the session to the pinned provider A. Archive the throwaway chat and restore the original settings. Never record API keys or authorization headers in evidence.",
+          "pass_when": "Session creation succeeds on gpt-live-1, not gpt-live-1.1; the response and persisted config agree on that engine, and config names B and Cedar. Settings still retain the GPT-Live-1.1 choice and provider A pin. Availability is checked against B, not only A.",
+          "past_bug": "#492: POST /voice/sessions skipped the per-key GPT-Live-1.1 availability fallback used by attach/secret, so an explicit provider without access failed upstream."
+        },
+        {
+          "id": "two-worker-smoke.26",
+          "check": "Unrelated Voice saves retain temporarily ineligible provider pins",
+          "kind": "owner",
+          "how": "On a disposable worker, save the original Voice/provider settings. Pin an enabled OpenAI API-key provider for GPT Live 1, then disable that provider without deleting it. PUT /api/v1/settings/voice with only voice_voice set to Cedar (omit voice_model and voice_provider_id), reload Settings and read GET /api/v1/settings/voice. Repeat with only voice_max_call_minutes and then only voice_options changed. Re-enable the provider and start a throwaway call, checking GET /api/v1/voice/sessions/{id}/config. Repeat the unrelated saves with a disposable connected ChatGPT login pinned for the ChatGPT voice engine while that login genuinely needs reauthentication; restore it through the normal reconnect flow and check the next call. Do not invalidate a production login or request credentials in chat. Hang up, archive throwaway chats and restore the original settings.",
+          "pass_when": "Every partial save succeeds and GET /api/v1/settings/voice retains the same voice_provider_id while the provider is disabled or needs reauthentication. Restoring eligibility does not require repinning: the next call config names the original provider. A voice-only save must preserve the pin, not merely call-length/options-only saves.",
+          "past_bug": "#491: saving a voice choice while the pinned provider was disabled or needed reauthentication silently deleted the compatible provider preference."
+        },
+        {
+          "id": "two-worker-smoke.27",
           "check": "Disposable coordinators retain the owner working record",
           "kind": "owner",
           "two_worker": true,
@@ -324,6 +340,22 @@
           "past_bug": "#1957: Monitor copied the full server environment; Python key writers had no Windows ACL restriction. OS-user isolation remains a separate owner decision."
         },
         {
+          "id": "harness-basics.14",
+          "check": "Delegated queued questions are successful tool results",
+          "kind": "owner",
+          "how": "In a throwaway delegated Claude chat on a candidate worker, request a question through the native AskUserQuestion bridge while independent work continues. Inspect the canonical tool.result event and stored ToolResultBlock, answer the posted card, and let the answer wake the chat. Separately attempt an invalid question and deny an ordinary permission request. Archive only the throwaway chat.",
+          "pass_when": "The successfully posted queued result has is_error false in both canonical events and stored history, the card is answerable, and the owner answer reaches the next turn exactly once. Validation failures and genuine permission denials retain is_error true.",
+          "past_bug": "#493: the CLI denial used to defer native questions leaked is_error true into successful queued results."
+        },
+        {
+          "id": "harness-basics.15",
+          "check": "Local SendMessage waits for its Monitor-result wake",
+          "kind": "owner",
+          "how": "On a candidate worker, start and finish a disposable local Task, then continue it through SendMessage. Have that continuation launch a short Monitor and end with an interim waiting note as the Monitor finishes. Repeat until logs show an undelivered live notification falling back to a queued unpark wake. Hold the wake before it finishes and inspect the parent's notifications and TaskGet; then allow the worker to consume the Monitor result and finish. Also queue an unrelated owner turn after a separate completed continuation. Archive only the throwaway chats.",
+          "pass_when": "No completed parent notification or dependent-work release occurs while the Monitor wake is queued or running, and TaskGet remains running. Only the post-wake final report is delivered once. A genuinely completed continuation followed by unrelated owner work still reports its own round once, without reporting the owner's later text.",
+          "past_bug": "#494: a local continuation sent completed for its interim waiting note before its queued Monitor-result wake ran."
+        },
+        {
           "id": "harness-basics.6",
           "check": "Delegated prompt respects CLI-spelling tool blocks",
           "kind": "owner",
@@ -378,6 +410,24 @@
           "how": "On candidate Linux and Windows workers, use a disposable checkout and an isolated GitService probe (never replace the worker's Git executable). Put a fake git redirector on only the probe's PATH that spawns a hung child and grandchild inheriting stdout/stderr. Start concurrent status requests, invalidate while the first read is blocked, then release it or let its deadline expire. Record read start/end times and all probe descendant PIDs. Repeat against real Git after editing a tracked file. Remove only the disposable probe artifacts.",
           "pass_when": "Hung reads and every waiter return within their deadlines plus the documented cleanup grace; no live probe descendants remain. Reads of one checkout never overlap, repeated invalidations coalesce into one follow-up for the latest state, and the real-Git follow-up reports the edited file. Other worker requests remain responsive. Missing Windows evidence is not a pass.",
           "past_bug": "#436: a Git for Windows redirector timeout left its pipe-holding child alive and shared status waiters blocked; invalidation launched overlapping reads of the same checkout."
+        },
+        {
+          "id": "harness-basics.16",
+          "check": "Task bases respect hotfix callers and explicit pins",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On disposable paired candidate workers, register a temporary repository whose origin/main is ahead of a hotfix/1.2 branch with no unique commits and no default upstream. Dispatch coding Tasks locally and to the peer from a chat bound to hotfix/1.2; then repeat from main and from a branch tracking origin/main. Repeat with an explicit old base_commit and a deliberately slow origin (more than five but less than sixty seconds) for a new chat. Do not alter production repository refs.",
+          "pass_when": "Hotfix Tasks on both workers retain the caller SHA and cannot merge unreleased main commits into hotfix. Default/tracking callers use fresh origin/main only when it contains the caller. Explicit pins trigger no fetch. A new chat waits for the slow successful fetch and starts at the new origin tip; missing dispatch receipts leave remote branches untouched with an honest reason.",
+          "past_bug": "#407: ancestry alone refreshed non-default callers, chat fetches timed out after five seconds, explicit pins fetched unnecessarily, and missing receipts blamed branch movement."
+        },
+        {
+          "id": "harness-basics.17",
+          "check": "Peer terminal consent survives only retryable folder checks",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On disposable paired candidate workers, enable peer terminals in owner policy and approve one shell on the recipient using matching panel codes. Enter an invalid folder, correct it and open with the same approval. Repeat with a folder moved during spawn, and revoke the requester lease during a deliberately delayed recipient folder check. Finally open a shell and turn policy off on the source only without polling source authorization status. Inspect recipient PTY creation/closure and source leases; exercise input/output, resize, reload/reconnect and close through the panel.",
+          "pass_when": "Pre-spawn folder refusal retains approval and correction works. A spawn-time folder race forgets the source lease, drops recipient consent and asks for new approval instead of promising a folder retry. Revoke during folder validation creates no PTY. Source-only policy-off refuses the recipient callback and ends the live shell within its fifteen-second authorization recheck plus callback time, without waiting for a status GET or ten-minute expiry.",
+          "past_bug": "#378: a spawn-time folder race kept a dead lease, requester revoke during folder validation spawned a PTY, and source-only policy-off retained callback authority."
         },
         {
           "id": "harness-basics.11",

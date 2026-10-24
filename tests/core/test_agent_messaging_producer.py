@@ -697,6 +697,7 @@ async def test_original_dispatch_cleanup_cannot_drop_new_continuation_owner(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", [
     "completed", "error", "stop_task", "stop_all", "queued_stop", "parked_report",
+    "monitor_boundary", "user_followup",
     *[f"overlap_{first}_{stop}" for first in ("completed", "error", "parked")
       for stop in ("stop_task", "stop_all", "queued_stop", "completed", "error", "parked_report", "enqueue_race")],
 ])
@@ -775,7 +776,10 @@ async def test_dispatched_worker_native_continuation_lifecycle(
                     await workers.start("last-grandchild", root="native-child")
             yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
             yield StreamChunk("text_delta", {"index": 0, "text": (
-                "original native report" if len(self.requests) == 1 else "new native report"
+                "original native report" if len(self.requests) == 1 else
+                "Waiting for background checks" if ending == "monitor_boundary" and len(self.requests) == 2 else
+                "unrelated owner report" if ending == "user_followup" and len(self.requests) == 3 else
+                "new native report"
             )})
             yield StreamChunk("block_stop", {"index": 0})
             yield StreamChunk("usage", {"usage": {}, "stop_reason": "end_turn"})
@@ -803,6 +807,28 @@ async def test_dispatched_worker_native_continuation_lifecycle(
                 elif message.is_error:
                     yield {"type": "error", "message": message.result or "native error"}
                 else:
+                    if ending == "user_followup" and len(provider.requests) == 2:
+                        turns_db.enqueue_turn("native-child", "user", prompt="Unrelated owner work")
+                    if ending == "monitor_boundary" and len(provider.requests) == 2:
+                        # The CLI/provider has ended, but runtime finalization has
+                        # not. Offer the Monitor result to this live turn; no
+                        # subsequent model call can receipt it, so finalize must
+                        # turn the undelivered steer into a real queued wake.
+                        task_registry.start_task("native-child", "monitor", "shell", "checks")
+                        task_registry.mark_monitor_shell_task("native-child", "monitor")
+                        task_registry.complete_task("native-child", "monitor", "completed")
+                        # Model a CLI stdin write accepted just before its
+                        # result: transport acceptance is not a model receipt.
+                        # NativeLoop correctly refuses new steers after result,
+                        # so double only that transport admission here.
+                        with monkeypatch.context() as patch:
+                            patch.setattr(adapter, "steer", AsyncMock())
+                            await turn_scheduler.on_task_terminal("native-child", {
+                                "task_id": "monitor", "kind": "shell", "status": "completed",
+                                "summary": "Background checks passed.",
+                            })
+                            adapter.steer.assert_awaited_once()
+                        assert _real_get_live_runtime("native-child")._task_steers
                     yield {"type": "done", "metadata": {"stop_reason": "end_turn"}}
 
     monkeypatch.setattr(query_engine, "_stream_to_websocket_impl", pump)
@@ -970,6 +996,50 @@ async def test_dispatched_worker_native_continuation_lifecycle(
                     await stop_all_background_tasks("root", user_stop=True)
                 await asyncio.wait_for(provider.cancelled.wait(), 10)
             outcome = await asyncio.wait_for(job, 10)
+            if ending == "user_followup":
+                assert outcome == "completed"
+                (owner_turn,) = turns_db.get_queued_turns("native-child")
+                (parent_wake,) = turns_db.get_queued_turns("root")
+                assert "new native report" in parent_wake["prompt"]
+                assert task_registry.get_task("root", "native-child")["status"] == "running"
+                assert await session_runtime.execute(owner_turn) == "completed"
+                (parent_wake,) = turns_db.get_queued_turns("root")
+                assert len(parent_wake["payload"]["pending_frames"]) == 1
+                assert "unrelated owner report" not in parent_wake["prompt"]
+                assert task_registry.get_task("root", "native-child")["status"] == "completed"
+                return
+            if ending == "monitor_boundary":
+                assert outcome == "completed"
+                (monitor_wake,) = turns_db.get_queued_turns("native-child")
+                assert monitor_wake["source"] == "unpark"
+                assert monitor_wake["parent_turn_id"] == continuation["id"]
+                assert task_registry.get_task("root", "native-child")["status"] == "running"
+                assert turns_db.get_queued_turns("root") == []
+                record = provider_agent_supervisor.get_worker("root", "native-child")
+                assert record is not None and record.delivered_report is None
+                # The SQLite shim has second-resolution timestamps. Give the
+                # wake the strict chronological ordering real PostgreSQL uses.
+                from datetime import datetime, timedelta
+
+                from app.db.base import get_db
+
+                with get_db() as conn:
+                    conn.cursor().execute("UPDATE turns SET created_at=%s WHERE id=%s", (
+                        (datetime.fromisoformat(continuation["created_at"]) + timedelta(seconds=1)).isoformat(),
+                        monitor_wake["id"],
+                    ))
+                assert await session_runtime.execute(monitor_wake) == "completed"
+                (parent_wake,) = turns_db.get_queued_turns("root")
+                assert len(parent_wake["payload"]["pending_frames"]) == 1
+                assert parent_wake["payload"]["pending_frames"][0]["agent_message_turn_id"] == monitor_wake["id"]
+                assert task_registry.get_task("root", "native-child")["status"] == "completed"
+                assert "new native report" in parent_wake["prompt"]
+                assert "Waiting for background checks" not in parent_wake["prompt"]
+                # A delayed pre-wake callback cannot publish the interim note.
+                await messaging.finish_message_resume("native-child", continuation, outcome)
+                (parent_wake,) = turns_db.get_queued_turns("root")
+                assert len(parent_wake["payload"]["pending_frames"]) == 1
+                return
             if ending == "parked_report":
                 assert outcome == "parked"
                 assert provider_agent_supervisor.get_worker("root", "native-child") is not None

@@ -12,6 +12,7 @@ from fluid.events import (
     Interrupt, QuestionAnswered, QuestionRequest,
     RespondQuestion, ToolResult, TurnComplete, UserTurn,
 )
+from fluid.messages import ToolResultBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
@@ -254,23 +255,47 @@ async def test_repl_does_not_auto_answer_persistent_questions():
     await loop.aclose()
 
 
-async def test_delegated_native_question_control_posts_and_idle_answer_wakes():
+async def test_delegated_native_question_control_posts_and_idle_answer_wakes(tmp_path):
     from fluid.events import PermissionRequest
     from tests.unit.test_delegated import _make_loop
 
-    loop = _make_loop("q")
+    loop = _make_loop("q", store=JsonlStore(tmp_path))
     await loop.submit(UserTurn(content="start"))
     await asyncio.wait_for(loop.wait_turn(), 5)
     q, = await loop.pending_questions()
-    events = loop.bus.log(loop.session_id)
+    events = await loop.store.events_since(loop.session_id, 0)
     assert not any(isinstance(e, PermissionRequest) for e in events)
-    assert any(isinstance(e, ToolResult) and '"status": "queued"' in e.output for e in events)
+    queued = [e for e in events if isinstance(e, ToolResult) and '"status": "queued"' in e.output]
+    assert len(queued) == 1 and not queued[0].is_error
+    history = await loop.store.load_path(loop.session_id)
+    blocks = [b for n in history for b in n.message.content
+              if isinstance(b, ToolResultBlock) and b.tool_use_id == queued[0].tool_use_id]
+    assert len(blocks) == 1 and not blocks[0].is_error
     await loop.submit(RespondQuestion(request_id=q.request_id, answer="eu-west", user_answered=True))
     await asyncio.wait_for(loop.wait_turn(), 5)
     history = await loop.store.load_path(loop.session_id)
     assert any("eu-west" in n.message.text() for n in history)
     assert not await loop.pending_question_answers()
     await loop.aclose()
+
+
+@pytest.mark.parametrize("result", ["invalid", "different_id", "denied"])
+async def test_delegated_question_normalization_preserves_real_errors(result):
+    from tests.unit.test_delegated import _make_loop
+
+    loop = _make_loop("q", extra_env={"FAKE_CLAUDE_QUESTION_RESULT": result})
+    try:
+        await loop.submit(UserTurn(content="start"))
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        results = [e for e in await loop.store.events_since(loop.session_id, 0)
+                   if isinstance(e, ToolResult)]
+        assert len(results) == 1 and results[0].is_error
+        history = await loop.store.load_path(loop.session_id)
+        blocks = [b for n in history for b in n.message.content if isinstance(b, ToolResultBlock)]
+        assert len(blocks) == 1 and blocks[0].is_error
+        assert bool(await loop.pending_questions()) == (result != "invalid")
+    finally:
+        await loop.aclose()
 
 
 async def test_question_persistence_failure_never_returns_queued():

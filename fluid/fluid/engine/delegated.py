@@ -2851,6 +2851,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         last_assistant: Message | None = None
         self._main_compacting = False
         self._main_tools_open.clear()
+        posted_questions: dict[str, str] = {}
         while True:
             line = await self._next_stdout_line()
             if not line:
@@ -2886,6 +2887,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # "Context Compacted" card in the parent's chat.
                 logger.info("a subagent's compaction boundary; not reported")
                 continue
+            if frame.get("type") == "user":
+                # The CLI represents our nonblocking question bridge as a tool
+                # denial. Only its exact, successfully posted result is a
+                # success in canonical events/history; real denials stay errors.
+                message = frame.get("message")
+                blocks = message.get("content") if isinstance(message, dict) else None
+                for block in blocks if isinstance(blocks, list) else []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    posted = posted_questions.pop(block.get("tool_use_id"), None)
+                    if posted is not None and flatten_tool_content(block.get("content")) == posted:
+                        block["is_error"] = False
             mapped = mapper.feed(frame)
             await self._stdin_lane_frame(frame, mapped)
             if mapped.hook_request is not None:
@@ -2918,6 +2931,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     })
                 else:
                     message = error
+                if error is None:
+                    posted_questions[bridge.tool_use_id] = message
                 await self._write_control_response(
                     bridge.cli_request_id, False, bridge.input, message=message,
                 )

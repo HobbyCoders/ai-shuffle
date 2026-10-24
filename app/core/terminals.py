@@ -121,11 +121,12 @@ _TRAMPOLINE = (
 class TerminalError(Exception):
     """A refusal with a stable ``code`` and a plain-language ``message``."""
 
-    def __init__(self, code: str, message: str, status: int = 400):
+    def __init__(self, code: str, message: str, status: int = 400, *, retryable: bool = False):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        self.retryable = retryable
 
 
 # Start in a stable, non-user cwd, then select the directory by descriptor.
