@@ -1114,6 +1114,17 @@ def worker_turn_overrides(
     return overrides
 
 
+async def _observe_worker_queue(worker_session_id: str, feed: Any) -> bool:
+    """Best-effort queue snapshot/notice, never awaited inline by a watchdog."""
+    from app.db import turns
+
+    queued = await asyncio.to_thread(turns.session_waiting_to_start, worker_session_id)
+    announce = getattr(feed, "queued", None)
+    if callable(announce):
+        await announce(queued)
+    return queued
+
+
 async def _await_worker_idle(
     worker_session_id: str,
     provider_id: Optional[str],
@@ -1169,42 +1180,61 @@ async def _await_worker_idle(
     waiter = asyncio.ensure_future(
         turn_manager.wait_session_idle(worker_session_id, timeout=float("inf"))
     )
+    observation: Optional[asyncio.Task] = None
+    observation_expired = False
     try:
         while True:
-            now = loop.time()
-            queued = False
-            if first_frame_budget is not None or feed is not None:
-                # The executor's durable state works across remote dispatch too.
-                # A failed read never exempts a stuck provider from its watchdog.
-                try:
-                    from app.db import turns
-                    def waiting_to_start() -> bool:
-                        # A queued FOLLOW-UP must not hide a stuck live provider.
-                        if turns.get_live_turn(worker_session_id) is not None:
-                            return False
-                        latest = turns.get_latest_turn(worker_session_id)
-                        return bool(latest and latest.get("state") == "queued")
-                    queued = await asyncio.to_thread(waiting_to_start)
-                except Exception:  # noqa: BLE001 — retain the existing deadlines
-                    pass
-                announce = getattr(feed, "queued", None)
-                if callable(announce):
-                    await announce(queued)
-            if queued and first_frame_budget is not None:
-                first_frame_deadline = loop.time() + first_frame_budget
             now = loop.time()
             if wall_cap is not None:
                 await wall_cap.refresh(now)
             hard_deadline = wall_cap.deadline() if wall_cap is not None else None
+            now = loop.time()
             if hard_deadline is not None and now >= hard_deadline:
                 return WAIT_DEADLINE
+            if waiter.done():
+                waiter.result()
+                return None
+            if provider_id and rate_limit_breaker.is_tripped(provider_id):
+                return WAIT_RATE_LIMITED
+            # Keep at most ONE observation in flight. A slow read/notice cannot
+            # stall liveness checks, create a backlog, or grant a stale exemption.
+            if observation is not None and observation_expired and observation.done():
+                with contextlib.suppress(Exception):
+                    observation.result()
+                observation = None
+            if observation is None and (first_frame_budget is not None or feed is not None):
+                observation = asyncio.create_task(_observe_worker_queue(worker_session_id, feed))
+                observation_expired = False
             wait_seconds = WAIT_SLICE_SECONDS
             if hard_deadline is not None:
                 wait_seconds = min(wait_seconds, hard_deadline - now)
-            done, _pending = await asyncio.wait({waiter}, timeout=wait_seconds)
+            slice_end = now + wait_seconds
+            queued = False
+            watched = {waiter}
+            if observation is not None and not observation_expired:
+                watched.add(observation)
+            done, _pending = await asyncio.wait(
+                watched, timeout=wait_seconds, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if observation is not None and not observation_expired:
+                if observation in done:
+                    try:
+                        observed = observation.result()
+                        queued = observed and loop.time() <= slice_end
+                    except Exception:  # noqa: BLE001 — unknown is NOT an exemption
+                        pass
+                    observation = None
+                else:
+                    observation_expired = True
+            if queued and first_frame_budget is not None:
+                first_frame_deadline = loop.time() + first_frame_budget
+            # A quick observation must not spin; retain the original idle/breaker
+            # cadence and race idle completion against the remaining slice.
+            if waiter not in done:
+                await asyncio.wait({waiter}, timeout=max(0.0, slice_end - loop.time()))
             if hard_deadline is not None and loop.time() >= hard_deadline:
                 return WAIT_DEADLINE
-            if done:
+            if waiter.done():
                 # Surface any exception the wait raised — notably the
                 # CancelledError when the parent turn is cancelled, which MUST
                 # propagate so the worker is stopped rather than stranded. The
@@ -1226,6 +1256,10 @@ async def _await_worker_idle(
             if hard_deadline is not None and now >= hard_deadline:
                 return WAIT_DEADLINE
     finally:
+        if observation is not None:
+            observation.cancel()
+            with contextlib.suppress(BaseException):
+                await observation
         if not waiter.done():
             waiter.cancel()
             with contextlib.suppress(BaseException):

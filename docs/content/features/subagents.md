@@ -40,7 +40,10 @@ At most 128 starts wait in memory (FIFO, one per session). Overflow or a 300-sec
 admission wait leaves the durable turn queued and schedules another attempt after
 5 seconds; retried overflow joins the tail. Existing hard job/synchronous wait
 limits still apply. The provider first-frame watchdog starts counting only after
-a turn leaves the queue; unavailable state reads do not suspend that watchdog.
+a turn leaves the queue. One snapshot checks for any queued work and no live turn,
+so a newer removed message cannot hide an older waiting start. Queue reads and
+status notices race idle completion and the watchdog budget; unavailable or overdue
+observations do not suspend the watchdog or exempt a live provider.
 
 Administrators can tune `DB_START_UTILIZATION` (0.85),
 `DB_START_LATENCY_SECONDS` (0.5), `DB_START_SUSTAIN_SECONDS` (2),
