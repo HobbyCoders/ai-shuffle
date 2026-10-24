@@ -924,9 +924,13 @@ def home_repair_cursor(data_dir, state=None):
             if next(entries, None) is None:
                 return
         temporary = HOME_REPAIR_CURSOR + ".new-" + secrets.token_hex(6)
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=parent)
         try:
             with os.fdopen(fd, "w") as stream:
+                # Advisory filenames/cookies, not secrets. appuser's backup
+                # must be able to archive a cursor created by root, even with
+                # a restrictive inherited umask.
+                os.fchmod(stream.fileno(), 0o644)
                 json.dump(state, stream)
             os.replace(temporary, HOME_REPAIR_CURSOR, src_dir_fd=parent, dst_dir_fd=parent)
         finally:

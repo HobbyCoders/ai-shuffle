@@ -1100,6 +1100,18 @@ def test_home_root_repair_resumes_across_restarts(tmp_path, home_ownership, coun
     assert {entry[0] for entry in changed} == set(targets)
 
 
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_home_root_repair_cursor_is_readable_by_unprivileged_backup(tmp_path, mask):
+    (tmp_path / "existing-install").write_text("initialized earlier")
+    previous = os.umask(mask)
+    try:
+        runtime.home_repair_cursor(tmp_path, {"version": 1, "scan": 0, "frames": {}})
+    finally:
+        os.umask(previous)
+    # Root creates this advisory metadata; the appuser tar backup must read it.
+    assert (tmp_path / runtime.HOME_REPAIR_CURSOR).stat().st_mode & 0o004
+
+
 @pytest.mark.parametrize("cursor", ["malformed", "symlink", "escape", "nul", "huge-offset"])
 def test_home_root_repair_cursor_is_untrusted_advisory_state(tmp_path, home_ownership, cursor):
     home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
@@ -1125,7 +1137,7 @@ def test_home_root_repair_cursor_is_untrusted_advisory_state(tmp_path, home_owne
     assert changed == [(target, 41002, 41002)]
     assert outside.read_text() == "must stay unchanged"
     assert not progress.is_symlink()
-    assert progress.stat().st_mode & 0o777 == 0o600
+    assert progress.stat().st_mode & 0o777 == 0o644
 
 
 def test_home_root_repair_resumed_directory_is_revalidated(tmp_path, home_ownership):
