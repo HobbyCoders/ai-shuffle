@@ -379,7 +379,7 @@
           "past_bug": "#436: an interpreter freeze ended in SIGKILL without a durable last-tick time or recovery context; WAL/checkpoint pressure lacked a non-destructive sampler."
         },
         {
-          "id": "harness-basics.14",
+          "id": "harness-basics.16",
           "check": "Incremental desktop update restore points",
           "kind": "owner",
           "how": "Use only a disposable Windows candidate install with synthetic data, never a live install or database. Install two updates with identical dependency inputs. After the first healthy startup, keep its cold-copy cache. Change one synthetic relation file, update again and inspect restore-point copied/reused counts and phase durations. Confirm the installed launcher validates all snapshot hashes before selecting the update. Corrupt a same-size snapshot file and repeat selection; then use a fresh valid point, fail the candidate first start after a synthetic migration and retry recovery. Run the synthetic benchmark with at least 3072 MiB before release.",
@@ -387,7 +387,7 @@
           "past_bug": "#430: every update recopied and repeatedly hashed a multi-GB cluster."
         },
         {
-          "id": "harness-basics.15",
+          "id": "harness-basics.17",
           "check": "Desktop native runtime keys ignore script-only edits",
           "kind": "owner",
           "how": "On a disposable Windows candidate install with synthetic data only, build one source update, then build another changing only comments in native runtime scripts. Compare runtime keys, dependency install commands and build durations. Repeat with changed native contract pins, a Python dependency lock and an npm lock, one at a time. Never inspect or rebuild an installed live worker's runtimes for this check.",
@@ -419,7 +419,7 @@
           "past_bug": "#436: a Git for Windows redirector timeout left its pipe-holding child alive and shared status waiters blocked; invalidation launched overlapping reads of the same checkout."
         },
         {
-          "id": "harness-basics.14",
+          "id": "harness-basics.18",
           "check": "Task bases respect hotfix callers and explicit pins",
           "kind": "owner",
           "two_worker": true,
@@ -428,7 +428,7 @@
           "past_bug": "#407: ancestry alone refreshed non-default callers, chat fetches timed out after five seconds, explicit pins fetched unnecessarily, and missing receipts blamed branch movement."
         },
         {
-          "id": "harness-basics.15",
+          "id": "harness-basics.19",
           "check": "Peer terminal consent survives only retryable folder checks",
           "kind": "owner",
           "two_worker": true,
