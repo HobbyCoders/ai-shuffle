@@ -24,7 +24,7 @@ from app.core.permission_handler import permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_payload import client_view
 from app.core.session_title import derive_session_title
-from app.core.sync_engine import sync_engine
+from app.core.sync_engine import invalidate_queue_snapshot, queue_snapshot_epoch, sync_engine
 # The origin socket reuses sync_engine's bounded-queue writer.
 from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
@@ -2256,6 +2256,27 @@ class ChatWebSocketHandler:
 
     async def _hydrate_watch_queue(self, session_id: str, generation: int) -> None:
         """Read queue state without holding up subsequent inbound frames."""
+        epoch = queue_snapshot_epoch(session_id)
+        while True:
+            revision = epoch.revision
+            snapshot = await self._read_watch_queue(session_id)
+            # A slow reply must not overwrite a later watch or queue mutation.
+            if (self.current_session_id != session_id
+                    or self._queue_watch_generation != generation):
+                return
+            if epoch.revision != revision:
+                continue
+            # send_json only enqueues: no yield between the epoch check and send.
+            await self.send_json({
+                "type": "sync",
+                "event_type": "queue_updated",
+                "session_id": session_id,
+                "data": snapshot,
+            })
+            return
+
+    async def _read_watch_queue(self, session_id: str) -> Dict[str, Any]:
+        """Build an owner-checked snapshot for one hydration attempt."""
         from app.network import control
 
         # A mirror has no executable turns. Read through the same authenticated
@@ -2290,16 +2311,7 @@ class ChatWebSocketHandler:
             # empty snapshot. Clients retain cached chips and can re-watch to retry.
             snapshot = {"queue_status": "unavailable"}
         snapshot["queue_owner_device_id"] = owner
-        # A slow peer response must not overwrite a later switch or reconnect.
-        if (self.current_session_id != session_id
-                or self._queue_watch_generation != generation):
-            return
-        await self.send_json({
-            "type": "sync",
-            "event_type": "queue_updated",
-            "session_id": session_id,
-            "data": snapshot,
-        })
+        return snapshot
 
     # ------------------------------------------------------------------
     # handle_close_session
@@ -2576,6 +2588,8 @@ class ChatWebSocketHandler:
         while streaming, so the broadcast alone would not reach it). Same wire
         shape as the legacy ``queued_messages`` path — the frontend is unchanged.
         """
+        # Also invalidate when this socket is not currently registered for sync.
+        invalidate_queue_snapshot(session_id)
         queue = await run_sync(_v2_queue_view, session_id)
         peer_queue = await run_sync(_v2_peer_queue_view, session_id)
         await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peer_queue)

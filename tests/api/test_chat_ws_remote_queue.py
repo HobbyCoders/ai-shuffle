@@ -1,10 +1,12 @@
 """Owner-aware queue hydration and late peer reply regressions (#524)."""
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import app.api.chat_ws_handler as cwh
+from app.core.sync_engine import SyncEngine
 from app.db import turns
 from app.network import control
 from tests.api.test_chat_ws_dispatch_contract import (
@@ -203,3 +205,87 @@ async def test_disconnect_cancels_inflight_hydration(
     assert hydration.cancelled()
     assert cancelled.is_set()
     assert conn.handler._queue_watch_task is None
+
+
+@pytest.mark.parametrize("sibling", [False, True])
+@pytest.mark.parametrize("mutation", [
+    "queue_message", "remove_queued_message", "clear_queued_messages", "edit",
+])
+async def test_hydration_rereads_after_newer_queue_mutation(
+    ws_env: Any, monkeypatch: pytest.MonkeyPatch, sibling: bool, mutation: str,
+) -> None:
+    """An older read cannot replace a newer mutation's authoritative snapshot."""
+    sid = _make_session("mutation-during-hydration")
+    _live_turn(sid)
+    queued = None
+    if mutation != "queue_message":
+        queued = turns.enqueue_turn(sid, "queue", prompt="remove me")
+    read_done, release = asyncio.Event(), asyncio.Event()
+    reads = 0
+
+    async def read(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal reads
+        result = fn(*args, **kwargs)
+        if fn is cwh._v2_queue_view:
+            reads += 1
+            if reads == 1:
+                # Capture the real DB projection, then let a real enqueue/remove
+                # and its broadcast complete before this stale read resumes.
+                read_done.set()
+                await release.wait()
+        return result
+
+    sync = SyncEngine()
+    monkeypatch.setattr(cwh, "sync_engine", sync)
+    monkeypatch.setattr(cwh, "run_sync", read)
+    try:
+        async with _connect(ws_env) as conn:
+            conn.wire.push({"type": "watch_session", "session_id": sid})
+            await asyncio.wait_for(read_done.wait(), 1)
+            frame = {"type": mutation, "session_id": sid, "content": "keep this queued"}
+            if queued is not None:
+                frame["message_id"] = queued["id"]
+            if mutation == "edit":
+                # Exercise an in-place queued edit and the shared broadcast path
+                # independently of _v2_broadcast_queue's origin-socket guard.
+                updated = turns.update_queued_turn_prompt(
+                    queued["id"], "edited queued message", {},
+                )
+                assert updated is not None
+                await sync.broadcast_queue_updated(
+                    sid, await read(cwh._v2_queue_view, sid), pending_peer_messages=[],
+                )
+            elif sibling:
+                producer = cwh.ChatWebSocketHandler(
+                    websocket=MagicMock(), device_id="sibling-tab", user_id="admin",
+                    api_user_id=None,
+                )
+                producer.send_json = AsyncMock()
+                producer._authorize_mobile_session = AsyncMock(return_value=True)
+                await producer._handlers[mutation](frame)
+            else:
+                await conn.roundtrip(frame)
+            expected = {
+                "queue_message": ["keep this queued"], "edit": ["edited queued message"],
+            }.get(mutation, [])
+            await conn.wait_for(lambda fs: any(
+                f.get("event_type") == "queue_updated"
+                and [row["content"] for row in f["data"]["queued_messages"]] == expected
+                for f in fs
+            ))
+            assert [row["prompt"] for row in turns.get_queued_turns(sid)] == expected
+            # The newer authoritative snapshot has reached the observer already.
+            # Resume the earlier read; hydration must discard it and read again.
+            release.set()
+            await asyncio.wait_for(conn.handler._queue_watch_task, 1)
+            await conn.wait_for(lambda fs: any(
+                f.get("event_type") == "queue_updated"
+                and f["data"].get("queue_status") == "available" for f in fs
+            ))
+            frames = [f for f in conn.frames() if f.get("event_type") == "queue_updated"]
+            final_state = [row["content"] for row in frames[-1]["data"]["queued_messages"]]
+            assert final_state == expected
+            assert reads >= 3  # hydration read, mutation broadcast read, hydration re-read
+    finally:
+        release.set()
+        await sync.shutdown()
