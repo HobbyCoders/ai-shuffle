@@ -144,6 +144,12 @@ def measure(*, native=True):
         totals["delegated_loaded_tools"] = sum(loaded.values())
         totals["delegated_deferred_names"] = sum(
             len("mcp__fluid_bundled__" + s.name) + 1 for s in specs if deferred(s.name))
+    # No tokenizer/provider dependency: these are explicitly chars/4 estimates,
+    # not billed input tokens. Keep per-section/per-tool counts reproducible.
+    result["estimated_tokens_chars_div_4"] = {
+        group: {name: (chars + 3) // 4 for name, chars in result[group].items()}
+        for group in ("sections", "tools", "totals", "worker_sections")
+    }
     return result
 
 
