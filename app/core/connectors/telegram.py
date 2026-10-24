@@ -133,7 +133,9 @@ class TelegramConnector(BaseConnector):
     async def _run_polling(self) -> None:
         """Background task that runs the aiogram polling loop."""
         try:
-            await self._dp.start_polling(self._bot)
+            # aiogram advances getUpdates.offset after each yielded update.
+            # Await ingress before requesting/acknowledging the next batch.
+            await self._dp.start_polling(self._bot, handle_as_tasks=False)
         except asyncio.CancelledError:
             logger.info("TelegramConnector %s polling cancelled", self.connector_id)
         except Exception as exc:
@@ -172,35 +174,33 @@ class TelegramConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     async def _handle_message(self, message: Any) -> None:
-        """Process an incoming Telegram message."""
+        """Commit ingress before allowing aiogram to advance its update offset."""
+        chat_id = str(message.chat.id)
+        if not self._chat_allowed(chat_id):
+            logger.debug("Ignoring message from non-allowed chat %s", chat_id)
+            return
+        user = message.from_user
+        msg = IncomingMessage(
+            connector_id=self.connector_id,
+            platform_chat_id=chat_id,
+            platform_user_id=str(user.id) if user else "unknown",
+            platform_user_name=user.full_name if user else "Unknown",
+            text=message.text or "",
+            platform_message_id=str(message.message_id),
+            metadata={"chat_type": message.chat.type},
+        )
+        await self.emit_durable_trigger("watch_message_received", {
+            "message_id": chat_id + ":" + str(message.message_id),
+            "platform_chat_id": chat_id,
+            "platform_user_id": msg.platform_user_id,
+            "platform_user_name": msg.platform_user_name,
+            "text": msg.text,
+        })
         try:
-            chat_id = str(message.chat.id)
-
-            if not self._chat_allowed(chat_id):
-                logger.debug("Ignoring message from non-allowed chat %s", chat_id)
-                return
-
-            user = message.from_user
-            msg = IncomingMessage(
-                connector_id=self.connector_id,
-                platform_chat_id=chat_id,
-                platform_user_id=str(user.id) if user else "unknown",
-                platform_user_name=user.full_name if user else "Unknown",
-                text=message.text or "",
-                platform_message_id=str(message.message_id),
-                metadata={"chat_type": message.chat.type},
-            )
-            await self.emit_trigger("message_received", {
-                "message_id": chat_id + ":" + str(message.message_id),
-                "platform_chat_id": chat_id,
-                "platform_user_id": msg.platform_user_id,
-                "platform_user_name": msg.platform_user_name,
-                "text": msg.text,
-            })
             await self._on_incoming_message(msg)
-
-        except Exception as exc:
-            logger.exception("Error handling Telegram message: %s", exc)
+        except Exception:
+            # Chat dispatch is best-effort only after watch ingress has committed.
+            logger.exception("Error handling journaled Telegram message")
 
     def _chat_allowed(self, chat_id: Optional[str]) -> bool:
         """True when ``chat_id`` passes the connector's allowlist (if any)."""

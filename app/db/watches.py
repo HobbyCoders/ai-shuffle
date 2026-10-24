@@ -215,12 +215,23 @@ def import_watch(
     return get(wid)
 
 
-def complete_transfer(wid: str, target: str) -> None:
+def import_receipt(wid: str) -> dict[str, Any]:
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT token,target FROM watch_transfers WHERE watch_id=%s", (wid,))
+        receipt = c.fetchone()
+        if not receipt or not receipt["target"].startswith("import:"):
+            return {}
+        return {"source": receipt["target"][len("import:"):], "token": receipt["token"]}
+
+
+def complete_transfer(wid: str, target: str, token: str) -> None:
     with get_db() as conn:
         c = conn.cursor()
         c.execute(
-            "UPDATE watch_transfers SET completed=TRUE WHERE watch_id=%s AND target=%s",
-            (wid, target),
+            "UPDATE watch_transfers SET completed=TRUE "
+            "WHERE watch_id=%s AND target=%s AND token=%s",
+            (wid, target, token),
         )
         if not c.rowcount:
             raise ValueError("Transfer does not exist")
@@ -269,12 +280,20 @@ def set_status(wid: str, owner: str, status: str, reason: str | None = None) -> 
     return row
 
 
+def lock_connector(cursor: Any, connector_id: str) -> None:
+    """Keep sequence allocation, commit and cursor reads ordered per connector."""
+    key = int(hashlib.sha256(("watch-ingress:" + connector_id).encode()).hexdigest()[:15], 16)
+    cursor.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+
+
 def record_connector_event(connector_id: str, key: str, payload: dict[str, Any]) -> None:
     """Commit before the connector acknowledges the incoming update."""
     if len(encode(payload)) > 16000:
         payload = dict(payload, text=str(payload.get("text", ""))[:4000])
     with get_db() as conn:
-        conn.cursor().execute(
+        c = conn.cursor()
+        lock_connector(c, connector_id)
+        c.execute(
             "INSERT INTO watch_connector_inbox (connector_id,event_key,payload) "
             "VALUES (%s,%s,%s) ON CONFLICT(connector_id,event_key) DO NOTHING",
             (connector_id, key, encode(payload)),
@@ -286,6 +305,7 @@ def connector_page(
 ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
     with get_db() as conn:
         c = conn.cursor()
+        lock_connector(c, connector_id)
         if not cursor:
             c.execute(
                 "SELECT COALESCE(MAX(seq),0) AS seq FROM watch_connector_inbox "

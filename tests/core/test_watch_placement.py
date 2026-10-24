@@ -30,6 +30,8 @@ def network(
     remote.commit()
     shims = {"DesktopWorker": ShimConnection(test_db), "ServerWorker": ShimConnection(remote)}
     current = ["DesktopWorker"]
+    devices = {"DesktopWorker": "dev_desktop", "ServerWorker": "dev_server"}
+    monkeypatch.setattr(runners, "self_device_id", lambda: devices[current[0]])
     monkeypatch.setattr(settings, "instance_id", current[0])
     test_db.execute("UPDATE sessions SET instance_id=? WHERE id=?", (current[0], owner["id"]))
     test_db.commit()
@@ -53,15 +55,16 @@ def network(
 
     def directory() -> dict[str, Any]:
         return {"runners": [
-            dict(id=name, online=True, is_self=name == current[0],
+            dict(id=devices[name], online=True, is_self=name == current[0],
                  legacy_instance_id=name, platform=platform, capabilities={}, device_name=name)
             for name, platform in [("DesktopWorker", "windows"), ("ServerWorker", "linux")]
         ]}
 
     async def rpc(device_id: str, action: str, body: dict[str, Any]) -> dict[str, Any]:
-        sender = current[0]
+        sender = devices[current[0]]
         assert action == "watches" and control.known_action(action)
-        with on(device_id):
+        receiver = next(name for name, device in devices.items() if device == device_id)
+        with on(receiver):
             return await control.handle(action, body, from_device=sender)
 
     monkeypatch.setattr(runners, "directory", directory)
@@ -73,7 +76,7 @@ def network(
 def test_default_override_and_unavailable(
     owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch
 ) -> None:
-    assert placement.resolve() == "ServerWorker"
+    assert placement.resolve() == "dev_server"
     assert placement.resolve("DesktopWorker") == "DesktopWorker"
     database.set_system_setting(placement.PREFERENCE, "DesktopWorker")
     assert placement.resolve() == "DesktopWorker"
@@ -133,7 +136,7 @@ async def test_move_cursor_outbox_dedupe_retry_and_return(
     original_event = store.events(wid)[0]
     moved = await placement.move(wid, "ServerWorker")
     assert moved["cursor"] == {"next_at": "2099-01-01"}
-    assert store.get(wid)["worker_id"] == "transfer:ServerWorker"
+    assert store.get(wid)["worker_id"] == "transfer:dev_server"
     assert not store.checkpoint(watch, [("stale", {})], {"bad": True})
     assert not store.reserve(wid, original_event["id"], 0.25)
     with network("ServerWorker"):
@@ -233,4 +236,46 @@ async def test_owner_confirmed_move_keeps_scope(
     assert result["watch"]["source"] == watch["source"]
     assert result["watch"]["permissions"] == watch["permissions"]
     assert result["watch"]["id"] == watch["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_operation", [None, "import", "complete"])
+async def test_move_retry_then_reverse_with_distinct_device_ids(
+    owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch, lost_operation: str | None
+) -> None:
+    watch = make_watch(owner, worker_id="DesktopWorker")
+    wid = watch["id"]
+    assert store.checkpoint(watch, [("first", {})], {"next_at": "2099-01-01"})
+    event = store.events(wid)[0]
+    dispatch = placement.call
+    lost = False
+
+    async def call(worker_id: str, operation: str, **body: Any) -> dict[str, Any]:
+        nonlocal lost
+        result = await dispatch(worker_id, operation, **body)
+        if operation == lost_operation and not lost:
+            lost = True
+            raise control.RunnerUnreachable("acknowledgement lost")
+        return result
+
+    monkeypatch.setattr(placement, "call", call)
+    if lost_operation is not None:
+        with pytest.raises(control.RunnerUnreachable):
+            await placement.move(wid, "ServerWorker")
+        # Retry from the original worker must finish its outstanding receipt.
+        await placement.move(wid, "ServerWorker")
+    else:
+        await placement.move(wid, "ServerWorker")
+    with base.get_db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM watch_transfers WHERE watch_id=%s", (wid,))
+        assert c.fetchone()["completed"]
+    with network("ServerWorker"):
+        returned = await placement.move(wid, "DesktopWorker")
+        assert returned["worker_id"] == "DesktopWorker"
+        assert store.get(wid)["worker_id"] == "transfer:dev_desktop"
+    assert store.get(wid)["worker_id"] == "DesktopWorker"
+    assert store.get(wid)["cursor"] == {"next_at": "2099-01-01"}
+    assert store.events(wid)[0]["id"] == event["id"]
+    assert len(store.events(wid)) == 1
 

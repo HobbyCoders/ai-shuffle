@@ -57,8 +57,18 @@ def label(worker_id: str) -> str:
     return worker_id
 
 
+def canonical(worker_id: str) -> str:
+    """Transfer receipts/routing use device IDs, not installation execution IDs."""
+    for row in runners.directory()["runners"]:
+        if worker_id in (row["id"], row.get("legacy_instance_id")) or (
+            row["is_self"] and worker_id == assistant_id()
+        ):
+            return str(row["id"])
+    return worker_id
+
+
 def local(worker_id: str) -> bool:
-    return worker_id == assistant_id()
+    return worker_id == assistant_id() or worker_id == runners.self_device_id()
 
 
 async def call(worker_id: str, operation: str, **body: Any) -> dict[str, Any]:
@@ -103,7 +113,8 @@ async def rows() -> list[dict[str, Any]]:
     members = {peer["id"] for peer in directory["runners"] if not peer["is_self"]}
     result = [row for row in await run_sync(cached_rows)
               if row["placement_device_id"] in members]
-    result.extend(await run_sync(panel_rows))
+    device = await run_sync(canonical, assistant_id())
+    result.extend(dict(row, placement_device_id=device) for row in await run_sync(panel_rows))
     for peer in directory["runners"]:
         if peer["is_self"] or not peer["online"]:
             continue
@@ -126,12 +137,18 @@ async def change(wid: str, status: str) -> dict[str, Any]:
 
 
 async def move(wid: str, target: str) -> dict[str, Any]:
-    target = await run_sync(resolve, target)
+    target = await run_sync(canonical, await run_sync(resolve, target))
     for row in await rows():
         if row["id"] != wid:
             continue
-        source = row.get("placement_device_id") or assistant_id()
+        source = await run_sync(canonical, row.get("placement_device_id") or assistant_id())
         if source == target:
+            # Import may have committed while its acknowledgement was lost.
+            # Reconcile the original source before reporting an idempotent move.
+            receipt = await call(target, "receipt", watch_id=wid)
+            if receipt:
+                await call(receipt["source"], "complete", watch_id=wid,
+                           target=target, token=receipt["token"])
             return row
         # Destination validates the existing source/grant before fencing source.
         await call(target, "validate", row=row, moving=True)
@@ -139,7 +156,7 @@ async def move(wid: str, target: str) -> dict[str, Any]:
         # A timeout after import is intentionally not rolled back: retrying the
         # same id imports once; source remains permanently fenced meanwhile.
         answer = await call(target, "import", snapshot=snapshot, source=source)
-        await call(source, "complete", watch_id=wid, target=target)
+        await call(source, "complete", watch_id=wid, target=target, token=snapshot["token"])
         return answer["watch"]
     raise ValueError("Watch does not exist on an available worker")
 
@@ -201,9 +218,12 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
             if connector["type"] == "telegram":
                 raise ValueError("Telegram watches cannot move: receive journals are worker-local")
         return {"watch": await run_sync(
-            store.import_watch, snapshot, row, body.get("source") or from_device
+            store.import_watch, snapshot, row,
+            await run_sync(canonical, body.get("source") or from_device)
         )}
+    if operation == "receipt":
+        return await run_sync(store.import_receipt, body["watch_id"])
     if operation == "complete":
-        await run_sync(store.complete_transfer, body["watch_id"], body["target"])
+        await run_sync(store.complete_transfer, body["watch_id"], body["target"], body["token"])
         return {"ok": True}
     raise ValueError("Unknown watch control operation")

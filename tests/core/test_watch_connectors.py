@@ -183,6 +183,45 @@ async def test_slack_page_boundary_preserves_high_watermark() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("messaging", ["telegram"], indirect=True)
+async def test_telegram_durable_ingress_retries_before_offset_advance(
+    messaging: tuple[dict[str, Any], Any, Any], monkeypatch: MonkeyPatch
+) -> None:
+    connector, instance, sdk = messaging
+    persist = store.record_connector_event
+    attempts = 0
+    acknowledged = False
+
+    def record(connector_id: str, key: str, payload: dict[str, Any]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary database failure")
+        persist(connector_id, key, payload)
+        if attempts == 2:
+            raise RuntimeError("commit succeeded but acknowledgement was lost")
+
+    monkeypatch.setattr(store, "record_connector_event", record)
+
+    async def start_polling(bot: Any, *, handle_as_tasks: bool) -> None:
+        nonlocal acknowledged
+        assert handle_as_tasks is False
+        await incoming(instance, sdk, {}, "important")
+        # aiogram's next getUpdates offset is only advanced after this await.
+        assert attempts == 3
+        acknowledged = True
+
+    instance._dp = SimpleNamespace(start_polling=start_polling)
+    await instance._run_polling()
+    assert acknowledged
+    events, cursor = store.connector_page(connector["id"], "123", {"seq": 0})
+    assert len(events) == 1
+    assert events[0][1]["text"] == "important"
+    assert store.connector_page(connector["id"], "123", cursor) == ([], cursor)
+    instance._on_incoming_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_old_telegram_package_fails_explicitly() -> None:
     from app.core.watch_connector_sources import poll
 
