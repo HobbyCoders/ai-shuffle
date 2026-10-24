@@ -104,6 +104,20 @@ Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI
 
 The agent asks one confirmation sentence covering the source/filter, executing worker, read-only access, action and daily cap; your yes authorizes it. Placement prefers an available worker advertising `always_on`, then an available Linux server. You can override `worker_id` when creating a watch. `PUT /api/v1/watches/preference` with `{"worker_id":"<network worker ID>"}` designates your preferred worker; `null` clears it. This preference and display-only watch metadata sync across your worker network. An unavailable designated worker fails explicitly without silently falling back to a sleeping desktop. Connectors and grants must already belong to the executing worker; credentials are never moved by watch placement.
 
+
+Workers publish `desktop` from the desktop launcher's markers, not from their OS or an
+attached display. Electron desktop installs (including Linux) default to `always_on: false`;
+container and headless server installs default to `true`. A sleeping Linux desktop is not
+an automatic watch target. On the intended worker, authenticated
+`GET /api/v1/settings/worker-availability` shows `worker_id`, `desktop`, effective `always_on`
+and `always_on_override`. Owner-only `PUT /api/v1/settings/worker-availability` with
+`{"always_on":true}` or `{"always_on":false}` overrides that worker; `{"always_on":null}`
+restores its detected default. Overrides sync as per-worker settings, not a fleet-wide
+default, and are advertised on the next presence refresh. An explicit `false` excludes
+that worker from automatic placement, even if it runs Linux; you can still choose it
+explicitly. A Settings UI control for this availability override is a follow-up; use the
+API for now.
+
 Use `CreateWatch` with `move_watch_id` and `worker_id`, or owner-only `PATCH /api/v1/watches/{id}` with `worker_id`, to move a watch. Moving freezes the old executor before transferring the saved cursor, pending events and dedupe/accounting history. In-flight deliveries must finish first. A failed or ambiguous network transfer stays fenced; retry the same move, never resume the old executor. Transfers over 10,000 events or 3 MiB fail explicitly. Pause/Stop and listing route to the executing worker; synced rows remain display-only and never create a second executor.
 
 The app polls with plain code and saves bookmarks; it does not run a model while nothing matches. A live creating chat receives a real read-only turn, including when its watch executes on another worker. Authenticated peer delivery retains the same event command across retries and restarts; the creating worker rechecks the executor's current grant, deadline and budget before unattended work. Receipts are not executable watch leases. If the creating worker is offline, chat delivery waits durably rather than running against its mirror, while the bell retains bounded event details without waiting for inference. After the creator is settled or archived, an alert uses a tool-free cheap-model summary and a linked notification; an investigation starts a short no-project chat and notifies you without reactivating the creator. The event's durable bell notification is shared with your network workers using an idempotent outbox, including offline peers after reconnect. Pending notifications and dedupe/accounting history survive watch transfers. Notifications stay in the bell even when no device supports push. Push transport is best-effort, not an exactly-once delivery guarantee.

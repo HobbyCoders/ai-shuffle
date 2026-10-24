@@ -194,7 +194,17 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
             link = transport.PeerLink(a.device_id, ["https://a.example.com"])
-            await link.sync_once(client, engine.context())
+            import threading
+
+            loop_thread = threading.get_ident()
+            probe = transport._capabilities
+
+            def capabilities_off_loop() -> dict:
+                assert threading.get_ident() != loop_thread
+                return probe()
+
+            with patch.object(transport, "_capabilities", side_effect=capabilities_off_loop):
+                await link.sync_once(client, engine.context())
             assert identity.load().incarnation == 2
             assert engine.context().identity.incarnation == 2
     set_owner_pref(b, "after_restore", True)
