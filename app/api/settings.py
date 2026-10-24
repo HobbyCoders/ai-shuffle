@@ -1117,10 +1117,11 @@ async def update_voice_settings(
             if not row or not provider_matches_model(row, model):
                 if "voice_provider_id" in supplied:
                     raise HTTPException(400, "Choose a provider for the selected voice engine; ChatGPT and SuperGrok voice need their connected subscription login.")
-                # Switching engine leaves the old engine's pin behind; the new
-                # engine picks its own provider rather than keeping a pin no
-                # call on it would use.
-                provider = None
+                # Eligibility can recover (disabled or needs reauth). Keep the
+                # preference unless its row is gone or cannot fund this engine.
+                row = database.get_model_provider(provider)
+                if not row or not provider_matches_model(row, model):
+                    provider = None
         if model == LIVE_11_MODEL and "voice_model" in supplied and not _live_11_available(provider):
             raise HTTPException(400, "GPT-Live-1.1 isn't available for this OpenAI API key yet.")
         voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]

@@ -4112,6 +4112,11 @@ class HarnessAdapter(ProviderAdapter):
                 },
             )]
 
+        if cls == "AssistantTextSanitized":
+            return [SystemMessage(
+                subtype="assistant_text_sanitized", data={"content": event.message},
+            )]
+
         if cls == "HookEvent":
             # A configured hook denied a tool call ("deny") or misbehaved and
             # was ignored ("warning"). Never terminal; shown like the safety

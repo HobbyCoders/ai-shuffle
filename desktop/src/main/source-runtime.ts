@@ -4,11 +4,15 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { buildEnvironment, type SourceRuntime } from './source-build';
 
+/** Bump the contract for native layout/install-policy changes; script edits alone do not discard runtimes. */
+export async function nativeRuntimeKey(source: string): Promise<string> {
+  const contract = JSON.parse(await fs.readFile(path.join(source, 'desktop/runtime-contract.json'), 'utf8'));
+  return createHash('sha256').update(`native-runtime-2\0${process.platform}\0${process.arch}\0${JSON.stringify(contract)}`).digest('hex');
+}
+
 export async function prepareNativeRuntime(source: string, root: string, bootstrapNode: string, progress: (message: string) => void): Promise<{ key: string; runtime: SourceRuntime }> {
   if (!['win32', 'linux'].includes(process.platform) || process.arch !== 'x64') throw new Error('Source-managed desktop currently supports Windows and Linux x64');
-  const hash = createHash('sha256');
-  for (const file of ['desktop/runtime-contract.json', 'desktop/scripts/build-worker.mjs', 'desktop/scripts/postgres-binaries.mjs']) hash.update(file + '\0' + (await fs.readFile(path.join(source, file), 'utf8')).replace(/\r\n/g, '\n'));
-  const key = hash.digest('hex');
+  const key = await nativeRuntimeKey(source);
   // Windows DLL loading still has path limits even when Node supports long
   // paths. Keep native caches compact; the full fingerprint stays in build.json.
   const target = path.join(root, 'runtimes', key.slice(0, 24));
