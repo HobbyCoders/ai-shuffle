@@ -9,6 +9,10 @@
 	 * and re-quotes the price as they change. "Use this" saves the pick as the
 	 * account's last choice (and remembered choice when the box is ticked) and,
 	 * in a chat, replies with the exact arguments the agent passes back.
+	 *
+	 * Every save reports the server's fresh quote (#518). The card shows it, or
+	 * why unattended runs will skip the pick, and stays open on a warning so
+	 * collapsing never hides it. Saving never submits, re-quotes or approves.
 	 */
 	import '../deck/cards/card-design-system.css';
 	import { onMount, untrack } from 'svelte';
@@ -25,6 +29,7 @@
 		modelLabel,
 		pickMessage,
 		priceView,
+		saveOutcome,
 		repliedFigure,
 		quickChips,
 		sameChoice,
@@ -35,6 +40,8 @@
 		type GenerationOption,
 		type GenerationPrice,
 		type NativeValue,
+		type SaveOutcome,
+		type SaveQuote,
 		type SchemaField
 	} from '$lib/utils/generation-choice';
 
@@ -56,9 +63,11 @@
 		/**
 		 * Settings variant only: hand the pick to the caller instead of saving it
 		 * as a remembered/last choice (an automation's pinned job choice). A
-		 * rejection is shown on the card like a failed save.
+		 * rejection is shown on the card like a failed save. Resolve with the
+		 * server's save-time quote to show it here; resolve empty when the pick
+		 * was only staged.
 		 */
-		onpick?: (choice: GenerationChoice) => Promise<void>;
+		onpick?: (choice: GenerationChoice) => Promise<Partial<SaveQuote> | void>;
 		/** The settings variant's button text when `onpick` is set. */
 		pickLabel?: string;
 	}
@@ -112,6 +121,8 @@
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
 	let picked = $state<{ index: number; remembered: boolean } | null>(null);
+	/** What the last save reported: the fresh price, or why unattended runs will skip it. */
+	let outcome = $state<{ index: number; verb: string; view: SaveOutcome } | null>(null);
 	let tick = $state(0);
 	let quoteTimer: ReturnType<typeof setTimeout> | null = null;
 	let quoteSeq = 0;
@@ -326,21 +337,34 @@
 		const option = options[index];
 		const chosen = values[index];
 		const keep = variant === 'settings' ? true : remember;
+		outcome = null;
 		try {
-			if (handoff && onpick) await onpick(choiceOf(option, chosen));
-			else await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			const result =
+				handoff && onpick
+					? await onpick(choiceOf(option, chosen))
+					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			// Shown before the chat reply goes out, so a failed send still says what was saved.
+			const view = saveOutcome(result || null, kind);
+			if (view) outcome = { index, verb: savedVerb(keep), view };
 			if (variant === 'chat') {
 				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep));
 				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
 			}
 			picked = { index, remembered: keep };
-			reopened = false;
+			// A consequential warning keeps the chat card open.
+			reopened = !!view?.warning;
 			onsaved?.(option);
 		} catch (e) {
 			saveError = getErrorMessage(e, 'Could not use this choice.');
 		} finally {
 			saving = false;
 		}
+	}
+
+	function savedVerb(keep: boolean): string {
+		if (handoff) return 'Pinned to this job';
+		if (variant === 'settings') return 'Remembered';
+		return keep ? 'Saved and remembered' : 'Saved as your last choice';
 	}
 
 	async function forget() {
@@ -356,8 +380,11 @@
 	const summaryOption = $derived(summaryIndex >= 0 ? options[summaryIndex] : null);
 	const summaryRemembered = $derived(!!summaryOption && sameChoice(remembered, summaryOption));
 	// After a reload the live quote is gone; the reply carries the figure it was picked at.
+	// The saved pick's warning, still shown on the collapsed line.
+	const summaryWarning = $derived(!!picked && outcome?.index === summaryIndex ? (outcome?.view.warning ?? null) : null);
 	const summaryFigure = $derived.by(() => {
 		if (!summaryOption) return '';
+		if (picked && outcome?.index === summaryIndex) return outcome.view.figure;
 		if (picked) return priceView(quotes[summaryIndex], kind).figure;
 		return (reply && repliedFigure(reply)) || priceView(summaryOption.price, kind).figure;
 	});
@@ -387,6 +414,7 @@
 					{#if summaryOption}
 						{summaryFigure}
 						{#if summaryRemembered}<span class="gcc-dot" aria-hidden="true">·</span> remembered for {label.plural}{/if}
+						{#if summaryWarning}<span class="gcc-sub-warn" title={summaryWarning}><span class="gcc-dot" aria-hidden="true">·</span><TriangleAlert aria-hidden="true" />Unattended runs will skip it</span>{/if}
 					{:else}
 						Answered in the chat
 					{/if}
@@ -566,6 +594,31 @@
 			<p class="gcc-note" role="note">Above $0.10, so I'll ask again before spending.</p>
 		{:else if current && !currentPrice.priced}
 			<p class="gcc-note warn" role="note"><TriangleAlert aria-hidden="true" />This price is unknown, so it cannot run. Pick another option.</p>
+		{/if}
+		{#if outcome}
+			{@const view = outcome.view}
+			{@const saved = options[outcome.index]}
+			<div class="gcc-saved" data-state={view.state} role={view.warning ? 'alert' : 'status'}>
+				<span class="gcc-saved-icon" aria-hidden="true">
+					{#if view.warning}<TriangleAlert />{:else}<Check />{/if}
+				</span>
+				<div class="gcc-saved-body">
+					<p class="gcc-saved-head">
+						<strong>{outcome.verb}:</strong>
+						<span class="gcc-saved-what" title={saved.model}>{sourceLabel(saved.source)} · {modelLabel(saved.model)}</span>
+						{#if view.warning}<span class="gcc-saved-tag">{view.tag}</span>{/if}
+					</p>
+					{#if view.warning}
+						<p class="gcc-saved-text">{view.warning}</p>
+					{:else}
+						<p class="gcc-saved-text">Fresh quote from the server. Unattended runs can use it.</p>
+					{/if}
+				</div>
+				<p class="gcc-saved-price">
+					<span class="gcc-saved-figure">{view.figure}</span>
+					<span class="gcc-saved-note">{view.note}</span>
+				</p>
+			</div>
 		{/if}
 		{#if saveError}
 			<p class="gcc-note warn" role="alert"><TriangleAlert aria-hidden="true" />{saveError}</p>
@@ -999,6 +1052,111 @@
 		height: 13px;
 		margin-top: 1px;
 	}
+	/* Save receipt: the server's fresh quote, or why unattended runs skip it.
+	   A warning gets the warning tint and stays open until the owner hides it. */
+	.gcc-saved {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: start;
+		gap: 0.25rem 0.625rem;
+		margin: 0.625rem 0 0;
+		padding: 0.5rem 0.625rem;
+		border: 1px solid var(--border);
+		border-left: 2px solid var(--success, var(--foreground));
+		border-radius: var(--gcc-inner-radius);
+		background: color-mix(in oklab, var(--success, var(--muted)) 6%, var(--card));
+		font-size: 0.75rem;
+		line-height: 1.45;
+		animation: gcc-expand 0.2s ease-out both;
+	}
+	.gcc-saved[data-state='unpriced'],
+	.gcc-saved[data-state='unavailable'] {
+		border-color: color-mix(in oklab, var(--warning) 40%, var(--border));
+		border-left-color: var(--warning);
+		background: color-mix(in oklab, var(--warning) 8%, var(--card));
+	}
+	.gcc-saved-icon {
+		display: grid;
+		place-items: center;
+		width: 14px;
+		height: 18px;
+		color: var(--success, var(--foreground));
+	}
+	.gcc-saved[data-state='unpriced'] .gcc-saved-icon,
+	.gcc-saved[data-state='unavailable'] .gcc-saved-icon {
+		color: var(--warning);
+	}
+	.gcc-saved-icon :global(svg) {
+		width: 13px;
+		height: 13px;
+	}
+	.gcc-saved-body {
+		min-width: 0;
+	}
+	.gcc-saved-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 2px 6px;
+		margin: 0;
+	}
+	.gcc-saved-head strong {
+		font-weight: 600;
+	}
+	.gcc-saved-what {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.gcc-saved-tag {
+		padding: 0 6px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
+		font-size: 0.625rem;
+		font-weight: 600;
+		letter-spacing: 0.01em;
+		white-space: nowrap;
+	}
+	.gcc-saved-text {
+		margin: 2px 0 0;
+		color: var(--muted-foreground);
+	}
+	.gcc-saved[data-state='unpriced'] .gcc-saved-text,
+	.gcc-saved[data-state='unavailable'] .gcc-saved-text {
+		color: var(--foreground);
+	}
+	.gcc-saved-price {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		margin: 0;
+		text-align: right;
+	}
+	.gcc-saved-figure {
+		font-family: var(--font-mono);
+		font-size: 0.8125rem;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.gcc-saved-note {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+	}
+	.gcc-sub-warn {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		color: var(--foreground);
+		white-space: nowrap;
+	}
+	.gcc-sub-warn .gcc-dot {
+		margin: 0 0 0 4px;
+	}
+	.gcc-sub-warn :global(svg) {
+		width: 12px;
+		height: 12px;
+		color: var(--warning);
+	}
 	.gcc-foot {
 		display: flex;
 		align-items: center;
@@ -1164,6 +1322,25 @@
 			align-items: flex-end;
 			gap: 0;
 		}
+		/* The collapsed warning takes its own line rather than wrapping after a dot. */
+		.gcc-sub-warn {
+			display: flex;
+			margin-top: 1px;
+		}
+		.gcc-sub-warn .gcc-dot {
+			display: none;
+		}
+		/* The price drops under the text instead of squeezing it. */
+		.gcc-saved {
+			grid-template-columns: auto minmax(0, 1fr);
+		}
+		.gcc-saved-price {
+			grid-column: 2;
+			flex-direction: row;
+			align-items: baseline;
+			gap: 6px;
+			text-align: left;
+		}
 	}
 
 	@keyframes gcc-in {
@@ -1191,7 +1368,8 @@
 	@media (prefers-reduced-motion: reduce) {
 		.gcc,
 		.gcc-total,
-		.gcc-adv-body {
+		.gcc-adv-body,
+		.gcc-saved {
 			animation: none;
 		}
 		.gcc-option,

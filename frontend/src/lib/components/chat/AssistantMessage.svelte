@@ -1075,7 +1075,7 @@
 	}
 
 	.abody :global(.code-run-btn:hover:not([aria-disabled='true'])) {
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
 		color: var(--foreground);
 	}

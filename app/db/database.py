@@ -17,7 +17,8 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Iterator
+from threading import Event
 
 import psycopg2
 
@@ -36,6 +37,8 @@ from app.db.base import (  # noqa: F401
     row_to_dict,
     rows_to_list,
 )
+
+from app.db.sql_timeouts import analyze_timeouts, migration_timeouts, vacuum_timeouts
 
 from app.db.compat import (  # noqa: F401
     ph,
@@ -2702,6 +2705,9 @@ def _run_column_migrations(cursor: Any) -> None:
     migrations_applied.extend(_retire_fal_billing_key(cursor))
     migrations_applied.extend(_retire_secret_named_observations(cursor))
     migrations_applied.extend(_retire_assistant_home(cursor))
+    from app.db.session_mode_migration import migrate as migrate_session_modes
+
+    migrations_applied.extend(migrate_session_modes(cursor))
     from app.db.watch_migration import migrate as migrate_email_watches
 
     migrations_applied.extend(migrate_email_watches(cursor))
@@ -3440,13 +3446,17 @@ def migrations_fingerprint() -> str:
     import hashlib
 
     from app.db import schema_postgres, mobile_hub, network, assistant, working_record
+    from app.db import session_mode_migration
     from app.core import owner_auth
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
     # The hub and owner helpers also define tables used during encryption init.
     # Include their sources and the network schema so upgrades cannot skip new DDL.
-    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant, working_record):
+    for module in (
+        sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network,
+        assistant, working_record, session_mode_migration,
+    ):
         path = getattr(module, "__file__", None)
         if not path:
             return ""
@@ -3473,7 +3483,7 @@ BOOT_INIT_LOCK_KEY = int.from_bytes(
 
 
 @contextmanager
-def boot_init_lock():
+def boot_init_lock() -> Iterator[None]:
     """Serialize a worker's whole database start-up against other workers.
 
     ``init_database``'s lock ends with its transaction, but start-up goes on
@@ -3490,19 +3500,12 @@ def boot_init_lock():
     """
     with get_db() as conn:
         cursor = conn.cursor()
+        migration_timeouts(cursor)
         cursor.execute("SELECT pg_advisory_xact_lock(%s)", (BOOT_INIT_LOCK_KEY,))
-        # This connection idles in its transaction for the whole start-up; a
-        # server-wide idle_in_transaction_session_timeout would end it (and
-        # the lock) half way.
-        try:
-            with _savepoint(cursor, "sp_boot_lock_idle"):
-                cursor.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
-        except Exception:  # noqa: BLE001 - best effort; the lock is what matters
-            pass
         yield
 
 
-def init_database():
+def init_database() -> None:
     """Initialize the PostgreSQL database with schema.
 
     Delegates to schema_postgres.create_postgres_schema() for initial DDL,
@@ -3533,6 +3536,7 @@ def init_database():
 
     with get_db() as conn:
         cursor = conn.cursor()
+        migration_timeouts(cursor)
 
         # Serialize schema initialisation across processes. Workers sharing
         # one database can boot (or roll out an upgrade) at the same moment;
@@ -3664,7 +3668,9 @@ def _prune_notifications_cap(cap, *, stop=None):
     return total
 
 
-def run_database_maintenance(skip_vacuum: bool = False, *, stop=None) -> dict:
+def run_database_maintenance(
+    skip_vacuum: bool = False, *, stop: Optional[Event] = None,
+) -> dict[str, Any]:
     """Run periodic database maintenance to prevent progressive slowdown.
 
     Should be called every few hours. Handles:
@@ -3737,9 +3743,8 @@ def run_database_maintenance(skip_vacuum: bool = False, *, stop=None) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 1. Update query planner statistics.
-        from app.db.retention import set_timeout
-        set_timeout(cursor)
+        # 1. Statistics scans need longer than ordinary retention batches.
+        analyze_timeouts(cursor)
         try:
             with _savepoint(cursor, "sp_maint_analyze"):
                 cursor.execute("ANALYZE")
@@ -3766,8 +3771,9 @@ def run_database_maintenance(skip_vacuum: bool = False, *, stop=None) -> dict:
                 # Parallel index vacuum allocates dynamic shared memory; on a
                 # container with a small /dev/shm it fails with "could not
                 # resize shared memory segment". A serial vacuum needs none.
-                cursor.execute("SET max_parallel_maintenance_workers = 0")
-                cursor.execute("VACUUM ANALYZE")
+                with vacuum_timeouts(cursor):
+                    cursor.execute("SET max_parallel_maintenance_workers = 0")
+                    cursor.execute("VACUUM ANALYZE")
                 results["vacuum"] = "ok"
             finally:
                 # VACUUM uses a session setting; do not leak it to the next borrower.

@@ -540,7 +540,11 @@ curl -X POST http://localhost:8000/api/v1/sessions/batch-delete \
   -d '{"session_ids": ["sess_abc123", "sess_def456"]}'
 ```
 
-Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`. The assistant’s built-in home chat is also skipped, with `Deletion failed for session {id}: Your personal assistant is a persistent conversation and cannot be deleted` in `errors`. Other sessions in the batch are still deleted; the response remains `200` and the home binding is preserved.
+Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is
+`null` when every session was deleted). A session that does not exist or that the
+caller may not delete is skipped and listed in `errors`. Other sessions in the
+batch are still deleted; the response remains `200`. There is no reserved or
+persistent assistant conversation exempt from deletion.
 
 ### POST /api/v1/sessions/{session_id}/archive
 

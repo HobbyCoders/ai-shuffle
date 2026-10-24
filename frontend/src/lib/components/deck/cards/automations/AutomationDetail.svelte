@@ -266,7 +266,7 @@
 
 	.auto-agent-pick:hover {
 		background: var(--hover-overlay);
-		border-color: color-mix(in oklch, var(--warning) 55%, var(--border));
+		border-color: color-mix(in oklab, var(--warning) 55%, var(--border));
 	}
 
 	.auto-agent-pick:focus-visible {

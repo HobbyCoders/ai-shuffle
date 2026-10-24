@@ -62,11 +62,11 @@
   --surface-1: color-mix(in oklch, var(--muted) 60%, transparent);
   --surface-2: color-mix(in oklch, var(--muted) 80%, transparent);
   --surface-hover: color-mix(in oklch, var(--muted) 70%, transparent);
-  --surface-active: color-mix(in oklch, var(--primary) 15%, var(--card));
+  --surface-active: color-mix(in oklab, var(--primary) 15%, var(--card));
 
   /* Selection states */
-  --surface-selected: color-mix(in oklch, var(--selection, var(--ring)) 10%, var(--card));
-  --surface-selected-emphasis: color-mix(in oklch, var(--selection, var(--ring)) 15%, var(--card));
+  --surface-selected: color-mix(in oklab, var(--selection, var(--ring)) 10%, var(--card));
+  --surface-selected-emphasis: color-mix(in oklab, var(--selection, var(--ring)) 15%, var(--card));
   --border-selected: color-mix(in oklch, var(--selection, var(--ring)) 50%, transparent);
   --shadow-selected: var(--selection-shadow);
   --shadow-selected-subtle: var(--selection-shadow-subtle);
@@ -74,7 +74,7 @@
   /* Borders */
   --border-subtle: color-mix(in oklch, var(--border) 60%, transparent);
   --border-default: var(--border);
-  --border-emphasis: color-mix(in oklch, var(--primary) 40%, var(--border));
+  --border-emphasis: color-mix(in oklab, var(--primary) 40%, var(--border));
   --border-glow: color-mix(in oklch, var(--primary) 50%, transparent);
 
   /* Text hierarchy */

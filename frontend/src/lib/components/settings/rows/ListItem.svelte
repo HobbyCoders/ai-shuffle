@@ -143,7 +143,7 @@
 		background: var(--st-primary-soft);
 	}
 	.st-it.pinned[aria-current='true'] {
-		background: color-mix(in oklch, var(--st-primary) 20%, var(--st-accent));
+		background: color-mix(in oklab, var(--st-primary) 20%, var(--st-accent));
 	}
 	.st-it.pinned .meta {
 		color: var(--st-mfg);

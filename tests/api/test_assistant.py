@@ -27,10 +27,9 @@ class LocalListener:
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch: MonkeyPatch) -> Any:
     monkeypatch.setattr(settings, "instance_id", "assistant-test")
     monkeypatch.setattr(settings, "shuffle_local_access", True)
-    monkeypatch.setattr(service, "_guard_version", 0)
     app = FastAPI()
     app.include_router(assistant.router)
     app.include_router(connectors.router)
@@ -96,21 +95,27 @@ def test_owner_only_reads_writes_and_csrf(client: Any, assistant_fixture: Any) -
     assert database.get_profile("assistant-agent")["name"] == "Helper"
 
 
-def test_builtin_agent_is_hidden_from_agent_lists_and_locked(client, assistant_fixture):
+def test_retired_id_is_only_a_tombstone_not_a_live_special_agent(
+    client: Any, assistant_fixture: Any,
+) -> None:
     agent_id = service.AGENT_ID
     assert agent_id not in {row["id"] for row in client.get("/api/v1/agents").json()}
     assert agent_id not in {row["id"] for row in client.get("/api/v1/assistant/agents").json()}
     assert agent_id not in {row["id"] for row in database.get_all_profiles()}
     assert client.get(f"/api/v1/agents/{agent_id}").status_code == 200  # Readable by id.
-    assert client.put(f"/api/v1/agents/{agent_id}", json={"name": "Hijacked"}).status_code == 403
-    assert client.delete(f"/api/v1/agents/{agent_id}").status_code == 403
-    assert client.put(f"/api/v1/agents/{agent_id}/enabled-agents", json={"enabled_agents": []}).status_code == 403
+    for response in (
+        client.put(f"/api/v1/agents/{agent_id}", json={"name": "Hijacked"}),
+        client.delete(f"/api/v1/agents/{agent_id}"),
+        client.put(f"/api/v1/agents/{agent_id}/enabled-agents", json={"enabled_agents": []}),
+    ):
+        assert response.status_code == 410
+        assert response.json()["detail"] == "This agent ID is retired"
     assert client.patch(f"/api/v1/assistant/agents/{agent_id}/identity", json={"name": "Hijacked"}).status_code == 409
     with pytest.raises(PermissionError):
         database.update_profile(agent_id, name="Hijacked", allow_builtin=True)
-    with pytest.raises(PermissionError):
-        database.delete_profile(agent_id)
-    assert database.get_profile(agent_id)["name"] == service.AGENT_NAME
+    # A tombstone must not protect the historical agent row from DB cleanup.
+    assert database.delete_profile(agent_id)
+    assert database.get_profile(agent_id) is None
     # Ordinary agents keep working as before.
     assert client.put("/api/v1/agents/assistant-agent", json={"name": "Renamed"}).status_code == 200
 

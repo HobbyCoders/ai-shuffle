@@ -1013,7 +1013,7 @@
 	}
 	.seg:hover { background: var(--hover-overlay); }
 	.seg[aria-checked='true'] {
-		background: color-mix(in oklch, var(--primary) 13%, var(--card));
+		background: color-mix(in oklab, var(--primary) 13%, var(--card));
 		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 40%, transparent);
 		color: var(--primary);
 		font-weight: 600;
@@ -1088,7 +1088,7 @@
 	.mcp-note { margin: 0 2px; font-size: 12.5px; color: var(--muted-foreground); }
 
 	.run-row { min-height: 60px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 20px; align-items: center; gap: 10px; }
-	.run-ic { display: grid; place-items: center; width: 34px; height: 34px; border-radius: calc(var(--radius) - 2px); background: color-mix(in oklch, var(--primary) 13%, var(--card)); color: var(--primary); }
+	.run-ic { display: grid; place-items: center; width: 34px; height: 34px; border-radius: calc(var(--radius) - 2px); background: color-mix(in oklab, var(--primary) 13%, var(--card)); color: var(--primary); }
 	.run-copy b { display: block; font-size: 14.5px; font-weight: 600; }
 	.run-copy small { display: block; font-size: 12px; color: var(--muted-foreground); }
 
@@ -1110,7 +1110,7 @@
 	.tg-state { display: flex; align-items: center; gap: 4px; font-size: 12px; }
 	.tg-name { display: block; font-size: 14px; font-weight: 600; }
 	.tg-help { display: block; margin-top: 1px; font-size: 11.5px; color: var(--muted-foreground); }
-	.toggle[aria-checked='true'] { background: color-mix(in oklch, var(--primary) 13%, var(--card)); border-color: color-mix(in oklch, var(--primary) 40%, transparent); }
+	.toggle[aria-checked='true'] { background: color-mix(in oklab, var(--primary) 13%, var(--card)); border-color: color-mix(in oklch, var(--primary) 40%, transparent); }
 	.toggle[aria-checked='true'] .tg-top { color: var(--primary); }
 	.toggle[aria-disabled='true'] .tg-name { color: var(--muted-foreground); }
 	.toggle[aria-disabled='true'] .tg-top { color: var(--subtle-foreground); }
@@ -1119,7 +1119,7 @@
 	.bars { display: grid; grid-template-columns: repeat(var(--n, 5), minmax(0, 1fr)); gap: 6px; margin-top: 8px; touch-action: pan-y; cursor: ew-resize; }
 	.bar { height: 64px; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-end; gap: 5px; padding: 0; border: 0; border-radius: calc(var(--radius) - 2px); background: transparent; font: inherit; cursor: pointer; }
 	.bar-fill { height: var(--h); border-radius: 4px; background: color-mix(in oklch, var(--muted-foreground) 22%, var(--card)); transition: background-color 0.15s, height 0.2s; }
-	.bar.lit .bar-fill { background: color-mix(in oklch, var(--primary) 70%, var(--card)); }
+	.bar.lit .bar-fill { background: color-mix(in oklab, var(--primary) 70%, var(--card)); }
 	.bar[aria-checked='true'] .bar-fill { background: var(--primary); }
 	.bar-label { font-size: 11.5px; color: var(--muted-foreground); text-align: center; }
 	.bar[aria-checked='true'] .bar-label { color: var(--foreground); font-weight: 600; }
@@ -1167,7 +1167,7 @@
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner) { color: var(--foreground); background: var(--card); }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner.busy) {
 		border-color: color-mix(in oklch, var(--warning) 40%, transparent);
-		background: color-mix(in oklch, var(--warning) 14%, var(--card));
+		background: color-mix(in oklab, var(--warning) 14%, var(--card));
 		color: var(--warning);
 	}
 	.mcp-setup :global(.sheet-mode .queued-cancel) { width: 44px; height: 44px; margin-left: 6px; border-radius: var(--radius); }
@@ -1201,7 +1201,7 @@
 		cursor: pointer;
 	}
 	.act:hover:not(:disabled) { background: var(--hover-overlay); }
-	.act[aria-pressed='true'] { background: color-mix(in oklch, var(--primary) 13%, var(--card)); color: var(--primary); }
+	.act[aria-pressed='true'] { background: color-mix(in oklab, var(--primary) 13%, var(--card)); color: var(--primary); }
 	.act:disabled { opacity: 0.45; cursor: not-allowed; }
 	.act-label { color: var(--muted-foreground); pointer-events: none; }
 	.act[aria-pressed='true'] .act-label { color: var(--primary); }

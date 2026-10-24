@@ -1,5 +1,6 @@
 """Real PostgreSQL admission and row-lock races on a private disposable cluster."""
 from concurrent.futures import ThreadPoolExecutor
+from typing import Iterator
 import threading
 from uuid import uuid4
 
@@ -169,7 +170,9 @@ def test_late_renewal_rejects_terminal_or_reassigned_turn(lease_pool, outcome):
     assert not runs.renew_run(run["id"], "old", run["fence_token"], 60)
 
 
-def test_lease_sql_timeouts_release_workers_and_do_not_leak(lease_pool):
+def test_lease_sql_timeouts_release_workers_and_do_not_leak(
+    lease_pool: base._RetainingThreadedConnectionPool,
+) -> None:
     sid = uuid4().hex
     run = runs.claim_run(sid, "owner", 60)
     with base.get_db() as blocker:
@@ -184,20 +187,22 @@ def test_lease_sql_timeouts_release_workers_and_do_not_leak(lease_pool):
     with base.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SHOW lock_timeout")
-        assert cursor.fetchone()["lock_timeout"] == "0"
+        assert cursor.fetchone()["lock_timeout"] == "5s"
         cursor.execute("SHOW statement_timeout")
-        assert cursor.fetchone()["statement_timeout"] == "0"
+        assert cursor.fetchone()["statement_timeout"] == "30s"
     assert runs.renew_run(run["id"], "owner", run["fence_token"], 60)
 
 
-def test_reaper_has_longer_local_timeouts_without_leaking(lease_pool, monkeypatch):
+def test_reaper_has_longer_local_timeouts_without_leaking(
+    lease_pool: base._RetainingThreadedConnectionPool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from contextlib import contextmanager
 
     real_lease_db = base.get_lease_db
     observed = []
 
     @contextmanager
-    def inspect_lease_db(**kwargs):
+    def inspect_lease_db(**kwargs: int) -> Iterator[base._PgDictConnection]:
         with real_lease_db(**kwargs) as conn:
             cursor = conn.cursor()
             cursor.execute("SHOW lock_timeout")
@@ -214,9 +219,9 @@ def test_reaper_has_longer_local_timeouts_without_leaking(lease_pool, monkeypatc
     with base.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SHOW lock_timeout")
-        assert cursor.fetchone()["lock_timeout"] == "0"
+        assert cursor.fetchone()["lock_timeout"] == "5s"
         cursor.execute("SHOW statement_timeout")
-        assert cursor.fetchone()["statement_timeout"] == "0"
+        assert cursor.fetchone()["statement_timeout"] == "30s"
     with real_lease_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SHOW lock_timeout")

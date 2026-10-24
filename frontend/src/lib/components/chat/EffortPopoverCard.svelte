@@ -233,7 +233,7 @@
 	}
 
 	.fast-toggle.on {
-		background: color-mix(in oklch, var(--primary) 18%, var(--card));
+		background: color-mix(in oklab, var(--primary) 18%, var(--card));
 		color: var(--primary);
 		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
@@ -318,7 +318,7 @@
 	}
 
 	.tick.on {
-		background: color-mix(in oklch, var(--primary) 75%, var(--foreground));
+		background: color-mix(in oklab, var(--primary) 75%, var(--foreground));
 	}
 
 	.slider input[type='range'] {

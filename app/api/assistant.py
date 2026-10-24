@@ -22,7 +22,10 @@ from app.core.watch_manager import watch_manager
 from app.db import assistant_limits as limits_db
 from app.db.async_database import run_sync
 
-router = APIRouter(prefix="/api/v1/assistant", tags=["Assistant"], dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api/v1/assistant", tags=["Owner coordination"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _avatar(value):

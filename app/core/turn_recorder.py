@@ -36,7 +36,7 @@ from app.core.config import settings
 from app.core.session_title import derive_session_title
 from app.db import runs as runs_db
 from app.db import session_events as session_events_db
-from app.db.async_database import run_lease
+from app.db.async_database import run_lease, run_event_write
 
 logger = logging.getLogger(__name__)
 
@@ -1415,7 +1415,7 @@ class TurnRecorder:
             self._superseded_dropped += len(events)
             return
         try:
-            def append_current_events():
+            def append_current_events() -> None:
                 from app.core.task_registry import task_registry
 
                 # The recorder lock and executor admission can both yield.
@@ -1436,7 +1436,7 @@ class TurnRecorder:
                          if self.run_id is not None and self.fence_token is not None else {})
                 session_events_db.append_events(self.session_id, current, **fence)
 
-            await asyncio.to_thread(append_current_events)
+            await run_event_write(append_current_events)
             self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
@@ -1560,7 +1560,7 @@ class TurnRecorder:
 async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> None:
     if not events:
         return
-    await asyncio.to_thread(session_events_db.append_events, session_id, events)
+    await run_event_write(session_events_db.append_events, session_id, events)
 
 
 async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:

@@ -77,7 +77,7 @@
 	.np-pill :global(.np-icon) { color: var(--subtle-foreground); transition: color 150ms ease; }
 	.np-pill:hover, .np-pill[aria-expanded='true'] {
 		border-style: solid;
-		border-color: color-mix(in oklch, var(--primary) 55%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
 		color: var(--foreground);
 		background: color-mix(in oklch, var(--primary) 8%, transparent);
 	}

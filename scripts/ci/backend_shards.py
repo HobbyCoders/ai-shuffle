@@ -166,9 +166,12 @@ def refresh(run_id, directory, output):
     if directory.exists() and any(directory.iterdir()):
         raise ValueError("duration download directory must be empty")
     subprocess.run(["gh", "run", "download", run_id, "--repo", "HobbyCoders/ai-shuffle",
-                    "--pattern", "backend-shard-*", "--dir", str(directory)], check=True)
+                    "--pattern", "backend-shard-*-a*", "--dir", str(directory)], check=True)
+    from scripts.ci.shard_evidence import select_evidence
+    selected = directory / "selected"
+    select_evidence(directory, selected, "backend-shard", 4)
     receipts, durations = [], {}
-    for receipt in sorted(directory.glob("**/receipt.json")):
+    for receipt in sorted(selected.glob("**/receipt.json")):
         receipts.append(json.loads(receipt.read_text()))
         timings = json.loads(receipt.with_name("durations.json").read_text())
         evidence = receipts[-1]
