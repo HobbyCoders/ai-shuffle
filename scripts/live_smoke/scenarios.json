@@ -514,6 +514,14 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.approval-self-gated-tools",
+          "check": "Tools with their own consent card ask once in an owner chat",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
+          "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
+          "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
+        },
+        {
           "id": "harness-basics.23",
           "check": "Native wake provenance across context pruning and rewind/resume",
           "kind": "owner",

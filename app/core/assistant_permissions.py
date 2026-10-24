@@ -25,6 +25,10 @@ permission engine, the delegated PreToolUse policy and the bundled-tool
 dispatch), and the approver puts a high call to the owner past any mode or
 saved rule (``query_engine``). The model can ask when the app would not, but it
 cannot lower a level or skip an ask, and the levels are not a setting.
+
+A few tools put their own consent in front of the owner (a private access
+card, a grant, a one-shot approval, the screen-access card). The gate does not
+ask before those as well: :data:`OWN_CONSENT_TOOLS`.
 """
 from __future__ import annotations
 
@@ -576,9 +580,94 @@ def level(name: Any, tool_input: Any, scope: Scope, *, spec_risk: Optional[str] 
         return HIGH
 
 
-def needs_owner(name: Any, tool_input: Any, scope: Optional[Scope], *, spec_risk: Optional[str] = None) -> bool:
-    """True when this call must wait for the owner's firm yes."""
-    return bool(scope) and level(name, tool_input, scope, spec_risk=spec_risk) == HIGH
+# ---------------------------------------------------------------------------
+# Tools that put their own consent in front of the owner
+# ---------------------------------------------------------------------------
+
+def _always(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    return True
+
+
+def _outside_bypass(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    return mode != "bypassPermissions"
+
+
+def _chat_http_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    method = data.get("method")
+    if isinstance(method, str) and method.upper() in ("GET", "HEAD"):
+        return True
+    return _outside_bypass(data, mode)
+
+
+def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    # Ask and Accept Edits show the access card on every request a saved
+    # Allow rule doesn't already cover. Bypass shows
+    # it on the session's first grant only, and the delegated CLI's Auto
+    # classifier may approve without a prompt, so there the gate stays.
+    return mode not in ("bypassPermissions", "auto")
+
+
+#: The tools whose own card, or the grant behind them, already collects the
+#: owner's decision, and when it does. A yes/no before such a call would be a
+#: second gate for one decision (the owner: "things that still require a
+#: permission step with UI shouldn't also require a yes/no to even call it",
+#: #527).
+#: So the owner gate stands aside for a call its own consent covers in the
+#: session's mode, and still asks where that mode skips it. Outside Bypass a
+#: saved Deny rule still wins (``harness_adapter`` checks it at dispatch);
+#: Bypass skips saved rules for these tools as for every tool. Nothing here
+#: grants access: the card, the grant's scope, its expiry and Away mode decide.
+#:
+#: * RequestChatAccess: the private access card, in every mode. The owner
+#:   approves it there (and types any secret there); Away refuses it.
+#: * ChatListFiles, ChatReadFile, ChatHttpRequest GET/HEAD: inside a grant the
+#:   owner approved; the broker refuses anything outside it or after expiry.
+#: * ChatRunCommand, ChatWriteFile, other ChatHttpRequest methods: the broker's
+#:   one-shot card, outside Bypass. In Bypass the grant card promises no repeat
+#:   approval, so the owner gate asks as before.
+#: * computer-use request_access: the screen-access card on every request in
+#:   Ask and Accept Edits (a saved Allow rule skips it, as in other chats). In Bypass and Auto the gate stays, and the approver
+#:   shows that same card instead of a yes/no (``query_engine``).
+#:
+#: AskUser/AskUserQuestion are low already (questions never pass the gate).
+OWN_CONSENT_TOOLS: Dict[str, Callable[[Mapping[str, Any], Optional[str]], bool]] = {
+    "mcp__chat-access__RequestChatAccess": _always,
+    "mcp__chat-access__ChatListFiles": _always,
+    "mcp__chat-access__ChatReadFile": _always,
+    "mcp__chat-access__ChatHttpRequest": _chat_http_consent,
+    "mcp__chat-access__ChatRunCommand": _outside_bypass,
+    "mcp__chat-access__ChatWriteFile": _outside_bypass,
+    "mcp__computer-use__request_access": _computer_access_consent,
+}
+
+
+def has_own_consent(name: Any) -> bool:
+    """Whether ``name`` is one of :data:`OWN_CONSENT_TOOLS`."""
+    return canonical(name) in OWN_CONSENT_TOOLS
+
+
+def own_consent_covers(name: Any, tool_input: Any, permission_mode: Optional[str]) -> bool:
+    """Whether the tool's own card or grant decides this call in this mode."""
+    rule = OWN_CONSENT_TOOLS.get(canonical(name))
+    if rule is None:
+        return False
+    try:
+        return bool(rule(tool_input if isinstance(tool_input, Mapping) else {}, permission_mode))
+    except Exception:  # noqa: BLE001 — doubt keeps the owner's yes
+        logger.warning("Own-consent rule failed for %s; asking the owner", name, exc_info=True)
+        return False
+
+
+def needs_owner(name: Any, tool_input: Any, scope: Optional[Scope], *, spec_risk: Optional[str] = None,
+                permission_mode: Optional[str] = None) -> bool:
+    """True when this call must wait for the owner's firm yes.
+
+    ``permission_mode`` is the session's live mode; a tool whose own consent
+    covers the call in that mode (:data:`OWN_CONSENT_TOOLS`) does not ask first.
+    """
+    if not scope or own_consent_covers(name, tool_input, permission_mode):
+        return False
+    return level(name, tool_input, scope, spec_risk=spec_risk) == HIGH
 
 
 ASK_REASON = (
