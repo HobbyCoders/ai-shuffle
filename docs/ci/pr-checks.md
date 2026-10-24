@@ -769,17 +769,22 @@ also independently supports safe ancestors and rechecks its own pointer.
   `ci-folder-confinement.yml`.
 - The Linux `backend-linux` local suite runs both container runtime and image
   contracts serially. `check` runs their plain cases for container/startup changes;
-  `full` also runs the plain cases by default. While
-  [#350](https://github.com/HobbyCoders/ai-shuffle/issues/350) is unresolved, the
-  real-PostgreSQL functional cases require
-  `LOCAL_CI_CONTAINER_PG=1 python scripts/local_ci.py full`; checkpoint timing
-  measurements require `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`
-  (which also enables PG). Both opt-ins require local PostgreSQL binaries and
-  create disposable clusters, not connections to a configured database. A full
-  run with a requested opt-in but no binaries fails clearly. Disabled opt-in
-  groups get a coverage note naming #350 and their opt-in; enabled groups do not.
+  `full` runs the plain cases and, when local PostgreSQL binaries are available,
+  the real-PostgreSQL functional cases by default. Checkpoint and FAST-shutdown
+  timing measurements require
+  `LOCAL_CI_CONTAINER_PRESSURE=1 python scripts/local_ci.py full`.
+  These create disposable clusters, not connections to a configured database.
+  A full run with a requested PG/pressure opt-in but no binaries fails clearly
+  (`LOCAL_CI_CONTAINER_PG=1` remains a way to require binaries). Missing coverage
+  gets an explicit note; disabled measurements name #350 and their opt-in.
   Staged full receipts include both opt-ins in their identity, so changing them
-  reruns the gate. Restore PG functional cases to default full after #350 is fixed.
+  reruns the gate. Checkpoint observations use a dedicated 60-second lab command
+  budget, not the product's generic 10-second SQL budget. Independently selected
+  FAST-shutdown measurements dirty the database and call the unchanged production
+  30-second shutdown path while pressure writers are still active. Failure to acquire
+  an idle interval produces an explicit lab-precondition skip, not a product failure;
+  observation deadlines and real FAST-shutdown failures remain failures with
+  distinct diagnostics.
   The manual hosted backend job still covers other network-database and agent
   isolation contracts when a local run cannot answer the release question;
   do not dispatch it to discover failures.
@@ -806,7 +811,9 @@ panel, turn navigator, side panel, composer, usage rows) at desktop
 cover (360×882) screens, opens the panel or popover under test, and compares
 each with `frontend/tests/visual-baselines/`. Run it before and after chat UI
 work; accept intended changes with `node tests/visual-regression.mjs --update`
-and commit the new baselines. Pass a fixture name to run one
+and commit the new baselines in the same PR (they are test fixtures, not PR
+evidence, so the no-screenshots rule in docs/internal/CONTRIBUTING.md does not
+apply to them). Pass a fixture name to run one
 (`node tests/visual-regression.mjs usage-rows`). It uses the browser runtime's
 playwright-core and Chromium, freezes the page clock, and is deliberately not a
 CI job to keep runner minutes down.

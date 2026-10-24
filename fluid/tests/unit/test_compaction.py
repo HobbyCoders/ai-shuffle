@@ -2319,11 +2319,13 @@ async def test_engine_reads_wake_turn_sources_from_turn_started(tmp_path) -> Non
     store = JsonlStore(tmp_path)
     loop = NativeLoop(provider=_ScriptedProvider([_text_script("done")]),
                       store=store, model="m", session_id=sid)
-    await loop._note_wake_turn_starts(sid)
+    nodes = [_node(nid, "user", [Text(nid)]) for nid in ("u0", "w1", "w2", "old")]
+    await loop._note_wake_turn_starts(sid, nodes)
     assert loop._compactor.wake_turn_starts == {"w1", "w2"}
     await persist_event(store, TurnStarted(
         session_id=sid, node_id="w3", turn_id="t5", seq=6,
         model="m", provider="p", source="wakeup"))
-    await loop._note_wake_turn_starts(sid)
+    nodes.append(_node("w3", "user", [Text("w3")]))
+    await loop._note_wake_turn_starts(sid, nodes)
     assert loop._compactor.wake_turn_starts == {"w1", "w2", "w3"}
     await loop.aclose()
