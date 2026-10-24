@@ -31,7 +31,9 @@ def identity(row: dict[str, Any]) -> str:
     return hashlib.sha256(str(token).encode()).hexdigest()
 
 
-def gate(watch: dict[str, Any], value: str, *, exporting: bool) -> str:
+def gate(
+    watch: dict[str, Any], value: str, *, exporting: bool, fence: bool = True,
+) -> str:
     row = connector(watch)
     if row is None:
         return ""
@@ -48,7 +50,12 @@ def gate(watch: dict[str, Any], value: str, *, exporting: bool) -> str:
     result = identity(row)
     with journal.get_db() as conn:
         c = conn.cursor()
-        state = journal.lock(c, cid)
+        if fence:
+            state = journal.lock(c, cid)
+        else:
+            store.lock_connector(c, cid)
+            c.execute("SELECT fence FROM watch_connector_journals WHERE connector_id=%s", (cid,))
+            state = c.fetchone() or {"fence": ""}
         others = [w for w in journal.consumers(c, cid) if w["id"] != watch["id"]]
         if others:
             raise ValueError(
@@ -61,10 +68,11 @@ def gate(watch: dict[str, Any], value: str, *, exporting: bool) -> str:
                          and value.endswith(":" + previous["target"]))
             if not returning:
                 raise ValueError("Telegram receiver is fenced by another transfer")
-        c.execute("UPDATE watch_connector_journals SET fence=%s WHERE connector_id=%s",
-                  (value, cid))
-        if not exporting:
-            journal.trim(c, cid)
+        if fence:
+            c.execute("UPDATE watch_connector_journals SET fence=%s WHERE connector_id=%s",
+                      (value, cid))
+            if not exporting:
+                journal.trim(c, cid)
     return result
 
 
@@ -78,7 +86,7 @@ async def ensure_started(watch: dict[str, Any]) -> None:
 
 
 async def prepare(
-    watch: dict[str, Any], peer: str, *, exporting: bool,
+    watch: dict[str, Any], peer: str, *, exporting: bool, fence: bool = True,
 ) -> dict[str, Any]:
     row = await run_sync(connector, watch)
     if row is None:
@@ -96,7 +104,20 @@ async def prepare(
         if await connector_manager.get_running_connector(cid) is not None:
             raise ValueError("Stop the Telegram receiver before moving its watch")
         value = ("export:" if exporting else "import:") + watch["id"] + ":" + peer
-        return {"identity": await run_sync(gate, watch, value, exporting=exporting)}
+        return {"identity": await run_sync(gate, watch, value, exporting=exporting, fence=fence)}
+
+
+async def export(watch: dict[str, Any], peer: str) -> dict[str, Any]:
+    """Commit the source fence with its snapshot while excluding receiver startup."""
+    row = await run_sync(connector, watch)
+    if row is None:
+        return await run_sync(store.export_watch, watch["id"], peer)
+    async with connector_manager.receiver_lock(row["id"]):
+        if await connector_manager.get_running_connector(row["id"]) is not None:
+            raise ValueError("Stop the Telegram receiver before moving its watch")
+        value = "export:" + watch["id"] + ":" + peer
+        bot = await run_sync(gate, watch, value, exporting=True, fence=False)
+        return await run_sync(store.export_watch, watch["id"], peer, bot)
 
 
 def validate_import(

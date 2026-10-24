@@ -145,7 +145,10 @@ def export_watch(
             if previous["target"] != target or previous["completed"]:
                 raise ValueError("Watch has already moved or is moving to another worker")
             snapshot = previous["snapshot"]
-            return json.loads(snapshot) if isinstance(snapshot, str) else snapshot
+            snapshot = json.loads(snapshot) if isinstance(snapshot, str) else snapshot
+            if not snapshot:
+                raise ValueError("Watch transfer was invalidated by connector deletion")
+            return snapshot
         if watch["status"] == "stopped":
             raise ValueError("Stopped watches cannot move")
         c.execute("SELECT * FROM watch_events WHERE watch_id=%s ORDER BY created_at,id", (wid,))
@@ -161,6 +164,14 @@ def export_watch(
             snapshot["journal"] = dict(watch_journal.tail(c, watch), identity=telegram_identity)
         if len(encode(snapshot).encode()) > 3 * 1024 * 1024:
             raise ValueError("Watch history exceeds the transfer payload limit")
+        if telegram_identity is not None:
+            cid = watch["source"]["connector_id"]
+            state = watch_journal.lock(c, cid)
+            fence = "export:" + wid + ":" + target
+            if state["fence"] and state["fence"] != fence:
+                raise ValueError("Telegram receiver is fenced by another transfer")
+            c.execute("UPDATE watch_connector_journals SET fence=%s WHERE connector_id=%s",
+                      (fence, cid))
         c.execute(
             "INSERT INTO watch_transfers (watch_id,token,target,snapshot) VALUES (%s,%s,%s,%s)",
             (wid, snapshot["token"], target, encode(snapshot)),

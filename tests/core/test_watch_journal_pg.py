@@ -117,7 +117,7 @@ def test_journal_serializes_reversed_commit_attempts(
 def workers(
     journal_cluster: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[Any]:
-    """Two process-local workers, isolated PG schemas and fake Telegram receivers."""
+    """Process-local workers, isolated PG schemas and fake Telegram receivers."""
     from contextvars import ContextVar
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -131,8 +131,8 @@ def workers(
     from app.network import runners
 
     current: ContextVar[str] = ContextVar("journal_worker", default="source")
-    schemas = {name: "worker_" + uuid4().hex for name in ("source", "target")}
-    running: dict[str, Any] = {"source": None, "target": None}
+    schemas = {name: "worker_" + uuid4().hex for name in ("source", "target", "other")}
+    running: dict[str, Any] = {name: None for name in schemas}
     instances: dict[str, Any] = {}
     starts: list[str] = []
     managers = {name: ConnectorManager() for name in schemas}
@@ -187,7 +187,7 @@ def workers(
     monkeypatch.setattr(placement, "assistant_id", current.get)
     monkeypatch.setattr(runners, "self_device_id", current.get)
     monkeypatch.setattr(runners, "directory", lambda: {"runners": [
-        {"id": name, "online": True, "is_self": name == current.get(),
+        {"id": name, "online": True, "is_self": name == current.get(), "device_name": name,
          "capabilities": {}, "platform": "linux"} for name in schemas
     ]})
     monkeypatch.setattr(automation_manager, "handle_connector_trigger", AsyncMock())
@@ -358,6 +358,156 @@ async def test_retention_preserves_slow_paused_cursor_then_expires_explicitly(
     assert store.checkpoint(current, events, cursor)
     await workers.receive(4, "replay must not resurrect compacted content")
     assert store.connector_page("bot", "123", cursor) == ([], cursor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["credential", "allowlist", "grant", "ownership"])
+async def test_rejected_destination_keeps_source_restartable_and_retargetable(
+    workers: Any, monkeypatch: pytest.MonkeyPatch, bad: str,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core import watch_placement as placement
+    from app.core.connectors import manager as managers
+    from app.core.connectors.telegram import TelegramConnector
+    from app.db import database
+    from app.network import ownership
+
+    watch = workers.create()
+    await workers.receive(1, "unread before rejected move")
+    with workers.on("target"), workers.db() as conn:
+        c = conn.cursor()
+        if bad == "ownership":
+            c.execute("UPDATE connectors SET runner_id='not-this-worker'")
+        elif bad == "grant":
+            c.execute("""CREATE TABLE api_users (
+                id TEXT PRIMARY KEY, web_login_allowed BOOLEAN, description TEXT,
+                is_active BOOLEAN, profile_id TEXT
+            )""")
+            c.execute("INSERT INTO api_users VALUES "
+                      "('revoked',FALSE,'Auto-created API user for connector bot',FALSE,'agent')")
+            c.execute("UPDATE connectors SET api_user_id='revoked'")
+        else:
+            config = {"bot_token": "fake-bot-secret", "allowed_chat_ids": ["123"]}
+            config["bot_token" if bad == "credential" else "allowed_chat_ids"] = (
+                "wrong-bot" if bad == "credential" else ["456"]
+            )
+            c.execute("UPDATE connectors SET config=%s", (store.encode(config),))
+    with pytest.raises((ValueError, PermissionError)):
+        await placement.move(watch["id"], "target")
+    assert journal.receiver_allowed("bot")
+    assert store.get(watch["id"])["worker_id"] == "source"
+    with workers.on("target"):
+        assert journal.receiver_allowed("bot")
+
+    # Exercise real startup fence checks, replacing network connect and status
+    # reporting (the private fixture has a minimal connector table).
+    monkeypatch.setattr(ownership, "decide_connector", lambda _: None)
+    monkeypatch.setattr(managers, "get_connector_class", lambda _: TelegramConnector)
+    monkeypatch.setattr(database, "update_connector_status", MagicMock())
+    connect = AsyncMock(return_value=True)
+    monkeypatch.setattr(TelegramConnector, "connect", connect)
+    manager = managers.ConnectorManager()
+    assert await manager.start_connector("bot")
+    connect.assert_awaited_once()
+    await manager.stop_connector("bot")
+
+    moved = await placement.move(watch["id"], "other")
+    assert moved["worker_id"] == "other"
+    assert not journal.receiver_allowed("bot")
+    with workers.on("other"):
+        events, _ = store.connector_page("bot", "123", moved["cursor"])
+        assert [payload["text"] for _, payload in events] == ["unread before rejected move"]
+
+
+@pytest.mark.asyncio
+async def test_export_transaction_failure_does_not_commit_receiver_fence(workers: Any) -> None:
+    from app.core import watch_placement as placement
+
+    watch = workers.create()
+    with workers.db() as conn:
+        c = conn.cursor()
+        c.execute("""CREATE FUNCTION reject_export() RETURNS trigger AS $$
+            BEGIN RAISE EXCEPTION 'fake export failure'; END; $$ LANGUAGE plpgsql""")
+        c.execute("CREATE TRIGGER reject_export BEFORE INSERT ON watch_transfers "
+                  "FOR EACH ROW EXECUTE FUNCTION reject_export()")
+    with pytest.raises(Exception, match="fake export failure"):
+        await placement.move(watch["id"], "target")
+    assert journal.receiver_allowed("bot")
+    assert store.get(watch["id"])["worker_id"] == "source"
+    with workers.on("target"):
+        assert journal.receiver_allowed("bot")
+
+
+@pytest.mark.asyncio
+async def test_connector_deletion_invalidates_pending_journal_snapshot(workers: Any) -> None:
+    from app.core import watch_placement as placement
+    from app.db import connectors
+
+    watch = workers.create()
+    await workers.receive(1, "private pending journal content")
+    snapshot = await placement.call("source", "export", watch_id=watch["id"], target="target")
+    assert snapshot["journal"]["entries"][0]["payload"]["text"] == "private pending journal content"
+    assert connectors.delete_connector("bot")
+    with workers.db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT snapshot,completed FROM watch_transfers WHERE watch_id=%s",
+                  (watch["id"],))
+        pending = c.fetchone()
+        assert pending["snapshot"] == {} and not pending["completed"]
+        c.execute("SELECT COUNT(*) AS n FROM watch_connector_inbox")
+        assert c.fetchone()["n"] == 0
+    assert store.get(watch["id"])["cursor"]["expired"]
+    assert not journal.receiver_allowed("bot")
+    with pytest.raises(ValueError, match="invalidated"):
+        store.export_watch(watch["id"], "target")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [None, "grant", "ownership"])
+async def test_conversation_move_to_local_stopped_telegram_rechecks_access(
+    workers: Any, monkeypatch: pytest.MonkeyPatch, revoked: str | None,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.core import watches
+    from app.core.agent_types import PermissionResultAllow
+    from app.core.permission_handler import permission_handler
+
+    watch = workers.create()
+    monkeypatch.setattr(watches, "owner_session", lambda _: {"profile_id": "agent"})
+
+    async def approve(**kwargs: Any) -> PermissionResultAllow:
+        with workers.db() as conn:
+            c = conn.cursor()
+            if revoked == "ownership":
+                c.execute("UPDATE connectors SET runner_id='not-this-worker'")
+            if revoked == "grant":
+                c.execute("""CREATE TABLE api_users (
+                    id TEXT PRIMARY KEY, web_login_allowed BOOLEAN, description TEXT,
+                    is_active BOOLEAN, profile_id TEXT
+                )""")
+                c.execute("INSERT INTO api_users VALUES "
+                          "('revoked',FALSE,'Auto-created API user for connector bot',"
+                          "FALSE,'agent')")
+                c.execute("UPDATE connectors SET api_user_id='revoked'")
+        return PermissionResultAllow()
+
+    approval = AsyncMock(side_effect=approve)
+    monkeypatch.setattr(permission_handler, "request_permission", approval)
+    with workers.on("target"):
+        request = {"move_watch_id": watch["id"], "worker_id": "target"}
+        if revoked:
+            with pytest.raises(PermissionError, match="grant"):
+                await watches.create_from_conversation("owner-session", request)
+        else:
+            result = await watches.create_from_conversation("owner-session", request)
+            assert result["watch"]["worker_id"] == "target"
+        approval.assert_awaited_once()
+    if revoked:
+        assert journal.receiver_allowed("bot") and not workers.starts
+    else:
+        assert not journal.receiver_allowed("bot") and workers.starts == ["target"]
 
 
 @pytest.mark.asyncio

@@ -151,7 +151,8 @@ async def move(wid: str, target: str) -> dict[str, Any]:
                 await call(receipt["source"], "complete", watch_id=wid,
                            target=target, token=receipt["token"])
             return row
-        # Telegram additionally requires an explicitly stopped old receiver.
+        # Read-only prerequisite checks must not strand either stopped receiver.
+        # Only export commits the source fence, atomically with its snapshot.
         prepared = await call(source, "prepare_export", watch_id=wid, target=target)
         await call(target, "validate", row=row, moving=True, source=source, prepared=prepared)
         snapshot = await call(source, "export", watch_id=wid, target=target)
@@ -198,8 +199,9 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
             body.get("moving") or body.get("stopped_connector")
         ))
         if body.get("moving"):
-            prepared = await journal_transfer.prepare(row | {"id": body["row"]["id"]},
-                                                      body["source"], exporting=False)
+            prepared = await journal_transfer.prepare(
+                row | {"id": body["row"]["id"]}, body["source"], exporting=False, fence=False,
+            )
             if prepared != body.get("prepared", {}):
                 raise ValueError(
                     "Telegram transfer requires the same bot credential on both workers"
@@ -217,14 +219,10 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
         return {"watch": await run_sync(store.get, wid)}
     if operation == "prepare_export":
         watch = await run_sync(store.get, body["watch_id"])
-        return await journal_transfer.prepare(watch, body["target"], exporting=True)
+        return await journal_transfer.prepare(watch, body["target"], exporting=True, fence=False)
     if operation == "export":
         watch = await run_sync(store.get, body["watch_id"])
-        connector = await run_sync(journal_transfer.connector, watch)
-        identity = await run_sync(journal_transfer.identity, connector) if connector else None
-        if connector:
-            await journal_transfer.prepare(watch, body["target"], exporting=True)
-        return await run_sync(store.export_watch, body["watch_id"], body["target"], identity)
+        return await journal_transfer.export(watch, body["target"])
     if operation == "import":
         snapshot = body["snapshot"]
         if not local(await run_sync(resolve, snapshot["target"])):
@@ -232,6 +230,7 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
         row = await run_sync(execution_row, snapshot["watch"],
                              stopped_connector="journal" in snapshot)
         source = await run_sync(canonical, body.get("source") or from_device)
+        await journal_transfer.prepare(row | {"id": snapshot["watch"]["id"]}, source, exporting=False)
         await run_sync(journal_transfer.validate_import, snapshot, row, source)
         imported = await run_sync(store.import_watch, snapshot, row, source)
         # Import commits both the rebased cursor/tail and the open receive gate.

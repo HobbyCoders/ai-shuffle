@@ -202,11 +202,21 @@ def restore(c: Any, watch: dict[str, Any], journal: dict[str, Any]) -> dict[str,
 
 
 def purge(c: Any, cid: str) -> None:
+    from app.db.watches import parse
+
     lock(c, cid)
-    for row in consumers(c, cid):
-        c.execute("UPDATE watches SET status='paused',reason=%s,cursor=%s,revision=revision+1 "
-                  "WHERE id=%s", ("Telegram connector deleted; create a new watch",
-                                  encode(dict(row["cursor"], expired=True)), row["id"]))
+    c.execute("SELECT * FROM watches")
+    rows = [parse(row) for row in c.fetchall()]
+    for row in rows:
+        if row["source"].get("connector_id") != cid:
+            continue
+        if row["status"] in ("active", "paused"):
+            c.execute("UPDATE watches SET status='paused',reason=%s,cursor=%s,revision=revision+1 "
+                      "WHERE id=%s", ("Telegram connector deleted; create a new watch",
+                                      encode(dict(row["cursor"], expired=True)), row["id"]))
+        # Pending exports contain a second copy of unread message text. Keep the
+        # token tombstone for fencing, but invalidate its entire retry payload.
+        c.execute("UPDATE watch_transfers SET snapshot='{}' WHERE watch_id=%s", (row["id"],))
     for table in ("watch_connector_inbox", "watch_connector_heads"):
         c.execute("DELETE FROM " + table + " WHERE connector_id=%s", (cid,))
     # A content-free tombstone also rejects an ingress callback racing deletion.
