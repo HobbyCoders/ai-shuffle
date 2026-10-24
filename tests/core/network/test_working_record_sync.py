@@ -1,9 +1,11 @@
 """Working items converge through the real signed owner network transport."""
+import pytest
+
 from app.db import database
 from app.db import working_record as store
 from app.db.base import parse_jsonb
 from app.network import engine
-from tests.core.network.harness import converge, join
+from tests.core.network.harness import converge, exchange, join
 
 
 def test_independent_items_and_acknowledgements_follow_owner(workers):
@@ -50,6 +52,45 @@ def test_richer_report_preserves_an_acknowledgement_received_from_peer(workers):
             report = store.items(include_resolved=True)[0]
             assert report["status"] == "resolved" and "Actual result" in report["content"]
             assert parse_jsonb(report["report_frame"])["status"] == "completed"
+
+
+
+
+@pytest.mark.parametrize("ack_first", [True, False], ids=["ack-arrives-first", "report-arrives-first"])
+def test_concurrent_acknowledgement_and_genuine_report_converge(workers, ack_first):
+    first, second = workers("first"), workers("second")
+    provisional = {"status": "killed", "reason": "park_watchdog", "summary": "Stand-in"}
+    genuine = {"status": "completed", "summary": "Genuine result survived concurrent acknowledgement"}
+    with first.active():
+        engine.create_network("Concurrent working record")
+        store.add("report", store.report_text(provisional), "child", item_id="report:race", report_frame=provisional)
+    join(first, second)
+    converge([first, second])
+
+    def acknowledge():
+        with second.active():
+            assert store.resolve("report:race")
+
+    def complete():
+        with first.active():
+            store.add("report", store.report_text(genuine), "child", item_id="report:race", report_frame=genuine)
+
+    # Both writes commit and publish while disconnected. Neither sees the other's edit.
+    for write in ([acknowledge, complete] if ack_first else [complete, acknowledge]):
+        write()
+    # Explicitly exercise each first arrival, not just eventual full scans.
+    sender, receiver = (second, first) if ack_first else (first, second)
+    exchange(sender, receiver)
+    exchange(receiver, sender)
+    converge([first, second])
+    for worker in (first, second):
+        with worker.active():
+            assert not store.items()
+            report = store.items(include_resolved=True)[0]
+            assert report["status"] == "resolved"
+            assert "Genuine result" in report["content"]
+            assert parse_jsonb(report["report_frame"])["status"] == "completed"
+            assert not store.resolve("report:race")
 
 
 def test_remote_session_state_is_used_without_mirroring_execution_tables(workers, monkeypatch):

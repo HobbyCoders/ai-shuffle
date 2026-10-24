@@ -317,11 +317,18 @@ _register(Collection(
 
 _register(Collection(
     name="working_record", table="owner_working_items", keys=("id",),
-    fields=("id", "owner_key", "kind", "content", "status", "source_session_id",
+    fields=("id", "owner_key", "kind", "content", "source_session_id",
             "source_turn_id", "created_at", "updated_at", "report_frame"), json_fields=("report_frame",),
     resource="working_record", priority=87,
     shared_row=lambda row: row.get("owner_key") == OWNER_PLACEHOLDER,
-    notes="Owner working record. Independent items merge; resolved items remain as durable acknowledgements."))
+    notes="Owner working items and reports. Acknowledgements replicate separately from editable content."))
+
+_register(Collection(
+    name="working_record_acknowledgements", table="owner_working_acknowledgements", keys=("item_id",),
+    fields=("item_id", "owner_key", "acknowledged_at"),
+    resource="working_record", priority=88,
+    shared_row=lambda row: row.get("owner_key") == OWNER_PLACEHOLDER,
+    notes="Monotonic owner acknowledgements: receipt existence resolves an item, including a later richer report."))
 
 
 def _serialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:

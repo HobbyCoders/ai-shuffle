@@ -182,6 +182,10 @@ def test_migration_idempotent_and_sync_registry(owner):
     coll = policy.COLLECTIONS["working_record"]
     assert coll.table == "owner_working_items" and coll.mode == policy.MODE_SHARED
     assert "content" in coll.fields and coll.shared_row(store.items()[0])
+    assert "status" not in coll.fields
+    acknowledgements = policy.COLLECTIONS["working_record_acknowledgements"]
+    assert acknowledgements.table == "owner_working_acknowledgements"
+    assert "report_frame" not in acknowledgements.fields
 
 
 async def test_task_report_survives_stopped_coordinator_and_is_deduplicated(owner):
