@@ -14,25 +14,28 @@ export function sameProcess(a: ProcessIdentity, b: ProcessIdentity): boolean {
   const canonical = (file: string) => process.platform === 'win32' ? file.toLowerCase() : file;
   return a.pid === b.pid && a.started === b.started && canonical(a.executable) === canonical(b.executable);
 }
+/**
+ * The kernel32 imports are defined in memory with Reflection.Emit. `Add-Type`
+ * ran the C# compiler on every probe, the slowest and least predictable phase
+ * under load (#597); the calls, access right and checks are unchanged.
+ */
 const windowsScript = String.raw`
 $ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public static class ProcessProof {
- [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint rights, bool inherit, int pid);
- [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
- [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder path, ref int length);
- [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+$type = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly([Reflection.AssemblyName]::new('ShuffleProcessProof'), [Reflection.Emit.AssemblyBuilderAccess]::Run).DefineDynamicModule('ShuffleProcessProof').DefineType('ProcessProof', 'Public,Abstract,Sealed')
+foreach ($import in @(
+ @('OpenProcess', [IntPtr], @([uint32], [bool], [int])),
+ @('GetProcessTimes', [bool], @([IntPtr], [long].MakeByRefType(), [long].MakeByRefType(), [long].MakeByRefType(), [long].MakeByRefType())),
+ @('QueryFullProcessImageNameW', [bool], @([IntPtr], [int], [Text.StringBuilder], [int].MakeByRefType())),
+ @('CloseHandle', [bool], @([IntPtr])))) {
+ $type.DefinePInvokeMethod($import[0], 'kernel32.dll', [Reflection.MethodAttributes]'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, $import[1], [Type[]]$import[2], [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode).SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
 }
-'@
-$handle = [ProcessProof]::OpenProcess(0x1000, $false, [int]$env:SHUFFLE_ID_PID)
+$ProcessProof = $type.CreateType()
+$handle = $ProcessProof::OpenProcess(0x1000, $false, [int]$env:SHUFFLE_ID_PID)
 if ($handle -eq [IntPtr]::Zero) { throw 'Cannot open process identity handle' }
 try {
  [long]$created=0; [long]$exited=0; [long]$kernel=0; [long]$user=0
  $name=New-Object Text.StringBuilder 32768; [int]$length=$name.Capacity
- if (![ProcessProof]::GetProcessTimes($handle,[ref]$created,[ref]$exited,[ref]$kernel,[ref]$user) -or ![ProcessProof]::QueryFullProcessImageName($handle,0,$name,[ref]$length)) { throw 'Cannot read process identity' }
+ if (!$ProcessProof::GetProcessTimes($handle,[ref]$created,[ref]$exited,[ref]$kernel,[ref]$user) -or !$ProcessProof::QueryFullProcessImageNameW($handle,0,$name,[ref]$length)) { throw 'Cannot read process identity' }
  $identity=@{pid=[int]$env:SHUFFLE_ID_PID; executable=$name.ToString(); started=$created.ToString(); startedAt=[long][Math]::Floor(($created-116444736000000000)/10000000)}
  if ($env:SHUFFLE_ID_EXPECTED) {
   $expected=$env:SHUFFLE_ID_EXPECTED | ConvertFrom-Json
@@ -43,7 +46,7 @@ try {
   $output = & $env:SHUFFLE_ID_COMMAND @arguments 2>&1 | Out-String
   @{code=$LASTEXITCODE;stdout=$output;stderr=''} | ConvertTo-Json -Compress
  } else { $identity | ConvertTo-Json -Compress }
-} finally { [void][ProcessProof]::CloseHandle($handle) }
+} finally { [void]$ProcessProof::CloseHandle($handle) }
 `;
 async function windows(pid: number, expected?: ProcessIdentity, command?: { file: string; args: string[]; env?: NodeJS.ProcessEnv; timeoutMs?: number }): Promise<string> {
   const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsScript, 'utf16le').toString('base64')], {

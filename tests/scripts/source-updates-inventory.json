@@ -44,7 +44,7 @@
   "'disabled updates cannot discard a legacy retried revision and installed Linux launches B, never older A'": "1d417f8bef9f685467ee651add1b87a6d2c97feb5a8cb1ae0b37043d64073f3c",
   "'discardStaged never forgets active, previous, pending or possibly migrated failed code'": "f0191e72024e190ea3f6a5f836149e023fabe304f4a1cd3c05b390e80780a07d",
   "'healthy supersession preserves failed diagnostics without resurrecting old fences or permitting a stale staged downgrade'": "deb8a58cfac24b775936d93a2a076e99f379447674c6df2aaf7096dcd04cd316",
-  "'installed-entry factory fully hashes a real ready journal before selection'": "f9d3a9f591a4bd1817cdf1999bcb86f4423219d436fdca1e1d11a80c5857d431",
+  "'installed-entry factory fully hashes a real ready journal before selection'": "9570440f95fd7153ac4731a39fccbd408a1492a4b44e2b71ac8f72c5de3969be",
   "'installer baseline checks main without a source directory and transitions to a signed source update'": "ff22e6cea3c7081427f438e3806e9b3a5cfbadea1487982c6a86954b6ce1d02e",
   "'installer baseline rejects source metadata older than its bundled build'": "884b74b26f1062858aada96b732cefe9bcc132e0c85a2f2be542ff1688a46ba2",
   "'installer with no provable floor needs explicit recovery-dialog consent, then stays repaired on relaunch'": "d2522b831ceaac9dda514f043a586d5ba3ebb7c9445f8b1eaa0b13a2174028f6",

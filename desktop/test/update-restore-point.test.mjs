@@ -23,9 +23,9 @@ async function cluster(t) {
 const read = file => fs.readFile(file, 'utf8');
 
 test('only a known installed Windows launcher handoff skips the second hash', () => {
-  assert.deepEqual([...RESTORE_POINT_VALIDATING_LAUNCHERS], [4, 5, 6, 7]);
-  for (const version of [4, 5, 6, 7]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
-  for (const version of [0, 1, 2, 3, 8, 999, NaN, Infinity, 4.5]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), false);
+  assert.deepEqual([...RESTORE_POINT_VALIDATING_LAUNCHERS], [4, 5, 6, 7, 8]);
+  for (const version of [4, 5, 6, 7, 8]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
+  for (const version of [0, 1, 2, 3, 9, 999, NaN, Infinity, 4.5]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), false);
   for (const platform of ['linux', 'darwin']) assert.equal(launcherValidatedRestorePoint(platform, 4, true, false), false);
   assert.equal(launcherValidatedRestorePoint('win32', 4, false, false), false);
   assert.equal(launcherValidatedRestorePoint('win32', 4, true, true), false);
@@ -33,7 +33,7 @@ test('only a known installed Windows launcher handoff skips the second hash', ()
 
 test('a launcher version bump requires explicitly reviewing the hash allowlist', async () => {
   const { version } = JSON.parse(await read(new URL('../launcher.json', import.meta.url)));
-  assert.equal(version, 7, 'Re-audit RESTORE_POINT_VALIDATING_LAUNCHERS and the installed factory; do not trust a new launcher without proof it hashes ready points');
+  assert.equal(version, 8, 'Re-audit RESTORE_POINT_VALIDATING_LAUNCHERS and the installed factory; do not trust a new launcher without proof it hashes ready points');
 });
 
 test('the installed launcher awaits prepareRollback before every select', async () => {

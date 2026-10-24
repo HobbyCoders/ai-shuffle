@@ -88,7 +88,7 @@ test('installed-entry factory fully hashes a real ready journal before selection
  const { f, u } = await rollbackFixture(t);
  const { version } = JSON.parse(await fs.readFile(new URL('../launcher.json', import.meta.url), 'utf8'));
  const { launcherValidatedRestorePoint } = require('../dist/main/update-restore-point.js');
- assert.equal(version, 7, 'the audited installed factory must cover the shipped launcher');
+ assert.equal(version, 8, 'the audited installed factory must cover the shipped launcher');
  assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
  const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
