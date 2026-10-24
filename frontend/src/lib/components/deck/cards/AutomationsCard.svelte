@@ -413,7 +413,8 @@
 					const state = saved.is_enabled ? 'saved' : 'saved, paused';
 					formError =
 						`The automation was ${creating ? 'created' : 'saved'} (${state}), but some media ` +
-						`generation choices were not saved: ${errors.join('; ')}. Save again to retry.`;
+						`generation choices were not saved: ${errors.map((e) => e.replace(/[.\s]+$/, '')).join('; ')}. ` +
+						'Save again to retry.';
 					return;
 				}
 				generationDraft = {};

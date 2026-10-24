@@ -203,6 +203,7 @@ describe('creating an automation with a pinned generation choice', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 		await waitFor(() => expect(screen.getByText(/some media generation choices were not saved/)).toBeTruthy());
 		expect(screen.getByText(/video: Worker offline\./)).toBeTruthy();
+		expect(screen.queryByText(/offline\.\./)).toBeNull();
 
 		// Image shows the new pin, audio stays cleared, video keeps its staged pick.
 		await waitFor(() => expect(within(row('image')).getByText('SuperGrok · Grok Imagine Image')).toBeTruthy());
