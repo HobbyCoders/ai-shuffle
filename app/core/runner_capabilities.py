@@ -20,6 +20,8 @@ Shape::
         "computer_use": bool,
         "has_chrome": bool,
         "docker": bool,
+        "desktop": bool,
+        "always_on": bool,
         "claude_cli_signed_in": bool,
         "provider_kinds": ["openai", ...],
         "remote_task": int,
@@ -225,6 +227,19 @@ def _detect_terminal() -> int:
         return 0
 
 
+def _detect_watch_availability() -> dict[str, bool]:
+    """A failed probe must not silently opt a sleeping worker into placement."""
+    desktop = False
+    try:
+        from app.core.worker_availability import is_desktop, snapshot
+
+        desktop = is_desktop()
+        state = snapshot()
+        return {"desktop": desktop, "always_on": state["always_on"]}
+    except Exception:  # noqa: BLE001 — capability detection must never raise
+        return {"desktop": desktop, "always_on": False}
+
+
 def detect_capabilities() -> Dict[str, Any]:
     """Best-effort snapshot of this runner's placement capabilities.
 
@@ -232,6 +247,7 @@ def detect_capabilities() -> Dict[str, Any]:
     default so registration/heartbeat can always proceed.
     """
     return {
+        **_detect_watch_availability(),
         "os": _detect_os(),
         "has_display": _detect_has_display(),
         "computer_use": _detect_computer_use(),

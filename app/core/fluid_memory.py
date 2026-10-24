@@ -65,8 +65,9 @@ def save_detected_owner_fact(text: str, key: str, source: str) -> bool:
 
 
 def session_memory(session_id: str | None, cwd: str | None = None):
-    from app.core.config import settings
     from fluid.codemode.skills import project_key_for
+
+    from app.core.config import settings
     if not settings.managed_database_available():
         # Standalone/isolated tests have no authenticated multi-user database.
         return store_for_owner("local"), project_key_for(cwd)
@@ -83,8 +84,9 @@ def session_memory(session_id: str | None, cwd: str | None = None):
 
 def stores():
     """Existing stores only; no user-controlled path is accepted."""
-    from fluid.codemode.skills import SkillStore
     import json
+
+    from fluid.codemode.skills import SkillStore
     root = skills_root()
     if (root / "memories.json").exists():
         yield store_for_owner("local")
@@ -115,9 +117,15 @@ def journal_diagnostics() -> dict:
     import os
     import stat
     import time
+
     from fluid.codemode.skills import (
-        JOURNAL_LOSS_EVENTS, JOURNAL_LOSS_FILE, JOURNAL_MAX_BYTES, LEARNER_SILENCE_ALARM_SECONDS,
-        journal_metrics, learner_silence_seconds, read_journal_loss,
+        JOURNAL_LOSS_EVENTS,
+        JOURNAL_LOSS_FILE,
+        JOURNAL_MAX_BYTES,
+        LEARNER_SILENCE_ALARM_SECONDS,
+        journal_metrics,
+        learner_silence_seconds,
+        read_journal_loss,
     )
 
     started = time.perf_counter()
@@ -278,6 +286,7 @@ def owner_health() -> dict:
     not create it.
     """
     import time
+
     from fluid.codemode import memory_health
     root = skills_root()
     if not (root / "memories.json").exists():
@@ -302,8 +311,9 @@ async def _announce_health(owner: str, store, state: dict) -> None:
     """One bell notification per stretch of attention; never raises."""
     import logging
     try:
-        from app.services.notification_service import emit_notification
         from fluid.codemode import memory_health
+
+        from app.services.notification_service import emit_notification
         user_id = "admin" if owner == "local" else owner.removeprefix("api:")
         sent = await emit_notification(
             user_id,
@@ -317,7 +327,7 @@ async def _announce_health(owner: str, store, state: dict) -> None:
         if sent is not None:
             import asyncio
             await asyncio.to_thread(memory_health.mark_notified, store)
-    except Exception:  # noqa: BLE001 — a notification never stops maintenance
+    except Exception:  # A notification never stops maintenance.
         logging.getLogger(__name__).warning("Memory health notification failed", exc_info=True)
 
 

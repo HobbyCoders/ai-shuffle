@@ -1061,7 +1061,10 @@ class PeerLink:
                 or recovered.device_id != env.origin_device_id
                 or recovered.identity.incarnation <= env.origin_incarnation):
             return False
-        await asyncio.to_thread(engine.publish_presence, capabilities=_capabilities(), version=settings.version)
+        capabilities = await asyncio.to_thread(_capabilities)
+        await asyncio.to_thread(
+            engine.publish_presence, capabilities=capabilities, version=settings.version,
+        )
         return True
 
 

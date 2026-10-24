@@ -8,6 +8,9 @@ runner can do; cluster.register_self / cluster.heartbeat_self merge it into the
 
 from unittest.mock import patch
 
+import pytest
+from pytest import MonkeyPatch
+
 from app.core import cluster
 from app.core import runner_capabilities as rc
 
@@ -16,11 +19,16 @@ from app.core import runner_capabilities as rc
 # detect_capabilities — shape + value domains.
 # ---------------------------------------------------------------------------
 
-def test_shape_has_all_keys_and_types():
+def test_shape_has_all_keys_and_types() -> None:
     caps = rc.detect_capabilities()
-    assert set(caps.keys()) == {"os", "has_display", "computer_use", "has_chrome", "docker",
-                                "claude_cli_signed_in", "provider_kinds", "remote_task", "move_wakes", "start_session_permissions",
-                                "terminal", "handoff_poll", "move_questions", "handoff_target_resume", "handoff_receipt", "generation"}
+    assert set(caps.keys()) == {
+        "desktop", "always_on", "os", "has_display", "computer_use", "has_chrome", "docker",
+        "claude_cli_signed_in", "provider_kinds", "remote_task", "move_wakes",
+        "start_session_permissions", "terminal", "handoff_poll", "move_questions",
+        "handoff_target_resume", "handoff_receipt", "generation",
+    }
+    assert isinstance(caps["desktop"], bool)
+    assert isinstance(caps["always_on"], bool)
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
     assert isinstance(caps["computer_use"], bool)
@@ -115,6 +123,66 @@ def test_provider_kinds_default_empty_when_the_database_fails():
 
     with patch("app.db.base.get_db", side_effect=_boom):
         assert rc._detect_provider_kinds() == []
+
+
+# ---------------------------------------------------------------------------
+# Launch-kind and availability capabilities.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+@pytest.mark.parametrize("desktop", [True, False])
+def test_launch_kind_capabilities(
+    platform: str, desktop: bool, monkeypatch: MonkeyPatch
+) -> None:
+    from app.core import desktop_listener
+    from app.core.config import settings
+
+    monkeypatch.setattr(rc.sys, "platform", platform)
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setenv("SHUFFLE_DESKTOP", "1" if desktop else "0")
+    monkeypatch.delenv("SHUFFLE_LAUNCHER_VERSION", raising=False)
+    monkeypatch.setattr(desktop_listener, "configured", lambda: False)
+    monkeypatch.setattr("app.db.database.get_system_setting_cached", lambda key: None)
+    caps = rc.detect_capabilities()
+    assert caps["desktop"] is desktop
+    assert caps["always_on"] is not desktop
+
+
+@pytest.mark.parametrize("marker", ["listener", "launcher"])
+def test_existing_desktop_markers(marker: str, monkeypatch: MonkeyPatch) -> None:
+    from app.core import desktop_listener
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.delenv("SHUFFLE_DESKTOP", raising=False)
+    monkeypatch.setenv("SHUFFLE_LAUNCHER_VERSION", "5" if marker == "launcher" else "0")
+    monkeypatch.setattr(desktop_listener, "configured", lambda: marker == "listener")
+    monkeypatch.setattr("app.db.database.get_system_setting_cached", lambda key: None)
+    assert rc.detect_capabilities()["desktop"] is True
+    assert rc.detect_capabilities()["always_on"] is False
+
+
+def test_watch_availability_fails_closed(monkeypatch: MonkeyPatch) -> None:
+    def fail() -> None:
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr("app.core.worker_availability.is_desktop", lambda: True)
+    monkeypatch.setattr("app.core.worker_availability.snapshot", fail)
+    caps = rc.detect_capabilities()
+    assert caps["desktop"] is True
+    assert caps["always_on"] is False
+
+
+def test_container_is_not_desktop_even_with_display(monkeypatch: MonkeyPatch) -> None:
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setenv("SHUFFLE_DESKTOP", "1")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr("app.db.database.get_system_setting_cached", lambda key: None)
+    caps = rc.detect_capabilities()
+    assert caps["desktop"] is False
+    assert caps["always_on"] is True
 
 
 # ---------------------------------------------------------------------------

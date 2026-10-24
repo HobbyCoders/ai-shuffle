@@ -31,21 +31,23 @@ def resolve(requested: str | None = None) -> str:
                 return assistant_id() if row["is_self"] else row["id"]
         raise ValueError("Preferred watch worker is not an active network member")
     candidates = [row for row in rows if row["online"] and (
-        row["capabilities"].get("always_on") or (
+        row["capabilities"].get("always_on", (
             str(row.get("platform", "")).lower() == "linux"
             and not row["capabilities"].get("desktop", False)
-        )
+        ))
     )]
     if candidates:
         chosen = sorted(candidates, key=lambda row: (
             not row["capabilities"].get("always_on", False), row["id"]
         ))[0]
         return assistant_id() if chosen["is_self"] else chosen["id"]
-    # Standalone Linux servers can run continuously. Desktop owners must choose
-    # explicitly rather than silently creating a watch that sleeps with them.
-    import sys
-    if not rows and sys.platform == "linux":
-        return assistant_id()
+    # A standalone worker has no network directory. Apply the same launch-kind
+    # and owner override rules, including on Linux Electron desktops.
+    if not rows:
+        from app.core.runner_capabilities import detect_capabilities
+
+        if detect_capabilities().get("always_on", False):
+            return assistant_id()
     raise ValueError("No always-on worker is available; explicitly choose worker_id")
 
 
@@ -137,7 +139,14 @@ async def change(wid: str, status: str) -> dict[str, Any]:
     raise ValueError("Watch does not exist on an available worker")
 
 
-async def move(wid: str, target: str) -> dict[str, Any]:
+async def move(wid: str, target: str, *, confirm_only: bool = False) -> dict[str, Any]:
+    """Move a watch to ``target``, or with ``confirm_only`` only finish one.
+
+    ``confirm_only`` is the panel's automatic follow-up to a move whose answer
+    was lost: it closes the source's transfer receipt when the watch already
+    executes on ``target`` and never starts a transfer, so a stale view cannot
+    pull a watch back from where a newer move put it.
+    """
     target = await run_sync(canonical, await run_sync(resolve, target))
     for row in await rows():
         if row["id"] != wid:
@@ -151,6 +160,8 @@ async def move(wid: str, target: str) -> dict[str, Any]:
                 await call(receipt["source"], "complete", watch_id=wid,
                            target=target, token=receipt["token"])
             return row
+        if confirm_only:
+            raise ValueError("Watch is no longer on that worker; nothing was moved")
         # Read-only prerequisite checks must not strand either stopped receiver.
         # Only export commits the source fence, atomically with its snapshot.
         prepared = await call(source, "prepare_export", watch_id=wid, target=target)

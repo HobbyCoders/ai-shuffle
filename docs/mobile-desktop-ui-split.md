@@ -134,9 +134,11 @@ When you add mobile-specific styling to a shared component, add it to
 1. `mobile/` builds with `paths.base = '/mobile'` and an `index.html`
    fallback (client-only, no service worker, no manifest).
 2. `npm run build` in `frontend/` runs `frontend/scripts/build-mobile-ui.mjs`,
-   which builds the desktop UI and `mobile/` (at the same time when at least
-   8 GB of memory is free, one after the other otherwise; either failure fails
-   the build). Its `postbuild` then copies `mobile/build` into
+   which builds the desktop UI, then `mobile/`; either failure fails the build.
+   SvelteKit rewrites the desktop's generated tsconfig during config resolution
+   and postbuild analysis/prerender, while mobile reads it for shared sources
+   and its Vite config, so the builds must not overlap. Its `postbuild` copies
+   `mobile/build` into
    `frontend/build/mobile`. Every install path
    copies `frontend/build` into `app/static` (Docker image, source archive,
    desktop source build), so every worker has `app/static/mobile`. A build

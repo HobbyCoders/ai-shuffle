@@ -38,6 +38,15 @@
           "past_bug": "#575: Gmail watches called a native SDK method absent from installed connector proxies."
         },
         {
+          "id": "durable-watches.panel-placement-controls",
+          "check": "Watch panel shows placement, owner preference and honest move states",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On two disposable candidates (DesktopWorker, ServerWorker), create one schedule watch on each from an owner chat. Open the running-tasks panel on a 1440px desktop and in the phone sheet at 375px: each row names its executing worker with Always on/Server/May sleep. Open New watches in the Watches heading: Automatic names the server it would pick; choose DesktopWorker, then clear it, and confirm the choice shows on the other worker. Stop the ServerWorker candidate: its row reads offline with Pause, Stop and Move disabled, and choosing it as the preference is offered only as disabled with a reason. Bring it back and Move the DesktopWorker watch to ServerWorker; watch the pending note, then the row naming ServerWorker. Repeat a move while the destination drops the connection after import (block its port briefly): the row must read not confirmed or Move unfinished, never Moved, until Retry move completes it. Try moving a Telegram watch and read the refusal reason. Never restart production workers.",
+          "pass_when": "Rows name the executing worker and tier on desktop and phone. The preference picker lists offline workers disabled with a reason and saves and clears through the synced setting. A move is reported as Moved only after the server answers with the row; unanswered or fenced moves stay as warnings with Retry move, refusals show the server's reason, and an offline worker's synced row never accepts Pause, Stop or Move.",
+          "past_bug": "#565: the watch panel had no placement indicator, preference picker or move control after placement shipped backend-only."
+        },
+        {
           "id": "durable-watches.real-connectors",
           "check": "Real Slack, Discord and Telegram watch cursors",
           "kind": "owner",
@@ -70,6 +79,15 @@
           "how": "Use two disposable candidates named DesktopWorker and ServerWorker with network device IDs distinct from their installation IDs. From an owner chat on DesktopWorker create a schedule watch with ServerWorker available; inspect the named confirmation and executing row. Stop only the disposable creator and observe a server-side event/report. Bring it back, verify list/Pause/Stop through peer controls, set and clear the owner preference, and try an unavailable designated worker. Move a second watch with pending observations after all in-flight deliveries finish; interrupt once after destination import before acknowledgement, retry the same move, and compare cursor, event IDs, budget history and source fencing. Start the reverse move from the destination worker and verify that the original source receipt is complete and the returned watch executes once. Never restart production workers.",
           "pass_when": "Default chooses the server; explicit override and synced preference win, unavailable preference never silently falls back. Events continue with creator offline. Source is fenced before import, cursor/outbox IDs and cost history survive hand-over without duplicate reports, and synced display rows never execute. Remote active-creator turns and Telegram journal migration remain explicit follow-ups, not passing claims.",
           "past_bug": "#555: watches were pinned to the creating worker and had no default placement."
+        },
+        {
+          "id": "durable-watches.worker-availability",
+          "check": "Launch-kind capability publication and synced per-worker always-on override",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable Linux Electron DesktopWorker and Docker ServerWorker candidates. Read authenticated GET /api/v1/settings/worker-availability on each and inspect real network presence after a refresh: desktop is true only on DesktopWorker, always_on defaults false there and true on ServerWorker. From an owner chat confirm a schedule watch without a worker override and observe ServerWorker execute it. Set DesktopWorker always_on true through owner-only PUT /api/v1/settings/worker-availability; verify the scoped setting syncs without changing ServerWorker. Make ServerWorker unavailable and confirm a new automatic watch executes on DesktopWorker. Set DesktopWorker false, verify automatic placement explicitly refuses instead of picking the Linux desktop; null restores the launch default. Also set ServerWorker false and verify it is excluded despite Linux, while explicit worker selection still works. Restore both settings, stop disposable watches and archive throwaway chats. Keep receipts private, not screenshots.",
+          "pass_when": "Both presence producers advertise real launch defaults and owner overrides. Per-worker settings replicate without bleeding into other workers. Linux desktops and servers explicitly marked false are excluded from automatic placement; a desktop explicitly marked true is eligible. Standalone Linux desktops follow the same rule. No real two-worker pass is claimed without candidate receipts.",
+          "past_bug": "#602: workers never published desktop or always_on, so sleeping Linux desktops were treated as servers."
         }
       ]
     },
@@ -876,6 +894,14 @@
           "how": "On a disposable candidate worker with synthetic legacy account/spend rows, upgrade and inspect agent identities, avatars, owner introduction/memory and Usage limits. Rename an ordinary agent and change its avatar, lower the spending limit, then finish a bounded real coordination job including a remote child when available. Replay its accounting receipt after restart. Delete an ordinary disposable chat and try the retired home/research routes. Keep all receipts private; no screenshots are needed.",
           "pass_when": "Ordinary identity edits preserve all unrelated config, avatars and owner memory survive, and cumulative local/remote cost is charged once across restart/replay. No dedicated agent, protected home, home prompt or research runner appears. Retired routes remain unavailable; ordinary chat deletion succeeds. Historical assistant-prefixed shared endpoints still serve their documented owner-only functions until the atomic naming follow-up #561.",
           "past_bug": "#557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
+        },
+        {
+          "id": "harness-basics.turn-insert-order-upgrade",
+          "check": "Persistent-database upgrade preserves insertion order without blocking unrelated sessions",
+          "kind": "owner",
+          "how": "Use only a disposable install with a persistent PostgreSQL volume and synthetic retained history, never an installed owner's database. On the pre-candidate build create several sessions with queued, removed, parked, front-inserted and ad-hoc turns; include an older queued turn and newer removed follow-up with exactly equal created_at and reverse lexical IDs. Stop that disposable install, upgrade the same volume to the candidate, and capture startup SQL/lock waits. Before the first write, read latest-turn, latest-run, command and queue ordering on legacy rows. Then insert normal, front and ad-hoc turns. In a bounded test helper hold one session's first-insert transaction open for at most five seconds while another session writes through the application. Check a mixture of assigned history and zero-ordinal legacy imports, requeue a turn, and restart. Retain private timing and row-order receipts; do not restart a live worker or use its data volume.",
+          "pass_when": "Startup adds only the metadata column: no history-wide ordinal UPDATE or new ordinal index build occurs under the DDL transaction. Legacy zero rows read in stable created_at/position/id order below assigned history; the newer removed equal-time follow-up wins over the older queued turn. First-write allocation touches only that session, and the other session's write finishes before the held transaction releases. New normal/front/ad-hoc inserts get strictly increasing insertion ordinals independent of queue position; queued front priority, first-command identity and latest-run filtering stay correct. Requeue/restart preserve assigned ordinals and all non-ordering history fields. Missing upgrade, lock-wait or producing-path evidence is not a pass.",
+          "past_bug": "#627 and #628 review: timestamp/UUID ties selected older history; an eager upgrade backfill would hold the turns DDL lock through a history-wide rewrite."
         },
         {
           "id": "harness-basics.watchdog-stop",
