@@ -7,6 +7,8 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -198,8 +200,24 @@ async def test_blocked_loop_dumps_sleeping_frame(
     assert wd._recovery_task_count > 0
 
 
+@pytest.fixture
+def heartbeat_fsync(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    # Tick/healthy-loop tests exercise persistence ordering, not storage latency.
+    # Keep real writes and atomic replace, but control the unbounded fsync syscall.
+    # The lifecycle regression below explicitly holds I/O across a stop timeout.
+    calls: list[int] = []
+
+    def record_fsync(fd: int) -> None:
+        calls.append(threading.get_ident())
+
+    monkeypatch.setattr("app.core.loop_watchdog.os.fsync", record_fsync)
+    return calls
+
+
 @pytest.mark.asyncio
-async def test_healthy_loop_never_dumps(caplog):
+async def test_healthy_loop_never_dumps(
+    caplog: pytest.LogCaptureFixture, heartbeat_fsync: list[int],
+) -> None:
     caplog.set_level(logging.ERROR, logger="app.core.loop_watchdog")
     wd = LoopStallWatchdog(
         asyncio.get_running_loop(), threshold_s=0.2, ping_interval_s=0.02
@@ -214,9 +232,151 @@ async def test_healthy_loop_never_dumps(caplog):
         wd.stop()
     assert wd.stall_count == 0
     assert wd.dump_count == 0
-    assert wd._thread is None
-    assert not thread.is_alive()
+    assert wd._thread is None, _watchdog_stack(thread)
+    assert not thread.is_alive(), _watchdog_stack(thread)
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def _watchdog_stack(thread: threading.Thread | None) -> str:
+    if thread is None:
+        return "<no thread handle>"
+    frame = sys._current_frames().get(thread.ident)
+    return "".join(traceback.format_stack(frame)) if frame is not None else "<thread exited>"
+
+
+@pytest.mark.parametrize("phase", ["boot", "heartbeat", "shutdown"])
+@pytest.mark.parametrize("reap_with_start", [False, True], ids=["rejoin", "restart"])
+def test_stop_retains_blocked_thread_until_it_can_be_joined(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    phase: str, reap_with_start: bool,
+) -> None:
+    from app.core import loop_watchdog
+
+    entered = threading.Event()
+    release = threading.Event()
+    loop = asyncio.new_event_loop()
+    wd = LoopStallWatchdog(loop, ping_interval_s=0.01)
+    boot = wd._boot_heartbeat
+    thread: threading.Thread | None = None
+
+    def blocked_io() -> None:
+        entered.set()
+        assert release.wait(5), "test did not release blocked watchdog I/O"
+
+    def blocked_boot() -> None:
+        blocked_io()
+        boot()
+
+    def blocked_fsync(fd: int) -> None:
+        if phase == "heartbeat" or wd._stop.is_set():
+            blocked_io()
+
+    monkeypatch.setattr(loop_watchdog.os, "fsync", blocked_fsync)
+    if phase == "boot":
+        monkeypatch.setattr(wd, "_boot_heartbeat", blocked_boot)
+    wd._pong()
+    try:
+        wd.start()
+        thread = wd._thread
+        assert thread is not None
+        if phase == "shutdown":
+            wd._stop.set()  # Enter the real final-write path before joining.
+        assert entered.wait(5), "watchdog did not enter the requested I/O phase"
+        wd.stop(join_timeout=0.01)
+        stack = _watchdog_stack(thread)
+        assert thread.is_alive(), stack
+        assert "blocked_io" in stack, stack
+        assert wd._thread is thread, stack
+        assert wd._stop.is_set()
+        wd.start()
+        assert wd._thread is thread, "start must not replace a surviving watchdog"
+        assert wd._stop.is_set(), "start must not revive a watchdog still stopping"
+        assert "did not stop" in caplog.text
+        assert "blocked_io" in caplog.text
+        release.set()
+        if reap_with_start:
+            thread.join(timeout=2)
+            assert not thread.is_alive(), _watchdog_stack(thread)
+            assert wd._thread is thread
+            wd.start()
+            restarted = wd._thread
+            assert restarted is not None and restarted is not thread
+            wd.stop()
+            assert not restarted.is_alive(), _watchdog_stack(restarted)
+        else:
+            wd.stop()
+        assert not thread.is_alive(), _watchdog_stack(thread)
+        assert wd._thread is None
+    finally:
+        release.set()
+        wd.stop()
+        if thread is not None:
+            thread.join(timeout=2)
+        loop.close()
+
+
+@pytest.mark.parametrize("depth", [0, 64], ids=["shallow", "deep"])
+def test_stop_diagnostic_does_not_wait_for_source_lookup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, depth: int,
+) -> None:
+    import linecache
+
+    io_entered = threading.Event()
+    release_io = threading.Event()
+    source_entered = threading.Event()
+    release_source = threading.Event()
+    returned = threading.Event()
+    loop = asyncio.new_event_loop()
+    wd = LoopStallWatchdog(loop, ping_interval_s=0.01)
+    stopper: threading.Thread | None = None
+    stopped_in_time = False
+
+    def blocked_boot(remaining: int = depth) -> None:
+        if remaining:
+            blocked_boot(remaining - 1)
+            return
+        io_entered.set()
+        release_io.wait(5)
+
+    def blocked_source_lookup(*args: object, **kwargs: object) -> str:
+        source_entered.set()
+        release_source.wait(5)
+        return ""
+
+    def stop_watchdog() -> None:
+        try:
+            wd.stop(join_timeout=0.01)
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(wd, "_boot_heartbeat", blocked_boot)
+    wd.start()
+    thread = wd._thread
+    assert thread is not None
+    try:
+        assert io_entered.wait(5), "watchdog never entered the held I/O"
+        with monkeypatch.context() as source_patch:
+            source_patch.setattr(linecache, "checkcache", blocked_source_lookup)
+            source_patch.setattr(linecache, "getline", blocked_source_lookup)
+            stopper = threading.Thread(target=stop_watchdog, daemon=True)
+            stopper.start()
+            # The source gate remains shut throughout this bounded observation.
+            stopped_in_time = returned.wait(1)
+    finally:
+        release_source.set()
+        release_io.set()
+        if stopper is not None:
+            stopper.join(timeout=2)
+        wd.stop()
+        loop.close()
+    assert stopped_in_time, "bounded stop waited for filesystem-backed source lookup"
+    assert not source_entered.is_set(), "shutdown diagnostics must not consult linecache"
+    assert not thread.is_alive()
+    assert stopper is not None and not stopper.is_alive()
+    assert "blocked_boot" in caplog.text
+    assert "test_loop_watchdog.py" in caplog.text
+    assert caplog.text.count('", line ') <= 32
+    assert ("<older frames omitted>" in caplog.text) == (depth > 32)
 
 
 @pytest.mark.asyncio
@@ -465,8 +625,11 @@ def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_freeze_log(tm
     assert "threading.py" in text, "the bystander thread's stack is dumped too"
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("write_delay", [0, 0.3], ids=["normal-io", "delayed-io"])
-async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch, write_delay):
+@pytest.mark.parametrize("gate_io", [False, True], ids=["normal-io", "delayed-io"])
+async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    heartbeat_fsync: list[int], gate_io: bool,
+) -> None:
     from app.core import loop_watchdog
 
     # Rate limiting has its own test. Here every watchdog wakeup may write,
@@ -474,15 +637,19 @@ async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch
     monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0)
     path = tmp_path / "loop-heartbeat.json"
     loop_thread = threading.get_ident()
-    writers = []
+    writers: list[int] = []
     replace = loop_watchdog.os.replace
     progressed = threading.Condition()
+    hold_write = threading.Event()
+    write_entered = threading.Event()
+    release_write = threading.Event()
     wakeups = 0
 
-    def record_replace(source, target):
-        # Regression: persistence can finish after the old fixed 0.1 s window.
-        if write_delay:
-            time.sleep(write_delay)
+    def record_replace(source: Path, target: Path) -> None:
+        if hold_write.is_set():
+            hold_write.clear()
+            write_entered.set()
+            assert release_write.wait(5), "loop did not release the in-flight write"
         replace(source, target)
         writers.append(threading.get_ident())
 
@@ -490,18 +657,20 @@ async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch
     wd = LoopStallWatchdog(asyncio.get_running_loop(), threshold_s=5, ping_interval_s=0.01)
     write_heartbeat = wd._write_heartbeat
 
-    def completed_write(*args, **kwargs):
+    def completed_write(now: float, *, stopped_at: float | None = None) -> None:
         nonlocal wakeups
-        write_heartbeat(*args, **kwargs)
+        write_heartbeat(now, stopped_at=stopped_at)
         with progressed:
             wakeups += 1
             progressed.notify_all()
 
     monkeypatch.setattr(wd, "_write_heartbeat", completed_write)
 
-    def wait_for(predicate):
+    def wait_for(predicate: Callable[[], bool]) -> None:
         with progressed:
-            assert progressed.wait_for(predicate, timeout=5), "watchdog did not progress"
+            assert progressed.wait_for(predicate, timeout=5), (
+                f"watchdog did not progress\n{_watchdog_stack(wd._thread)}"
+            )
 
     wd.start()
     try:
@@ -509,10 +678,16 @@ async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch
         first_tick = json.loads(path.read_text())["last_tick"]
         await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick > first_tick)
         assert json.loads(path.read_text())["last_tick"] > first_tick
-        # Block the loop, but first drain its last answered tick. fsync/replace
-        # can take arbitrarily longer than 0.1 s without implying another pong.
+        if gate_io:
+            # Acknowledge an actual in-flight write instead of sleeping 300 ms.
+            hold_write.set()
+            assert await asyncio.to_thread(write_entered.wait, 5)
+            assert wd._heartbeat_written_tick != wd._last_tick
+        # From here the loop cannot answer another ping. Release the held write,
+        # drain the final real pong, then acknowledge three no-new-tick wakeups.
         with wd._lock:
             final_tick = wd._last_tick
+        release_write.set()
         wait_for(lambda: wd._heartbeat_written_tick == final_tick)
         during = path.read_bytes(), path.stat().st_mtime_ns
         with progressed:
@@ -523,8 +698,10 @@ async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch
         await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick > stalled_tick)
         assert json.loads(path.read_text())["last_tick"] > stalled_tick
     finally:
+        release_write.set()
         wd.stop()
     assert writers and loop_thread not in writers
+    assert heartbeat_fsync == writers, "each atomic replace must follow off-loop fsync"
     assert json.loads(path.read_text())["stopped_at"] is not None
     assert not list(tmp_path.glob("*.tmp"))
 

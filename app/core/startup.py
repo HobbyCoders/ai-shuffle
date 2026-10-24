@@ -565,7 +565,13 @@ def start_background_tasks() -> List[asyncio.Task]:
         while True:
             try:
                 ready = await asyncio.to_thread(session_recall.run_backfill)
-                await asyncio.sleep(60 if ready else 1)
+                from app.db import history_indexing
+                from app.core import streaming_status
+                history_ready = await asyncio.to_thread(
+                    history_indexing.run_pass,
+                    can_work=lambda: not streaming_status.has_any_active_run(),
+                )
+                await asyncio.sleep(60 if ready and history_ready else 1)
             except asyncio.CancelledError:
                 break
             except Exception as e:  # noqa: BLE001 — recall keeps its legacy queries

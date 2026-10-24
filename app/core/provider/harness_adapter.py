@@ -5149,12 +5149,15 @@ class HarnessAdapter(ProviderAdapter):
 
         dispatch = registry.dispatch
 
-        async def guarded_dispatch(name, input, ctx=None, **kwargs):
+        async def guarded_dispatch(
+            name: str, input: Dict[str, Any], ctx: Optional[ToolCtx] = None, **kwargs: Any,
+        ) -> ToolOutcome:
             from app.core.assistant_permissions import has_own_consent
 
             denial = None
             if not native and self._owner_needed(name, input):
-                denial = await self._ask_owner(name, input)
+                agent_id = ctx.extra.get("agent_id") if ctx is not None else None
+                denial = await self._ask_owner(name, input, agent_id=agent_id)
             elif has_own_consent(name) and self.permission_mode != "bypassPermissions":
                 # The tool's own card or grant is the owner's consent
                 # (assistant_permissions.OWN_CONSENT_TOOLS); a saved Deny still

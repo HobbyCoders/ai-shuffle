@@ -13,6 +13,10 @@ in-memory SQLite shim.
 
 import asyncio
 import json
+import sqlite3
+import threading
+from contextvars import ContextVar
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,6 +38,35 @@ from app.db import sessions as sessions_db
 # ---------------------------------------------------------------------------
 
 SID = "sess-v2"
+
+async def test_recorder_event_writes_use_isolated_executor_and_caller_context(
+    mock_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mk_session()
+    recorder = await _recorder()
+    marker: ContextVar[str] = ContextVar("event-test-context", default="missing")
+    token = marker.set("caller")
+    observed: list[tuple[str, str]] = []
+    original = se.append_events
+
+    def append(
+        session_id: str, events: list[dict[str, Any]], *args: Any, **kwargs: Any,
+    ) -> tuple[int, int]:
+        observed.append((threading.current_thread().name, marker.get()))
+        return original(session_id, events, *args, **kwargs)
+
+    monkeypatch.setattr(se, "append_events", append)
+    try:
+        await recorder.start("hello")
+        await recorder.on_event({"type": "done", "metadata": {}})
+        await recorder.close()
+        await tr._append_unfenced(SID, [{"type": "system.note", "payload": {}}])
+        assert observed
+        assert all(name.startswith("db-event") and value == "caller" for name, value in observed)
+    finally:
+        await recorder.close()
+        marker.reset(token)
+
 
 @pytest.mark.parametrize("phase", ["start", "timer", "done", "close", "usage"])
 @pytest.mark.parametrize("callback_raises", [False, True])

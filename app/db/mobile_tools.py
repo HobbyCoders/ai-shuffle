@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db
+from app.db.sql_timeouts import migration_timeouts
 
 
 def now():
@@ -29,9 +30,10 @@ def _ts(value):
     return value
 
 
-def init_schema():
+def init_schema() -> None:
     with get_db() as conn:
         cur = conn.cursor()
+        migration_timeouts(cur)
         cur.execute("""CREATE TABLE IF NOT EXISTS mobile_tool_devices (
             device_id TEXT PRIMARY KEY REFERENCES mobile_devices(device_id) ON DELETE CASCADE,
             enabled BOOLEAN NOT NULL DEFAULT FALSE,

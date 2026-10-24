@@ -8,6 +8,7 @@ watching the same session.
 import asyncio
 import json
 import logging
+import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -79,6 +80,35 @@ _OUTBOUND_QUEUE_MAXSIZE = 256
 #      beats a silently truncated stream it cannot detect.
 _COALESCABLE_SESSION_EVENTS = frozenset({"queue_updated"})
 _COALESCABLE_USER_FRAMES = frozenset({"usage_snapshot", "tabs_sync"})
+
+
+@dataclass
+class QueueSnapshotEpoch:
+    """In-process invalidation token, retained only by in-flight queue reads."""
+
+    revision: int = 0
+
+
+_queue_snapshot_epochs: weakref.WeakValueDictionary[str, QueueSnapshotEpoch] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def queue_snapshot_epoch(session_id: str) -> QueueSnapshotEpoch:
+    """Share a token among concurrent reads without retaining old sessions."""
+    epoch = _queue_snapshot_epochs.get(session_id)
+    if epoch is None:
+        epoch = QueueSnapshotEpoch()
+        _queue_snapshot_epochs[session_id] = epoch
+    return epoch
+
+
+def invalidate_queue_snapshot(session_id: str) -> None:
+    """Make any older hydration re-read before publishing over this update."""
+    epoch = _queue_snapshot_epochs.get(session_id)
+    if epoch is not None:
+        epoch.revision += 1
+
 
 def _session_coalesce_key(event_type: str, session_id: str) -> Optional[Tuple[Any, ...]]:
     """Coalescing key for a session-scoped SyncEvent, or None if it must not drop."""
@@ -580,7 +610,7 @@ class SyncEngine:
         self,
         event: SyncEvent,
         exclude_device_id: Optional[str] = None
-    ):
+    ) -> None:
         """
         Broadcast an event to all devices watching the session.
 
@@ -593,6 +623,10 @@ class SyncEngine:
             exclude_device_id: Device ID to exclude (usually the source device)
         """
         session_id = event.session_id
+        if event.event_type == "queue_updated":
+            # Covers mutations from other sockets, queue edits and turn drains,
+            # not only the watching socket's own queue handlers.
+            invalidate_queue_snapshot(session_id)
 
         # Snapshot connections under lock to avoid TOCTOU race with
         # register_device/unregister_device which modify _connections under lock.

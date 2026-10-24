@@ -26,6 +26,13 @@
 	 * only returns to the composer on a confirmed withdrawal (store-side).
 	 * Screen-reader announcements of those verdicts live in
 	 * PendingStatusAnnouncer, outside the transcript's log region.
+	 *
+	 * `stale` (#524): the worker running this chat could not confirm the queue
+	 * (its read came back unavailable, or never came back). The bubbles are the
+	 * ones this tab last knew about and stay put; they only change chrome — a
+	 * dashed outline and an "Unconfirmed" hint in place of "Not seen yet",
+	 * which would otherwise claim something nobody could check. The store keeps
+	 * retrying and drops the flag when an available snapshot lands.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
 	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
@@ -36,9 +43,18 @@
 		onRemove: (id: string) => void;
 		/** Stop the live turn so the pending message is delivered next. */
 		onInterrupt: () => void;
+		/** The executing worker could not confirm these yet; they are kept, not dropped. */
+		stale?: boolean;
+		/** Who could not be reached, for the stale hint's tooltip. */
+		ownerName?: string | null;
 	}
 
-	let { messages, onRemove, onInterrupt }: Props = $props();
+	let { messages, onRemove, onInterrupt, stale = false, ownerName = null }: Props = $props();
+
+	const staleTitle = $derived(
+		`${ownerName ? `Can't reach ${ownerName}` : "Can't reach the worker running this chat"} to confirm ` +
+		'these messages. They are kept here and update when it answers.'
+	);
 
 	// The action row's bubble: the last one without a status, or — when every
 	// bubble has one — the last bubble (whose row then shows its status only).
@@ -61,7 +77,7 @@
 </script>
 
 {#if messages.length > 0}
-	<div class="pending-messages">
+	<div class="pending-messages" class:is-stale={stale}>
 		{#each messages as msg, i (msg.id)}
 			{@const isAnchor = i === anchor}
 			<div class="userrow" role="article">
@@ -86,6 +102,8 @@
 									class="pending-status"
 									class:is-delivered={msg.status === 'delivered'}
 								>{STATUS_LABEL[msg.status]}</span>
+							{:else if stale}
+								<span class="pending-hint is-stale" title={staleTitle}>Unconfirmed · retrying…</span>
 							{:else}
 								<span class="pending-hint">Not seen yet</span>
 							{/if}
@@ -200,6 +218,18 @@
 
 	.hover-remove:hover:not(:disabled) {
 		color: var(--foreground);
+	}
+
+	/* ── Unconfirmed by the executing worker (#524): same bubble, quieter edge ── */
+	.pending-messages.is-stale .bubble {
+		border-style: dashed;
+		border-color: color-mix(in oklab, var(--border) 60%, var(--muted-foreground));
+	}
+
+	.pending-hint.is-stale {
+		cursor: help;
+		text-decoration: underline dotted color-mix(in oklab, var(--subtle-foreground) 60%, transparent);
+		text-underline-offset: 2px;
 	}
 
 	/* ── Unsend in flight / refused ── */
