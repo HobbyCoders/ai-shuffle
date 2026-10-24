@@ -268,6 +268,59 @@ def mark_interaction_requeued(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def _mark_pending_flag(interaction_id: str, key: str) -> bool:
+    """Stamp ``key: true`` into a still-pending interaction's payload.
+
+    Read-modify-write in Python (not a JSONB ``||``) so the SQLite test shim
+    stays compatible; the UPDATE is guarded on ``pending``, so it serializes
+    against an answer, a cancel or an expiry (each also guarded on ``pending``):
+    either the stamp lands while the row is pending, or it is refused. True
+    when the row is pending and now carries the stamp.
+    """
+    session_id = None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT session_id, payload FROM pending_interactions "
+            "WHERE id=%s AND state='pending'",
+            (interaction_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        payload = dict(_parse_json(row["payload"]) or {})
+        if payload.get(key):
+            return True
+        payload[key] = True
+        cursor.execute(
+            "UPDATE pending_interactions SET payload=%s WHERE id=%s AND state='pending'",
+            (json.dumps(payload), interaction_id),
+        )
+        if cursor.rowcount > 0:
+            session_id = row["session_id"]
+    notify_session_write(session_id, "pending_interactions")
+    return session_id is not None
+
+
+def mark_interaction_parked(interaction_id: str) -> bool:
+    """An owner-chat approval whose waiting call should be let go "not run
+    yet" (``app.core.assistant_confirm``, #523): the row stays pending and
+    answerable, and its waiter (any install) sees the stamp on its next read."""
+    return _mark_pending_flag(interaction_id, "parked")
+
+
+def mark_interaction_released(interaction_id: str) -> bool:
+    """The waiter of a parked approval is letting its call go "not run yet".
+
+    Written by the waiter itself, before it returns the placeholder, and only
+    while the row is still pending. An answer that lands first wins instead
+    (the waiter then returns that answer and the call runs or is denied as
+    usual), so ``released`` on an answered or expired row means its call was
+    really let go and nobody else will report the outcome.
+    """
+    return _mark_pending_flag(interaction_id, "released")
+
+
 def has_detached_handoff_question(session_id: str, handoff_id: str, *, pending_only: bool = False) -> bool:
     """Pending or target-resolved cards own the handoff's continuation.
 
