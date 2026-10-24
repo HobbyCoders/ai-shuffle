@@ -548,10 +548,10 @@ def backend_linux(ctx: Context) -> None:
     # globals and measure idle/checkpoint timing under bounded disk pressure.
     # Each real-PG case creates its own cluster under tmp_path; no shared server
     # or TEST_POSTGRES_DSN is needed. Override inherited opt-ins/DSNs explicitly.
-    # Keep check/full deterministic on busy developer machines. Until #350 is
-    # fixed, even the functional crash-recovery case hits a host-sensitive
-    # checkpoint budget. Both real-PG groups therefore require explicit opt-in.
-    container_pg = ctx.mode == "full" and bool(pg_bin) and pg_optin
+    # Functional cases run by default in full mode. Only host-idle/pressure
+    # measurements require opt-in; their lab deadlines are distinct from the
+    # real FAST shutdown deadline (#350).
+    container_pg = ctx.mode == "full" and bool(pg_bin)
     container_pressure = container_pg and pressure_optin
     container_env = {
         **env, "ALLOW_REAL_PG": "0", "TEST_POSTGRES_DSN": "",
@@ -570,14 +570,9 @@ def backend_linux(ctx: Context) -> None:
     run([ctx.python, "-m", "pytest", "tests/core/test_container_runtime.py",
          "tests/core/test_container_image_contract.py", "-rs",
          *pytest_args(ctx.python, timeout=120, parallel=False)], env=container_env)
-    if not container_pg:
-        ctx.notes.append("Container real-PG coverage is opt-in pending #350: run full with "
-                         "LOCAL_CI_CONTAINER_PG=1 for functional cases or "
-                         "LOCAL_CI_CONTAINER_PRESSURE=1 for measurements (implies PG); "
-                         "both require PostgreSQL binaries.")
-    elif not container_pressure:
-        ctx.notes.append("Container checkpoint measurements disabled pending #350; run full with "
-                         "LOCAL_CI_CONTAINER_PRESSURE=1 to opt in (implies PG).")
+    if container_pg and not container_pressure:
+        ctx.notes.append("Container checkpoint/FAST shutdown lab measurements (#350) are opt-in; run full with "
+                         "LOCAL_CI_CONTAINER_PRESSURE=1 to enable them.")
 
 
 FLUID_TESTS = "fluid/tests/unit"

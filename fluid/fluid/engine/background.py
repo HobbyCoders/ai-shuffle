@@ -20,7 +20,7 @@ from fluid.events.model import (
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.engine.questions import QuestionLifecycleMixin
-from fluid.store.base import iter_events
+from fluid.store.base import iter_events_of_class
 from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
 
@@ -92,8 +92,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             return
         meta = await self._ensure_session()
         try:
-            events = [event async for event in iter_events(self.store, meta.session_id, 0)
-                      if isinstance(event, (SubagentEvent, SessionWoken))]
+            events = [event async for event in iter_events_of_class(
+                self.store, meta.session_id, 0, (SubagentEvent, SessionWoken))]
         except Exception:  # noqa: BLE001 — stores without replay degrade in memory
             self._background_rehydrated = True
             return
