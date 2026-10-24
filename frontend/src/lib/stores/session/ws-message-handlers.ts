@@ -24,6 +24,7 @@ import { serverNotificationActions } from '$lib/services/error-actions';
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
+import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
@@ -487,8 +488,22 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (eventType === 'queue_updated' &&
 				(!eventSessionId || eventSessionId === state.sessionId)) {
 				const syncData = data.data as Record<string, unknown> | undefined;
-				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string; client_message_id?: string }>;
-				const rows = messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime(), clientMessageId: m.client_message_id }));
+				// #524: `unavailable` means the executing worker's queue could not
+				// be read. Its arrays are omitted on purpose — it is NOT an empty
+				// queue, so the bubbles on screen stay (marked stale) and the watch
+				// is retried. Legacy mutation frames carry no status: available.
+				if (syncData?.queue_status === 'unavailable') {
+					queueHydration.snapshot(state.sessionId, 'unavailable');
+					return;
+				}
+				queueHydration.snapshot(state.sessionId, 'available');
+				const messages = (syncData?.queued_messages ?? []) as Array<{
+					id: string; content: string; created_at: string; client_message_id?: string; command_id?: string;
+				}>;
+				const rows = messages.map(m => ({
+					id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime(),
+					clientMessageId: m.client_message_id ?? m.command_id,
+				}));
 				// The snapshot is authoritative about what EXISTS, but it is not
 				// ordered against the other producer of this frame (the turn pump's
 				// clearing broadcast), so a pre-absorption snapshot can land last and

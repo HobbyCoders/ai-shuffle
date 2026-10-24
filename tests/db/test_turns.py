@@ -67,6 +67,25 @@ def test_enqueue_persists_optional_fields(mock_db):
     assert got["instance_id"] == "inst-1"
 
 
+@pytest.mark.parametrize("live_state", ["running", "interrupting", "draining"])
+def test_waiting_to_start_snapshot_ignores_terminal_rows_not_live_turns(
+    mock_db: object, live_state: str,
+) -> None:
+    assert not turns.session_waiting_to_start("waiting-snapshot")
+    first = turns.enqueue_turn("waiting-snapshot", "worker", prompt="first")
+    removed = turns.enqueue_turn("waiting-snapshot", "user", prompt="remove me")
+    assert turns.remove_queued_turn(removed["id"])
+    assert turns.session_waiting_to_start("waiting-snapshot")
+    assert not turns.session_waiting_to_start("other-session")
+    turns.start_turn(first["id"], run_id="run-snapshot")
+    turns.enqueue_turn("waiting-snapshot", "user", prompt="queued followup")
+    if live_state in ("interrupting", "draining"):
+        turns.interrupt_turn("waiting-snapshot", "stop")
+    if live_state == "draining":
+        turns.escalate_to_draining(first["id"])
+    assert not turns.session_waiting_to_start("waiting-snapshot")
+
+
 def test_session_has_unsettled_turns_counts_every_non_terminal_state(mock_db):
     """The wait_session_idle busy predicate: ANY non-terminal row counts, in
     one atomic statement (the split live/queued reads let a queued→running

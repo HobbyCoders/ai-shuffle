@@ -93,10 +93,10 @@
 	.join { display: flex; flex-direction: column; gap: 10px; color: var(--foreground); }
 	h5 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 13px; font-weight: 600; }
 	p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
-	.waiting { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--primary) 5%, var(--card)); }
+	.waiting { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklab, var(--primary) 5%, var(--card)); }
 	.waiting p { margin-bottom: 8px; }
-	.fail { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border)); border-radius: 10px; font-size: 12px; color: var(--destructive); }
-	.fail.warn { color: var(--foreground); border-color: color-mix(in oklch, var(--warning, orange) 50%, var(--border)); }
+	.fail { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border)); border-radius: 10px; font-size: 12px; color: var(--destructive); }
+	.fail.warn { color: var(--foreground); border-color: color-mix(in oklab, var(--warning, orange) 50%, var(--border)); }
 	.field { display: block; }
 	.field span { display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted-foreground); }
 	.inp { box-sizing: border-box; width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }

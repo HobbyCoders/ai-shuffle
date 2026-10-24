@@ -1156,7 +1156,7 @@ async def _note_uncarried_wakes(sid, target):
                                                   "source": wake.get("source"), "wakeup_id": wake.get("id")}})
 
 
-def _history_conflict(table, columns):
+def _history_conflict(table: str, columns: tuple[str, ...], deferred: bool = False) -> str:
     key = {"session_events": ("session_id", "seq"), "pending_interactions": ("id",),
            "turns": ("id",), "fluid_sessions": ("session_id",),
            "fluid_session_nodes": ("session_id", "node_id"),
@@ -1165,8 +1165,11 @@ def _history_conflict(table, columns):
         return ""
     changed = [c for c in columns if c not in key and c != "session_id"]
     same_session = f"{table}.session_id=EXCLUDED.session_id AND "
+    assignments = [f"{c}=EXCLUDED.{c}" for c in changed]
+    if deferred:
+        assignments.append("history_index_state=EXCLUDED.history_index_state")
     return ("ON CONFLICT (" + ", ".join(key) + ") DO UPDATE SET " +
-            ", ".join(f"{c}=EXCLUDED.{c}" for c in changed) + " WHERE " + same_session + "(" +
+            ", ".join(assignments) + " WHERE " + same_session + "(" +
             ", ".join(f"{table}.{c}" for c in changed) + ") IS DISTINCT FROM (" +
             ", ".join(f"EXCLUDED.{c}" for c in changed) + ")")
 
@@ -1255,7 +1258,10 @@ def _publish_history(cur, sid, token):
         columns = ("session_id", *TABLES[table])
         rows = [(sid, *[Json(v) if c in JSON_COLUMNS and v is not None else v
                         for c, v in zip(TABLES[table], values)]) for values in snapshot]
-        _insert_rows(cur, table, columns, rows, _history_conflict(table, columns), batch=200)
+        from app.db.history_indexing import importing
+        with importing(cur, table) as deferred:
+            _insert_rows(cur, table, columns, rows,
+                         _history_conflict(table, columns, deferred), batch=200)
         if timing:
             timing.steps.append(f"publish_history.{table}={monotonic() - started:.3f}s rows={count}")
     cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
@@ -1544,8 +1550,11 @@ def install_history(sid, data, cwd):
                     else:
                         adapted = [(r[0], *[Json(v) if c in JSON_COLUMNS and v is not None else v
                                              for c, v in zip(columns, r[1:])]) for r in part]
-                        _insert_rows(cur, table, ("session_id", *columns), adapted,
-                                     _history_conflict(table, ("session_id", *columns)), batch=200)
+                        from app.db.history_indexing import importing
+                        with importing(cur, table) as deferred:
+                            conflict = _history_conflict(table, ("session_id", *columns), deferred)
+                            _insert_rows(cur, table, ("session_id", *columns), adapted,
+                                         conflict, batch=200)
                     written = monotonic()
                 metrics["commit_seconds"] += monotonic() - written
                 if timing:

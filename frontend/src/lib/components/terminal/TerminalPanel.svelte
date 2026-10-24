@@ -521,7 +521,7 @@
 	:global(.tpanel .spin) { animation: spin 0.9s linear infinite; }
 
 	/* ── Confirm, notice, status ── */
-	.confirm { display: grid; gap: 8px; padding: 10px 12px; border-top: 1px solid color-mix(in oklch, var(--primary) 35%, transparent); background: color-mix(in oklch, var(--primary) 7%, var(--background)); animation: slide 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); outline: none; }
+	.confirm { display: grid; gap: 8px; padding: 10px 12px; border-top: 1px solid color-mix(in oklch, var(--primary) 35%, transparent); background: color-mix(in oklab, var(--primary) 7%, var(--background)); animation: slide 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); outline: none; }
 	.confirm-text { display: grid; gap: 2px; font-size: 12.5px; color: var(--muted-foreground); }
 	.confirm-text strong { font-size: 13px; color: var(--foreground); }
 	.preview { margin: 0; max-height: 72px; overflow: hidden; padding: 6px 8px; border-radius: 6px; background: var(--code-bg); color: var(--foreground); font: 11.5px/1.45 var(--font-mono); white-space: pre-wrap; word-break: break-all; }
@@ -532,7 +532,7 @@
 	.ghost:hover { background: var(--hover-overlay); }
 	.go { border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); }
 	.go.danger { border-color: var(--destructive); background: var(--destructive); color: var(--destructive-foreground); }
-	.notice { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 12px; border-top: 1px solid color-mix(in oklch, var(--warning) 35%, transparent); background: color-mix(in oklch, var(--warning) 10%, var(--background)); color: var(--warning); font-size: 12px; }
+	.notice { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 12px; border-top: 1px solid color-mix(in oklch, var(--warning) 35%, transparent); background: color-mix(in oklab, var(--warning) 10%, var(--background)); color: var(--warning); font-size: 12px; }
 	.notice span { flex: 1; min-width: 0; }
 	.status { display: flex; align-items: center; gap: 10px; height: 26px; flex-shrink: 0; padding: 0 12px; border-top: 1px solid var(--border); background: var(--background); font: 11px var(--font-mono); color: var(--muted-foreground); white-space: nowrap; }
 	.state-pill { display: inline-flex; align-items: center; gap: 6px; color: var(--foreground); }

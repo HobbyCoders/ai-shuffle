@@ -25,7 +25,7 @@ from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
 from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, github_inbox, github_repos, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
-from app.api import voice_context, assistant
+from app.api import voice_context, assistant, watches
 from app.api import tools as tools_api
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
@@ -237,6 +237,9 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
+    from app.preview_run import initialize_preview_access
+    from app.db.async_database import run_sync
+    await run_sync(initialize_preview_access)
     # OWNER_PASSWORD seeds the owner password on first boot only; it is taken
     # out of the environment either way so agents never inherit it.
     from app.core import owner_auth
@@ -636,6 +639,7 @@ app.include_router(owner_login.router)
 app.include_router(model_providers.router)
 app.include_router(agents.router)
 app.include_router(assistant.router)
+app.include_router(watches.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 from app.api import data_export

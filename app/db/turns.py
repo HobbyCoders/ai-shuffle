@@ -529,11 +529,14 @@ def enqueue_turn(
         # Serialize admission with the pre-model filesystem breaker. Queued
         # automatic turns remain durable but cannot claim a live slot while held.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-        # The same compact-first request can be retried after a lost HTTP reply.
-        # Check under the admission lock, before either row is inserted (and
-        # before clearing Stop), so concurrent retries cannot create two pairs.
-        if command_id and ((payload or {}).get("compact_first")
-                           or (source == "wakeup" and str(command_id).startswith("handoff-resume-"))):
+        # Retryable watch/compact/handoff commands are resolved under the
+        # session admission lock, before inserting or clearing Stop. A receipt
+        # committed before an overlapping watch retry cannot admit two turns.
+        if command_id and (
+            source == "watch"
+            or (payload or {}).get("compact_first")
+            or (source == "wakeup" and str(command_id).startswith("handoff-resume-"))
+        ):
             existing = get_turn_by_command(session_id, command_id, _conn=conn)
             if existing is not None:
                 return existing
@@ -1518,6 +1521,24 @@ def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
         )
         rows = cursor.fetchall()
     return _rows(rows)
+
+
+def session_waiting_to_start(session_id: str) -> bool:
+    """Queued work with no live turn, from ONE statement/snapshot.
+
+    Newer removed/terminal rows cannot hide an older queued start. The atomic
+    no-live check also prevents a queued follow-up from exempting a live provider
+    from its first-frame watchdog during the queued-to-running handoff.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM turns WHERE session_id=%s AND state='queued' "
+            "AND NOT EXISTS (SELECT 1 FROM turns live WHERE live.session_id=%s "
+            "AND live.state IN ('running','interrupting','draining')) LIMIT 1",
+            (session_id, session_id),
+        )
+        return cursor.fetchone() is not None
 
 
 def session_has_unsettled_turns(session_id: str) -> bool:

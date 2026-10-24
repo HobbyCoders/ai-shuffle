@@ -742,17 +742,33 @@ with unavailable groups and locked options, not inferred subscription support.
 | SuperGrok image | `grok-imagine-image`, square `1k`, `jpeg`; quality hidden |
 | SuperGrok video | `grok-imagine-video-1.5-lite`, 1 s, `480p`, `16:9`, `generate_audio: false` |
 
-`GenerateNativeImage` is registered only when the bound account's Image
-capability is available. OpenAI/xAI API-key and no-account/environment-fallback
-sessions do not receive it until verified; direct calls without an account are
-refused without a request. It reads the account's Image group, falling back to
-verified defaults for stale stored settings. ChatGPT's default request is unchanged. SuperGrok sends one images-endpoint request (`n=1`), without
-OpenAI-only fields, and detects JPEG/PNG from returned bytes. Its `2.0` model,
-`2k`, and PNG request format are locked, not claimed as supported.
+`GenerateNativeImage` and `GenerateNativeVideo` are guarded compatibility
+aliases for the [unified generation tools](/docs/api-reference/generation-tools)
+`generateImage` and `generateVideo`, never direct submissions with the session's
+bound account. `GenerateNativeImage` is registered only when the session's
+account has an available Image capability, and `GenerateNativeVideo` only for
+SuperGrok subscription sessions. OpenAI/xAI API-key and
+no-account/environment-fallback sessions do not receive them until verified.
+A call goes through the same admission as the unified tools: the remembered or
+automation-job choice, an explicit `source`/`model`/`worker`/`options` pick, the
+displayed price, confirmation above the threshold and the daily-cap reservation.
+With nothing chosen, an interactive call returns `status: "choose"` and the chat
+shows the same choice card; an unattended call is skipped. The aliases never
+offer or run fal.ai. They also accept the native `image_model`, `size`,
+`format` and `quality` fields (mapped to `model` and `options`; a conflicting
+value is refused). Retry an alias with the `source`, `model`, `worker`,
+`options` and, after an approved confirmation, the `confirmation_token` the
+result returned.
 
-`GenerateNativeVideo` is exposed only to SuperGrok subscription sessions. It
-submits once, polls asynchronously for at most 180 seconds, and saves a
-session-owned MP4. Its `/api/v1/artifacts/{hash}/video.mp4?session_id=...` URL
+After admission, the native transports below run the admitted choice. The image
+transport reads the account's Image group, falling back to verified defaults for
+stale stored settings. ChatGPT's default request is unchanged. SuperGrok sends
+one images-endpoint request (`n=1`), without OpenAI-only fields, and detects
+JPEG/PNG from returned bytes. Its `2.0` model, `2k`, and PNG request format are
+locked, not claimed as supported.
+
+The video transport submits once, polls asynchronously for at most 180 seconds,
+and saves a session-owned MP4. Its `/api/v1/artifacts/{hash}/video.mp4?session_id=...` URL
 is recognizable as video, uses inline Content-Disposition, and supports browser
 byte-range requests with the existing artifact/session authorization. Reported
 cost remains in the structured tool result. Timeout/cancellation never resubmits

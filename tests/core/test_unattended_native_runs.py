@@ -705,12 +705,14 @@ async def test_a_connector_tool_prompt_shows_in_the_app_and_is_denied_at_the_tim
     assert chat.sent[1].text == "I was not allowed to write it."
 
 
-async def test_the_allowed_chat_rule_refuses_other_senders(provider, project, connectors):
+async def test_the_allowed_chat_rule_refuses_other_senders(
+    provider: Any, project: Path, connectors: Any
+) -> None:
     from app.core.connectors.manager import connector_manager
     from app.core.connectors.telegram import TelegramConnector
 
     class RecordingTelegram(TelegramConnector):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self.sent: List[OutgoingMessage] = []
 
@@ -721,10 +723,12 @@ async def test_the_allowed_chat_rule_refuses_other_senders(provider, project, co
         async def send_typing_indicator(self, platform_chat_id: str) -> None:
             return None
 
-        async def send_ack_reaction(self, platform_chat_id, platform_message_id) -> None:
+        async def send_ack_reaction(
+            self, platform_chat_id: str, platform_message_id: str
+        ) -> None:
             return None
 
-        async def mark_as_read(self, platform_chat_id, platform_message_id) -> None:
+        async def mark_as_read(self, platform_chat_id: str, platform_message_id: str) -> None:
             return None
 
     agent = _agent(project)
@@ -733,10 +737,22 @@ async def test_the_allowed_chat_rule_refuses_other_senders(provider, project, co
     bot = connectors(RecordingTelegram(
         connector_id, "telegram", config,
         connector_manager.handle_incoming_message, connector_manager.handle_permission_response,
+        on_trigger=connector_manager._handle_trigger,
     ))
     provider.script(Messages.text("hello friend"))
+    from app.db import watches as journal
 
-    def _update(chat_id: int, text: str):
+    # Opt in before ingress so bounded retention preserves this test's unread update.
+    _, initial_cursor = journal.connector_page(connector_id, "100", {})
+    journal.create(
+        owner="admin", creating_session_id=None, worker_id="source", agent_id=agent,
+        description="allowed Telegram chat", source={"kind": "connector",
+        "connector_id": connector_id, "channel_id": "100"}, filter={}, action="alert",
+        permissions={"read_only": True, "tools": []}, daily_budget_usd=1,
+        cursor=initial_cursor,
+    )
+
+    def _update(chat_id: int, text: str) -> SimpleNamespace:
         return SimpleNamespace(
             chat=SimpleNamespace(id=chat_id, type="private"),
             from_user=SimpleNamespace(id=chat_id, full_name="Someone"),
@@ -748,8 +764,14 @@ async def test_the_allowed_chat_rule_refuses_other_senders(provider, project, co
     assert database.get_connector_session(connector_id, "999") is None
 
     await asyncio.wait_for(bot._handle_message(_update(100, "hi")), RUN_BUDGET)
+    # Production wires durable ingress and dispatches chat execution separately;
+    # await that tracked work here rather than bypassing the new receive path.
+    await asyncio.wait_for(asyncio.gather(*bot._chat_tasks), RUN_BUDGET)
     assert [m.text for m in bot.sent] == ["hello friend"]
     assert len(provider.requests) == 1
+    events, _ = journal.connector_page(connector_id, "100", initial_cursor)
+    assert [payload["text"] for _, payload in events] == ["hi"]
+    assert journal.connector_page(connector_id, "999", initial_cursor)[0] == []
 
 
 async def test_a_connector_without_a_key_is_refused_before_any_model_call(

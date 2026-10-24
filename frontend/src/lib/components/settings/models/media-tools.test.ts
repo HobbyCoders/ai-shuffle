@@ -5,14 +5,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogModel } from '$lib/types/ai-models';
 
-const mocks = vi.hoisted(() => ({ owner: 0, get: vi.fn(), patch: vi.fn(), post: vi.fn(), put: vi.fn(), invalidate: vi.fn(), error: vi.fn() }));
+const mocks = vi.hoisted(() => ({ owner: 0, get: vi.fn(), patch: vi.fn(), post: vi.fn(), put: vi.fn(), invalidate: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get, patch: mocks.patch, post: mocks.post, put: mocks.put },
 	getErrorMessage: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 }));
 vi.mock('$lib/stores/session-owner', () => ({ sessionOwnerEpoch: () => mocks.owner }));
 vi.mock('$lib/services/sttStream', () => ({ invalidateSttCapability: mocks.invalidate }));
-vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.error } }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.error, warning: mocks.warning } }));
 
 import { catalogStore } from '$lib/stores/catalog';
 import { generationChoices } from '$lib/stores/generation-choices.svelte';
@@ -127,6 +127,23 @@ describe('MediaTools', () => {
 		expect(mocks.patch).not.toHaveBeenCalled();
 		expect(tools.isDefault('fal-ai/new-image')).toBe(true);
 		expect(tools.saving).toBeNull();
+	});
+
+	it('says when a remembered catalog pick has no verified price, keeping the pick (#513)', async () => {
+		const warning = 'This saved choice has no verified price. Unattended runs will skip it until a price is available.';
+		mocks.put.mockImplementation(async (_url: string, body: { choice: unknown }) => ({
+			choice: body.choice,
+			price: { currency: 'USD', unit: 'item', amount: null, total: null, status: 'unknown' },
+			priced: false,
+			quote_error: null,
+			unattended_skip_reason: 'stored_choice_unpriced',
+			warning
+		}));
+		const tools = await loaded();
+		expect(await tools.selectFromCatalog(catalog[0])).toBe(true);
+		expect(mocks.warning).toHaveBeenCalledWith(warning, { title: 'Remembered New Image', category: 'generation-choice' });
+		expect(tools.isDefault('fal-ai/new-image')).toBe(true);
+		expect(mocks.error).not.toHaveBeenCalled();
 	});
 
 	it('still pins a catalog pick for a tool the generation tools did not replace', async () => {

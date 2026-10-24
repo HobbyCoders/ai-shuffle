@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import psutil
 import pytest
 
-from app.preview_run import preview_environment, supervise
+from app.preview_run import initialize_preview_access, main, preview_environment, supervise
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux preview ownership")
 
@@ -25,6 +25,17 @@ def test_preview_environment_never_inherits_credentials(tmp_path, monkeypatch):
     assert env["HOME"] == str(tmp_path / "home")
     assert env["LOCAL_MODE"] == "true"
     assert env["AI_SHUFFLE_PREVIEW"] == "1"
+    assert env["HOST"] == "127.0.0.1"
+    assert env["SHUFFLE_PREVIEW_PORT"] == "18880"
+    assert env["PORT"] not in ("18880", "18881", "8000", "8001")
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0", "10.0.0.30"])
+def test_preview_bind_host_only_moves_guarded_listener(tmp_path: Path, host: str) -> None:
+    env = preview_environment(tmp_path, 18880, 18881, host=host)
+    assert env["HOST"] == "127.0.0.1"
+    assert env["SHUFFLE_PREVIEW_HOST"] == host
+    assert env["SHUFFLE_PREVIEW_PORT"] == "18880"
 
 
 @pytest.mark.parametrize("reason", ["ttl", "stop", "error", "owner_exit", "pid_reused"])
@@ -75,3 +86,116 @@ def test_preview_teardown_does_not_kill_another_session(tmp_path):
     finally:
         other.terminate()
         other.wait(timeout=5)
+
+
+@pytest.mark.parametrize("options,host,browser_host", [
+    ([], "127.0.0.1", "127.0.0.1"),
+    (["--host", "0.0.0.0", "--browser-host", "10.0.0.30"], "0.0.0.0", "10.0.0.30"),
+    (["--host", "10.0.0.30"], "10.0.0.30", "10.0.0.30"),
+])
+def test_cli_passes_preview_host_and_lease(
+    monkeypatch: pytest.MonkeyPatch, options: list[str], host: str, browser_host: str,
+) -> None:
+    from docker import container_runtime
+
+    database = Mock()
+    supervise_mock = Mock(return_value=0)
+    monkeypatch.setattr(container_runtime, "Database", database)
+    monkeypatch.setattr("app.preview_run.supervise", supervise_mock)
+    assert main(["--port", "18880", "--ttl-seconds", "60", *options]) == 0
+    env = supervise_mock.call_args.args[1]
+    assert env["HOST"] == "127.0.0.1"
+    assert env["SHUFFLE_PREVIEW_PORT"] == "18880"
+    assert env["SHUFFLE_PREVIEW_HOST"] == host
+    assert env["SHUFFLE_PREVIEW_ACCESS_HOST"] == browser_host
+    assert env["SHUFFLE_PREVIEW_ACCESS_TTL"] == "60"
+    assert supervise_mock.call_args.kwargs["ttl"] == 60
+    ports = {int(env[key]) for key in ("PORT", "SHUFFLE_PROTECTED_PORT", "SHUFFLE_PREVIEW_PORT")}
+    ports.add(database.call_args.kwargs["port"])
+    assert len(ports) == 4 and not ports.intersection({8000, 8001})
+
+
+@pytest.mark.parametrize("options", [
+    ["--host", "0.0.0.0"], ["--host", "::"], ["--host", "not-an-address"],
+    ["--browser-host", "0.0.0.0"], ["--port", "8000"], ["--ttl-seconds", "14401"],
+    ["--protected-port", "18880"],
+])
+def test_cli_rejects_invalid_preview_before_starting(
+    monkeypatch: pytest.MonkeyPatch, options: list[str],
+) -> None:
+    supervise_mock = Mock()
+    monkeypatch.setattr("app.preview_run.supervise", supervise_mock)
+    with pytest.raises(SystemExit) as error:
+        main(["--port", "18880", *options])
+    assert error.value.code == 2
+    supervise_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("preview,host", [("0", "10.0.0.30"), ("1", "")])
+def test_access_bootstrap_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], preview: str, host: str,
+) -> None:
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", preview)
+    monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_HOST", host)
+    initialize_preview_access()
+    assert capsys.readouterr().out == ""
+
+
+def test_access_bootstrap_requires_guarded_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core import preview_access
+
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "1")
+    monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_HOST", "10.0.0.30")
+    monkeypatch.setattr(preview_access, "_listener_port", None)
+    with pytest.raises(RuntimeError, match="token-only listener"):
+        initialize_preview_access()
+
+
+def test_bootstrap_link_uses_real_session_and_normal_guard(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from urllib.parse import parse_qs, urlsplit
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+    from app.api import auth
+    from app.core import preview_access
+    from app.core.config import settings
+    from app.db.sessions import get_session, delete_session
+    from app.serve import IngressApplication
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    monkeypatch.setattr(preview_access, "_listener_port", 18880)
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "1")
+    monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_HOST", "10.0.0.30")
+    monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_TTL", "60")
+    initialize_preview_access()
+    url = capsys.readouterr().out.strip().split()[-1]
+    parts = urlsplit(url)
+    token = parse_qs(parts.query)["token"][0]
+    grant = preview_access.verify(token)
+    assert grant is not None
+    row = get_session(grant.session_id)
+    assert row["hidden"] and row["api_user_id"] is None
+    assert parts.netloc == "10.0.0.30:18880"
+
+    app = FastAPI()
+    app.include_router(auth.router)
+
+    @app.get("/")
+    @app.post("/api/v1/settings/test")
+    async def guarded(_: str = Depends(auth.require_auth)) -> dict[str, bool]:
+        return {"ok": True}
+
+    client = TestClient(IngressApplication(app, 18882, 18881, 18880),
+                        base_url="http://10.0.0.30:18880", client=("10.0.0.20", 54321))
+    assert client.get("/").status_code == 403
+    assert client.get(parts.path + "?token=forged").status_code == 403
+    assert not client.cookies
+    assert client.get(parts.path + "?" + parts.query).json() == {"ok": True}
+    assert client.get("/").json() == {"ok": True}
+    assert client.post("/api/v1/settings/test").status_code == 403
+    assert preview_access.verify(token, now=grant.expires_at + 1) is None
+    delete_session(grant.session_id)
+    assert client.get("/").status_code == 403

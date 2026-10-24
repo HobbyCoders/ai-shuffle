@@ -163,6 +163,12 @@ class PackageConnector(BaseConnector):
             return False
         return WebhookConnector.verify_inbound_request(self, *args, **kwargs)
 
+    async def poll_watch(
+        self, source: dict[str, object], cursor: dict[str, object]
+    ) -> tuple[list[tuple[str, dict[str, object]]], dict[str, object]]:
+        events, checkpoint = await self._call("poll_watch", source, cursor)
+        return [(key, payload) for key, payload in events], checkpoint
+
     async def send_message(self, message):
         return await self._call("send_message", message)
 

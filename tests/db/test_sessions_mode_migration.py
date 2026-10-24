@@ -12,6 +12,8 @@ Mirrors tests/db/test_sessions_provider_binding_migration.py (the v66
 provider_id precedent this column follows exactly).
 """
 
+from typing import Any
+
 from app.db import database
 from tests.db.migration_helpers import column_names, schema_version
 
@@ -24,7 +26,7 @@ def test_fresh_db_has_mode_column_and_version(mock_db):
     assert schema_version(conn) == database.SCHEMA_VERSION
 
 
-def test_init_upgrades_pre_v74_db(mock_db):
+def test_init_upgrades_pre_v74_db(mock_db: Any) -> None:
     """EXISTING-DB path: a v73-shaped sessions table (no mode) is upgraded in
     place — the guarded ADD COLUMN lands mode and the version bumps, with the
     existing row preserved (its mode NULL → chat) and no exception."""
@@ -47,7 +49,8 @@ def test_init_upgrades_pre_v74_db(mock_db):
     row = conn.execute(
         "SELECT mode FROM sessions WHERE id = 's-legacy-mode'"
     ).fetchone()
-    assert row[0] is None
+    # #553 completes the deferred owner/no-project migration after adding mode.
+    assert row[0] == "chat"
 
 
 def test_column_migration_is_idempotent(mock_db):

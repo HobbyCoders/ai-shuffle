@@ -180,7 +180,7 @@
 	@media (prefers-reduced-motion: reduce) { .refresh :global(.refreshing) { animation: none; } }
 	.hint, p, .muted { font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
 	.hint { margin: 8px 0 0; }
-	.flow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--primary) 4%, var(--card)); }
+	.flow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklab, var(--primary) 4%, var(--card)); }
 	.flow p { margin: 0; }
 	.qr { width: 172px; max-width: 100%; box-sizing: border-box; padding: 10px; background: white; border-radius: 8px; }
 	.qr :global(svg) { display: block; width: 100%; height: auto; }

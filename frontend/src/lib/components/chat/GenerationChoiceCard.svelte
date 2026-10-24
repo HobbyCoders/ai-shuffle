@@ -9,12 +9,18 @@
 	 * and re-quotes the price as they change. "Use this" saves the pick as the
 	 * account's last choice (and remembered choice when the box is ticked) and,
 	 * in a chat, replies with the exact arguments the agent passes back.
+	 *
+	 * Every save reports the server's fresh quote (#518). The card shows it, or
+	 * why unattended runs will skip the pick, and stays open on a warning so
+	 * collapsing never hides it. Saving never submits, re-quotes or approves.
 	 */
+	import '../deck/cards/card-design-system.css';
 	import { onMount, untrack } from 'svelte';
 	import { derived } from 'svelte/store';
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
+	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { getErrorMessage } from '$lib/api/client';
 	import {
 		KIND_LABEL,
@@ -23,14 +29,19 @@
 		modelLabel,
 		pickMessage,
 		priceView,
+		saveOutcome,
 		repliedFigure,
 		quickChips,
 		sameChoice,
 		sourceLabel,
+		workerLabel,
+		type GenerationChoice,
 		type GenerationKind,
 		type GenerationOption,
 		type GenerationPrice,
 		type NativeValue,
+		type SaveOutcome,
+		type SaveQuote,
 		type SchemaField
 	} from '$lib/utils/generation-choice';
 
@@ -49,6 +60,16 @@
 		answeredBy?: string | null;
 		/** Settings: called after a pick is saved. */
 		onsaved?: (choice: GenerationOption) => void;
+		/**
+		 * Settings variant only: hand the pick to the caller instead of saving it
+		 * as a remembered/last choice (an automation's pinned job choice). A
+		 * rejection is shown on the card like a failed save. Resolve with the
+		 * server's save-time quote to show it here; resolve empty when the pick
+		 * was only staged.
+		 */
+		onpick?: (choice: GenerationChoice) => Promise<Partial<SaveQuote> | void>;
+		/** The settings variant's button text when `onpick` is set. */
+		pickLabel?: string;
 	}
 
 	let {
@@ -61,7 +82,9 @@
 		rememberedUnavailable = false,
 		rememberedUnpriced = false,
 		answeredBy = undefined,
-		onsaved
+		onsaved,
+		onpick,
+		pickLabel = 'Use this choice'
 	}: Props = $props();
 
 	onMount(() => {
@@ -98,6 +121,8 @@
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
 	let picked = $state<{ index: number; remembered: boolean } | null>(null);
+	/** What the last save reported: the fresh price, or why unattended runs will skip it. */
+	let outcome = $state<{ index: number; verb: string; view: SaveOutcome } | null>(null);
 	let tick = $state(0);
 	let quoteTimer: ReturnType<typeof setTimeout> | null = null;
 	let quoteSeq = 0;
@@ -108,6 +133,17 @@
 	const Icon = $derived(KIND_ICON[kind]);
 	const remembered = $derived(generationChoices.remembered[kind]);
 	const remember = $derived(rememberTouched ? rememberPick : currentPrice.total === 0);
+	// A caller-owned pick (automation job choice) never touches remembered/last picks.
+	const handoff = $derived(variant === 'settings' && !!onpick);
+
+	// Options are spread across accounts and the workers holding them. An option
+	// held by another worker names it, so the same plan on two workers differs.
+	const here = $derived(generationChoices.worker);
+	const elsewhere = (option: GenerationOption) => !!here && !!option.worker && option.worker !== here && option.worker !== 'local';
+	const anyElsewhere = $derived(options.some(elsewhere));
+	$effect(() => {
+		if (anyElsewhere && $workerInstalls === null) refreshWorkerPresence().catch(() => {});
+	});
 
 	// Which option a reply picked (it carries the exact model and account).
 	const repliedIndex = $derived.by(() => {
@@ -301,20 +337,34 @@
 		const option = options[index];
 		const chosen = values[index];
 		const keep = variant === 'settings' ? true : remember;
+		outcome = null;
 		try {
-			await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			const result =
+				handoff && onpick
+					? await onpick(choiceOf(option, chosen))
+					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			// Shown before the chat reply goes out, so a failed send still says what was saved.
+			const view = saveOutcome(result || null, kind);
+			if (view) outcome = { index, verb: savedVerb(keep), view };
 			if (variant === 'chat') {
 				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep));
 				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
 			}
 			picked = { index, remembered: keep };
-			reopened = false;
+			// A consequential warning keeps the chat card open.
+			reopened = !!view?.warning;
 			onsaved?.(option);
 		} catch (e) {
 			saveError = getErrorMessage(e, 'Could not use this choice.');
 		} finally {
 			saving = false;
 		}
+	}
+
+	function savedVerb(keep: boolean): string {
+		if (handoff) return 'Pinned to this job';
+		if (variant === 'settings') return 'Remembered';
+		return keep ? 'Saved and remembered' : 'Saved as your last choice';
 	}
 
 	async function forget() {
@@ -330,15 +380,18 @@
 	const summaryOption = $derived(summaryIndex >= 0 ? options[summaryIndex] : null);
 	const summaryRemembered = $derived(!!summaryOption && sameChoice(remembered, summaryOption));
 	// After a reload the live quote is gone; the reply carries the figure it was picked at.
+	// The saved pick's warning, still shown on the collapsed line.
+	const summaryWarning = $derived(!!picked && outcome?.index === summaryIndex ? (outcome?.view.warning ?? null) : null);
 	const summaryFigure = $derived.by(() => {
 		if (!summaryOption) return '';
+		if (picked && outcome?.index === summaryIndex) return outcome.view.figure;
 		if (picked) return priceView(quotes[summaryIndex], kind).figure;
 		return (reply && repliedFigure(reply)) || priceView(summaryOption.price, kind).figure;
 	});
 </script>
 
 <section
-	class="gcc"
+	class="gcc card-system"
 	class:settings={variant === 'settings'}
 	class:collapsed
 	aria-labelledby="{uid}-title"
@@ -361,6 +414,7 @@
 					{#if summaryOption}
 						{summaryFigure}
 						{#if summaryRemembered}<span class="gcc-dot" aria-hidden="true">·</span> remembered for {label.plural}{/if}
+						{#if summaryWarning}<span class="gcc-sub-warn" title={summaryWarning}><span class="gcc-dot" aria-hidden="true">·</span><TriangleAlert aria-hidden="true" />Unattended runs will skip it</span>{/if}
 					{:else}
 						Answered in the chat
 					{/if}
@@ -408,19 +462,21 @@
 					disabled={!option.available}
 					onclick={() => select(index)}
 					onkeydown={(event) => onRadioKey(event, index)}
-					style="--i: {index}"
 				>
 					<span class="gcc-opt-top">
 						<span class="gcc-source">{sourceLabel(option.source)}</span>
 						{#if option.label}
-							<span class="gcc-badge">{option.label}</span>
+							<span class="gcc-badge card-badge card-badge--primary">{option.label}</span>
 						{:else if sameChoice(remembered, option)}
-							<span class="gcc-badge">Remembered</span>
+							<span class="gcc-badge card-badge card-badge--primary">Remembered</span>
 						{:else if option.verified && option.source !== 'fal'}
-							<span class="gcc-badge quiet">Verified</span>
+							<span class="gcc-badge card-badge card-badge--muted">Verified</span>
 						{/if}
 					</span>
 					<span class="gcc-model" title={option.model}>{modelLabel(option.model)}</span>
+					{#if elsewhere(option)}
+						<span class="gcc-where">on {workerLabel(option.worker, $workerInstalls, here)}</span>
+					{/if}
 					{#if option.available}
 						{#if chips.length}
 							<span class="gcc-chips">{chips.join(' · ')}</span>
@@ -478,6 +534,7 @@
 									{:else if field.control === 'select'}
 										<select
 											id={inputId}
+											class="card-form-input"
 											value={value === undefined || value === null ? '' : String(value)}
 											disabled={field.locked}
 											onchange={(e) => setValue(field, coerce(field, (e.currentTarget as HTMLSelectElement).value))}
@@ -504,6 +561,7 @@
 										<input
 											id={inputId}
 											type="number"
+											class="card-form-input card-form-input--mono"
 											inputmode="decimal"
 											placeholder="Default"
 											value={value === undefined || value === null ? '' : String(value)}
@@ -513,6 +571,7 @@
 										<input
 											id={inputId}
 											type="text"
+											class="card-form-input"
 											placeholder={field.control === 'json' ? 'JSON' : 'Default'}
 											value={value === undefined || value === null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)}
 											onchange={(e) => setValue(field, coerce(field, (e.currentTarget as HTMLInputElement).value))}
@@ -536,6 +595,31 @@
 		{:else if current && !currentPrice.priced}
 			<p class="gcc-note warn" role="note"><TriangleAlert aria-hidden="true" />This price is unknown, so it cannot run. Pick another option.</p>
 		{/if}
+		{#if outcome}
+			{@const view = outcome.view}
+			{@const saved = options[outcome.index]}
+			<div class="gcc-saved" data-state={view.state} role={view.warning ? 'alert' : 'status'}>
+				<span class="gcc-saved-icon" aria-hidden="true">
+					{#if view.warning}<TriangleAlert />{:else}<Check />{/if}
+				</span>
+				<div class="gcc-saved-body">
+					<p class="gcc-saved-head">
+						<strong>{outcome.verb}:</strong>
+						<span class="gcc-saved-what" title={saved.model}>{sourceLabel(saved.source)} · {modelLabel(saved.model)}</span>
+						{#if view.warning}<span class="gcc-saved-tag">{view.tag}</span>{/if}
+					</p>
+					{#if view.warning}
+						<p class="gcc-saved-text">{view.warning}</p>
+					{:else}
+						<p class="gcc-saved-text">Fresh quote from the server. Unattended runs can use it.</p>
+					{/if}
+				</div>
+				<p class="gcc-saved-price">
+					<span class="gcc-saved-figure">{view.figure}</span>
+					<span class="gcc-saved-note">{view.note}</span>
+				</p>
+			</div>
+		{/if}
 		{#if saveError}
 			<p class="gcc-note warn" role="alert"><TriangleAlert aria-hidden="true" />{saveError}</p>
 		{/if}
@@ -557,7 +641,6 @@
 			{/if}
 			<div class="gcc-receipt" aria-live="polite" aria-busy={quoting}>
 				<span class="gcc-receipt-label">{variant === 'settings' ? 'Price' : 'Total'}</span>
-				<span class="gcc-leader" aria-hidden="true"></span>
 				{#key tick}
 					<span class="gcc-total" class:busy={quoting}>{currentPrice.figure}</span>
 				{/key}
@@ -565,6 +648,8 @@
 			<button type="button" class="gcc-use" disabled={!canUse} onclick={use}>
 				{#if saving}
 					<span class="gcc-spinner" aria-hidden="true"></span>Saving
+				{:else if handoff}
+					<Sparkles aria-hidden="true" />{pickLabel}
 				{:else if variant === 'settings'}
 					<Sparkles aria-hidden="true" />Remember this
 				{:else}
@@ -579,52 +664,51 @@
 </section>
 
 <style>
+	/* The chat's card language (QuestionTray, the private-access cards): a flat
+	   card on the theme radius, a neutral icon tile, sentence-case card badges,
+	   neutral selection (strong border on muted, as the question tray marks a
+	   picked answer) and the foreground-filled send button. */
 	.gcc {
-		--gcc-accent: var(--primary);
-		--gcc-wash: color-mix(in oklch, var(--primary) 6%, transparent);
-		--gcc-radius: 10px;
+		--gcc-inner-radius: calc(var(--radius, 10px) - 4px);
 		container-type: inline-size;
 		position: relative;
 		width: 100%;
 		min-width: 0;
 		margin: 6px 0;
-		padding: 14px;
+		padding: 0.75rem;
 		border: 1px solid var(--border);
-		border-radius: var(--gcc-radius);
-		background:
-			radial-gradient(120% 80% at 0% 0%, var(--gcc-wash), transparent 60%),
-			var(--card);
+		border-radius: var(--radius, 10px);
+		background: var(--card);
 		color: var(--foreground);
-		animation: gcc-in 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+		animation: gcc-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
 	}
 	.gcc.settings {
 		margin: 0;
-		background: var(--card);
 	}
 	.gcc.collapsed {
-		padding: 10px 12px;
+		padding: 0.625rem 0.75rem;
 	}
 
 	.gcc-head {
 		display: flex;
-		align-items: flex-start;
-		gap: 10px;
+		align-items: center;
+		gap: 0.625rem;
 		min-width: 0;
 	}
 	.gcc-glyph {
 		flex: none;
 		display: grid;
 		place-items: center;
-		width: 30px;
-		height: 30px;
-		border-radius: 8px;
-		color: var(--gcc-accent);
-		background: color-mix(in oklch, var(--gcc-accent) 12%, transparent);
-		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--gcc-accent) 22%, transparent);
+		width: 2rem;
+		height: 2rem;
+		border-radius: var(--gcc-inner-radius);
+		border: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 50%, var(--card));
+		color: var(--foreground);
 	}
 	.gcc-glyph :global(svg) {
-		width: 16px;
-		height: 16px;
+		width: 15px;
+		height: 15px;
 	}
 	.gcc-heading {
 		flex: 1;
@@ -632,15 +716,14 @@
 	}
 	h3 {
 		margin: 0;
-		font-size: 13.5px;
+		font-size: 0.875rem;
 		font-weight: 600;
-		line-height: 1.35;
-		letter-spacing: -0.005em;
+		line-height: 1.4;
 		overflow-wrap: anywhere;
 	}
 	.gcc-sub {
-		margin: 2px 0 0;
-		font-size: 12px;
+		margin: 1px 0 0;
+		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		font-variant-numeric: tabular-nums;
 	}
@@ -648,63 +731,50 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		font-style: italic;
 	}
 	.gcc-dot {
 		margin: 0 4px;
 	}
 	.gcc-head-actions {
 		display: flex;
-		gap: 12px;
+		gap: 0.75rem;
 		flex: none;
 		align-items: center;
-		align-self: center;
 	}
 
 	/* ── Options ─────────────────────────────────────────────────── */
 	.gcc-options {
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-		gap: 8px;
-		margin-top: 12px;
+		gap: 0.5rem;
+		margin-top: 0.75rem;
 	}
 	.gcc-option {
 		position: relative;
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
-		gap: 3px;
+		gap: 2px;
 		min-width: 0;
 		min-height: 44px;
-		padding: 10px 11px 11px;
+		padding: 0.625rem;
 		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--background);
+		border-radius: var(--gcc-inner-radius);
+		background: transparent;
 		color: inherit;
 		font: inherit;
 		text-align: left;
 		cursor: pointer;
 		transition:
-			border-color 160ms ease-out,
-			background-color 160ms ease-out,
-			transform 160ms ease-out,
-			box-shadow 160ms ease-out;
-		animation: gcc-rise 300ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
-		animation-delay: calc(var(--i) * 45ms + 60ms);
+			border-color 0.15s ease,
+			background-color 0.15s ease;
 	}
 	.gcc-option:hover:not(:disabled) {
-		border-color: var(--border-strong, var(--border));
 		background: var(--muted);
-		transform: translateY(-1px);
-	}
-	.gcc-option:active:not(:disabled) {
-		transform: translateY(0);
 	}
 	.gcc-option.selected {
-		border-color: color-mix(in oklch, var(--gcc-accent) 70%, transparent);
-		/* oklab: the achromatic background carries hue 0, which oklch would drift toward pink. */
-		background: color-mix(in oklab, var(--gcc-accent) 7%, var(--background));
-		box-shadow: 0 0 0 1px color-mix(in oklch, var(--gcc-accent) 45%, transparent);
+		border-color: var(--border-strong, var(--foreground));
+		background: var(--muted);
 	}
 	.gcc-option:disabled {
 		cursor: not-allowed;
@@ -726,10 +796,8 @@
 	.gcc-source {
 		flex: 0 1 auto;
 		max-width: 100%;
-		font-size: 10.5px;
-		font-weight: 600;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
+		font-size: 0.6875rem;
+		font-weight: 500;
 		color: var(--muted-foreground);
 		white-space: nowrap;
 		overflow: hidden;
@@ -737,31 +805,31 @@
 	}
 	.gcc-badge {
 		flex: none;
-		padding: 1px 6px;
-		border-radius: 999px;
-		font-size: 10px;
-		font-weight: 600;
-		color: var(--gcc-accent);
-		background: color-mix(in oklch, var(--gcc-accent) 12%, transparent);
-		white-space: nowrap;
-	}
-	.gcc-badge.quiet {
-		color: var(--muted-foreground);
-		background: var(--muted);
+		padding: 0 5px;
+		font-size: 0.625rem;
 	}
 	.gcc-model {
 		max-width: 100%;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		font-weight: 600;
-		line-height: 1.3;
+		line-height: 1.35;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.gcc-where {
+		max-width: 100%;
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 	.gcc-chips {
 		max-width: 100%;
-		font-size: 11px;
-		line-height: 1.35;
+		font-size: 0.6875rem;
+		line-height: 1.4;
 		color: var(--muted-foreground);
 		overflow: hidden;
 		display: -webkit-box;
@@ -778,13 +846,12 @@
 	}
 	.gcc-figure {
 		font-family: var(--font-mono);
-		font-size: 15px;
+		font-size: 0.8125rem;
 		font-weight: 600;
-		letter-spacing: -0.02em;
 		font-variant-numeric: tabular-nums;
 	}
 	.gcc-per {
-		font-size: 10.5px;
+		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 	}
 	.gcc-price.unknown .gcc-figure {
@@ -792,52 +859,54 @@
 	}
 	.gcc-check {
 		position: absolute;
-		top: 9px;
-		right: 9px;
+		top: 0.625rem;
+		right: 0.625rem;
 		display: grid;
 		place-items: center;
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		color: var(--primary-foreground, var(--background));
-		background: var(--gcc-accent);
-		animation: gcc-pop 220ms cubic-bezier(0.3, 1.4, 0.5, 1) both;
+		width: 14px;
+		height: 14px;
+		color: var(--foreground);
 	}
 	.gcc-check :global(svg) {
-		width: 11px;
-		height: 11px;
-		stroke-width: 3;
+		width: 14px;
+		height: 14px;
+		stroke-width: 2.5;
 	}
 
 	/* ── Advanced ────────────────────────────────────────────────── */
 	.gcc-advanced {
-		margin-top: 10px;
-		border-top: 1px dashed var(--border);
+		margin-top: 0.625rem;
+		border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
 	}
 	.gcc-adv-toggle {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 0.375rem;
 		width: 100%;
 		min-height: 36px;
-		padding: 8px 0 4px;
+		padding: 0.5rem 0 0.25rem;
 		border: 0;
 		background: none;
 		color: var(--foreground);
 		font: inherit;
-		font-size: 12px;
-		font-weight: 600;
+		font-size: 0.75rem;
+		font-weight: 500;
 		cursor: pointer;
 		text-align: left;
 	}
 	.gcc-adv-toggle :global(.gcc-chev) {
+		flex: none;
 		width: 14px;
 		height: 14px;
+		color: var(--muted-foreground);
 		transform: rotate(-90deg);
-		transition: transform 200ms ease-out;
+		transition: transform 0.2s ease;
 	}
 	.gcc-adv-toggle[aria-expanded='true'] :global(.gcc-chev) {
 		transform: rotate(0deg);
+	}
+	.gcc-adv-toggle:hover :global(.gcc-chev) {
+		color: var(--foreground);
 	}
 	.gcc-adv-meta {
 		font-weight: 400;
@@ -850,17 +919,17 @@
 	.gcc-adv-body {
 		display: grid;
 		gap: 2px;
-		padding: 4px 0 2px;
-		animation: gcc-rise 200ms ease-out both;
+		padding: 0.25rem 0 0.125rem;
+		animation: gcc-expand 0.2s ease-out both;
 	}
 	.gcc-field {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
 		align-items: center;
-		gap: 12px;
+		gap: 0.75rem;
 		min-height: 40px;
-		padding: 4px 0;
-		border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+		padding: 0.25rem 0;
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 40%, transparent);
 	}
 	.gcc-field:last-of-type {
 		border-bottom: 0;
@@ -870,11 +939,11 @@
 		flex-direction: column;
 		gap: 1px;
 		min-width: 0;
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 500;
 	}
 	.gcc-help {
-		font-size: 10.5px;
+		font-size: 0.6875rem;
 		font-weight: 400;
 		color: var(--muted-foreground);
 		overflow: hidden;
@@ -885,22 +954,20 @@
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
-		gap: 8px;
+		gap: 0.5rem;
 		min-width: 0;
 	}
-	.gcc-control select,
-	.gcc-control input[type='text'],
-	.gcc-control input[type='number'] {
-		width: 100%;
+	/* The shared input, in the theme's own fonts (it would set Inter / JetBrains Mono). */
+	.gcc-control .card-form-input {
+		font-family: inherit;
 		max-width: 220px;
 		min-height: 32px;
-		padding: 5px 8px;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		background: var(--background);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 12px;
+		padding: 0.3125rem 0.5rem;
+		border-radius: var(--gcc-inner-radius);
+		font-size: 0.75rem;
+	}
+	.gcc-control select.card-form-input {
+		appearance: auto;
 	}
 	.gcc-control input[type='number'] {
 		max-width: 120px;
@@ -912,12 +979,12 @@
 	.gcc-control input[type='range'] {
 		flex: 1;
 		max-width: 170px;
-		accent-color: var(--gcc-accent);
+		accent-color: var(--primary);
 	}
 	.gcc-range-value {
 		min-width: 3ch;
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-variant-numeric: tabular-nums;
 		text-align: right;
 	}
@@ -926,11 +993,12 @@
 		position: relative;
 		width: 34px;
 		height: 20px;
+		margin: 0;
 		border-radius: 999px;
 		background: var(--muted);
 		box-shadow: inset 0 0 0 1px var(--border);
 		cursor: pointer;
-		transition: background-color 160ms ease-out;
+		transition: background-color 0.15s ease;
 	}
 	.gcc-switch::after {
 		content: '';
@@ -942,93 +1010,193 @@
 		border-radius: 50%;
 		background: var(--background);
 		box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
-		transition: transform 180ms cubic-bezier(0.3, 1.3, 0.5, 1);
+		transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 	.gcc-switch:checked {
-		background: var(--gcc-accent);
+		background: var(--primary);
+		box-shadow: none;
 	}
 	.gcc-switch:checked::after {
+		background: var(--primary-foreground, var(--background));
 		transform: translateX(14px);
 	}
 	.gcc-empty {
-		margin: 4px 0;
-		font-size: 12px;
+		margin: 0.25rem 0;
+		font-size: 0.75rem;
 		color: var(--muted-foreground);
 	}
 	.gcc-reset {
 		justify-self: start;
-		margin-top: 4px;
+		margin-top: 0.25rem;
 	}
 
 	/* ── Notes, footer ───────────────────────────────────────────── */
 	.gcc-note {
 		display: flex;
 		align-items: flex-start;
-		gap: 6px;
-		margin: 10px 0 0;
-		font-size: 11.5px;
+		gap: 0.375rem;
+		margin: 0.625rem 0 0;
+		font-size: 0.6875rem;
 		line-height: 1.45;
 		color: var(--muted-foreground);
 	}
 	.gcc-note.warn {
-		color: var(--warning, var(--foreground));
+		color: var(--foreground);
+	}
+	.gcc-note.warn :global(svg) {
+		color: var(--warning, var(--muted-foreground));
 	}
 	.gcc-note :global(svg) {
 		flex: none;
 		width: 13px;
 		height: 13px;
-		margin-top: 2px;
+		margin-top: 1px;
+	}
+	/* Save receipt: the server's fresh quote, or why unattended runs skip it.
+	   A warning gets the warning tint and stays open until the owner hides it. */
+	.gcc-saved {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: start;
+		gap: 0.25rem 0.625rem;
+		margin: 0.625rem 0 0;
+		padding: 0.5rem 0.625rem;
+		border: 1px solid var(--border);
+		border-left: 2px solid var(--success, var(--foreground));
+		border-radius: var(--gcc-inner-radius);
+		background: color-mix(in oklab, var(--success, var(--muted)) 6%, var(--card));
+		font-size: 0.75rem;
+		line-height: 1.45;
+		animation: gcc-expand 0.2s ease-out both;
+	}
+	.gcc-saved[data-state='unpriced'],
+	.gcc-saved[data-state='unavailable'] {
+		border-color: color-mix(in oklab, var(--warning) 40%, var(--border));
+		border-left-color: var(--warning);
+		background: color-mix(in oklab, var(--warning) 8%, var(--card));
+	}
+	.gcc-saved-icon {
+		display: grid;
+		place-items: center;
+		width: 14px;
+		height: 18px;
+		color: var(--success, var(--foreground));
+	}
+	.gcc-saved[data-state='unpriced'] .gcc-saved-icon,
+	.gcc-saved[data-state='unavailable'] .gcc-saved-icon {
+		color: var(--warning);
+	}
+	.gcc-saved-icon :global(svg) {
+		width: 13px;
+		height: 13px;
+	}
+	.gcc-saved-body {
+		min-width: 0;
+	}
+	.gcc-saved-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 2px 6px;
+		margin: 0;
+	}
+	.gcc-saved-head strong {
+		font-weight: 600;
+	}
+	.gcc-saved-what {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.gcc-saved-tag {
+		padding: 0 6px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
+		font-size: 0.625rem;
+		font-weight: 600;
+		letter-spacing: 0.01em;
+		white-space: nowrap;
+	}
+	.gcc-saved-text {
+		margin: 2px 0 0;
+		color: var(--muted-foreground);
+	}
+	.gcc-saved[data-state='unpriced'] .gcc-saved-text,
+	.gcc-saved[data-state='unavailable'] .gcc-saved-text {
+		color: var(--foreground);
+	}
+	.gcc-saved-price {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		margin: 0;
+		text-align: right;
+	}
+	.gcc-saved-figure {
+		font-family: var(--font-mono);
+		font-size: 0.8125rem;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.gcc-saved-note {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+	}
+	.gcc-sub-warn {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		color: var(--foreground);
+		white-space: nowrap;
+	}
+	.gcc-sub-warn .gcc-dot {
+		margin: 0 0 0 4px;
+	}
+	.gcc-sub-warn :global(svg) {
+		width: 12px;
+		height: 12px;
+		color: var(--warning);
 	}
 	.gcc-foot {
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
-		gap: 10px 14px;
-		margin-top: 12px;
-		padding-top: 12px;
-		border-top: 1px solid var(--border);
+		gap: 0.625rem 0.875rem;
+		margin-top: 0.75rem;
+		padding-top: 0.75rem;
+		border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
 	}
 	.gcc-remember {
 		display: inline-flex;
 		align-items: center;
-		gap: 8px;
+		gap: 0.5rem;
 		min-height: 32px;
-		font-size: 12px;
+		font-size: 0.75rem;
 		cursor: pointer;
 	}
 	.gcc-remember input {
-		width: 15px;
-		height: 15px;
+		width: 14px;
+		height: 14px;
 		margin: 0;
-		accent-color: var(--gcc-accent);
+		accent-color: var(--foreground);
 	}
-	/* The signature: a receipt line whose total ticks as options change. */
 	.gcc-receipt {
 		display: flex;
 		align-items: baseline;
-		gap: 8px;
-		flex: 1 1 140px;
-		min-width: 120px;
-		font-size: 11px;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		flex: 1 1 120px;
+		min-width: 100px;
+		font-size: 0.6875rem;
 		color: var(--muted-foreground);
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-	}
-	.gcc-leader {
-		flex: 1;
-		min-width: 12px;
-		border-bottom: 1px dotted color-mix(in oklch, var(--muted-foreground) 55%, transparent);
-		transform: translateY(-3px);
 	}
 	.gcc-total {
 		font-family: var(--font-mono);
-		font-size: 16px;
+		font-size: 0.875rem;
 		font-weight: 600;
-		letter-spacing: -0.02em;
-		text-transform: none;
 		color: var(--foreground);
 		font-variant-numeric: tabular-nums;
-		animation: gcc-tick 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+		animation: gcc-tick 0.2s ease-out both;
 	}
 	.gcc-total.busy {
 		opacity: 0.45;
@@ -1038,29 +1206,24 @@
 		align-items: center;
 		justify-content: center;
 		gap: 6px;
-		min-height: 36px;
-		min-width: 104px;
-		padding: 0 14px;
-		border: 1px solid transparent;
-		border-radius: 8px;
+		min-height: 34px;
+		min-width: 96px;
+		padding: 0 0.875rem;
+		border: 1px solid var(--border-strong, transparent);
+		border-radius: var(--gcc-inner-radius);
 		background: var(--foreground);
 		color: var(--background);
 		font: inherit;
-		font-size: 12.5px;
+		font-size: 0.75rem;
 		font-weight: 600;
 		cursor: pointer;
-		transition:
-			opacity 160ms ease-out,
-			transform 120ms ease-out;
+		transition: opacity 0.15s ease;
 	}
 	.gcc-use:hover:not(:disabled) {
 		opacity: 0.88;
 	}
-	.gcc-use:active:not(:disabled) {
-		transform: scale(0.98);
-	}
 	.gcc-use:disabled {
-		opacity: 0.4;
+		opacity: 0.45;
 		cursor: not-allowed;
 	}
 	.gcc-use :global(svg) {
@@ -1076,10 +1239,11 @@
 		animation: gcc-spin 700ms linear infinite;
 	}
 	.gcc-hint {
-		margin: 8px 0 0;
-		font-size: 11px;
+		margin: 0.5rem 0 0;
+		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 	}
+	/* Quiet text actions, like the question tray's Skip. */
 	.gcc-link {
 		min-height: 28px;
 		padding: 2px 0;
@@ -1087,12 +1251,10 @@
 		background: none;
 		color: var(--muted-foreground);
 		font: inherit;
-		font-size: 12px;
+		font-size: 0.75rem;
 		cursor: pointer;
-		text-decoration: underline;
-		text-decoration-color: color-mix(in oklch, currentColor 35%, transparent);
-		text-underline-offset: 3px;
 		white-space: nowrap;
+		transition: color 0.15s ease;
 	}
 	.gcc-link:hover {
 		color: var(--foreground);
@@ -1109,8 +1271,8 @@
 		.gcc-option {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) auto;
-			grid-template-areas: 'top price' 'model price' 'chips price';
-			column-gap: 10px;
+			grid-template-areas: 'top price' 'model price' 'where price' 'chips price';
+			column-gap: 0.625rem;
 		}
 		.gcc-opt-top {
 			grid-area: top;
@@ -1118,6 +1280,9 @@
 		}
 		.gcc-model {
 			grid-area: model;
+		}
+		.gcc-where {
+			grid-area: where;
 		}
 		.gcc-chips {
 			grid-area: chips;
@@ -1136,17 +1301,20 @@
 		}
 		.gcc-field {
 			grid-template-columns: 1fr;
-			gap: 4px;
+			gap: 0.25rem;
 		}
 		.gcc-control {
 			justify-content: flex-start;
 		}
-		.gcc-control select,
-		.gcc-control input[type='text'] {
+		.gcc-control .card-form-input {
 			max-width: none;
+			min-height: 44px;
 		}
 		.gcc-use {
 			flex: 1 1 100%;
+			min-height: 44px;
+		}
+		.gcc-link {
 			min-height: 44px;
 		}
 		.gcc-head-actions {
@@ -1154,31 +1322,42 @@
 			align-items: flex-end;
 			gap: 0;
 		}
+		/* The collapsed warning takes its own line rather than wrapping after a dot. */
+		.gcc-sub-warn {
+			display: flex;
+			margin-top: 1px;
+		}
+		.gcc-sub-warn .gcc-dot {
+			display: none;
+		}
+		/* The price drops under the text instead of squeezing it. */
+		.gcc-saved {
+			grid-template-columns: auto minmax(0, 1fr);
+		}
+		.gcc-saved-price {
+			grid-column: 2;
+			flex-direction: row;
+			align-items: baseline;
+			gap: 6px;
+			text-align: left;
+		}
 	}
 
 	@keyframes gcc-in {
 		from {
 			opacity: 0;
-			transform: translateY(4px);
-		}
-	}
-	@keyframes gcc-rise {
-		from {
-			opacity: 0;
 			transform: translateY(6px);
 		}
 	}
-	@keyframes gcc-pop {
+	@keyframes gcc-expand {
 		from {
-			transform: scale(0.4);
 			opacity: 0;
+			transform: translateY(-4px);
 		}
 	}
 	@keyframes gcc-tick {
 		from {
 			opacity: 0;
-			transform: translateY(-6px);
-			filter: blur(2px);
 		}
 	}
 	@keyframes gcc-spin {
@@ -1188,10 +1367,9 @@
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.gcc,
-		.gcc-option,
-		.gcc-check,
 		.gcc-total,
-		.gcc-adv-body {
+		.gcc-adv-body,
+		.gcc-saved {
 			animation: none;
 		}
 		.gcc-option,

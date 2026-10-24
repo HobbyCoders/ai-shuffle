@@ -14,6 +14,7 @@ vi.mock('$lib/stores/active-session', async () => {
 });
 
 import { generationChoices } from '$lib/stores/generation-choices.svelte';
+import { refreshWorkerPresence } from '$lib/stores/worker-presence';
 import GenerationChoiceCard from './GenerationChoiceCard.svelte';
 
 const PRICE = { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' };
@@ -119,6 +120,22 @@ describe('GenerationChoiceCard', () => {
 		expect(screen.getByRole('heading', { name: 'How should I make this image?' })).toBeTruthy();
 	});
 
+	it('names the worker holding an option that is not on this worker', async () => {
+		mocks.get.mockImplementation(async (url: string) =>
+			url === '/cluster/installs'
+				? { installs: [{ id: 'worker-b', device_id: 'worker-b', device_name: 'DesktopWorker', online: true }], self_instance_id: 'worker-a' }
+				: { remembered: {}, last: {}, migrated: true, worker: 'worker-a' }
+		);
+		await refreshWorkerPresence();
+		await generationChoices.load(true);
+		const sameOnPeer: GenerationOption = { ...FAL, worker: 'worker-b', label: undefined };
+		card({ options: [FAL, sameOnPeer, GROK] });
+		const radios = screen.getAllByRole('radio');
+		expect(radios[0].querySelector('.gcc-where')).toBeNull();
+		await waitFor(() => expect(radios[1].querySelector('.gcc-where')?.textContent).toBe('on DesktopWorker'));
+		expect(radios[2].querySelector('.gcc-where')?.textContent).toBe('on DesktopWorker');
+	});
+
 	it('moves the selection with the arrow keys, skipping unavailable options', async () => {
 		card();
 		const radios = screen.getAllByRole('radio');
@@ -193,6 +210,19 @@ describe('GenerationChoiceCard', () => {
 		expect(screen.getByText(/remembered for images/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Ask me next time' }));
 		expect(mocks.del).toHaveBeenCalledWith('/generation/choices/image');
+	});
+
+	it('replies to a native alias card by calling that alias again with the exact pick (#550)', async () => {
+		card({ options: [GROK], tool: 'GenerateNativeImage' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+		expect(mocks.put.mock.calls[0][1]).toMatchObject({
+			choice: { source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-image', options: GROK.options }
+		});
+		const message = mocks.send.mock.calls[0][0] as string;
+		expect(message).toContain(
+			`Call GenerateNativeImage again with the same prompt and ${JSON.stringify({ source: 'grok-1', model: 'grok-imagine-image', worker: 'worker-b', options: GROK.options })}.`
+		);
 	});
 
 	it('ticks "use this every time" only for an option that costs nothing, until the box is touched', async () => {
@@ -271,5 +301,148 @@ describe('GenerationChoiceCard', () => {
 		await waitFor(() => expect(onsaved).toHaveBeenCalledOnce());
 		expect(mocks.put.mock.calls[0][1]).toMatchObject({ remember: true, origin: 'settings' });
 		expect(mocks.send).not.toHaveBeenCalled();
+	});
+});
+
+// The save response (#518), with the exact strings app/api/generation_choices.py returns.
+const UNKNOWN = { currency: 'USD', unit: 'item', amount: null, total: null, status: 'unknown' };
+const SAVED_PRICED = {
+	price: { ...PRICE, amount: '0.03', total: '0.03', status: 'quoted' },
+	priced: true,
+	quote_error: null,
+	unattended_skip_reason: null,
+	warning: null
+};
+const SAVED_UNPRICED = {
+	price: UNKNOWN,
+	priced: false,
+	quote_error: null,
+	unattended_skip_reason: 'stored_choice_unpriced',
+	warning: 'This saved choice has no verified price. Unattended runs will skip it until a price is available.'
+};
+const unavailable = (error: string) => ({
+	price: UNKNOWN,
+	priced: false,
+	quote_error: error,
+	unattended_skip_reason: 'stored_choice_unavailable',
+	warning: `${error} Unattended runs will skip it.`
+});
+const SAVED_UNAVAILABLE = unavailable('This account or model is not available right now.');
+const SAVED_TIMEOUT = unavailable("The saved choice's quote timed out. Its worker or provider may be unavailable.");
+
+function saveReplies(quote: Record<string, unknown>) {
+	mocks.put.mockImplementation(async (_url: string, body: { choice: object; remember: boolean; origin: string }) => ({
+		kind: 'image',
+		choice: { ...body.choice, origin: body.origin },
+		remembered: body.remember,
+		...quote
+	}));
+}
+
+const notice = () => document.querySelector('.gcc-saved') as HTMLElement | null;
+
+describe('GenerationChoiceCard save-time quote', () => {
+	it('collapses a priced chat pick on the fresh server price, without quoting again', async () => {
+		saveReplies(SAVED_PRICED);
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		await waitFor(() => expect(screen.getByRole('heading', { name: 'Using fal.ai · Flux Dev' })).toBeTruthy());
+		// The card priced it at $0.025; the server's fresh quote is what it shows now.
+		expect(document.querySelector('.gcc-sub')?.textContent).toContain('$0.03');
+		expect(document.querySelector('.gcc-sub-warn')).toBeNull();
+		expect(mocks.post).not.toHaveBeenCalled();
+		expect(mocks.send).toHaveBeenCalledOnce();
+	});
+
+	it('keeps an unpriced chat pick open with the server warning, and on the collapsed line', async () => {
+		saveReplies(SAVED_UNPRICED);
+		card();
+		await fireEvent.click(screen.getAllByRole('radio')[1]);
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toContain('Saved and remembered:');
+		expect(alert.textContent).toContain('SuperGrok · Grok Imagine Image');
+		expect(alert.textContent).toContain('No verified price');
+		expect(alert.textContent).toContain(SAVED_UNPRICED.warning);
+		expect(within(alert).getByText('Unknown')).toBeTruthy();
+		expect(notice()?.dataset.state).toBe('unpriced');
+		// Still expanded: the pick went out once, nothing was quoted or resent.
+		expect(screen.getAllByRole('radio')).toHaveLength(3);
+		expect(mocks.send).toHaveBeenCalledOnce();
+		expect(mocks.post).not.toHaveBeenCalled();
+		expect(generationChoices.remembered.image?.model).toBe('grok-imagine-image');
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
+		expect(screen.getByRole('heading', { name: 'Using SuperGrok · Grok Imagine Image' })).toBeTruthy();
+		expect(document.querySelector('.gcc-sub')?.textContent).toContain('Unknown');
+		expect(document.querySelector('.gcc-sub-warn')?.textContent).toContain('Unattended runs will skip it');
+	});
+
+	it.each([
+		['an unavailable route', SAVED_UNAVAILABLE],
+		['a 2-second quote timeout', SAVED_TIMEOUT],
+		['another quote failure', unavailable('A fresh quote for this saved choice is unavailable right now.')]
+	])('keeps the pick and names %s as unavailable, not unpriced', async (_name, quote) => {
+		saveReplies(quote);
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		const alert = await screen.findByRole('alert');
+		expect(notice()?.dataset.state).toBe('unavailable');
+		expect(alert.textContent).toContain('Unavailable now');
+		expect(alert.textContent).toContain(quote.quote_error);
+		expect(alert.textContent).toContain('Unattended runs will skip it.');
+		expect(alert.textContent).not.toContain('No verified price');
+		expect(within(alert).getByText('No quote')).toBeTruthy();
+		expect(generationChoices.last.image?.model).toBe('fal-ai/flux/dev');
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
+	it('still shows what was saved when the chat reply then fails to send', async () => {
+		saveReplies(SAVED_UNPRICED);
+		mocks.send.mockResolvedValue(false);
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		await waitFor(() => expect(screen.getByText(/Your pick was saved, but the reply could not be sent/)).toBeTruthy());
+		expect(notice()?.textContent).toContain(SAVED_UNPRICED.warning);
+		expect(notice()?.textContent).toContain('Saved as your last choice:');
+		expect(generationChoices.last.image?.model).toBe('fal-ai/flux/dev');
+		// Not answered: the card stays open and can be used again.
+		expect(screen.queryByRole('button', { name: 'Hide' })).toBeNull();
+		expect((screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('shows the fresh price in Settings after remembering a priced pick', async () => {
+		saveReplies(SAVED_PRICED);
+		card({ variant: 'settings', answeredBy: undefined, toolId: '' });
+		await fireEvent.click(screen.getByRole('button', { name: /Remember this/ }));
+		const status = await screen.findByRole('status');
+		expect(status.textContent).toContain('Remembered:');
+		expect(status.textContent).toContain('Unattended runs can use it.');
+		expect(within(status).getByText('$0.03')).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('warns in Settings when the remembered pick has no verified price', async () => {
+		saveReplies(SAVED_UNPRICED);
+		card({ variant: 'settings', answeredBy: undefined, toolId: '' });
+		await fireEvent.click(screen.getByRole('button', { name: /Remember this/ }));
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toContain('Remembered:');
+		expect(alert.textContent).toContain(SAVED_UNPRICED.warning);
+		expect(generationChoices.remembered.image?.model).toBe('fal-ai/flux/dev');
+	});
+
+	it('shows a handed-off pin warning, and nothing for a staged pick', async () => {
+		const onpick = vi.fn().mockResolvedValue({ choice: {}, ...SAVED_TIMEOUT });
+		card({ variant: 'settings', answeredBy: undefined, toolId: '', onpick, pickLabel: 'Pin to this job' });
+		await fireEvent.click(screen.getByRole('button', { name: /Pin to this job/ }));
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toContain('Pinned to this job:');
+		expect(alert.textContent).toContain('timed out');
+		expect(mocks.put).not.toHaveBeenCalled();
+		cleanup();
+		card({ variant: 'settings', answeredBy: undefined, toolId: '', onpick: vi.fn().mockResolvedValue(undefined), pickLabel: 'Pin to this job' });
+		await fireEvent.click(screen.getByRole('button', { name: /Pin to this job/ }));
+		await waitFor(() => expect((screen.getByRole('button', { name: /Pin to this job/ }) as HTMLButtonElement).disabled).toBe(false));
+		expect(notice()).toBeNull();
 	});
 });

@@ -7,6 +7,7 @@ visible but unavailable; discovering a text model is not media verification.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -49,6 +50,21 @@ class Sources:
         from app.network import runners
         return runners.self_device_id() or "local"
 
+    async def source_for_account(self, account):
+        """Resolve an account's public metadata without catalog or provider I/O."""
+        if not self.context.owner:
+            return None
+        from app.core import native_generation_settings as native
+        from app.core.generation_resolver import normalize_source
+        from app.db import database
+        row = await run_sync(database.get_model_provider, account, include_token=False)
+        if row is None:
+            return None
+        try:
+            return normalize_source(native.provider_kind(row))
+        except ValueError:
+            return None
+
     async def fal_key(self):
         if self.context.api_user_id:
             from app.core import fal_credential
@@ -67,7 +83,14 @@ class Sources:
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
             entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt, worker=worker))
-        return entries
+        # Workers are execution holders, not distinct owner choices. Keep
+        # different accounts/options separate, and prefer a usable local holder.
+        unique = {}
+        for entry in sorted(entries, key=lambda c: (not c.available, c.worker != here, c.worker)):
+            key = (entry.source, entry.account, entry.model, entry.kind,
+                   json.dumps(entry.options, sort_keys=True, separators=(",", ":")))
+            unique.setdefault(key, entry)
+        return list(unique.values())
 
     async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
         from app.core import native_generation_settings as native
@@ -106,21 +129,30 @@ class Sources:
             capability = native.capabilities(provider_kind).get(kind) or {}
             combination = capability.get("verified_combination")
             if combination and capability.get("available"):
-                # The owner's stored settings decide; a disabled group is skipped.
+                # Disabled groups remain visible for the all-account catalog,
+                # but cannot be selected or submitted.
                 stored = await stored_native_group(account, kind)
-                if stored is None:
-                    continue
-                combination = stored.model_dump()
+                combination = stored.model_dump() if stored else combination
                 if model and combination["model"] != model:
+                    continue
+                if (query and query.casefold()
+                        not in f"{name} {account} {combination['model']}".casefold()):
                     continue
                 # Plan images carry no per-item charge on the verified route.
                 price = dict(INCLUDED_PRICE) if kind == "image" and name in ("chatgpt", "supergrok") else dict(UNKNOWN_PRICE)
+                if kind == "image" and name in ("openai", "xai"):
+                    from app.core.native_image_verification import verified
+                    price = verified(name).price(prompt)
                 if name == "supergrok" and kind == "video":
                     from app.core.provider.native_video import estimate_price
                     price = estimate_price(native.NativeVideoSettings(**combination))
-                entries.append(Candidate(name, account, worker, combination["model"], kind, True,
-                                         options={k: v for k, v in combination.items() if k != "model"},
-                                         schema=capability, price=price))
+                entries.append(Candidate(
+                    name, account, worker, combination["model"], kind, True,
+                    options={k: v for k, v in combination.items() if k != "model"},
+                    schema=capability, price=price, available=stored is not None,
+                    reason=None if stored else
+                    "Disabled in this account's Native generation settings.",
+                ))
             elif not model or source:
                 # Unsupported accounts are visible in discovery, but must not
                 # invent a match for a model explicitly named on another source.
@@ -145,7 +177,13 @@ class Sources:
             schema = await schema_service.get_schema(model, await self.fal_key())
             if schema is None or not rate.is_finite() or rate < 0:
                 return dict(UNKNOWN_PRICE)
-            quantity, count = schema.pricing_quantity(row["unit"], options, prompt)
+            # Discovery and execution must resolve exactly the same defaults.
+            # Partial validation permits models with required per-call media;
+            # missing quantities or prompt-dependent prices still stay unknown.
+            defaults = {f.name: f.default for f in schema.fields
+                        if not f.is_primary_text and f.default is not None}
+            values = schema.validate_options({**defaults, **options}, "", partial=True)
+            quantity, count = schema.pricing_quantity(row["unit"], values, prompt)
             amount = rate * quantity
             return {"currency": "USD", "unit": "item", "amount": str(amount), "total": str(amount * count), "status": "estimated"}
         except (httpx.HTTPError, ValueError, TypeError, KeyError, ArithmeticError, AttributeError):
@@ -174,7 +212,7 @@ class Sources:
         if "model" in options:
             raise ValueError("Pass the model separately, not in options.")
         values = {**options, "model": candidate.model}
-        kind = "grok" if candidate.source == "supergrok" else "chatgpt"
+        kind = "grok" if candidate.source == "supergrok" else candidate.source
         if await stored_native_group(candidate.account, candidate.kind) is None:
             raise ValueError("This kind is disabled in the account's Native generation settings.")
         try:
@@ -188,6 +226,11 @@ class Sources:
                 raise ValueError("No verified subscription route for this kind.")
         except ValueError:
             raise ValueError("Unsupported or not yet verified subscription combination.") from None
+        if candidate.source in ("openai", "xai"):
+            from app.core.native_image_verification import verified
+            return replace(
+                candidate, options=options, price=verified(candidate.source).price(prompt),
+            )
         return replace(candidate, options=options)
 
     async def reserve(self, candidate, context):
@@ -281,6 +324,11 @@ class Sources:
             return {**output, "video_url": f"/api/v1/artifacts/{artifact['hash']}/video.mp4?" + urlencode({"session_id": context.session_id})}
         if candidate.source == "supergrok":
             items, warning = await supergrok_images.generate(candidate.account, prompt, NativeImageSettings(**options))
+        elif candidate.source in ("openai", "xai"):
+            from app.core.provider import api_images
+            items, warning = await api_images.generate(
+                candidate.account, candidate.source, prompt, NativeImageSettings(**options),
+            )
         else:
             from fluid.messages import Message, Text
             from fluid.providers.base import ProviderRequest

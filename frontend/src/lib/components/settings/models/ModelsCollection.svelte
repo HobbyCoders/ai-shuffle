@@ -102,7 +102,7 @@
 	const catalogSummary = $derived.by(() => {
 		void tools.catalogVersion;
 		const n = catalogStore.catalogSize;
-		return n ? `${n.toLocaleString()} models` : 'Browse and pick';
+		return n ? `All accounts, ${n.toLocaleString()} fal.ai models` : 'All accounts and fal.ai models';
 	});
 
 	const effortText = $derived(text.effort ? `${text.effortLabel.toLowerCase()} effort` : 'default effort');
@@ -131,7 +131,7 @@
 		},
 		{
 			label: 'Catalog',
-			rows: [{ id: 'catalog', name: 'All fal.ai models', summary: catalogSummary, icon: CATALOG_ICON }]
+			rows: [{ id: 'catalog', name: 'Generation catalog', summary: catalogSummary, icon: CATALOG_ICON }]
 		}
 	]);
 

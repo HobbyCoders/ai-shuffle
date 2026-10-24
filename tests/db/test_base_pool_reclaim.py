@@ -8,6 +8,10 @@ bare ``except: pass`` hid it. ``_close_connection`` must now force the slot
 free so the pool cannot exhaust itself with phantom "in use" connections.
 """
 
+from __future__ import annotations
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 
@@ -16,6 +20,256 @@ import psycopg2.pool
 import pytest
 
 import app.db.base as base
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["native", "delegated"])
+@pytest.mark.parametrize("phase", ["node", "terminal", "cli-id"])
+async def test_turn_writes_outlast_ordinary_pool_deadline(
+    retaining_pool: tuple[base._RetainingThreadedConnectionPool, list[_PhysicalConn]],
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    phase: str,
+) -> None:
+    from app.core.provider.fluid_pg_store import (
+        PgFluidStore, _append_node_sync, _set_cli_session_id_sync,
+    )
+    from app.db.async_database import run_sync
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import ErrorEvent, TurnComplete
+    from fluid.messages import Message
+    from fluid.store.base import SessionNode
+
+    pool, physical = retaining_pool
+    pool._reserved = 2
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(base, "_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(base, "_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS", 2.0)
+
+    def commit(self: _PhysicalConn) -> None:
+        pass
+
+    monkeypatch.setattr(_PhysicalConn, "commit", commit, raising=False)
+    monkeypatch.setattr(_FakeCursor, "rowcount", 1, raising=False)
+    ready = threading.Barrier(pool.maxconn - pool._reserved + 1)
+    release = threading.Event()
+
+    def holder() -> None:
+        with base.get_db():
+            ready.wait(timeout=3)
+            assert release.wait(4)
+
+    async def finish(index: int) -> None:
+        sid = f"turn-{index}"
+        store = PgFluidStore()
+        if engine == "native":
+            loop = NativeLoop(provider=object(), store=store, model="test", session_id=sid)
+        else:
+            loop = DelegatedLoop(store=store, model="test", session_id=sid)
+        try:
+            # Drive the real node and terminal-event writers, not a retry mock.
+            node = SessionNode(
+                node_id=f"node-{index}", parent_id=None,
+                message=Message(role="assistant", content=[]),
+            )
+            if phase == "cli-id":
+                await run_sync(_set_cli_session_id_sync, sid, f"cli-{index}")
+            if phase == "node":
+                await run_sync(_append_node_sync, sid, node)
+            event = await loop._emit(TurnComplete(
+                session_id=sid, stop_reason="end_turn", num_model_calls=1,
+            ))
+            if phase != "node":
+                await run_sync(_append_node_sync, sid, node)
+            assert isinstance(event, TurnComplete)
+            assert not any(isinstance(e, ErrorEvent) for e in loop.bus.log(sid))
+        finally:
+            await loop.aclose()
+
+    with ThreadPoolExecutor(max_workers=pool.maxconn) as executor:
+        holders = [executor.submit(holder) for _ in range(pool.maxconn - pool._reserved)]
+        tasks: list[asyncio.Task[None]] = []
+        try:
+            ready.wait(timeout=3)
+            tasks = [asyncio.create_task(finish(index)) for index in range(45)]
+            # Ordinary callers still time out, while turn writes stay queued.
+            with pytest.raises(psycopg2.pool.PoolError, match="exhausted"):
+                await asyncio.to_thread(base._get_pg_connection)
+            await asyncio.sleep(0.1)
+            assert not any(task.done() for task in tasks)
+            assert len(physical) <= pool.maxconn - pool._reserved
+        finally:
+            release.set()
+            await asyncio.gather(*tasks)
+        for future in holders:
+            future.result(timeout=3)
+    statements = [sql for conn in physical for sql in conn.executed]
+    assert sum("INSERT INTO fluid_session_nodes" in sql for sql in statements) == 45
+    assert sum("INSERT INTO fluid_session_events" in sql for sql in statements) == 45
+    assert not any(sql.startswith("SET") for sql in statements)
+    assert not pool._used and not pool._waiters and not pool._lease_waiters
+    assert base._pool_acquire_wait.get() is None
+    assert not base._lease_checkout.get()
+
+
+def test_turn_admission_is_bounded_and_does_not_take_lease_slots(
+    retaining_pool: tuple[base._RetainingThreadedConnectionPool, list[_PhysicalConn]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool, _ = retaining_pool
+    pool._reserved = 2
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(base, "_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.05)
+
+    def commit(self: _PhysicalConn) -> None:
+        pass
+
+    monkeypatch.setattr(_PhysicalConn, "commit", commit, raising=False)
+    held = [pool.getconn() for _ in range(pool.maxconn - pool._reserved)]
+    started = time.monotonic()
+    try:
+        with pytest.raises(psycopg2.pool.PoolError, match="exhausted"):
+            with base.get_turn_db():
+                pytest.fail("turn admission consumed a lease slot")
+        assert time.monotonic() - started < 1
+        assert base._pool_acquire_wait.get() is None
+        assert not pool._waiters
+        # Lease callers, unlike turn writers, can still use the reservation.
+        with base.get_lease_db():
+            pass
+    finally:
+        for conn in held:
+            pool.putconn(conn)
+
+
+def test_exhaustion_logs_once_until_admission_recovers_with_stats(
+    retaining_pool: tuple[base._RetainingThreadedConnectionPool, list[_PhysicalConn]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pool, _ = retaining_pool
+    monkeypatch.setattr(base, "_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.1)
+    held = [pool.getconn() for _ in range(pool.maxconn)]
+    ready = threading.Barrier(9)
+
+    def timeout() -> None:
+        ready.wait(timeout=3)
+        with pytest.raises(psycopg2.pool.PoolError, match="exhausted"):
+            base._get_pg_connection()
+
+    try:
+        for wave in range(3):
+            if wave == 2:
+                # Draining timeout queues alone is not recovery. A successful
+                # ordinary admission rearms the warning for a later shortage.
+                pool.putconn(held.pop())
+                recovered = base._get_pg_connection()
+                base._close_connection(recovered)
+                held.append(pool.getconn())
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [executor.submit(timeout) for _ in range(8)]
+                ready.wait(timeout=3)
+                for future in futures:
+                    future.result(timeout=3)
+        messages = [r.message for r in caplog.records if "PostgreSQL pool exhausted:" in r.message]
+        assert len(messages) == 2
+        assert all("in_use=8 max=8 waiters=" in message for message in messages)
+    finally:
+        for conn in held:
+            pool.putconn(conn)
+
+
+def test_turn_transaction_failure_is_not_retried(
+    retaining_pool: tuple[base._RetainingThreadedConnectionPool, list[_PhysicalConn]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool, _ = retaining_pool
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    with pytest.raises(ValueError, match="write failed"):
+        with base.get_turn_db():
+            raise ValueError("write failed")
+    assert pool.pressure_stats()["acquisitions"] == 1
+    assert base._pool_acquire_wait.get() is None
+    assert not pool._used
+
+
+
+@pytest.mark.asyncio
+async def test_event_backpressure_keeps_pool_capacity_free(
+    retaining_pool: tuple[base._RetainingThreadedConnectionPool, list[_PhysicalConn]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.provider.fluid_pg_store import _append_events_sync
+    from app.db.async_database import run_event_write
+    from fluid.events.model import TurnComplete
+
+    pool, _ = retaining_pool
+    pool._reserved = 2
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(_FakeCursor, "rowcount", 1, raising=False)
+    release = threading.Event()
+    saturated = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def commit(self: _PhysicalConn) -> None:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                saturated.set()
+        try:
+            assert release.wait(3)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(_PhysicalConn, "commit", commit, raising=False)
+    tasks = [asyncio.create_task(run_event_write(_append_events_sync, f"session-{i}", [
+        TurnComplete(session_id=f"session-{i}", seq=1, stop_reason="end_turn", num_model_calls=1),
+    ])) for i in range(45)]
+    try:
+        assert await asyncio.to_thread(saturated.wait, 2)
+        assert len(pool._used) == 4
+        pressure = base.event_pressure_stats()
+        assert pressure["active"] == 4
+        assert pressure["oldest_write_seconds"] > 0
+        from app.core.start_admission import snapshot
+        assert snapshot()["oldest"] >= pressure["oldest_write_seconds"]
+        # Backpressured event producers hold no DB slot: an ordinary read can
+        # still borrow one without using either lease-only reserved connection.
+        # Even with 45 pending event writers, default-executor work dispatches.
+        probe = await asyncio.wait_for(asyncio.to_thread(base._get_pg_connection), timeout=1)
+        base._close_connection(probe)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert peak == 4
+    assert not pool._used
+    assert base.event_pressure_stats()["active"] == 0
+    assert base.event_pressure_stats()["waiting"] == 0
+
+
+def test_event_admission_timeout_never_borrows_a_connection(
+    retaining_pool: tuple[base._RetainingThreadedConnectionPool, list[_PhysicalConn]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool, _ = retaining_pool
+    slots = threading.BoundedSemaphore(1)
+    slots.acquire()
+    monkeypatch.setattr(base, "_event_write_slots", slots)
+    monkeypatch.setattr(base, "_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.01)
+    try:
+        with pytest.raises(psycopg2.pool.PoolError, match="event write admission"):
+            with base.get_event_db():
+                pytest.fail("no event slot available")
+        assert pool.pressure_stats()["acquisitions"] == 0
+    finally:
+        slots.release()
+
 
 @pytest.mark.parametrize("scope", ["get_db", "transaction"])
 def test_slow_hold_logs_location_not_local_values(monkeypatch, caplog, scope):

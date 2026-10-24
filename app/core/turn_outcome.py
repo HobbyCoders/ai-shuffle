@@ -13,6 +13,8 @@ The log is the record: :func:`final_turn_outcome` reads the session's LAST
 terminal turn event and :func:`extract_final_assistant_text` concatenates the
 text deltas of that same latest attempt (including a park). Neither raises — an unreadable log
 yields an empty outcome, which callers treat as "nothing derivable".
+Callers holding a submitted turn's receipt pass ``turn_id`` to both readers;
+that selects only its latest attempt even if a later turn has already finished.
 """
 
 from __future__ import annotations
@@ -47,8 +49,16 @@ def load_session_events(session_id: str) -> List[Dict[str, Any]]:
     return events
 
 
-def _latest_attempt(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """A logical turn can start again; never borrow text/outcomes across attempts."""
+def _latest_attempt(
+    events: List[Dict[str, Any]], turn_id: str | None = None,
+) -> List[Dict[str, Any]]:
+    """A logical turn can start again; never borrow text/outcomes across attempts.
+
+    An explicit turn id is a receipt, not a hint: unknown ids return no events,
+    and untagged historical markers cannot borrow another turn's outcome.
+    """
+    if turn_id is not None:
+        events = [ev for ev in events if ev.get("turn_id") == turn_id]
     for index in range(len(events) - 1, -1, -1):
         if events[index].get("event_type") == "turn.started":
             turn_id = events[index].get("turn_id")
@@ -61,7 +71,7 @@ def _last_terminal(events: List[Dict[str, Any]]) -> Dict[str, Any] | None:
                  ("turn.completed", "turn.aborted", "turn.parked")), None)
 
 
-def final_turn_outcome(session_id: str) -> Dict[str, Any]:
+def final_turn_outcome(session_id: str, turn_id: str | None = None) -> Dict[str, Any]:
     """Derive a settled turn's outcome from the session's LAST terminal turn
     event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``).
 
@@ -87,7 +97,7 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     ignoring it; callers that just waited a submitted turn out must fail
     closed on it (``AutomationManager._run_prompt_as_session`` does).
     """
-    events = _latest_attempt(load_session_events(session_id))
+    events = _latest_attempt(load_session_events(session_id), turn_id)
     terminal = _last_terminal(events)
     result: Dict[str, Any] = {
         "usage": {},
@@ -136,7 +146,7 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     return result
 
 
-def extract_final_assistant_text(session_id: str) -> str:
+def extract_final_assistant_text(session_id: str, turn_id: str | None = None) -> str:
     """Final assistant text of the turn — feeds output delivery and the
     runs-list preview. Derived from the V2 session event log: the turn
     recorder streams assistant text as ``assistant.text_delta`` events and
@@ -145,7 +155,7 @@ def extract_final_assistant_text(session_id: str) -> str:
     Parks/aborts must not return an older completed answer; a resumed attempt
     must not re-deliver text from earlier attempts of the same logical turn.
     Never raises (returns "")."""
-    events = _latest_attempt(load_session_events(session_id))
+    events = _latest_attempt(load_session_events(session_id), turn_id)
     terminal = _last_terminal(events)
     target_turn_id = terminal.get("turn_id") if terminal else None
     if target_turn_id is None:

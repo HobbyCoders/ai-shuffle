@@ -250,11 +250,11 @@
 	.hint {
 		flex-shrink: 0; display: flex; align-items: center; gap: 8px; min-height: 28px;
 		padding: 4px 12px; border-top: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-		background: color-mix(in oklch, var(--primary) 9%, var(--code-bg));
+		background: color-mix(in oklab, var(--primary) 9%, var(--code-bg));
 		color: var(--foreground); font: 500 11.5px/1.3 var(--font-sans);
 		animation: rise 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 	}
-	.hint.risky { border-top-color: color-mix(in oklch, var(--warning) 45%, transparent); background: color-mix(in oklch, var(--warning) 12%, var(--code-bg)); color: var(--warning); }
+	.hint.risky { border-top-color: color-mix(in oklch, var(--warning) 45%, transparent); background: color-mix(in oklab, var(--warning) 12%, var(--code-bg)); color: var(--warning); }
 	kbd { display: inline-grid; place-items: center; min-width: 20px; height: 18px; padding: 0 4px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; font: 600 11px/1 var(--font-mono); color: inherit; }
 
 	.ended {

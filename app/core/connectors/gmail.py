@@ -128,6 +128,14 @@ class GmailConnector(BaseConnector):
         """Build the Gmail API service client."""
         return build("gmail", "v1", credentials=creds)
 
+    async def poll_watch(
+        self, source: dict[str, Any], cursor: dict[str, Any]
+    ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+        """Keep SDK credentials and blocking HTTP reads in the package process."""
+        from app.core.connectors.gmail_history import poll
+
+        return await asyncio.to_thread(poll, self, cursor)
+
     def build_thread_client(self) -> Optional[Any]:
         """Return a new Gmail service for use off the event loop, or None.
 

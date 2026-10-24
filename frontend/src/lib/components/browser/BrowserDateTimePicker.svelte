@@ -870,7 +870,7 @@
 		border: 1px solid transparent;
 	}
 	.bdp-btn.primary:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 88%, var(--foreground));
+		background: color-mix(in oklab, var(--primary) 88%, var(--foreground));
 	}
 	.bdp-btn:disabled {
 		opacity: 0.45;

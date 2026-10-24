@@ -82,10 +82,9 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
 def get_all_profiles() -> List[ProfileRow]:
     """Get all profiles.
 
-    The built-in assistant agent is left out: it runs only background
-    research, so it never appears in agent pickers,
-    the Agents page, Task rosters or "first agent" fallbacks. Look it up by
-    id with ``get_profile``.
+    Exclude only the mixed-version retired-ID tombstone from live rosters.
+    ``get_profile`` can still read it by ID for historical accounting. No
+    background research or dedicated agent is created or run here.
     """
     from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
 
@@ -100,14 +99,11 @@ def get_all_profiles() -> List[ProfileRow]:
 
 
 def _refuse_assistant_agent(profile_id: str) -> None:
-    """The assistant's built-in agent is app-defined: no owner edits or deletes.
-
-    ``assistant_service.ensure_agent`` writes it directly, outside these helpers.
-    """
+    """Do not revive an ID older peers may still send (compatibility tombstone)."""
     from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
 
     if profile_id == ASSISTANT_AGENT_ID:
-        raise PermissionError("The assistant's built-in agent cannot be changed or deleted")
+        raise PermissionError("This agent ID is retired")
 
 
 def create_profile(
@@ -210,7 +206,7 @@ def delete_profile(profile_id: str) -> bool:
     Sessions are preserved when a profile is deleted - their profile_id is set to NULL.
     This allows users to keep their chat history even after deleting a profile.
     """
-    _refuse_assistant_agent(profile_id)
+    # Retired rows can be deleted just like any other historical agent.
     existing = get_profile(profile_id)
     if not existing:
         return False

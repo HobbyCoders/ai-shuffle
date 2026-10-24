@@ -76,6 +76,14 @@ def test_store_crud_and_missing_delete(events, resource, create, update, delete)
     events.assert_not_called()
 
 
+def test_missing_connector_delete_does_not_initialize_journal() -> None:
+    from app.db import watch_journal
+
+    with patch.object(watch_journal, "purge") as purge:
+        assert not database.delete_connector("missing-retention-connector")
+        purge.assert_not_called()
+
+
 def test_system_settings_initialization_noop_and_delete(events):
     from app.db import settings
     settings.set_system_setting("sync-test", "secret value")

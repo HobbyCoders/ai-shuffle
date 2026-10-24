@@ -14,7 +14,7 @@ import time
 import logging
 import traceback
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -24,6 +24,7 @@ import psycopg2.extras
 import psycopg2.extensions
 
 from app.core.config import settings
+from app.db.commit_deadline import bounded_commit
 
 logger = logging.getLogger("app.db")
 
@@ -92,7 +93,9 @@ def parse_database_url(db_url: str) -> Dict[str, Any]:
 class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
     """Open the startup minimum, then retain healthy connections up to maxconn."""
 
-    def __init__(self, minconn, maxconn, *args, reserved=0, **kwargs):
+    def __init__(
+        self, minconn: int, maxconn: int, *args: Any, reserved: int = 0, **kwargs: Any
+    ) -> None:
         self._reserved = min(reserved, maxconn - 1)
         self._lease_waiters = deque()
         # Separate lock: snapshots and sleeping acquirers never block on libpq.
@@ -100,6 +103,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._waiters = deque()
         self._generation = 0
         self._closing = False
+        self._exhaustion_logged = False
         self._pressure_lock = threading.Lock()
         self._pressure = dict.fromkeys((
             "connections_opened", "connections_discarded", "connections_stale",
@@ -133,14 +137,17 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             self._available.notify_all()
 
     @contextmanager
-    def _acquire(self):
+    def _acquire(self) -> Iterator[psycopg2.extensions.connection]:
         """FIFO admission; direct driver calls retain their keyed semantics.
 
         Never enter the driver under _available: returns notify under the
         driver's lock. The generation closes the failed-getconn/wait race.
         """
         start = time.monotonic()
-        deadline = start + _POOL_ACQUIRE_MAX_WAIT_SECONDS
+        wait_seconds = _pool_acquire_wait.get()
+        if wait_seconds is None:
+            wait_seconds = _POOL_ACQUIRE_MAX_WAIT_SECONDS
+        deadline = start + wait_seconds
         ticket = object()
         lease = _lease_checkout.get()
         waiters = self._lease_waiters if lease else self._waiters
@@ -165,6 +172,9 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     generation = self._generation
                 try:
                     conn = self.getconn()
+                    if not lease:
+                        with self._available:
+                            self._exhaustion_logged = False
                     break
                 except psycopg2.pool.PoolError:
                     with self._available:
@@ -178,14 +188,29 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             # Include setup in timing; advance the queue even if setup fails.
             yield conn
         finally:
+            exhaustion = None
             with self._available:
+                if timed_out and not self._exhaustion_logged:
+                    self._exhaustion_logged = True
+                    with self._pressure_lock:
+                        in_use = len(self._held_since)
+                    exhaustion = (
+                        in_use, self.maxconn, len(self._waiters) + len(self._lease_waiters),
+                    )
                 waiters.remove(ticket)
                 self._available.notify_all()
             self._acquisition_finished(time.monotonic() - start, waited, timed_out)
+            if exhaustion is not None:
+                logger.warning(
+                    "PostgreSQL pool exhausted: in_use=%d max=%d waiters=%d "
+                    "(acquisition deadline %.1fs; once until ordinary admission recovers)",
+                    *exhaustion, wait_seconds, stack_info=True,
+                )
 
     def pressure_stats(self):
         with self._pressure_lock:
             stats = dict(self._pressure)
+            stats["ordinary_capacity"] = self.maxconn - self._reserved
             stats["oldest_hold_seconds"] = (
                 time.monotonic() - min(self._held_since.values())
                 if self._held_since else 0.0
@@ -398,11 +423,13 @@ class _PgDictConnection:
             cursor_factory = psycopg2.extras.RealDictCursor
         return self._conn.cursor(*args, cursor_factory=cursor_factory, **kwargs)
 
-    def commit(self):
-        return self._conn.commit()
+    def commit(self) -> None:
+        with bounded_commit(self._conn):
+            self._conn.commit()
 
-    def rollback(self):
-        return self._conn.rollback()
+    def rollback(self) -> None:
+        with bounded_commit(self._conn):
+            self._conn.rollback()
 
     def close(self):
         return self._conn.close()
@@ -423,6 +450,10 @@ class _PgDictConnection:
 
 # Application callers wait in FIFO order, bounded by the existing deadline.
 _POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
+# Durable turn writes must outlast short commit bursts, without unbounded waits.
+# They share the ordinary FIFO and cannot consume the lease-only reservation.
+_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS = 20.0
+_pool_acquire_wait: ContextVar[Optional[float]] = ContextVar("db_acquire_wait", default=None)
 
 # A connection that has sat in the pool longer than this is probed with
 # SELECT 1 before it is handed out. Below the threshold we rely on the two
@@ -666,6 +697,66 @@ def _rollback_quietly(conn) -> None:
 _commit_callbacks = ContextVar("db_commit_callbacks", default=())
 _lease_checkout = ContextVar("db_lease_checkout", default=False)
 _lease_timeouts = ContextVar("db_lease_timeouts", default=(500, 1500))
+
+
+@contextmanager
+def get_turn_db() -> Iterator[_PgDictConnection]:
+    """Wait longer for turn-store admission, never retry an executed transaction.
+
+    Only acquisition changes: SQL/commit errors still propagate. In particular,
+    this does not use get_lease_db's reserved slots or issue its SET LOCAL SQL.
+    """
+    token = _pool_acquire_wait.set(_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS)
+    try:
+        with get_db() as conn:
+            yield conn
+    finally:
+        _pool_acquire_wait.reset(token)
+
+
+# Bound concurrent self-owned event transactions before they borrow a DB slot.
+# Four fsync writers leave the ordinary pool and lease reservation available.
+_event_write_slots = threading.BoundedSemaphore(4)
+_event_pressure_lock = threading.Lock()
+_event_waiting: Dict[object, float] = {}
+_event_active: Dict[object, float] = {}
+
+
+def event_pressure_stats() -> Dict[str, float]:
+    """Non-DB snapshot, including writers waiting BEFORE pool checkout."""
+    now = time.monotonic()
+    with _event_pressure_lock:
+        return {
+            "waiting": len(_event_waiting),
+            "active": len(_event_active),
+            "oldest_wait_seconds": now - min(_event_waiting.values(), default=now),
+            "oldest_write_seconds": now - min(_event_active.values(), default=now),
+        }
+
+
+@contextmanager
+def get_event_db() -> Iterator[_PgDictConnection]:
+    """Backpressure event commits without holding a scarce pooled connection."""
+    ticket = object()
+    with _event_pressure_lock:
+        _event_waiting[ticket] = time.monotonic()
+    acquired = False
+    try:
+        acquired = _event_write_slots.acquire(timeout=_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS)
+        with _event_pressure_lock:
+            _event_waiting.pop(ticket, None)
+            if acquired:
+                _event_active[ticket] = time.monotonic()
+        if not acquired:
+            raise psycopg2.pool.PoolError("event write admission deadline exceeded")
+        with get_turn_db() as conn:
+            yield conn
+    finally:
+        with _event_pressure_lock:
+            _event_waiting.pop(ticket, None)
+            _event_active.pop(ticket, None)
+        if acquired:
+            _event_write_slots.release()
 
 
 @contextmanager

@@ -675,7 +675,7 @@
 	.pill-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.pill-btn:disabled { opacity: 0.45; cursor: default; }
 	.pill-btn.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground, #fff); }
-	.pill-btn.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+	.pill-btn.primary:hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
 	.pill-btn.big { height: 36px; padding: 0 18px; font-size: 0.8125rem; }
 
 	.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -726,7 +726,7 @@
 		padding: 18px 16px 16px;
 		text-align: center;
 		border-radius: var(--radius);
-		border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border));
+		border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
 		background: color-mix(in oklch, var(--popover, var(--background)) 94%, transparent);
 		backdrop-filter: blur(8px);
 		color: var(--foreground);
@@ -737,7 +737,7 @@
 	.fail-title { margin: 2px 0 0; font-size: 0.8125rem; font-weight: 600; }
 	.fail-copy { margin: 0 0 6px; font-size: 0.75rem; line-height: 1.45; color: var(--muted-foreground); }
 	.banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-	.banner.bad { border-color: color-mix(in oklch, var(--destructive) 45%, var(--border)); }
+	.banner.bad { border-color: color-mix(in oklab, var(--destructive) 45%, var(--border)); }
 	.banner.bad :global(svg:first-child) { color: var(--destructive); }
 	.banner.ok :global(svg:first-child) { color: var(--success); }
 	.banner code { font-family: var(--font-mono, monospace); font-size: 0.6875rem; }
@@ -822,7 +822,7 @@
 		cursor: pointer;
 		transition: border-color 150ms ease, background 150ms ease;
 	}
-	.consent:has(input:checked) { border-color: color-mix(in oklch, var(--primary) 50%, var(--border)); background: color-mix(in oklch, var(--primary) 5%, transparent); }
+	.consent:has(input:checked) { border-color: color-mix(in oklab, var(--primary) 50%, var(--border)); background: color-mix(in oklch, var(--primary) 5%, transparent); }
 	.consent input { margin-top: 2px; width: 16px; height: 16px; accent-color: var(--primary); flex-shrink: 0; cursor: pointer; }
 	.consent a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
 	.consent a :global(svg) { display: inline; margin-left: 3px; vertical-align: -1px; }
@@ -830,7 +830,7 @@
 	.progress-fill {
 		height: 100%;
 		border-radius: inherit;
-		background: linear-gradient(90deg, var(--primary), color-mix(in oklch, var(--primary) 70%, var(--background)), var(--primary));
+		background: linear-gradient(90deg, var(--primary), color-mix(in oklab, var(--primary) 70%, var(--background)), var(--primary));
 		background-size: 200% 100%;
 		animation: shimmer 1.6s linear infinite;
 		transition: width 400ms ease;
@@ -976,7 +976,7 @@
 	@keyframes spin { to { transform: rotate(360deg); } }
 	@keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 	@keyframes shimmer { to { background-position: -200% 0; } }
-	@keyframes breathe { 0%, 100% { border-color: color-mix(in oklch, var(--warning) 25%, var(--border)); } 50% { border-color: color-mix(in oklch, var(--warning) 70%, var(--border)); } }
+	@keyframes breathe { 0%, 100% { border-color: color-mix(in oklab, var(--warning) 25%, var(--border)); } 50% { border-color: color-mix(in oklab, var(--warning) 70%, var(--border)); } }
 	@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 	@keyframes drop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
