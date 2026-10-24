@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "revision": "6b56f3bad8d542c7714b4f80638de78e8da57266",
+  "revision": "d847f4f6fda906a0160c04157e8a44df65557ac5",
   "packages": {
     "telegram": {
       "module": "telegram",
       "class": "TelegramConnector",
       "files": {
-        "telegram.py": "85eb5d97a7cb2029280f63e146d80eaa539364bfe433aec56b6a2a34a4ce77ee",
+        "telegram.py": "e3025617bab8e8a8d3845f04ae029cf9e1d86e160912c618999fed9ee7a7b9b6",
         "telegram_actions.py": "6a14a672d0ae8a797b4d8874a7fe4fd0dbfbd2928088624a4dccf1758927ae72"
       }
     },
@@ -144,5 +144,5 @@
     ]
   },
   "sdk": 1,
-  "release": "777f1db27c87ba88"
+  "release": "5b029addd1d74d6e"
 }

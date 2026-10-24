@@ -285,7 +285,7 @@ async def test_telegram_approval_and_other_chat_dispatch_while_turn_is_running(
 
     instance._dp = SimpleNamespace(start_polling=start_polling, stop_polling=AsyncMock())
     try:
-        await instance._run_polling()
+        await asyncio.wait_for(instance._run_polling(), timeout=5)
         assert outcomes == [decision == "approve"] and other_chat.is_set()
         finish_turn.set()
         await asyncio.gather(*instance._chat_tasks)
@@ -312,9 +312,9 @@ async def test_telegram_chat_dispatch_is_bounded_and_cancelled_on_stop(
 
     instance._on_incoming_message = turn
     instance.send_message = AsyncMock(return_value=True)
-    await incoming(instance, sdk, {}, "first")
+    await asyncio.wait_for(incoming(instance, sdk, {}, "first"), timeout=2)
     await asyncio.wait_for(started.wait(), timeout=2)
-    await incoming(instance, sdk, {}, "capacity reached")
+    await asyncio.wait_for(incoming(instance, sdk, {}, "capacity reached"), timeout=2)
     assert len(instance._chat_tasks) == 1
     instance.send_message.assert_awaited_once()
     assert "Too many chats" in instance.send_message.call_args.args[0].text
