@@ -1119,6 +1119,14 @@ def build_options_from_profile(
         else:
             final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
 
+    if owner_coordinator and session_id:
+        from app.core.working_record import summary as working_summary
+        record_context = working_summary(session_id, owner_row=_binding_row)
+        if isinstance(final_system_prompt, dict):
+            final_system_prompt["append"] = final_system_prompt.get("append", "") + "\n\n" + record_context
+        else:
+            final_system_prompt += "\n\n" + record_context
+
     # ── The session's own run binding ───────────────────────────────────────
     #
     # The user picks the model, effort level and permission mode when the

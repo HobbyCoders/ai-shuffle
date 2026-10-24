@@ -315,6 +315,15 @@ _register(Collection(
     notes="Fact snapshots (memory-v2:), code-mode skills (skill:<name>, <data_dir>/fluid/skills/*.py) and "
           "prose skill folders (prose-skill:<name>, ~/.fluid/skills/<name>/SKILL.md). The journal stays local."))
 
+_register(Collection(
+    name="working_record", table="owner_working_items", keys=("id",),
+    fields=("id", "owner_key", "kind", "content", "status", "source_session_id",
+            "source_turn_id", "created_at", "updated_at"),
+    resource="sessions", priority=87,
+    shared_row=lambda row: row.get("owner_key") == OWNER_PLACEHOLDER,
+    notes="Owner working record. Independent items merge; resolved items remain as durable acknowledgements."))
+
+
 def _serialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:
     # PostgreSQL returns bool; the SQLite test/import adapter returns 0/1.
     # Keep signed membership canonical without coercing malformed values.

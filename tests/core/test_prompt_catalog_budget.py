@@ -33,7 +33,9 @@ def _emulator_tools_listed(monkeypatch):
 # of the no-Swarm sizing line, and the app-tools note maps Swarm onto its
 # bridged name: +441 chars (14,094 -> 14,535 on a local run of the fixture).
 # Swarm's schema stays deferred: the always-loaded bridge tools are unchanged.
-MEASURED_FULL = 128_050
+# WorkingRecord adds one deferred schema (792 chars). Current full measurement
+# is 130,017; eager/loaded budgets stay unchanged (no new eager tool).
+MEASURED_FULL = 130_017
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
@@ -174,7 +176,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    assert len(specs) == 105
+    assert len(specs) == 106
     assert first["totals"]["compiled_eager"] < first["totals"]["combined_full"]
     assert "# Deferred tools" in compiled.text
     # Discovery remains available; full schemas remain measurable on demand.

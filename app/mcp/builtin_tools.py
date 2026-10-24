@@ -2992,6 +2992,9 @@ def create_builtin_tools_server(
 
     all_tools.append(hand_off_session_tool)
 
+    from app.mcp.working_record_tools import build_tools as build_working_record_tools
+    all_tools.extend(build_working_record_tools(tool, is_admin=is_admin, session_id=session_id))
+
     # Plugins: find one, check one, install one switched off for the owner
     # to review and enable in Settings (app/mcp/plugin_tools.py).
     try:
@@ -3078,6 +3081,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ArchiveSession",
         "mcp__builtins__HandOffSession",
         "mcp__builtins__WorktreeReport",
+        "mcp__builtins__WorkingRecord",
         "mcp__builtins__ListAgents",
         "mcp__builtins__SendMessage",
         "mcp__builtins__NotifyDevices",
