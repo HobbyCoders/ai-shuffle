@@ -316,9 +316,9 @@
 	/* Approval banner */
 	.as-approval {
 		display: flex; align-items: center; gap: 14px; padding: 14px 16px;
-		border: 1px solid color-mix(in oklch, var(--warning) 40%, var(--border));
+		border: 1px solid color-mix(in oklab, var(--warning) 40%, var(--border));
 		border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklch, var(--warning) 12%, var(--card));
+		background: color-mix(in oklab, var(--warning) 12%, var(--card));
 	}
 	.as-approval-ic { width: 38px; height: 38px; border-radius: 50%; background: var(--warning); display: grid; place-items: center; color: #fff; flex-shrink: 0; }
 	.as-approval-body { min-width: 0; flex: 1; }
@@ -353,7 +353,7 @@
 	.as-btn--sm { height: 30px; padding: 0 11px; font-size: 0.78rem; }
 	.as-btn--primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
 	.as-btn--primary:hover { filter: brightness(1.08); background: var(--primary); }
-	.as-btn--danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 35%, var(--border)); }
+	.as-btn--danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 35%, var(--border)); }
 	.as-btn--danger:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 
 	/* List + rows */
@@ -408,8 +408,8 @@
 	.as-toggle.on .as-toggle-thumb { transform: translateX(16px); background: var(--primary-foreground); }
 
 	/* Inline confirm row */
-	.as-row--confirm { justify-content: space-between; cursor: default; background: color-mix(in oklch, var(--destructive) 6%, var(--card)); }
-	.as-row--confirm:hover { background: color-mix(in oklch, var(--destructive) 6%, var(--card)); }
+	.as-row--confirm { justify-content: space-between; cursor: default; background: color-mix(in oklab, var(--destructive) 6%, var(--card)); }
+	.as-row--confirm:hover { background: color-mix(in oklab, var(--destructive) 6%, var(--card)); }
 	.as-confirm-text { margin: 0; font-size: 0.8rem; color: var(--foreground); }
 	.as-confirm-actions { display: flex; gap: 8px; flex-shrink: 0; }
 

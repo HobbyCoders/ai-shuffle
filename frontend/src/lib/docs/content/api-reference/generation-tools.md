@@ -88,7 +88,11 @@ submitted, including unattended calls.
 - **Old or unreachable peers** are listed as unavailable but never make a
   named request ambiguous when a usable candidate matches.
 - **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
-  registered for sessions running on a verified ChatGPT or SuperGrok account.
+  registered for sessions running on a verified ChatGPT or SuperGrok account,
+  as guarded aliases of `generateImage` and `generateVideo`. They never submit
+  with the session's account implicitly: they use the same remembered or job
+  choice, price, confirmation and daily-cap admission, return the same results
+  (including `choose`, shown as the same choice card) and never use fal.ai.
 - **Stored Native generation settings** decide eligibility per account. A
   `null` group is shown as unavailable and never run. Unreadable stored JSON keeps the
   verified image default and disables video; an account with no stored row keeps

@@ -467,7 +467,7 @@
 		height: 26px;
 		padding: 0 10px 0 8px;
 		border-radius: 999px;
-		border: 1px solid color-mix(in oklch, var(--primary) 32%, var(--border));
+		border: 1px solid color-mix(in oklab, var(--primary) 32%, var(--border));
 		background: color-mix(in oklch, var(--primary) 7%, transparent);
 		color: var(--primary);
 		font-size: 11.5px;
@@ -481,7 +481,7 @@
 
 	.wl-phone:hover {
 		background: color-mix(in oklch, var(--primary) 14%, transparent);
-		border-color: color-mix(in oklch, var(--primary) 55%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
 	}
 
 	.wl-phone:active {

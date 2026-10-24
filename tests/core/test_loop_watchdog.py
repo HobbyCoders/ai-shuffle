@@ -494,43 +494,47 @@ def test_freeze_dump_timer_stays_off_without_a_freeze_log(monkeypatch):
 
 _FREEZE_DUMP_CHILD = r"""
 import sys
-import threading
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[2])
 from app.core import file_logging
 
-path = Path(sys.argv[1])
-dumped = threading.Event()
-stop = threading.Event()
 
-
-def _observe_freeze_dump() -> None:
-    while not stop.wait(0.01):
-        if "Timeout (0:00:00.200000)!" in path.read_text(encoding="utf-8"):
-            dumped.set()
-            stop.wait()  # Keep this thread alive until the native dumper is cancelled.
-            return
+def _block_for_dump() -> None:
+    assert sys.stdin.readline().strip() == "dumped"
 
 
 def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil() -> None:
-    with path.open("a", encoding="utf-8") as stream:
+    with Path(sys.argv[1]).open("a", encoding="utf-8") as stream:
         file_logging._freeze_file = stream
-        observer = threading.Thread(target=_observe_freeze_dump, name="dump-observer")
-        observer.start()
         try:
             assert file_logging.arm_freeze_dump(0.2) is True
-            # Native wait releases the GIL; only an actual C watchdog dump releases us.
-            assert dumped.wait(5), "C watchdog did not write freeze.log"
+            # Native read releases the GIL. Only the parent observing a complete
+            # C dump releases us; no Python observer runs alongside the dumper.
+            _block_for_dump()
         finally:
             file_logging.cancel_freeze_dump()
-            stop.set()
-            observer.join(timeout=1)
-        assert not observer.is_alive()
 
 
 test_faulthandler_dumps_a_frozen_interpreter_without_the_gil()
 """
+
+
+def _freeze_dump_finished(text: str) -> bool:
+    # The single-thread child ends its stack at the module frame. The timeout
+    # header is written BEFORE the stack; it is not a completion signal (#572).
+    return "Timeout (0:00:00.200000)!" in text and text.rstrip().endswith("in <module>")
+
+
+def test_freeze_dump_completion_requires_the_last_frame() -> None:
+    header = "Timeout (0:00:00.200000)!\nThread 0x1234 (most recent call first):\n"
+    assert not _freeze_dump_finished(header)
+    partial = header + (
+        '  File "<string>", line 20 in '
+        'test_faulthandler_dumps_a_frozen_interpreter_without_the_gil\n'
+    )
+    assert not _freeze_dump_finished(partial)
+    assert _freeze_dump_finished(partial + '  File "<string>", line 21, in <module>\n')
 
 
 def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil(
@@ -545,19 +549,35 @@ def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil(
     # Regression guard: a return to the in-worker arm/cancel sequence must fail.
     monkeypatch.setattr(file_logging, "arm_freeze_dump", unexpected_worker_timer)
     freeze = tmp_path / "freeze.log"
-    result = subprocess.run(
+    with subprocess.Popen(
         [sys.executable, "-c", _FREEZE_DUMP_CHILD, str(freeze),
          str(Path(__file__).resolve().parents[2])],
-        capture_output=True, text=True, timeout=15, check=False,
-    )
-    text = freeze.read_text(encoding="utf-8") if freeze.exists() else "<no freeze.log>"
-    assert result.returncode == 0, (
-        f"freeze-dump child exited {result.returncode}\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}\nfreeze.log:\n{text}"
-    )
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ) as child:
+        try:
+            deadline = time.monotonic() + 10
+            text = ""
+            while child.poll() is None and time.monotonic() < deadline:
+                text = freeze.read_text(encoding="utf-8") if freeze.exists() else ""
+                if _freeze_dump_finished(text):
+                    break
+                time.sleep(0.01)
+            assert _freeze_dump_finished(text), (
+                f"C watchdog did not finish freeze.log (child status {child.poll()}):\n{text}"
+            )
+            stdout, stderr = child.communicate("dumped\n", timeout=5)
+            assert child.returncode == 0, (
+                f"freeze-dump child exited {child.returncode}\n"
+                f"stdout: {stdout}\nstderr: {stderr}\nfreeze.log:\n{text}"
+            )
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate(timeout=5)
+
     assert "Timeout (0:00:00.200000)!" in text
     assert "test_faulthandler_dumps_a_frozen_interpreter_without_the_gil" in text
-    assert "threading.py" in text  # The main thread is blocked in Event.wait.
+    assert "_block_for_dump" in text  # The main thread is blocked in the native pipe read.
 
 
 @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGUSR1"), reason="SIGUSR1 is POSIX only")
@@ -625,10 +645,13 @@ def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_freeze_log(tm
     assert "threading.py" in text, "the bystander thread's stack is dumped too"
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gate_io", [False, True], ids=["normal-io", "delayed-io"])
+@pytest.mark.parametrize(
+    ("gate_io", "startup_delay"), [(False, 0), (True, 0), (True, 5.1)],
+    ids=["normal-io", "delayed-io", "slow-start-io"],
+)
 async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    heartbeat_fsync: list[int], gate_io: bool,
+    heartbeat_fsync: list[int], gate_io: bool, startup_delay: float,
 ) -> None:
     from app.core import loop_watchdog
 
@@ -646,6 +669,8 @@ async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(
     wakeups = 0
 
     def record_replace(source: Path, target: Path) -> None:
+        if not writers:
+            time.sleep(startup_delay)
         if hold_write.is_set():
             hold_write.clear()
             write_entered.set()
@@ -668,7 +693,10 @@ async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(
 
     def wait_for(predicate: Callable[[], bool]) -> None:
         with progressed:
-            assert progressed.wait_for(predicate, timeout=5), (
+            # This covers real fsync/replace, not the watchdog's tick latency.
+            # Shared disks can exceed 5s; completion and tick assertions below
+            # remain the correctness gates, with a bounded 30s deadlock guard.
+            assert progressed.wait_for(predicate, timeout=30), (
                 f"watchdog did not progress\n{_watchdog_stack(wd._thread)}"
             )
 
@@ -916,7 +944,7 @@ def test_recovery_thread_context_is_bounded(monkeypatch):
 
 
 _HEARTBEAT_CHILD = r"""
-import asyncio, sys, threading
+import asyncio, sys, threading, traceback
 from collections.abc import Callable
 from pathlib import Path
 from app.core import file_logging, loop_watchdog
@@ -948,7 +976,13 @@ async def main() -> None:
 
     def wait_for(predicate: Callable[[], bool]) -> None:
         with progressed:
-            assert progressed.wait_for(predicate, timeout=5), "heartbeat did not progress"
+            # Persisting a tick includes real fsync/replace on a shared disk.
+            # Match the in-process test's I/O guard, not a 5s latency assertion.
+            if not progressed.wait_for(predicate, timeout=30):
+                frame = sys._current_frames().get(wd._thread.ident)
+                raise AssertionError("heartbeat did not progress\n" + "".join(
+                    traceback.format_stack(frame) if frame is not None else ["<thread exited>"]
+                ))
 
     wd._write_heartbeat = completed_write
     wd.start()
@@ -970,7 +1004,9 @@ asyncio.run(main())
 """
 
 
-@pytest.mark.parametrize("write_delay", [0, 0.3], ids=["normal-io", "delayed-io"])
+@pytest.mark.parametrize(
+    "write_delay", [0, 0.3, 5.1], ids=["normal-io", "delayed-io", "slow-start-io"],
+)
 def test_killed_stalled_process_leaves_a_boot_readable_heartbeat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture, write_delay: float,

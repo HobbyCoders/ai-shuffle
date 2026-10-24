@@ -21,6 +21,15 @@
           "past_bug": "#589: overlapping handlers read the session's latest reply and raced first-message AI-session minting."
         },
         {
+          "id": "durable-watches.cross-worker-delivery",
+          "check": "Creating-chat delivery and shared durable watch notifications",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable DesktopWorker and ServerWorker candidates only. From an active owner chat on DesktopWorker confirm a schedule watch on ServerWorker. Observe its real event reach that chat under a read-only ceiling. Drop the delivery acknowledgement after admission, restart only the candidates and retry the same event command. Pause the watch and revoke a connector grant during delivery; lower the owner budget on each worker in turn. Settle the creator, disconnect it, let an event accrue, reconnect it and verify a durable linked notification without reactivation. Lose a notification acknowledgement, move the finished watch with its pending notification outbox, replay the old event and compare command and notification IDs on both devices. Also run durable-watches.two-worker-placement. Stop watches and archive throwaway chats; retain private receipts, not screenshots.",
+          "pass_when": "One event command produces at most one creator turn and one bell row per worker across retries, restart and transfer. No executable watch leases are mirrored. Both workers recheck current revocations, deadlines and budgets; peer loss fails closed. Settled/offline creators stay settled while reports arrive durably after reconnect. Tests alone do not claim this real-provider smoke passed.",
+          "past_bug": "#566: remote watch results remained on the executing worker."
+        },
+        {
           "id": "durable-watches.gmail-package-history",
           "check": "Installed Gmail package history replay and explicit expiry gap",
           "kind": "owner",
@@ -686,6 +695,14 @@
           "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
         },
         {
+          "id": "harness-basics.branch-preview-remote-access",
+          "check": "Disposable branch preview admits a remote browser only with its access link",
+          "kind": "owner",
+          "how": "In a fresh branch checkout build the frontend and run python -m app.preview stamp. Under Monitor run python -m app.preview run --port 18080 --host 0.0.0.0 --browser-host <worker-IP> --ttl-seconds 300, using the IP reachable by the agent browser. Check the named port without a cookie and with a forged token; then open the printed preview-access link in the agent browser and load the stamped app. Confirm owner/protected sockets remain loopback-only. Let the TTL expire and check that the app and disposable PostgreSQL stop. Never copy installed worker data, keys or credentials.",
+          "pass_when": "The remote browser reaches the stamped branch app through the printed link. Missing/forged tokens are refused; only the new disposable access session grants a cookie, normal preview mutation/transport limits remain enforced, and the named port is not an unauthenticated owner listener. TTL teardown closes the app and cluster; a missing build or unexecuted browser path is not a pass.",
+          "past_bug": "#582: the Linux preview bound loopback, disabled its token-only listener and offered no access link for a remote agent browser."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",
@@ -762,6 +779,14 @@
           "how": "On a disposable candidate worker with synthetic data and an already configured verified subscription, create throwaway native chat and automation sessions permitting only GenerateNativeImage and GenerateNativeVideo. Do not enter credentials or approve a paid submission. With no remembered/job pick, call each alias and inspect its structured result and provider-request logs. Repeat with an unreadable synthetic job choice, then a valid saved choice and an already-exceeded synthetic daily cap. Check image Included pricing and the exact verified video estimate. Archive only the throwaway sessions. Run the focused no-provider registry tests for the approved confirmation retry; never use this smoke row to authorize a real generation charge.",
           "pass_when": "Both interactive aliases return choose with the unified price/choice envelope; both unattended aliases skip without a saved choice or with unreadable choices. A valid saved choice still refuses an exhausted cap, including Included images, with zero provider submissions. Above-threshold calls require the unified one-use confirmation receipt before reserve/submission. Exact approved retries and job choices are covered by the no-provider test. Alias choice-card rendering is tracked separately and must not be inferred from JSON alone.",
           "past_bug": "#545: raw native registrations submitted without resolver admission or generation_budget.reserve."
+        },
+        {
+          "id": "harness-basics.native-generation-alias-cards",
+          "check": "Native generation aliases render the existing choice card and saved-choice line",
+          "kind": "browser",
+          "how": "On a disposable candidate worker with an already configured verified subscription and no remembered image/video pick, start a throwaway native chat on that account's model and ask for an image with GenerateNativeImage, then a video with GenerateNativeVideo. Pick an option on each card without approving any above-threshold spend, and read the reply the card sends. Remember an Included image choice and ask again. Add a throwaway MCP server exposing a tool named GenerateNativeImage that returns a choose envelope and call it. Repeat the views at a phone width. Archive only the throwaway chat and remove the throwaway server.",
+          "pass_when": "Both alias choose results show the same choice card as generateImage/generateVideo, with each option's price. The reply calls the same alias again with the exact selected source, model, worker and options. A remembered run shows the saved-choice line with Ask me next time and Change. The third-party tool renders as an ordinary tool row, never a choice card. No provider submission or charge occurs without an approved pick.",
+          "past_bug": "#550: generationToolKind knew only the unified names, so alias choose results rendered as raw JSON instead of the choice card."
         },
         {
           "id": "harness-basics.native-owner-pass",

@@ -418,7 +418,7 @@
 	/* Delete confirmation */
 	.mem-confirm {
 		padding: 13px 18px;
-		background: color-mix(in oklch, var(--destructive) 6%, var(--card));
+		background: color-mix(in oklab, var(--destructive) 6%, var(--card));
 		border-bottom: 1px solid color-mix(in oklch, var(--destructive) 18%, transparent);
 	}
 	.mem-confirm p {

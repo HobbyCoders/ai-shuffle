@@ -86,6 +86,61 @@ describe('generation choice results', () => {
 	});
 });
 
+describe('guarded native generation aliases (#550)', () => {
+	const grok = option({ source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-video-1.5-lite', options: { duration: 1 } });
+	const chooseVideo = { status: 'choose', success: false, kind: 'video', options: [grok] };
+
+	it('recognises the bare native alias names the harness registers', () => {
+		expect(generationToolKind('GenerateNativeImage')).toBe('image');
+		expect(generationToolKind('GenerateNativeVideo')).toBe('video');
+	});
+
+	it('does not trust a third-party tool that borrows an alias name', () => {
+		// Only the native harness registers the aliases, always bare: no MCP
+		// server (the bundled ai-tools one included) serves them.
+		for (const name of [
+			'mcp__my-server__GenerateNativeImage',
+			'mcp__evil__GenerateNativeVideo',
+			'mcp__ai-tools__GenerateNativeImage',
+			'mcp__fluid_bundled__GenerateNativeVideo',
+			'mcp__fluid_bundled__mcp__ai-tools__GenerateNativeImage',
+			'mcp__my-server__mcp__ai-tools__GenerateNativeVideo',
+			'generateNativeImage',
+			'GenerateNativeAudio'
+		]) {
+			expect(generationToolKind(name), name).toBeNull();
+			expect(chooseResult(row(name, chooseVideo)), name).toBeNull();
+			expect(isGenerationChoiceRow(row(name, chooseVideo)), name).toBe(false);
+		}
+	});
+
+	it('renders an alias choose result as the choice card and retries the alias with the exact pick', () => {
+		const parsed = chooseResult(row('GenerateNativeVideo', chooseVideo, { prompt: 'a square' }));
+		expect(parsed).toMatchObject({ kind: 'video', tool: 'GenerateNativeVideo', prompt: 'a square' });
+		expect(parsed?.options[0]).toMatchObject({ source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-video-1.5-lite' });
+		const reply = pickMessage(parsed!.tool, parsed!.kind, parsed!.options[0], { duration: 1 }, priceView(PRICE as never, 'video'), false);
+		// Canonical arguments (source/model/worker/options), not the native-only
+		// image_model/size fields, so the resolver re-admits exactly this pick.
+		expect(reply).toContain('Call GenerateNativeVideo again with the same prompt and {"source":"grok-1","model":"grok-imagine-video-1.5-lite","worker":"worker-b","options":{"duration":1}}.');
+		const image = chooseResult(row('GenerateNativeImage', { ...choose, kind: 'image' }));
+		expect(image).toMatchObject({ kind: 'image', tool: 'GenerateNativeImage' });
+	});
+
+	it('shows the saved-choice line for remembered alias confirmations and completions', () => {
+		const choice = { source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-video-1.5-lite', options: { duration: 1 } };
+		const confirm = {
+			status: 'needs-confirmation', success: false, kind: 'video', remembered: true, price: PRICE, choice,
+			confirmation_token: 'receipt-1',
+			retry: { source: 'grok-1', model: choice.model, worker: 'worker-b', options: choice.options, confirmed: true, confirmation_token: 'receipt-1' }
+		};
+		expect(rememberedResult(row('GenerateNativeVideo', confirm))).toEqual({ kind: 'video', choice, price: PRICE });
+		const done = { status: 'completed', success: true, remembered: true, price: PRICE, choice: { ...choice, model: 'grok-imagine-image' } };
+		expect(rememberedResult(row('GenerateNativeImage', done))?.kind).toBe('image');
+		expect(isGenerationChoiceRow(row('GenerateNativeImage', done))).toBe(true);
+		expect(rememberedResult(row('mcp__evil__GenerateNativeVideo', confirm))).toBeNull();
+	});
+});
+
 describe('labels and prices', () => {
 	it('labels models readably', () => {
 		expect(modelLabel('fal-ai/flux/dev')).toBe('Flux Dev');

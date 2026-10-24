@@ -175,14 +175,14 @@
 		display: grid;
 		place-items: center;
 		color: var(--orb);
-		background: color-mix(in oklch, var(--orb) 14%, var(--card));
-		border: 1px solid color-mix(in oklch, var(--orb) 45%, var(--border));
+		background: color-mix(in oklab, var(--orb) 14%, var(--card));
+		border: 1px solid color-mix(in oklab, var(--orb) 45%, var(--border));
 		box-shadow: 0 0 0 4px color-mix(in oklch, var(--orb) 7%, transparent);
 		transition: background 200ms ease, transform 200ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 200ms ease;
 	}
 	.call-card:hover:not(:disabled):not(.blocked) { color: var(--foreground); }
 	.call-card:hover:not(:disabled):not(.blocked) .call-orb {
-		background: color-mix(in oklch, var(--orb) 24%, var(--card));
+		background: color-mix(in oklab, var(--orb) 24%, var(--card));
 		box-shadow: 0 0 0 6px color-mix(in oklch, var(--orb) 10%, transparent);
 		transform: scale(1.04);
 	}

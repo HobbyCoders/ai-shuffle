@@ -311,7 +311,7 @@
 		cursor: pointer; transition: border-color 0.15s ease-out, background-color 0.15s ease-out; }
 	.target:hover:not(.off) { border-color: var(--border-strong); background: color-mix(in oklch, var(--hover-overlay) 60%, var(--code-bg)); }
 	.target.on { border-color: color-mix(in oklch, var(--primary) 60%, transparent);
-		background: color-mix(in oklch, var(--primary) 8%, var(--code-bg)); box-shadow: inset 3px 0 0 var(--primary); }
+		background: color-mix(in oklab, var(--primary) 8%, var(--code-bg)); box-shadow: inset 3px 0 0 var(--primary); }
 	.target.off { cursor: not-allowed; }
 	.target.off .t-name { color: var(--muted-foreground); }
 	.target input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: inherit; }
@@ -331,7 +331,7 @@
 	.pending, .ended { display: grid; gap: 10px; padding: 12px; border-radius: calc(var(--radius) - 4px);
 		border: 1px dashed color-mix(in oklch, var(--primary) 50%, transparent); background: color-mix(in oklch, var(--primary) 5%, transparent);
 		animation: drop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
-	.ended { border-style: solid; border-color: color-mix(in oklch, var(--warning) 40%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
+	.ended { border-style: solid; border-color: color-mix(in oklab, var(--warning) 40%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
 	.pending p, .ended p { margin: 0; line-height: 1.45; }
 	.p-title { display: flex; align-items: center; gap: 7px; font: 600 12.5px var(--font-sans); color: var(--foreground); }
 	.ended .p-title { color: var(--warning); }
@@ -341,7 +341,7 @@
 	.approved { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: calc(var(--radius) - 4px);
 		font-size: 12px; color: var(--success); background: color-mix(in oklch, var(--success) 10%, transparent); }
 	.approved time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-	.ghost.danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 45%, var(--border-strong)); }
+	.ghost.danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, var(--border-strong)); }
 	.ghost.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 10%, transparent); }
 	.ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 	@keyframes p-spin { to { transform: rotate(360deg); } }
