@@ -35,49 +35,40 @@ def network(workers):
     return a, b
 
 
-def set_up_research():
+def set_up_owner():
     with store.get_db() as conn:
-        store.write_account(conn, {"agent_id": service.AGENT_ID})
+        store.write_account(conn, {"agent_id":"default", "introduction":{"detected":{"preferred_name":"Owner"}}})
     service.reconcile()
 
 
-def test_research_account_syncs_and_each_worker_projects_it_locally(workers):
-    a, b = network(workers)
+def test_owner_introduction_still_syncs_without_research(workers):
+    a,b=network(workers)
     with a.active():
-        set_up_research()
+        set_up_owner()
         engine.scan_all()
-    settle([a, b])
-    for worker in (a, b):
+    settle([a,b])
+    for worker in (a,b):
         with worker.active():
-            state = store.get_state(service.assistant_id())
-            assert store.research_allowed(state) and state["agent_id"] == service.AGENT_ID
-            assert state.get("home_session_id") is None
-            # No conversation is made for it anywhere.
-            assert database.get_sessions(include_hidden=True) == []
+            assert store.get_account()['introduction']['detected']['preferred_name']=='Owner'
+            assert database.get_sessions(include_hidden=True)==[]
+            from app.db.base import table_exists
+            with store.get_db() as conn:
+                assert not table_exists(conn.cursor(),'assistant_sources')
 
 
-def test_sources_sync_but_availability_and_research_stay_local(workers):
-    a, b = network(workers)
+def test_older_peers_source_optins_sync_without_recreating_watches(workers):
+    a,b=network(workers)
     with a.active():
-        database.create_connector("mail", "gmail", "Desktop mail", {}, [], is_active=True,
-                                  runner_id=service.assistant_id())
-        database.update_connector_status("mail", "connected")
-        set_up_research()
-        service.set_source("mail", True)
+        set_up_owner()
+        with store.get_db() as conn:
+            store.write_account(conn,{'sources':{'mail':True}})
         engine.scan_all()
-    settle([a, b])
-    with b.active():
-        assert store.get_account()["sources"] == {"mail": True}
-        source = next(s for s in service.source_catalog() if s["id"] == "mail")
-        assert source["enabled"] and not source["available"]
-        assert service.record_proactive_event("mail", "email_received", {"message_id": "peer"}) == []
-        assert store.admit_run(service.assistant_id()) is None
-        service.set_source("mail", False)
-        engine.scan_all()
-    settle([a, b])
-    with a.active():
-        assert store.get_account()["sources"] == {}
-        assert not store.get_sources(service.assistant_id())[0]["enabled"]
+    settle([a,b])
+    for worker in (a,b):
+        with worker.active():
+            assert store.get_account()['sources']=={'mail':True}
+            from app.db.watches import list_watches
+            assert list_watches()==[]
 
 
 def test_any_session_can_be_settled_and_archived(workers):

@@ -57,7 +57,13 @@ def prepare(session_id, data):
 def confirmation(row):
     scope = ', '.join(row['permissions']['tools']) or 'event context only'
     until = f" until {row['ends_at']}" if row.get('ends_at') else ''
-    return (f"May I watch {row['description']} on this worker{until}, {row['action']} when it matches "
+    source = row['source']
+    target = (f"{source['repo']} GitHub {source['resource']}" if source['kind']=='github' else
+              f"connector {source['connector_id']}" if source['kind']=='connector' else
+              f"session {source.get('session_id','states')} {source.get('state','')}" if source['kind']=='session' else
+              f"usage {source.get('metric','')}" if source['kind']=='usage' else
+              f"a schedule every {source['interval_seconds']} seconds")
+    return (f"May I watch {row['description']} ({target}) on this worker{until}, {row['action']} when it matches "
             f"{store.encode(row['filter'])}, with read-only {scope} and a ${row['daily_budget_usd']:g} daily cap?")
 
 
@@ -117,8 +123,13 @@ def assert_allowed(meta,session_id=None):
         raise ValueError('Watch session does not match')
     if store.at(event['deadline_at']) <= store.now():
         raise ValueError('Watch deadline expired')
+    if not database.get_profile(watch['agent_id']):
+        raise ValueError('Watch is missing its agent')
     if session_id:
-        owner_session(session_id)
+        session = owner_session(session_id)
+        from app.core.assistant_service import session_stopped
+        if not session.get('is_active') or session_stopped(session_id):
+            raise ValueError('Watch delivery session was stopped or settled')
     if watch['source']['kind']=='connector':
         sources.connector_allowed(watch)
     return watch,event

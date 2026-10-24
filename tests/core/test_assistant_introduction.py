@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core import assistant_introduction as introductions, assistant_service as service
-from app.core.assistant_manager import AssistantManager
+from app.core.watch_manager import WatchManager
 from app.db import assistant as store, checkouts, database, projects_v2
 from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
@@ -109,11 +109,9 @@ async def test_manager_pass_reads_the_running_gmail_address_not_mail(assistant_f
         assert connector_id == "conn-mail"
         return SimpleNamespace(_email_address="ada@example.com")
     monkeypatch.setattr(connector_manager, "get_running_connector", running)
-    manager = AssistantManager()
-    task = manager.detect_owner()
-    assert manager.detect_owner() is task  # single flight
-    await task
-    assert manager.detect_owner(max_age=3600) is None  # fresh enough
+    manager = WatchManager()
+    await manager.detect_owner()
+    await manager.detect_owner()  # fresh enough: cached periodic detection
     assert introduction()["email"] == "ada@example.com"
 
 
@@ -193,7 +191,7 @@ async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(assis
     monkeypatch.setattr(introductions, "github_login", REAL_GITHUB_LOGIN)
     monkeypatch.setattr(auth, "is_github_authenticated_cached", lambda probe=None: True)
     monkeypatch.setattr(auth.auth_service, "github_login", lambda: None)
-    await AssistantManager().detect_owner()
+    await WatchManager().detect_owner()
     assert introduction()["github_username"] == "ada-gh"
 
 
@@ -201,4 +199,4 @@ async def test_no_detection_without_an_assistant_running_here(monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("detected without an assistant")
     monkeypatch.setattr(introductions, "detect", unexpected)
-    await AssistantManager().detect_owner()
+    await WatchManager().detect_owner()

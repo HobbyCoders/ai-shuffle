@@ -440,35 +440,20 @@ def test_mobile_retention_separately_commits_and_stops(pg, kind, stopping):
     assert len(queries) == before
 
 
-@pytest.mark.parametrize("step", ["events_deleted", "runs_deleted", "events_scrubbed", "remote_costs_deleted", "limit_stops_deleted"])
+@pytest.mark.parametrize("step", ["remote_costs_deleted", "limit_stops_deleted"])
 @pytest.mark.parametrize("stopping", [False, True])
 def test_assistant_retains_per_pass_budget_and_protected_rows(pg, step, stopping):
     sql, queries, commits, stop, state, _ = pg
-    sql("CREATE TABLE assistant_events(id TEXT PRIMARY KEY, assistant_id TEXT, status TEXT, observed_at TIMESTAMPTZ, payload TEXT, run_id TEXT)")
-    sql("CREATE TABLE assistant_runs(id TEXT PRIMARY KEY, assistant_id TEXT, created_at TIMESTAMPTZ, kind TEXT, status TEXT, session_id TEXT)")
     sql("CREATE TABLE assistant_remote_costs(id TEXT PRIMARY KEY, assistant_id TEXT, booked_at TIMESTAMPTZ)")
     sql("CREATE TABLE assistant_limit_stops(turn_id TEXT PRIMARY KEY, assistant_id TEXT, created_at TIMESTAMPTZ)")
-    table = {"events_deleted": "assistant_events", "events_scrubbed": "assistant_events", "runs_deleted": "assistant_runs", "remote_costs_deleted": "assistant_remote_costs", "limit_stops_deleted": "assistant_limit_stops"}[step]
+    table = {"remote_costs_deleted": "assistant_remote_costs", "limit_stops_deleted": "assistant_limit_stops"}[step]
     for i in range(6):
         age = "2999-01-01" if i == 5 else "2000-01-01"
-        if step == "events_scrubbed" and i < 5:
-            # Past payload horizon, inside history horizon.
-            from datetime import timedelta
-            age = assistant.now() - timedelta(days=assistant.EVENT_PAYLOAD_RETENTION_DAYS + 1)
-        if table == "assistant_events":
-            sql("INSERT INTO assistant_events VALUES (%s,'a','completed',%s,'private',NULL)", (str(i), age))
-        elif table == "assistant_runs":
-            sql("INSERT INTO assistant_runs VALUES (%s,'a',%s,'proactive','completed',NULL)", (str(i), age))
-        else:
-            sql(f"INSERT INTO {table} VALUES (%s,'a',%s)", (str(i), age))
+        sql(f"INSERT INTO {table} VALUES (%s,'a',%s)", (str(i), age))
     state["stop_after_commit"] = stopping
-    drains = step in {"remote_costs_deleted", "limit_stops_deleted"}
-    assert assistant.retention_sweep("a", stop=stop)[step] == (5 if drains and not stopping else 2)
+    assert assistant.retention_sweep("a", stop=stop)[step] == (2 if stopping else 5)
     assert max(commits) == 2
     if not stopping:
-        if not drains:
-            assert assistant.retention_sweep("a", stop=stop)[step] == 2
-            assert assistant.retention_sweep("a", stop=stop)[step] == 1
         assert assistant.retention_sweep("a", stop=stop)[step] == 0
     stop.set()
     before = len(queries)

@@ -421,8 +421,6 @@ async def start_services() -> None:
     from app.core.automation_manager import automation_manager
     await automation_manager.start()
 
-    from app.core.assistant_manager import assistant_manager
-    await assistant_manager.start()
     from app.core.watch_manager import watch_manager
     await watch_manager.start()
 
@@ -812,8 +810,6 @@ async def shutdown_services() -> None:
     """
     global is_shutting_down
     is_shutting_down = True
-    from app.core.assistant_manager import assistant_manager
-    await assistant_manager.shutdown()
     from app.core.watch_manager import watch_manager
     await watch_manager.shutdown()
     from app.core.global_events import global_events

@@ -46,13 +46,9 @@ def test_retired_assistant_routes_are_gone(client, method, path):
     assert response.status_code in (404, 405), (method, path, response.status_code)
 
 
-def test_http_source_explicit_optin(client, assistant_fixture):
-    sources = client.get("/api/v1/assistant/sources")
-    assert sources.status_code == 200 and sources.json()[0]["connector_id"] == "conn-mail"
-    assert "config" not in sources.json()[0]
-    source = client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False})
-    assert source.status_code == 200 and not source.json()["enabled"]
-    assert client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": True}).json()["enabled"]
+def test_retired_source_api_does_not_reenable_research(client, assistant_fixture):
+    assert client.get('/api/v1/assistant/sources').status_code==404
+    assert client.patch('/api/v1/assistant/sources/conn-mail',json={'enabled':True}).status_code==404
 
 
 def test_identity_specialist_endpoint_preserves_all_other_config(client, assistant_fixture):
@@ -79,14 +75,14 @@ def test_identity_endpoint_rejects_unknown_agents_and_blank_names(client, assist
 def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
     database.create_api_user("foreign", "Limited user", auth.hash_api_key("limited-key"))
     key = {"Authorization": "Bearer limited-key"}
-    for path in ("/sources", "/agents", "/limits"):
+    for path in ("/agents", "/limits"):
         assert client.get("/api/v1/assistant" + path, headers=key).status_code == 403
-    assert client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False}, headers=key).status_code == 403
-    assert client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False},
-                        headers={"Origin": "http://evil.example"}).status_code == 403
-    client.headers.pop("Origin")
-    assert client.patch("/api/v1/assistant/sources/conn-mail", json={"enabled": False}).status_code == 403
-    assert store.get_account()["sources"] == {"conn-mail": True}
+    path='/api/v1/assistant/agents/assistant-agent/identity'
+    assert client.patch(path,json={'name':'No'},headers=key).status_code==403
+    assert client.patch(path,json={'name':'No'},headers={'Origin':'http://evil.example'}).status_code==403
+    client.headers.pop('Origin')
+    assert client.patch(path,json={'name':'No'}).status_code==403
+    assert database.get_profile('assistant-agent')['name']=='Helper'
 
 
 def test_builtin_agent_is_hidden_from_agent_lists_and_locked(client, assistant_fixture):
@@ -118,12 +114,11 @@ def test_normal_connector_api_dedicated_credential_is_discoverable(client, monke
     credential = database.get_api_user(connector["api_user_id"])
     assert not credential["web_login_allowed"]
     assert credential["description"] == "Auto-created API user for connector " + connector["id"]
-    sources = client.get("/api/v1/assistant/sources").json()
-    source = next(s for s in sources if s["id"] == connector["id"])
-    assert not source["enabled"] and not source["available"]
-    assert "api_user_id" not in source and "config" not in source
-    # Creation alone is NOT authorization or a successful OAuth connection.
-    assert client.patch("/api/v1/assistant/sources/" + connector["id"], json={"enabled": True}).status_code == 409
+    # Creation alone never authorizes recurring observation. The retired
+    # source opt-in route cannot create a watch.
+    assert client.patch("/api/v1/assistant/sources/" + connector["id"], json={"enabled": True}).status_code == 404
+    from app.db.watches import list_watches
+    assert list_watches()==[]
 
 
 def test_limits_read_update_and_confirmed_off_switch(client, assistant_fixture):

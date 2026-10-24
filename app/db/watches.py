@@ -51,13 +51,18 @@ def create_schema(cursor):
     cursor.execute("""CREATE TABLE IF NOT EXISTS watch_events (
         id TEXT PRIMARY KEY, watch_id TEXT NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
         event_key TEXT NOT NULL, payload JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-        session_id TEXT, turn_id TEXT, route TEXT,
+        session_id TEXT, turn_id TEXT, command_id TEXT, route TEXT,
         reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0, cost_usd DOUBLE PRECISION,
         summary TEXT, summary_attempted BOOLEAN NOT NULL DEFAULT FALSE,
         notification_sent BOOLEAN NOT NULL DEFAULT FALSE,
-        deadline_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        deadline_at TIMESTAMPTZ, admitted_at TIMESTAMPTZ,
+        lease_until TIMESTAMPTZ, lease_owner TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(watch_id, event_key)
     )""")
+    from app.db.base import column_exists
+    for column, ddl in (("command_id","TEXT"),("admitted_at","TIMESTAMPTZ"),("lease_until","TIMESTAMPTZ"),("lease_owner","TEXT")):
+        if not column_exists(cursor, "watch_events", column):
+            cursor.execute(f"ALTER TABLE watch_events ADD COLUMN {column} {ddl}")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_watch_events_pending ON watch_events(watch_id,status)")
 
 
@@ -169,12 +174,16 @@ def reserve(wid, eid, reserve_usd, *, max_per_hour=20):
             return False
         c.execute("SELECT * FROM watches WHERE id=%s", (wid,))
         watch = parse(c.fetchone())
+        c.execute("SELECT status FROM watch_events WHERE id=%s AND watch_id=%s", (eid,wid))
+        candidate = c.fetchone()
+        if not candidate or candidate['status'] != 'pending':
+            return False
         c.execute("SELECT * FROM watch_events WHERE watch_id=%s AND status IN ('admitted','running','delivered')", (wid,))
         rows = [parse(r) for r in c.fetchall()]
         stamp = now()
         spent = sum(float(r['cost_usd'] if r['cost_usd'] is not None else r['reserved_usd']) for r in rows
-                    if r['status'] != 'delivered' or at(r['created_at']) > stamp-timedelta(days=1))
-        count = sum(at(r['created_at']) > stamp-timedelta(hours=1) for r in rows)
+                    if r['status'] != 'delivered' or at(r.get('admitted_at') or r['created_at']) > stamp-timedelta(days=1))
+        count = sum(at(r.get('admitted_at') or r['created_at']) > stamp-timedelta(hours=1) for r in rows)
         reason = None
         if watch.get('ends_at') and at(watch['ends_at']) <= stamp:
             reason = 'End date reached'
@@ -185,9 +194,9 @@ def reserve(wid, eid, reserve_usd, *, max_per_hour=20):
         if reason:
             c.execute("UPDATE watches SET status='paused',reason=%s WHERE id=%s", (reason,wid))
             return False
-        c.execute("UPDATE watch_events SET status='admitted',reserved_usd=%s,deadline_at=%s "
+        c.execute("UPDATE watch_events SET status='admitted',reserved_usd=%s,deadline_at=%s,admitted_at=%s "
                   "WHERE id=%s AND watch_id=%s AND status='pending'",
-                  (reserve_usd,stamp+timedelta(seconds=180),eid,wid))
+                  (reserve_usd,stamp+timedelta(seconds=180),stamp,eid,wid))
         if not c.rowcount:
             return False
         c.execute("UPDATE watches SET last_fired_at=%s WHERE id=%s", (stamp,wid))
@@ -204,6 +213,33 @@ def settle(eid, cost):
         c.execute("UPDATE watch_events SET status='delivered',cost_usd=%s WHERE id=%s AND status <> 'delivered'", (cost,eid))
         if c.rowcount:
             c.execute("UPDATE watches SET cost_usd=cost_usd+%s WHERE id=%s", (cost,event['watch_id']))
+
+
+def claim_delivery(eid, token):
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE watch_events SET lease_until=%s,lease_owner=%s WHERE id=%s AND status IN ('admitted','running') "
+                  "AND (lease_until IS NULL OR lease_until<%s OR lease_owner=%s)",
+                  (now()+timedelta(seconds=60),token,eid,now(),token))
+        return bool(c.rowcount)
+
+
+def release_delivery(eid, token):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE watch_events SET lease_until=NULL,lease_owner=NULL WHERE id=%s AND lease_owner=%s",(eid,token))
+
+
+def assign_route(eid, route, sid):
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE watch_events SET route=%s,session_id=%s WHERE id=%s AND route IS NULL",(route,sid,eid))
+        c.execute("SELECT * FROM watch_events WHERE id=%s",(eid,))
+        return parse(c.fetchone())
+
+
+def mark_creator_notified(wid):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE watches SET creator_notified=TRUE WHERE id=%s",(wid,))
 
 
 def failure(wid, message):

@@ -9,8 +9,8 @@ What counts
 -----------
 Owner coordination chats (``orchestration_limits.role``: a no-project owner
 chat) and every job they start: Task workers and the chats they start with
-StartSession, nested or not. Background research runs (``assistant_runs``)
-count too, from the moment each was admitted.
+StartSession, nested or not. Watch alert generation is charged from admission;
+watch investigation chats and live watch turns are charged through usage_log.
 
 Task workers and chats a coordination chat started on another worker count too
 (``assistant_remote_jobs``). That worker books their turns in its own
@@ -173,8 +173,8 @@ def day_window(now=None):
 def _tracked(cursor, roles):
     """``{session_id: counted-from}`` for coordinators, their jobs and research runs."""
     tracked: dict = {sid: None for sid in roles}
-    cursor.execute("SELECT session_id, created_at FROM assistant_runs WHERE assistant_id=%s "
-                   "AND session_id IS NOT NULL", (assistant_id(),))
+    cursor.execute("SELECT e.session_id,e.created_at FROM watch_events e JOIN watches w ON w.id=e.watch_id "
+                   "WHERE w.worker_id=%s AND e.session_id IS NOT NULL", (assistant_id(),))
     for row in cursor.fetchall():
         sid = row["session_id"]
         since = _utc(row["created_at"])
@@ -280,6 +280,10 @@ def _measure(now=None, limits=None) -> dict:
         live = _live_turns(cursor, tracked) if tracked else []
         spent = ((_booked(cursor, tracked, start, roles) + _in_flight(cursor, tracked, live, roles)) if tracked else 0.0)
         spent += _remote_booked(cursor, start)
+        cursor.execute("SELECT e.cost_usd,e.reserved_usd,e.status FROM watch_events e JOIN watches w ON w.id=e.watch_id "
+                       "WHERE w.worker_id=%s AND e.route='alert' AND COALESCE(e.admitted_at,e.created_at)>=%s", (assistant_id(),start))
+        spent += sum(float(r['cost_usd'] if r['cost_usd'] is not None else r['reserved_usd'])
+                     for r in cursor.fetchall() if r['status'] in ('admitted','running','delivered'))
         from app.core.generation_budget import reserved
         spent += float(reserved(cursor, day))
     return dict(day=day, start=start, resets_at=resets_at, timezone=tz_name,
@@ -339,7 +343,8 @@ def _job_minutes(session, now):
 
 def _created_by_assistant(cursor, session):
     """Whether the research loop created ``session`` for its run."""
-    cursor.execute("SELECT MIN(created_at) AS linked FROM assistant_runs WHERE assistant_id=%s AND session_id=%s",
+    cursor.execute("SELECT MIN(e.created_at) AS linked FROM watch_events e JOIN watches w ON w.id=e.watch_id "
+                   "WHERE w.worker_id=%s AND e.session_id=%s AND e.route='investigate'",
                    (assistant_id(), session["id"]))
     linked = _utc((row_to_dict(cursor.fetchone()) or {}).get("linked"))
     created = _utc(session.get("created_at"))

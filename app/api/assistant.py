@@ -5,8 +5,7 @@ The personal assistant's own conversation and settings page were removed in
 
 * ``/limits``: the owner's spending and job time limits (Settings > Usage);
 * ``/agents``: agent names and avatars (the Agents page and agent card);
-* ``/sources``: which connected sources background research may read, the
-  research loop's only switch until watches (#371 step 3) replace it.
+Email sources now live in watches, not under this compatibility prefix.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.auth import require_admin
 from app.core import assistant_limits as limits, assistant_service as service
-from app.core.assistant_manager import assistant_manager
+from app.core.watch_manager import watch_manager
 from app.db import assistant_limits as limits_db
 from app.db.async_database import run_sync
 
@@ -42,11 +41,6 @@ class LimitsUpdate(BaseModel):
     job_limit_enabled: Optional[bool] = None
     max_job_minutes: Optional[int] = Field(None, ge=limits_db.MINUTE_BOUNDS[0], le=limits_db.MINUTE_BOUNDS[1])
     confirm_spend_limit_off: Optional[bool] = None
-
-
-class SourceUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool
 
 
 class AgentIdentity(BaseModel):
@@ -92,22 +86,8 @@ async def update_limits(body: LimitsUpdate):
         raise HTTPException(409, "Confirm switching the spending limit off (confirm_spend_limit_off: true)")
     await _value_error_call(limits_db.update, service.assistant_id(), changes)
     # Enforce a lowered limit now rather than on the next loop pass.
-    assistant_manager.notify()
+    watch_manager.notify()
     return await run_sync(limits.status)
-
-
-@router.get("/sources")
-async def read_sources():
-    return await run_sync(service.source_catalog)
-
-
-@router.patch("/sources/{connector_id}")
-@router.put("/sources/{connector_id}")
-async def update_source(connector_id: str, body: SourceUpdate):
-    source = await _value_error_call(service.set_source, connector_id, body.enabled)
-    await assistant_manager.cancel_invalid_runs()
-    assistant_manager.notify()
-    return source
 
 
 @router.get("/agents")

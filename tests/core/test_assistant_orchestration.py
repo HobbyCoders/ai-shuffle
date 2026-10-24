@@ -32,7 +32,8 @@ def test_start_makes_a_normal_unlinked_session_without_replacing_agent(assistant
     assert reply["session_id"] == home
     from app.db import assistant as store
     # Started work is no longer recorded as assistant activity.
-    assert store.get_activity(service.assistant_id()) == []
+    from app.db.watches import list_watches
+    assert list_watches() == []
 
 
 async def test_peer_message_joins_safe_boundary_with_non_user_attribution(mock_db, monkeypatch):
@@ -116,4 +117,5 @@ async def test_task_worker_producer_is_not_linked_as_assistant_activity(assistan
     created = database.get_session(worker.session_id)
     assert created["is_worker"] and created["parent_session_id"] == home
     from app.db import assistant as store
-    assert store.get_activity(service.assistant_id()) == []
+    from app.db.watches import list_watches
+    assert list_watches() == []

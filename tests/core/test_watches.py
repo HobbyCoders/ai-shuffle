@@ -95,6 +95,37 @@ async def test_investigate_creates_short_no_project_session(owner,monkeypatch):
     notify.assert_awaited_once()
 
 
+
+
+def test_resumed_backlog_counts_cost_on_admission_day(owner):
+    watch = make_watch(owner,daily_budget_usd=1)
+    store.append_events(watch,[('old1',{}),('old2',{})])
+    with get_db() as conn:
+        conn.cursor().execute('UPDATE watch_events SET created_at=%s',(store.now()-timedelta(days=3),))
+    events = store.events(watch['id'],('pending',))
+    assert store.reserve(watch['id'],events[0]['id'],1)
+    store.settle(events[0]['id'],0.9)
+    assert not store.reserve(watch['id'],events[1]['id'],0.25)
+    assert 'budget' in store.get(watch['id'])['reason']
+
+
+def test_delivery_lease_and_route_are_atomic(owner):
+    watch = make_watch(owner)
+    store.append_events(watch,[('one',{})])
+    event = store.events(watch['id'],('pending',))[0]
+    assert not store.claim_delivery(event['id'],'a')
+    assert store.reserve(watch['id'],event['id'],1)
+    assert store.claim_delivery(event['id'],'a')
+    assert not store.claim_delivery(event['id'],'b')
+    route = store.assign_route(event['id'],'live',owner['id'])
+    assert store.assign_route(event['id'],'investigate','other')['session_id']==route['session_id']
+    store.release_delivery(event['id'],'a')
+    assert store.claim_delivery(event['id'],'b')
+    store.settle(event['id'],0.01)
+    store.release_delivery(event['id'],'b')
+    assert not store.claim_delivery(event['id'],'c')
+
+
 def test_budget_reservations_flood_and_owner_scope(owner):
     watch = make_watch(owner,daily_budget_usd=1)
     store.append_events(watch,[(str(i),{}) for i in range(5)])

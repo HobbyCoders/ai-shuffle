@@ -2700,6 +2700,8 @@ def _run_column_migrations(cursor):
     migrations_applied.extend(_retire_fal_billing_key(cursor))
     migrations_applied.extend(_retire_secret_named_observations(cursor))
     migrations_applied.extend(_retire_assistant_home(cursor))
+    from app.db.watch_migration import migrate as migrate_email_watches
+    migrations_applied.extend(migrate_email_watches(cursor))
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

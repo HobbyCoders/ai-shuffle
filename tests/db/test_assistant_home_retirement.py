@@ -60,8 +60,9 @@ def _start_marker(sid, sender):
 
 def _legacy_install(cursor):
     """What an older build left: homes, their links and the retired columns."""
-    with get_db() as conn:
-        service.ensure_agent(conn.cursor())
+    db.create_profile(AGENT,service.AGENT_NAME,service.AGENT_DESCRIPTION,service.AGENT_CONFIG,is_builtin=True)
+    cursor.execute("""CREATE TABLE assistant_runs (
+        id TEXT PRIMARY KEY,assistant_id TEXT,home_session_id TEXT,session_id TEXT,kind TEXT,status TEXT)""")
     _session(HOME, AGENT, hidden=True)
     _session(PEER_HOME, AGENT, hidden=True)  # Mirrored from a peer; no pointer here.
     _session(HOME_WORKER, AGENT, hidden=True, is_worker=True, parent_session_id=HOME)

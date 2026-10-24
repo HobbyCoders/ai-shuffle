@@ -43,7 +43,7 @@ def test_real_close_pool_keeps_coroutine_borrower_running(monkeypatch):
             close_pool()
         session_pool = MagicMock()
         session_pool.shutdown = AsyncMock()
-        with patch("app.core.assistant_manager.assistant_manager.shutdown", new=AsyncMock()), \
+        with patch("app.core.watch_manager.watch_manager.shutdown", new=AsyncMock()), \
              patch("app.core.global_events.global_events.shutdown", new=AsyncMock()), \
              patch("app.core.composer_suggestions.stop", new=AsyncMock()), \
              patch("app.core.lifecycle_events.stop", new=AsyncMock()), \

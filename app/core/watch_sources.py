@@ -91,6 +91,28 @@ def gmail_poll(instance, cursor):
     if sdk is None:
         raise ValueError("Gmail is not connected")
     users = sdk.users()
+    if 'legacy_seen_ids' in cursor:
+        history_id = cursor.get('history_id') or str(users.getProfile(userId='me').execute()['historyId'])
+        args = dict(userId='me',q=('after:'+str(cursor['legacy_after'])) if cursor.get('legacy_after') else 'is:unread',maxResults=100,
+                    labelIds=[s.strip() for s in str(instance.config.get('labels','INBOX')).split(',') if s.strip()])
+        if cursor.get('legacy_page_token'):
+            args['pageToken'] = cursor['legacy_page_token']
+        page = users.messages().list(**args).execute()
+        events = []
+        for item in page.get('messages',[]):
+            mid = str(item['id'])
+            if mid in cursor['legacy_seen_ids']:
+                continue
+            message = users.messages().get(userId='me',id=mid,format='metadata',metadataHeaders=['From','Subject']).execute()
+            headers = {h['name'].lower():h.get('value','') for h in message.get('payload',{}).get('headers',[])}
+            events.append(('email_received:'+mid,dict(event_type='email_received',message_id=mid,
+                           sender=headers.get('from',''),subject=headers.get('subject',''),snippet=str(message.get('snippet',''))[:4000])))
+        checkpoint = {'history_id':history_id}
+        if page.get('nextPageToken'):
+            checkpoint.update(legacy_seen_ids=cursor['legacy_seen_ids'],legacy_page_token=page['nextPageToken'])
+            if cursor.get('legacy_after'):
+                checkpoint['legacy_after'] = cursor['legacy_after']
+        return events,checkpoint
     if not cursor.get("history_id"):
         profile = users.getProfile(userId="me").execute()
         return [], {"history_id": str(profile["historyId"])}

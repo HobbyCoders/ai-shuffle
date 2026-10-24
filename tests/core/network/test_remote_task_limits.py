@@ -241,7 +241,8 @@ def test_the_target_never_counts_a_child_another_worker_started_as_its_own_job(w
     child = started_child(a, b)
     with a.active():
         assert store.get_remote_job(service.assistant_id(), child) is None
-        assert store.get_activity(service.assistant_id()) == []
+        from app.db.watches import list_watches
+        assert list_watches()==[]
 
 
 # --- linking ----------------------------------------------------------------------
