@@ -164,12 +164,21 @@ def test_bootstrap_link_uses_real_session_and_normal_guard(
     from app.db.sessions import get_session, delete_session
     from app.serve import IngressApplication
 
-    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    env = preview_environment(tmp_path, 18880, 18881)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(settings, "data_dir", Path(env["DATA_DIR"]))
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(preview_access, "_listener_port", 18880)
     monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "1")
     monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_HOST", "10.0.0.30")
     monkeypatch.setenv("SHUFFLE_PREVIEW_ACCESS_TTL", "60")
+    from app.core import encryption
+    from app.db import database
+
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    monkeypatch.setattr(encryption, "_credential_status", {})
+    assert encryption.initialize_server_key(database)
     initialize_preview_access()
     url = capsys.readouterr().out.strip().split()[-1]
     parts = urlsplit(url)
@@ -195,7 +204,45 @@ def test_bootstrap_link_uses_real_session_and_normal_guard(
     assert not client.cookies
     assert client.get(parts.path + "?" + parts.query).json() == {"ok": True}
     assert client.get("/").json() == {"ok": True}
+    status = client.get("/api/v1/auth/status").json()
+    assert status["preview_access"] is True
+    assert status["setup_required"] is False
+    assert status["onboarding_complete"] is True
+    assert client.post("/api/v1/auth/setup").status_code == 403
+    assert client.post("/api/v1/auth/onboarding/complete").status_code == 403
     assert client.post("/api/v1/settings/test").status_code == 403
     assert preview_access.verify(token, now=grant.expires_at + 1) is None
     delete_session(grant.session_id)
     assert client.get("/").status_code == 403
+
+@pytest.mark.parametrize("preview,disposable", [("0", True), ("1", False)])
+def test_setup_bootstrap_requires_preview_and_disposable_data(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], preview: str, disposable: bool,
+) -> None:
+    from app.core import preview_access
+    from app.core.auth import auth_service
+    from app.core.config import settings
+    from app.db import database
+
+    env = preview_environment(tmp_path, 18880, 18881)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", preview)
+    data = Path(env["DATA_DIR"])
+    if not disposable:
+        (data / ".branch-preview").unlink()
+    monkeypatch.setattr(settings, "data_dir", data)
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    monkeypatch.setattr(preview_access, "_listener_port", 18880)
+
+    initialize_preview_access()
+
+    assert auth_service.is_setup_required() is True
+    assert auth_service.is_onboarding_complete() is False
+    assert database.get_system_setting("installation_configured") is None
+    assert database.get_system_setting("onboarding_complete") is None
+    assert database.get_system_setting(f"workspace_path:{settings.effective_instance_id}") is None
+    if preview == "0":
+        assert capsys.readouterr().out == ""
+

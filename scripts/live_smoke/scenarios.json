@@ -720,6 +720,14 @@
           "past_bug": "#582: the Linux preview bound loopback, disabled its token-only listener and offered no access link for a remote agent browser."
         },
         {
+          "id": "harness-basics.branch-preview-setup",
+          "check": "Disposable branch preview opens the chat UI without setup mutations",
+          "kind": "owner",
+          "how": "Build and stamp a fresh branch, then under Monitor run python -m app.preview run --host 0.0.0.0 --browser-host <worker-IP> --port <free-port> --ttl-seconds 300 with a free port in 18100-18199. Open its printed access link once in the agent browser. Inspect auth/status and the web shell at 1440 and 375 pixels wide. Try setup and onboarding-complete POSTs with the preview cookie. Use only the disposable launcher data, never installed worker data.",
+          "pass_when": "Auth status reports preview_access true, setup_required false and onboarding_complete true. Both widths reach the chat UI rather than the setup wizard. Setup and onboarding mutations remain refused with 403. Non-preview startup and caller-managed unmarked preview data do not auto-complete setup (covered by focused bootstrap tests).",
+          "past_bug": "#623: the access cookie correctly refused setup mutations, but disposable bootstrap left the web shell stuck at the setup wizard."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",

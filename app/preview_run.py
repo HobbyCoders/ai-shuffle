@@ -44,6 +44,9 @@ def preview_environment(
     home.mkdir()
     workspace = directory / "workspace"
     workspace.mkdir()
+    data = directory / "data"
+    data.mkdir()
+    (data / ".branch-preview").touch()
     empty = directory / "empty.env"
     empty.write_text("")
     root = Path(__file__).resolve().parents[1]
@@ -79,6 +82,22 @@ def initialize_preview_access() -> None:
     port = preview_access.listener_port()
     if port is None:
         raise RuntimeError("Branch preview requires its token-only listener")
+
+    from app.core import owner_auth
+    from app.core.auth import auth_service
+    from app.core.config import settings
+    from app.db import database
+
+    # Only the owned launcher marks its fresh data directory. Raw preview mode
+    # against caller-managed data must not silently configure an installation.
+    data = settings.effective_data_dir
+    if (data / ".branch-preview").is_file():
+        owner_auth.configure_installation()
+        database.set_system_setting(
+            f"workspace_path:{settings.effective_instance_id}", str(data.parent / "workspace"),
+        )
+        auth_service.set_onboarding_complete()
+
     profiles = get_all_profiles()
     profile_id = profiles[0]["id"] if profiles else "branch-preview-access"
     if not profiles:
