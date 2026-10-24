@@ -20,6 +20,7 @@ import { isForbidden } from '$lib/settings/access.svelte';
 import { flashSaved } from '$lib/settings/save-status.svelte';
 import type { StatusTone } from '$lib/settings/types';
 import { INSTALLER_LINK, installerHint } from './update-remedy';
+import { CHECK_IDLE_SETTLE_MS, CHECK_POLL_MS, CHECK_TIMEOUT_MS, OUTCOME_PHASES } from './update-check';
 import { waitingSummary, waitingView, type WaitingFields } from './update-waiting';
 
 export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_URL, installerHint } from './update-remedy';
@@ -135,13 +136,8 @@ interface Snapshot extends UpdatePolicy {
 }
 
 export const POLICY_POLL_MS = 5_000;
-export const CHECK_POLL_MS = 2_000;
-export const CHECK_TIMEOUT_MS = 90_000;
-/** An idle worker this long after the request has finished (or never started) its check. */
-export const CHECK_IDLE_SETTLE_MS = 10_000;
+export { CHECK_IDLE_SETTLE_MS, CHECK_POLL_MS, CHECK_TIMEOUT_MS } from './update-check';
 export const POLICY_EVENT = 'application-update-policy';
-
-const OUTCOME_PHASES = new Set(['available', 'ready', 'error', 'image-required', 'unsupported', 'downloading']);
 
 export class UpdatesState {
 	policy = $state<UpdatePolicy | null>(null);

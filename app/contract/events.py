@@ -311,6 +311,12 @@ class InteractionExpired(EventBase):
     reason: str | None = None
 
 
+class SwarmWorker(BaseModel):
+    """The network worker a remotely dispatched Swarm task runs on."""
+    name: str
+    device_id: str
+
+
 class SwarmTask(BaseModel):
     id: str
     title: str
@@ -319,6 +325,7 @@ class SwarmTask(BaseModel):
     status: Literal["queued", "running", "completed", "failed", "blocked", "cancelled", "interrupted"]
     task_id: str | None = None
     worker_session_id: str | None = None
+    worker: SwarmWorker | None = None
     result: str | None = None
     error: str | None = None
     started_at: datetime | None = None
