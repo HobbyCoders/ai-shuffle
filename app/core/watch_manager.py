@@ -255,8 +255,12 @@ class WatchManager:
             if watch["creating_session_id"]
             else None
         )
-        if not watch["creator_notified"] and (
-            not creator or not creator.get("is_active") or creator.get("status") == "archived"
+        # Missing or foreign mirrors are not authoritative lifecycle evidence.
+        if (
+            not watch["creator_notified"]
+            and creator
+            and assistant_service._owned_here(creator)
+            and (not creator.get("is_active") or creator.get("status") == "archived")
         ):
             await run_sync(
                 notifications.create_notification,
