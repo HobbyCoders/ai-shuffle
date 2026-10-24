@@ -272,3 +272,29 @@ async def test_forged_identity_and_both_budgets_refuse(
                 {"operation": "deliver", "watch_id": wid, "event_id": event["id"]}, "dev_server"
             )
     assert delivery.receipt(event["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_revoked_expired_ack_loss_cannot_pin_transfer(peers: dict[str, Any]) -> None:
+    wid = await create_watch(peers)
+    peers["faults"]["lose_deliver"] = True
+    with peers["on"]("dev_server"):
+        await watch_manager.WatchManager().run_once()
+        event = store.events(wid)[0]
+        assert not event["turn_id"]
+        store.set_status(wid, "admin", "paused")
+        with base.get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE watch_events SET deadline_at=NOW()-INTERVAL '1 second' WHERE id=%s",
+                (event["id"],),
+            )
+        await watch_manager.WatchManager().run_once()
+        delivered = store.events(wid, ("delivered",))[0]
+        assert delivered["cost_usd"] == delivered["reserved_usd"]
+        snapshot = store.export_watch(wid, "dev_desktop")
+        assert snapshot["events"][0]["id"] == event["id"]
+    turn = turns.get_turn_by_command(peers["session"]["id"], event["id"])
+    with pytest.raises(PermissionError, match="Not the creating worker"):
+        await asyncio.to_thread(
+            watches.assert_allowed, turn["payload"]["_assistant_proactive"], peers["session"]["id"]
+        )

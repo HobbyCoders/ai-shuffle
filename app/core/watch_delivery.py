@@ -204,6 +204,10 @@ async def deliver(watch: dict[str, Any], event: dict[str, Any], token: str) -> b
     if watch_values.at(event["deadline_at"]) <= watch_values.now() and not event.get("turn_id"):
         renewed = await run_sync(store.renew_admission, event["id"], token)
         if not renewed:
+            # An expired, revoked admission must not pin the watch forever.
+            # A lost peer reply leaves billing unknown: retain its reservation
+            # as spend, and revoke any late receiver execution at the source.
+            await run_sync(store.settle, event["id"], event["reserved_usd"])
             return True
         event.update(renewed)
     from app.core.watch_manager import notify
