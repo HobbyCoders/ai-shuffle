@@ -35,11 +35,14 @@ Invites are meant for your home network or a VPN such as Tailscale. Workers sign
 
 The composer's worker picker lists every online worker. Pick one, and the chat runs there.
 
-After the receiving worker's online index upgrade finishes, moved chat history is
-indexed in small background batches rather than holding up the move. Older text
-may not appear in search or agent recall until those batches catch up. You can
-still open and read the conversation. New live messages remain searchable as
-usual, and indexing resumes automatically if the worker restarts.
+Deferred history indexing is experimental and **off by default**: load tests
+still showed live-write latency outliers. On a disposable candidate only, an
+operator can request it with `python -m app.maintenance.history_indexing --apply`
+from that worker's source and interpreter. Its online index upgrade and indexing
+resume after restarts. After the upgrade, moved history is indexed in background
+batches; older text can be absent from search and agent recall until catch-up,
+but remains readable in the conversation. Ordinary live writes use separate
+indexes. Do not enable it on a production worker until the latency follow-up passes.
 
 From any other worker you can read that chat, send messages, answer prompts and stop it. Attachments are passed along too. Git buttons (Commit, Push, Pull, Create PR, Finish and Ship It) act on the owning worker's copy of the project.
 

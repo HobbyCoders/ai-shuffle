@@ -258,7 +258,11 @@ rebuilds and refills it. A term matching more than a couple of thousand pieces
 is read newest-first, so a very common word ranks recent sessions rather than
 scanning the whole history.
 
-Hand-off imports defer search indexing after an online migration has replaced
+Experimental deferred indexing is off by default pending latency acceptance.
+`python -m app.maintenance.history_indexing --apply` requests the online upgrade
+on a disposable candidate; its worker-local migration stamp resumes interrupted
+work after restart. No migration or deferral runs without that explicit opt-in.
+Hand-off imports defer search indexing after the online migration has replaced
 transcript and recall GIN indexes with disjoint live/history partial indexes.
 Existing rows remain live-indexed; adding the state columns is metadata-only.
 Indexes are built and retired concurrently, with a 250 ms lock-acquisition limit.

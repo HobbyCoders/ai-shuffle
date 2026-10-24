@@ -446,7 +446,8 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
         if not present:
             # A rebuilt projection needs fresh deferred indexes before imports
             # can bypass GIN maintenance again. Do not trust the old ready stamp.
-            cursor.execute("DELETE FROM system_settings WHERE key = %s", ("history_indexing_v1",))
+            cursor.execute("DELETE FROM system_settings WHERE key = %s",
+                           ("migration:history_indexing_v1",))
         for statement in _DDL if present else [*_TABLE_DDL, *_DDL]:
             cursor.execute(statement.replace(_S, f"{schema}."))
         if not intact:

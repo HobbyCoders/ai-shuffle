@@ -20,7 +20,7 @@ from app.db.base import get_db
 logger = logging.getLogger(__name__)
 COLUMN = "history_index_state"
 SETTING = "aishuffle.history_index_state"
-KEY = "history_indexing_v1"
+KEY = "migration:history_indexing_v1"
 TABLES = {
     "fluid_session_nodes": ("session_id, node_id", "message"),
     "session_store_entries": ("id", "entry"),
@@ -56,9 +56,10 @@ def search_table(
     """
     if table not in TABLES:
         raise ValueError("unsupported history search table")
-    cursor.execute("SELECT value FROM system_settings WHERE key = %s", (KEY,))
-    row = cursor.fetchone()
-    if not row or row["value"] not in ("building", "ready"):
+    from app.db.base import column_exists
+    # Projection repair can clear the ready stamp while the source tables still
+    # have partial indexes. Keep using those indexes throughout that repair.
+    if not column_exists(cursor, table, COLUMN):
         return table + (f" {alias}" if alias else "")
     states = (0, 2, 1) if include_pending else (0, 2)
     arms = " UNION ALL ".join(f"SELECT * FROM {table} WHERE {COLUMN} = {s}" for s in states)
@@ -89,6 +90,40 @@ def _valid(cursor: Any, name: str) -> bool:
     return bool(row and row["ok"])
 
 
+@contextmanager
+def _online_cursor() -> Iterator[Any]:
+    """Borrow only the initialized database; never bypass test/shim routing.
+
+    Concurrent DDL needs autocommit. Restore both session settings and the
+    transaction mode before returning the slot, and release only our own lock.
+    """
+    with get_db() as db:
+        raw = getattr(db, "_conn", None)
+        if not isinstance(raw, psycopg2.extensions.connection):
+            raise RuntimeError("online history indexing requires PostgreSQL")
+        raw.commit()
+        raw.autocommit = True
+        try:
+            with raw.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT current_setting('lock_timeout') AS lock, "
+                            "current_setting('statement_timeout') AS statement")
+                previous = cur.fetchone()
+                cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
+                            "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
+                locked = cur.fetchone()["ok"]
+                try:
+                    yield cur if locked else None
+                finally:
+                    if locked:
+                        cur.execute("SELECT pg_advisory_unlock(hashtext(current_database()), "
+                                    "hashtext(current_schema() || '.history_indexing_v1'))")
+                    cur.execute("SELECT set_config('lock_timeout',%s,false), "
+                                "set_config('statement_timeout',%s,false)",
+                                (previous["lock"], previous["statement"]))
+        finally:
+            raw.autocommit = False
+
+
 def migrate() -> bool:
     """One online migration pass. No startup transaction or table rewrite.
 
@@ -98,117 +133,107 @@ def migrate() -> bool:
     lock serializes migrators, not writers. Imports defer only after publication
     of the final ready marker. Ordinary old rows stay state 0 without a backfill.
     """
-    from app.core.config import settings
-
-    conn = psycopg2.connect(**settings.get_database_connection())
-    conn.autocommit = True
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
-                        "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
-            if not cur.fetchone()["ok"]:
-                return False
-            cur.execute("SET lock_timeout = '250ms'")
-            cur.execute("SET statement_timeout = '15min'")
-            cur.execute("CREATE TABLE IF NOT EXISTS history_index_migrations "
-                        "(name text PRIMARY KEY, tail text NOT NULL)")
-            for table in TABLES:
-                cur.execute("SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass(%s) "
-                            "AND attname=%s AND NOT attisdropped", (table, COLUMN))
-                if cur.fetchone():
-                    continue
-                # PostgreSQL 11+ constant defaults are metadata-only, even on
-                # large tables. Change to the transaction setting afterwards.
-                cur.execute("BEGIN")
-                try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-                                f"{COLUMN} smallint NOT NULL DEFAULT 0")
-                    cur.execute(f"ALTER TABLE {table} ALTER COLUMN {COLUMN} SET DEFAULT {_DEFAULT}")
-                    cur.execute("COMMIT")
-                except BaseException:
-                    cur.execute("ROLLBACK")
-                    raise
-            cur.execute(f"""
-                CREATE OR REPLACE FUNCTION history_index_on_update() RETURNS trigger
-                LANGUAGE plpgsql AS $fn$
-                BEGIN
-                    IF COALESCE(current_setting('{SETTING}', true), '') NOT IN ('1','2') THEN
-                        NEW.{COLUMN} := 0;
-                    END IF;
-                    RETURN NEW;
-                END
-                $fn$
-            """)
-            for table in TABLES:
-                trigger = f"trg_{table}_history_live_update"
-                cur.execute("SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(%s) "
-                            "AND tgname=%s AND NOT tgisinternal", (table, trigger))
-                if not cur.fetchone():
-                    cur.execute(f"CREATE TRIGGER {trigger} BEFORE UPDATE ON {table} "
-                                "FOR EACH ROW EXECUTE FUNCTION history_index_on_update()")
-            cur.execute("INSERT INTO system_settings(key,value) VALUES (%s,'building') "
-                        "ON CONFLICT (key) DO NOTHING", (KEY,))
-            for name in INDEXES:
-                cur.execute("SELECT pg_get_indexdef(indexrelid) AS ddl, "
-                            "pg_get_expr(indpred, indrelid) AS pred FROM pg_index "
-                            "WHERE indexrelid = to_regclass(%s)", (name,))
-                row = cur.fetchone()
-                partial = bool(row and COLUMN in (row["pred"] or ""))
-                if partial and _valid(cur, name) and _valid(cur, name + "_h2"):
-                    cur.execute("SELECT reloptions FROM pg_class WHERE oid=to_regclass(%s)",
-                                (name + "_h2",))
-                    options = cur.fetchone()["reloptions"] or []
-                    wanted = {"fastupdate=on", "gin_pending_list_limit=1024"}
-                    if not wanted.issubset(options):
-                        cur.execute(f"ALTER INDEX {name}_h2 SET "
-                                    "(fastupdate=on, gin_pending_list_limit=1024)")
-                    continue
-                if row and not partial:
-                    tail = row["ddl"].split(" USING gin ", 1)[1]
-                    cur.execute("INSERT INTO history_index_migrations(name, tail) VALUES (%s,%s) "
-                                "ON CONFLICT DO NOTHING", (name, tail))
-                cur.execute("SELECT tail FROM history_index_migrations WHERE name=%s", (name,))
-                saved = cur.fetchone()
-                if not saved:
-                    continue  # Optional index was never installed.
-                tail = saved["tail"]
-                # PostgreSQL supplies this expression/predicate, not external input.
-                expression, sep, original_predicate = tail.partition(" WHERE ")
-                expression, has_options, original_options = expression.partition(" WITH ")
-                table = next(t for t in TABLES if (
-                    (t == "fluid_session_nodes" and "fluid" in name)
-                    or (t == "session_store_entries" and "sse" in name)
-                    or (t == "session_recall_text" and "session_recall_text" in name)
-                    or (t == "session_events" and "events" in name)
-                    or (t == "session_messages" and "session_messages" in name)))
-                for state in (0, 2):
-                    replacement = name + f"_h{state}"
-                    if not _valid(cur, replacement):
-                        cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
-                        where = f"({original_predicate}) AND " if sep else ""
-                        if state == 2:
-                            options = " WITH (fastupdate=on, gin_pending_list_limit=1024)"
-                        else:
-                            options = " WITH " + original_options if has_options else ""
-                        cur.execute(f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
-                                    f"USING gin {expression}{options} WHERE "
-                                    f"{where}{COLUMN} = {state}")
-                cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                cur.execute(f"ALTER INDEX {name}_h0 RENAME TO {name}")
-                # Yield between indexes. A restart resumes from the valid ones.
-                return False
-            for table, (keys, _) in TABLES.items():
-                queue = f"idx_{table}_history_pending"
-                if not _valid(cur, queue):
-                    cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {queue}")
-                    cur.execute(f"CREATE INDEX CONCURRENTLY {queue} ON {table} ({keys}) "
-                                f"WHERE {COLUMN} = 1")
-            with get_db() as db:
-                db.cursor().execute("INSERT INTO system_settings(key,value) VALUES (%s,'ready') "
-                                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (KEY,))
-            return True
-    finally:
-        conn.close()  # Also releases the session advisory lock.
+    with _online_cursor() as cur:
+        if cur is None:
+            return False
+        cur.execute("SET lock_timeout = '250ms'")
+        cur.execute("SET statement_timeout = '15min'")
+        cur.execute("CREATE TABLE IF NOT EXISTS history_index_migrations "
+                    "(name text PRIMARY KEY, tail text NOT NULL)")
+        for table in TABLES:
+            cur.execute("SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass(%s) "
+                        "AND attname=%s AND NOT attisdropped", (table, COLUMN))
+            if cur.fetchone():
+                continue
+            # PostgreSQL 11+ constant defaults are metadata-only, even on
+            # large tables. Change to the transaction setting afterwards.
+            cur.execute("BEGIN")
+            try:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+                            f"{COLUMN} smallint NOT NULL DEFAULT 0")
+                cur.execute(f"ALTER TABLE {table} ALTER COLUMN {COLUMN} SET DEFAULT {_DEFAULT}")
+                cur.execute("COMMIT")
+            except BaseException:
+                cur.execute("ROLLBACK")
+                raise
+        cur.execute(f"""
+            CREATE OR REPLACE FUNCTION history_index_on_update() RETURNS trigger
+            LANGUAGE plpgsql AS $fn$
+            BEGIN
+                IF COALESCE(current_setting('{SETTING}', true), '') NOT IN ('1','2') THEN
+                    NEW.{COLUMN} := 0;
+                END IF;
+                RETURN NEW;
+            END
+            $fn$
+        """)
+        for table in TABLES:
+            trigger = f"trg_{table}_history_live_update"
+            cur.execute("SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(%s) "
+                        "AND tgname=%s AND NOT tgisinternal", (table, trigger))
+            if not cur.fetchone():
+                cur.execute(f"CREATE TRIGGER {trigger} BEFORE UPDATE ON {table} "
+                            "FOR EACH ROW EXECUTE FUNCTION history_index_on_update()")
+        cur.execute("INSERT INTO system_settings(key,value) VALUES (%s,'building') "
+                    "ON CONFLICT (key) DO NOTHING", (KEY,))
+        for name in INDEXES:
+            cur.execute("SELECT pg_get_indexdef(indexrelid) AS ddl, "
+                        "pg_get_expr(indpred, indrelid) AS pred FROM pg_index "
+                        "WHERE indexrelid = to_regclass(%s)", (name,))
+            row = cur.fetchone()
+            partial = bool(row and COLUMN in (row["pred"] or ""))
+            if partial and _valid(cur, name) and _valid(cur, name + "_h2"):
+                cur.execute("SELECT reloptions FROM pg_class WHERE oid=to_regclass(%s)",
+                            (name + "_h2",))
+                options = cur.fetchone()["reloptions"] or []
+                wanted = {"fastupdate=on", "gin_pending_list_limit=1024"}
+                if not wanted.issubset(options):
+                    cur.execute(f"ALTER INDEX {name}_h2 SET "
+                                "(fastupdate=on, gin_pending_list_limit=1024)")
+                continue
+            if row and not partial:
+                tail = row["ddl"].split(" USING gin ", 1)[1]
+                cur.execute("INSERT INTO history_index_migrations(name, tail) VALUES (%s,%s) "
+                            "ON CONFLICT DO NOTHING", (name, tail))
+            cur.execute("SELECT tail FROM history_index_migrations WHERE name=%s", (name,))
+            saved = cur.fetchone()
+            if not saved:
+                continue  # Optional index was never installed.
+            tail = saved["tail"]
+            # PostgreSQL supplies this expression/predicate, not external input.
+            expression, sep, original_predicate = tail.partition(" WHERE ")
+            expression, has_options, original_options = expression.partition(" WITH ")
+            table = next(t for t in TABLES if (
+                (t == "fluid_session_nodes" and "fluid" in name)
+                or (t == "session_store_entries" and "sse" in name)
+                or (t == "session_recall_text" and "session_recall_text" in name)
+                or (t == "session_events" and "events" in name)
+                or (t == "session_messages" and "session_messages" in name)))
+            for state in (0, 2):
+                replacement = name + f"_h{state}"
+                if not _valid(cur, replacement):
+                    cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
+                    where = f"({original_predicate}) AND " if sep else ""
+                    if state == 2:
+                        options = " WITH (fastupdate=on, gin_pending_list_limit=1024)"
+                    else:
+                        options = " WITH " + original_options if has_options else ""
+                    cur.execute(f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
+                                f"USING gin {expression}{options} WHERE "
+                                f"{where}{COLUMN} = {state}")
+            cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+            cur.execute(f"ALTER INDEX {name}_h0 RENAME TO {name}")
+            # Yield between indexes. A restart resumes from the valid ones.
+            return False
+        for table, (keys, _) in TABLES.items():
+            queue = f"idx_{table}_history_pending"
+            if not _valid(cur, queue):
+                cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {queue}")
+                cur.execute(f"CREATE INDEX CONCURRENTLY {queue} ON {table} ({keys}) "
+                            f"WHERE {COLUMN} = 1")
+        cur.execute("INSERT INTO system_settings(key,value) VALUES (%s,'ready') "
+                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (KEY,))
+        return True
 
 
 def promote_batch(*, rows: int = 8, byte_budget: int = 128_000) -> int:
@@ -249,7 +274,15 @@ def run_pass(
     *, seconds: float = 5.0, pause: float = 0.05, can_work: Callable[[], bool] = lambda: True,
 ) -> bool:
     """Yield between batches when a foreground turn needs the worker's I/O."""
-    if not can_work() or not migrate():
+    if not can_work():
+        return False
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM system_settings WHERE key=%s "
+                    "AND value IN ('building','ready')", (KEY,))
+        if not cur.fetchone():
+            return True  # Experimental: no online DDL or deferral without opt-in.
+    if not migrate():
         return False
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
