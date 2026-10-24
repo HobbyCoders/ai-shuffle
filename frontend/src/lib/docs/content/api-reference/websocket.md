@@ -84,7 +84,7 @@ Other devices watching the same session receive the same control frames. Content
 | `remove_queued_message` | Request withdrawal of one queued message; keep it visible until `queued_message_removal` confirms withdrawal | `session_id`, `client_message_id` (preferred), or legacy `message_id` |
 | `clear_queued_messages` | Remove every queued message for the session | `session_id` |
 | `load_session` | Load/switch to a session and receive its history | `session_id` |
-| `watch_session` | Follow a session without loading its history. The server sends its queue, if any, as a `sync` frame | `session_id` |
+| `watch_session` | Follow a session without loading its history. The server answers with one `sync` `queue_updated` frame for it (see Message Queue below); send it again to retry when that frame says `queue_status: "unavailable"` | `session_id` |
 | `close_session` | Stop following the current session; replies `session_closed` (with a null `session_id` when none was selected) | — |
 | `stop` | Stop the current turn, its background work and queued messages | `session_id`, `turn_id` (optional) |
 | `permission_response` | Approve, deny or defer a tool use | `request_id`, `session_id`, `decision`, `remember`, `pattern` |
@@ -164,11 +164,33 @@ A `query` sent while a turn is running is queued and answered with `query_queued
   "session_id": "sess_abc123",
   "data": {
     "queued_messages": [
-      { "id": "turn_789", "session_id": "sess_abc123", "content": "Also update the tests", "profile_id": "your-agent-id", "project_id": "my-project", "position": 0, "created_at": "2025-01-15T10:36:00Z" }
+      { "id": "turn_789", "session_id": "sess_abc123", "content": "Also update the tests", "profile_id": "your-agent-id", "project_id": "my-project", "position": 0, "created_at": "2025-01-15T10:36:00Z", "client_message_id": "client-0123456789abcdef0123456789abcdef", "command_id": "client-0123456789abcdef0123456789abcdef" }
     ]
   }
 }
 ```
+
+The frame that answers `watch_session` (sent when a client opens a session or reconnects) also says whether the queue could be read, and from where:
+
+```json
+{
+  "type": "sync",
+  "event_type": "queue_updated",
+  "session_id": "sess_abc123",
+  "data": {
+    "queue_status": "available",
+    "queue_owner_device_id": "remote-owner-id",
+    "queued_messages": [],
+    "pending_peer_messages": []
+  }
+}
+```
+
+- `queue_status: "available"` — the arrays are the queue as the device that runs the session holds it. For a session that runs on another device, the queue is read from that device, so a message sent from here stays visible after switching chats and back. `queue_owner_device_id` names that device, or is `null` when the session runs here.
+- `queue_status: "unavailable"` — the queue could not be read (the owning device is offline, the read failed, or the session is moving between devices). **Both arrays are omitted.** This is not an empty queue: keep the messages you already show, mark them as unconfirmed, and send `watch_session` again to retry. The web and mobile apps keep each chat's pending messages when you switch away, show them again at once when you come back, and retry with backoff (2, 4, 8, 16, then every 30 seconds) while the chat is open.
+- Queue frames sent after a change (a send, a removal) have no `queue_status`; treat them as available.
+
+Optional `command_id` and `client_message_id` on a row carry the `client_message_id` its `query` was sent with. Match rows by that identity, not by text: two queued messages can have the same words. A message leaves the queue when it is delivered (its `message.user` in the event feed carries the same `command_id`) or withdrawn. An `unavailable` frame says nothing either way.
 
 Generate a fresh `client_message_id` (`client-` plus 32 lowercase hexadecimal random digits) for each `query`. It is stored as the turn command id, echoed in queue rows and cancellation replies, and carried through engine steering and delivery receipts. Cancel using the same identity and `session_id`, even before a queue acknowledgement arrives; no expiring local-id map or text matching is needed. Legacy callers may still name `message_id`. Keep the chip in a cancelling state until `verdict: "withdrawn"`, then remove it and restore its draft. If delivery wins, `verdict: "already_delivered"` leaves the chip marked sent and shows the warning; it must not restore the draft. A missing/error reply is not proof of withdrawal. `clear_queued_messages` requests removal of all queued messages. There is no guaranteed undo interval. Cancellation transactions survive switching chats within the tab: a late withdrawal verdict restores text only when its own chat is open again. Held-message withdrawals have a content-free `queued_message.withdrawn` receipt in the session event log, so retrying either identity still reports withdrawal after the move row is deleted; a missing held row alone is not evidence of delivery.
 

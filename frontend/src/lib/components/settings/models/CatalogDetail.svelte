@@ -1,121 +1,102 @@
 <script lang="ts">
 	/**
-	 * CatalogDetail: every fal.ai model the catalog knows. Search across name,
-	 * description, id and tags; category chips; Refresh re-pulls the catalog
-	 * from fal.ai. Picking an image, video, audio or 3D generation model makes
-	 * it the remembered choice for that kind; any other model is pinned for
-	 * the tool fal.ai files it under. A model no tool uses is greyed out.
+	 * CatalogDetail: the generation catalog (#379).
+	 *
+	 *   All accounts: every connected account on every worker (fal.ai, ChatGPT
+	 *   and SuperGrok plans, OpenAI/xAI API keys), verified or not, with its
+	 *   status, live price and holding worker, plus one optional favourite per
+	 *   kind (a bookmark, apart from the remembered choice).
+	 *   fal.ai models: the full fal.ai list; picking remembers a generation
+	 *   model or pins a model for a media transform tool.
 	 */
+	import { onMount } from 'svelte';
 	import { RefreshCw } from 'lucide-svelte';
 	import { catalogStore } from '$lib/stores/catalog';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
-	import { CATEGORY_LABELS, type CatalogModel } from '$lib/types/ai-models';
+	import { generationChoices } from '$lib/stores/generation-choices.svelte';
+	import { modelLabel } from '$lib/utils/generation-choice';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import type { Fact } from '../shell/FactsStrip.svelte';
-	import RowGroup from '../rows/RowGroup.svelte';
+	import type { DetailTab } from '../shell/DetailTabs.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
-	import ModelOption from './ModelOption.svelte';
-	import SearchBox from './SearchBox.svelte';
-	import { ALL_TOOLS, GENERATION_TOOL_KIND, toolMeta } from './media-tools.svelte';
-	import { generationChoices } from '$lib/stores/generation-choices.svelte';
-	import { KIND_LABEL } from '$lib/utils/generation-choice';
+	import { ALL_TOOLS, GENERATION_TOOL_KIND } from './media-tools.svelte';
 	import { getModelsState } from './tasks.svelte';
 	import { CATALOG_ICON } from './icons';
+	import AccountCatalog from './AccountCatalog.svelte';
+	import FalCatalog from './FalCatalog.svelte';
+	import { AccountCatalog as AccountCatalogState, accountCount } from './account-catalog.svelte';
 
-	const NO_TOOL = 'No tool uses this model';
-	const PAGE = 60;
+	const ITEM = 'catalog';
+	const TABS: DetailTab[] = [
+		{ id: 'accounts', label: 'All accounts' },
+		{ id: 'fal', label: 'fal.ai models' }
+	];
 
 	const { tools } = getModelsState();
+	const accounts = new AccountCatalogState();
+	onMount(() => accounts.start());
 
-	let query = $state('');
-	let category = $state<string | null>(null);
-	let shown = $state(PAGE);
+	const tab = $derived(settingsNav.tabOf('models', ITEM, TABS.map((t) => t.id)));
 
-	// catalogStore is a plain store; catalogVersion makes these reactive.
-	const all = $derived.by(() => {
-		void tools.catalogVersion;
-		return catalogStore.getAll();
-	});
-	const categories = $derived.by(() => {
-		void tools.catalogVersion;
-		return catalogStore.categories;
-	});
-	const size = $derived.by(() => {
+	// ── fal.ai tab (catalogStore is a plain store; catalogVersion makes it reactive) ──
+	const falSize = $derived.by(() => {
 		void tools.catalogVersion;
 		return catalogStore.catalogSize;
 	});
-	const loading = $derived.by(() => {
+	const falCategories = $derived.by(() => {
+		void tools.catalogVersion;
+		return catalogStore.categories.length;
+	});
+	const falLoading = $derived.by(() => {
 		void tools.catalogVersion;
 		return catalogStore.loading;
 	});
-	const error = $derived.by(() => {
+	const falError = $derived.by(() => {
 		void tools.catalogVersion;
 		return catalogStore.error;
 	});
-
-	const q = $derived(query.trim().toLowerCase());
-	const filtered = $derived.by(() => {
-		let result = all;
-		if (category) result = result.filter((m) => m.category === category);
-		if (q) {
-			result = result.filter(
-				(m) =>
-					m.display_name.toLowerCase().includes(q) ||
-					m.description.toLowerCase().includes(q) ||
-					m.endpoint_id.toLowerCase().includes(q) ||
-					m.tags.some((t) => t.toLowerCase().includes(q))
-			);
-		}
-		return result;
-	});
-	const page = $derived(filtered.slice(0, shown));
 	const remembered = $derived(Object.keys(generationChoices.remembered).length);
 	const pinned = $derived(ALL_TOOLS.filter((t) => !GENERATION_TOOL_KIND[t.id] && tools.modelId(t)).length);
 
-	const facts = $derived<Fact[]>([
-		{ label: 'Models', value: size ? size.toLocaleString() : null },
-		{ label: 'Remembered', value: remembered },
-		{ label: 'Pinned for tools', value: pinned },
-		{ label: 'Categories', value: categories.length || null }
-	]);
+	// ── All accounts tab ──
+	const entries = $derived(accounts.entries ?? []);
+	const ready = $derived(entries.filter((e) => e.status === 'available').length);
+	const workers = $derived(new Set(entries.map((e) => e.worker)).size);
+	const favourite = $derived(generationChoices.favourites[accounts.kind]);
 
-	// A new filter starts from the first page again.
-	$effect(() => {
-		void q;
-		void category;
-		shown = PAGE;
-	});
+	const facts = $derived<Fact[]>(
+		tab === 'fal'
+			? [
+					{ label: 'Models', value: falSize ? falSize.toLocaleString() : null },
+					{ label: 'Remembered', value: remembered },
+					{ label: 'Pinned for tools', value: pinned },
+					{ label: 'Categories', value: falCategories || null }
+				]
+			: [
+					{ label: 'Accounts', value: accounts.entries ? accountCount(entries) : null },
+					{ label: 'Workers', value: accounts.entries ? workers : null },
+					{ label: 'Ready', value: accounts.entries ? `${ready} of ${entries.length}` : null },
+					{ label: 'Favourite', value: favourite ? modelLabel(favourite.model) : 'None' }
+				]
+	);
 
-	function categoryLabel(value: string): string {
-		return CATEGORY_LABELS[value] ?? value;
-	}
+	const busy = $derived(tab === 'fal' ? falLoading : accounts.loading);
+	const failed = $derived(tab === 'fal' ? !!falError : !!accounts.error);
 
-	function rowMeta(model: CatalogModel): { text?: string; badge: boolean } {
-		const tool = tools.toolForCatalogModel(model);
-		if (tools.isDefault(model.endpoint_id)) {
-			return { text: tool && GENERATION_TOOL_KIND[tool.id] ? 'Remembered' : 'Pinned', badge: true };
-		}
-		if (!tools.toolForCatalogModel(model)) return { text: 'No tool uses this', badge: false };
-		return { badge: false };
-	}
-
-	function rowTitle(model: CatalogModel): string {
-		const tool = tools.toolForCatalogModel(model);
-		if (!tool) return `${model.endpoint_id}: ${NO_TOOL}`;
-		const kind = GENERATION_TOOL_KIND[tool.id];
-		if (kind) return `${model.endpoint_id}: remember for ${KIND_LABEL[kind].plural}`;
-		return `${model.endpoint_id}: pin for ${toolMeta(tool).name.toLowerCase()}`;
+	function refresh() {
+		if (tab === 'fal') void catalogStore.refresh();
+		else void accounts.load();
 	}
 </script>
 
 {#snippet primary()}
-	<button type="button" class="st-btn" disabled={loading} onclick={() => catalogStore.refresh()}>
-		<RefreshCw class={loading ? 'spin' : ''} />Refresh
+	<button type="button" class="st-btn" disabled={busy} onclick={refresh}>
+		<RefreshCw class={busy ? 'spin' : ''} />Refresh
 	</button>
 {/snippet}
 
 {#snippet banner()}
-	{#if tools.falEnabled === false}
+	{#if tab === 'fal' && tools.falEnabled === false}
 		<InlineBanner tone="warn">
 			fal.ai is off, so these models cannot run.
 			{#snippet actions()}
@@ -128,115 +109,29 @@
 {/snippet}
 
 <DetailPane
-	name="All fal.ai models"
+	name="Generation catalog"
 	icon={CATALOG_ICON}
-	status={loading ? 'busy' : error ? 'err' : 'ok'}
-	statusText={loading ? 'Refreshing' : error ? 'Could not load' : 'Synced'}
+	status={busy ? 'busy' : failed ? 'err' : 'ok'}
+	statusText={busy ? 'Refreshing' : failed ? 'Could not load' : 'Synced'}
 	badge="Catalog"
-	subtitle="Pick to remember or pin a model"
+	subtitle={tab === 'fal' ? 'Pick to remember or pin a model' : 'Every account, on every worker'}
+	tabs={TABS}
 	{primary}
 	{facts}
 	{banner}
 	category="models"
-	item="catalog"
+	item={ITEM}
 >
-	{#if error}
-		<InlineBanner tone="warn">
-			{error}
-			{#snippet actions()}
-				<button type="button" class="st-btn sm" onclick={() => catalogStore.load(true)}>Retry</button>
-			{/snippet}
-		</InlineBanner>
-	{/if}
-	<RowGroup title="Browse" count={category || q ? `${filtered.length.toLocaleString()} shown` : undefined} bare>
-		<SearchBox bind:value={query} placeholder="Search {size.toLocaleString()} models" label="Search catalog" />
-		<div class="chips" role="group" aria-label="Category">
-			<button type="button" class="chip" aria-pressed={category === null} onclick={() => (category = null)}>
-				All {size.toLocaleString()}
-			</button>
-			{#each categories as cat (cat.category)}
-				<button
-					type="button"
-					class="chip"
-					aria-pressed={category === cat.category}
-					onclick={() => (category = category === cat.category ? null : cat.category)}
-				>
-					{categoryLabel(cat.category)} {cat.count.toLocaleString()}
-				</button>
-			{/each}
-		</div>
-		{#if page.length}
-			<div class="st-mopts">
-				{#each page as model (model.endpoint_id)}
-					{@const meta = rowMeta(model)}
-					<ModelOption
-						name={model.display_name}
-						id={model.endpoint_id}
-						kind={categoryLabel(model.category)}
-						meta={meta.text}
-						metaBadge={meta.badge}
-						pressed={tools.isDefault(model.endpoint_id)}
-						unusable={!tools.toolForCatalogModel(model)}
-						disabled={tools.saving !== null}
-						title={rowTitle(model)}
-						onpick={() => tools.selectFromCatalog(model)}
-					/>
-				{/each}
-			</div>
-			{#if filtered.length > shown}
-				<button type="button" class="st-btn ghost sm more" onclick={() => (shown += PAGE)}>
-					Show {Math.min(PAGE, filtered.length - shown)} more of {filtered.length.toLocaleString()}
-				</button>
-			{/if}
-		{:else if loading}
-			<p class="empty">Loading the catalog…</p>
-		{:else if q || category}
-			<p class="empty">No models match. Clear the search or pick another category.</p>
+	{#snippet children(current)}
+		{#if current === 'fal'}
+			<FalCatalog />
 		{:else}
-			<p class="empty">The catalog is empty. Refresh to fetch it from fal.ai.</p>
+			<AccountCatalog catalog={accounts} />
 		{/if}
-	</RowGroup>
+	{/snippet}
 </DetailPane>
 
 <style>
-	.chips {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-		margin: 10px 0 12px;
-	}
-	.chip {
-		font-size: 12.5px;
-		padding: 3px 10px;
-		border-radius: 999px;
-		border: 1px solid var(--st-border-strong);
-		color: var(--st-mfg);
-		background: none;
-		font-variant-numeric: tabular-nums;
-	}
-	.chip:hover:not([aria-pressed='true']) {
-		color: var(--st-fg);
-	}
-	.chip[aria-pressed='true'] {
-		background: var(--st-fg);
-		color: var(--st-bg);
-		border-color: transparent;
-	}
-	.st-mopts {
-		background: var(--st-card);
-		border: 1px solid var(--st-border);
-		border-radius: var(--st-radius);
-		overflow: hidden;
-	}
-	.empty {
-		margin: 0;
-		padding: 16px 2px;
-		font-size: 13px;
-		color: var(--st-mfg);
-	}
-	.more {
-		margin-top: 6px;
-	}
 	:global(.settings-shell svg.lucide.spin) {
 		animation: st-models-spin 0.9s linear infinite;
 	}

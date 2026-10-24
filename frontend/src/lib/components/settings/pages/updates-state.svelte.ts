@@ -8,18 +8,27 @@
  *
  * A check posts `{action: 'check'}`, then polls the workers every 2 s for up
  * to 90 s. A worker that still has the request queued (`request_pending`)
- * or is "checking" is not settled; otherwise it counts as settled once it has
- * left "checking" after being seen in it, reports an outcome (available,
- * ready, error...), or has stayed idle for 10 s (a check that finished before
- * the first poll). Workers that refused the request show the reason they
- * gave. The sidebar update button re-reads when the check is sent and when
- * it ends.
+ * or is "checking" is not settled, even one that refused the request
+ * because its own check was already running (the sidebar's rule, #519);
+ * otherwise it counts as settled once it has left "checking" after being
+ * seen in it, reports an outcome (available, ready, error...), or has stayed
+ * idle for 10 s (a check that finished before the first poll). A worker that
+ * refused because a check or download was already running then shows its
+ * own result; other refusals show the reason given. The sidebar update
+ * button re-reads when the check is sent and when it ends.
  */
 import { api, getErrorMessage } from '$lib/api/client';
 import { isForbidden } from '$lib/settings/access.svelte';
 import { flashSaved } from '$lib/settings/save-status.svelte';
 import type { StatusTone } from '$lib/settings/types';
 import { INSTALLER_LINK, installerHint } from './update-remedy';
+import {
+	CHECK_IDLE_SETTLE_MS,
+	CHECK_POLL_MS,
+	CHECK_TIMEOUT_MS,
+	IN_PROGRESS_REASON,
+	OUTCOME_PHASES
+} from './update-check';
 import { waitingSummary, waitingView, type WaitingFields } from './update-waiting';
 
 export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_URL, installerHint } from './update-remedy';
@@ -135,13 +144,8 @@ interface Snapshot extends UpdatePolicy {
 }
 
 export const POLICY_POLL_MS = 5_000;
-export const CHECK_POLL_MS = 2_000;
-export const CHECK_TIMEOUT_MS = 90_000;
-/** An idle worker this long after the request has finished (or never started) its check. */
-export const CHECK_IDLE_SETTLE_MS = 10_000;
+export { CHECK_IDLE_SETTLE_MS, CHECK_POLL_MS, CHECK_TIMEOUT_MS } from './update-check';
 export const POLICY_EVENT = 'application-update-policy';
-
-const OUTCOME_PHASES = new Set(['available', 'ready', 'error', 'image-required', 'unsupported', 'downloading']);
 
 export class UpdatesState {
 	policy = $state<UpdatePolicy | null>(null);
@@ -219,7 +223,13 @@ export class UpdatesState {
 			this.rows = null;
 			return;
 		}
-		const seenChecking = new Set<string>();
+		// A worker that refused because its own check or download was running has
+		// started: its result, not the refusal, answers this check.
+		const seenChecking = new Set<string>(
+			receipts
+				.filter((r) => r.accepted === false && r.reason === IN_PROGRESS_REASON && r.device_id)
+				.map((r) => r.device_id!)
+		);
 		const poll = async () => {
 			if (!this.#alive || run !== this.#run) return;
 			let snapshot: Snapshot | null = null;
@@ -257,17 +267,19 @@ export class UpdatesState {
 						continue;
 					}
 					// Queued counts as started: once it is neither queued nor checking, the check ran.
-					if (worker.phase === 'checking' || worker.request_pending) seenChecking.add(worker.device_id);
-					const refused = receipt?.accepted === false || !worker.online;
+					const busy = worker.online && (worker.phase === 'checking' || !!worker.request_pending);
+					if (busy) seenChecking.add(worker.device_id);
+					// A refusal from a worker seen checking is not its answer; its own check is.
+					const own = receipt?.accepted === false && seenChecking.has(worker.device_id) ? undefined : receipt;
+					const refused = own?.accepted === false || !worker.online;
 					const done =
-						refused ||
-						(worker.phase !== 'checking' &&
-							!worker.request_pending &&
-							(seenChecking.has(worker.device_id) ||
-								OUTCOME_PHASES.has(worker.phase) ||
-								elapsed >= CHECK_IDLE_SETTLE_MS));
+						!busy &&
+						(refused ||
+							seenChecking.has(worker.device_id) ||
+							OUTCOME_PHASES.has(worker.phase) ||
+							elapsed >= CHECK_IDLE_SETTLE_MS);
 					if (!done) settled = false;
-					const view = done ? describeWorker(worker, receipt) : { tone: 'busy' as const, text: 'Checking' };
+					const view = done ? describeWorker(worker, own) : { tone: 'busy' as const, text: 'Checking' };
 					const hint = done ? (installerHint(worker) ?? imageHint(worker)) : undefined;
 					const link = done && installerHint(worker) ? INSTALLER_LINK : undefined;
 					rows.push({ id, name, ...view, ...(hint ? { hint } : {}), ...(link ? { link } : {}) });

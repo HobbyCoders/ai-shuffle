@@ -13,6 +13,7 @@
 	 *
 	 * No buttons, deliberately: the decision comes from the owner's own message.
 	 */
+	import '../deck/cards/card-design-system.css';
 	import type { ApprovalCardData, ApprovalStatus } from '$lib/utils/assistant-confirm';
 
 	interface Props {
@@ -29,6 +30,16 @@
 		declined: 'Declined',
 		expired: 'Expired',
 		cancelled: 'Cancelled'
+	};
+
+	// Shared card badges: the waiting request reads in the theme's primary,
+	// an authorized one in success, and the rest stay neutral.
+	const BADGE: Record<ApprovalStatus, string> = {
+		pending: 'card-badge--muted',
+		approved: 'card-badge--success',
+		declined: 'card-badge--muted',
+		expired: 'card-badge--muted',
+		cancelled: 'card-badge--muted'
 	};
 
 	const status = $derived<ApprovalStatus>(data.status in STATUS ? data.status : 'pending');
@@ -53,7 +64,7 @@
 </script>
 
 <div
-	class="approval"
+	class="approval card-system"
 	class:is-active={waiting && active}
 	data-status={status}
 	data-approval-card={data.request_id}
@@ -61,108 +72,91 @@
 	role="group"
 	aria-label="Approval request"
 >
-	<span class="rail" aria-hidden="true"></span>
-	<div class="body">
-		<div class="head">
-			<span class="kicker">
-				<svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-					<path d="M8 1.5 2.75 3.6v4.1c0 3.2 2.2 5.6 5.25 6.8 3.05-1.2 5.25-3.6 5.25-6.8V3.6L8 1.5Z" />
-				</svg>
-				{#if data.asker}
-					<span class="asker" title={data.asker}>{data.asker}</span>
-				{:else}
-					<span class="asker">Approval needed</span>
-				{/if}
-			</span>
-			{#if data.attempt > 1}
-				<span class="retry" title="An earlier request asked the same thing; this is a new request">
-					Asked again · {ordinal(data.attempt)} request
-				</span>
+	<div class="head">
+		<span class="kicker">
+			<svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+				<path d="M8 1.5 2.75 3.6v4.1c0 3.2 2.2 5.6 5.25 6.8 3.05-1.2 5.25-3.6 5.25-6.8V3.6L8 1.5Z" />
+			</svg>
+			{#if data.asker}
+				<span class="asker" title={data.asker}>{data.asker}</span>
+			{:else}
+				<span class="asker">Approval needed</span>
 			{/if}
-			<span class="status" data-testid="approval-status">
-				{#if waiting && active}<span class="pulse" aria-hidden="true"></span>{/if}
-				{label}
+		</span>
+		{#if data.attempt > 1}
+			<span class="retry card-badge card-badge--muted" title="An earlier request asked the same thing; this is a new request">
+				Asked again · {ordinal(data.attempt)} request
 			</span>
-		</div>
-
-		{#if actionParts.length > 0}
-			<p class="action">
-				<span class="verb">Wants to</span>
-				{#each actionParts as part, i (i)}
-					{#if part.code}<code>{part.text}</code>{:else}{part.text}{/if}
-				{/each}
-			</p>
-		{:else}
-			<p class="action question">{data.question}</p>
 		{/if}
-
-		{#if waiting && active}
-			<p class="hint">Reply <strong>yes</strong> or <strong>no</strong> in the message box.</p>
-		{:else if waiting}
-			<p class="hint">Asked after the request before it. Answer that one first.</p>
-		{/if}
+		<span class="status card-badge {waiting && active ? 'card-badge--primary' : BADGE[status]}" data-testid="approval-status">
+			{#if waiting && active}<span class="pulse" aria-hidden="true"></span>{/if}
+			{label}
+		</span>
 	</div>
+
+	{#if actionParts.length > 0}
+		<p class="action">
+			<span class="verb">Wants to</span>
+			{#each actionParts as part, i (i)}
+				{#if part.code}<code>{part.text}</code>{:else}{part.text}{/if}
+			{/each}
+		</p>
+	{:else}
+		<p class="action question">{data.question}</p>
+	{/if}
+
+	{#if waiting && active}
+		<p class="hint">Reply <strong>yes</strong> or <strong>no</strong> in the message box. Other messages go to the agent and leave this open.</p>
+	{:else if waiting}
+		<p class="hint">Asked after the request before it. Answer that one first.</p>
+	{/if}
 </div>
 
 <style>
+	/* The chat's card language (QuestionTray, the private-access cards): one
+	   neutral surface on the theme radius, a sentence-case card badge for the
+	   state, and no colour wash. The request waiting for the owner's reply
+	   carries the strong border, as a picked option does. */
 	.approval {
-		--approval-tone: var(--muted-foreground);
-		position: relative;
 		display: flex;
+		flex-direction: column;
+		gap: 0.375rem;
 		width: 100%;
 		max-width: 640px;
 		min-width: 0;
+		padding: 0.75rem;
 		border: 1px solid var(--border);
-		border-radius: 12px;
+		border-radius: var(--radius, 10px);
 		background: var(--card);
 		color: var(--card-foreground, var(--foreground));
-		overflow: hidden;
-		transition: border-color 0.25s ease-out, opacity 0.25s ease-out, background-color 0.25s ease-out;
+		transition: border-color 0.2s ease-out, background-color 0.2s ease-out;
 	}
 
-	.approval[data-status='pending'] { --approval-tone: var(--warning); }
-	.approval[data-status='approved'] { --approval-tone: var(--success); }
-	.approval[data-status='declined'] { --approval-tone: var(--destructive); }
-
 	.approval.is-active {
-		border-color: color-mix(in oklch, var(--warning) 45%, var(--border));
-		background: color-mix(in oklch, var(--warning) 5%, var(--card));
+		border-color: var(--border-strong, var(--border));
 	}
 
 	/* A settled request steps back so the one waiting stands out. */
-	.approval:not([data-status='pending']) { opacity: 0.88; }
-
-	.rail {
-		flex: 0 0 3px;
-		background: var(--approval-tone);
-	}
-
-	.body {
-		flex: 1 1 auto;
-		min-width: 0;
-		padding: 10px 14px 11px;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
+	.approval:not([data-status='pending']) {
+		background: transparent;
 	}
 
 	.head {
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
-		gap: 6px 10px;
+		gap: 0.375rem 0.5rem;
 		min-width: 0;
 	}
 
 	.kicker {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
+		gap: 0.375rem;
 		min-width: 0;
 		flex: 1 1 auto;
-		font-size: 12px;
-		font-weight: 600;
-		letter-spacing: 0.01em;
+		font-size: 0.75rem;
+		font-weight: 500;
 		color: var(--muted-foreground);
 	}
 
@@ -171,7 +165,7 @@
 		height: 14px;
 		flex: 0 0 auto;
 		fill: none;
-		stroke: var(--approval-tone);
+		stroke: currentColor;
 		stroke-width: 1.5;
 		stroke-linejoin: round;
 	}
@@ -183,36 +177,12 @@
 		white-space: nowrap;
 	}
 
-	.retry {
-		font-size: 11px;
-		font-weight: 600;
-		padding: 1px 8px;
-		border-radius: 999px;
-		border: 1px dashed color-mix(in oklch, var(--primary) 55%, var(--border));
-		color: var(--primary);
-		white-space: nowrap;
+	.card-badge {
+		padding: 1px 6px;
 	}
 
 	.status {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
 		margin-left: auto;
-		font-size: 11px;
-		font-weight: 700;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		padding: 2px 8px;
-		border-radius: 999px;
-		color: var(--approval-tone);
-		background: color-mix(in oklch, var(--approval-tone) 13%, transparent);
-		white-space: nowrap;
-	}
-
-	.approval[data-status='expired'] .status,
-	.approval[data-status='cancelled'] .status {
-		color: var(--muted-foreground);
-		background: var(--muted);
 	}
 
 	.pulse {
@@ -224,40 +194,41 @@
 	}
 
 	@keyframes approval-pulse {
-		0%, 100% { opacity: 1; transform: scale(1); }
-		50% { opacity: 0.35; transform: scale(0.7); }
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.35; }
 	}
 
 	.action {
 		margin: 0;
-		font-size: 14px;
-		line-height: 1.55;
+		font-size: 0.875rem;
+		line-height: 1.5;
+		font-weight: 500;
 		overflow-wrap: anywhere;
 	}
 
-	.verb { color: var(--muted-foreground); }
+	.approval:not([data-status='pending']) .action {
+		font-weight: 400;
+		color: var(--muted-foreground);
+	}
+
+	.verb { color: var(--muted-foreground); font-weight: 400; }
 
 	.action code {
 		font-family: var(--font-mono);
-		font-size: 12.5px;
-		padding: 1px 6px;
-		border-radius: 6px;
+		font-size: 0.75rem;
+		padding: 1px 5px;
+		border-radius: calc(var(--radius, 10px) - 6px);
 		background: var(--muted);
-		border: 1px solid var(--border-subtle, var(--border));
+		color: var(--foreground);
 	}
 
 	.hint {
 		margin: 0;
-		font-size: 12.5px;
+		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 	}
 
 	.hint strong { color: var(--foreground); font-weight: 600; }
-
-	@media (max-width: 480px) {
-		.body { padding: 9px 12px 10px; }
-		.status { margin-left: 0; }
-	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.approval { transition: none; }

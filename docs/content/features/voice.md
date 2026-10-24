@@ -50,7 +50,7 @@ You can call any of your chats at any time, even while its agent is busy. Only a
 
 - **Ask for status**, such as "what are you working on?" or "is it done yet?". It answers from the app's task list.
 - **Finished jobs** are mentioned at the next pause.
-- **Approvals:** when work needs your permission, the agent asks one plain question, and you can answer it out loud or by typing. Only a clear yes approves and a clear no declines. An unclear answer is asked once more, then declined.
+- **Approvals:** when work needs your permission, the agent asks one plain question, and you can answer it out loud or by typing. Only a clear yes approves and a clear no declines. An unclear spoken answer is asked once more, then declined. A typed message that is not a clear yes or no never answers: it goes to the agent as an ordinary message and the request stays open.
 - **Secrets stay on screen.** Private access requests are answered on screen, and the agent tells you when that is needed.
 
 ## Background noise

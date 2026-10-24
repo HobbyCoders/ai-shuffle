@@ -968,7 +968,10 @@ export const feedController: FeedController = {
 						currentSessionId,
 						typeof ev.content === 'string' ? ev.content : '',
 						typeof ev.turn_id === 'string' && ev.turn_id ? ev.turn_id : undefined,
-						caughtUp
+						caughtUp,
+						// The bubble's own command handle: retires it exactly, history included (#524).
+						typeof ev.command_id === 'string' && ev.command_id ? ev.command_id : undefined,
+						typeof ev.created_at === 'string' ? ev.created_at : undefined
 					);
 				}
 				seedOptimistic();

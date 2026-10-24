@@ -2,7 +2,7 @@
 	/**
 	 * RunningTasksList — the chat's running background work in one list (#1816).
 	 *
-	 * Agents (subagents and swarms) and Shell tasks, grouped. A swarm is ONE row
+	 * Agents (subagents and swarms), Shell tasks and Watches, grouped. A swarm is ONE row
 	 * that expands to its member tasks, each with its own state, transcript and
 	 * stop, plus a stop for the whole swarm. Agent rows open the subagent's chat.
 	 *
@@ -16,7 +16,13 @@
 	 * that names how many it stops. `onClose` is called by Back, Escape and the
 	 * scrim; the caller unmounts it.
 	 *
-	 * Reads the session store's activeTasks and the swarms store; it keeps no
+	 * Watches (#371 step 3) are the owner's, not this chat's, so every chat
+	 * lists all of them: what each watches, when it last fired and its cost,
+	 * with Pause / Resume and Stop (terminal, so it confirms). Stop all never
+	 * stops a watch.
+	 *
+	 * Reads the session store's activeTasks, the swarms store and the watches
+	 * store; it keeps no
 	 * copy of either. Whether the inline list is collapsed is an account
 	 * preference (runningTasksOpen), the same in every chat. The only local
 	 * state is UI: filter, search, which swarms are open, stops in flight, and
@@ -30,8 +36,11 @@
 		Bot,
 		ChevronDown,
 		CircleCheck,
+		Eye,
 		LoaderCircle,
 		MessageSquareText,
+		Pause,
+		Play,
 		Search,
 		Terminal,
 		Workflow,
@@ -40,6 +49,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 	import { swarms } from '$lib/stores/swarms';
+	import { watches } from '$lib/stores/watches';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { cancelLimitResume } from '$lib/api/limit-resume';
@@ -51,20 +61,28 @@
 	import SwarmHistory from './SwarmHistory.svelte';
 	import {
 		buildRows,
+		buildWatchRows,
 		countRows,
 		countSummary,
 		formatElapsed,
+		formatFired,
+		formatWatchCost,
 		groupRows,
 		memberStateLabel,
 		plural,
 		stopAllQuestion,
 		stoppableRows,
 		visibleRows,
+		visibleWatches,
+		watchCostTitle,
+		watchCount,
+		watchSummary,
 		type RunFilter,
 		type RunRow,
 		type StoppedRecord,
 		type SwarmMemberRow,
-		type SwarmRow
+		type SwarmRow,
+		type WatchListRow
 	} from './running-tasks';
 
 	interface Props {
@@ -93,6 +111,8 @@
 	$effect(() => {
 		if (hydrationId) void swarms.hydrate(hydrationId);
 	});
+	// Keep the owner's watches fresh while this list is mounted.
+	$effect(() => watches.track());
 
 	// ── UI state ──────────────────────────────────────────────────────────────
 	let filter = $state<RunFilter>('all');
@@ -102,6 +122,11 @@
 	let expanded = $state<Record<string, boolean>>({});
 	let stopping = $state<Set<string>>(new Set());
 	let stopped = $state<Record<string, StoppedRecord>>({});
+	let confirmingWatch = $state<string | null>(null);
+	/** Watches stopped from this list: they read "Stopped" until it closes. */
+	let stoppedWatches = $state<Set<string>>(new Set());
+	/** Watch rows whose Pause or Resume is in flight. */
+	let watchBusy = $state<Set<string>>(new Set());
 	// Collapsed or open is the owner's choice for every chat, kept with the
 	// account (ui:running_tasks_open): a session switch, a remount or a task
 	// starting or ending never reopens a list they collapsed.
@@ -129,6 +154,9 @@
 		expanded = {};
 		stopping = new Set();
 		stopped = {};
+		confirmingWatch = null;
+		stoppedWatches = new Set();
+		watchBusy = new Set();
 		ownSheetOpen = false;
 	}
 
@@ -146,16 +174,42 @@
 		sessionSwarms.filter((w) => !isSwarmActive(w) && !rows.some((r) => r.type === 'swarm' && r.id === w.id)).length
 	);
 	const showFinished = $derived(finishedSwarms > 0 && filter !== 'shell' && !query.trim());
+	const watchRows = $derived(buildWatchRows($watches.list, { stopping, stoppedHere: stoppedWatches }));
+	const liveWatches = $derived(watchRows.filter((w) => w.state !== 'stopped').length);
+	const pausedWatches = $derived(watchRows.filter((w) => w.state === 'paused').length);
+	const shownWatches = $derived(visibleWatches(watchRows, filter, query));
+	/** Something to show: running work, or a watch that is not stopped. */
+	const hasContent = $derived(hasRunning || liveWatches > 0);
+	const allRowCount = $derived(rows.length + watchRows.length);
+	/** The watch list has never loaded: an empty list here is unknown, not "none". */
+	const watchesUnknown = $derived($watches.error && !$watches.fetched);
 	const inlineLineCount = $derived(
-		rows.reduce((n, r) => n + 1 + (r.type === 'swarm' && expanded[r.key] ? r.members.length : 0), 0)
+		rows.reduce((n, r) => n + 1 + (r.type === 'swarm' && expanded[r.key] ? r.members.length : 0), 0) +
+			watchRows.length
+	);
+	/** "2 agents · 1 shell task · 1 watch", or just the watches. */
+	const fullSummary = $derived(
+		[counts.running ? countSummary(counts) : '', watchSummary(watchRows)].filter(Boolean).join(' · ') ||
+			(watchesUnknown ? 'No tasks running · watches unavailable' : 'Nothing running')
+	);
+	const headLabel = $derived(counts.running ? plural(counts.running, 'running task') : watchCount(liveWatches));
+	const headSub = $derived(
+		counts.running
+			? fullSummary
+			: pausedWatches
+				? pausedWatches === liveWatches
+					? 'All paused'
+					: `${pausedWatches} paused`
+				: 'Watching for changes'
 	);
 
 	// Rows that stopped and left the running list are remembered; once nothing
 	// runs, the inline list goes away and forgets them.
 	$effect(() => {
-		if (variant === 'inline' && !hasRunning && !ownSheetOpen) {
+		if (variant === 'inline' && !hasContent && !ownSheetOpen) {
 			untrack(() => {
 				if (Object.keys(stopped).length) stopped = {};
+				if (stoppedWatches.size) stoppedWatches = new Set();
 			});
 		}
 	});
@@ -185,17 +239,22 @@
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const sheetVisible = $derived(variant === 'sheet' || ownSheetOpen);
-	const clockWanted = $derived(hasRunning && (sheetVisible || (variant === 'inline' && inlineOpen && !mobileShell)));
+	const onScreen = $derived(sheetVisible || (variant === 'inline' && inlineOpen && !mobileShell));
+	// Elapsed times tick each second; a watch's "Fired 5m ago" needs far less.
+	const tickMs = $derived(!onScreen ? 0 : hasRunning ? 1000 : watchRows.length ? 30_000 : 0);
+	let timerMs = 0;
 	$effect(() => {
-		if (clockWanted) {
-			if (timer === null) {
-				now = Date.now();
-				timer = setInterval(() => (now = Date.now()), 1000);
-			}
-		} else if (timer !== null) {
-			clearInterval(timer);
+		const ms = tickMs;
+		untrack(() => {
+			if (ms === timerMs) return;
+			if (timer !== null) clearInterval(timer);
 			timer = null;
-		}
+			timerMs = ms;
+			if (ms) {
+				now = Date.now();
+				timer = setInterval(() => (now = Date.now()), ms);
+			}
+		});
 	});
 	onDestroy(() => {
 		if (timer !== null) clearInterval(timer);
@@ -282,6 +341,45 @@
 		else void stopRow(row);
 	}
 
+	// ── Watches ───────────────────────────────────────────────────────────────
+	function markWatchBusy(key: string, on: boolean) {
+		const next = new Set(watchBusy);
+		if (on) next.add(key);
+		else next.delete(key);
+		watchBusy = next;
+	}
+
+	async function toggleWatch(row: WatchListRow) {
+		if (watchBusy.has(row.key) || !(row.canPause || row.canResume)) return;
+		const pausing = row.state === 'active';
+		markWatchBusy(row.key, true);
+		try {
+			await watches.setStatus(row.id, pausing ? 'paused' : 'active');
+		} catch {
+			notify.error(pausing ? "Couldn't pause the watch. Try again." : "Couldn't resume the watch. Try again.");
+		} finally {
+			markWatchBusy(row.key, false);
+		}
+	}
+
+	async function stopWatch(row: WatchListRow) {
+		confirmingWatch = null;
+		if (!row.canStop || stopping.has(row.key)) return;
+		markStopping(row.key, true);
+		// Kept before the stop lands, so the row reads "Stopped" instead of vanishing.
+		stoppedWatches = new Set([...stoppedWatches, row.id]);
+		try {
+			await watches.setStatus(row.id, 'stopped');
+		} catch {
+			const next = new Set(stoppedWatches);
+			next.delete(row.id);
+			stoppedWatches = next;
+			notify.error("Couldn't stop the watch. Try again.");
+		} finally {
+			markStopping(row.key, false);
+		}
+	}
+
 	function openTranscript(id: string | null) {
 		if (!id) return;
 		closeSheet();
@@ -304,6 +402,7 @@
 	function closeSheet() {
 		confirmingAll = false;
 		confirmingSwarm = null;
+		confirmingWatch = null;
 		if (variant === 'sheet') {
 			onClose?.();
 			return;
@@ -330,6 +429,7 @@
 			event.stopPropagation();
 			if (confirmingAll) confirmingAll = false;
 			else if (confirmingSwarm) confirmingSwarm = null;
+			else if (confirmingWatch) confirmingWatch = null;
 			else closeSheet();
 			return;
 		}
@@ -416,12 +516,15 @@
 		run();
 	}
 
-	const filters: { id: RunFilter; label: string }[] = [
+	// The Watches chip shows once there is a watch (or while it is chosen).
+	const filters = $derived<{ id: RunFilter; label: string }[]>([
 		{ id: 'all', label: 'All' },
 		{ id: 'agents', label: 'Agents' },
-		{ id: 'shell', label: 'Shell' }
-	];
-	const filterCount = (id: RunFilter) => (id === 'all' ? counts.running : id === 'agents' ? counts.agents : counts.shell);
+		{ id: 'shell', label: 'Shell' },
+		...(watchRows.length || filter === 'watches' ? [{ id: 'watches' as const, label: 'Watches' }] : [])
+	]);
+	const filterCount = (id: RunFilter) =>
+		id === 'all' ? counts.running + liveWatches : id === 'agents' ? counts.agents : id === 'shell' ? counts.shell : liveWatches;
 	const emptyMessage = $derived(
 		query.trim()
 			? `No task matches “${query.trim()}”`
@@ -429,8 +532,16 @@
 				? 'No shell tasks running'
 				: filter === 'agents'
 					? 'No agents running'
-					: 'Nothing running'
+					: filter === 'watches'
+						? watchesUnknown
+							? 'Your watches could not be loaded.'
+							: 'No watches. Ask any chat to watch something for you.'
+						: watchesUnknown
+							? 'No tasks running. Your watches could not be loaded.'
+							: 'Nothing running'
 	);
+	/** The all-clear tick only for a list confirmed empty. */
+	const confirmedEmpty = $derived(allRowCount === 0 && !watchesUnknown);
 </script>
 
 <!-- ── One row (task or swarm), shared by both variants ─────────────────── -->
@@ -566,6 +677,106 @@
 	</li>
 {/snippet}
 
+<!-- ── One watch: what it watches, last fired, cost; Pause / Resume, Stop ── -->
+{#snippet watchView(row: WatchListRow, size: 'compact' | 'roomy')}
+	{@const iconSize = size === 'roomy' ? 18 : 13}
+	{@const busy = watchBusy.has(row.key)}
+	{@const fired = row.state === 'stopped' ? 'Stopped' : formatFired(row.lastFiredAt, now)}
+	<li
+		class="row watch size-{size}"
+		class:is-stopped={row.state === 'stopped'}
+		class:is-stopping={row.state === 'stopping'}
+		class:is-paused={row.state === 'paused'}
+		data-row={row.key}
+		data-state={row.state}
+	>
+		<div class="row-inner">
+			<span class="row-icon kind-watch" aria-hidden="true"><Eye size={size === 'roomy' ? 16 : 13} strokeWidth={1.8} /></span>
+			<span class="watch-text">
+				<span class="row-name" title={row.name}>
+					<span class="name-text">{row.name}</span>
+					{#if row.state === 'paused'}<span class="state-chip on-name" class:roomy={size === 'roomy'}>Paused</span>{/if}
+				</span>
+				<span class="row-meta">
+					<!-- In the one-line sheet row the chip leads the meta line instead,
+					     so the name keeps its room (CSS picks one of the two). -->
+					{#if row.state === 'paused' && size === 'roomy'}<span class="state-chip on-meta">Paused</span>{/if}
+					<b
+						class="meta-time"
+						title={row.lastFiredAt ? `Last fired ${new Date(row.lastFiredAt).toLocaleString()}` : undefined}
+					>{#if fired.startsWith('Fired ')}<span class="fired-word">{'Fired '}</span>{fired.slice(6)}{:else}{fired}{/if}</b>
+					<span class="meta-worker meta-cost" title={watchCostTitle(row)}>{formatWatchCost(row.costUsd)}</span>
+				</span>
+			</span>
+			<span class="row-actions">
+				{#if row.sessionId && row.sessionId !== sessionId && row.state !== 'stopped'}
+					<button
+						type="button"
+						class="icon-btn"
+						title="Open the chat it reports to"
+						aria-label="Open the chat for watch: {row.name}"
+						onclick={() => openTranscript(row.sessionId)}
+					><MessageSquareText size={size === 'roomy' ? 18 : 14} strokeWidth={1.7} /></button>
+				{:else}
+					<span class="icon-slot" aria-hidden="true"></span>
+				{/if}
+				{#if busy}
+					<span class="icon-btn busy" role="status" aria-label="Updating {row.name}"><LoaderCircle size={size === 'roomy' ? 17 : 13} class="spin" /></span>
+				{:else if row.canPause}
+					<button type="button" class="icon-btn" title="Pause" aria-label="Pause watch: {row.name}" onclick={() => toggleWatch(row)}>
+						<Pause size={iconSize} strokeWidth={2} />
+					</button>
+				{:else if row.canResume}
+					<button type="button" class="icon-btn resume" title="Resume" aria-label="Resume watch: {row.name}" onclick={() => toggleWatch(row)}>
+						<Play size={iconSize} strokeWidth={2} />
+					</button>
+				{:else}
+					<span class="icon-slot" aria-hidden="true"></span>
+				{/if}
+				{#if row.state === 'stopping'}
+					<span class="icon-btn stop busy" role="status" aria-label="Stopping {row.name}"><LoaderCircle size={size === 'roomy' ? 17 : 13} class="spin" /></span>
+				{:else if row.canStop}
+					<button
+						type="button"
+						class="icon-btn stop"
+						title="Stop"
+						aria-label="Stop watch: {row.name}"
+						aria-expanded={confirmingWatch === row.key}
+						onclick={() => (confirmingWatch = confirmingWatch === row.key ? null : row.key)}
+					><X size={size === 'roomy' ? 18 : 13} strokeWidth={2.5} /></button>
+				{:else}
+					<span class="icon-slot" aria-hidden="true"></span>
+				{/if}
+			</span>
+		</div>
+		{#if row.reason}
+			<div class="paused-note in-row" role="status">Paused: {row.reason}</div>
+		{/if}
+		{#if confirmingWatch === row.key && row.canStop}
+			<div class="confirm in-row" role="alertdialog" aria-label="Stop watch {row.name}">
+				<span>Stop this watch for good? To watch again, ask for a new one.</span>
+				<button type="button" class="btn ghost" onclick={() => (confirmingWatch = null)}>Keep</button>
+				<button type="button" class="btn danger" onclick={() => stopWatch(row)}>Stop watch</button>
+			</div>
+		{/if}
+	</li>
+{/snippet}
+
+{#snippet watchGroup(list: WatchListRow[], size: 'compact' | 'roomy')}
+	{#if list.length}
+		<section class="group" aria-labelledby="{titleId}-watches-{size}">
+			<h3 class="group-head" id="{titleId}-watches-{size}">
+				<span>Watches</span> <span class="group-count">{list.filter((r) => r.state !== 'stopped').length}</span>
+			</h3>
+			<ul class="rows" role="list">
+				{#each list as row (row.key)}
+					{@render watchView(row, size)}
+				{/each}
+			</ul>
+		</section>
+	{/if}
+{/snippet}
+
 {#snippet groupView(label: string, list: RunRow[], size: 'compact' | 'roomy', groupId: string)}
 	{#if list.length}
 		<section class="group" aria-labelledby="{titleId}-{groupId}-{size}">
@@ -602,7 +813,7 @@
 					</button>
 					<div class="rt-title">
 						<h2 id="{titleId}-title">Running tasks</h2>
-						<p aria-live="polite">{counts.running ? `${counts.running} running · ${countSummary(counts)}` : 'Nothing running'}</p>
+						<p aria-live="polite">{counts.running ? `${counts.running} running · ${fullSummary}` : fullSummary}</p>
 					</div>
 					<button
 						type="button"
@@ -626,7 +837,7 @@
 						<button type="button" class="clear" aria-label="Clear search" onclick={() => (query = '')}><X size={14} /></button>
 					{/if}
 				</label>
-				<div class="rt-chips" role="group" aria-label="Show">
+				<div class="rt-chips" role="group" aria-label="Show" class:four={filters.length > 3}>
 					{#each filters as f (f.id)}
 						<button
 							type="button"
@@ -642,14 +853,22 @@
 				{#if swarmError && sessionSwarms.length}
 					<p class="rt-warn" role="status">Swarm status could not be refreshed. <button type="button" class="link" onclick={() => sessionId && swarms.hydrate(sessionId)}>Retry</button></p>
 				{/if}
-				{#if shown.length === 0}
+				{#if $watches.error}
+					<!-- Shown even with no rows: a failed first load must not read as "no watches". -->
+					<p class="rt-warn" role="status" data-testid="watches-error">
+						{watchesUnknown ? 'Watches could not be loaded.' : 'Watches could not be refreshed.'}
+						<button type="button" class="link" onclick={() => watches.refresh()}>Retry</button>
+					</p>
+				{/if}
+				{#if shown.length === 0 && shownWatches.length === 0}
 					<div class="rt-empty">
-						{#if rows.length === 0}<CircleCheck size={28} aria-hidden="true" />{/if}
+						{#if confirmedEmpty}<CircleCheck size={28} aria-hidden="true" />{/if}
 						<p>{emptyMessage}</p>
 					</div>
 				{:else}
 					{@render groupView('Agents', groups.agents, 'roomy', 'agents')}
 					{@render groupView('Shell', groups.shell, 'roomy', 'shell')}
+					{@render watchGroup(shownWatches, 'roomy')}
 				{/if}
 				{#if showFinished && sessionId}
 					<details class="finished">
@@ -667,13 +886,13 @@
 
 {#if variant === 'sheet'}
 	{@render sheet()}
-{:else if hasRunning}
+{:else if hasContent}
 	{#if mobileShell}
 		<!-- Phone: one summary row; the full list opens as a sheet. -->
 		<button type="button" class="summary-row" onclick={openOwnSheet} aria-haspopup="dialog"
-			aria-label="{plural(counts.running, 'running task')}: {countSummary(counts)}. Open the list">
-			<span class="pulse" aria-hidden="true"><Activity size={16} /></span>
-			<span class="summary-text"><b>{counts.running} running</b><small>{countSummary(counts)}</small></span>
+			aria-label="{headLabel}: {headSub}. Open the list">
+			<span class="pulse" class:quiet={!hasRunning} aria-hidden="true">{#if hasRunning}<Activity size={16} />{:else}<Eye size={16} />{/if}</span>
+			<span class="summary-text"><b>{counts.running ? `${counts.running} running` : headLabel}</b><small>{headSub}</small></span>
 			<span class="summary-open">Open</span>
 		</button>
 	{:else}
@@ -681,14 +900,18 @@
 			<div class="inline-head">
 				<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
 					data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>
-					<span class="spinner" aria-hidden="true"></span>
-					<span class="inline-label">{plural(counts.running, 'running task')}</span>
-					<span class="inline-sub">{countSummary(counts)}</span>
+					{#if hasRunning}
+						<span class="spinner" aria-hidden="true"></span>
+					{:else}
+						<span class="watch-mark" aria-hidden="true"><Eye size={12} strokeWidth={2} /></span>
+					{/if}
+					<span class="inline-label">{headLabel}</span>
+					<span class="inline-sub">{headSub}</span>
 					<ChevronDown size={12} class={inlineOpen ? 'inline-chev open' : 'inline-chev'} aria-hidden="true" />
 				</button>
 				{#if inlineOpen}
 					<span class="inline-tools">
-						{#if rows.length > INLINE_CAP}
+						{#if allRowCount > INLINE_CAP}
 							<button type="button" class="text-btn" onclick={openOwnSheet} aria-haspopup="dialog">Show all</button>
 						{/if}
 						{#if counts.running > 1}
@@ -708,6 +931,7 @@
 				<div class="inline-body" class:capped={inlineLineCount > INLINE_CAP}>
 					{@render groupView('Agents', inlineGroups.agents, 'compact', 'agents')}
 					{@render groupView('Shell', inlineGroups.shell, 'compact', 'shell')}
+					{@render watchGroup(watchRows, 'compact')}
 				</div>
 			{/if}
 		</div>
@@ -1073,6 +1297,10 @@
 		background: var(--card);
 		border: 1px solid var(--border-subtle, var(--border));
 	}
+	/* With Watches, columns size to their labels first: at 320px "All" gives
+	   "Watches" the room it needs instead of four equal, truncated cells. */
+	.rt-chips.four { grid-template-columns: repeat(4, minmax(max-content, 1fr)); }
+	.rt-chips.four .chip { padding: 0 4px; gap: 4px; }
 	.chip {
 		display: inline-flex;
 		align-items: center;
@@ -1176,6 +1404,97 @@
 	.member-empty { padding: 10px 12px; font-size: 0.8125rem; }
 	.size-roomy .confirm.in-row { margin: 0 12px 10px 52px; padding: 6px 6px 6px 12px; font-size: 0.8125rem; }
 	.size-roomy .confirm.in-row .btn { min-height: 40px; padding: 0 12px; }
+
+	/* ── Watches ───────────────────────────────────────────────────────────── */
+	/* Compact rows keep the task grid: name and meta are its cells. */
+	.watch-text { display: contents; }
+	.state-chip {
+		flex: none;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		line-height: 1.5;
+		padding: 0 6px;
+		border-radius: 999px;
+		/* Mixed toward the text colour so small type passes AA on light themes. */
+		color: color-mix(in oklch, var(--warning) 72%, var(--foreground));
+		background: color-mix(in oklch, var(--warning) 14%, transparent);
+	}
+	.size-compact .state-chip { font-size: 0.625rem; padding: 0 5px; }
+	.watch.is-paused .row-icon { color: var(--muted-foreground); }
+	.watch.is-paused .meta-time { color: var(--muted-foreground); font-weight: 500; }
+	.meta-cost { font-variant-numeric: tabular-nums; }
+	.icon-btn.resume { color: var(--primary); }
+	.watch-mark { display: grid; place-items: center; flex: none; width: 12px; height: 12px; color: var(--primary); }
+	.pulse.quiet { color: var(--muted-foreground); background: var(--muted); }
+	/* Roomy rows (the sheet, phones): name over "Fired 5m ago · $0.42", so
+	   three 44px actions still leave the name room at 320px. */
+	.size-roomy.watch .row-inner {
+		grid-template-columns: 28px minmax(0, 1fr) auto;
+		padding-top: 6px;
+		padding-bottom: 6px;
+	}
+	.size-roomy .watch-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+	.size-roomy.watch .row-name { min-height: 0; }
+	.size-roomy.watch .name-text {
+		white-space: normal;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+		line-height: 1.3;
+		overflow-wrap: anywhere;
+	}
+	.size-roomy.watch .row-meta { flex-direction: row; align-items: baseline; gap: 6px; max-width: none; text-align: left; }
+	.size-roomy.watch .meta-time { font-size: 0.75rem; font-weight: 500; color: var(--muted-foreground); }
+	.size-roomy.watch .row-meta .state-chip { align-self: center; }
+	.state-chip.on-name.roomy { display: none; }
+	/* The cost never truncates; "Fired 2d ago" gives way first. */
+	.size-roomy.watch .meta-cost { flex: none; max-width: none; overflow: visible; }
+	.size-roomy.watch .meta-time { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+	.size-roomy.watch .meta-cost::before { content: '·'; margin-right: 6px; opacity: 0.6; }
+	.size-roomy.watch .paused-note { margin: -2px 12px 8px 52px; }
+	/* Narrow phones: the name takes the full width (two lines); the meta line
+	   and the three 44px actions share the line under it. */
+	@media (max-width: 480px) {
+		.size-roomy.watch .row-inner {
+			grid-template-columns: 28px minmax(0, 1fr) auto;
+			grid-template-areas: 'icon name name' 'icon meta actions';
+			row-gap: 0;
+			padding-top: 8px;
+			padding-bottom: 0;
+		}
+		.size-roomy .watch-text { display: contents; }
+		.size-roomy.watch .row-icon { grid-area: icon; align-self: start; }
+		.size-roomy.watch .row-name { grid-area: name; }
+		.size-roomy.watch .row-meta { grid-area: meta; }
+		.size-roomy.watch .row-actions { grid-area: actions; }
+		.size-roomy.watch .paused-note { margin-top: 0; }
+		.state-chip.on-name.roomy { display: inline; }
+		.size-roomy.watch .row-meta .state-chip.on-meta { display: none; }
+		/* "3h ago · $1.87" fits beside three actions at 320px; screen readers
+		   still hear "Fired". */
+		.size-roomy.watch .fired-word {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+	}
+	/* A phone-width browser on the web shell: same idea for compact rows. */
+	@media (max-width: 520px) {
+		.size-compact.watch .row-inner {
+			grid-template-areas: 'icon name name' '. meta actions';
+			row-gap: 0;
+			padding-top: 2px;
+		}
+		.size-compact.watch .row-icon { grid-area: icon; }
+		.size-compact.watch .row-name { grid-area: name; }
+		.size-compact.watch .row-meta { grid-area: meta; justify-self: start; }
+		.size-compact.watch .row-actions { grid-area: actions; }
+	}
+	.watch .paused-note { color: color-mix(in oklch, var(--warning) 72%, var(--foreground)); }
 
 	/* Phone: the sheet is a full-height page. */
 	.rt-layer.mobile { align-items: stretch; justify-content: stretch; }
