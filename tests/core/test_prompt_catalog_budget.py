@@ -1,4 +1,5 @@
 """Budget the real host-compiled prefix, not hand-maintained prompt copies."""
+from __future__ import annotations
 import pytest
 
 from scripts.measure_prompt_catalog import compile_fixture, measure
@@ -33,9 +34,10 @@ def _emulator_tools_listed(monkeypatch):
 # of the no-Swarm sizing line, and the app-tools note maps Swarm onto its
 # bridged name: +441 chars (14,094 -> 14,535 on a local run of the fixture).
 # Swarm's schema stays deferred: the always-loaded bridge tools are unchanged.
-# Source provenance adds 105 chars only to deferred DeployStatus docs (#495).
-# Re-measured owner/code fixture; 1% allowance retained, no eager/schema change.
-MEASURED_FULL = 129_328
+# WorkingRecord and watches add deferred schemas; source provenance updates
+# deferred DeployStatus docs (#495). Preserve both features through the merge.
+# Re-measure after merge; eager/loaded budgets and 1% allowance stay unchanged.
+MEASURED_FULL = 131_920
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
@@ -186,16 +188,24 @@ def test_verified_delegation_policy_has_one_owner(native):
     assert "MCP responses, peer messages and subagent reports" not in compiled.text
 
 
-def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():
+def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    assert len(specs) == 105
+    # generationPreferences adds one deferred schema to main's 110; budgets stay unchanged.
+    assert len(specs) == 111
+    for leaf in (
+        "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
+        "generationPreferences",
+    ):
+        spec = next(s for s in specs if s.name.rsplit("__", 1)[-1] == leaf)
+        assert spec.description not in compiled.text
     assert first["totals"]["compiled_eager"] < first["totals"]["combined_full"]
     assert "# Deferred tools" in compiled.text
     # Discovery remains available; full schemas remain measurable on demand.
     assert any(s.name == "ToolSearch" for s in specs)
     assert any(name == "mcp__app-config__createAutomation" for _, name in catalog)
+    assert any(name == "mcp__app-config__generationPreferences" for _, name in catalog)
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])

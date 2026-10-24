@@ -18,6 +18,11 @@
 	 * confirm the cancel) is announced by the error path, not here. Switching
 	 * sessions resets what was seen so another chat's queue is never announced.
 	 *
+	 * It also says once when the queue goes unconfirmed (#524) — the executing
+	 * worker could not be read, so the chips stay but carry no verdict — and
+	 * again when it is confirmed. Opening a session that is already unconfirmed
+	 * announces it too; opening one that is fine says nothing.
+	 *
 	 * Entries are keyed by their stable client identity (`clientMessageId`),
 	 * falling back to the row id: an optimistic echo that becomes its server row
 	 * changes `id` but is the same message, and must not read as withdrawn.
@@ -28,9 +33,12 @@
 		messages: QueuedMessage[];
 		/** Session the messages belong to; a change starts a fresh baseline. */
 		sessionId?: string | null;
+		/** The executing worker could not confirm the queue (#524). */
+		stale?: boolean;
 	}
 
-	let { messages, sessionId = null }: Props = $props();
+	let { messages, sessionId = null, stale = false }: Props = $props();
+	let seenStale = false;
 
 	let announcement = $state('');
 	let seen = new Map<string, QueuedMessage['status']>();
@@ -55,21 +63,30 @@
 		return text;
 	}
 
+	function say(text: string) {
+		// The same words twice in a row must still be spoken: a trailing
+		// no-break space changes the node's text without changing the speech.
+		announcement = announcement === text ? `${text}\u00a0` : text;
+	}
+
 	$effect(() => {
 		const next = messages;
+		const unconfirmed = stale && next.length > 0;
 		if (sessionId !== seenSession) {
 			seenSession = sessionId;
 			seen = snapshot(next);
+			seenStale = false;
 			announcement = '';
-			return;
+		}
+		if (unconfirmed !== seenStale) {
+			const wasStale = seenStale;
+			seenStale = unconfirmed;
+			if (unconfirmed) say("Queued messages can't be confirmed right now. Retrying.");
+			else if (wasStale && next.length > 0) say('Queued messages confirmed.');
 		}
 		const text = describe(seen, next);
 		seen = snapshot(next);
-		if (text) {
-			// The same words twice in a row must still be spoken: a trailing
-			// no-break space changes the node's text without changing the speech.
-			announcement = announcement === text ? `${text}\u00a0` : text;
-		}
+		if (text) say(text);
 	});
 </script>
 

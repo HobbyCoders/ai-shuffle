@@ -728,14 +728,22 @@ async def _seed_searchable(mock_db):
     ("session_store_entries", "id", "created_at", "entry"),
 ])
 @pytest.mark.parametrize("patterns", [["%quokka%"], ["%quokka%", "%東京%", "%50%_complete%"]])
-def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload, patterns):
+@pytest.mark.parametrize("deferred", [False, True])
+def test_search_ranks_row_keys_before_fetching_json(
+    table: str, key: str, ts: str, payload: str, patterns: list[str], deferred: bool,
+) -> None:
     from app.core.provider import fluid_pg_store as recall
 
     class Cursor:
-        def execute(self, sql, params):
+        def execute(self, sql: str, params: list[str] | tuple[str, ...]) -> None:
             self.sql, self.params = sql, params
 
-        def fetchall(self):
+        def fetchone(self) -> dict[str, str] | None:
+            assert "information_schema.columns" in self.sql
+            assert self.params == (table, "history_index_state")
+            return {"column_name": "history_index_state"} if deferred else None
+
+        def fetchall(self) -> list:
             return []
 
     cur = Cursor()
@@ -748,7 +756,12 @@ def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload, pat
     assert f"d.{key} = r.{key}" in cur.sql
     assert f"WHERE rn <= {recall._SEARCH_ROWS_PER_SESSION}" in cur.sql
     assert cur.params == [p for pattern in patterns for p in ("caller", pattern)]
-    assert cur.sql.count("UNION ALL") == len(patterns) - 1
+    # Each deferred table source has its own two disjoint index arms, in
+    # addition to the existing per-pattern UNION that preserves hit scoring.
+    assert cur.sql.count("UNION ALL") == len(patterns) - 1 + int(deferred) * len(patterns)
+    for state in (0, 2):
+        assert (f"history_index_state = {state}" in matching) == deferred
+    assert "history_index_state = 1" not in matching
     assert ("COUNT(*)::integer AS h" in matching) == (len(patterns) > 1)
     assert "1 AS h" in matching
     assert "CASE WHEN" not in matching

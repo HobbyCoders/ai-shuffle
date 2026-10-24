@@ -111,6 +111,14 @@ class DiscordConnector(BaseConnector):
     _SDK_AVAILABLE = DISCORD_AVAILABLE
     _SDK_NAME = "discord.py"
 
+    async def poll_watch(
+        self, source: dict[str, Any], cursor: dict[str, Any]
+    ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+        from app.core.connectors.watch_history import poll
+
+        return await poll(self.connector_type, self, source, cursor)
+
+
     async def connect(self) -> bool:
         """Start the Discord client and connect to the gateway.
 

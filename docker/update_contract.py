@@ -62,7 +62,9 @@ REQUIRES = ("base-1",)
 # What a coming release will require. Images without it say so in advance.
 RECOMMENDS = ()
 # Reviewed, hash-pinned tar archives for a release needing a newer runtime.
-# Keep empty until both architectures pass real runtime/rollback acceptance.
+# Keep empty until both architectures pass real runtime/rollback acceptance:
+# scripts/release/overlay_acceptance.py on a disposable container of each
+# (docs/ci/release-channels.md). validate() has no per-architecture switch.
 # Each entry: kind (python/node/chromium/tools), capability (kind-version),
 # platform (linux-x86_64/linux-aarch64), HTTPS url, sha256, size, unpacked_size,
 # executable (relative to archive root), optional library_path. Python must be
@@ -75,7 +77,7 @@ OVERLAYS = ()
 # The trust key is checked on its own (scripts/ci/update_reach.py).
 IMAGE_INPUTS = ("Dockerfile", "entrypoint.sh", "docker/install-claude-cli.sh")
 # sha256 of IMAGE_INPUTS with comment lines removed. Update with --pin.
-IMAGE_INPUTS_PIN = "aa790968be0cfc4be9266479aa1c7ef267788a853cc6c06bfe302f5bbf35dcd8"
+IMAGE_INPUTS_PIN = "1e1a4fcdfd83dbead66a0dc65d5d4a921c0696d4ec890ac7d06e088c74ffbfcc"
 
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,39}")
 

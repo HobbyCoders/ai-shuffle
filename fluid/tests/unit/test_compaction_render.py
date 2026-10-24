@@ -594,6 +594,38 @@ def test_rehydrate_replays_segment_retirement() -> None:
     assert list(resumed._digested) == [whole]
 
 
+def test_window_retires_replayed_prefix_before_discarding_its_node_order() -> None:
+    nodes = [n for t in range(80) for n in _hy_turn(t)]
+    root = nodes[0].node_id
+    promotions = []
+    for t in range(79):
+        start, end = nodes[t * 4].node_id, nodes[t * 4 + 3].node_id
+        promotions.extend([
+            Promotion(tier=2, spans=((start, end, SPAN_DIGEST),)),
+            Promotion(tier=4, spans=((root, end, "summary"),),
+                      summary_text=f"checkpoint {t}"),
+        ])
+    resumed = Compactor(config=_hy_cfg())
+    resumed.rehydrate(promotions)
+    # This is the engine's cold-resume order: window BEFORE the first view.
+    window = resumed.window(nodes)
+    end = nodes[-5].node_id
+    assert len(window) == 6
+    assert resumed._digested == {(root, end): "summary"}
+    assert len(resumed._span_versions) == 1
+    assert resumed._digest_by_start == {}
+    assert resumed._replayed_spans == []
+    expected = Compactor(config=_hy_cfg())
+    expected.rehydrate(promotions)
+    assert resumed.view(window) == expected.view(nodes)
+    assert resumed.view(window) == resumed.view(nodes)
+    # Old checkpoints still render forks; retiring residency must not erase
+    # the persisted summary text used by a shorter branch.
+    fork = nodes[:40]
+    assert resumed.view(fork) == expected.view(fork)
+    assert "checkpoint 9" in _flat(resumed.view(fork))
+
+
 def test_fold_slides_past_a_gap_instead_of_stopping() -> None:
     nodes = [n for t in range(6) for n in _hy_turn(t)]
     c = Compactor(config=_hy_cfg())

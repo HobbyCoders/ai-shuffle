@@ -913,6 +913,29 @@ describe('feedController queue reconciliation (#588)', () => {
 		const queued = deps.state.queuedMessages as Array<{ id: string }>;
 		expect(queued.map((q) => q.id)).toEqual(['turn-q']);
 	});
+
+	// #524: a bubble restored on switch-in may already be answered by history the
+	// resumed feed replays. Its command id is an exact handle (text is not).
+	it('retires a restored bubble whose command id the replayed history delivered', () => {
+		const deps = makeDeps();
+		const cmd = 'client-' + 'd'.repeat(32);
+		deps.update((s) => ({
+			...s,
+			queuedMessages: [
+				{ id: cmd, clientMessageId: cmd, content: 'continue', queuedAt: 1 },
+				{ id: 'turn-other', clientMessageId: 'client-' + 'e'.repeat(32), content: 'continue', queuedAt: 1 },
+			],
+		}));
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		hoisted.onEvent!({ ...userMessage('evt-steer', 'turn-live', 'continue'), command_id: cmd });
+		hoisted.onEvent!(caughtUp(0));
+		flushRaf();
+
+		const queued = deps.state.queuedMessages as Array<{ id: string }>;
+		expect(queued.map((q) => q.id)).toEqual(['turn-other']);
+	});
 });
 
 describe('feedController cross-device interaction settle (#606 item 4)', () => {

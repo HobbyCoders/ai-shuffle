@@ -59,36 +59,36 @@
 </div>
 
 <style>
+	/* Reads as a transcript row: the tool rows' inset, icon size and type
+	   scale, with the state carried by the glyph's colour. */
 	.outcome {
-		--tone: var(--muted-foreground);
+		--tone: var(--subtle-foreground, var(--muted-foreground));
 		display: flex;
 		align-items: flex-start;
-		gap: 8px;
+		gap: 9px;
 		width: 100%;
 		min-width: 0;
-		font-size: 13px;
+		padding: 6px 8px;
+		font-size: 12.5px;
 		line-height: 1.5;
 		color: var(--muted-foreground);
 	}
 
 	.outcome[data-decision='approved'] { --tone: var(--success); }
 	.outcome[data-decision='declined'] { --tone: var(--destructive); }
-	.outcome[data-decision='asked_again'] { --tone: var(--warning); }
 
 	.mark {
-		flex: 0 0 18px;
-		height: 18px;
-		margin-top: 1px;
+		flex: 0 0 14px;
+		height: 14px;
+		margin-top: 3px;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 50%;
-		background: color-mix(in oklch, var(--tone) 15%, transparent);
 	}
 
 	.mark svg {
-		width: 12px;
-		height: 12px;
+		width: 14px;
+		height: 14px;
 		fill: none;
 		stroke: var(--tone);
 		stroke-width: 2;
@@ -98,13 +98,13 @@
 
 	.text { min-width: 0; overflow-wrap: anywhere; }
 
-	.verdict { color: var(--tone); font-weight: 600; }
+	.verdict { color: var(--foreground); font-weight: 600; }
 
 	.outcome code {
 		font-family: var(--font-mono);
-		font-size: 12px;
-		padding: 0 5px;
-		border-radius: 5px;
+		font-size: 11.5px;
+		padding: 0 4px;
+		border-radius: calc(var(--radius, 10px) - 6px);
 		background: var(--muted);
 	}
 

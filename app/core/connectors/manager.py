@@ -372,14 +372,29 @@ class ConnectorManager:
         logger.debug(
             "Connector %s emitted trigger '%s'", connector_id, trigger_id
         )
-        try:
-            from app.core import assistant_service
-            from app.core.assistant_manager import assistant_manager
-            recorded = await run_sync(assistant_service.record_proactive_event, connector_id, trigger_id, payload)
-            if recorded:
-                assistant_manager.notify()
-        except Exception:
-            logger.exception("Failed to record assistant observation for %s/%s", connector_id, trigger_id)
+        from app.core.watch_sources import record_connector
+        from app.core.watch_manager import watch_manager
+
+        if trigger_id == "watch_message_received":
+            # A non-replayable ingress acknowledgement is a commit receipt,
+            # unlike the ordinary best-effort automation trigger callback.
+            from app.db import watches as watch_store
+
+            trigger_id = "message_received"
+            await run_sync(
+                watch_store.record_connector_event, connector_id,
+                "message_received:" + str(payload["message_id"]),
+                dict(payload, event_type=trigger_id),
+            )
+            watch_manager.notify()
+        else:
+            try:
+                await run_sync(record_connector, connector_id, trigger_id, payload)
+                watch_manager.notify()
+            except Exception:
+                logger.exception(
+                    "Failed to record watch observation for %s/%s", connector_id, trigger_id
+                )
         try:
             from app.core.automation_manager import automation_manager
             await automation_manager.handle_connector_trigger(

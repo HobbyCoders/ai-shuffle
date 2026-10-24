@@ -782,6 +782,13 @@ class HarnessAdapter(ProviderAdapter):
                 # defers none.
                 bridge_deferred=delegated_bridge_deferred(),
             )
+            # Only an owner chat's "not run yet" placeholder and a person's no
+            # carry the owner's waiting message on a deny; a deny from Stop,
+            # settle or a timeout carries nothing (#523). Plain attribute, so
+            # an older fluid without the behaviour ignores it.
+            from app.core.assistant_confirm import deny_carries_steers
+
+            self._engine.deny_carries_steers = deny_carries_steers
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
@@ -1328,6 +1335,9 @@ class HarnessAdapter(ProviderAdapter):
         # ``query_options.build_options_from_profile``).
         # It is what lets _build_provider_client authenticate a native leg from
         # the app's encrypted ``model_providers`` row.
+        generation_context = getattr(sdk_options, "aih_generation_context", None)
+        if generation_context is not None:
+            opts.extra["generation_context"] = generation_context
         provider_id = getattr(sdk_options, "aih_provider_id", None)
         if provider_id:
             opts.extra["provider_id"] = provider_id
@@ -2579,6 +2589,10 @@ class HarnessAdapter(ProviderAdapter):
                         self._turn_floor,
                     )
                     continue
+                if isinstance(translated, ResultMessage):
+                    release = getattr(self._store, "release_resume_memory", None)
+                    if release is not None:
+                        await release()
                 yield translated
                 if isinstance(translated, ResultMessage):
                     return
@@ -2647,7 +2661,8 @@ class HarnessAdapter(ProviderAdapter):
 
         inner_cwd = inner is not None and _policy_accepts_cwd(inner)
 
-        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
+                         agent_id: Optional[str] = None) -> Optional[str]:
             # fluid's to_thread only builds this coroutine; it runs on the
             # loop. ``inner`` may read the database and run Git (the checkout
             # lock), so it runs in a thread.
@@ -2663,7 +2678,7 @@ class HarnessAdapter(ProviderAdapter):
                 return denial
             if self._owner_needed(name, tool_input):
                 # The CLI never prompts in Bypass, so the owner is asked here.
-                return await self._ask_owner(name, tool_input)
+                return await self._ask_owner(name, tool_input, agent_id=agent_id)
             if self.permission_mode == "bypassPermissions":
                 return None
             try:
@@ -3060,10 +3075,16 @@ class HarnessAdapter(ProviderAdapter):
         """Whether this call in an owner's-assistant session needs the owner's yes."""
         from app.core.assistant_permissions import needs_owner
 
-        return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk)
+        mode = effective_permission_mode(self.permission_mode, delegated=self._is_delegated)
+        return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk,
+                           permission_mode=mode)
 
-    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any], *,
+                         agent_id: Optional[str] = None) -> Optional[str]:
         """Put a high-risk assistant call to the owner; None when approved.
+
+        ``agent_id`` names the CLI subagent making the call (None on the main
+        thread), so a subagent never spends the main chat's one-shot pass.
 
         The approver routes it to the assistant's conversation, where only
         the owner's firm yes approves it (``app.core.assistant_confirm``).
@@ -3078,7 +3099,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             result = await self._can_use_tool(
                 self._permission_tool_name(tool_name), tool_input,
-                SimpleNamespace(tool_use_id=None, agent_id=None, delegated=self._is_delegated,
+                SimpleNamespace(tool_use_id=None, agent_id=agent_id, delegated=self._is_delegated,
                                 assistant_owner=True, decision_reason=ASK_REASON),
             )
         except asyncio.CancelledError:
@@ -4934,9 +4955,9 @@ class HarnessAdapter(ProviderAdapter):
 
             register_builtins(registry)
             if self._provider_kind == "openai_responses":
-                # Step 1 of unified generation is additive: the session's own
-                # ChatGPT/SuperGrok plan keeps these tools, which honour the
-                # account's stored Native generation settings (#377).
+                # Keep existing native grants/discovery, but never register raw
+                # transports: aliases share the unified resolver's admission.
+                from app.core.provider.native_generation_aliases import make_alias
                 from app.core.native_generation_settings import capabilities, provider_kind
                 native_account = (options.extra or {}).get("provider_id")
                 native_caps = {}
@@ -4945,19 +4966,10 @@ class HarnessAdapter(ProviderAdapter):
                         native_caps = capabilities(provider_kind(_lookup_provider_row(native_account) or {}))
                     except ValueError:
                         pass  # Unknown/API-key accounts are not verified native media lanes.
-                if native_caps.get("image", {}).get("available"):
-                    from app.core.provider.native_images import SPEC, make_handler
-                    registry.register_builtin(SPEC, make_handler(
-                        lambda: self._engine, self._resolve_app_session_id,
-                        chat_mode=_session_mode(options) == "chat",
-                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
-                    ))
-                if native_caps.get("video", {}).get("available"):
-                    from app.core.provider.native_video import SPEC as VIDEO_SPEC, make_handler as video_handler
-                    registry.register_builtin(VIDEO_SPEC, video_handler(
-                        lambda: self._engine, self._resolve_app_session_id,
-                        provider_id_supplier=lambda: (self._options.extra or {}).get("provider_id") if self._options else None,
-                    ))
+                for kind in ("image", "video"):
+                    if native_caps.get(kind, {}).get("available"):
+                        spec, handler = make_alias(kind, options.extra.get("generation_context"))
+                        registry.register_builtin(spec, handler)
             builtins_registered = True
             logger.info(
                 "[HarnessAdapter] registered fluid builtin tools for native leg",
@@ -5122,25 +5134,43 @@ class HarnessAdapter(ProviderAdapter):
         # by _delegated_tool_policy.
         from app.core.checkout_lock import install_registry_guard
         install_registry_guard(registry, options.extra.get("app_session_id"), options.cwd)
-        if not native and _assistant_scope(options) is not None:
+        if _assistant_scope(options) is not None:
             # The claude CLI skips PreToolUse for the bundled app tools and
             # this leg has no permission engine, so the owner check for them
-            # runs at dispatch (the native leg asks through its engine).
-            self._guard_assistant_dispatch(registry, options)
+            # runs at dispatch (the native leg asks through its engine). On
+            # both legs a saved Deny on a tool with its own consent is
+            # enforced here, since the owner gate no longer asks before it.
+            self._guard_assistant_dispatch(registry, options, native=native)
         return registry
 
-    def _guard_assistant_dispatch(self, registry: ToolRegistry, options: SessionOptions) -> None:
+    def _guard_assistant_dispatch(self, registry: ToolRegistry, options: SessionOptions, *,
+                                  native: bool = False) -> None:
         from fluid.tools.registry import ToolOutcome
 
         dispatch = registry.dispatch
 
-        async def guarded_dispatch(name, input, ctx=None, **kwargs):
-            from app.core.assistant_permissions import needs_owner
+        async def guarded_dispatch(
+            name: str, input: Dict[str, Any], ctx: Optional[ToolCtx] = None, **kwargs: Any,
+        ) -> ToolOutcome:
+            from app.core.assistant_permissions import has_own_consent
 
-            if needs_owner(name, input, _assistant_scope(options)):
-                denial = await self._ask_owner(name, input)
-                if denial:
-                    return ToolOutcome(text=denial, is_error=True)
+            denial = None
+            if not native and self._owner_needed(name, input):
+                agent_id = ctx.extra.get("agent_id") if ctx is not None else None
+                denial = await self._ask_owner(name, input, agent_id=agent_id)
+            elif has_own_consent(name) and self.permission_mode != "bypassPermissions":
+                # The tool's own card or grant is the owner's consent
+                # (assistant_permissions.OWN_CONSENT_TOOLS); a saved Deny still
+                # wins, as it does over every mode short of Bypass.
+                try:
+                    if await self._saved_rule_decision(name, input) == "deny":
+                        denial = SAVED_RULE_DENIAL
+                except Exception:  # noqa: BLE001 — fail closed: the call may be one the owner saved as Deny
+                    logger.warning("[HarnessAdapter] saved-rule lookup failed for %s; denying it",
+                                   name, exc_info=True)
+                    denial = "Denied: the saved permission rules could not be read"
+            if denial:
+                return ToolOutcome(text=denial, is_error=True)
             return await dispatch(name, input, ctx, **kwargs)
 
         registry.dispatch = guarded_dispatch  # type: ignore[method-assign]
@@ -5997,7 +6027,9 @@ class _AssistantPermissionEngine(PermissionEngine):
         verdict = super().decide(spec, input, cwd=cwd)
         if verdict.decision == "deny":
             return verdict
-        if needs_owner(spec.name, input, self.assistant_scope, spec_risk=verdict.risk):
+        # The native leg runs ``auto`` as Ask, so the policy tells Bypass apart.
+        mode = "bypassPermissions" if self.approval_policy == "never_ask" else "default"
+        if needs_owner(spec.name, input, self.assistant_scope, spec_risk=verdict.risk, permission_mode=mode):
             return Verdict("ask", "policy", verdict.risk, verdict.rule)
         return verdict
 
