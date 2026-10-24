@@ -806,6 +806,14 @@
           "past_bug": "#559: CLI identity plumbing must not change native approval scope."
         },
         {
+          "id": "harness-basics.new-session-add-project-phone",
+          "check": "New-session Add a project row fits a phone-width browser",
+          "kind": "browser",
+          "how": "In the web UI (not the Android app), open a new session with no project at 412x915 and again at 360x882. Read the 'Add a project' button and its 'Optional' hint under the composer, hover or focus the button, then open and close its project list.",
+          "pass_when": "The button label stays on one line inside its own outline and focus ring; only the hint wraps, beside the button. The project list opens below the row.",
+          "past_bug": "#607: on phone-width browsers the button shrank and its label wrapped onto two lines, spilling out of the 34px button."
+        },
+        {
           "id": "harness-basics.owner-detection-memory",
           "check": "Detected owner identity reaches fresh native and delegated chats",
           "kind": "owner",
