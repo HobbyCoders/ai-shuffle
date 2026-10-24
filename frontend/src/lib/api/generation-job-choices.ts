@@ -10,7 +10,7 @@
  * rechecked on every run.
  */
 import { api } from './client';
-import type { GenerationChoice, GenerationKind } from '$lib/utils/generation-choice';
+import type { GenerationChoice, GenerationKind, SaveQuote } from '$lib/utils/generation-choice';
 
 const KIND_ORDER: readonly GenerationKind[] = ['image', 'video', 'audio', '3d'];
 
@@ -41,16 +41,34 @@ export async function getJobChoices(jobId: string): Promise<JobChoices> {
 	return data?.choices ?? {};
 }
 
+/**
+ * The PUT response: the stored choice plus the same save-time quote a
+ * remembered pick reports (#542). The quote fields are absent from servers
+ * older than that, so they stay optional here.
+ */
+export interface PinnedJobChoice extends Partial<SaveQuote> {
+	choice: GenerationChoice;
+}
+
+/** Write one job choice and keep the server's save-time quote. */
+export async function pinJobChoice(
+	jobId: string,
+	kind: GenerationKind,
+	choice: GenerationChoice
+): Promise<PinnedJobChoice> {
+	if (!choice.account || !choice.worker || !choice.model) {
+		throw new Error('A job choice must name its account, holding worker and model.');
+	}
+	const data = await api.put<Partial<PinnedJobChoice>>(path(jobId, kind), body(choice));
+	return { ...data, choice: data?.choice ?? choice };
+}
+
 export async function saveJobChoice(
 	jobId: string,
 	kind: GenerationKind,
 	choice: GenerationChoice
 ): Promise<GenerationChoice> {
-	if (!choice.account || !choice.worker || !choice.model) {
-		throw new Error('A job choice must name its account, holding worker and model.');
-	}
-	const data = await api.put<{ choice?: GenerationChoice }>(path(jobId, kind), body(choice));
-	return data?.choice ?? choice;
+	return (await pinJobChoice(jobId, kind, choice)).choice;
 }
 
 export async function clearJobChoice(jobId: string, kind: GenerationKind): Promise<void> {

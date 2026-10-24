@@ -218,7 +218,7 @@ from app.core.session_modes import (
     ensure_chat_uploads_dir,
     narrow_tool_access_for_mode,
     permission_mode_for_session_mode,
-    session_mode_of,
+    runtime_session_mode,
 )
 
 # Tool access. ``resolve_tool_access`` is the one seam both legs read; it lives
@@ -234,12 +234,6 @@ from app.core.tool_access import (  # noqa: F401  (re-exports, see above)
     tool_permitted,
     tool_selection_mode,
 )
-
-# This builder and both harness execution legs now enforce proactive provenance.
-# Registration changes only process capability state, not assistant policy.
-from app.core.assistant_service import register_proactive_guard
-register_proactive_guard(1)
-
 
 def _ai_tools_available() -> bool:
     """Whether the AI-generation tools have a credential to run on.
@@ -872,7 +866,7 @@ def build_options_from_profile(
         except Exception:
             session_row = None
 
-    if session_mode_of(session_row) == "chat":
+    if runtime_session_mode(session_row) == "chat":
         # Do not resolve/materialize a stale project binding before choosing the
         # chat cwd. Even spawning a Chat session must not perform repository work.
         project = None
@@ -993,7 +987,6 @@ def build_options_from_profile(
             _binding_row = database.get_session(session_id)
         except Exception:  # noqa: BLE001 — a lookup failure falls back to config
             _binding_row = None
-    from app.core.session_modes import runtime_session_mode
     session_mode = runtime_session_mode(_binding_row)
     from app.core.session_orchestration import is_owner_session
     owner_coordinator = session_mode == "chat" and is_owner_session(_binding_row)
@@ -1196,14 +1189,9 @@ def build_options_from_profile(
         or config.get("permission_mode")
         or "default"
     )
-    # The session's sidepanel mode overrules that chain for chat sessions, which
-    # always run on 'default' — see ``permission_mode_for_session_mode``.
-    # ``session_mode`` was resolved off ``_binding_row`` with the cwd above:
-    # ``session_row`` is None on a cwd-override spawn, and the mode must not
-    # depend on which branch happened to fetch the row.
-    # A legacy no-project code row gets the coordination tool ceiling, not a
-    # rewritten permission binding. Explicit chat rows still run on Ask.
-    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode_of(_binding_row))
+    # #553: the runtime ceiling applies equally to legacy and explicit chats.
+    # Ask/Auto/Bypass stay selected; Accept Edits has nothing to approve here.
+    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
     # An owner coordination chat (no project): the app asks the owner for the
     # high-risk calls itself (``app.core.assistant_permissions``).

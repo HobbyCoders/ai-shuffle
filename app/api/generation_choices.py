@@ -98,12 +98,20 @@ async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
             remember=body.remember, origin=body.origin))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    # Report a fresh server-side quote, never a client-supplied price. Failure
-    # to quote does not lose the owner's pick or imply it is free.
+    return {"kind": kind, "choice": choice, "remembered": body.remember,
+            **await _save_time_quote(kind, body.choice, request, token)}
+
+
+async def _save_time_quote(kind: str, choice: ChoiceBody, request: Request, token: str) -> dict:
+    """A fresh server-side quote for a pick that was just saved.
+
+    Never a client-supplied price. Failure to quote does not lose the pick or
+    imply it is free; it reports what unattended runs will do with it.
+    """
     from app.core.generation_resolver import UNKNOWN_PRICE
     try:
         quoted = await asyncio.wait_for(
-            quote(QuoteRequest(kind=kind, choice=body.choice), request, token=token),
+            quote(QuoteRequest(kind=kind, choice=choice), request, token=token),
             timeout=_SAVE_QUOTE_TIMEOUT_SECONDS)
     except TimeoutError:
         quoted = {"ok": False, "error": "The saved choice's quote timed out. Its worker or provider may be unavailable."}
@@ -117,8 +125,7 @@ async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
     else:
         skip_reason = "stored_choice_unpriced"
         warning = "This saved choice has no verified price. Unattended runs will skip it until a price is available."
-    return {"kind": kind, "choice": choice, "remembered": body.remember,
-            "price": quoted.get("price") or dict(UNKNOWN_PRICE), "priced": eligible, "quote_error": quote_error,
+    return {"price": quoted.get("price") or dict(UNKNOWN_PRICE), "priced": eligible, "quote_error": quote_error,
             "unattended_skip_reason": None if eligible else skip_reason,
             "warning": None if eligible else warning}
 
@@ -226,7 +233,9 @@ async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Req
             _identity(request), job_id, kind, body.model_dump(exclude_none=True)))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"job_id": job_id, "kind": kind, "choice": choice}
+    # The same save-time quote a remembered pick reports; nothing is submitted.
+    return {"job_id": job_id, "kind": kind, "choice": choice,
+            **await _save_time_quote(kind, body, request, token)}
 
 
 @router.delete("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])

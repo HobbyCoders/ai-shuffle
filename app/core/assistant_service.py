@@ -21,30 +21,12 @@ logger = logging.getLogger(__name__)
 
 AVATAR_PRESETS = store.AVATAR_PRESETS
 AGENT_ID = store.AGENT_ID
-# The built-in agent row research runs on. No system prompt and no model.
-# Every worker writes this exact definition (ensure_agent), so it stays
-# unchanged while older peers still restore it.
-AGENT_NAME = "Assistant"
-AGENT_DESCRIPTION = "Runs your personal assistant. Built into AI Shuffle."
-AGENT_CONFIG = {"tool_selection_mode": "all", "agent_invoke_mode": "all"}
-# Marks the agent older Assistant setups created; agent identities report it
-# as ``dedicated``.
-DEDICATED_KEY = "assistant_dedicated"
-_guard_version = 0
+# Mixed-version tombstone only: never seed a built-in agent or hidden home.
 
 
 def assistant_id():
     """This worker's runner row id (its install id)."""
     return settings.effective_instance_id
-
-
-def register_proactive_guard(version=1):
-    global _guard_version
-    _guard_version = version
-
-
-def proactive_guard_available():
-    return _guard_version == 1
 
 
 # ---------------------------------------------------------------------------
@@ -76,27 +58,27 @@ def _owned_here(session):
     return session.get("instance_id") == assistant_id()
 
 
-def _publish():
+def _publish() -> None:
     """Send the account row to the other workers (no-op when standalone)."""
     try:
         from app.network import engine
         engine.record_after_commit("assistant", store.ACCOUNT_ID)
     except Exception:  # noqa: BLE001 - the scanner publishes it on its next pass
-        logger.warning("Could not publish the assistant account row", exc_info=True)
+        logger.warning("Could not publish the owner account row", exc_info=True)
 
 
 def _seed(cursor: Any, local: Any) -> Any:
     return dict(agent_id=local.get("agent_id"), introduction=local.get("introduction") or {})
 
 
-def _project(conn, account):
+def _project(conn: Any, account: dict[str, Any]) -> None:
     """Write the account view this worker runs under into its runner row."""
     cursor = conn.cursor()
     agent_id = account.get("agent_id")
     if agent_id:
         cursor.execute("SELECT id FROM agents WHERE id=%s", (agent_id,))
         if not cursor.fetchone():
-            agent_id = None  # Not synced here yet; research waits for it.
+            agent_id = None  # The referenced historical identity has not synced yet.
     values = dict(agent_id=agent_id, enabled=True, paused=False,
                   introduction=account.get("introduction") or {})
     store.project(conn, assistant_id(), values, account.get("sources") or {})
@@ -105,8 +87,8 @@ def _project(conn, account):
 def reconcile() -> Any:
     """Project the synced account onto this worker's runner row.
 
-    Only seeding (and moving an older account onto the built-in agent) writes
-    the account. Research state is runner-local.
+    Only seeding an older account writes it. Historical wire/table names remain
+    for owner introduction and remote accounting, never for a research runner.
     """
     publish = False
     with get_db() as conn:
@@ -119,7 +101,7 @@ def reconcile() -> Any:
                 return None
             account = store.write_account(conn, _seed(cursor, local))
             publish = True
-            logger.info("Assistant: shared this worker's assistant configuration with the account")
+            logger.info("Shared this worker's owner configuration with the account")
         _project(conn, account)
     if publish:
         _publish()
@@ -132,16 +114,7 @@ def on_network_applied(touched):
         reconcile()
 
 
-def _config(agent):
-    config = (agent or {}).get("config") or {}
-    return json.loads(config) if isinstance(config, str) else config
-
-
-def _is_dedicated(agent):
-    return bool(agent and not agent.get("is_builtin") and _config(agent).get(DEDICATED_KEY) is True)
-
-
-def agent_identities():
+def agent_identities() -> list[dict[str, Any]]:
     # ProfileConfig's normal typed serializer deliberately does not contain
     # assistant presentation metadata. This owner-only projection uses the
     # SAME unified agent records/IDs, never a parallel agent registry.
@@ -150,11 +123,15 @@ def agent_identities():
         avatar = (agent.get("config") or {}).get("avatar_id", "robot")
         result.append({"id": agent["id"], "name": agent["name"],
                        "avatar_id": avatar if avatar in AVATAR_PRESETS else "robot",
-                       "dedicated": _is_dedicated(agent)})
+                       # Old clients read this key; no dedicated agent exists.
+                       "dedicated": False})
     return result
 
 
-def update_agent_identity(agent_id, name=None, avatar_id=None, _conn=None):
+def update_agent_identity(
+    agent_id: str, name: str | None = None, avatar_id: str | None = None,
+    _conn: Any = None,
+) -> dict[str, Any]:
     if avatar_id is not None and avatar_id not in AVATAR_PRESETS:
         raise ValueError("Unknown avatar preset")
     if name is not None and (not name.strip() or len(name) > 80 or any(ord(c) < 32 for c in name)):
@@ -167,8 +144,6 @@ def update_agent_identity(agent_id, name=None, avatar_id=None, _conn=None):
         agent = row_to_dict(cursor.fetchone())
         if not agent:
             raise ValueError("Agent does not exist")
-        if agent_id == AGENT_ID:
-            raise ValueError("The built-in assistant agent cannot be edited")
         if agent["is_builtin"]:
             raise ValueError("Copy a built-in agent before customizing its identity")
         config = agent.get("config") or {}
@@ -176,8 +151,12 @@ def update_agent_identity(agent_id, name=None, avatar_id=None, _conn=None):
             config = json.loads(config)
         if avatar_id is not None:
             config["avatar_id"] = avatar_id
-        cursor.execute("UPDATE agents SET name=%s,config=%s,updated_at=NOW() WHERE id=%s", (name.strip() if name is not None else agent["name"], json.dumps(config), agent_id))
-    return {"id": agent_id, "name": name.strip() if name is not None else agent["name"], "avatar_id": config.get("avatar_id", "robot")}
+        updated_name = name.strip() if name is not None else agent["name"]
+        cursor.execute(
+            "UPDATE agents SET name=%s,config=%s,updated_at=NOW() WHERE id=%s",
+            (updated_name, json.dumps(config), agent_id),
+        )
+    return {"id": agent_id, "name": updated_name, "avatar_id": config.get("avatar_id", "robot")}
 
 
 def session_stopped(session_id):
