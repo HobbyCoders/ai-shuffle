@@ -13,12 +13,12 @@ vi.mock('$lib/stores/app-data.svelte', async importOriginal => {
 
 import SwarmCard from './SwarmCard.svelte';
 
-const gaming = { name: 'GamingPC', device_id: 'dev_gaming' };
+const desktop = { name: 'DesktopWorker', device_id: 'dev_desktop' };
 const snapshot = (id: string): SwarmSnapshot => ({
  id, session_id: `coordinator-${id}`, title: 'Cross-worker review', status: 'running',
  created_at: '2026-10-20T10:00:00Z', updated_at: '2026-10-20T10:01:00Z',
  tasks: [
-  { id: 'remote', title: 'Review on the desktop', agent: 'general-purpose', depends_on: [], status: 'running', worker_session_id: 'w-1', worker: gaming },
+  { id: 'remote', title: 'Review on the desktop', agent: 'general-purpose', depends_on: [], status: 'running', worker_session_id: 'w-1', worker: desktop },
   { id: 'local', title: 'Review beside the chat', agent: 'general-purpose', depends_on: [], status: 'queued' }
  ]
 });
@@ -32,26 +32,26 @@ afterEach(() => { cleanup(); rows.store?.set([]); vi.unstubAllGlobals(); });
 describe('Swarm task worker', () => {
  it('names the worker on rows that run away from the chat, and only those', () => {
   const swarm = snapshot('elsewhere');
-  rows.store!.set([{ id: swarm.session_id, owner_device_id: 'dev_unraid', device_name: 'Unraid' }]);
+  rows.store!.set([{ id: swarm.session_id, owner_device_id: 'dev_server', device_name: 'ServerWorker' }]);
   show(swarm);
   const chip = within(taskRow('Review on the desktop')).getByTestId('swarm-task-worker');
-  expect(chip.textContent).toBe('Runs on GamingPC');
-  expect(chip.getAttribute('title')).toBe('Runs on GamingPC');
+  expect(chip.textContent).toBe('Runs on DesktopWorker');
+  expect(chip.getAttribute('title')).toBe('Runs on DesktopWorker');
   expect(within(taskRow('Review beside the chat')).queryByTestId('swarm-task-worker')).toBeNull();
   // The expanded task names the worker in full (touch screens get no tooltip).
-  expect(taskRow('Review on the desktop').parentElement!.querySelector('.runs-on')?.textContent).toBe('Runs on GamingPC · general-purpose');
+  expect(taskRow('Review on the desktop').parentElement!.querySelector('.runs-on')?.textContent).toBe('Runs on DesktopWorker · general-purpose');
   expect(taskRow('Review beside the chat').parentElement!.querySelector('.runs-on')).toBeNull();
  });
 
  it('stays quiet when the task runs on the chat’s own worker', () => {
   const swarm = snapshot('same');
-  rows.store!.set([{ id: swarm.session_id, owner_device_id: 'dev_gaming', device_name: 'GamingPC' }]);
+  rows.store!.set([{ id: swarm.session_id, owner_device_id: 'dev_desktop', device_name: 'DesktopWorker' }]);
   show(swarm);
   expect(screen.queryByTestId('swarm-task-worker')).toBeNull();
  });
 
  it('still names a remote worker before the chat row has loaded', () => {
   show(snapshot('unknown'));
-  expect(screen.getAllByTestId('swarm-task-worker').map(chip => chip.textContent)).toEqual(['Runs on GamingPC']);
+  expect(screen.getAllByTestId('swarm-task-worker').map(chip => chip.textContent)).toEqual(['Runs on DesktopWorker']);
  });
 });
