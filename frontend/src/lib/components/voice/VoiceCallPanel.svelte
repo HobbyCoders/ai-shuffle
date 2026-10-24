@@ -5,6 +5,7 @@
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-svelte';
 	import { voiceCallState, hangup, toggleAgent, toggleMic, MIC_PROBLEM_LABEL } from '$lib/services/voiceCall';
 	import { getVoiceCallState, voiceModelLabel, usesDelegation, usesAudioStream } from '$lib/api/voice';
+	import { isLiveApiModel } from '$lib/constants/voice-engines';
 
 	interface Props {
 		sessionId: string;
@@ -24,7 +25,7 @@
 	const delegated = $derived(mine && usesDelegation(call.model, call.options));
 	const realtime = $derived(mine && !!call.model && !usesAudioStream(call.model));
 	const engineLabel = $derived(mine && call.model ? voiceModelLabel(call.model) : 'Voice agent');
-	const modeLabel = $derived(delegated ? 'Conversation + your chat agent' : call.model === 'gpt-live-1' ? 'OpenAI Responses delegation' : realtime ? (call.options?.turn_detection === 'server_vad' ? 'Realtime agent tools · Normal VAD' : 'Realtime agent tools') : 'Full-duplex conversation');
+	const modeLabel = $derived(delegated ? 'Conversation + your chat agent' : isLiveApiModel(call.model) ? 'OpenAI Responses delegation' : realtime ? (call.options?.turn_detection === 'server_vad' ? 'Realtime agent tools · Normal VAD' : 'Realtime agent tools') : 'Full-duplex conversation');
 
 	// Never show a healthy call while the microphone is not reaching it (#1824).
 	const micProblem = $derived(status === 'live' && !call.micMuted && call.micProblem);
@@ -38,7 +39,7 @@
 					? 'Speaking…'
 					: call.userSpeaking
 						? 'Hearing you…'
-						: realtime || call.model === 'gpt-live-1' || call.model === 'grok-voice-latest' || call.model === 'grok-voice-supergrok' || call.model === 'gpt-live-1-codex' ? 'Listening' : 'Audio connected'
+						: realtime || isLiveApiModel(call.model) || call.model === 'grok-voice-latest' || call.model === 'grok-voice-supergrok' || call.model === 'gpt-live-1-codex' ? 'Listening' : 'Audio connected'
 			: status === 'connecting'
 				? 'Connecting…'
 				: status === 'reconnecting'

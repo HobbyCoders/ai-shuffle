@@ -1,4 +1,4 @@
-"""Unofficial, unsupported ChatGPT subscription voice over Codex WebRTC.
+"""ChatGPT subscription voice (GPT-Live-1.1) over Codex WebRTC.
 
 Reuses the server-owned PCM browser leg and same-chat delegation lifecycle.
 Explicit engine selection opts in; the default remains API-key GPT Live.
@@ -63,7 +63,7 @@ class CodexVoiceStream(VoiceStream):
         except Exception:
             # HTTP/network exceptions may carry request headers. Never pass them
             # into the shared lifecycle's logging/browser error channel.
-            raise ValueError("ChatGPT voice could not start; access may be unavailable.") from None
+            raise ValueError("ChatGPT voice could not start. Check your ChatGPT login in Settings > Providers, then try again.") from None
         finally:
             self.api_key = ""
         if self.options["opening"] and not history and self.config.get("greet", True):

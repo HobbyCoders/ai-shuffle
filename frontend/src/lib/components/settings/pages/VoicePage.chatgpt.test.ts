@@ -21,10 +21,13 @@ import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 
 const CODEX = 'gpt-live-1-codex';
-const LABEL = 'ChatGPT voice (ChatGPT subscription)';
+const LABEL = 'GPT-Live-1.1 · ChatGPT subscription';
 const UNAVAILABLE =
 	"ChatGPT voice isn't ready yet. Voice components are still installing; start a call to finish setup.";
-const PREVIEW_NOTE = "Uses your ChatGPT subscription login. Off until you select this engine. Voice samples aren't available for it.";
+const PREVIEW_NOTE = "Uses your ChatGPT subscription login. Previews aren't available for subscription voice.";
+/** openai/codex RealtimeVoicesList::builtin().v3, mirrored by app.core.voice_models.CODEX_VOICES. */
+const CODEX_VOICES = ['juniper', 'maple', 'spruce', 'ember', 'vale', 'breeze', 'arbor', 'sol', 'cove', 'aube', 'bubbie', 'haetsal', 'hanul', 'himari', 'leher', 'miko', 'neer', 'porto', 'rindo', 'rio', 'rivage', 'selva', 'sonna', 'tinta', 'viola'];
+const cap = (id: string) => id.charAt(0).toUpperCase() + id.slice(1);
 /** No warning framing anywhere on the page for the subscription engine. */
 const SCARY = /unofficial|unsupported|may stop working|refuse access/i;
 
@@ -39,7 +42,8 @@ function serve(patch: Record<string, unknown> = {}) {
 	const codex = next.voice_model === CODEX;
 	server = {
 		...next,
-		voice_voice: codex ? 'cove' : next.voice_voice,
+		voice_voice: codex ? (CODEX_VOICES.includes(next.voice_voice) ? next.voice_voice : 'cove') : next.voice_voice,
+		voice_options: { ...(server.voice_options as object), ...((patch.voice_options as object) ?? {}) },
 		model_details: codex
 			? {
 					...next.model_details,
@@ -47,7 +51,7 @@ function serve(patch: Record<string, unknown> = {}) {
 					label: LABEL,
 					available: runtimeAvailable,
 					unavailable_reason: runtimeAvailable ? null : UNAVAILABLE,
-					voices: [{ id: 'cove', label: 'Cove' }],
+					voices: CODEX_VOICES.map((id) => ({ id, label: cap(id) })),
 					preview_note: PREVIEW_NOTE
 				}
 			: { ...next.model_details, model: next.voice_model }
@@ -72,7 +76,7 @@ beforeEach(() => {
 		voice_input_mode: 'auto',
 		voice_input_silence_seconds: 5,
 		voice_input_models: [{ id: 'fal-ai/whisper', name: 'Whisper (Large v3)', provider: 'fal-ai' }],
-		voice_options: { opening: '', instructions: '', delegation_instructions: '' },
+		voice_options: { opening: '', instructions: '', delegation_instructions: '', mic_threshold_db: -42 },
 		model_details: {
 			model: 'gpt-live-1',
 			transport: 'stream',
@@ -112,7 +116,7 @@ async function mountPage() {
 const engine = () => screen.getByRole('combobox', { name: 'Voice engine' }) as HTMLSelectElement;
 const rowOf = (el: HTMLElement) => el.closest('[data-setting-anchor]') as HTMLElement;
 
-describe('ChatGPT voice (ChatGPT subscription)', () => {
+describe('GPT-Live-1.1 · ChatGPT subscription', () => {
 	it('is offered in the picker but never the default', async () => {
 		await mountPage();
 		expect(engine().value).toBe('gpt-live-1');
@@ -203,7 +207,7 @@ describe('ChatGPT voice (ChatGPT subscription)', () => {
 		try {
 			serve({ voice_model: CODEX });
 			await mountPage();
-			const button = screen.getByRole('button', { name: 'Samples are not available for ChatGPT voice (ChatGPT subscription)' }) as HTMLButtonElement;
+			const button = screen.getByRole('button', { name: `Samples are not available for ${LABEL}` }) as HTMLButtonElement;
 			expect(button.disabled).toBe(true);
 			expect(button.title).toBe(PREVIEW_NOTE);
 			expect(rowOf(button).textContent).toContain('No samples for this engine');
@@ -212,6 +216,53 @@ describe('ChatGPT voice (ChatGPT subscription)', () => {
 		} finally {
 			preview.mockRestore();
 		}
+	});
+
+	it('lists all 25 ChatGPT voices and saves the one picked', async () => {
+		serve({ voice_model: CODEX });
+		await mountPage();
+		const voice = screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement;
+		expect(Array.from(voice.options).map((o) => [o.value, o.textContent])).toEqual(CODEX_VOICES.map((id) => [id, cap(id)]));
+		expect(voice.value).toBe('cove');
+		await fireEvent.change(voice, { target: { value: 'juniper' } });
+		await waitFor(() => expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_voice: 'juniper' }));
+		await waitFor(() => expect(voice.value).toBe('juniper'));
+	});
+
+	it('saves opening words and the microphone gate for this engine', async () => {
+		serve({ voice_model: CODEX });
+		await mountPage();
+		const opening = screen.getByRole('textbox', { name: 'Opening words' }) as HTMLInputElement;
+		await fireEvent.focus(opening);
+		await fireEvent.input(opening, { target: { value: 'Hey' } });
+		await fireEvent.blur(opening);
+		await waitFor(() =>
+			expect(transport.put).toHaveBeenCalledWith('/settings/voice', { voice_options: { opening: 'Hey' }, voice_options_model: CODEX })
+		);
+		const gate = screen.getByRole('spinbutton', { name: 'Microphone gate' }) as HTMLInputElement;
+		expect(gate.value).toBe('-42');
+		await fireEvent.input(gate, { target: { value: '-55' } });
+		await fireEvent.blur(gate);
+		await waitFor(() =>
+			expect(transport.put).toHaveBeenLastCalledWith('/settings/voice', { voice_options: { mic_threshold_db: -55 }, voice_options_model: CODEX })
+		);
+		await waitFor(() => expect((screen.getByRole('spinbutton', { name: 'Microphone gate' }) as HTMLInputElement).value).toBe('-55'));
+	});
+
+	it('offers exactly the engines the server lists, including GPT-Live-1.1 when available', async () => {
+		server.voice_engines = [
+			{ id: 'gpt-live-1', label: 'GPT Live 1', funding: 'openai' },
+			{ id: 'gpt-live-1.1', label: 'GPT-Live-1.1', funding: 'openai' },
+			{ id: 'grok-voice-latest', label: 'Grok Voice', funding: 'xai' },
+			{ id: CODEX, label: LABEL, funding: 'chatgpt' }
+		];
+		await mountPage();
+		expect(Array.from(engine().options).map((o) => o.value)).toEqual(['gpt-live-1', 'gpt-live-1.1', 'grok-voice-latest', CODEX]);
+		await fireEvent.change(engine(), { target: { value: 'gpt-live-1.1' } });
+		await waitFor(() => expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_model: 'gpt-live-1.1', voice_provider_id: null }));
+		await waitFor(() => expect(engine().value).toBe('gpt-live-1.1'));
+		expect(screen.getByRole('button', { name: /Calls run on OpenAI API key/ })).toBeTruthy();
+		expect((screen.getByRole('button', { name: 'Play marin sample' }) as HTMLButtonElement).disabled).toBe(false);
 	});
 
 	it('leaves the default engine unchanged: samples enabled, API-key access, OpenAI providers only', async () => {

@@ -19,7 +19,7 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.voice_models import LIVE_MODEL
+from app.core.voice_models import LIVE_MODEL, LIVE_MODELS
 from app.core.voice_options import effective_options, validate_options
 from app.core.voice_prompts import (
     LIVE_INSTRUCTIONS, DELEGATION_INSTRUCTIONS, PERSONAPLEX_INSTRUCTIONS, VOICE_INSTRUCTIONS,
@@ -127,7 +127,8 @@ def is_noise(text: str) -> bool:
 
 def live_session_config(config: dict, history: list[dict]) -> dict:
     from app.core.query_options import decode_provider_model
-    o = validate_options(LIVE_MODEL, config.get("options") or {})
+    model = config.get("model") if config.get("model") in LIVE_MODELS else LIVE_MODEL
+    o = validate_options(model, config.get("options") or {})
     delegation = {"type": "client"}
     if o["delegation_type"] == "responses" and not config.get("conversation_surface"):
         decoded = decode_provider_model(o["delegation_model"])
@@ -143,7 +144,7 @@ def live_session_config(config: dict, history: list[dict]) -> dict:
             backend["reasoning"] = {"effort": o["delegation_effort"]}
         delegation = {"type": "responses", "responses": backend}
     return {
-        "model": LIVE_MODEL,
+        "model": model,
         "instructions": o["instructions"] or LIVE_INSTRUCTIONS,
         "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": config["voice"]}},
         "delegation": delegation,
@@ -231,7 +232,7 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # realtime option set, which LiveOptions rejects as extra fields.
     instructions = DELEGATION_INSTRUCTIONS
     from app.core.voice_models import CODEX_MODEL, GROK_MODEL, SUPERGROK_MODEL
-    if binding.get("model") in (LIVE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL):
+    if binding.get("model") in (*LIVE_MODELS, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL):
         options = validate_options(binding["model"], binding.get("options") or {})
         instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
     # Submit to the SAME session: reuse its history/client and normal queue,
@@ -424,7 +425,7 @@ class VoiceStream:
 
     @property
     def is_live(self):
-        return self.config["model"] == LIVE_MODEL
+        return self.config["model"] in LIVE_MODELS
 
     @property
     def upstream_url(self):
@@ -985,7 +986,7 @@ class VoiceStream:
             return
         seconds = len(data) / 48_000
         self.mic_voiced_s += seconds
-        if self.config["model"] != LIVE_MODEL or self.restoring:
+        if self.config["model"] not in LIVE_MODELS or self.restoring:
             return
         if self.last_out_at is not None and now - self.last_out_at < PROVIDER_DEAF_OUTPUT_QUIET_S:
             return  # The voice is talking; its own speech may be what the mic hears.

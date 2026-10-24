@@ -33,9 +33,10 @@ import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-own
 /** Labels for current and already-pinned legacy calls, not model choices. */
 const voiceModelLabels: Record<string, string> = {
  'gpt-live-1': 'GPT Live 1',
+ 'gpt-live-1.1': 'GPT-Live-1.1',
  'grok-voice-latest': 'Grok Voice',
  'grok-voice-supergrok': 'Grok voice (SuperGrok subscription)',
- 'gpt-live-1-codex': 'ChatGPT voice (ChatGPT subscription)',
+ 'gpt-live-1-codex': 'GPT-Live-1.1 · ChatGPT subscription',
  'gpt-realtime-2.1': 'GPT Realtime 2.1',
  'gpt-realtime-2.1-mini': 'GPT Realtime 2.1 Mini',
  'gpt-realtime-2': 'GPT Realtime 2',
@@ -87,7 +88,16 @@ export interface VoiceModelDetails {
 	preview_note: string;
 }
 
+/** An engine Settings may offer now; `funding` is the provider kind that pays for it. */
+export interface VoiceEngine {
+	id: string;
+	label: string;
+	funding?: 'openai' | 'xai' | 'chatgpt' | 'grok' | string;
+}
+
 export interface VoiceSettings {
+	/** Engines to offer, in order. Absent on older servers. */
+	voice_engines?: VoiceEngine[];
 	/** Absent only when talking to an older server. Never guess its voice list. */
 	model_details?: VoiceModelDetails;
 	voice_input_models?: Array<{ id: string; name: string; provider: string }>;

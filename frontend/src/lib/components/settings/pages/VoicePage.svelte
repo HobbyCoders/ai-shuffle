@@ -93,12 +93,26 @@
 	const supergrokLabel = voiceModelLabel(SUPERGROK_VOICE_MODEL);
 	/** Engines funded by a subscription login: no voice samples. */
 	const loginEngine = $derived(chatgpt || supergrok);
-	const engineOptions = $derived([
-		{ value: 'gpt-live-1', label: 'GPT Live 1' },
-		{ value: 'grok-voice-latest', label: 'Grok Voice' },
-		{ value: SUPERGROK_VOICE_MODEL, label: supergrokLabel },
-		{ value: CODEX_VOICE_MODEL, label: chatgptLabel }
-	]);
+	/**
+	 * The server lists the engines it offers now (GPT-Live-1.1 only once the
+	 * selected OpenAI key can use it). Older servers send no list.
+	 */
+	const engineOptions = $derived.by(() => {
+		const listed = s?.voice_engines?.length
+			? s.voice_engines.map((e) => ({ value: e.id, label: e.label }))
+			: [
+					{ value: 'gpt-live-1', label: 'GPT Live 1' },
+					{ value: 'grok-voice-latest', label: 'Grok Voice' },
+					{ value: SUPERGROK_VOICE_MODEL, label: supergrokLabel },
+					{ value: CODEX_VOICE_MODEL, label: chatgptLabel }
+				];
+		const current = s?.voice_model;
+		if (current && !listed.some((o) => o.value === current)) listed.push({ value: current, label: voiceModelLabel(current) });
+		return listed;
+	});
+	const engineWidth = $derived(Math.min(340, Math.max(180, 64 + 8 * (engineOptions.find((o) => o.value === s?.voice_model)?.label.length ?? 0))));
+	/** Microphone gate (dBFS) for engines that stream server-side audio; absent for others. */
+	const micGate = $derived(typeof s?.voice_options?.mic_threshold_db === 'number' ? s.voice_options.mic_threshold_db : null);
 
 	/** The provider a new call runs on: the pin when it is still eligible, else the first by name (server rule). */
 	const grok = $derived(s?.voice_model === 'grok-voice-latest');
@@ -241,7 +255,7 @@
 			onReset={() => voice.save({ voice_model: 'gpt-live-1', voice_provider_id: null })}
 			expanded={chatgptHelp ? chatgptNote : supergrokNeedsLogin ? supergrokConnect : undefined}
 		>
-			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={engineOptions} width={chatgpt ? 340 : supergrok ? 280 : 180} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
+			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={engineOptions} width={engineWidth} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
 		</SettingRow>
 		<SettingRow
 			label="Voice access"
@@ -350,6 +364,25 @@
 				disabled={locked}
 				onchange={(n) => voice.save({ voice_max_call_minutes: Math.max(1, Math.round(n)) })}
 			/>
+		</SettingRow>
+		<SettingRow
+			id="voice.micGate"
+			dim={!callsOn}
+			value={micGate ?? undefined}
+			onReset={micGate === null ? undefined : () => s && voice.save({ voice_options: { mic_threshold_db: defaultOf<number>('voice.micGate') }, voice_options_model: s.voice_model })}
+		>
+			{#if micGate !== null}
+				<NumberField
+					value={micGate}
+					min={-80}
+					max={-20}
+					unit="dBFS"
+					disabled={locked}
+					onchange={(n) => s && voice.save({ voice_options: { mic_threshold_db: Math.round(n) }, voice_options_model: s.voice_model })}
+				/>
+			{:else}
+				<ValueText value={s ? 'Not available' : unavailable} />
+			{/if}
 		</SettingRow>
 		<SettingRow id="voice.opening" dim={!callsOn} value={s?.voice_options?.opening ?? ''} onReset={() => saveOpening('')}>
 			<TextField

@@ -258,6 +258,23 @@ def _reset_turn_scheduler_seams():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_voice_model_lookup(monkeypatch):
+    """GPT-Live-1.1 stays hidden: no test asks api.openai.com about it.
+
+    Tests of the availability gate replace ``_fetch_status`` themselves.
+    """
+    from app.core import voice_availability
+
+    async def _not_found(api_key):
+        return 404
+
+    voice_availability.clear_cache()
+    monkeypatch.setattr(voice_availability, "_fetch_status", _not_found)
+    yield
+    voice_availability.clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _test_only_memory_store(monkeypatch):
     from app.core.provider.harness_adapter import HarnessAdapter, MemoryStore
     monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", MemoryStore)

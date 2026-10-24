@@ -4,7 +4,7 @@ Deliberately small surface:
 
 * ``GET  /api/v1/voice/providers`` — which ``model_providers`` rows can fund a
   realtime call. Supported engines require API keys. ChatGPT subscriptions
-  are eligible only for the explicitly selected, unofficial Codex engine;
+  are eligible only for the explicitly selected ChatGPT subscription engine;
   they are never used for API-key engines.
 * ``POST /api/v1/voice/sessions`` — create the session row (a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
@@ -46,12 +46,12 @@ from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
-    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, SUPERGROK_MODEL, session_config,
-    transport_for,
+    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_11_MODEL, LIVE_MODEL, LIVE_MODELS, PERSONAPLEX_MODEL, SUPERGROK_MODEL,
+    session_config, transport_for,
 )
 
 # Engines that converse on the server audio stream and hand work to the chat.
-_DELEGATING_STREAM_MODELS = (LIVE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
+_DELEGATING_STREAM_MODELS = (*LIVE_MODELS, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
 SUPERGROK_LOGIN_REQUIRED = (
     "Connect your SuperGrok login in Settings > Providers to use this voice engine. "
     "It does not use an xAI API key."
@@ -393,7 +393,7 @@ async def preview_voice(
     from app.core.voice_preview import generate_live_preview
 
     voice = (request.voice or "").strip()
-    if request.model not in (LIVE_MODEL, GROK_MODEL) or voice not in voices_for(request.model):
+    if request.model not in (*LIVE_MODELS, GROK_MODEL) or voice not in voices_for(request.model):
         raise HTTPException(400, "Choose a supported voice and engine.")
     voice_settings = await run_sync(get_voice_settings)
     api_user = get_api_user_from_request(http_request)
@@ -401,6 +401,10 @@ async def preview_voice(
         _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"], api_user, request.model
     )
     api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if request.model == LIVE_11_MODEL:
+        from app.core import voice_availability
+        if not await voice_availability.probe(provider_row["id"], api_key):
+            raise HTTPException(400, "GPT-Live-1.1 isn't available for this OpenAI API key yet.")
 
     finished = asyncio.Event()
 
@@ -460,7 +464,7 @@ def _resolve_provider_row(
                 raise HTTPException(400, chatgpt_login_required)
             if model == SUPERGROK_MODEL:
                 raise HTTPException(400, SUPERGROK_LOGIN_REQUIRED)
-            raise HTTPException(400, "Choose an enabled API-key provider for this voice engine. Subscription voice access is not verified; an API key is required.")
+            raise HTTPException(400, "Choose an enabled API-key provider for this voice engine.")
         return row
 
     pinned = (settings_provider_id or "").strip()
@@ -481,7 +485,7 @@ def _resolve_provider_row(
             status_code=400,
             detail=(
                 f"No {'xAI' if model == GROK_MODEL else 'OpenAI'} provider with a stored API key is configured. "
-                "Add one in Settings > Providers. Subscription voice access is not verified; an API key is required."
+                "Add one in Settings > Providers."
             ),
         )
     eligible.sort(key=lambda p: (p["name"].casefold(), p["id"]))
@@ -698,7 +702,10 @@ async def _provider_api_key(
 async def _require_voice_enabled() -> Dict[str, Any]:
     """The voice settings, or a 403 when the mode is switched off."""
     from app.api.settings import get_voice_settings
+    from app.core import voice_availability
 
+    # A saved GPT-Live-1.1 choice needs its (cached) access check first.
+    await voice_availability.refresh_from_settings(only_if_stored=True)
     voice_settings = await run_sync(get_voice_settings)
     if not voice_settings["voice_mode_enabled"]:
         raise HTTPException(
@@ -859,12 +866,7 @@ async def create_voice_session(
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
 
-    voice_settings = await run_sync(get_voice_settings)
-    if not voice_settings["voice_mode_enabled"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Voice mode is disabled. Enable it in Settings > Voice.",
-        )
+    voice_settings = await _require_voice_enabled()
 
     provider_row = await run_sync(
         _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"],
