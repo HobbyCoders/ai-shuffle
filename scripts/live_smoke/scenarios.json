@@ -408,6 +408,14 @@
           "past_bug": "#470: checking saved settings as a complete request blamed missing required media on the remembered choice; lossy field checks also misclassified nested saved values."
         },
         {
+          "id": "harness-basics.watchdog-stop",
+          "check": "Watchdog retains ownership when bounded stop times out",
+          "kind": "owner",
+          "how": "On a disposable candidate, gate watchdog fsync; stop, start, release, stop again.",
+          "pass_when": "Timeout logs its stack, keeps the handle, refuses a duplicate and rejoins.",
+          "past_bug": "#547: stop cleared a live thread handle while fsync was blocked."
+        },
+        {
           "id": "harness-basics.12",
           "check": "Durable loop heartbeat, recovery context and read-only WAL sampling",
           "kind": "owner",
