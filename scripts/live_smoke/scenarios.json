@@ -636,6 +636,14 @@
           "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
           "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
           "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
+        },
+        {
+          "id": "harness-basics.approval-pending-message-delivery",
+          "check": "A message sent while an approval waits reaches the agent and the card stays open",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat in Bypass, on a Claude CLI model and again on a native-provider model: ask the agent to run a harmless command that needs your approval (for example `git push --dry-run` in a throwaway repository). While its yes/no card waits, type \"Instead, tell me what that command would change\". Then answer the card yes. Repeat, answering no, and once more leaving it until the 15-minute approval time runs out. Finally ask for a command and answer it yes with nothing else sent. Never use a production repository.",
+          "pass_when": "The other message is answered in the same turn without a yes or no; the transcript shows the call as not run yet and the card still waiting. A later yes is followed by the agent running exactly that command once, with no second card; a later no and an expiry are each reported to the agent, which does not run the command. A plain yes with nothing else sent runs the command as before. No message stays unsent while a card waits.",
+          "past_bug": "#523: in owner chats every other message stayed queued and unsent until the pending approval was answered yes or no."
         }
       ]
     }
