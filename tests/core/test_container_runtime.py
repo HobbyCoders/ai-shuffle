@@ -855,6 +855,47 @@ def test_supervisor_hardening_really_clears_dumpable(allow, expected):
     assert out.stdout.strip() == expected
 
 
+@pytest.mark.parametrize("deadline_exceeded", [False, True])
+def test_fast_shutdown_budget_and_failure_fence(
+    settings_factory: Callable[..., Settings],
+    monkeypatch: pytest.MonkeyPatch,
+    deadline_exceeded: bool,
+) -> None:
+    import signal
+    import subprocess
+    db = runtime.Database(settings_factory())
+    db.pg.mkdir()
+    endpoints = (db.pg / "runtime.json", db.root / "managed-postgres.json")
+    for endpoint in endpoints:
+        endpoint.write_text("retained-until-clean-shutdown")
+    db.process = Mock()
+    db.process.poll.return_value = None
+    db.process.wait.side_effect = ([subprocess.TimeoutExpired("postgres", 60), 0]
+                                   if deadline_exceeded else [0, 0])
+    db.pg_log, db.private_runtime, db.lock = Mock(), Mock(), Mock()
+    signals = []
+    monkeypatch.setattr(runtime, "kill_group", lambda process, sig: signals.append((process, sig)))
+    # Cleanup must still run after the supervisor has received its stop signal.
+    runtime.STOP.set()
+    try:
+        if deadline_exceeded:
+            with pytest.raises(runtime.RuntimeFailure, match="fast shutdown deadline exceeded"):
+                db.close()
+        else:
+            db.close()
+    finally:
+        runtime.STOP.clear()
+    db.process.send_signal.assert_called_once_with(signal.SIGINT)
+    assert [call.kwargs for call in db.process.wait.call_args_list] == [
+        {"timeout": 60}, {"timeout": 5},
+    ]
+    assert signals == [(db.process, signal.SIGKILL)]
+    assert all(endpoint.exists() == deadline_exceeded for endpoint in endpoints)
+    db.pg_log.close.assert_called_once_with()
+    db.private_runtime.cleanup.assert_called_once_with()
+    db.lock.close.assert_called_once_with()
+
+
 def test_shutdown_order(monkeypatch):
     calls = []
     app, chrome = Mock(), Mock()
@@ -2107,7 +2148,7 @@ def _measured_checkpoint(db, phase):
     outcome = "failed"
     try:
         # This is a lab observation, not the product's generic 10s SQL budget
-        # and not PostgreSQL's 30s FAST shutdown deadline. #350 measured a
+        # and not PostgreSQL's FAST shutdown deadline. #350 measured a
         # completed checkpoint at ~12s; bound the observation independently.
         db.admin_script("CHECKPOINT", timeout=60)
         outcome = "completed"
@@ -2132,16 +2173,25 @@ def _measured_checkpoint(db, phase):
 
 
 def _measured_fast_shutdown(db):
+    import re
     import time
+    logpath = db.pg / "server.log"
+    offset = logpath.stat().st_size
     before, started = _host_counters(), time.monotonic()
     outcome = "failed"
     try:
-        db.close()  # The real SIGINT/30s wait/forced-stop path; no test override.
+        db.close()  # The real SIGINT/wait/forced-stop path; no test override.
         outcome = "completed"
     finally:
         seconds = time.monotonic() - started
+        with logpath.open("rb") as stream:
+            stream.seek(offset)
+            lines = stream.read().decode(errors="replace").splitlines()
+        timings = [line[line.index("checkpoint "):] for line in lines
+                   if re.search(r"LOG:  checkpoint (starting|complete):", line)]
         print(json.dumps({"phase": "postgresql-fast-shutdown", "seconds": seconds,
-                          "deadline_seconds": 30, "outcome": outcome,
+                          "deadline_seconds": runtime.PG_FAST_SHUTDOWN_TIMEOUT, "outcome": outcome,
+                          "checkpoint_log": timings,
                           "host": _host_delta(before, _host_counters(), seconds)}))
 
 
@@ -2170,6 +2220,15 @@ def test_checkpoint_measurement_labels_lab_deadline_and_excludes_other_logs(tmp_
 @pytest.mark.parametrize("failed", [False, True])
 def test_fast_shutdown_measurement_preserves_real_deadline_failure(tmp_path, capsys, failed):
     db = Mock(pg=tmp_path)
+    log = tmp_path / "server.log"
+    log.write_text("previous log entry\n")
+
+    def close() -> None:
+        with log.open("a") as stream:
+            stream.write("LOG:  checkpoint starting: shutdown immediate\n")
+            stream.write("ERROR: synthetic-private-value\n")
+
+    db.close.side_effect = close
     if failed:
         db.close.side_effect = runtime.RuntimeFailure("PostgreSQL fast shutdown deadline exceeded; operator inspection required")
         with pytest.raises(runtime.RuntimeFailure, match="fast shutdown deadline exceeded"):
@@ -2179,8 +2238,12 @@ def test_fast_shutdown_measurement_preserves_real_deadline_failure(tmp_path, cap
     db.close.assert_called_once_with()
     output = json.loads(capsys.readouterr().out)
     assert output["phase"] == "postgresql-fast-shutdown"
-    assert output["deadline_seconds"] == 30
+    assert output["deadline_seconds"] == 60
     assert output["outcome"] == ("failed" if failed else "completed")
+    assert output["checkpoint_log"] == (
+        [] if failed else ["checkpoint starting: shutdown immediate"]
+    )
+    assert "synthetic-private-value" not in json.dumps(output)
 
 
 @pytest.mark.timeout(300)
@@ -2244,6 +2307,22 @@ print(written, flush=True)
         for child in children:
             child.communicate(timeout=5)
         db.close()
+    if measurement == "fast-shutdown":
+        # Exercise the real next startup and committed data, not just a missing
+        # PID file. Pressure has ended, but no test CHECKPOINT cleaned the DB.
+        logpath = db.pg / "server.log"
+        offset = logpath.stat().st_size
+        reopened = runtime.Database(db.settings, port=pg_enabled)
+        try:
+            reopened.open()
+            assert reopened.identifier == db.identifier
+            assert reopened.query("SELECT count(*) FROM checkpoint_probe WHERE "
+                                  "value = reverse(repeat(md5(i::text), 64))") == "32768"
+            startup = logpath.read_bytes()[offset:]
+            assert b"database system was shut down at" in startup
+            assert b"database system was interrupted" not in startup
+        finally:
+            reopened.close()
 
 
 def test_real_pg_app_fenced_then_sigkill_recovers_committed_wal(settings_factory, tmp_path, pg_enabled):

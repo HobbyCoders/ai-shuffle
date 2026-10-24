@@ -40,7 +40,7 @@ For an **offline retained embedded database**, stop the app first, then use the
 maintenance entrypoint on its existing volumes, without starting dependencies:
 
 ```sh
-docker compose stop --timeout 90 ai-shuffle
+docker compose stop --timeout 120 ai-shuffle
 docker compose run --rm --no-deps ai-shuffle dump --file /data/offline-backup.dump
 ```
 
@@ -109,7 +109,7 @@ its original encryption password once. Protect all archives as sensitive data.
 
 ## Restore embedded data offline into an empty disposable target
 
-1. Stop app writers with at least 90 seconds' grace. Preserve the original volumes,
+1. Stop app writers with at least 120 seconds' grace. Preserve the original volumes,
    configuration and backups for rollback; **never restore over the live install**.
    Use the same PostgreSQL-16-capable image as the source, a **new empty** data
    volume and only a read-only mount of the selected recovery files. Do not pass
@@ -122,7 +122,7 @@ its original encryption password once. Protect all archives as sensitive data.
 
    ```sh
    docker volume create ai-shuffle-recovery-data
-   docker run --rm --network none --stop-timeout 90 \
+   docker run --rm --network none --stop-timeout 120 \
      -e PUID=99 -e PGID=100 \
      -v ai-shuffle-recovery-data:/data -v "$RECOVERY_FILES:/restore:ro" \
      "$IMAGE" restore --file /restore/ai-shuffle-db-TIMESTAMP.dump

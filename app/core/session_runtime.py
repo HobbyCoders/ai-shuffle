@@ -486,7 +486,9 @@ _REDELIVERY_NOTE = (
 
 
 def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
-    """The engine-facing text of a turn the caller started in a voice call.
+    """The engine-facing text of a turn the caller started in a voice call, or
+    of the owner's yes or no to an approval whose call was answered "not run
+    yet" (``assistant_confirm.engine_note``).
 
     The voice guidance is appended to that turn's own message, the way the
     per-turn environment note is, so the system prompt (the provider's cached
@@ -494,7 +496,16 @@ def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
     it: the stores and the transcript keep the row's prompt.
     """
     payload = payload or {}
-    if not prompt or not payload.get("voice_delegation"):
+    if not prompt:
+        return prompt
+    # The owner's yes or no to a request whose call was answered "not run
+    # yet": the agent learns the outcome with the owner's own words (#523).
+    from app.core.assistant_confirm import engine_note
+
+    approval = engine_note(payload)
+    if approval:
+        prompt = f"{prompt}\n\n{approval}"
+    if not payload.get("voice_delegation"):
         return prompt
     instructions = payload.get("voice_instructions")
     if not isinstance(instructions, str) or not instructions.strip():
@@ -1301,6 +1312,11 @@ class SessionRuntime:
                 })
             self._pending_done = None
         finally:
+            # A one-shot approval pass lives only as long as the turn it was
+            # armed for, however the turn ends (done, Stop, settle).
+            from app.core import assistant_confirm as _confirm
+
+            _confirm.drop_passes(sid, self.turn_id)
             # Deregister ourselves as the live runtime (self-guarded so a fresh
             # runtime that already took over the session is never evicted).
             if _live_runtimes.get(sid) is self:
@@ -1524,6 +1540,12 @@ class SessionRuntime:
                 if not engine_prompt:
                     self._terminal = "done"
                     return  # All completions superseded; no unrelated message to deliver.
+            # The owner's yes to a call that was let go "not run yet" (or a
+            # wake carrying a yes given elsewhere) admits that call once, in
+            # this turn only (#523).
+            from app.core import assistant_confirm as _confirm
+
+            _confirm.arm_pass(self.session_id, self.turn.get("payload"), self.turn_id)
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -1851,6 +1873,11 @@ class SessionRuntime:
                                 and command_id.startswith("client-") else row_id)
                     self._steer_ids[row_id] = steer_id
                     await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
+                    # Armed only once the engine took the message: a steer that
+                    # failed leaves the pass for the turn the row runs in.
+                    from app.core import assistant_confirm as _confirm
+
+                    _confirm.arm_pass(self.session_id, row.get("payload"), self.turn_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not
