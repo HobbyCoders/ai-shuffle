@@ -801,6 +801,32 @@ def test_refusals_hold_restart_until_a_later_install_completes(setup):
     asyncio.run(scenario())
 
 
+def test_a_refused_check_never_hides_the_peers_own_result(setup):
+    """A peer already checking refuses a second check; the update it finds must still show."""
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    peer = {"supported": True, "allow_updates": True, "phase": "checking", "version": None,
+            "running_version": A, "checked_at": time.time()}
+
+    async def call(_device, _kind, body, **kwargs):
+        if body["operation"] == "status":
+            return dict(peer)
+        return {"accepted": False, "reason": "An update is already in progress"}
+
+    remote.side_effect = call
+    fleet._refusals["peer"] = "Busy with active sessions; retry when finished"
+
+    async def scenario():
+        result = await fleet.dispatch("check")
+        assert any(row["device_id"] == "peer" and row["accepted"] is False for row in result["results"])
+        assert fleet._refusals == {}
+        peer.update(phase="available", version=B[:12])
+        state = await fleet.snapshot(fresh=True)
+        row = next(row for row in state["workers"] if row["device_id"] == "peer")
+        assert row["role"] == "available"
+    asyncio.run(scenario())
+
+
 def test_container_status_reports_when_the_feed_was_checked(setup, monkeypatch, tmp_path):
     import json
     import os

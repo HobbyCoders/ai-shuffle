@@ -261,6 +261,15 @@
           "past_bug": "ChatGPT subscription voice offered only Cove although the subscription has 25 voices; an engine switch could keep the previous engine's provider pin."
         },
         {
+          "id": "harness-basics.generation-choice-safety",
+          "check": "Unified generation named-choice safety, quotes and catalog shape",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable account preferences and throwaway chats on two candidate workers; never alter the owner's choices or caps. Remember a fal choice for each tested kind, then make unattended calls through that kind's tool naming SuperGrok or a different fal model. Inspect catalog/submission logs. For matching probes use a declared endpoint priced above the confirmation threshold, never approve a paid retry, and call runFalModel from worker A with the kind's remembered fal choice pinned to worker B, then with its worker omitted. Run default searchModels and searchModels(source=supergrok) with a real subscription account. Compare searchModels for kling/v4/text-to-video with its default choice-card and interactive generateVideo quotes. With the same SuperGrok account on both workers, request choices from each and inspect holders. Compare compact and full_schema searchModels for a large fal schema including generate_audio. Save an unpriced model, then an unavailable-holder choice, through the choices API and inspect the warning and save latency. Archive throwaway chats and discard only disposable preferences.",
+          "pass_when": "Unattended names that differ from a remembered choice skip with named_choice_differs_from_stored before any catalog lookup or submission. Matching runFalModel calls reach the existing price/confirmation/cap decision on the remembered holder, without injecting worker A or switching sources; above-threshold probes skip without billing. Default and SuperGrok-filtered searchModels return subscription options and their allowed values without errors. The single search quote, choice card and generate quote show the same known default price (0.785 USD for the recorded Kling rate; use the current provider rate if changed). Each source/account/model/options tuple appears once, preferring the local holder, and different accounts/options remain separate. Default searchModels JSON is at most 32768 ASCII-escaped characters, truncation is explicit, full_schema returns the complete schema, and generate_audio stays boolean. An unpriced save returns stored_choice_unpriced and a skip warning; unavailable or timed-out quotes retain their error and return stored_choice_unavailable within the two-second quote budget. The pick is saved in both cases. No paid retry is approved. Missing provider/worker evidence is not a pass.",
+          "past_bug": "#512 silently replaced named unattended sources with stored choices; #513 masked prices and misreported unavailable saves; #514 duplicated holders, returned huge schemas and typed booleans as files. Review also caught subscription-schema crashes and runFalModel overriding remembered holders."
+        },
+        {
           "id": "two-worker-smoke.25",
           "check": "New voice session checks its explicit funding key",
           "kind": "owner",
@@ -284,6 +293,34 @@
           "how": "Move a throwaway long chat (thousands of transcript events, including large tool results) to the other worker with HandOffSession. While it sends, inspect GET /api/v1/sessions/{id}/handoff on the source. Capture pending.progress across multiple polls in an install_history table step; archive the throwaway chat afterwards.",
           "pass_when": "The progress has rows_completed and rows_total for the current import table; counts advance in committed chunks without exceeding the total. A new step clears the previous table's counts. Ownership and the complete transcript appear only after successful publication; a failed import does not replace the old mirror. Row counts are API evidence, not a claim that the current frontend renders them.",
           "past_bug": "#295: importing a long chat spent minutes in install_history with no row-count progress, making the move look stuck."
+        },
+        {
+          "id": "two-worker-smoke.28",
+          "check": "Disposable coordinators retain the owner working record",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "In a throwaway no-project chat, ask the agent to record a distinctive decision and pending item using WorkingRecord, then start a short project chat on the peer. Settle the coordinator before the peer reports. Start a brand-new no-project chat on either worker and ask what is going on. Resolve the pending item and report, and ask again from another fresh chat. On disposable paired workers, hold sync, acknowledge a provisional report on one worker while the other receives its genuine report, then reconnect; repeat with the opposite first delivery. Separately, run a throwaway coordinator until its measured context crosses 80%, with no queued messages, approvals or background Tasks. Archive the throwaway chats and resolve their record items afterwards.",
+          "pass_when": "The new chat knows the decision, pending item, child report and live running/needs-owner state without opening the settled coordinator. Both workers see the same items and acknowledgements. Concurrent acknowledgement and genuine report delivery preserve the resolved state and genuine result in both delivery orders. At the threshold the old chat settles exactly once and a notification opens a fresh active chat with the same model/effort/access, the working record and no old transcript; completed work is not restarted. Stop, pending questions and active background Tasks prevent automatic hand-off.",
+          "past_bug": "#371 step 2: status and decisions existed only in a long coordinator transcript; a fresh chat lost the work and no automatic replacement existed."
+        },
+        {
+          "id": "two-worker-smoke.29",
+          "check": "Concurrent remote starts and workflow reads remain responsive",
+          "kind": "owner",
+          "two_worker": true,
+          "optional": true,
+          "how": "On disposable paired branch workers (including Windows), use an isolated in-process harness with task execution suppressed, not 31 real model agents. Submit 31 concurrent task-start requests with distinct child ids to one project; during admission poll that project's git/pr-state (including a branch beyond the first 100 open PRs, with gh mocked) and a session's swarms after 120 publications of 30 tasks interleaved with at least 12000 transcript events. Repeat the same child ids and inspect durable turns and report obligations. Time handler and fetch spans, then repeat with branch and default checkout modes; never use the installed app's data directory.",
+          "pass_when": "Task-start receipts return within a few seconds, each child has exactly one queued turn and report obligation after retries, worktrees retain their validated base and branch, and pr-state and swarms stay under 1 second. A burst wakes the coalescing catalog scanner rather than awaiting 31 whole-catalog passes; distinct branch fetches overlap, while worktree mutations remain protected.",
+          "past_bug": "#482: 31 simultaneous remote starts took about 90 seconds on Windows; full status and unfiltered PR scans delayed pr-state, while serial full-transcript replays delayed swarms."
+        },
+        {
+          "id": "two-worker-smoke.30",
+          "check": "Sidebar Check for updates finds a peer's update like Settings does",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking. Install nothing.",
+          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress (Settings may show that refusal on its own repeated click; see #519).",
+          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date."
         }
       ]
     },
@@ -412,6 +449,30 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.34",
+          "check": "Required Docker isolation refuses before root writes",
+          "kind": "owner",
+          "how": "Run the disposable-image preflight matrix in agent-shell-isolation.md.",
+          "pass_when": "Bad starts leave sentinels unchanged; valid required starts isolated.",
+          "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
+        },
+        {
+          "id": "harness-basics.27",
+          "check": "Confirmed watches recover cursors and deliver without self-triggering",
+          "kind": "owner",
+          "how": "Use only a disposable candidate worker with its own persistent data directory and a configured real provider; never restart a production worker. In a throwaway live project chat request a 60-second schedule watch with a small daily cap. Confirm the host-owned source/filter, read-only scope, delivery action and budget sentence. Record its id, saved cursor, event ids and stable delivery command ids. After one real delivery, stop only the disposable worker for over 180 seconds, letting scheduled events accrue, then restart with the same data directory. Also interrupt once immediately after event admission but before dispatch using approved candidate diagnostics; retain the original command identity. Confirm all elapsed schedule events arrive once, then restart again and check no event or turn is repeated. Settle the creating chat, let a new schedule event arrive, and inspect the durable bell/push notification and cheap summary rather than a turn waking that chat. Create an investigation watch and verify a new short no-project chat plus notification. Finally create a finished-session watch scoped to its own creating chat; finish one ordinary owner turn, let the watch's real delivery finish, and wait through several polling intervals. Pause and stop every test watch, archive the throwaway chats, and remove only the disposable candidate after saving private receipts; do not publish screenshots.",
+          "pass_when": "No watch exists before the owner's confirmation. Live deliveries are real turns in the creating chat; a settled creator stays settled, alerts are durable notifications, and investigations use a new bounded no-project chat. Persisted cursors recover every elapsed schedule event exactly once across both restarts, including the expired undispatched admission, with unchanged dedupe and command ids. The finished-session watch reports the owner turn once and never re-fires on its own delivery, with no further provider call or cost during idle polling. Current permission revocation, pause/stop and daily budget still prevent dispatch after recovery. Record actual producing-path and provider evidence; mocked/seeded consumer state or an unexecuted restart is not a pass.",
+          "past_bug": "#371 review: expired admitted events were lost across restarts; finished-session watches observed their own delivery turns; only mocked local watch flows had been covered."
+        },
+        {
+          "id": "harness-basics.26",
+          "check": "Bounded home ownership repair progresses across persistent-volume restarts",
+          "kind": "owner",
+          "how": "Use only a disposable candidate container with synthetic data and persistent home/data/workspace volumes; never modify a live worker. Boot once with explicit non-root PUID:PGID and AGENT_ISOLATION=off to initialize storage, then stop it. With a throwaway root helper mounting those same volumes, create 45,000 uniquely named root:root regular files under /home/appuser/.fluid/repair-probe (more than the 20,000-entry per-start budget). Seed root-owned 0600 sentinel files inside DATA_DIR and WORKSPACE_DIR; record their contents, UID:GID and modes, and expose the storage volumes as additional bind aliases below the home probe so the walk encounters them. Start, stop and recreate the candidate several times, retaining all volumes and its home-repair-cursor.json. After each ready boot record the home-ownership summary, cursor and remaining root-owned probe filenames; do not manually chown targets or delete/reset the cursor. Continue until a full scan cycle completes, with a bounded total test duration. Separately launch a throwaway helper with an unmounted image-tree DATA_DIR (for example /etc) and verify startup refuses before any home-repair cursor or temporary cursor appears there. Remove only the disposable containers and volumes after collecting evidence.",
+          "pass_when": "Each startup respects the 20,000-entry/5-second scan budget, and successive scans advance rather than repeatedly repairing the same prefix. Every eligible probe file, including ones beyond the first budget, eventually belongs to the configured PUID:PGID; evidence names late files and the restart that repaired them. Protected storage sentinels keep identical contents, UID:GID and modes, including through the home bind aliases. Invalid unmounted image-tree DATA_DIR refuses with the documented volume/path message and leaves no cursor or temporary file. Missing privileged-container, multiple-restart or late-file ownership evidence is not a pass.",
+          "past_bug": "#380: every bounded startup walk restarted from the same prefix, so later root-owned home files were never repaired; review also caught advisory cursor writes before DATA_DIR mount validation."
+        },
+        {
           "id": "harness-basics.21",
           "check": "Assistant marker spoofing stays quoted after storage and replay",
           "kind": "owner",
@@ -468,6 +529,80 @@
           "how": "On a disposable candidate install, prepare a project with 100 non-retired historical worktrees (sessions inactive for over three hours) and three active worktrees: one focused, one recently used, and one streaming. Restart only the disposable install to clear its in-memory status cache. Refresh the worktree list repeatedly and record actual git status reader calls and status_checked_at fields. Focus a previously unchecked historical checkout once, then leave it inactive. In a recently active but idle checkout, edit a tracked file outside an agent turn, wait for the file-event debounce, and refresh the list. Repeat after adding a directory and editing a file inside it. Open the same project in two clients focused on different checkouts and alternate polls, including requests with no focus; edit files in both checkouts. Stop renewing only one focus and confirm only its watch expires after the lease; finally leave the project and confirm all watches expire. Do not use production data or restart installed workers.",
           "pass_when": "Cold and repeated refreshes read only the three active checkouts, not the 100 historical ones. Unchecked rows retain null status and status_checked_at until focused; previously checked inactive rows retain their last status. Idle edits, including in new directories, appear with a newer status_checked_at after debounce without a turn-end hook. Native watches exclude nested worktrees and dependency trees. Concurrent clients retain independent per-path leases: another client's different or missing focus cannot cancel a live watch, and only unrenewed paths stop after expiry.",
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
+        },
+        {
+          "id": "harness-basics.31",
+          "check": "Phone attach sheet swipe and in-chat card style",
+          "kind": "owner",
+          "how": "On the Android app, open a no-project chat and tap the project pill to open 'Attach a project'. Pull the sheet down a little and let go; pull it fast, hold still for a second, then let go; flick it down. With more projects than fit, scroll the project list up and down, starting with a small downward wobble. Then, in a light and a dark theme, trigger one approval asked in words and one generation choice card.",
+          "pass_when": "Short and held pulls spring back, a flick or a long pull closes the sheet, and the list scrolls normally. The approval and choice cards use the same border, radius, badges and buttons as the question tray in both themes.",
+          "past_bug": "The phone attach sheet could not be swiped closed, and the approval and generation choice cards used their own rails, tints and uppercase badges."
+        },
+        {
+          "id": "harness-basics.approval-self-gated-tools",
+          "check": "Tools with their own consent card ask once in an owner chat",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
+          "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
+          "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
+        },
+        {
+          "id": "harness-basics.23",
+          "check": "Native wake provenance across context pruning and rewind/resume",
+          "kind": "owner",
+          "how": "On a disposable candidate install, start a throwaway native-provider chat. Produce ordinary user turns, a background-task wake and a peer-delivered turn, including assistant tool calls/results. Record their first persisted TurnStarted sources and node IDs using a read-only diagnostic that emits only synthetic IDs, sources, replay cursors and decoded-row counts. Compact enough history to prune those nodes from the live context, then rewind to each recorded user/wake/peer node and resume it. Repeat an unchanged context scan and append a fresh user turn after an assistant/tool exchange. Archive only the throwaway chat and remove only diagnostics created for this check; never restart or mutate the installed worker or dump prompts, credentials or provider payloads.",
+          "pass_when": "Returning nodes retain their FIRST TurnStarted source despite later resume events: user turns stay user-authored and wake/peer turns keep their original exemptions and wake-aware counting. Only re-entering pruned context replays provenance from zero. Unchanged context and newly appended turns keep the saved cursor and decode only newer matching events, not the historical prefix or large tool results. Examined-node and provenance bookkeeping are pruned to the active context plus nodes appended since its last scan. Missing live evidence is recorded as not_run, not pass.",
+          "past_bug": "#354 / #264 / PR #504: unbounded wake bookkeeping required pruning, but comparing all active context nodes with only TurnStarted-named nodes restarted full provenance replay on ordinary mixed-role turns."
+        },
+        {
+          "id": "harness-basics.20",
+          "check": "Monitor viewer disconnect preserves its running shell",
+          "kind": "owner",
+          "how": "On a real candidate worker, start a throwaway chat and a long-running Monitor shell that prints a marker and waits for an explicit release file in its disposable folder. As the authenticated owner, open the read-only Monitor viewer, wait for the marker and repeatedly disconnect and reconnect it at least 50 times while the worker is busy. Include abrupt WebSocket closes overlapping an owner-auth recheck. Reattach and inspect the same task's status/output after each disconnect. With a second owner login available for cleanup, revoke the viewer's owner session while attached and confirm the connection closes. Inspect worker logs for every connection, then release only the throwaway shell and archive its chat; do not stop or restart the worker.",
+          "pass_when": "Every disconnect and reconnect leaves the original shell running with the same task id and readable backlog. Revocation closes the viewer with code 4001 without stopping that shell. Worker logs contain no teardown exception, CancelledError or leaked Monitor connection task for these connections. The explicit release ends the shell normally; a missing log inspection or fewer than 50 disconnects is not a pass.",
+          "past_bug": "#402: a disconnect followed by ASGI cancellation during Monitor child-task cleanup propagated a child CancelledError through WebSocket teardown."
+        },
+        {
+          "id": "harness-basics.24",
+          "check": "Learned prose workflow across separately synthesized sessions",
+          "kind": "owner",
+          "how": "Use a disposable local-owner Fluid install and project, never the installed worker's skill store. Complete the same harmless fixture-summary workflow in two separate non-code sessions, confirming each completed result with the exact user receipt workflow accepted: fixture-summary. Let synthesis drain after each session. Inspect fluid workflows list/show in a separate owner terminal. Before approval verify a fresh session cannot discover the skill; attempt approval from a managed agent shell and verify refusal. In the owner terminal approve the exact reviewed digest, then start fresh native and delegated sessions, load Skill(fixture-summary), and summarize a new fixture result. In another disposable project repeat with workflow corrected: fixture-summary or reject the proposal before approval. Remove only these disposable installs/projects.",
+          "pass_when": "The second synthesis creates one pending, project-scoped proposal with two source session IDs, ordered successful steps and evidence hashes, without installing it or adding another synthesis call. Only separate interactive local-owner approval installs SKILL.md. Fresh native and delegated sessions discover/load it and use its Checked: format for the new result. Corrected/rejected, private-path, secret-bearing and duplicate workflows do not promote. API-owned stores remain fail-closed pending an authenticated approval surface; this is not a test of an app approval UI.",
+          "past_bug": "#206: separately consumed journal slices could not ground repeated prose workflow proposals, although same-slice synthesis and manual promotion tests passed."
+        },
+        {
+          "id": "harness-basics.25",
+          "check": "Large native cold-resume memory retention",
+          "kind": "owner",
+          "how": "On a disposable Linux/glibc candidate install only, grow a native session beyond 8 MiB of durable message JSON using streaming turns and tool results, then compact it. Repeatedly detach/reconnect that session and complete a turn, at least 60 seconds apart, with three clients attached. Sample fixed-process anonymous RSS, retained nodes, compaction residency, subscriber and task counts for 30 minutes after warm-up. Open old history and a fork ending before a checkpoint. Do not restart or instrument an installed worker.",
+          "pass_when": "The resumed transcript and older fork remain readable with unchanged compacted output. Retained nodes stay near the checkpoint tail and superseded digest residency does not increase on each reconnect. Warm anonymous RSS does not ratchet after large cold loads; only the first terminal after an evicted cold load may attempt allocator reclamation, globally at most once per minute. Ordinary turns do not trim; non-glibc and non-Linux workers remain unaffected.",
+          "past_bug": "#264: cold resume retained retired compaction entries after windowing and left large temporary transcript allocations in glibc arenas."
+        },
+        {
+          "id": "harness-basics.28",
+          "check": "ChatGPT Settings default and Included choice obey admission",
+          "kind": "owner",
+          "how": "On a disposable candidate install only with a verified ChatGPT subscription, select the legacy ChatGPT Settings image default and clear remembered and job-stored image choices. Capture legacy-handler entry, cap/reservation state and provider-submission activity. First request one image through generateImage without source/model in a fresh interactive owner chat, leaving the choice card unanswered; repeat in an unattended automation with no job choice. Inspect structured results and confirm zero submissions. Next deliberately remember a verified Included ChatGPT choice with its exact account/model/holding worker. Using disposable fixture storage, establish recorded daily spend above the enabled daily cap without making paid calls, and confirm the cap is exhausted. Repeat the interactive and unattended image requests and inspect their structured results, cap/reservation state and provider activity. Restore only the disposable settings, choices, cap and fixture storage and archive the throwaway sessions. Never change an installed owner's preferences or ledger; no generation submission is authorized by this row.",
+          "pass_when": "With no stored choice the interactive result is choose with a choice card and the unattended result is skipped with reason no_stored_choice; neither request enters the legacy handler, reserves a generation or submits to any provider. With the stored Included choice and exhausted cap, both requests are refused with reason daily_cap and the unattended run reports it. Both refusals retain Included pricing (known USD zero), append no successful reservation and submit nothing. Retain structured results and zero-submission evidence; prose-only promises to ask or refuse are not a pass.",
+          "past_bug": "#379: the non-chat ChatGPT Settings default returned the legacy handler before the resolver, bypassing deliberate choices, Included pricing and daily-cap admission."
+        },
+        {
+          "id": "harness-basics.33",
+          "check": "Scheduled automation binds its stored choice on the holding worker",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable candidate workers ServerWorker and DesktopWorker with one owner-approved, verified Included image account held only by DesktopWorker. On ServerWorker create a disabled throwaway automation and PUT its exact account/worker/model/options to /api/v1/generation/jobs/{automation_id}/choices/image; GET it back. Leave remembered image choices empty or deliberately different. With the disposable cap admitting the request, trigger one scheduled run on ServerWorker with a prompt that calls generateImage without naming source/model/worker. Inspect the scheduler-created session's automation_id, structured generation result, both workers' submission activity and the resulting session artifact. Restore the disposable choices and remove only the throwaway automation/session afterward. No API-key or fal generation is authorized by this check.",
+          "pass_when": "The real unattended run uses the saved job choice despite the absent or different remembered choice. Result source/account/model/options and holding worker match the read-back binding; exactly one Included submission occurs on DesktopWorker, none on ServerWorker or another source. Current cap and schema admission run before submission, and the generated artifact is readable from the run session. A fixture that only injects RunContext.job_choices is not a pass.",
+          "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
+        },
+        {
+          "id": "harness-basics.32",
+          "check": "Docker runtime overlay acceptance on both architectures",
+          "kind": "owner",
+          "optional": true,
+          "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
+          "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
+          "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
         }
       ]
     }

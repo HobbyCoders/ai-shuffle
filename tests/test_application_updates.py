@@ -526,6 +526,28 @@ def test_runtime_selection_is_opt_in_platform_specific_and_image_first(feed, mon
     assert module.selected_overlays({"requires": ["base-1"]}, updater.image) == []
 
 
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="POSIX directory permissions, as the container's appuser sees them")
+def test_installed_runtime_keeps_signed_times_and_cannot_be_written_into(feed: tuple) -> None:
+    # A relocatable Python ships .pyc files checked against their sources'
+    # times. Unpack-time mtimes made the interpreter rewrite them inside the
+    # payload, and the next launch refused the overlay as tampered.
+    updater = feed[0]
+    item, data = runtime_artifact("python", "3.13", executable="python/bin/python3", entries={
+        "python/bin/python3": b"#!/bin/sh\n", "python/lib/os.py": b"# stdlib",
+        "python/lib/__pycache__/os.cpython-313.pyc": b"bytecode"})
+    offer_runtimes(feed, [(item, data)])
+    updater.check(download=True)
+    payload = updater.overlays.installed(item)
+    assert all(path.stat().st_mtime == 0 for path in payload.rglob("*") if path.is_file())
+    assert stat.S_IMODE((payload / "python/lib/__pycache__").stat().st_mode) == 0o555
+    with pytest.raises(PermissionError):
+        (payload / "python/lib/__pycache__/new.cpython-313.pyc").write_bytes(b"written at run time")
+    updater.state = {}
+    updater.prune_overlays()
+    assert list(updater.overlays.root.iterdir()) == []
+
+
 @pytest.mark.parametrize("corrupt", ["checksum", "short", "oversized"])
 def test_runtime_download_hash_and_size_refused_without_activation(feed, corrupt):
     updater, _, _, _, responses = feed
@@ -566,6 +588,7 @@ def test_cached_runtime_reverified_before_launch(feed, mutation):
     directory = updater.overlays.directory(item)
     path = {"file": directory / "payload" / item["executable"],
             "archive": directory / "runtime.tar", "extra": directory / "payload/extra.py"}[mutation]
+    path.parent.chmod(0o755)  # same-account tampering can undo the read-only payload
     path.write_bytes(b"tampered")
     with pytest.raises(UpdateError, match="signed archive|checksum"):
         updater.launch({}, activate=True)
@@ -606,6 +629,41 @@ def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, mo
     assert built.read_text() == "built"
     assert all("x-shuffle-lease" not in request.headers for request in feed[3]
                if request.url.host == "runtimes.example")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="executes a Linux overlay interpreter")
+@pytest.mark.parametrize("binary", ["other-processor", "missing-libraries"])
+def test_overlay_that_does_not_start_is_refused_by_name_before_anything_is_built(
+        feed: tuple, monkeypatch: pytest.MonkeyPatch, binary: str) -> None:
+    import platform
+    import struct
+    updater = feed[0]
+    if binary == "other-processor":
+        # EM_AARCH64 on an x86-64 host, EM_X86_64 elsewhere.
+        machine = 183 if platform.machine().lower() in ("x86_64", "amd64") else 62
+        content = (b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8)
+                   + struct.pack("<HHIQQQIHHHHHH", 2, machine, 1, 0x400000, 64, 0, 0, 64, 56, 0,
+                                 64, 0, 0))
+    else:
+        content = b"#!/bin/sh\necho 'version GLIBC_2.99 not found' >&2\nexit 1\n"
+    artifact = runtime_artifact("python", "3.13", executable="python/bin/python3",
+                                entries={"python/bin/python3": content})
+    offer_runtimes(feed, [artifact], entries={f"ai-shuffle-{B}/requirements.lock": "# pinned"})
+    monkeypatch.setattr(updater, "build", ContainerUpdates.build.__get__(updater))
+    real, commands = updater.run_build, []
+
+    def run(command: list[str], cwd: Path, env: dict[str, str]) -> None:
+        commands.append(command)
+        if command[1:] != ["-I", "-c", "pass"]:
+            raise AssertionError("nothing is built on an overlay that does not start")
+        return real(command, cwd, env)
+
+    monkeypatch.setattr(updater, "run_build", run)
+    with pytest.raises(UpdateError, match="python-3.13 runtime this update needs does not start"):
+        updater.check(download=True)
+    assert len(commands) == 1 and artifact[0]["sha256"] in commands[0][0]
+    assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
+    assert not updater.directory(B).exists()
 
 
 def test_runtime_rollback_restores_prior_selection_offline_and_prunes_unused(feed):

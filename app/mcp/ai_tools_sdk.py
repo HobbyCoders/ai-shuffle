@@ -656,37 +656,59 @@ UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 #   saved fal default is migrated into a remembered choice before the run,
 #   and an unreadable or unmigrated state must not fall back to an unguarded
 #   fal job with no known price, cap or confirmation.
-# - The only generation lane left is the ChatGPT-plan image tool (#1796): it
-#   runs on the subscription login and spends no per-item money.
+# - Subscription images also use the resolver: Included pricing still needs
+#   admission, a deliberate choice and the daily-cap check.
 # - runFalModel uses its fal lane only to pin the guarded request to this
 #   worker, never to call the raw handler. Unsupported inputs are refused
 #   (interactive) or skipped and reported (unattended), not run unpriced.
 
 
 def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
-    """``{name: (lane, handler)}`` for main's configured routes.
-
-    ``"chatgpt"`` is the ChatGPT-plan image tool (#1796), which needs no fal
-    key. ``"fal"`` pins ``runFalModel`` to this worker while a key is usable;
-    its raw handler is never called. The four unified generation tools never
-    get a fal lane (see above).
-    """
-    from app.core.provider import subscription_images as sub
-
-    subscription_image = sub.is_subscription_model(_configured_image_models(tool_env)[0])
-    lanes = {}
-    for name, legacy in legacy_tools.items():
-        if name == "generateImage" and subscription_image:
-            lanes[name] = ("chatgpt", legacy.handler)
-        elif fal_usable and name not in UNIFIED_TOOL_KINDS and name != "searchModels":
-            lanes[name] = ("fal", legacy.handler)
-    return lanes
+    """Pin guarded runFalModel to this worker; never admit raw generation."""
+    return {name: ("fal", legacy.handler) for name, legacy in legacy_tools.items()
+            if fal_usable and name not in UNIFIED_TOOL_KINDS and name != "searchModels"}
 
 
-def _lane_label(tool_env: Optional[Dict[str, str]]) -> str:
-    from app.core.provider import subscription_images as sub
+def _compact_generation_option(option):
+    """Bound discovery schemas; execution and choice cards retain the full one."""
+    import json
 
-    return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
+    view = {k: v for k, v in option.items() if k not in ("schema", "quick_settings", "options")}
+    if len(json.dumps(option.get("options", {}), ensure_ascii=True)) <= 1024:
+        view["options"] = option.get("options", {})
+    else:
+        view["options_omitted"] = True
+    schema = option.get("schema")
+    if not isinstance(schema, dict):
+        view["schema"] = None
+        return view
+    # Native capabilities use a mapping of option names to allowed values,
+    # not fal's list of ParamField records. Preserve that selectable schema.
+    if isinstance(schema.get("fields"), dict):
+        view["schema"] = schema
+        return view
+    compact = {"primary_text_field": schema.get("primary_text_field"), "fields": [], "compact": True, "truncated": False}
+    truncated = False
+    for field in schema.get("fields", []):
+        if len(compact["fields"]) >= 32:
+            truncated = True
+            break
+        item = {}
+        for key in ("name", "type", "required", "is_file", "is_primary_text", "enum", "default", "minimum", "maximum"):
+            value = field.get(key)
+            if value is None:
+                continue
+            if len(json.dumps(value, ensure_ascii=True)) > 512:
+                truncated = True
+                continue
+            item[key] = value
+        if len(json.dumps({**compact, "fields": [*compact["fields"], item]}, ensure_ascii=True)) > 4096:
+            truncated = True
+            break
+        compact["fields"].append(item)
+    compact["truncated"] = truncated
+    view["schema"] = compact
+    return view
 
 
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
@@ -717,39 +739,25 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     def plan_image_refusal(request):
         if normalize_source(request.get("source")) == "fal":
             return sub.fal_image_refusal()
-        if request.get("model") and normalize_source(request.get("source")) in (None, "chatgpt"):
+        # The verified native ChatGPT route calls its provider-default image
+        # model "default". Accept the card's exact ID, then let the resolver
+        # check account, schema, Included pricing and admission.
+        if (request.get("model") not in (None, "", "default")
+                and normalize_source(request.get("source")) in (None, "chatgpt")):
             return sub.refusal(request["model"], configured_image)
         return None
 
     def lane_for(name):
-        # A trusted stored/job choice outranks the Settings default.
-        kind = UNIFIED_TOOL_KINDS.get(name)
-        remembered = context.remembered_for(kind) if kind else context.remembered_choice
-        lane = None if context.job_choice or remembered else lanes.get(name)
-        # Main's fal handlers are never a generation tool's lane (see above).
-        return None if kind and lane and lane[0] != "chatgpt" else lane
+        return None if name in UNIFIED_TOOL_KINDS else lanes.get(name)
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
                   "audio": {"duration": {"type": "number"}},
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
-        lane = lane_for(name)
         description = (f"Generate {kind}. No source/model: the user's saved choice, else they pick; never pick for them. "
                        "IDs/schema: searchModels. Unknown prices never run (unattended skips, interactive asks); "
                        "above-threshold spend needs an approved retry.")
-        if lane:
-            description += f" Here, omitting source/model uses the Settings default ({_lane_label(tool_env)})."
-
-        def main_args(request):
-            """The call as main's ChatGPT-plan image tool took it, or None."""
-            if any(request.get(key) not in (None, {}, False) for key in ("worker", "options", "confirmed", "confirmation_token")):
-                return None
-            # The configured plan model (or its tail) is accepted, as on main.
-            if normalize_source(request.get("source")) not in (None, "chatgpt") or sub.refusal(request.get("model"), configured_image):
-                return None
-            return {key: request[key] for key in ("prompt", "model") if request.get(key)}
-
         @tool(name, description, {
             "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
         }, annotations=_LARGE_RESULT_ANNOTATIONS)
@@ -761,10 +769,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                 refused = plan_image_refusal(request)
                 if refused:
                     return _tool_result(result("refused", reason="image_provider_restricted", error=refused))
-            fallback = main_args(request) if lane else None
-            if fallback is not None:
-                # The ChatGPT-plan image setting: main's path, unchanged.
-                return await lane[1](fallback)
             options = request.get("options", {})
             if not isinstance(options, dict):
                 return _tool_result(result("refused", error="options must be an object."))
@@ -781,11 +785,12 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
 
-    @tool("searchModels", "On-demand accounts, exact model IDs, holding workers, schemas, prices, verified status; no prompt catalogs. Unknown prices refuse, never free.", {
+    @tool("searchModels", "Look up accounts, exact model IDs, workers, prices and compact declared fields. Use full_schema=true for complete schemas. Unknown prices are never free.", {
         "type": "object", "properties": {
             "query": {"type": "string"}, "source": {"type": "string"}, "model": {"type": "string"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "full_schema": {"type": "boolean", "default": False},
         }, "additionalProperties": False,
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def search_models(args):
@@ -809,7 +814,10 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         needle = query.casefold()
         options = [o for o in options if o["source"] == "fal" or not needle
                    or needle in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
-        output = result("catalog", options=options[:limit], total_matches=len(options))
+        # A single quote has a real price; do not mask it with result()'s
+        # unknown-price envelope default. Multiple choices have no single price.
+        output = result("catalog", price=options[0]["price"] if len(options) == 1 else None,
+                        options=options[:limit], total_matches=len(options))
         if failed is not None:
             output["priced_lookup_error"] = "Some accounts or workers could not be listed."
         if source in (None, "fal") and (query or not model) and await backend.fal_key():
@@ -818,6 +826,18 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
             fal = await _search_catalog(query, args.get("output_type"), limit)
             output.update(fal_models=fal["models"], fal_total_matches=fal["total_matches"],
                           hint="Quote a fal model with source \"fal\" and its endpoint_id as model, or run it with runFalModel.")
+        if not args.get("full_schema", False):
+            import json
+            output["options"] = [_compact_generation_option(o) for o in output["options"]]
+            output["schema_hint"] = "Use full_schema=true for complete schemas and defaults."
+            # Bound the complete default result too, including fal discovery.
+            # Preserve original match counts and explicitly signal omissions.
+            while len(json.dumps(output, indent=2, default=_json_default)) > 32768:
+                key = "fal_models" if output.get("fal_models") else "options"
+                if not output.get(key):
+                    break
+                output[key].pop()
+                output["truncated"] = True
         return _tool_result(output)
 
     tools.append(search_models)
@@ -850,7 +870,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                                        reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        if fal_local:
+        if fal_local and not context.unattended and not (context.job_choice or context.remembered_for(kind)):
             request["worker"] = backend.local_worker()
         output = await resolver.generate(kind, request, context)
         if context.unattended and output.get("status") == "refused":
