@@ -5,15 +5,14 @@ one polling generation; unique event keys deduplicate callbacks and polling.
 """
 
 from __future__ import annotations
-from typing import Any
-from datetime import datetime
 
 import hashlib
 import json
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import Any
 
-from app.core.watch_values import now, at, encode
+from app.core.watch_values import at, encode, now
 from app.db.base import get_db, row_to_dict
 
 
@@ -53,6 +52,9 @@ def create_schema(cursor: Any) -> None:
         seq BIGSERIAL PRIMARY KEY, connector_id TEXT NOT NULL, event_key TEXT NOT NULL,
         payload JSONB NOT NULL, UNIQUE(connector_id,event_key)
     )""")
+    from app.db import watch_journal
+
+    watch_journal.schema(cursor)
     cursor.execute("""CREATE TABLE IF NOT EXISTS watch_transfers (
         watch_id TEXT PRIMARY KEY, token TEXT NOT NULL, target TEXT NOT NULL,
         snapshot JSONB NOT NULL, completed BOOLEAN NOT NULL DEFAULT FALSE
@@ -88,6 +90,14 @@ def create(
     wid = watch_id or str(uuid.uuid4())
     with nullcontext(conn) if conn is not None else get_db() as connection:
         c = connection.cursor()
+        if source.get("connector_id"):
+            from app.db import watch_journal
+
+            state = watch_journal.lock(c, source["connector_id"])
+            if state["fence"]:
+                raise ValueError("Telegram receiver is fenced for transfer")
+            if cursor and "seq" in cursor and int(cursor["seq"]) < state["floor_seq"]:
+                raise ValueError(watch_journal.EXPIRED)
         c.execute(
             """INSERT INTO watches
             (id,owner,creating_session_id,worker_id,agent_id,description,source,filter,action,
@@ -113,10 +123,15 @@ def create(
     return wid
 
 
-def export_watch(wid: str, target: str) -> dict[str, Any]:
+def export_watch(
+    wid: str, target: str, telegram_identity: str | None = None,
+) -> dict[str, Any]:
     """Fence polling/admission under reserve's row lock before taking a snapshot."""
     with get_db() as conn:
         c = conn.cursor()
+        before = get(wid)
+        if before and before["source"].get("connector_id"):
+            lock_connector(c, before["source"]["connector_id"])
         c.execute("SELECT * FROM watches WHERE id=%s FOR UPDATE", (wid,))
         watch = parse(c.fetchone())
         if not watch or watch["owner"] != "admin":
@@ -140,6 +155,10 @@ def export_watch(wid: str, target: str) -> dict[str, Any]:
         if len(rows) > 10000:
             raise ValueError("Watch history is too large for a single transfer")
         snapshot = dict(watch=watch, events=rows, token=str(uuid.uuid4()), target=target)
+        if telegram_identity is not None:
+            from app.db import watch_journal
+
+            snapshot["journal"] = dict(watch_journal.tail(c, watch), identity=telegram_identity)
         if len(encode(snapshot).encode()) > 3 * 1024 * 1024:
             raise ValueError("Watch history exceeds the transfer payload limit")
         c.execute(
@@ -162,6 +181,8 @@ def import_watch(
     token = snapshot["token"]
     with get_db() as conn:
         c = conn.cursor()
+        if row["source"].get("connector_id"):
+            lock_connector(c, row["source"]["connector_id"])
         # Serialize even two first imports of a previously absent id.
         lock_id = int(hashlib.sha256(("watch-import:" + wid).encode()).hexdigest()[:15], 16)
         c.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
@@ -183,9 +204,12 @@ def import_watch(
             c.execute("DELETE FROM watch_events WHERE watch_id=%s", (wid,))
             c.execute("DELETE FROM watches WHERE id=%s", (wid,))
             c.execute("DELETE FROM watch_transfers WHERE watch_id=%s", (wid,))
-        create(
-            **row, watch_id=wid, cursor=original["cursor"], status=original["status"], conn=conn
-        )
+        cursor = original["cursor"]
+        if "journal" in snapshot:
+            from app.db import watch_journal
+
+            cursor = watch_journal.restore(c, row, snapshot["journal"])
+        create(**row, watch_id=wid, cursor=cursor, status=original["status"], conn=conn)
         c.execute(
             "UPDATE watches SET cost_usd=%s,last_fired_at=%s,created_at=%s,reason=%s "
             "WHERE id=%s",
@@ -210,7 +234,7 @@ def import_watch(
             )
         c.execute(
             "INSERT INTO watch_transfers (watch_id,token,target,snapshot,completed) "
-            "VALUES (%s,%s,%s,%s,TRUE)", (wid, token, "import:" + from_device, encode(snapshot)),
+            "VALUES (%s,%s,%s,%s,TRUE)", (wid, token, "import:" + from_device, "{}"),
         )
     return get(wid)
 
@@ -228,14 +252,22 @@ def import_receipt(wid: str) -> dict[str, Any]:
 def complete_transfer(wid: str, target: str, token: str) -> None:
     with get_db() as conn:
         c = conn.cursor()
+        watch = get(wid)
+        cid = watch["source"].get("connector_id") if watch else None
+        if cid:
+            lock_connector(c, cid)
         c.execute(
-            "UPDATE watch_transfers SET completed=TRUE "
+            "UPDATE watch_transfers SET completed=TRUE,snapshot='{}' "
             "WHERE watch_id=%s AND target=%s AND token=%s",
             (wid, target, token),
         )
         if not c.rowcount:
             raise ValueError("Transfer does not exist")
         c.execute("UPDATE watches SET reason='Transferred' WHERE id=%s", (wid,))
+        if cid:
+            from app.db.watch_journal import trim
+
+            trim(c, cid)
 
 
 def get(wid: str) -> dict[str, Any] | None:
@@ -262,6 +294,14 @@ def set_status(wid: str, owner: str, status: str, reason: str | None = None) -> 
         raise ValueError("Unknown watch status")
     with get_db() as conn:
         c = conn.cursor()
+        before = get(wid)
+        if before and before["source"].get("connector_id"):
+            lock_connector(c, before["source"]["connector_id"])
+            before = get(wid)
+        if status == "active" and before and before["cursor"].get("expired"):
+            from app.db.watch_journal import EXPIRED
+
+            raise ValueError(EXPIRED)
         # Stop is terminal: a new confirmation is needed to create another watch.
         c.execute(
             "UPDATE watches SET status=%s,reason=%s,revision=revision+1,updated_at=NOW() "
@@ -288,39 +328,17 @@ def lock_connector(cursor: Any, connector_id: str) -> None:
 
 def record_connector_event(connector_id: str, key: str, payload: dict[str, Any]) -> None:
     """Commit before the connector acknowledges the incoming update."""
-    if len(encode(payload)) > 16000:
-        payload = dict(payload, text=str(payload.get("text", ""))[:4000])
-    with get_db() as conn:
-        c = conn.cursor()
-        lock_connector(c, connector_id)
-        c.execute(
-            "INSERT INTO watch_connector_inbox (connector_id,event_key,payload) "
-            "VALUES (%s,%s,%s) ON CONFLICT(connector_id,event_key) DO NOTHING",
-            (connector_id, key, encode(payload)),
-        )
+    from app.db.watch_journal import append
+
+    append(connector_id, key, payload)
 
 
 def connector_page(
     connector_id: str, channel_id: str, cursor: dict[str, Any]
 ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
-    with get_db() as conn:
-        c = conn.cursor()
-        lock_connector(c, connector_id)
-        if not cursor:
-            c.execute(
-                "SELECT COALESCE(MAX(seq),0) AS seq FROM watch_connector_inbox "
-                "WHERE connector_id=%s", (connector_id,),
-            )
-            return [], {"seq": c.fetchone()["seq"]}
-        c.execute(
-            "SELECT * FROM watch_connector_inbox WHERE connector_id=%s AND seq>%s "
-            "ORDER BY seq LIMIT 100", (connector_id, cursor["seq"]),
-        )
-        rows = [parse(row) for row in c.fetchall()]
-    return [
-        (row["event_key"], row["payload"]) for row in rows
-        if str(row["payload"].get("platform_chat_id")) == channel_id
-    ], {"seq": rows[-1]["seq"] if rows else cursor["seq"]}
+    from app.db.watch_journal import page
+
+    return page(connector_id, channel_id, cursor)
 
 
 def event_id(wid: str, key: str) -> str:
@@ -352,6 +370,9 @@ def checkpoint(
     """Inbox and bookmark commit together; a raced/paused poll cannot advance."""
     with get_db() as conn:
         c = conn.cursor()
+        cid = watch["source"].get("connector_id")
+        if cid:
+            lock_connector(c, cid)
         c.execute(
             "UPDATE watches SET cursor=%s,revision=revision+1,updated_at=NOW() "
             "WHERE id=%s AND revision=%s AND status='active'",
@@ -360,6 +381,10 @@ def checkpoint(
         if not c.rowcount:
             return False
         _insert(c, watch, events)
+        if cid:
+            from app.db.watch_journal import trim
+
+            trim(c, cid)
     return True
 
 

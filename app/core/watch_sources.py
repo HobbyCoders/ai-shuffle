@@ -82,7 +82,9 @@ def matches(filter: dict[str, Any], payload: dict[str, Any]) -> bool:
     return str(filter.get("contains", "")).casefold() in values.encode(payload).casefold()
 
 
-def connector_allowed(watch: dict[str, Any]) -> dict[str, Any]:
+def connector_allowed(
+    watch: dict[str, Any], *, allow_stopped: bool = False,
+) -> dict[str, Any]:
     from app.core.assistant_service import assistant_id
     from app.db.assistant import connector_grant_available
 
@@ -91,7 +93,7 @@ def connector_allowed(watch: dict[str, Any]) -> dict[str, Any]:
     with get_db() as conn:
         allowed = (
             connector
-            and connector.get("is_active")
+            and (connector.get("is_active") or allow_stopped)
             and connector.get("runner_id") == watch["worker_id"]
             and watch["worker_id"] == assistant_id()
             and connector_grant_available(conn, connector, watch["agent_id"])

@@ -9,7 +9,8 @@ import json
 from typing import Any
 
 from app.core.assistant_service import assistant_id
-from app.db import database, watches as store
+from app.db import database
+from app.db import watches as store
 from app.db.async_database import run_sync
 from app.network import control, runners
 
@@ -150,8 +151,9 @@ async def move(wid: str, target: str) -> dict[str, Any]:
                 await call(receipt["source"], "complete", watch_id=wid,
                            target=target, token=receipt["token"])
             return row
-        # Destination validates the existing source/grant before fencing source.
-        await call(target, "validate", row=row, moving=True)
+        # Telegram additionally requires an explicitly stopped old receiver.
+        prepared = await call(source, "prepare_export", watch_id=wid, target=target)
+        await call(target, "validate", row=row, moving=True, source=source, prepared=prepared)
         snapshot = await call(source, "export", watch_id=wid, target=target)
         # A timeout after import is intentionally not rolled back: retrying the
         # same id imports once; source remains permanently fenced meanwhile.
@@ -161,7 +163,9 @@ async def move(wid: str, target: str) -> dict[str, Any]:
     raise ValueError("Watch does not exist on an available worker")
 
 
-def execution_row(row: dict[str, Any]) -> dict[str, Any]:
+def execution_row(
+    row: dict[str, Any], *, stopped_connector: bool = False,
+) -> dict[str, Any]:
     from app.core import watches
 
     if not database.get_profile(row["agent_id"]):
@@ -173,12 +177,14 @@ def execution_row(row: dict[str, Any]) -> dict[str, Any]:
     return watches.prepare(
         row.get("creating_session_id"), data,
         _session={"profile_id": row["agent_id"]}, _worker=assistant_id(),
+        _allow_stopped_connector=stopped_connector,
     )
 
 
 async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
     """Called only by the authenticated owner-worker control endpoint."""
-    from app.core import watches, watch_sources
+    from app.core import watch_journal_transfer as journal_transfer
+    from app.core import watch_sources, watches
 
     operation = body.get("operation")
     if operation == "list":
@@ -188,11 +194,16 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
             store.set_status, body["watch_id"], "admin", body["status"]
         )}
     if operation == "validate":
-        row = await run_sync(execution_row, body["row"])
-        if body.get("moving") and row["source"]["kind"] == "connector":
-            connector = await run_sync(database.get_connector, row["source"]["connector_id"])
-            if connector["type"] == "telegram":
-                raise ValueError("Telegram watches cannot move: receive journals are worker-local")
+        row = await run_sync(execution_row, body["row"], stopped_connector=bool(
+            body.get("moving") or body.get("stopped_connector")
+        ))
+        if body.get("moving"):
+            prepared = await journal_transfer.prepare(row | {"id": body["row"]["id"]},
+                                                      body["source"], exporting=False)
+            if prepared != body.get("prepared", {}):
+                raise ValueError(
+                    "Telegram transfer requires the same bot credential on both workers"
+                )
         return {"row": row}
     if operation == "create":
         row = await run_sync(execution_row, body["row"])
@@ -204,25 +215,35 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
             _, cursor = await watch_sources.poll(dict(row, cursor={}))
         wid = await run_sync(store.create, **row, cursor=cursor, watch_id=body["watch_id"])
         return {"watch": await run_sync(store.get, wid)}
+    if operation == "prepare_export":
+        watch = await run_sync(store.get, body["watch_id"])
+        return await journal_transfer.prepare(watch, body["target"], exporting=True)
     if operation == "export":
-        return await run_sync(store.export_watch, body["watch_id"], body["target"])
+        watch = await run_sync(store.get, body["watch_id"])
+        connector = await run_sync(journal_transfer.connector, watch)
+        identity = await run_sync(journal_transfer.identity, connector) if connector else None
+        if connector:
+            await journal_transfer.prepare(watch, body["target"], exporting=True)
+        return await run_sync(store.export_watch, body["watch_id"], body["target"], identity)
     if operation == "import":
         snapshot = body["snapshot"]
         if not local(await run_sync(resolve, snapshot["target"])):
             raise ValueError("Watch transfer is addressed to another worker")
-        row = await run_sync(execution_row, snapshot["watch"])
-        # Telegram has no history API: its worker-local journal cannot be
-        # transplanted safely, unlike Slack/Discord/Gmail service cursors.
-        if row["source"]["kind"] == "connector":
-            connector = await run_sync(database.get_connector, row["source"]["connector_id"])
-            if connector["type"] == "telegram":
-                raise ValueError("Telegram watches cannot move: receive journals are worker-local")
-        return {"watch": await run_sync(
-            store.import_watch, snapshot, row,
-            await run_sync(canonical, body.get("source") or from_device)
-        )}
+        row = await run_sync(execution_row, snapshot["watch"],
+                             stopped_connector="journal" in snapshot)
+        source = await run_sync(canonical, body.get("source") or from_device)
+        await run_sync(journal_transfer.validate_import, snapshot, row, source)
+        imported = await run_sync(store.import_watch, snapshot, row, source)
+        # Import commits both the rebased cursor/tail and the open receive gate.
+        # Starting afterwards cannot race ahead of the durable snapshot.
+        if "journal" in snapshot:
+            await journal_transfer.ensure_started(imported)
+        return {"watch": imported}
     if operation == "receipt":
-        return await run_sync(store.import_receipt, body["watch_id"])
+        receipt = await run_sync(store.import_receipt, body["watch_id"])
+        if receipt:
+            await journal_transfer.ensure_started(await run_sync(store.get, body["watch_id"]))
+        return receipt
     if operation == "complete":
         await run_sync(store.complete_transfer, body["watch_id"], body["target"], body["token"])
         return {"ok": True}

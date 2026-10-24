@@ -91,7 +91,7 @@ Chats started by an owner conversation report back automatically. If the startin
 
 ## Durable watches
 
-Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI, session states (stuck, waiting on you, finished), usage/credit thresholds, or a plain interval schedule. Messaging watches name an explicit channel/chat ID within the connector's allowlist. Slack reads channel history with a saved page/high-water cursor; Discord reads oldest-first message history after a saved message ID. Both require the bot's history permissions. Telegram polls a durable journal populated by the existing bot receiver. It commits each update to the journal before acknowledging the next one, retrying persistence failures instead of silently dropping messages. Chat execution then runs in a bounded, tracked background task, leaving the receiver free for approval buttons and other chats; stopping the connector cancels those tasks. If chat capacity is full, it replies with a busy notice while preserving the journaled observation. Journal writes and cursor reads are serialized per connector to prevent concurrent commits from skipping messages: the Bot API exposes no chat-history API, so messages that Telegram never delivered to the receiver (including updates expired during downtime) cannot be recovered. Telegram's journal is worker-local; moving those watches is explicitly refused rather than skipping messages. Installed first-party Slack, Discord and Telegram connector packages must be updated to the bundled watch-capable release before creating watches; older packages fail explicitly. Stop their connections before updating the package, then reconnect.
+Ask an owner chat to watch Gmail, Slack, Discord, Telegram, GitHub issues/PRs/CI, session states (stuck, waiting on you, finished), usage/credit thresholds, or a plain interval schedule. Messaging watches name an explicit channel/chat ID within the connector's allowlist. Slack reads channel history with a saved page/high-water cursor; Discord reads oldest-first message history after a saved message ID. Both require the bot's history permissions. Telegram polls a durable journal populated by the existing bot receiver. It commits each update to the journal before acknowledging the next one, retrying persistence failures instead of silently dropping messages. Chat execution then runs in a bounded, tracked background task, leaving the receiver free for approval buttons and other chats; stopping the connector cancels those tasks. If chat capacity is full, it replies with a busy notice while preserving the journaled observation. Journal writes and cursor reads are serialized per connector to prevent concurrent commits from skipping messages: the Bot API exposes no chat-history API, so messages that Telegram never delivered to the receiver (including updates expired during downtime) cannot be recovered. Telegram's journal uses the bounded retention and fenced transfer rules below. Installed first-party Slack, Discord and Telegram connector packages must be updated to the bundled watch-capable release before creating watches; older packages fail explicitly. Stop their connections before updating the package, then reconnect.
 
 The agent asks one confirmation sentence covering the source/filter, executing worker, read-only access, action and daily cap; your yes authorizes it. Placement prefers an available worker advertising `always_on`, then an available Linux server. You can override `worker_id` when creating a watch. `PUT /api/v1/watches/preference` with `{"worker_id":"<network worker ID>"}` designates your preferred worker; `null` clears it. This preference and display-only watch metadata sync across your worker network. An unavailable designated worker fails explicitly without silently falling back to a sleeping desktop. Connectors and grants must already belong to the executing worker; credentials are never moved by watch placement.
 
@@ -100,6 +100,33 @@ Use `CreateWatch` with `move_watch_id` and `worker_id`, or owner-only `PATCH /ap
 The app polls with plain code and saves bookmarks; it does not run a model while nothing matches. A live creating chat on the executing worker receives a real turn. For a creator on another worker, delivery currently uses the executing worker's alert/investigation path instead of remotely waking the creator; notifications are stored on that executing worker. After it is settled or archived, an alert uses a tool-free cheap-model summary and a notification; an investigation starts a short no-project chat and notifies you. Notifications stay in the bell even when no device supports push. Push transport is best-effort, not an exactly-once delivery guarantee.
 
 Ask “what are you watching?”, “pause that watch”, or “stop it” to list and control watches. Stop is permanent. Settling the creating chat does not stop its watches. Daily admission caps include in-flight reservations; actual reported costs are recorded after execution, so these are not provider-side billing caps. Floods, repeated failures and end dates pause watches with a reason. Read-only scope is enforced even in Bypass; requests for more access are left as questions for you in the resulting chat.
+### Telegram journal retention and moves
+
+Each connector retains at most 1,000 received journal entries (at most 16,000 bytes each).
+Entries are removed only after every active or paused watch cursor has passed them. If a
+cursor would hold the journal above that limit, that watch is explicitly paused with
+“Telegram journal retention exceeded; create a new watch to opt in again”. Its old cursor
+cannot be resumed or silently rebased; a new watch requires a fresh confirmation. Message-ID
+high-water marks contain no message text and prevent compacted Telegram replays from creating
+new observations. Unwatched content is discarded immediately; hourly maintenance also cleans
+old/idle journals. Deleting a connector removes its journal content and high-water marks,
+expires its watches and keeps only a content-free receive fence against late callbacks.
+
+Before moving a Telegram watch, stop and disable the connection on **both** workers. Provision
+the same connector ID and bot credential independently on the destination, with the watched
+chat allowlisted and its original agent grant available there. Credentials are never copied.
+The connector must have no other active/paused non-expired watches: moving one bot receiver
+cannot silently strand another watch. Do not run two `getUpdates` consumers for the same bot.
+
+The move durably fences both receivers, exports the opted-in unread chat tail together with
+the cursor, pending events and dedupe history, and rebases that tail to destination sequence
+numbers in a single import transaction. Only after import commits does the destination enable
+and start its receiver. The old receiver stays fenced across restarts and ambiguous network
+failures. Retry the same move after acknowledgement loss; do not re-enable the source or
+start a second consumer as recovery. Completed transfer snapshots discard their message
+content. Messages Telegram never delivered, including expired updates during downtime,
+cannot be reconstructed: Telegram has no chat-history API.
+
 ### Working record and fresh coordinating chats
 
 AI Shuffle keeps an owner working record outside any one conversation: goals, decisions, pending items, what needs you, and finished reports. Ask the agent to add a decision or pending item, list the record, or resolve an item using **WorkingRecord**. An open report means finished but not yet acknowledged in the record; simply reading a summary does not acknowledge it, and this is separate from the notification bell's read state. Records and acknowledgements follow your owner account across paired workers. Remote session state is the last known snapshot and can be stale while a worker is offline.

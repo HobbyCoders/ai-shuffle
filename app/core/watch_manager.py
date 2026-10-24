@@ -167,6 +167,9 @@ class WatchManager:
                     await run_maintenance(
                         owner_store.retention_sweep, assistant_service.assistant_id()
                     )
+                    from app.db.watch_journal import sweep
+
+                    await run_maintenance(sweep)
             except Exception:
                 logger.warning("Watch accounting retention failed", exc_info=True)
             await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
