@@ -50,6 +50,56 @@ def no_gh():
         yield
 
 
+def test_current_runtime_does_not_certify_a_stale_registered_checkout(repo):
+    root, shas = repo
+    _git(root, "checkout", "--detach", shas["a"])
+    with patch.object(ds, "_project_checkouts", return_value=[root]):
+        report = ds.assess([_row("Worker", shas["c"], is_self=True)], repo=root, refresh=False)
+    assert report["workers"][0]["action"] == "up to date"
+    source = report["source_checkouts"][0]
+    assert source["head"] == shas["a"]
+    assert source["dirty"] is False
+    assert source["matches_running"] is False
+    assert source["status"] == "revision mismatch; not installed source"
+    assert "exact running revision" in report["source_guidance"]
+    (root / "untracked.py").write_text("changed")
+    with patch.object(ds, "_project_checkouts", return_value=[root]):
+        report = ds.assess([_row("Worker", shas["a"], is_self=True)], repo=root, refresh=False)
+    assert report["source_checkouts"][0]["dirty"] is True
+    assert report["source_checkouts"][0]["status"] == "dirty; not installed source"
+
+
+def test_source_unknown_and_registered_checkout_provenance(repo, tmp_path):
+    root, shas = repo
+    registered = tmp_path / "registered"
+    _git(tmp_path, "clone", "--quiet", str(root), str(registered))
+    _git(registered, "remote", "set-url", "origin", "https://github.com/example/ai-shuffle.git")
+    _git(registered, "checkout", "--detach", shas["a"])
+    with patch.object(ds, "_project_checkouts", return_value=[registered]):
+        report = ds.assess([_row("Worker", shas["c"], is_self=True)], repo=root, refresh=False)
+    sources = {s["path"]: s for s in report["source_checkouts"]}
+    assert sources[str(registered)]["matches_running"] is False
+    assert sources[str(root)]["matches_running"] is True
+    with patch.object(ds, "_project_checkouts", return_value=[]):
+        report = ds.assess([_row("Worker", None, is_self=True)], repo=root, refresh=False)
+    assert report["source_checkouts"][0]["matches_running"] is None
+    assert report["source_checkouts"][0]["status"] == "unknown; source unverified"
+    with patch.object(ds, "_project_checkouts", return_value=[]):
+        report = ds.assess([_row("Worker", "deadbeefdeadbeef", is_self=True)], repo=root, refresh=False)
+    assert report["source_checkouts"][0]["matches_running"] is False
+    real_out = ds._out
+
+    def unreadable_status(path, *args, **kwargs):
+        return None if args[0] == "status" else real_out(path, *args, **kwargs)
+
+    with patch.object(ds, "_project_checkouts", return_value=[]), \
+         patch.object(ds, "_out", side_effect=unreadable_status):
+        report = ds.assess([_row("Worker", shas["c"], is_self=True)], repo=root, refresh=False)
+    source = report["source_checkouts"][0]
+    assert source["dirty"] is None
+    assert source["status"] == "unknown; source unverified"
+
+
 def test_drift_without_a_change(repo):
     root, shas = repo
     report = ds.assess([_row("ServerWorker", shas["a"], is_self=True), _row("DesktopWorker", shas["c"])],

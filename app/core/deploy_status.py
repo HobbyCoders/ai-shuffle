@@ -328,6 +328,49 @@ def _not_live_action(row: Dict[str, Any], offered_contains: Optional[bool]) -> s
     return "check for updates; publish edge first if none is offered"
 
 
+SOURCE_GUIDANCE = (
+    "Checkout HEAD and origin/main alone do not establish installed source. Before live-app diagnosis, "
+    "compare source_checkouts with the target worker revision; dirty/unknown source is unverified. "
+    "On mismatch or uncertainty, use a project session to read the exact running revision "
+    "with git show <revision>:<path>, without switching or updating the checkout."
+)
+
+
+def _source_checkouts(repo: Optional[Path], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Local source provenance only; never infer installed code from main drift."""
+    running = next((r["revision"] for r in rows if r["is_self"] and r["online"]), None)
+    sources = []
+    seen = set()
+    for path in ([repo] if repo else []) + _project_checkouts():
+        top = _out(path, "rev-parse", "--show-toplevel", timeout=5)
+        if not top or top in seen:
+            continue
+        seen.add(top)
+        if repo is None or Path(top) != repo.resolve():
+            origin = _out(path, "remote", "get-url", "origin", timeout=5)
+            if not origin or not _AI_SHUFFLE_ORIGIN.search(origin):
+                continue
+        head = _resolve(path, "HEAD")
+        status = _out(path, "status", "--porcelain", "--untracked-files=normal", timeout=5)
+        dirty = bool(status) if status is not None else None
+        full_running = _resolve(path, running) if running else None
+        matches = head == full_running if head and full_running else None
+        if head and not full_running and running and _SHA.fullmatch(running):
+            # A newer runtime object may not exist in this stale clone. A
+            # differing prefix still proves mismatch, never a positive match.
+            matches = None if head.startswith(running.lower()) else False
+        source_status = (
+            "dirty; not installed source" if dirty else
+            "revision mismatch; not installed source" if matches is False else
+            "revision matches; working tree clean" if matches and dirty is False else
+            "unknown; source unverified"
+        )
+        sources.append({"path": top, "head": head, "dirty": dirty,
+                        "running_revision": full_running or running,
+                        "matches_running": matches, "status": source_status})
+    return sources
+
+
 def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Optional[str] = None,
            repo: Optional[Path] = None, refresh: bool = True) -> Dict[str, Any]:
     """Blocking: git per worker, change resolution and the summary line."""
@@ -419,6 +462,7 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
         needed = android["build_needed"]
         marks.append("Android: " + ("Play build needed" if needed else "no build needed" if needed is False else "unknown"))
     return {"origin_main": main[:9] if main else None, "reason": repo_reason, "change": change,
+            "source_checkouts": _source_checkouts(repo, rows), "source_guidance": SOURCE_GUIDANCE,
             "android": android, "workers": workers, "summary": "Live on: " + " · ".join(marks)}
 
 
@@ -431,4 +475,5 @@ async def deploy_status(pr: Optional[int] = None, commit: Optional[str] = None) 
     except Exception as exc:  # noqa: BLE001 — informational
         logger.warning("deploy status failed", exc_info=True)
         return {"origin_main": None, "reason": f"deploy status failed: {exc}", "change": None,
+                "source_checkouts": [], "source_guidance": SOURCE_GUIDANCE,
                 "android": None, "workers": [], "summary": "Live on: unknown"}

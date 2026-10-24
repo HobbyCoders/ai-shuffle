@@ -81,7 +81,7 @@ test('Linux native setup selects bin/python3, bin/node and lib/node_modules/npm 
   if(id==='node:path')return path;
   if(id==='node:crypto')return {createHash:()=>({update(){return this;},digest:()=> 'a'.repeat(64)}),randomUUID:()=> 'build-id'};
   if(id==='./source-build')return {buildEnvironment:()=>({})};
-  if(id==='node:fs')return {promises:{access:async()=>{throw Error('not cached');},mkdir:async()=>{},rename:async()=>{},rm:async()=>{},open:async()=>({fd:1,write:async()=>{},close:async()=>{}}),readFile:async file=>{reads.push(file);return file.endsWith('manifest.json')?JSON.stringify({pythonDependencies:'b'.repeat(64)}):'signed source';}}};
+  if(id==='node:fs')return {promises:{access:async()=>{throw Error('not cached');},mkdir:async()=>{},rename:async()=>{},rm:async()=>{},open:async()=>({fd:1,write:async()=>{},close:async()=>{}}),readFile:async file=>{reads.push(file);return file.endsWith('manifest.json')?JSON.stringify({pythonDependencies:'b'.repeat(64)}):'{}';}}};
   if(id==='node:child_process')return {spawn:(...args)=>{spawns.push(args);const child={once:(event,fn)=>{if(event==='exit')queueMicrotask(()=>fn(0));return child;}};return child;}};
   throw Error('Unexpected module '+id);
  },queueMicrotask});
@@ -91,5 +91,6 @@ test('Linux native setup selects bin/python3, bin/node and lib/node_modules/npm 
  assert.equal(spawns[0][0],'/opt/AI Shuffle/resources/worker/node/bin/node');
  assert(spawns[0][1].includes('--runtime-only'));assert(spawns[0][1].includes(path.join('/home/me/updates','downloads')));
  assert.equal(spawns[0][1][spawns[0][1].indexOf('--python-from')+1],path.resolve(path.dirname('/opt/AI Shuffle/resources/worker/node/bin/node'),'../..'));
- assert(reads.includes(path.join('/signed/source','desktop/scripts/build-worker.mjs')));
+ assert(reads.includes(path.join('/signed/source','desktop/runtime-contract.json')));
+ assert(!reads.includes(path.join('/signed/source','desktop/scripts/build-worker.mjs')));
 });

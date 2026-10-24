@@ -186,6 +186,7 @@ def dispatch(args):
 def test_dispatch_negotiates_fresh_base_with_real_receiver(world, monkeypatch, peer_version, moved):
     # A long-running caller with no unique commits, behind an un-fetched origin.
     git(world.parent, "switch", "-c", "behind", "HEAD~1")
+    git(world.parent, "branch", "--set-upstream-to=origin/main")
     caller = git(world.parent, "rev-parse", "HEAD")
     seed = world.tmp / "seed"
     fresh = commit(seed, "new-main.txt", "fresh main work")

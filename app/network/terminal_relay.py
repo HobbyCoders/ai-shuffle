@@ -100,8 +100,12 @@ async def handle_owner(body, from_device):
     from app.api.terminals import require_terminal_owner
     require_encrypted_transport()
     require_peer(from_device)
-    entry = _owners.get(body.get("lease"))
+    lease = body.get("lease")
+    entry = _owners.get(lease)
     if not entry or entry[2] != from_device or time.monotonic() >= entry[3]:
+        return {"authorized": False}
+    if not peer_targets_enabled():
+        forget(lease)
         return {"authorized": False}
     request, who, _, _ = entry
     try:
@@ -282,9 +286,13 @@ async def handle(body, from_device):
             try:
                 cwd, cwd_root = await run_sync(_validated_terminal_cwd, options.get("cwd"))
             except HTTPException as exc:
-                return {"error": {"code": "bad_folder", "message": str(exc.detail), "status": 400}}
+                return {"error": {"code": "bad_folder", "message": str(exc.detail), "status": 400, "retryable": True}}
             except service.TerminalError as exc:
-                return {"error": {"code": exc.code, "message": exc.message, "status": exc.status}}
+                return {"error": {"code": exc.code, "message": exc.message, "status": exc.status,
+                                  "retryable": exc.code == "bad_folder"}}
+            proof = await control.call(from_device, "terminal-owner", {"lease": lease}, timeout=10, secure=True)
+            if proof.get("authorized") is not True:
+                raise PermissionError("Source terminal owner authorization expired during folder validation")
             if await require_recipient_owner(key) is not approval:
                 raise PermissionError("Recipient approval replaced during folder validation")
             approval["used"] = True
@@ -299,7 +307,10 @@ async def handle(body, from_device):
                 await registry.close(terminal.id, by="authorization-lost-during-open")
             await _close(key, "open-failed")
             if isinstance(exc, service.TerminalError):
-                return {"error": {"code": exc.code, "message": exc.message, "status": exc.status}}
+                # Unlike a folder-check refusal, a spawn race has consumed
+                # consent. Do not let the picker promise a same-approval retry.
+                code = "folder_changed" if exc.code == "bad_folder" else exc.code
+                return {"error": {"code": code, "message": exc.message, "status": exc.status}}
             raise
         finally:
             _opening.discard(key)
