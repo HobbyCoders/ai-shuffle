@@ -486,6 +486,15 @@
           "how": "On a disposable Linux/glibc candidate install only, grow a native session beyond 8 MiB of durable message JSON using streaming turns and tool results, then compact it. Repeatedly detach/reconnect that session and complete a turn, at least 60 seconds apart, with three clients attached. Sample fixed-process anonymous RSS, retained nodes, compaction residency, subscriber and task counts for 30 minutes after warm-up. Open old history and a fork ending before a checkpoint. Do not restart or instrument an installed worker.",
           "pass_when": "The resumed transcript and older fork remain readable with unchanged compacted output. Retained nodes stay near the checkpoint tail and superseded digest residency does not increase on each reconnect. Warm anonymous RSS does not ratchet after large cold loads; only the first terminal after an evicted cold load may attempt allocator reclamation, globally at most once per minute. Ordinary turns do not trim; non-glibc and non-Linux workers remain unaffected.",
           "past_bug": "#264: cold resume retained retired compaction entries after windowing and left large temporary transcript allocations in glibc arenas."
+        },
+        {
+          "id": "harness-basics.32",
+          "check": "Docker runtime overlay acceptance on both architectures",
+          "kind": "owner",
+          "optional": true,
+          "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
+          "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
+          "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
         }
       ]
     }
