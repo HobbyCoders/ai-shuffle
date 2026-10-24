@@ -394,6 +394,29 @@ def get_latest_task_updates(session_id: str) -> List[Dict[str, Any]]:
         return [_parse_payload(row["payload"]) for row in cursor.fetchall()]
 
 
+def get_latest_swarm_snapshots(session_id: str) -> list[dict[str, Any]]:
+    """Latest durable publication per workflow, without replaying the transcript.
+
+    Rank only swarm events in SQL and transfer/parse only the winning payloads.
+    First-publication order matches the historical replay reader, including for
+    mirrored sessions and after process restarts. No in-memory projection can
+    hide a publication from another process.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM ("
+            "SELECT payload, ROW_NUMBER() OVER ("
+            "PARTITION BY payload->'swarm'->>'id' ORDER BY seq DESC) AS position, "
+            "MIN(seq) OVER (PARTITION BY payload->'swarm'->>'id') AS first_seq "
+            "FROM session_events WHERE session_id = %s AND event_type = 'swarm.updated'"
+            ") AS swarms WHERE position = 1 ORDER BY first_seq",
+            (session_id,),
+        )
+        payloads = [_parse_payload(row["payload"]) for row in cursor.fetchall()]
+    return [payload["swarm"] for payload in payloads if isinstance(payload.get("swarm"), dict)]
+
+
 def get_compaction_events_before(session_id: str, before_seq: int) -> List[Dict[str, Any]]:
     """Newest durable audit cards in an elided prefix, in transcript order.
 
