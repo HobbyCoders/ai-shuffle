@@ -21,7 +21,7 @@
 	import {
 		clearJobChoice,
 		getJobChoices,
-		saveJobChoice,
+		pinJobChoice,
 		type JobChoiceCommit,
 		type JobChoiceDraft,
 		type JobChoices
@@ -34,12 +34,14 @@
 		formatValue,
 		modelLabel,
 		priceView,
+		quoteFromSave,
 		sameChoice,
 		sourceLabel,
 		workerLabel,
 		type GenerationChoice,
 		type GenerationKind,
-		type GenerationOption
+		type GenerationOption,
+		type SaveQuote
 	} from '$lib/utils/generation-choice';
 	import GenerationChoiceCard from '$lib/components/chat/GenerationChoiceCard.svelte';
 	import { GENERATION_ICONS, GENERATION_NAMES } from '$lib/components/settings/models/icons';
@@ -165,6 +167,10 @@
 	function quoteKey(kind: GenerationKind, choice: GenerationChoice): string {
 		return JSON.stringify([kind, choice.account, choice.worker, choice.model, choice.options ?? {}]);
 	}
+	// The latest writer per key. A save-time quote replaces the token, so a row
+	// quote still in flight for the same choice can no longer overwrite it.
+	const quoteTokens = new Map<string, number>();
+	let quoteToken = 0;
 	$effect(() => {
 		const pinned = GENERATION_KINDS.map((kind) => [kind, jobChoice(kind)] as const);
 		untrack(() => {
@@ -173,12 +179,15 @@
 				const key = quoteKey(kind, choice);
 				if (quotes[key] !== undefined) continue;
 				quotes[key] = 'loading';
+				const token = ++quoteToken;
+				quoteTokens.set(key, token);
 				Promise.resolve()
 					.then(() => generationChoices.quote(kind, choice))
 					.then((q) => {
-						quotes[key] = q ?? { ok: false };
+						if (quoteTokens.get(key) === token) quotes[key] = q ?? { ok: false };
 					})
 					.catch((e) => {
+						if (quoteTokens.get(key) !== token) return;
 						quotes[key] = { ok: false, error: getErrorMessage(e, 'Could not get a fresh quote.') };
 					});
 			}
@@ -215,7 +224,12 @@
 		onDraftChange?.(next);
 	}
 
-	async function pick(kind: GenerationKind, choice: GenerationChoice): Promise<void> {
+	/**
+	 * Live mode returns the server's save-time quote so the card can show it.
+	 * The row reuses that quote instead of asking again, and a warning keeps
+	 * the picker open so it stays in view.
+	 */
+	async function pick(kind: GenerationKind, choice: GenerationChoice): Promise<Partial<SaveQuote> | void> {
 		if (!choice.account || !choice.worker) {
 			throw new Error('This option does not name its account and holding worker, so it cannot be pinned.');
 		}
@@ -229,9 +243,17 @@
 		if (!jobId) throw new Error('Save the automation before pinning a choice.');
 		busyKind = kind;
 		try {
-			const stored = await saveJobChoice(jobId, kind, pinned);
-			saved = { ...saved, [kind]: stored ?? pinned };
-			openKind = null;
+			const result = await pinJobChoice(jobId, kind, pinned);
+			const stored = result.choice ?? pinned;
+			const reported = quoteFromSave(result);
+			if (reported) {
+				const key = quoteKey(kind, stored);
+				quoteTokens.set(key, ++quoteToken);
+				quotes[key] = reported;
+			}
+			saved = { ...saved, [kind]: stored };
+			if (!result.warning) openKind = null;
+			return result;
 		} finally {
 			busyKind = null;
 		}

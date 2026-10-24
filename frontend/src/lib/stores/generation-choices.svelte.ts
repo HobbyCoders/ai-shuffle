@@ -12,7 +12,8 @@ import type {
 	GenerationChoice,
 	GenerationKind,
 	GenerationOption,
-	GenerationPrice
+	GenerationPrice,
+	SaveQuote
 } from '$lib/utils/generation-choice';
 
 export const GENERATION_KINDS: readonly GenerationKind[] = ['image', 'video', 'audio', '3d'];
@@ -29,6 +30,15 @@ interface CatalogResponse {
 	favourites: Partial<Record<GenerationKind, GenerationChoice>>;
 	kinds: GenerationKind[];
 	limit: number;
+}
+
+export type { SaveQuote, UnattendedSkipReason } from '$lib/utils/generation-choice';
+
+/** `PUT /generation/choices/{kind}`: the stored pick plus the save-time quote. */
+export interface SavedChoice extends SaveQuote {
+	kind: GenerationKind;
+	choice: GenerationChoice;
+	remembered: boolean;
 }
 
 export interface Quote {
@@ -69,18 +79,22 @@ class GenerationChoices {
 		return this.#inflight;
 	}
 
-	/** Record a pick (always the last choice; remembered when `remember`). */
-	async save(kind: GenerationKind, choice: GenerationChoice, remember: boolean, origin: 'card' | 'settings' = 'card'): Promise<GenerationChoice> {
+	/**
+	 * Record a pick (always the last choice; remembered when `remember`). The
+	 * response carries the server's fresh quote and, when unattended runs will
+	 * skip the pick, why. It never submits or approves anything.
+	 */
+	async save(kind: GenerationKind, choice: GenerationChoice, remember: boolean, origin: 'card' | 'settings' = 'card'): Promise<SavedChoice> {
 		const { origin: _drop, ...body } = choice;
 		void _drop;
-		const response = await api.put<{ choice: GenerationChoice }>(`/generation/choices/${encodeURIComponent(kind)}`, {
+		const response = await api.put<SavedChoice>(`/generation/choices/${encodeURIComponent(kind)}`, {
 			choice: body,
 			remember,
 			origin
 		});
 		this.last = { ...this.last, [kind]: response.choice };
 		if (remember) this.remembered = { ...this.remembered, [kind]: response.choice };
-		return response.choice;
+		return response;
 	}
 
 	/** Ask again next time for this kind. */

@@ -364,13 +364,20 @@ export class MediaTools {
 		this.saving = tool.id;
 		try {
 			await generationChoices.load();
-			await generationChoices.save(
+			const saved = await generationChoices.save(
 				kind,
 				{ source: 'fal', account: 'fal-ai', worker: generationChoices.worker || undefined, model: model.endpoint_id, options: {} },
 				true,
 				'settings'
 			);
-			if (this.isCurrent()) flashSaved();
+			if (!this.isCurrent()) return true;
+			// The pick is kept either way; "Saved" alone must not imply unattended runs can use it.
+			if (saved?.warning) {
+				notify.warning(saved.warning, {
+					title: `Remembered ${model.display_name || model.endpoint_id}`,
+					category: 'generation-choice'
+				});
+			} else flashSaved();
 			return true;
 		} catch (e: unknown) {
 			if (this.isCurrent()) notify.error(getErrorMessage(e, 'Could not remember this model'));
