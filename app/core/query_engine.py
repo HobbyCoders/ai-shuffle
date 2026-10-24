@@ -2395,7 +2395,13 @@ async def _stream_to_websocket_impl(
                 # model. It goes to the owner whatever the mode, past saved
                 # rules; routing puts it in the assistant's conversation, where
                 # only a firm yes approves it (app.core.assistant_confirm).
-                if getattr(context, "assistant_owner", False):
+                # The computer-use access request is asked with its own card
+                # instead (the branch below), so the owner answers it once
+                # (assistant_permissions.OWN_CONSENT_TOOLS).
+                from app.core.session_modes import COMPUTER_USE_REQUEST_ACCESS
+
+                _owner_asks = bool(getattr(context, "assistant_owner", False))
+                if _owner_asks and tool_name != COMPUTER_USE_REQUEST_ACCESS:
                     result = await _request_permission(
                         request_id=f"perm-{_sid}-{uuid.uuid4().hex[:8]}",
                         session_id=_sid,
@@ -2437,7 +2443,9 @@ async def _stream_to_websocket_impl(
                             not cu_access.is_granted(_sid)
                             and not await run_sync(is_dedicated_desktop)
                         )
-                        if _perm_mode == "bypassPermissions" and not first_use:
+                        # The owner gate asks in every mode of an owner chat
+                        # (above), and past saved rules, with this card.
+                        if _perm_mode == "bypassPermissions" and not first_use and not _owner_asks:
                             return PermissionResultAllow()
                         apps = tool_input.get("apps") or []
                         reason = tool_input.get("reason") or ""
@@ -2457,7 +2465,7 @@ async def _stream_to_websocket_impl(
                             title="Computer control access",
                             display_name="Control your computer",
                             description=desc,
-                            skip_saved_rules=first_use,
+                            skip_saved_rules=first_use or _owner_asks,
                         )
                         if isinstance(result, _DeferSentinel):
                             return PermissionResultDeny(message="Computer-use access deferred by user")
