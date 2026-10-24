@@ -37,6 +37,33 @@ def store_for_owner(owner: str):
     return SkillStore(owner_root(owner), owner=owner)
 
 
+def save_detected_owner_fact(text: str, key: str, source: str) -> bool:
+    """Insert a bounded identity observation; never rewrite any remembered slot.
+
+    Reuse Remember's validation, deletion barriers, tiers and replication. The
+    check and save share its reentrant file lock so a concurrent correction wins.
+    Detected facts are inferred, not user-requested saves or access grants.
+    """
+    from fluid.codemode.facts import fingerprint
+    from fluid.codemode.transactions import file_transaction
+
+    store = store_for_owner("local")
+    with file_transaction(store._facts.lock):
+        snapshot = store._load_memories()
+        entries = snapshot["entries"] + snapshot["archived"]
+        if any(
+            entry.get("scope", "global") == "global"
+            and (entry.get("key") == key or fingerprint(entry["text"]) == fingerprint(text))
+            for entry in entries
+        ):
+            return False
+        store.save_memory(
+            text, scope="global", key=key, provenance="session",
+            source_session=source, protected=False, durable=False,
+        )
+    return True
+
+
 def session_memory(session_id: str | None, cwd: str | None = None):
     from app.core.config import settings
     from fluid.codemode.skills import project_key_for
