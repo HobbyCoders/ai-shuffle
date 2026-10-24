@@ -68,12 +68,14 @@ launcher swap to this one after the update's first healthy start; from the
 next update on, the launcher makes the restore point again. Run the acceptance
 run below against a 0.9.6 installer and a 1.0.x installer before release.
 
-Current version is **7**, with **minimum 4** and **start 3** unchanged. It adds
-best-effort optional voice dependency installation and includes the voice lock in
-the Python environment fingerprint. It retains the start-floor/staged replacement
-changes and waits for a timed-out self-test to close after killing it (bounded to
-10 seconds) before rejecting the candidate.
-Launcher 7 still runs the full `ColdClusterCopy.validate()` content read-back
+Current version is **8**, with **minimum 4** and **start 3** unchanged. It starts
+the managed PostgreSQL server with `statement_timeout=30s`, `lock_timeout=5s` and
+`idle_in_transaction_session_timeout=30s` (#591), and its Windows process-identity
+probe no longer compiles a helper with `Add-Type` (#597). It keeps launcher 7's
+best-effort optional voice dependency installation, the voice lock in the Python
+environment fingerprint, the start-floor/staged replacement changes, and the
+bounded 10-second wait for a killed self-test before rejecting the candidate.
+Launcher 8 still runs the full `ColdClusterCopy.validate()` content read-back
 on a ready journal: every snapshot file is hashed against the manifest before
 selection. There is no redundant copy or second read in this path to remove;
 a structure-only or manifest-trust check would weaken the rollback guarantee.
@@ -96,6 +98,21 @@ now runs against launcher 7 and rejects same-size snapshot corruption. Launcher 
 is explicitly added to `RESTORE_POINT_VALIDATING_LAUNCHERS`; unknown versions,
 non-Windows handoffs and migration-risk recovery still require full validation.
 This test audit is not a Windows installed-app acceptance run.
+
+Launcher 8 audit: the launcher closure changes in two files. `postgres.ts` adds
+the three session timeout settings to the options passed on every `pg_ctl start`,
+matching the container's `WAL_SETTINGS`, so existing clusters get them without a
+`postgresql.conf` edit. `process-identity.ts` defines the same four kernel32 imports
+(`OpenProcess`, `GetProcessTimes`, `QueryFullProcessImageNameW`, `CloseHandle`) in
+memory with Reflection.Emit instead of `Add-Type`. It opens the process with the
+same access right, keeps the handle open while the signal command runs, keeps
+the start-time and executable checks and the 30-second probe timeout. The
+lockfile refresh for #584 changes only development packages (`electron`
+44.2.0 to 44.9.3, `fast-uri`, `http-cache-semantics`, `undici`). `app.asar`
+packs none of them, and the Electron change is the `linux-electron` group.
+`installed-entry.ts`, `prepareRollback` and `ColdClusterCopy` are untouched. The
+installed-factory test runs against launcher 8 and still rejects same-size
+snapshot corruption, so launcher 8 is added to `RESTORE_POINT_VALIDATING_LAUNCHERS`.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.
