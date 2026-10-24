@@ -128,7 +128,21 @@ class LoopStallWatchdog:
             # Do not lose ownership or let start() clear the stop event underneath
             # this thread. A later stop() can finish joining once I/O returns.
             frame = sys._current_frames().get(thread.ident)
-            stack = "".join(traceback.format_stack(frame)) if frame is not None else "<exited>"
+            locations: list[str] = []
+            # traceback formatting consults linecache and can block on the same
+            # filesystem as the survivor. Read only in-memory frame metadata and
+            # bound the walk so shutdown never waits for source-file lookups.
+            for _ in range(32):
+                if frame is None:
+                    break
+                code = frame.f_code
+                locations.append(
+                    f'  File "{code.co_filename}", line {frame.f_lineno}, in {code.co_name}'
+                )
+                frame = frame.f_back
+            if frame is not None:
+                locations.append("  <older frames omitted>")
+            stack = "\n".join(locations) if locations else "<exited>"
             self._log.warning(
                 "Event-loop stall watchdog did not stop within %.1fs; thread retained\n%s",
                 join_timeout, stack,

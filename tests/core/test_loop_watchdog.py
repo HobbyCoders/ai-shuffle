@@ -315,6 +315,70 @@ def test_stop_retains_blocked_thread_until_it_can_be_joined(
         loop.close()
 
 
+@pytest.mark.parametrize("depth", [0, 64], ids=["shallow", "deep"])
+def test_stop_diagnostic_does_not_wait_for_source_lookup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, depth: int,
+) -> None:
+    import linecache
+
+    io_entered = threading.Event()
+    release_io = threading.Event()
+    source_entered = threading.Event()
+    release_source = threading.Event()
+    returned = threading.Event()
+    loop = asyncio.new_event_loop()
+    wd = LoopStallWatchdog(loop, ping_interval_s=0.01)
+    stopper: threading.Thread | None = None
+    stopped_in_time = False
+
+    def blocked_boot(remaining: int = depth) -> None:
+        if remaining:
+            blocked_boot(remaining - 1)
+            return
+        io_entered.set()
+        release_io.wait(5)
+
+    def blocked_source_lookup(*args: object, **kwargs: object) -> str:
+        source_entered.set()
+        release_source.wait(5)
+        return ""
+
+    def stop_watchdog() -> None:
+        try:
+            wd.stop(join_timeout=0.01)
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(wd, "_boot_heartbeat", blocked_boot)
+    wd.start()
+    thread = wd._thread
+    assert thread is not None
+    try:
+        assert io_entered.wait(5), "watchdog never entered the held I/O"
+        with monkeypatch.context() as source_patch:
+            source_patch.setattr(linecache, "checkcache", blocked_source_lookup)
+            source_patch.setattr(linecache, "getline", blocked_source_lookup)
+            stopper = threading.Thread(target=stop_watchdog, daemon=True)
+            stopper.start()
+            # The source gate remains shut throughout this bounded observation.
+            stopped_in_time = returned.wait(1)
+    finally:
+        release_source.set()
+        release_io.set()
+        if stopper is not None:
+            stopper.join(timeout=2)
+        wd.stop()
+        loop.close()
+    assert stopped_in_time, "bounded stop waited for filesystem-backed source lookup"
+    assert not source_entered.is_set(), "shutdown diagnostics must not consult linecache"
+    assert not thread.is_alive()
+    assert stopper is not None and not stopper.is_alive()
+    assert "blocked_boot" in caplog.text
+    assert "test_loop_watchdog.py" in caplog.text
+    assert caplog.text.count('", line ') <= 32
+    assert ("<older frames omitted>" in caplog.text) == (depth > 32)
+
+
 @pytest.mark.asyncio
 async def test_persistent_stall_redumps(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,

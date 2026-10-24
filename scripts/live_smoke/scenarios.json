@@ -445,8 +445,8 @@
           "id": "harness-basics.watchdog-stop",
           "check": "Watchdog retains ownership when bounded stop times out",
           "kind": "owner",
-          "how": "On a disposable candidate, gate watchdog fsync; stop, start, release, stop again.",
-          "pass_when": "Timeout logs its stack, keeps the handle, refuses a duplicate and rejoins.",
+          "how": "On a disposable candidate, gate fsync/source reads; stop/start, release, stop.",
+          "pass_when": "Stop avoids source I/O, logs 32 frames max, retains ownership and rejoins.",
           "past_bug": "#547: stop cleared a live thread handle while fsync was blocked."
         },
         {
