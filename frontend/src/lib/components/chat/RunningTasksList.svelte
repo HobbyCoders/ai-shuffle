@@ -58,7 +58,7 @@
 	import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 	import { swarms } from '$lib/stores/swarms';
 	import { watches } from '$lib/stores/watches';
-	import { watchWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
+	import { refreshWorkerPresence, watchWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { cancelLimitResume } from '$lib/api/limit-resume';
@@ -176,6 +176,7 @@
 
 	function resetState() {
 		filter = 'all';
+		filterTouched = false;
 		query = '';
 		confirmingAll = false;
 		confirmingSwarm = null;
@@ -209,8 +210,14 @@
 	const liveWatches = $derived(watchRows.filter((w) => w.state !== 'stopped').length);
 	const pausedWatches = $derived(watchRows.filter((w) => w.state === 'paused').length);
 	const shownWatches = $derived(visibleWatches(watchRows, filter, query));
-	/** Something to show: running work, or a watch that is not stopped. */
-	const hasContent = $derived(hasRunning || liveWatches > 0);
+	/**
+	 * Nothing runs and no watch is live, but a worker is chosen for new
+	 * watches. The list stays reachable so a chosen worker that went offline
+	 * or left the network can still be changed or cleared (#565).
+	 */
+	const prefOnly = $derived(!hasRunning && liveWatches === 0 && !!$watches.preferredWorkerId);
+	/** Something to show: running work, a watch that is not stopped, or the preference. */
+	const hasContent = $derived(hasRunning || liveWatches > 0 || prefOnly);
 	const allRowCount = $derived(rows.length + watchRows.length);
 	/** The watch list has never loaded: an empty list here is unknown, not "none". */
 	const watchesUnknown = $derived($watches.error && !$watches.fetched);
@@ -230,11 +237,15 @@
 		[counts.running ? countSummary(counts) : '', watchSummary(watchRows)].filter(Boolean).join(' · ') ||
 			(watchesUnknown ? 'No tasks running · watches unavailable' : 'Nothing running')
 	);
-	const headLabel = $derived(counts.running ? plural(counts.running, 'running task') : watchCount(liveWatches));
+	const headLabel = $derived(
+		counts.running ? plural(counts.running, 'running task') : prefOnly ? 'Watches' : watchCount(liveWatches)
+	);
 	const headSub = $derived(
 		counts.running
 			? fullSummary
-			: pausedWatches
+			: prefOnly
+				? `New watches: ${preference.label}`
+				: pausedWatches
 				? pausedWatches === liveWatches
 					? 'All paused'
 					: `${pausedWatches} paused`
@@ -297,9 +308,14 @@
 	onDestroy(() => {
 		if (timer !== null) clearInterval(timer);
 	});
-	// Worker presence (online, always on) only while a watch row is on screen.
+	// Worker presence (online, always on) while a watch row or the sheet is on
+	// screen; the sheet needs it to offer the preference with no watches yet.
 	$effect(() => {
-		if (onScreen && (watchRows.length > 0 || filter === 'watches')) return watchWorkerPresence();
+		if (sheetVisible || (onScreen && (watchRows.length > 0 || prefOnly))) return watchWorkerPresence();
+	});
+	// A collapsed head still names the chosen worker: one read is enough.
+	$effect(() => {
+		if (prefOnly && installs === null) untrack(() => void refreshWorkerPresence().catch(() => {}));
 	});
 
 	function elapsedOf(row: { startedAt: number | null; endedAt: number | null }): string {
@@ -455,13 +471,15 @@
 		void watches.move(row.id, target);
 	}
 
-	// A move whose answer was lost, now listed on its target, did land.
+	// A move whose answer was lost, now listed on its target: re-send the same
+	// move so the server closes the old worker's transfer receipt; only its
+	// answer reads "Moved" (watches.reconcileMove).
 	$effect(() => {
 		for (const row of watchRows) {
 			const move = $watches.moves[row.id];
-			if (!move || (move.phase !== 'uncertain' && move.phase !== 'failed') || row.transferTo !== null) continue;
+			if (!move || move.confirming || (move.phase !== 'uncertain' && move.phase !== 'failed') || row.transferTo !== null) continue;
 			const at = placementOf(row, installs).worker;
-			if (at && at.id === move.target) untrack(() => watches.settleMove(row.id));
+			if (at && at.id === move.target) untrack(() => void watches.reconcileMove(row.id));
 		}
 	});
 
@@ -528,6 +546,18 @@
 		ownSheetOpen = true;
 	}
 
+	// Opened with only the preference to show: start on Watches, where it is.
+	let filterTouched = false;
+	$effect(() => {
+		if (sheetVisible && prefOnly && filter === 'all' && !query) untrack(() => {
+			if (!filterTouched) filter = 'watches';
+		});
+	});
+	function pickFilter(id: RunFilter) {
+		filterTouched = true;
+		filter = id;
+	}
+
 	function closeSheet() {
 		confirmingAll = false;
 		confirmingSwarm = null;
@@ -542,6 +572,7 @@
 		ownSheetOpen = false;
 		query = '';
 		filter = 'all';
+		filterTouched = false;
 		const opener = sheetOpener;
 		sheetOpener = null;
 		void tick().then(() => opener?.focus({ preventScroll: true }));
@@ -649,12 +680,13 @@
 		run();
 	}
 
-	// The Watches chip shows once there is a watch (or while it is chosen).
+	// The Watches chip shows once there is a watch, while it is chosen, or
+	// when where new watches run can be set (a second worker, or a choice made).
 	const filters = $derived<{ id: RunFilter; label: string }[]>([
 		{ id: 'all', label: 'All' },
 		{ id: 'agents', label: 'Agents' },
 		{ id: 'shell', label: 'Shell' },
-		...(watchRows.length || filter === 'watches' ? [{ id: 'watches' as const, label: 'Watches' }] : [])
+		...(watchRows.length || filter === 'watches' || showPreference ? [{ id: 'watches' as const, label: 'Watches' }] : [])
 	]);
 	const filterCount = (id: RunFilter) =>
 		id === 'all' ? counts.running + liveWatches : id === 'agents' ? counts.agents : id === 'shell' ? counts.shell : liveWatches;
@@ -940,8 +972,15 @@
 		{#if live || row.transferTo !== null}
 			{#if move?.phase === 'pending'}
 				<div class="move-note pending in-row" role="status" data-testid="watch-move">
-					<span class="lane" aria-hidden="true"><span>{placeName ?? 'This worker'}</span><i></i><span>{workerName(move.target)}</span></span>
-					<span>Moving to {workerName(move.target)}. It pauses first and runs nowhere else until {workerName(move.target)} takes it over.</span>
+					<!-- Confirming: the list already shows it on the target, so there is no "from" to draw. -->
+					{#if !move.confirming}
+						<span class="lane" aria-hidden="true"><span>{placeName ?? 'This worker'}</span><i></i><span>{workerName(move.target)}</span></span>
+					{/if}
+					{#if move.confirming}
+						<span>Confirming the move to {workerName(move.target)}. It is listed there; its old worker is being told the move finished.</span>
+					{:else}
+						<span>Moving to {workerName(move.target)}. It pauses first and runs nowhere else until {workerName(move.target)} takes it over.</span>
+					{/if}
 				</div>
 			{:else if row.transferTo !== null}
 				<div class="move-note warn in-row" role="status" data-testid="watch-move">
@@ -1126,7 +1165,7 @@
 							class="chip"
 							aria-pressed={filter === f.id}
 							aria-label="{f.label}, {filterCount(f.id)}"
-							onclick={() => (filter = f.id)}
+							onclick={() => pickFilter(f.id)}
 						><span class="chip-label">{f.label}</span><span class="chip-count">{filterCount(f.id)}</span></button>
 					{/each}
 				</div>
@@ -1149,7 +1188,7 @@
 					</div>
 					{#if filter === 'watches' && !watchesUnknown && showPreference}
 						<div class="empty-pref">{@render preferenceButton('roomy')}</div>
-						{@render preferencePicker('roomy')}
+						<div class="empty-pref-body">{@render preferencePicker('roomy')}</div>
 					{/if}
 				{:else}
 					{@render groupView('Agents', groups.agents, 'roomy', 'agents')}
@@ -1218,6 +1257,17 @@
 					{@render groupView('Agents', inlineGroups.agents, 'compact', 'agents')}
 					{@render groupView('Shell', inlineGroups.shell, 'compact', 'shell')}
 					{@render watchGroup(watchRows, 'compact')}
+					{#if prefOnly}
+						<!-- No watch is live, but where new ones run is set: keep it changeable. -->
+						<section class="group" aria-labelledby="{titleId}-watches-empty">
+							<div class="group-head watch-head">
+								<h3 class="group-title" id="{titleId}-watches-empty"><span>Watches</span> <span class="group-count">0</span></h3>
+								{@render preferenceButton('compact')}
+							</div>
+							{@render preferencePicker('compact')}
+							<p class="empty-watch-note">No watches. Ask any chat to watch something for you.</p>
+						</section>
+					{/if}
 				</div>
 			{/if}
 		</div>
@@ -1934,6 +1984,8 @@
 	.pref-btn :global(.pref-chev.open) { transform: rotate(180deg); }
 	.rt-list .pref-btn { min-height: 32px; font-size: 0.75rem; padding: 0 8px; }
 	.empty-pref { display: flex; justify-content: center; margin: -32px 16px 8px; }
+	.empty-pref-body :global(.picker) { margin: 0 16px 12px; }
+	.empty-watch-note { margin: 2px 0 4px 4px; font-size: 0.6875rem; color: var(--muted-foreground); }
 
 	/* Phone: the sheet is a full-height page. */
 	.rt-layer.mobile { align-items: stretch; justify-content: stretch; }

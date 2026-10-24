@@ -80,7 +80,7 @@ describe('watches store', () => {
 		let answer!: (v: unknown) => void;
 		api.moveWatch.mockReturnValueOnce(new Promise((r) => (answer = r)));
 		const pending = watches.move('a', 'dev_server');
-		expect(get(watches).moves.a).toEqual({ target: 'dev_server', phase: 'pending', message: null });
+		expect(get(watches).moves.a).toEqual({ target: 'dev_server', phase: 'pending', message: null, confirming: false });
 		// A second click while it runs does not send another move.
 		expect(await watches.move('a', 'dev_server')).toBe('pending');
 		expect(api.moveWatch).toHaveBeenCalledTimes(1);
@@ -100,7 +100,8 @@ describe('watches store', () => {
 		expect(get(watches).moves.a).toEqual({
 			target: 'dev_server',
 			phase: 'failed',
-			message: 'Telegram watches cannot move: receive journals are worker-local'
+			message: 'Telegram watches cannot move: receive journals are worker-local',
+			confirming: false
 		});
 		for (const error of [{ status: 503, detail: 'Watch worker is unavailable; retry the same operation' }, new TypeError('Failed to fetch'), { status: 500, detail: 'Internal Server Error' }]) {
 			api.moveWatch.mockRejectedValueOnce(error);
@@ -113,14 +114,38 @@ describe('watches store', () => {
 		expect(get(watches).moves.a).toBeUndefined();
 	});
 
-	it('an uncertain move later listed on its target settles as moved', async () => {
+	it('an unconfirmed move listed on its target is re-sent once; only the answer reads Moved', async () => {
 		await watches.refresh();
+		// Import committed on the target, but the answer was lost.
 		api.moveWatch.mockRejectedValueOnce({ status: 503, detail: 'retry the same operation' });
 		await watches.move('a', 'dev_server');
-		watches.settleMove('a');
+		expect(get(watches).moves.a).toMatchObject({ phase: 'uncertain', confirming: false });
+		// The listing now shows it on the target: the same PATCH goes again so the
+		// server closes the old worker's receipt. Until it answers, nothing says Moved.
+		let answer!: (v: unknown) => void;
+		api.moveWatch.mockReturnValueOnce(new Promise((r) => (answer = r)));
+		const confirming = watches.reconcileMove('a');
+		expect(get(watches).moves.a).toMatchObject({ phase: 'pending', confirming: true });
+		expect(api.moveWatch).toHaveBeenCalledTimes(2);
+		expect(api.moveWatch).toHaveBeenLastCalledWith('a', 'dev_server');
+		answer(row('a', 'active', { placement_device_id: 'dev_server' }));
+		expect(await confirming).toBe('moved');
 		expect(get(watches).moves.a.phase).toBe('moved');
 		await vi.advanceTimersByTimeAsync(MOVED_NOTE_MS);
 		expect(get(watches).moves.a).toBeUndefined();
+	});
+
+	it('a failed confirmation stays unconfirmed and is not re-sent again by itself', async () => {
+		await watches.refresh();
+		api.moveWatch.mockRejectedValueOnce({ status: 503 }).mockRejectedValueOnce({ status: 503 });
+		await watches.move('a', 'dev_server');
+		expect(await watches.reconcileMove('a')).toBe('uncertain');
+		expect(get(watches).moves.a).toMatchObject({ phase: 'uncertain', confirming: true });
+		expect(watches.reconcileMove('a')).toBeNull();
+		expect(api.moveWatch).toHaveBeenCalledTimes(2);
+		// The owner's own Retry starts a fresh attempt.
+		api.moveWatch.mockResolvedValueOnce(row('a'));
+		expect(await watches.move('a', 'dev_server')).toBe('moved');
 	});
 
 	it('classifies only a 409 as a refusal', () => {

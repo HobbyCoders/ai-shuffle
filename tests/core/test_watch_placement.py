@@ -305,3 +305,59 @@ async def test_move_retry_then_reverse_with_distinct_device_ids(
     assert store.events(wid)[0]["id"] == event["id"]
     assert len(store.events(wid)) == 1
 
+
+@pytest.mark.asyncio
+async def test_listing_confirmed_move_is_reconciled_before_reverse_move(
+    owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch
+) -> None:
+    """The panel re-sends a move whose import answer was lost (#565).
+
+    The destination committed the import, so the listing already shows the
+    watch there, but the source's transfer receipt is still open. Treating
+    the listing as success would leave a reverse move refused; the panel's
+    automatic re-send of the same PATCH closes the receipt first.
+    """
+    import httpx
+    from fastapi import FastAPI
+    from app.api import watches as api
+    from app.api.auth import require_admin
+
+    watch = make_watch(owner, worker_id="DesktopWorker")
+    wid = watch["id"]
+    dispatch = placement.call
+    lost = False
+
+    async def call(worker_id: str, operation: str, **body: Any) -> dict[str, Any]:
+        nonlocal lost
+        result = await dispatch(worker_id, operation, **body)
+        if operation == "import" and not lost:
+            lost = True
+            raise control.MaybeApplied("import answer lost")
+        return result
+
+    def receipt_completed() -> bool:
+        with base.get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT completed FROM watch_transfers WHERE watch_id=%s", (wid,))
+            return bool(c.fetchone()["completed"])
+
+    monkeypatch.setattr(placement, "call", call)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[require_admin] = lambda: {"id": "admin"}
+    path = f"/api/v1/watches/{wid}"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        unknown = await client.patch(path, json={"worker_id": "ServerWorker"})
+        assert unknown.status_code == 503
+        listed = [r for r in (await client.get("/api/v1/watches")).json()["watches"] if r["id"] == wid]
+        assert listed and listed[0]["worker_id"] == "ServerWorker"
+        assert not receipt_completed()
+        # What the panel sends when the listing shows the watch on its target.
+        confirmed = await client.patch(path, json={"worker_id": "ServerWorker"})
+        assert confirmed.status_code == 200, confirmed.text
+        assert receipt_completed()
+    with network("ServerWorker"):
+        returned = await placement.move(wid, "DesktopWorker")
+        assert returned["worker_id"] == "DesktopWorker"
+    assert store.get(wid)["worker_id"] == "DesktopWorker"

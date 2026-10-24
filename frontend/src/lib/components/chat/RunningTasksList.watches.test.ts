@@ -426,6 +426,68 @@ describe('RunningTasksList watches', () => {
 			expect(mocks.moveWatch).toHaveBeenLastCalledWith('w1', 'dev_server');
 		});
 
+		it('an unanswered move later listed on its target is re-sent, and reads Moved only on that answer', async () => {
+			mocks.installs = NETWORK;
+			serve([watch('w1')]);
+			// The destination imported it but the answer was lost; the next listing shows it there.
+			mocks.moveWatch.mockImplementationOnce(async () => {
+				serve([watch('w1', { placement_device_id: 'dev_server', worker_id: 'ServerWorker' })]);
+				throw { status: 503, detail: 'Watch worker is unavailable; retry the same operation' };
+			});
+			let answer!: (v: unknown) => void;
+			mocks.moveWatch.mockImplementationOnce(() => new Promise((r) => (answer = r)));
+			render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+			await waitFor(() => expect(moveTo(rowOf('Watch w1'))).toBeTruthy());
+			await fireEvent.click(moveTo(rowOf('Watch w1')));
+			await fireEvent.click(screen.getByRole('radio', { name: /^ServerWorker/ }));
+			await fireEvent.click(screen.getByRole('button', { name: 'Move to ServerWorker' }));
+			// The same move goes again by itself, so the old worker's receipt is closed.
+			await waitFor(() => expect(mocks.moveWatch).toHaveBeenCalledTimes(2));
+			expect(mocks.moveWatch).toHaveBeenLastCalledWith('w1', 'dev_server');
+			const note = screen.getByTestId('watch-move');
+			expect(note.textContent).toContain('Confirming the move to ServerWorker');
+			expect(note.textContent).not.toContain('Moved');
+			answer(mocks.list[0]);
+			await waitFor(() => expect(screen.getByTestId('watch-move').textContent).toContain('Moved to ServerWorker.'));
+			expect(mocks.moveWatch).toHaveBeenCalledTimes(2);
+		});
+
+		it('with no watches, a chosen worker that went offline can still be changed', async () => {
+			mocks.installs = NETWORK;
+			mocks.preferred = 'dev_laptop';
+			mocks.setWatchPreference.mockImplementation(async (id: string | null) => id);
+			render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+			const toggle = await screen.findByTestId('tasks-toggle');
+			await waitFor(() => expect(toggle.textContent).toContain('New watches: LaptopWorker (offline)'));
+			expect(toggle.textContent).toContain('Watches');
+			await fireEvent.click(screen.getByRole('button', { name: 'New watches run on: LaptopWorker (offline). Change' }));
+			expect(screen.getByText(/LaptopWorker is offline\. New watches are refused/)).toBeTruthy();
+			await fireEvent.click(screen.getByRole('radio', { name: /^Automatic/ }));
+			expect(mocks.setWatchPreference).toHaveBeenCalledWith(null);
+			// Cleared, nothing runs and no watch is live: the list goes away again.
+			await waitFor(() => expect(screen.queryByTestId('tasks-toggle')).toBeNull());
+		});
+
+		it('the phone sheet opened with only a chosen worker starts on Watches with the control', async () => {
+			mocks.mobile = true;
+			mocks.installs = NETWORK;
+			mocks.preferred = 'dev_server';
+			render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+			const dialog = sheet();
+			await waitFor(() => expect(within(dialog).getByRole('button', { name: /^Watches, 0/ }).getAttribute('aria-pressed')).toBe('true'));
+			expect(await within(dialog).findByRole('button', { name: 'New watches run on: ServerWorker. Change' })).toBeTruthy();
+		});
+
+		it('with two workers and no watches yet, the sheet offers Watches and where new ones run', async () => {
+			mocks.installs = NETWORK;
+			render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+			const dialog = sheet();
+			const chip = await within(dialog).findByRole('button', { name: /^Watches, 0/ });
+			await fireEvent.click(chip);
+			await fireEvent.click(await within(dialog).findByRole('button', { name: 'New watches run on: Automatic · ServerWorker. Change' }));
+			expect(within(dialog).getByRole('radiogroup', { name: 'Where new watches run' })).toBeTruthy();
+		});
+
 		it('a refused move gives the reason and Try again', async () => {
 			mocks.installs = NETWORK;
 			serve([watch('w1')]);

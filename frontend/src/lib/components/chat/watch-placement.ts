@@ -140,6 +140,8 @@ export function preferenceSummary(
 					problem: 'No always-on worker or server is online, so a new watch will ask you to choose a worker.'
 				};
 	}
+	// The worker directory is still loading: say nothing it does not know.
+	if (installs === null) return { label: 'Chosen worker', effective: null, problem: null };
 	const chosen = findWorker(installs, preferredId);
 	if (!chosen) {
 		return {
