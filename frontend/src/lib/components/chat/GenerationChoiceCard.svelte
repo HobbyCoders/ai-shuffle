@@ -414,7 +414,7 @@
 					{#if summaryOption}
 						{summaryFigure}
 						{#if summaryRemembered}<span class="gcc-dot" aria-hidden="true">·</span> remembered for {label.plural}{/if}
-						{#if summaryWarning}<span class="gcc-dot" aria-hidden="true">·</span><span class="gcc-sub-warn" title={summaryWarning}><TriangleAlert aria-hidden="true" />Unattended runs will skip it</span>{/if}
+						{#if summaryWarning}<span class="gcc-sub-warn" title={summaryWarning}><span class="gcc-dot" aria-hidden="true">·</span><TriangleAlert aria-hidden="true" />Unattended runs will skip it</span>{/if}
 					{:else}
 						Answered in the chat
 					{/if}
@@ -1147,6 +1147,10 @@
 		align-items: center;
 		gap: 4px;
 		color: var(--foreground);
+		white-space: nowrap;
+	}
+	.gcc-sub-warn .gcc-dot {
+		margin: 0 0 0 4px;
 	}
 	.gcc-sub-warn :global(svg) {
 		width: 12px;
@@ -1317,6 +1321,14 @@
 			flex-direction: column;
 			align-items: flex-end;
 			gap: 0;
+		}
+		/* The collapsed warning takes its own line rather than wrapping after a dot. */
+		.gcc-sub-warn {
+			display: flex;
+			margin-top: 1px;
+		}
+		.gcc-sub-warn .gcc-dot {
+			display: none;
 		}
 		/* The price drops under the text instead of squeezing it. */
 		.gcc-saved {

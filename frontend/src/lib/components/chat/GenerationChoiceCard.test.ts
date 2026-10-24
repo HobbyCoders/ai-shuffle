@@ -361,7 +361,7 @@ describe('GenerationChoiceCard save-time quote', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
 		expect(screen.getByRole('heading', { name: 'Using SuperGrok · Grok Imagine Image' })).toBeTruthy();
 		expect(document.querySelector('.gcc-sub')?.textContent).toContain('Unknown');
-		expect(document.querySelector('.gcc-sub-warn')?.textContent).toBe('Unattended runs will skip it');
+		expect(document.querySelector('.gcc-sub-warn')?.textContent).toContain('Unattended runs will skip it');
 	});
 
 	it.each([
