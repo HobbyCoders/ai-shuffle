@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -14,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize("refills", [1, 100])
 @pytest.mark.parametrize("failure", [False, True])
-def test_pytest_reports_late_basetemp_writer(tmp_path, refills, failure):
+def test_pytest_reports_late_basetemp_writer(
+    tmp_path: Path, refills: int, failure: bool,
+) -> None:
     """A real child refills the directory after rmtree's scan, before rmdir."""
     import json
     import shutil
@@ -22,20 +25,23 @@ def test_pytest_reports_late_basetemp_writer(tmp_path, refills, failure):
     suite = tmp_path / "test_late_writer.py"
     record = tmp_path / "late-writes.json"
     suite.write_text(
-        "import json, os, pathlib, subprocess, sys\n"
-        "def test_payload(tmp_path_factory):\n"
+        "import json, os, pathlib, subprocess, sys, pytest\n"
+        "def test_payload(tmp_path_factory: pytest.TempPathFactory) -> None:\n"
         "    base = tmp_path_factory.getbasetemp()\n"
         "    original = os.rmdir\n"
         "    writes = 0\n"
-        "    def rmdir(path, *args, **kwargs):\n"
+        "    def rmdir(path: str | os.PathLike[str],\n"
+        "              *args: object, **kwargs: object) -> None:\n"
         "        nonlocal writes\n"
         f"        if pathlib.Path(path).name == 'pytest' and writes < {refills}:\n"
         "            writes += 1\n"
         "            late = base / ('late-write-' + str(writes))\n"
         "            subprocess.run([sys.executable, '-c',\n"
-        "                            'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(\"late\")',\n"
+        "                            'import pathlib, sys; '\n"
+        "                            'pathlib.Path(sys.argv[1]).write_text(\"late\")',\n"
         "                            str(late)], check=True, timeout=10)\n"
-        f"            pathlib.Path({str(record)!r}).write_text(json.dumps([str(base.parent), writes]))\n"
+        f"            record = pathlib.Path({str(record)!r})\n"
+        "            record.write_text(json.dumps([str(base.parent), writes]))\n"
         "        return original(path, *args, **kwargs)\n"
         "    os.rmdir = rmdir\n"
         f"    assert {not failure!r}\n"
@@ -51,16 +57,19 @@ def test_pytest_reports_late_basetemp_writer(tmp_path, refills, failure):
     owner, writes = json.loads(record.read_text())
     owner = Path(owner)
     try:
-        assert result.returncode == int(failure), output
         assert ("1 failed" if failure else "1 passed") in output
         assert "WARNING: pytest scratch refilled during cleanup" in output
         assert str(owner) in output
-        assert "Traceback (most recent call last)" not in result.stderr
         if refills == 1:
+            assert result.returncode == int(failure), output
+            assert "Traceback (most recent call last)" not in result.stderr
             assert writes == 1
             assert not owner.exists()
             assert "removed after retry" in output
         else:
+            assert result.returncode != 0, output
+            assert "Traceback (most recent call last)" in result.stderr
+            assert "OSError:" in result.stderr
             assert 1 < writes < refills  # cleanup is bounded, not a retry loop forever
             assert "leftover" in output
             assert f"late-write-{writes}" in output
@@ -76,7 +85,9 @@ def test_pytest_reports_late_basetemp_writer(tmp_path, refills, failure):
 
 @pytest.mark.parametrize("error_name", ["EACCES", "EIO"])
 @pytest.mark.parametrize("after_refill", [False, True])
-def test_pytest_scratch_does_not_hide_other_cleanup_errors(tmp_path, monkeypatch, error_name, after_refill):
+def test_pytest_scratch_does_not_hide_other_cleanup_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_name: str, after_refill: bool,
+) -> None:
     from contextlib import contextmanager
     import errno
     from scripts.ci import test_scratch
@@ -85,13 +96,13 @@ def test_pytest_scratch_does_not_hide_other_cleanup_errors(tmp_path, monkeypatch
     retries = []
 
     @contextmanager
-    def scratch(*args, **kwargs):
+    def scratch(*args: object, **kwargs: object) -> Iterator[str]:
         yield str(tmp_path)
         if after_refill:
             raise OSError(errno.ENOTEMPTY, "refilled", str(tmp_path))
         raise failure
 
-    def retry(directory):
+    def retry(directory: Path) -> None:
         retries.append(directory)
         raise failure
 
@@ -102,6 +113,41 @@ def test_pytest_scratch_does_not_hide_other_cleanup_errors(tmp_path, monkeypatch
             pass
     assert raised.value is failure
     assert len(retries) == int(after_refill)
+
+
+@pytest.mark.parametrize("operation", ["receipt", "listing"])
+@pytest.mark.parametrize("error_name", ["ENOENT", "EACCES"])
+def test_pytest_scratch_diagnostic_errors_preserve_original_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    operation: str, error_name: str,
+) -> None:
+    import errno
+    from scripts.ci import test_scratch
+
+    original = OSError(errno.ENOTEMPTY, "original refill", str(tmp_path))
+    diagnostic = OSError(getattr(errno, error_name), "diagnostic failure", str(tmp_path))
+
+    def refilled(directory: Path) -> None:
+        raise original
+
+    def restore_marker(path: Path, receipt: bytes) -> int:
+        raise diagnostic
+
+    def list_entries(path: Path) -> Iterator[Path]:
+        raise diagnostic
+
+    monkeypatch.setattr(test_scratch.shutil, "rmtree", refilled)
+    if operation == "receipt":
+        monkeypatch.setattr(Path, "write_bytes", restore_marker)
+    else:
+        monkeypatch.setattr(Path, "iterdir", list_entries)
+    with pytest.raises(OSError) as raised:
+        test_scratch._retry_refilled_scratch(tmp_path, b"owner receipt", original)
+    assert raised.value is original
+    stderr = capsys.readouterr().err
+    assert "diagnostic failure" in stderr
+    assert "leftover after 3 retries" in stderr
+    assert str(tmp_path) in stderr
 
 
 def test_retention_is_explicit():
