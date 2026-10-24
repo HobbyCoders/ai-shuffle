@@ -133,6 +133,7 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "StartSession": "write",
     "SettleSession": "write",
     "HandOffSession": "write",
+    "WorkingRecord": "write",
     "UnsettleSession": "write",
     "ArchiveSession": "write",
     # Agent messaging with this session's Task workers and its parent — the
@@ -196,6 +197,7 @@ def _swarm_risk(data: dict) -> str:
 BUILTINS_RISK_CLASSIFIERS: Mapping[str, Callable[[dict], str]] = {
     "Emulator": _emulator_risk,
     "Swarm": _swarm_risk,
+    "WorkingRecord": lambda data: "safe" if data.get("action") == "list" else "write",
 }
 
 # Dynamic gateway tools (per-connector, e.g. sending messages through a linked

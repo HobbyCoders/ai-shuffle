@@ -506,12 +506,29 @@ async def test_finalizing_tick_after_local_ttl_exits_quietly(mock_db, monkeypatc
     runtime._lease_finalizing = True
     monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.001)
     monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.01)
+    # Windows' event-loop clock can be coarser than these sub-tick intervals.
+    # Advance only this heartbeat's clock instead of relying on a real sleep
+    # to have crossed the TTL (asyncio timers may wake one clock tick early).
+    from types import SimpleNamespace
+
+    now = [100.0]
+    sleeps = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(session_runtime, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: now[0]),
+        sleep=sleep, wait_for=asyncio.wait_for,
+    ))
     with patch.object(session_runtime, "run_lease") as renew, patch.object(
         runtime, "_on_lease_lost", wraps=runtime._on_lease_lost,
     ) as lost, patch.object(
         runtime, "_stop_unowned", wraps=runtime._stop_unowned,
     ) as stop, patch("app.core.query_session_lifecycle.interrupt_session") as interrupt:
         await asyncio.wait_for(runtime._renew_loop("run", "runner", 1), 1)
+    assert sleeps == [0.01]
     renew.assert_not_awaited()
     lost.assert_not_called()
     stop.assert_not_called()
