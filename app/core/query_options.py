@@ -15,7 +15,10 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+
+if TYPE_CHECKING:
+    from app.core.generation_resolver import RunContext
 
 from app.core.agent_types import AgentOptions
 
@@ -761,6 +764,21 @@ def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
     if api_user_id:
         caller["api_user_id"] = api_user_id
     return generation_choices.for_session(caller)
+
+
+def _generation_context(
+    ai_tools_config: dict[str, Any], session_row: dict[str, Any] | None,
+    api_user_id: str | None, *, session_id: str | None,
+    unattended: bool, chat_mode: bool = False,
+) -> "RunContext":
+    from app.core.generation_resolver import RunContext
+
+    choices = _generation_choices(ai_tools_config, session_row, api_user_id)
+    return RunContext(session_id=session_id, unattended=unattended,
+                      owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
+                      chat_mode=chat_mode, remembered_choices=choices["remembered"],
+                      last_choices=choices["last"], job_choices=choices.get("job"),
+                      choices_unreadable=bool(choices.get("unreadable")))
 
 
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
@@ -1638,13 +1656,11 @@ def build_options_from_profile(
     # above follows the raw config plus this permitted set, so every attached
     # tool can reach its key.)
     ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
-    from app.core.generation_resolver import RunContext
-    choices = _generation_choices(ai_tools_server_config, session_row, api_user_id)
-    generation_context = RunContext(session_id=session_id, unattended=not _is_interactive_run(overrides, session_row),
-                                    owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
-                                    chat_mode=session_mode == "chat",
-                                    remembered_choices=choices["remembered"], last_choices=choices["last"],
-                                    choices_unreadable=bool(choices.get("unreadable")))
+    generation_context = _generation_context(
+        ai_tools_server_config, session_row, api_user_id, session_id=session_id,
+        unattended=not _is_interactive_run(overrides, session_row),
+        chat_mode=session_mode == "chat",
+    )
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
         ai_tools_config=ai_tools_server_config,

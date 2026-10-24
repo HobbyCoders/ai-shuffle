@@ -15,6 +15,7 @@
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
+	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { getErrorMessage } from '$lib/api/client';
 	import {
 		KIND_LABEL,
@@ -27,6 +28,7 @@
 		quickChips,
 		sameChoice,
 		sourceLabel,
+		workerLabel,
 		type GenerationKind,
 		type GenerationOption,
 		type GenerationPrice,
@@ -108,6 +110,15 @@
 	const Icon = $derived(KIND_ICON[kind]);
 	const remembered = $derived(generationChoices.remembered[kind]);
 	const remember = $derived(rememberTouched ? rememberPick : currentPrice.total === 0);
+
+	// Options are spread across accounts and the workers holding them. An option
+	// held by another worker names it, so the same plan on two workers differs.
+	const here = $derived(generationChoices.worker);
+	const elsewhere = (option: GenerationOption) => !!here && !!option.worker && option.worker !== here && option.worker !== 'local';
+	const anyElsewhere = $derived(options.some(elsewhere));
+	$effect(() => {
+		if (anyElsewhere && $workerInstalls === null) refreshWorkerPresence().catch(() => {});
+	});
 
 	// Which option a reply picked (it carries the exact model and account).
 	const repliedIndex = $derived.by(() => {
@@ -421,6 +432,9 @@
 						{/if}
 					</span>
 					<span class="gcc-model" title={option.model}>{modelLabel(option.model)}</span>
+					{#if elsewhere(option)}
+						<span class="gcc-where">on {workerLabel(option.worker, $workerInstalls, here)}</span>
+					{/if}
 					{#if option.available}
 						{#if chips.length}
 							<span class="gcc-chips">{chips.join(' · ')}</span>
@@ -754,6 +768,15 @@
 		font-size: 13px;
 		font-weight: 600;
 		line-height: 1.3;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.gcc-where {
+		max-width: 100%;
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1109,7 +1132,7 @@
 		.gcc-option {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) auto;
-			grid-template-areas: 'top price' 'model price' 'chips price';
+			grid-template-areas: 'top price' 'model price' 'where price' 'chips price';
 			column-gap: 10px;
 		}
 		.gcc-opt-top {
@@ -1118,6 +1141,9 @@
 		}
 		.gcc-model {
 			grid-area: model;
+		}
+		.gcc-where {
+			grid-area: where;
 		}
 		.gcc-chips {
 			grid-area: chips;
