@@ -151,7 +151,10 @@ atomically replaced `DATA_DIR/home-repair-cursor.json` saves the scan phase and
 bounded directory-buffer positions across starts, so a large tree does not
 permanently hide later files. Each resumed path is reopened and revalidated;
 missing or malformed state starts a new cycle. After a complete cycle the next
-start scans from the beginning again. If progress cannot be saved, the summary
+start scans from the beginning again. No cursor is written into an empty data
+volume: first-boot root ownership preparation still requires that volume to be
+empty; progress saving begins on a later start after database initialization.
+If progress cannot be saved, the summary
 includes `cursor-unavailable` and repair remains best-effort. Its one-line
 summary reports repairs, skips by reason, the scan limit and at most five
 relative-path samples; it never logs file contents.

@@ -1064,11 +1064,23 @@ def test_home_root_repair_prioritizes_shallow_home_before_large_local(tmp_path, 
     assert result["limited"]
 
 
+@pytest.mark.parametrize("budget", [1, 20000])
+def test_home_root_repair_preserves_empty_data_volume_for_initial_ownership(tmp_path, home_ownership, budget):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace, home / ".fluid"):
+        directory.mkdir()
+    home_ownership()
+    runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=budget)
+    # drop_privileges may re-own only an EMPTY named volume, never retained data.
+    assert list(data.iterdir()) == []
+
+
 @pytest.mark.parametrize("count,budget", [(40, 1), (40, 5), (2500, 300)])
 def test_home_root_repair_resumes_across_restarts(tmp_path, home_ownership, count, budget):
     home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
     for directory in (home, data, workspace, home / ".fluid", home / ".local", home / "deep"):
         directory.mkdir()
+    (data / "existing-install").write_text("initialized on an earlier boot")
     targets = []
     for index in range(count):
         path = home / ".fluid" / str(index)
@@ -1120,6 +1132,7 @@ def test_home_root_repair_resumed_directory_is_revalidated(tmp_path, home_owners
     home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
     for directory in (home, data, workspace, home / ".fluid"):
         directory.mkdir()
+    (data / "existing-install").write_text("initialized on an earlier boot")
     victim = home / ".fluid"
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1146,6 +1159,7 @@ def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeyp
     class SlowListing:
         def __init__(self, fd):
             self.iterator = original_scandir(fd)
+            self.is_home = os.fstat(fd).st_ino == home.stat().st_ino
         def __enter__(self):
             return self
         def __exit__(self, *args):
@@ -1153,8 +1167,9 @@ def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeyp
         def __iter__(self):
             return self
         def __next__(self):
-            reads.append(1)
-            clock[0] += 2
+            if self.is_home:
+                reads.append(1)
+                clock[0] += 2
             return next(self.iterator)
     monkeypatch.setattr(runtime.os, "scandir", SlowListing)
     monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])

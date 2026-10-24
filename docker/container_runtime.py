@@ -917,6 +917,12 @@ def home_repair_cursor(data_dir, state=None):
                         or "/" in frame["pending"] or frame["pending"] in {".", ".."}):
                     raise ValueError("invalid cursor frame")
             return state
+        # Fresh named volumes must stay empty until drop_privileges prepares
+        # their root ownership. The database initializes them later this boot;
+        # advisory progress can start on the following container start.
+        with os.scandir(parent) as entries:
+            if next(entries, None) is None:
+                return
         temporary = HOME_REPAIR_CURSOR + ".new-" + secrets.token_hex(6)
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
         try:
