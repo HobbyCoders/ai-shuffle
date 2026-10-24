@@ -81,6 +81,11 @@ SNAPSHOT_TIMEOUT = 1800
 # supervisor exits and the container's restart policy takes over (#2112).
 RELAUNCH_LIMIT = 3
 RELAUNCH_WINDOW = 15 * 60.0
+# #533: a disposable shutdown checkpoint took 30.7s (22.4s in fsync) under
+# two bounded same-volume writers. Give slow but progressing checkpoints room
+# without disabling the forced-stop fence. Compose/docker run allow 120s for
+# app (30+5), Chromium (5+5), PostgreSQL (60+5), and supervisor overhead.
+PG_FAST_SHUTDOWN_TIMEOUT = 60
 # Checkpoint and WAL settings, passed on every start so existing clusters pick
 # them up. The 1 GB / 5 minute defaults forced a checkpoint every few seconds
 # under load, and after each checkpoint the first write to every page logs a
@@ -658,7 +663,7 @@ class Database:
                 if self.process.poll() is None:
                     self.process.send_signal(signal.SIGINT)  # PostgreSQL FAST shutdown
                     try:
-                        self.process.wait(timeout=30)
+                        self.process.wait(timeout=PG_FAST_SHUTDOWN_TIMEOUT)
                     except subprocess.TimeoutExpired:
                         forced = True
                 kill_group(self.process, signal.SIGKILL)
