@@ -110,6 +110,7 @@ const profile = {
 	devices: []
 };
 let status: NetworkStatus;
+let availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null as boolean | null };
 let connection: unknown;
 function reads(path: string): unknown {
 	if (path === '/network/status') return status;
@@ -135,6 +136,7 @@ function reads(path: string): unknown {
 		};
 	if (path === '/network/advertised-addresses') return { addresses: [], advertised: ['https://desk.example.com'] };
 	if (path === '/network/lan') return { enabled: true, addresses: [], advertised: ['https://desk.example.com', 'http://10.0.0.5:8000'] };
+	if (path === '/settings/worker-availability') return { ...availability };
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
 	if (path === '/mobile/hub/devices/confirmations') return [{ ...request }];
@@ -148,6 +150,7 @@ beforeEach(async () => {
 	vi.resetAllMocks();
 	settingsNav.reset();
 	status = enrolled();
+	availability = { worker_id: 'self', desktop: true, always_on: false, always_on_override: null };
 	connection = { signed_in: true, status: 'connected', code: null, qr_svg: null, error: null };
 	api.get.mockImplementation(async (path: string) => reads(path));
 	model = new DevicesModel();
@@ -379,6 +382,38 @@ describe('Devices list', () => {
 		await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith('/network/advertised-addresses', {
 			addresses: ['https://proxy.example', 'https://other.example']
 		}));
+	});
+
+	it('marks a desktop always on for watches, then goes back to its default', async () => {
+		api.put.mockImplementation(async (_path: string, body: { always_on: boolean | null }) => ({
+			...availability,
+			always_on: body.always_on ?? !availability.desktop,
+			always_on_override: body.always_on
+		}));
+		show('self', 'Overview');
+		const toggle = await screen.findByRole('switch', { name: /Always on/ });
+		expect(toggle.getAttribute('aria-checked')).toBe('false');
+		expect(screen.getByText('Default for a desktop')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Use default' })).toBeNull();
+		await fireEvent.click(toggle);
+		expect(api.put).toHaveBeenCalledWith('/settings/worker-availability', { always_on: true });
+		await vi.waitFor(() => expect(screen.getByText('Set by you')).toBeTruthy());
+		expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(screen.getByRole('button', { name: 'Use default' }));
+		expect(api.put).toHaveBeenLastCalledWith('/settings/worker-availability', { always_on: null });
+		await vi.waitFor(() => expect(screen.getByText('Default for a desktop')).toBeTruthy());
+		expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('flips the always-on switch back when the save is refused', async () => {
+		availability = { worker_id: 'self', desktop: false, always_on: true, always_on_override: null };
+		api.put.mockRejectedValue(new Error('Admin required'));
+		show('self', 'Overview');
+		const toggle = await screen.findByRole('switch', { name: /Always on/ });
+		expect(screen.getByText('Default for a server')).toBeTruthy();
+		await fireEvent.click(toggle);
+		expect((await screen.findByRole('alert')).textContent).toBe('Admin required');
+		expect(screen.getByRole('switch', { name: /Always on/ }).getAttribute('aria-checked')).toBe('true');
 	});
 
 	it('turns LAN-direct sync off and saves an extra address', async () => {

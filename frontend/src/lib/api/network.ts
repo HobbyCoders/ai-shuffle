@@ -517,6 +517,29 @@ export async function updateLanSettings(body: { enabled?: boolean; addresses?: s
 	return api.put<LanSettings>('/network/lan', body);
 }
 
+// ─── Worker availability (#602) ──────────────────────────────────────────────
+
+/**
+ * Whether this worker stays up for watches. `always_on` is the effective value
+ * peers see; `always_on_override` is the owner's choice, null for the
+ * launch-kind default (off on a desktop, on otherwise).
+ */
+export interface WorkerAvailability {
+	worker_id: string;
+	desktop: boolean;
+	always_on: boolean;
+	always_on_override: boolean | null;
+}
+
+export async function getWorkerAvailability(): Promise<WorkerAvailability> {
+	return api.get<WorkerAvailability>('/settings/worker-availability', { cache: 'no-store' });
+}
+
+/** Null restores the launch-kind default. */
+export async function updateWorkerAvailability(alwaysOn: boolean | null): Promise<WorkerAvailability> {
+	return api.put<WorkerAvailability>('/settings/worker-availability', { always_on: alwaysOn });
+}
+
 /** The label a peer's route reads as in the UI. */
 export function routeLabel(route: PeerRoute | null | undefined): string {
 	if (route === 'lan') return 'Direct (LAN)';

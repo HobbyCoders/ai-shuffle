@@ -9,7 +9,8 @@ import {
 	tierLabel,
 	transferTarget,
 	workerChoices,
-	workerTier
+	workerTier,
+	type WorkerTier
 } from './watch-placement';
 
 function install(id: string, name: string, over: Partial<Install> = {}): Install {
@@ -36,6 +37,102 @@ describe('automaticWorker', () => {
 		expect(automaticWorker(workerChoices([desktop, server, always]))?.name).toBe('Mini');
 		expect(automaticWorker(workerChoices([desktop, server]))?.name).toBe('Box');
 		expect(automaticWorker(workerChoices([desktop, { ...server, online: false }]))).toBeNull();
+	});
+});
+
+/**
+ * The decision table of app/core/watch_placement.py resolve(), with the cases
+ * of tests/core/test_watch_placement.py: what a worker publishes decides its
+ * tier, and the automatic preview names the worker the backend would pick.
+ */
+describe('automatic placement matches watch_placement.resolve()', () => {
+	// What app/core/runner_capabilities.py publishes for each launch kind.
+	const linuxDesktop = { desktop: true, always_on: false };
+	const dockerServer = { desktop: false, always_on: true };
+	const cases: {
+		name: string;
+		peers: Partial<Install>[];
+		tiers: WorkerTier[];
+		picks: string | null;
+	}[] = [
+		{
+			name: 'a Linux desktop may sleep; a Docker server is always on and picked',
+			peers: [
+				{ platform: 'linux', capabilities: linuxDesktop },
+				{ platform: 'linux', capabilities: dockerServer }
+			],
+			tiers: ['may_sleep', 'always_on'],
+			picks: 'B'
+		},
+		{
+			name: 'an owner always-on override on a desktop makes it a candidate',
+			peers: [
+				{ platform: 'linux', capabilities: { desktop: true, always_on: true } },
+				{ platform: 'windows', capabilities: { desktop: true, always_on: false } }
+			],
+			tiers: ['always_on', 'may_sleep'],
+			picks: 'A'
+		},
+		{
+			name: 'explicit always_on false on a Linux server is never picked',
+			peers: [
+				{ platform: 'windows', capabilities: linuxDesktop },
+				{ platform: 'linux', capabilities: { desktop: false, always_on: false } }
+			],
+			tiers: ['may_sleep', 'may_sleep'],
+			picks: null
+		},
+		{
+			name: 'explicit always_on true wins whatever the OS',
+			peers: [
+				{ platform: 'windows', capabilities: { always_on: true } },
+				{ platform: 'darwin', capabilities: { always_on: true } }
+			],
+			tiers: ['always_on', 'always_on'],
+			picks: 'A'
+		},
+		{
+			name: 'an older peer without the keys falls back to a Linux server',
+			peers: [
+				{ platform: 'windows', capabilities: {} },
+				{ platform: 'linux', capabilities: {} }
+			],
+			tiers: ['may_sleep', 'server'],
+			picks: 'B'
+		},
+		{
+			name: 'an older Linux peer that says it is a desktop may sleep',
+			peers: [
+				{ platform: 'linux', capabilities: { desktop: true } },
+				{ platform: 'Linux', capabilities: {} }
+			],
+			tiers: ['may_sleep', 'server'],
+			picks: 'B'
+		},
+		{
+			name: 'a marked always-on worker outranks an older Linux server',
+			peers: [
+				{ platform: 'linux', capabilities: {} },
+				{ platform: 'windows', capabilities: { always_on: true } }
+			],
+			tiers: ['server', 'always_on'],
+			picks: 'B'
+		},
+		{
+			name: 'an offline always-on worker is skipped',
+			peers: [
+				{ platform: 'linux', capabilities: dockerServer, online: false },
+				{ platform: 'linux', capabilities: {} }
+			],
+			tiers: ['always_on', 'server'],
+			picks: 'B'
+		}
+	];
+
+	it.each(cases)('$name', ({ peers, tiers, picks }) => {
+		const installs = peers.map((over, i) => install(`dev_${'AB'[i]}`, 'AB'[i], over));
+		expect(installs.map(workerTier)).toEqual(tiers);
+		expect(automaticWorker(workerChoices(installs))?.name ?? null).toBe(picks);
 	});
 });
 
