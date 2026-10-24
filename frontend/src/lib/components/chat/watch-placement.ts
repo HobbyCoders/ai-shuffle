@@ -3,8 +3,9 @@
  * watch may move to, and where new watches go.
  *
  * Mirrors app/core/watch_placement.py: automatic placement prefers an online
- * worker marked always-on, then an online Linux server; a desktop that may
- * sleep is never picked automatically, and an unavailable chosen worker is
+ * worker that publishes always_on, then an online Linux server among older
+ * peers that publish no always_on; a worker that may sleep (including an
+ * explicit always_on: false) is never picked automatically, and an unavailable chosen worker is
  * refused rather than silently replaced. The server decides; these helpers
  * only describe it.
  */
@@ -23,9 +24,14 @@ export interface WorkerChoice {
 
 const TRANSFER = 'transfer:';
 
+/**
+ * A published `always_on` (launch kind plus the owner's override, #602) decides
+ * on its own, whatever the OS: false is never picked automatically. Only older
+ * peers that publish no key fall back to "a Linux worker that is not a desktop".
+ */
 export function workerTier(install: Pick<Install, 'platform' | 'capabilities'>): WorkerTier {
 	const caps = install.capabilities ?? {};
-	if (caps.always_on === true) return 'always_on';
+	if ('always_on' in caps) return caps.always_on ? 'always_on' : 'may_sleep';
 	if (String(install.platform ?? '').toLowerCase() === 'linux' && caps.desktop !== true) return 'server';
 	return 'may_sleep';
 }

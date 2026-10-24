@@ -1,9 +1,11 @@
 <script lang="ts">
 	/**
-	 * This worker: its name, platform and version, and the Network tab
+	 * This worker: its name, platform and version, whether it stays on for
+	 * watches (#602), and the Network tab
 	 * (current network, joining another one with an invite, keeping its own
 	 * settings, and the account-network situations).
 	 */
+	import { onMount } from 'svelte';
 	import { LogIn, Server } from 'lucide-svelte';
 	import { NETWORK_STATE_LABELS } from '$lib/api/network-status';
 	import {
@@ -12,12 +14,16 @@
 		updateLanSettings,
 		getAdvertisedAddresses,
 		updateAdvertisedAddresses,
+		getWorkerAvailability,
+		updateWorkerAvailability,
+		type WorkerAvailability,
 		type AdvertisedAddresses,
 		type HandoffTransferRecovery,
 		type LanSettings
 	} from '$lib/api/network';
 	import { getErrorMessage } from '$lib/api/client';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
+	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import type { StatusTone } from '$lib/settings/types';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
@@ -99,6 +105,46 @@
 		aliasesRev += 1;
 	}
 
+	const ALWAYS_ON_HELP =
+		'New watches run automatically on a worker that stays on. Turn this off for a worker that sleeps or shuts down; turn it on for a desktop you keep running. You can still choose any worker for a watch yourself.';
+	const access = getSettingsAccess();
+	let availability = $state<WorkerAvailability | null>(null);
+	let availabilityError = $state('');
+	let availabilityBusy = $state(false);
+	const availabilityHint = $derived(
+		availability?.always_on_override != null
+			? 'Set by you'
+			: availability?.desktop
+				? 'Default for a desktop'
+				: 'Default for a server'
+	);
+
+	onMount(() => void loadAvailability());
+
+	async function loadAvailability() {
+		try {
+			availability = await getWorkerAvailability();
+		} catch (e) {
+			availabilityError = getErrorMessage(e, 'Could not load whether this worker stays on');
+		}
+	}
+
+	/** `null` goes back to the launch-kind default. */
+	async function saveAvailability(alwaysOn: boolean | null): Promise<boolean> {
+		availabilityError = '';
+		availabilityBusy = true;
+		try {
+			availability = await updateWorkerAvailability(alwaysOn);
+			flashSaved();
+			return true;
+		} catch (e) {
+			availabilityError = getErrorMessage(e, 'Could not save whether this worker stays on');
+			return false;
+		} finally {
+			availabilityBusy = false;
+		}
+	}
+
 	const LAN_HELP =
 		'Workers on the same local network sync directly instead of through the tunnel. The connection is authenticated and encrypted by the workers themselves; if it fails, sync uses the tunnel.';
 	let lan = $state<LanSettings | null>(null);
@@ -173,6 +219,26 @@
 				<SettingRow label="Version"><ValueText value={status.version ?? 'Unknown'} mono tone="fg" /></SettingRow>
 				<SettingRow label="Revision"><ValueText value={status.revision ?? 'Unknown'} mono tone="fg" /></SettingRow>
 			</RowGroup>
+			{#if availability}
+				<RowGroup title="Watches">
+					<SettingRow label="Always on" hint={availabilityHint} help={ALWAYS_ON_HELP}>
+						{#if availability.always_on_override != null}
+							<button
+								type="button"
+								class="st-btn ghost sm"
+								disabled={availabilityBusy || access.readOnly}
+								onclick={() => saveAvailability(null)}>Use default</button
+							>
+						{/if}
+						<Switch
+							checked={availability.always_on}
+							disabled={availabilityBusy}
+							onchange={(on) => saveAvailability(on)}
+						/>
+					</SettingRow>
+				</RowGroup>
+			{/if}
+			{#if availabilityError}<InlineBanner tone="warn"><span role="alert">{availabilityError}</span></InlineBanner>{/if}
 		{:else}
 			{@render networkTab()}
 		{/if}

@@ -47,6 +47,15 @@
           "past_bug": "#565: the watch panel had no placement indicator, preference picker or move control after placement shipped backend-only."
         },
         {
+          "id": "durable-watches.panel-tier-matches-placement",
+          "check": "Watch panel tiers and the Automatic preview follow published always_on, set from Settings",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable Linux Electron DesktopWorker and Docker ServerWorker candidates with one schedule watch on each. On DesktopWorker open Settings > Devices > This worker > Overview at 1440px and 375px: Always on reads off with Default for a desktop. Open the running-tasks panel: DesktopWorker reads May sleep, ServerWorker Always on, and New watches reads Automatic with ServerWorker. On ServerWorker switch Always on off in its own Settings (hint Set by you); after the next presence refresh the panel on both workers labels ServerWorker May sleep and Automatic reads none online, and a new automatic watch is refused. Switch DesktopWorker on: it reads Always on and Automatic names it; a new automatic watch executes there. Use default on both restores the launch defaults. Stop disposable watches and archive throwaway chats.",
+          "pass_when": "Every tier label and the Automatic preview agree with where automatic placement actually runs a new watch: explicit always_on false reads May sleep and is never previewed, even on Linux; explicit true reads Always on on any OS; Server appears only for older peers without the key. The Settings switch and Use default round-trip through /api/v1/settings/worker-availability.",
+          "past_bug": "#629: the watch panel labelled a Linux worker with explicit always_on false as Server and previewed it as the automatic pick while the backend refused it."
+        },
+        {
           "id": "durable-watches.real-connectors",
           "check": "Real Slack, Discord and Telegram watch cursors",
           "kind": "owner",

@@ -45,6 +45,12 @@ export function searchSource(): SearchItem[] {
 			target: self('Overview')
 		},
 		{
+			title: 'Always on for watches',
+			where: 'Devices, This worker',
+			keywords: 'watch placement sleep server desktop availability',
+			target: self('Overview')
+		},
+		{
 			title: 'Join network',
 			where: 'Devices, This worker, Network',
 			keywords: 'invite code tailscale worker address leave and join',
