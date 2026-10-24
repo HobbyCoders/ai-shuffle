@@ -1312,6 +1312,11 @@ class SessionRuntime:
                 })
             self._pending_done = None
         finally:
+            # A one-shot approval pass lives only as long as the turn it was
+            # armed for, however the turn ends (done, Stop, settle).
+            from app.core import assistant_confirm as _confirm
+
+            _confirm.drop_passes(sid, self.turn_id)
             # Deregister ourselves as the live runtime (self-guarded so a fresh
             # runtime that already took over the session is never evicted).
             if _live_runtimes.get(sid) is self:
@@ -1535,6 +1540,12 @@ class SessionRuntime:
                 if not engine_prompt:
                     self._terminal = "done"
                     return  # All completions superseded; no unrelated message to deliver.
+            # The owner's yes to a call that was let go "not run yet" (or a
+            # wake carrying a yes given elsewhere) admits that call once, in
+            # this turn only (#523).
+            from app.core import assistant_confirm as _confirm
+
+            _confirm.arm_pass(self.session_id, self.turn.get("payload"), self.turn_id)
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -1861,6 +1872,9 @@ class SessionRuntime:
                     steer_id = (command_id if isinstance(command_id, str)
                                 and command_id.startswith("client-") else row_id)
                     self._steer_ids[row_id] = steer_id
+                    from app.core import assistant_confirm as _confirm
+
+                    _confirm.arm_pass(self.session_id, row.get("payload"), self.turn_id)
                     await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for

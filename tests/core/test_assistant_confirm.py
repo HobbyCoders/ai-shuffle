@@ -2,6 +2,7 @@
 owner's own message, decided by the app, one request at a time."""
 import asyncio
 import json
+from typing import Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -188,7 +189,7 @@ async def test_firm_no_declines(home):  # noqa: F811
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultDeny)
 
 
-async def test_unclear_never_approves_or_declines(home):  # noqa: F811
+async def test_unclear_never_approves_or_declines(home: Tuple[str, str]) -> None:  # noqa: F811
     """#523 (owner decision): only a firm yes or no answers. However many other
     messages arrive, the request stays pending and answerable, records no
     outcome, and the started chat that asked keeps waiting on it."""

@@ -782,6 +782,13 @@ class HarnessAdapter(ProviderAdapter):
                 # defers none.
                 bridge_deferred=delegated_bridge_deferred(),
             )
+            # Only an owner chat's "not run yet" placeholder and a person's no
+            # carry the owner's waiting message on a deny; a deny from Stop,
+            # settle or a timeout carries nothing (#523). Plain attribute, so
+            # an older fluid without the behaviour ignores it.
+            from app.core.assistant_confirm import deny_carries_steers
+
+            self._engine.deny_carries_steers = deny_carries_steers
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
@@ -2651,7 +2658,8 @@ class HarnessAdapter(ProviderAdapter):
 
         inner_cwd = inner is not None and _policy_accepts_cwd(inner)
 
-        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
+                         agent_id: Optional[str] = None) -> Optional[str]:
             # fluid's to_thread only builds this coroutine; it runs on the
             # loop. ``inner`` may read the database and run Git (the checkout
             # lock), so it runs in a thread.
@@ -2667,7 +2675,7 @@ class HarnessAdapter(ProviderAdapter):
                 return denial
             if self._owner_needed(name, tool_input):
                 # The CLI never prompts in Bypass, so the owner is asked here.
-                return await self._ask_owner(name, tool_input)
+                return await self._ask_owner(name, tool_input, agent_id=agent_id)
             if self.permission_mode == "bypassPermissions":
                 return None
             try:
@@ -3068,8 +3076,12 @@ class HarnessAdapter(ProviderAdapter):
         return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk,
                            permission_mode=mode)
 
-    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any], *,
+                         agent_id: Optional[str] = None) -> Optional[str]:
         """Put a high-risk assistant call to the owner; None when approved.
+
+        ``agent_id`` names the CLI subagent making the call (None on the main
+        thread), so a subagent never spends the main chat's one-shot pass.
 
         The approver routes it to the assistant's conversation, where only
         the owner's firm yes approves it (``app.core.assistant_confirm``).
@@ -3084,7 +3096,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             result = await self._can_use_tool(
                 self._permission_tool_name(tool_name), tool_input,
-                SimpleNamespace(tool_use_id=None, agent_id=None, delegated=self._is_delegated,
+                SimpleNamespace(tool_use_id=None, agent_id=agent_id, delegated=self._is_delegated,
                                 assistant_owner=True, decision_reason=ASK_REASON),
             )
         except asyncio.CancelledError:

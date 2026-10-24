@@ -703,6 +703,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # loop is never handed a coroutine it would read as a denial text.
     supports_async_tool_policy = True
 
+    # Which host denials may carry the user steers and peers waiting for a tool
+    # boundary (``_deny_boundary``): called with the deny's text, True to carry.
+    # None (the default) carries nothing, so a deny caused by Stop, settle, a
+    # timeout or a cancelled prompt never receipts a steer the dying turn will
+    # not deliver. A host sets it after construction; an older loop simply
+    # lacks the behaviour.
+    deny_carries_steers: Callable[[str], bool] | None = None
+
     def __init__(
         self,
         *,
@@ -2558,6 +2566,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     def _deny_boundary(
         self, tool_use_id: str | None, mapper: StreamJsonMapper | None,
+        message: str | None,
     ) -> list[AgentMessage | Steer]:
         """Take the waiting peers and user steers a main-thread DENY may carry.
 
@@ -2568,11 +2577,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         NativeLoop folds steers into a denied call's result the same way. An
         owner chat relies on this when it answers a call waiting on approval
         with "not run yet" so the owner's other message reaches the model in
-        the same turn (#523). Same guards as :meth:`_peer_boundary`, minus the
-        hook budget: a permission reply has no CLI timeout, and a PreToolUse
-        answer is bounded by ``PRE_TOOL_USE_HOOK_BUDGET``.
+        the same turn (#523).
+
+        Only a deny the host opted in carries anything
+        (:attr:`deny_carries_steers` answers True for ``message``). Same guards
+        as :meth:`_peer_boundary`, minus the hook budget (a permission reply has
+        no CLI timeout, and a PreToolUse answer is bounded by
+        ``PRE_TOOL_USE_HOOK_BUDGET``): never after a Stop or a hook stop, never
+        for another turn's call, never off the main thread. A PreToolUse deny
+        that ends the query (``continue: false``) or names a subagent
+        (``agent_id``) is refused earlier, in :meth:`_pre_tool_use_deny_boundary`.
         """
         if not self._pending_peers or mapper is None:
+            return []
+        carries = self.deny_carries_steers
+        try:
+            if carries is None or not carries(message or ""):
+                return []
+        except Exception:  # noqa: BLE001 — a failing predicate carries nothing
+            logger.warning("deny_carries_steers failed; the deny carries nothing", exc_info=True)
             return []
         if (
             not self._peer_admission_open
@@ -3223,7 +3246,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._remember_allow(bridge.tool_name, input)
             suggestions = bridge.suggestions
         message = resp.message
-        carried = [] if allow else self._deny_boundary(bridge.tool_use_id, mapper)
+        carried = [] if allow else self._deny_boundary(bridge.tool_use_id, mapper, message)
         if carried:
             message = f"{message or 'permission denied'}\n\n{self._boundary_text(carried)}"
         try:
@@ -3558,11 +3581,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             or request.input.get("agent_id")
         ):
             return []
+        reason = str(specific.get("permissionDecisionReason") or "denied")
         peers = self._deny_boundary(
-            request.tool_use_id or request.input.get("tool_use_id"), mapper,
+            request.tool_use_id or request.input.get("tool_use_id"), mapper, reason,
         )
         if peers:
-            reason = str(specific.get("permissionDecisionReason") or "denied")
             specific["permissionDecisionReason"] = f"{reason}\n\n{self._boundary_text(peers)}"
         return peers
 
@@ -3651,12 +3674,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     async def _policy_denial(
         self, tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+        agent_id: str | None = None,
     ) -> str | None:
         """Why the deny policy refuses this call, or None.
 
         ``cwd`` is the CLI's working directory for this call, from the hook
         payload: its shell keeps a ``cd`` between calls, so it can differ from
         the session's. It reaches a policy that takes a ``cwd`` keyword.
+        ``agent_id`` names the subagent making the call (None on the main
+        thread); it reaches a policy that names an ``agent_id`` parameter.
 
         Fails closed: a ``tool_policy`` that raises, or returns an awaitable
         that raises, denies the call. Letting it through instead would turn
@@ -3668,7 +3694,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # A sync policy may block on a DB read (the app's saved-rule
                 # lookup), so it runs off the loop; an async policy returns
                 # its coroutine from the thread and is awaited here.
-                extra = {"cwd": cwd} if _accepts_cwd(self.tool_policy) else {}
+                extra: dict[str, Any] = {"cwd": cwd} if _accepts_cwd(self.tool_policy) else {}
+                if _names_param(self.tool_policy, "agent_id"):
+                    extra["agent_id"] = agent_id
                 verdict = await asyncio.to_thread(self.tool_policy, tool_name, tool_input, **extra)
                 if inspect.isawaitable(verdict):
                     verdict = await verdict
@@ -3728,8 +3756,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if decision.additional_context:
                 specific["additionalContext"] = decision.additional_context
         cli_cwd = data.get("cwd")
+        agent = data.get("agent_id")
         denial = await self._policy_denial(
             name, tool_input, cli_cwd if isinstance(cli_cwd, str) and cli_cwd else None,
+            agent_id=agent if isinstance(agent, str) and agent else None,
         )
         if denial is not None:
             return {"hookSpecificOutput": {
@@ -4542,6 +4572,15 @@ def _accepts_cwd(policy: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _names_param(policy: Any, name: str) -> bool:
+    """Whether ``policy`` names parameter ``name`` explicitly (a ``**kwargs``
+    catch-all does not count, so existing policies see no new keyword)."""
+    try:
+        return name in inspect.signature(policy).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _hook_text(value: Any) -> str:

@@ -5,13 +5,16 @@ run yet" deny when the owner sends another message, so that message reaches
 the model in the same turn. NativeLoop folds a steer into every tool result,
 a denied one included. DelegatedLoop holds a user steer for the next
 main-thread PostToolUse hook, which a denied call never reaches, so the deny
-itself (the ``can_use_tool`` reply, or a PreToolUse deny) carries it.
+itself (the ``can_use_tool`` reply, or a PreToolUse deny) carries it, but only
+a deny the host opts in (``DelegatedLoop.deny_carries_steers``): a deny caused
+by Stop, settle or a timeout carries nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 from fluid.context.steering import STEER_CLOSE, STEER_OPEN
 from fluid.engine.delegated import DelegatedLoop
@@ -24,6 +27,11 @@ from tests.unit.test_web_and_steering import _ScriptedProvider, _text_script, _t
 
 PLACEHOLDER = "Not run yet: this call is waiting for the owner's approval."
 OWNER_TEXT = "Instead, explain what that command would change"
+
+
+def _placeholder_only(message: str) -> bool:
+    """The host's opt-in, as the app sets it: only its placeholder carries."""
+    return message.startswith(PLACEHOLDER)
 
 
 def _marked(text: str) -> str:
@@ -100,6 +108,7 @@ def _permission_reply(frames: list[dict]) -> dict:
 
 async def test_delegated_deny_carries_the_waiting_user_steer() -> None:
     async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
+        loop.deny_carries_steers = _placeholder_only
         await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
         await loop.submit(RespondPermission(
             request_id=event.request_id, decision="deny", message=PLACEHOLDER,
@@ -124,6 +133,7 @@ async def test_delegated_deny_carries_the_waiting_user_steer() -> None:
 async def test_delegated_allow_leaves_the_steer_for_the_tool_boundary() -> None:
     """Unchanged: an allowed call runs, and its PostToolUse answer carries it."""
     async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
+        loop.deny_carries_steers = _placeholder_only
         await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
         await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
 
@@ -136,6 +146,7 @@ async def test_delegated_allow_leaves_the_steer_for_the_tool_boundary() -> None:
 
 async def test_delegated_deny_after_a_stop_carries_nothing() -> None:
     async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
+        loop.deny_carries_steers = _placeholder_only
         await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
         await loop.submit(Interrupt())
         await loop.submit(RespondPermission(
@@ -148,6 +159,39 @@ async def test_delegated_deny_after_a_stop_carries_nothing() -> None:
     assert not any(isinstance(e, SteerDelivered) for e in events)
 
 
+async def test_delegated_cancel_or_timeout_deny_carries_nothing_before_the_stop() -> None:
+    """Stop and settle cancel the pending prompt BEFORE they interrupt the CLI,
+    so the deny arrives while the turn still looks live. It is not a deny the
+    host opted in, so the steer stays waiting and is never receipted."""
+    for message in ("Request cancelled", "Permission request timed out"):
+        async def on_prompt(loop: DelegatedLoop, event: PermissionRequest,
+                            message: str = message) -> None:
+            loop.deny_carries_steers = _placeholder_only
+            await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
+            await loop.submit(RespondPermission(
+                request_id=event.request_id, decision="deny", message=message,
+            ))
+
+        _loop, frames, _events, seen = await _run_peer_boundary_turn(on_prompt)
+
+        # The deny carries only its own text. The steer stays waiting: in this
+        # scripted turn, which goes on, the next tool boundary takes it.
+        assert _permission_reply(frames)["message"] == message
+        assert seen["main"].count(OWNER_TEXT) == 1
+
+
+async def test_delegated_deny_carries_nothing_without_the_host_opt_in() -> None:
+    async def on_prompt(loop: DelegatedLoop, event: PermissionRequest) -> None:
+        await loop.submit(Steer(text=OWNER_TEXT, id="q1"))
+        await loop.submit(RespondPermission(
+            request_id=event.request_id, decision="deny", message=PLACEHOLDER,
+        ))
+
+    _loop, frames, _events, _seen = await _run_peer_boundary_turn(on_prompt)
+
+    assert _permission_reply(frames)["message"] == PLACEHOLDER
+
+
 # ─── DelegatedLoop: a PreToolUse deny (Bypass asks the owner there) ──────────
 
 
@@ -157,11 +201,12 @@ def _armed_loop(pending: list) -> tuple:
     loop._turn_peer_ids = {op.id for op in pending if op.id}
     loop._peer_admission_open = True
     loop._active_turn_id = "turn_1"
+    loop.deny_carries_steers = _placeholder_only
     mapper = SimpleNamespace(turn_id="turn_1", main_tool_use_ids={"toolu_main"})
     return loop, mapper
 
 
-def _pre_tool_use(tool_use_id: str, **extra) -> HookCallbackRequest:
+def _pre_tool_use(tool_use_id: str, **extra: Any) -> HookCallbackRequest:
     return HookCallbackRequest(
         cli_request_id="cli_hook_1", callback_id="fluid_hook_PreToolUse",
         input={"tool_name": "Bash", "tool_use_id": tool_use_id, **extra}, tool_use_id=tool_use_id,
@@ -209,3 +254,34 @@ async def test_pre_tool_use_carries_nothing_off_the_main_thread_or_on_an_allow()
     # No reader (an answer given outside the running turn).
     assert loop._pre_tool_use_deny_boundary(_pre_tool_use("toolu_main"), _deny(), None) == []
     assert loop._pending_peers == [steer]
+
+
+async def test_pre_tool_use_cancel_deny_carries_nothing() -> None:
+    steer = Steer(text=OWNER_TEXT, id="q1")
+    loop, mapper = _armed_loop([steer])
+    output = _deny("Request cancelled")
+
+    assert loop._pre_tool_use_deny_boundary(_pre_tool_use("toolu_main"), output, mapper) == []
+    assert output["hookSpecificOutput"]["permissionDecisionReason"] == "Request cancelled"
+    assert loop._pending_peers == [steer]
+
+
+async def test_policy_hears_which_subagent_calls_when_it_asks() -> None:
+    """A policy that names ``agent_id`` learns the calling subagent (None on the
+    main thread); a policy without it is called as before."""
+    seen: list = []
+
+    async def policy(name: str, tool_input: dict, cwd: str | None = None,
+                     agent_id: str | None = None) -> None:
+        seen.append(agent_id)
+
+    def plain(name: str, tool_input: dict, **kwargs: Any) -> None:
+        seen.append(("plain", sorted(kwargs)))
+
+    loop = _make_loop("w")
+    loop.tool_policy = policy
+    await loop._policy_denial("Bash", {}, None, agent_id="agent_1")
+    await loop._policy_denial("Bash", {})
+    loop.tool_policy = plain
+    await loop._policy_denial("Bash", {}, "/w", agent_id="agent_1")
+    assert seen == ["agent_1", None, ("plain", ["cwd"])]

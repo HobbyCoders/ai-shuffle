@@ -52,11 +52,13 @@ OTHER = "Instead, explain what that command would change"
 Home = Tuple[str, str]
 
 
-def _own_call(home_id: str, command: str = "gh pr merge 12") -> "asyncio.Task[Any]":
-    """One of the owner chat's OWN calls asking for approval (production entry)."""
+def _own_call(home_id: str, command: str = "gh pr merge 12",
+              **extra: Any) -> "asyncio.Task[Any]":
+    """One of the owner chat's OWN calls asking for approval, past saved rules
+    as the owner gate asks (production entry, ``query_engine``)."""
     kwargs = dict(request_id=f"perm-{home_id}-{uuid4().hex[:8]}", session_id=home_id,
                   profile_id="assistant-agent", tool_name="Bash", tool_input={"command": command},
-                  broadcast_func=AsyncMock())
+                  broadcast_func=AsyncMock(), skip_saved_rules=True, **extra)
     request = ph.permission_handler.request_permission
     return asyncio.create_task(approvals.route_permission(kwargs, request))
 
@@ -114,7 +116,8 @@ async def test_another_message_lets_the_waiting_call_go_and_keeps_the_card(
     assert _answers(home_id) == [] and _outcomes(home_id) == []
     # The card stays pending and answerable.
     [still] = confirm.pending_requests(home_id)
-    assert still["request_id"] == request["request_id"] and still["parked"] and still["own"]
+    assert still["request_id"] == request["request_id"] and still["own"]
+    assert still["parked"] and still["released"]
     rows = ph.permission_handler.get_pending_requests(home_id)
     assert [r["request_id"] for r in rows] == [request["request_id"]]
     assert "Not run yet" in away_mode.turn_note(home_id)
@@ -162,13 +165,25 @@ async def test_a_later_yes_admits_exactly_that_call_once(
     payload = turns.get_turn(turn_id)["payload"]
     answer = payload[confirm.ANSWER_KEY]
     assert answer["request_id"] == request["request_id"]
-    assert answer["decision"] == "approved" and answer["parked"] is True
+    assert answer["decision"] == "approved" and answer["released"] is True
+    assert answer["pass"] == {"tool_name": "Bash", "tool_input": {"command": "gh pr merge 12"},
+                              "interaction_id": request["interaction_id"]}
     # The agent hears it with the owner's own yes, at turn start or steered.
     note = confirm.engine_note(payload)
     assert "run that exact call again now" in note and "gh pr merge 12" in note
+    assert "It should not ask again" in note
     assert "run that exact call again now" in session_runtime._with_voice_note("yes", payload)
-    # The typed yes carries it, so no separate wake.
-    assert _wakes(home_id) == []
+    # The typed yes carries it, so no separate wake, and no outcome note twice.
+    assert _wakes(home_id) == [] and confirm.context_note(home_id) is None
+
+    # Nothing is admitted until the turn carrying the yes reaches the engine.
+    early = _own_call(home_id)
+    await _pending(home_id)
+    assert not early.done()
+    await owner_says(home_id, "no")
+    assert isinstance(await asyncio.wait_for(early, 12.0), PermissionResultDeny)
+    # session_runtime arms the pass when it hands the yes to the engine.
+    assert confirm.arm_pass(home_id, payload, "turn-yes")
 
     # A different call is not admitted: it asks as usual.
     other = _own_call(home_id, "gh pr merge 13")
@@ -181,12 +196,107 @@ async def test_a_later_yes_admits_exactly_that_call_once(
     again = _own_call(home_id)
     assert isinstance(await asyncio.wait_for(again, 5.0), PermissionResultAllow)
     assert confirm.pending_requests(home_id) == []
-    # ...and only once.
+    # ...and only once, even when the same message is delivered again.
+    assert not confirm.arm_pass(home_id, payload, "turn-later")
     third = _own_call(home_id)
     await _pending(home_id)
     assert not third.done()
     await owner_says(home_id, "no")
     assert isinstance(await asyncio.wait_for(third, 12.0), PermissionResultDeny)
+
+
+async def test_the_pass_lives_only_for_its_turn_and_only_replaces_the_ask(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    home_id, _ = home
+    await _parked(home_id, monkeypatch)
+    payload = turns.get_turn(await owner_says(home_id, "yes"))["payload"]
+    assert confirm.arm_pass(home_id, payload, "turn-yes")
+
+    # A subagent's call never spends the main chat's pass.
+    sub_call = _own_call(home_id, agent_id="agent-1")
+    await _pending(home_id)
+    assert not sub_call.done()
+    await owner_says(home_id, "no")
+    assert isinstance(await asyncio.wait_for(sub_call, 12.0), PermissionResultDeny)
+    # Nor does a call outside the allowed paths.
+    blocked = _own_call(home_id, blocked_path="/etc")
+    await _pending(home_id)
+    assert not blocked.done()
+    await owner_says(home_id, "no")
+    assert isinstance(await asyncio.wait_for(blocked, 12.0), PermissionResultDeny)
+    # A saved Deny outranks it: the call is asked, the pass stays unspent.
+    ph.permission_handler._add_session_rule_idempotent(home_id, "Bash", "gh pr merge 12", "deny")
+    denied = _own_call(home_id)
+    await _pending(home_id)
+    assert not denied.done()
+    await owner_says(home_id, "no")
+    assert isinstance(await asyncio.wait_for(denied, 12.0), PermissionResultDeny)
+    ph.permission_handler._session_rules.pop(home_id, None)
+    # Away mode defers the call before the pass is looked at.
+    from app.core import away_mode as away
+
+    async def away_now(session_id: str, what: str) -> str:
+        return "Owner away"
+
+    present = away.defer_if_away
+    monkeypatch.setattr(away, "defer_if_away", away_now)
+    result = await asyncio.wait_for(_own_call(home_id), 5.0)
+    assert isinstance(result, PermissionResultDeny) and result.message == "Owner away"
+    monkeypatch.setattr(away, "defer_if_away", present)
+
+    # The pass is still there for its turn; the turn ending drops it.
+    confirm.drop_passes(home_id, "another-turn")
+    assert confirm.take_approved_once(home_id, "Bash", {"command": "gh pr merge 12"})
+    assert confirm.arm_pass(home_id, {confirm.PASS_KEY: {
+        "tool_name": "Bash", "tool_input": {"command": "ls"}, "interaction_id": "i-2"}}, "turn-2")
+    confirm.drop_passes(home_id, "turn-2")
+    assert not confirm.take_approved_once(home_id, "Bash", {"command": "ls"})
+
+
+async def test_a_yes_that_reaches_the_waiter_first_runs_the_call_once(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """The yes lands after the request was parked but before its waiter read
+    the row: the waiter gets the yes and runs the call, so the yes neither
+    admits the call again nor tells the agent to re-run it."""
+    home_id, _ = home
+    steers = _steers(monkeypatch)
+    task = _own_call(home_id)
+    [request] = await _pending(home_id)
+    # park() stamped the row, but its waiter has not read it yet.
+    assert interactions.mark_interaction_parked(request["interaction_id"])
+    turn_id = await owner_says(home_id, "yes")
+    assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
+    answer = turns.get_turn(turn_id)["payload"][confirm.ANSWER_KEY]
+    assert answer["decision"] == "approved" and answer["released"] is False
+    assert "pass" not in answer and confirm.engine_note({confirm.ANSWER_KEY: answer}) is None
+    assert not interactions.mark_interaction_released(request["interaction_id"])
+    assert steers == [] and _wakes(home_id) == []
+
+
+async def test_a_remembered_answer_reports_every_released_sibling(
+    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """An "always allow" answer settles the sibling requests its rule matches
+    too: each released one wakes the agent with its own pass."""
+    home_id, _ = home
+    _steers(monkeypatch)
+    first = _own_call(home_id, "git push origin a")
+    await _pending(home_id)
+    second = _own_call(home_id, "git push origin b")
+    pending = await _pending(home_id, 2)
+    await owner_says(home_id, OTHER)
+    for task in (first, second):
+        assert (await asyncio.wait_for(task, 12.0)).message == confirm.NOT_RUN_YET
+    await ph.permission_handler.respond(pending[0]["request_id"], home_id, "allow",
+                                        remember="session", pattern="git push*",
+                                        broadcast_func=AsyncMock())
+    assert confirm.pending_requests(home_id) == []
+    wakes = _wakes(home_id)
+    assert [w["payload"][confirm.PASS_KEY]["tool_input"]["command"] for w in wakes] == [
+        "git push origin a", "git push origin b"]
+    assert all(w["prompt"].startswith("The owner approved this request:") for w in wakes)
 
 
 async def test_a_later_no_declines_and_says_so(
@@ -254,7 +364,38 @@ async def test_an_answer_from_elsewhere_wakes_the_agent(
                                         broadcast_func=AsyncMock())
     [wake] = _wakes(home_id)
     assert wake["prompt"].startswith("The owner approved this request: run `gh pr merge 12`.")
+    # The wake's turn carries the pass; it admits the call once it runs.
+    assert not confirm.take_approved_once(home_id, "Bash", {"command": "gh pr merge 12"})
+    assert confirm.arm_pass(home_id, wake["payload"], wake["id"])
     assert confirm.take_approved_once(home_id, "Bash", {"command": "gh pr merge 12"})
+
+
+async def test_an_expiry_reports_only_a_call_its_waiter_released(mock_db: sqlite3.Connection,
+                                                                 monkeypatch: pytest.MonkeyPatch,
+                                                                 ) -> None:
+    woken: List[str] = []
+
+    async def wake(session_id: str, prompt: str, **kwargs: Any) -> None:
+        woken.append(prompt)
+
+    monkeypatch.setattr(confirm, "_wake", wake)
+    base = {"request_id": "r", "tool_name": "Bash", "tool_input": {"command": "ls"},
+            confirm.SUBTYPE: {"question": "Run ls?", "action": "run `ls`"}}
+    rows = [
+        {"id": "a", "session_id": "s1", "kind": "permission", "payload": {**base, "parked": True}},
+        {"id": "b", "session_id": "s1", "kind": "permission",
+         "payload": {**base, "parked": True, "released": True}},
+    ]
+    assert await confirm.on_expired(rows) == 1
+    assert woken == [confirm.expired_note("run `ls`")]
+
+
+def test_only_the_placeholder_and_a_persons_no_carry_the_message() -> None:
+    assert confirm.deny_carries_steers(confirm.NOT_RUN_YET)
+    assert confirm.deny_carries_steers(ph.OWNER_DENIAL)
+    for message in ("Request cancelled", "Permission request timed out", "Denied by saved rule",
+                    "Owner away", ""):
+        assert not confirm.deny_carries_steers(message)
 
 
 async def test_a_plain_yes_or_no_with_nothing_else_is_unchanged(
@@ -268,7 +409,8 @@ async def test_a_plain_yes_or_no_with_nothing_else_is_unchanged(
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
     payload = turns.get_turn(turn_id)["payload"]
     assert payload[confirm.ANSWER_KEY]["decision"] == "approved"
-    assert not payload[confirm.ANSWER_KEY]["parked"]
+    assert not payload[confirm.ANSWER_KEY]["released"]
+    assert not confirm.arm_pass(home_id, payload, turn_id)
     assert confirm.engine_note(payload) is None and steers == [] and _wakes(home_id) == []
     # A live call's yes is spent on that call: nothing is left to admit.
     assert not confirm.take_approved_once(home_id, "Bash", {"command": "gh pr merge 12"})
@@ -300,7 +442,9 @@ async def test_a_started_chats_request_is_not_let_go(
 
 
 def test_the_one_shot_admit_is_exact_and_single() -> None:
-    confirm.allow_once("s1", "Bash", {"command": "ls", "timeout": 5})
+    assert confirm.arm_pass("s1", {confirm.PASS_KEY: {
+        "tool_name": "Bash", "tool_input": {"command": "ls", "timeout": 5},
+        "interaction_id": "i-1"}}, "turn-1")
     assert not confirm.take_approved_once("s2", "Bash", {"command": "ls", "timeout": 5})
     assert not confirm.take_approved_once("s1", "Bash", {"command": "ls"})
     assert not confirm.take_approved_once("s1", "Read", {"command": "ls", "timeout": 5})
@@ -312,11 +456,13 @@ def test_the_one_shot_admit_is_exact_and_single() -> None:
 async def test_mark_parked_only_touches_a_pending_row(mock_db: sqlite3.Connection) -> None:
     row = interactions.create_interaction("s1", "permission", {"request_id": "r1"}, 60)
     assert interactions.mark_interaction_parked(row["id"])
+    assert interactions.mark_interaction_released(row["id"])
     payload = interactions.get_interaction(row["id"])["payload"]
-    assert payload == {"request_id": "r1", "parked": True}
+    assert payload == {"request_id": "r1", "parked": True, "released": True}
     assert interactions.mark_interaction_parked(row["id"])  # idempotent
     interactions.answer_interaction(row["id"], {"decision": "deny"})
     other = interactions.create_interaction("s1", "permission", {"request_id": "r2"}, 60)
     interactions.cancel_interaction(other["id"])
     assert not interactions.mark_interaction_parked(other["id"])
+    assert not interactions.mark_interaction_released(other["id"])
     assert not interactions.mark_interaction_parked("missing")
