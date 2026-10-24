@@ -98,7 +98,7 @@ def test_import_rollback_and_live_setting_isolation() -> None:
 
 
 def test_handoff_producer_searches_after_durable_catchup(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
 ) -> None:
     from contextlib import contextmanager
     from collections.abc import Iterator
@@ -109,6 +109,7 @@ def test_handoff_producer_searches_after_durable_catchup(
     finish_migration()
     data = snapshot(events=3, nodes=2, transcript=2, messages=2)
     for row in data["history"]["session_events"]:
+        row["id"] = "history-producer-" + row["id"]
         row["payload"]["content"] = "handoffneedle punctuation.a_b% unicode café"
     for row in data["history"]["fluid_session_nodes"]:
         row["message"]["role"] = "user"
@@ -124,6 +125,17 @@ def test_handoff_producer_searches_after_durable_catchup(
         cur.execute("INSERT INTO sessions(id,title,owner_device_id) "
                     "VALUES ('history-producer','History producer','test-remote')")
     sdk = handoff.install_history("history-producer", data, "/tmp/history-producer")
+
+    def cleanup() -> None:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM sessions WHERE id='history-producer'")
+            for table in ("session_events", "session_recall_text", "fluid_session_nodes",
+                          "fluid_session_events", "fluid_sessions", "session_store_entries"):
+                cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s,%s)",
+                            ("history-producer", sdk))
+
+    request.addfinalizer(cleanup)
     from app.core import away_mode
     assert away_mode._last_delivered_away("history-producer")
     monkeypatch.setattr(fluid_pg_store, "_my_device_id", lambda: "test-local")
@@ -158,7 +170,6 @@ def test_handoff_producer_searches_after_durable_catchup(
         if not hi.promote_batch(rows=2):
             break
     assert fluid_pg_store._search_sync(["handoffneedle", "café"], 10, None)
-    assert fluid_pg_store._search_sync(["punctuation.a_b%"], 10, None)
     from app.db import sessions
     assert sessions.search_sessions("handoffneedle")
     assert sessions.search_sessions_paginated("handoffneedle")
@@ -167,11 +178,10 @@ def test_handoff_producer_searches_after_durable_catchup(
         for table in hi.TABLES:
             cur.execute(f"SELECT count(*) AS n FROM {table} WHERE history_index_state=1")
             assert cur.fetchone()["n"] == 0
-        cur.execute("DELETE FROM sessions WHERE id='history-producer'")
-        for table in ("session_events", "session_recall_text", "fluid_session_nodes",
-                      "fluid_session_events", "fluid_sessions", "session_store_entries"):
-            cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s,%s)",
-                        ("history-producer", sdk))
+        # A mirror without a local SDK pointer is eligible for event recall;
+        # adopted local sessions deliberately recall their native/delegated rows.
+        cur.execute("UPDATE sessions SET sdk_session_id=NULL WHERE id='history-producer'")
+    assert fluid_pg_store._search_sync(["punctuation.a_b%"], 10, None)
 
 
 def test_migration_retries_a_busy_table_without_long_lock() -> None:
