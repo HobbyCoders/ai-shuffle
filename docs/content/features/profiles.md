@@ -87,7 +87,7 @@ Subagents, Swarm tasks and chats an agent starts begin in the starting chat's cu
 - A prompt nobody answers within 5 minutes is denied, and the agent carries on.
 - Tick **Always do this for** *tool* to save your answer for that agent in every chat. Only do this for tools you always want handled the same way.
 
-**Tools that ask you themselves** do not also ask for a yes before they run: a private access request (its card is the approval), the one-shot approval for a command or write on access you granted, and the screen-control card. Listing or reading files and GET or HEAD requests on access you already granted ask nothing more. In Bypass, a command, write or other change on granted access still asks you in your own chat, because Bypass skips its one-shot approval. A saved Deny for one of these tools still denies.
+**Tools that ask you themselves** do not also ask for a yes before they run: a private access request (its card is the approval), the one-shot approval for a command or write on access you granted, and the screen-control card. Listing or reading files and GET or HEAD requests on access you already granted ask nothing more. In Bypass, a command, write or other change on granted access still asks you in your own chat, because Bypass skips its one-shot approval. Outside Bypass, a saved Deny for one of these tools still denies; Bypass skips saved rules, as it does for every tool. A saved Always allow for screen control skips its card, as it does in other chats.
 
 **Runs with nobody to ask**, such as API queries and automation **Send prompt** steps, follow the mode alone. Anything that would ask is denied. Give them a mode that allows the tools they need.
 
