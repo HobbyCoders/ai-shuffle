@@ -773,6 +773,14 @@
           "past_bug": "#545: raw native registrations submitted without resolver admission or generation_budget.reserve."
         },
         {
+          "id": "harness-basics.native-generation-alias-cards",
+          "check": "Native generation aliases render the existing choice card and saved-choice line",
+          "kind": "browser",
+          "how": "On a disposable candidate worker with an already configured verified subscription and no remembered image/video pick, start a throwaway native chat on that account's model and ask for an image with GenerateNativeImage, then a video with GenerateNativeVideo. Pick an option on each card without approving any above-threshold spend, and read the reply the card sends. Remember an Included image choice and ask again. Add a throwaway MCP server exposing a tool named GenerateNativeImage that returns a choose envelope and call it. Repeat the views at a phone width. Archive only the throwaway chat and remove the throwaway server.",
+          "pass_when": "Both alias choose results show the same choice card as generateImage/generateVideo, with each option's price. The reply calls the same alias again with the exact selected source, model, worker and options. A remembered run shows the saved-choice line with Ask me next time and Change. The third-party tool renders as an ordinary tool row, never a choice card. No provider submission or charge occurs without an approved pick.",
+          "past_bug": "#550: generationToolKind knew only the unified names, so alias choose results rendered as raw JSON instead of the choice card."
+        },
+        {
           "id": "harness-basics.native-owner-pass",
           "check": "Native owner approval retains its caller scope",
           "kind": "owner",

@@ -212,6 +212,19 @@ describe('GenerationChoiceCard', () => {
 		expect(mocks.del).toHaveBeenCalledWith('/generation/choices/image');
 	});
 
+	it('replies to a native alias card by calling that alias again with the exact pick (#550)', async () => {
+		card({ options: [GROK], tool: 'GenerateNativeImage' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
+		await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+		expect(mocks.put.mock.calls[0][1]).toMatchObject({
+			choice: { source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-image', options: GROK.options }
+		});
+		const message = mocks.send.mock.calls[0][0] as string;
+		expect(message).toContain(
+			`Call GenerateNativeImage again with the same prompt and ${JSON.stringify({ source: 'grok-1', model: 'grok-imagine-image', worker: 'worker-b', options: GROK.options })}.`
+		);
+	});
+
 	it('ticks "use this every time" only for an option that costs nothing, until the box is touched', async () => {
 		card();
 		const box = () => screen.getByRole('checkbox', { name: /Use this every time for images/ }) as HTMLInputElement;

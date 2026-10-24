@@ -130,9 +130,21 @@ export interface RememberedResult {
 	price: GenerationPrice | null;
 }
 
+/**
+ * Guarded compatibility aliases (#545 / #550): the native harness registers
+ * them bare, and they return the same choose / needs-confirmation /
+ * remembered envelopes as the unified tools. No MCP server serves them, so
+ * any prefixed name carrying one is a third-party tool, never ours.
+ */
+export const NATIVE_GENERATION_ALIASES: Record<string, GenerationKind> = {
+	GenerateNativeImage: 'image',
+	GenerateNativeVideo: 'video'
+};
+
 /** The unified generation tool a row called, or null for any other tool. */
 export function generationToolKind(toolName: string | undefined): GenerationKind | null {
 	if (!toolName) return null;
+	if (Object.hasOwn(NATIVE_GENERATION_ALIASES, toolName)) return NATIVE_GENERATION_ALIASES[toolName];
 	const bare = displayToolName(toolName);
 	const kind = GENERATION_TOOLS[bare];
 	if (!kind) return null;
