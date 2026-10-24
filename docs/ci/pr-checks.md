@@ -780,8 +780,15 @@ also independently supports safe ancestors and rechecks its own pointer.
   Staged full receipts include both opt-ins in their identity, so changing them
   reruns the gate. Checkpoint observations use a dedicated 60-second lab command
   budget, not the product's generic 10-second SQL budget. Independently selected
-  FAST-shutdown measurements dirty the database and call the unchanged production
-  30-second shutdown path while pressure writers are still active. Failure to acquire
+  FAST-shutdown measurements dirty the database and call the production
+  60-second shutdown path while pressure writers are still active, recording only
+  checkpoint timing lines from PostgreSQL. #533 measured a clean shutdown at
+  30.865 seconds with 22.377 seconds spent syncing; the former 30-second deadline
+  could kill a progressing checkpoint. The bounded 60-second wait retains the
+  forced-stop/error fence. Compose and docker-run examples allow 120 seconds for
+  app cleanup (30+5), Chromium (5+5), PostgreSQL (60+5), and overhead. No manual
+  pre-shutdown CHECKPOINT is needed; FAST already requests an immediate one.
+  Failure to acquire
   an idle interval produces an explicit lab-precondition skip, not a product failure;
   observation deadlines and real FAST-shutdown failures remain failures with
   distinct diagnostics.

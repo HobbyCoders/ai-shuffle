@@ -440,6 +440,14 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.pg-fast-shutdown-pressure",
+          "check": "PostgreSQL finishes a dirty FAST shutdown under bounded write pressure",
+          "kind": "owner",
+          "how": "Use only a disposable candidate container and synthetic volumes, never a live worker or database. Give Docker 120 seconds of stop grace. Run the checkpoint lab's two same-volume writers (each overwrites 32 MiB and fsyncs for at most 240 seconds), create and update its 32768-row checkpoint_probe table, and stop the container while both writers remain active. Repeat three times. Record checkpoint write/sync/total durations, container exit status and the next startup's recovery log; verify every committed row after restart. Separately inject a stuck postmaster only in a disposable fixture to exercise the 60-second deadline fence.",
+          "pass_when": "All three dirty shutdowns finish cleanly within the 60-second PostgreSQL budget and 120-second container grace, with pressure still active, no forced-stop failure and no crash recovery on restart. Committed rows survive. A stuck postmaster is still forcibly stopped and reported as a failure with recovery descriptors retained; exceeding the real deadline is never skipped as a lab precondition.",
+          "past_bug": "#533: the 30-second FAST deadline killed a shutdown checkpoint that needed slightly longer under same-volume fsync pressure."
+        },
+        {
           "id": "harness-basics.34",
           "check": "Required Docker isolation refuses before root writes",
           "kind": "owner",

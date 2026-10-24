@@ -23,9 +23,9 @@ services:
     restart: unless-stopped
 
     # The app stops its agents first, then its private PostgreSQL database
-    # writes a clean checkpoint. That can take up to 90 seconds; Docker's
+    # writes a clean checkpoint. That can take up to 120 seconds; Docker's
     # default of 10 seconds would cut it off.
-    stop_grace_period: 90s
+    stop_grace_period: 120s
 
     # The built-in browser (Chromium) needs more shared memory than Docker's
     # 64 MB default.

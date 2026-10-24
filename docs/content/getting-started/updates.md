@@ -52,7 +52,7 @@ When no compatible runtime overlay can satisfy a release, the in-app update says
 - **Docker Compose:** set `AI_SHUFFLE_VERSION` in `.env` to the new version and run `docker compose up -d`.
 - **docker run:** pull the new version, remove the container and start it again with the new version. See [Install with Docker](/docs/getting-started/install-docker-compose#update).
 
-Your data stays in its volumes. Give the container up to 90 seconds to stop cleanly.
+Your data stays in its volumes. Give the container up to 120 seconds to stop cleanly.
 
 Updating the image always works, even when an in-app update would have, and it is the way to jump several versions at once.
 

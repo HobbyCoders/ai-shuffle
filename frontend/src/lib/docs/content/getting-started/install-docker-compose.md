@@ -52,9 +52,9 @@ services:
     restart: unless-stopped
 
     # The app stops its agents first, then its private PostgreSQL database
-    # writes a clean checkpoint. That can take up to 90 seconds; Docker's
+    # writes a clean checkpoint. That can take up to 120 seconds; Docker's
     # default of 10 seconds would cut it off.
-    stop_grace_period: 90s
+    stop_grace_period: 120s
 
     # The built-in browser (Chromium) needs more shared memory than Docker's
     # 64 MB default.
@@ -263,7 +263,7 @@ mkdir -p ~/ai-shuffle/workspace
 docker run -d \
   --name ai-shuffle \
   --restart unless-stopped \
-  --stop-timeout 90 \
+  --stop-timeout 120 \
   --shm-size 1g \
   --pids-limit 8192 \
   --security-opt seccomp=unconfined \
@@ -285,7 +285,7 @@ docker run -d \
 
 - Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).
 - Add `-e OWNER_PASSWORD=...` to set the owner password on the first start.
-- Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
+- Keep `--stop-timeout 120`. AI Shuffle needs up to 120 seconds to shut down cleanly.
 - Set `PUID` and `PGID` to the owner of your workspace folder.
 - Keep `--restart unless-stopped`. When AI Shuffle stops answering, the container restarts it on its own. If that keeps failing, the container exits so that Docker can start it again. Without a restart policy it stays stopped until you start it.
 
@@ -293,7 +293,7 @@ docker run -d \
 
 If you create the container in a web interface instead of a terminal, set the same options as the `docker run` command above. Most important is the restart policy: many of these tools create containers with no restart policy, and then AI Shuffle stays down after a failure.
 
-- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 90 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
+- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 120 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
 - **Portainer:** under **Restart policy**, choose **Unless stopped**.
 
 For an existing hand-created install, change the policy on the **Docker host**, not inside the container: `docker update --restart=unless-stopped <container-name>`. This does not restart it. Verify with `docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' <container-name>`; it must print `unless-stopped`. Save the same policy in Unraid's template or Portainer's configuration so recreating the container preserves it. In-app source updates restart the application, not the Docker container, and cannot change its host restart policy.
