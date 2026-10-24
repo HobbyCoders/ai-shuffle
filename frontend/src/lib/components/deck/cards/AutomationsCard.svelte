@@ -38,8 +38,13 @@
 		approveRun,
 		denyRun
 	} from '$lib/api/automations';
-	import { api } from '$lib/api/client';
+	import { api, getErrorMessage } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
+	import {
+		commitJobChoiceDraft,
+		hasDraftChanges,
+		type JobChoiceDraft
+	} from '$lib/api/generation-job-choices';
 	import type { Project } from '$lib/stores/types';
 	import { getConnectors, getConnectorTypes } from '$lib/api/connectors';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
@@ -121,6 +126,10 @@
 	// The model picker's value; '' = no choice of its own (the app default).
 	let formModel = $state('');
 	let formActionSteps: ActionStep[] = $state([]);
+	// Pinned generation job choices, staged until Save and written after the
+	// automation itself (a new automation is created paused, so it cannot run
+	// before its choices are stored).
+	let generationDraft: JobChoiceDraft = $state({});
 
 	// Test result
 	let testResult: AutomationTestResult | null = $state(null);
@@ -223,6 +232,7 @@
 		formRequiresApproval = false;
 		formModel = '';
 		formActionSteps = [];
+		generationDraft = {};
 		formError = '';
 		testResult = null;
 	}
@@ -263,6 +273,7 @@
 		formTimeoutSeconds = automation.timeout_seconds != null ? String(automation.timeout_seconds) : '';
 		formRequiresApproval = automation.requires_approval;
 		formModel = automation.model || '';
+		generationDraft = {};
 		formError = '';
 		testResult = null;
 		currentView = 'edit';
@@ -375,10 +386,30 @@
 		formError = '';
 		try {
 			const data = buildFormData();
-			if (currentView === 'edit' && selectedAutomation) {
-				await updateAutomation(selectedAutomation.id, data as AutomationUpdate);
-			} else {
-				await createAutomation(data);
+			const creating = !(currentView === 'edit' && selectedAutomation);
+			const saved = creating
+				? await createAutomation(data)
+				: await updateAutomation(selectedAutomation!.id, data as AutomationUpdate);
+			if (saved?.id && hasDraftChanges(generationDraft)) {
+				const { remaining, errors } = await commitJobChoiceDraft(saved.id, generationDraft, (e) =>
+					getErrorMessage(e, 'not saved')
+				);
+				if (errors.length) {
+					// Keep every unsaved pick on screen, on the saved automation, so
+					// Save retries the writes instead of creating a duplicate. A new
+					// automation stays paused; nothing here enables it.
+					await loadData(true);
+					selectedAutomation = automations.find((a) => a.id === saved.id) ?? saved;
+					currentView = 'edit';
+					generationDraft = remaining;
+					remoteBaseline = remoteSnapshot({});
+					const state = saved.is_enabled ? 'saved' : 'saved, paused';
+					formError =
+						`The automation was ${creating ? 'created' : 'saved'} (${state}), but some media ` +
+						`generation choices were not saved: ${errors.join('; ')}. Save again to retry.`;
+					return;
+				}
+				generationDraft = {};
 			}
 			await loadData();
 			currentView = 'list';
@@ -531,7 +562,7 @@
 	}
 	let remoteChange = $state('');
 	let remoteBaseline = '';
-	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formModel, formActionSteps]); }
+	function remoteSnapshot(draft: JobChoiceDraft = generationDraft) { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formModel, formActionSteps, draft]); }
 	// The project picker: a project deleted elsewhere leaves it at once (#434).
 	watchResources(['projects'], async () => {
 		try { projects = await api.get<Project[]>('/projects'); } catch { /* the next load retries */ }
@@ -654,6 +685,8 @@
 				onUpdateFormRequiresApproval={(val) => formRequiresApproval = val}
 				onUpdateFormModel={(val) => formModel = val}
 				onUpdateFormActionSteps={(val) => formActionSteps = val}
+				{generationDraft}
+				onUpdateGenerationDraft={(val) => generationDraft = val}
 				onToggleSection={toggleSection}
 				onToggleTriggerExpand={toggleTriggerExpand}
 				onToggleActionExpand={toggleActionExpand}

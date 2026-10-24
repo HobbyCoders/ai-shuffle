@@ -23,9 +23,12 @@
 		CalendarClock,
 		Settings,
 		FileText,
-		DollarSign
+		DollarSign,
+		Sparkles
 	} from 'lucide-svelte';
 	import AutomationTriggerConfig from './AutomationTriggerConfig.svelte';
+	import AutomationJobChoices from './AutomationJobChoices.svelte';
+	import { hasDraftChanges, type JobChoiceDraft } from '$lib/api/generation-job-choices';
 	import Banner from '$lib/components/Banner.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { onMount } from 'svelte';
@@ -57,6 +60,9 @@
 		formActionSteps: ActionStep[];
 		/** The saved automation when editing, for its fallback / unavailable model. */
 		savedAutomation?: Automation | null;
+		/** Pinned generation job choices staged until Save (written after the automation). */
+		generationDraft?: JobChoiceDraft;
+		onUpdateGenerationDraft?: (draft: JobChoiceDraft) => void;
 		profiles: Profile[];
 		projects: Project[];
 		connectors: Connector[];
@@ -112,6 +118,8 @@
 		formModel,
 		formActionSteps,
 		savedAutomation = null,
+		generationDraft = {},
+		onUpdateGenerationDraft,
 		profiles,
 		projects,
 		connectors,
@@ -515,7 +523,7 @@
 			</div>
 		</div>
 		<div class="set-row" data-testid="automation-model-row">
-			<div class="lab"><h4>Model</h4><p class:model-error={modelHintIsError}>{modelHint}</p></div>
+			<div class="lab"><h4>Reasoning model</h4><p class:model-error={modelHintIsError}>{modelHint}</p></div>
 			<div class="ctl">
 				<ModelPicker
 					id="automation-model"
@@ -589,6 +597,29 @@
 			<div class="lab"><h4>Requires approval</h4><p>Pause before running so you can review.</p></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={formRequiresApproval} role="switch" aria-checked={formRequiresApproval} aria-label="Requires approval" onclick={() => onUpdateFormRequiresApproval(!formRequiresApproval)}><i></i></button>
+			</div>
+		</div>
+	{/if}
+</div>
+
+<!-- Media generation: pinned job choices (separate from the reasoning model above) -->
+<div class="set-group" data-testid="automation-generation-group">
+	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('generation')} onclick={() => onToggleSection('generation')}>
+		<span class="gh-left">
+			<h3><Sparkles />Media generation</h3>
+			{#if hasDraftChanges(generationDraft)}<span class="pill-s acc">unsaved</span>{/if}
+		</span>
+		<ChevronDown size={15} class={collapsedSections.has('generation') ? 'gh-chev' : 'gh-chev open'} />
+	</button>
+	{#if !collapsedSections.has('generation')}
+		<div class="set-row stack">
+			<div class="ctl">
+				<AutomationJobChoices
+					jobId={currentView === 'edit' ? selectedAutomationId : null}
+					mode="draft"
+					draft={generationDraft}
+					onDraftChange={(draft) => onUpdateGenerationDraft?.(draft)}
+				/>
 			</div>
 		</div>
 	{/if}

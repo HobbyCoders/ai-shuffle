@@ -29,6 +29,7 @@
 		sameChoice,
 		sourceLabel,
 		workerLabel,
+		type GenerationChoice,
 		type GenerationKind,
 		type GenerationOption,
 		type GenerationPrice,
@@ -51,6 +52,14 @@
 		answeredBy?: string | null;
 		/** Settings: called after a pick is saved. */
 		onsaved?: (choice: GenerationOption) => void;
+		/**
+		 * Settings variant only: hand the pick to the caller instead of saving it
+		 * as a remembered/last choice (an automation's pinned job choice). A
+		 * rejection is shown on the card like a failed save.
+		 */
+		onpick?: (choice: GenerationChoice) => Promise<void>;
+		/** The settings variant's button text when `onpick` is set. */
+		pickLabel?: string;
 	}
 
 	let {
@@ -63,7 +72,9 @@
 		rememberedUnavailable = false,
 		rememberedUnpriced = false,
 		answeredBy = undefined,
-		onsaved
+		onsaved,
+		onpick,
+		pickLabel = 'Use this choice'
 	}: Props = $props();
 
 	onMount(() => {
@@ -110,6 +121,8 @@
 	const Icon = $derived(KIND_ICON[kind]);
 	const remembered = $derived(generationChoices.remembered[kind]);
 	const remember = $derived(rememberTouched ? rememberPick : currentPrice.total === 0);
+	// A caller-owned pick (automation job choice) never touches remembered/last picks.
+	const handoff = $derived(variant === 'settings' && !!onpick);
 
 	// Options are spread across accounts and the workers holding them. An option
 	// held by another worker names it, so the same plan on two workers differs.
@@ -313,7 +326,8 @@
 		const chosen = values[index];
 		const keep = variant === 'settings' ? true : remember;
 		try {
-			await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
+			if (handoff && onpick) await onpick(choiceOf(option, chosen));
+			else await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
 			if (variant === 'chat') {
 				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep));
 				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
@@ -579,6 +593,8 @@
 			<button type="button" class="gcc-use" disabled={!canUse} onclick={use}>
 				{#if saving}
 					<span class="gcc-spinner" aria-hidden="true"></span>Saving
+				{:else if handoff}
+					<Sparkles aria-hidden="true" />{pickLabel}
 				{:else if variant === 'settings'}
 					<Sparkles aria-hidden="true" />Remember this
 				{:else}
