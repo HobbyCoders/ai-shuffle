@@ -132,7 +132,7 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    source watermarks stay on that worker. The row's `home_session_id`,
    `home_device_id`, `home_created_at`, `assistant_name` and `avatar_id`
    fields still sync, unused, only so peers on an older release keep working.
-   See `app/core/assistant_service.py`.
+   See `app/core/owner_services.py`.
 
 ## Trust
 

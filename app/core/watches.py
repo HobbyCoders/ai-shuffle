@@ -16,14 +16,14 @@ READ_TOOLS = {"WebSearch", "WebFetch"}
 
 
 def owner_session(session_id: str) -> dict[str, Any]:
-    from app.core import assistant_service
+    from app.core import owner_services
 
     session = database.get_session(session_id)
     if (
         not session
         or session.get("api_user_id")
         or session.get("parent_session_id")
-        or not assistant_service._owned_here(session)
+        or not owner_services._owned_here(session)
     ):
         raise PermissionError("Watches require a local owner top-level session")
     return session
@@ -34,7 +34,7 @@ def prepare(
     _session: dict[str, Any] | None = None, _worker: str | None = None,
     _allow_stopped_connector: bool = False,
 ) -> dict[str, Any]:
-    from app.core.assistant_service import assistant_id
+    from app.core.owner_services import assistant_id
 
     from app.core import watch_placement
 
@@ -216,7 +216,7 @@ def assert_allowed(
     watch = store.get(meta.get("watch_id"))
     if not watch or watch["status"] != "active":
         raise ValueError("Watch is paused or stopped")
-    from app.core.assistant_service import assistant_id
+    from app.core.owner_services import assistant_id
 
     if watch["owner"] != "admin" or watch["worker_id"] != assistant_id():
         raise ValueError("Watch owner or worker changed")
@@ -241,7 +241,7 @@ def assert_allowed(
         raise ValueError("Watch is missing its agent")
     if session_id:
         session = owner_session(session_id)
-        from app.core.assistant_service import session_stopped
+        from app.core.owner_services import session_stopped
 
         if not session.get("is_active") or session_stopped(session_id):
             raise ValueError("Watch delivery session was stopped or settled")

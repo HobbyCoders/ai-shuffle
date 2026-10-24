@@ -8,7 +8,7 @@ import logging
 import uuid
 from datetime import timedelta
 
-from app.core import assistant_service, turn_manager, watch_sources, watches
+from app.core import owner_services, turn_manager, watch_sources, watches
 from app.db import database, notifications, turns, watches as store
 from app.db.async_database import run_maintenance, run_sync
 from app.core import watch_values as values
@@ -164,13 +164,13 @@ class WatchManager:
             await asyncio.sleep(LIMIT_INTERVAL_SECONDS)
 
     async def _maintenance_loop(self) -> None:
-        from app.db import assistant as owner_store
+        from app.db import owner_state as owner_store
 
         while True:
             try:
                 async with asyncio.timeout(300):
                     await run_maintenance(
-                        owner_store.retention_sweep, assistant_service.assistant_id()
+                        owner_store.retention_sweep, owner_services.assistant_id()
                     )
                     from app.db.watch_journal import sweep
 
@@ -183,12 +183,12 @@ class WatchManager:
         if self._detection_at and values.now() - self._detection_at < timedelta(hours=6):
             return
         self._detection_at = values.now()
-        if not await run_sync(assistant_service.detection_wanted):
+        if not await run_sync(owner_services.detection_wanted):
             return
-        from app.core import assistant_introduction as introductions
+        from app.core import owner_introduction as introductions
         from app.core.connectors.manager import connector_manager
 
-        runner = assistant_service.assistant_id()
+        runner = owner_services.assistant_id()
         ids = await run_sync(introductions.owner_gmail_connectors, runner)
         emails = []
         for cid in ids:
@@ -196,13 +196,13 @@ class WatchManager:
             emails.append(getattr(instance, "_email_address", "") if instance else "")
         unknown = set()
         detected = await run_sync(introductions.detect, runner, emails, unknown)
-        await run_sync(assistant_service.apply_detection, detected, unknown)
+        await run_sync(owner_services.apply_detection, detected, unknown)
 
     async def run_once(self) -> None:
         from app.core.watch_placement import publish
 
         async with self._lock:
-            rows = await run_sync(store.list_watches, worker_id=assistant_service.assistant_id())
+            rows = await run_sync(store.list_watches, worker_id=owner_services.assistant_id())
             for watch in rows:
                 try:
                     await self._run_watch(watch)
@@ -262,7 +262,7 @@ class WatchManager:
         if (
             not watch["creator_notified"]
             and creator
-            and assistant_service._owned_here(creator)
+            and owner_services._owned_here(creator)
             and (not creator.get("is_active") or creator.get("status") == "archived")
         ):
             await run_sync(
@@ -301,9 +301,9 @@ class WatchManager:
                 if watch["action"] == "alert" and not (creator and creator.get("is_active"))
                 else 1.0
             )
-            from app.core import assistant_limits
+            from app.core import spending_limits
 
-            if (await run_sync(assistant_limits.status))["limit_reached"]:
+            if (await run_sync(spending_limits.status))["limit_reached"]:
                 break
             if not await run_sync(store.reserve, watch["id"], event["id"], amount):
                 current = await run_sync(store.get, watch["id"])
@@ -352,7 +352,7 @@ class WatchManager:
             if (
                 not creator
                 or not creator.get("is_active")
-                or await run_sync(assistant_service.session_stopped, event["session_id"])
+                or await run_sync(owner_services.session_stopped, event["session_id"])
             ):
                 await run_sync(store.update_event, event["id"], route=None, session_id=None)
                 event.update(route=None, session_id=None)
@@ -366,9 +366,9 @@ class WatchManager:
             and not event.get("summary")
             and event.get("cost_usd") is None
         ):
-            from app.core import assistant_limits
+            from app.core import spending_limits
 
-            if (await run_sync(assistant_limits.status))["limit_reached"]:
+            if (await run_sync(spending_limits.status))["limit_reached"]:
                 return
             renewed = await run_sync(store.renew_admission, event["id"], self._lease_token)
             if renewed is None:
@@ -404,9 +404,9 @@ class WatchManager:
             )
             live = (
                 creator
-                and assistant_service._owned_here(creator)
+                and owner_services._owned_here(creator)
                 and creator.get("is_active")
-                and not await run_sync(assistant_service.session_stopped, creator["id"])
+                and not await run_sync(owner_services.session_stopped, creator["id"])
             )
             route = "live" if live else watch["action"]
             sid = (

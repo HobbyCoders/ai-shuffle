@@ -201,8 +201,8 @@ async def get_git_status(
 
 
 def _initial_commit_name() -> str:
-    from app.core.assistant_introduction import effective
-    from app.db import assistant
+    from app.core.owner_introduction import effective
+    from app.db import owner_state as assistant
 
     account = assistant.get_account() or {}
     name = effective(account.get("introduction")).get("preferred_name")

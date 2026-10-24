@@ -223,8 +223,8 @@ def projects_and_repositories(runner_id: str) -> tuple[list[str], list[str]]:
 
 def owner_gmail_connectors(runner_id):
     """Connected owner Gmail connectors on this worker (ids only)."""
-    from app.db import assistant as store
     from app.db import database
+    from app.db import owner_state as store
     from app.db.base import get_db
     result = []
     for connector in database.get_all_connectors():

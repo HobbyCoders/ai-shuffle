@@ -2161,9 +2161,9 @@ def create_postgres_schema(cursor: Any) -> None:
         )
     """)
 
-    from app.db.assistant import create_schema as create_assistant_schema
+    from app.db.owner_state import create_schema as create_assistant_schema
     create_assistant_schema(cursor)
-    from app.db.assistant_limits import create_schema as create_assistant_limits_schema
+    from app.db.spending_limits import create_schema as create_assistant_limits_schema
     create_assistant_limits_schema(cursor)
     from app.db.watches import create_schema as create_watches_schema
 

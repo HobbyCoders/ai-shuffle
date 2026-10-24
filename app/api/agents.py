@@ -35,7 +35,7 @@ class ProfilePresentationConfig(ProfileConfig):
     @field_validator("avatar_id", mode="before")
     @classmethod
     def validated_avatar(cls, value):
-        from app.core.assistant_service import AVATAR_PRESETS
+        from app.core.owner_services import AVATAR_PRESETS
         return value if isinstance(value, str) and value in AVATAR_PRESETS else None
 
 
@@ -84,7 +84,7 @@ def _refuse_assistant_agent(*agent_ids: str) -> None:
 
     This does not reserve a conversation or protect a hidden home from deletion.
     """
-    from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+    from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
 
     if ASSISTANT_AGENT_ID in agent_ids:
         raise HTTPException(

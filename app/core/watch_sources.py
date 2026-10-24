@@ -85,8 +85,8 @@ def matches(filter: dict[str, Any], payload: dict[str, Any]) -> bool:
 def connector_allowed(
     watch: dict[str, Any], *, allow_stopped: bool = False,
 ) -> dict[str, Any]:
-    from app.core.assistant_service import assistant_id
-    from app.db.assistant import connector_grant_available
+    from app.core.owner_services import assistant_id
+    from app.db.owner_state import connector_grant_available
 
     source = watch["source"]
     connector = database.get_connector(source["connector_id"])
@@ -362,7 +362,7 @@ async def poll(watch: dict[str, Any]) -> tuple[list[tuple[str, dict[str, Any]]],
 
 
 def record_connector(connector_id: str, event_type: str, payload: dict[str, Any]) -> None:
-    from app.core.assistant_service import assistant_id
+    from app.core.owner_services import assistant_id
 
     connector = database.get_connector(connector_id)
     if not connector:

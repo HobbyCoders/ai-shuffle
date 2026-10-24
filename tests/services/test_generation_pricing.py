@@ -77,7 +77,7 @@ async def test_audio_choose_has_input_dependent_character_price(backend, monkeyp
 
 
 async def test_verified_native_video_quote_and_reported_overrun_are_preserved(backend, monkeypatch, tmp_path):
-    from app.core import artifact_store, assistant_limits
+    from app.core import artifact_store, spending_limits
     from app.core.provider import native_video
     entry = (await backend.local_catalog("video", source="plan-b"))[0]
     assert entry.price["total"] == "0.02"
@@ -93,7 +93,7 @@ async def test_verified_native_video_quote_and_reported_overrun_are_preserved(ba
     assert submissions == ["plan-b"]
     assert result["status"] == "completed"
     assert result["price"] == {"currency": "USD", "unit": "item", "amount": "0.03", "total": "0.03", "status": "reported"}
-    assert assistant_limits.status()["spent_today_usd"] == 0.03
+    assert spending_limits.status()["spent_today_usd"] == 0.03
     assert "/video.mp4?" in result["result"]["video_url"]
 
 

@@ -635,9 +635,9 @@ def _run_column_migrations(cursor: Any) -> None:
     # an agent deletion could turn an Explore-only key into an unrestricted key.
     cursor.execute("ALTER TABLE api_user_profiles DROP CONSTRAINT IF EXISTS api_user_profiles_profile_id_fkey")
     _migrate_preference_revisions(cursor)
-    from app.db.assistant import create_schema as create_assistant_schema
+    from app.db.owner_state import create_schema as create_assistant_schema
     create_assistant_schema(cursor)
-    from app.db.assistant_limits import create_schema as create_assistant_limits_schema
+    from app.db.spending_limits import create_schema as create_assistant_limits_schema
     create_assistant_limits_schema(cursor)
     from app.db.watches import create_schema as create_watches_schema
 
@@ -3069,7 +3069,7 @@ def _retire_fal_billing_key(cursor) -> List[str]:
     return ["system_settings.fal_billing_api_key"]
 
 
-#: The built-in agent the retired assistant home ran on (``app.db.assistant.AGENT_ID``).
+#: The built-in agent the retired assistant home ran on (``app.db.owner_state.AGENT_ID``).
 RETIRED_ASSISTANT_AGENT_ID = "builtin_assistant"
 #: system_settings key: JSON list of the home ids ``_retire_assistant_home``
 #: deleted. ``orchestration_limits`` keeps the chats they started capped.
@@ -3457,7 +3457,7 @@ def migrations_fingerprint() -> str:
     import hashlib
 
     from app.db import (
-        schema_postgres, mobile_hub, network, assistant, working_record, watches, watch_delivery,
+        schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
         session_mode_migration,
     )
     from app.core import owner_auth
@@ -3467,7 +3467,7 @@ def migrations_fingerprint() -> str:
     # The hub and owner helpers also define tables used during encryption init.
     # Include their sources and the network schema so upgrades cannot skip new DDL.
     for module in (
-        sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant,
+        sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration,
     ):
         path = getattr(module, "__file__", None)

@@ -643,12 +643,12 @@ def _api_unit_credentials(monkeypatch, _isolate_credential_state):
 def _no_gh_in_owner_detection(monkeypatch):
     """Assistant owner detection never shells out to the developer's gh.
 
-    The manager loop and GET /assistant?detect=true start a detection pass;
+    Owner introduction detection can query GitHub for the default author;
     tests that exercise the GitHub login patch this back themselves.
     """
-    from app.core import assistant_introduction
+    from app.core import owner_introduction
 
-    monkeypatch.setattr(assistant_introduction, "github_login", lambda unknown=None: None)
+    monkeypatch.setattr(owner_introduction, "github_login", lambda unknown=None: None)
 
 
 @pytest.fixture(autouse=True)

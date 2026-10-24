@@ -56,6 +56,8 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, Iterable, List, Optional
 
+from app.core.owner_compat import APPROVAL_ANSWER_KEY, APPROVAL_PASS_KEY, APPROVAL_SUBTYPE
+
 logger = logging.getLogger(__name__)
 
 YES, NO, UNCLEAR = "yes", "no", "unclear"
@@ -64,7 +66,7 @@ TTL_SECONDS = 15 * 60
 # Voice calls only (app.core.voice_approval): the second unclear spoken answer
 # to the same question declines it. A typed unclear answer never does (#523).
 MAX_UNCLEAR = 2
-SUBTYPE = "assistant_confirm"
+SUBTYPE = APPROVAL_SUBTYPE
 _MAX_ANSWER_CHARS = 80
 # What on_owner_message returns for a message that is not an answer but lets
 # this chat's waiting calls go (turn_manager parks them once the message is
@@ -75,7 +77,7 @@ HELD = "held"
 PARKED_KEY = "parked"
 RELEASED_KEY = "released"
 # Turn payload key on a wake: the call a yes given outside the chat admits once.
-PASS_KEY = "assistant_confirm_pass"
+PASS_KEY = APPROVAL_PASS_KEY
 
 # The result a waiting call gets when the owner sends another message instead
 # of answering (owner decision, #523). The request itself stays pending.
@@ -436,7 +438,7 @@ async def record_answer(session_id: str, answer: Dict[str, Any]) -> None:
 _ANSWER_FIELDS = ("request_id", "interaction_id", "question", "action", "asker",
                   "decision", "chat_session_id", "released")
 # Turn payload key: the answer the owner's message gave, recorded after it.
-ANSWER_KEY = "assistant_confirm_answer"
+ANSWER_KEY = APPROVAL_ANSWER_KEY
 
 
 async def after_owner_message(session_id: str, payload: Optional[Dict[str, Any]]) -> None:

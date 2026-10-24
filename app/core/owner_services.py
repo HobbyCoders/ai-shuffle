@@ -11,10 +11,11 @@ import logging
 from contextlib import nullcontext
 from typing import Any
 
-from app.core import assistant_introduction as introductions
+from app.core import owner_introduction as introductions
 from app.core.config import settings
-from app.db import assistant as store
+from app.core.owner_compat import OWNER_COLLECTION, SPENDING_INTERRUPT_SOURCE
 from app.db import database
+from app.db import owner_state as store
 from app.db.base import get_db, row_to_dict
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def _publish() -> None:
     """Send the account row to the other workers (no-op when standalone)."""
     try:
         from app.network import engine
-        engine.record_after_commit("assistant", store.ACCOUNT_ID)
+        engine.record_after_commit(OWNER_COLLECTION, store.ACCOUNT_ID)
     except Exception:  # The scanner publishes it on its next pass.
         logger.warning("Could not publish the owner account row", exc_info=True)
 
@@ -114,7 +115,7 @@ def reconcile() -> Any:
 
 def on_network_applied(touched):
     """A peer's change landed: re-run reconcile when it concerns the assistant."""
-    if any(collection == "assistant" for collection, _record, _op in touched):
+    if any(collection == OWNER_COLLECTION for collection, _record, _op in touched):
         reconcile()
 
 
@@ -180,7 +181,10 @@ def session_stopped(session_id):
         payload = turn.get("payload") or {}
         if isinstance(payload, str):
             payload = json.loads(payload)
-        return (turn.get("interrupt_mode") == "stop" and payload.get("interrupt_source") != "assistant") or turn.get("stop_reason") in ("user_stopped", "user_stopped_all", "agent_stopped")
+        return (
+            turn.get("interrupt_mode") == "stop"
+            and payload.get("interrupt_source") != SPENDING_INTERRUPT_SOURCE
+        ) or turn.get("stop_reason") in ("user_stopped", "user_stopped_all", "agent_stopped")
 
 
 def assert_proactive_allowed(metadata: dict[str, Any], session_id: str | None = None) -> Any:
@@ -214,7 +218,7 @@ def detection_wanted():
 def apply_detection(
     detected: dict[str, Any], unknown: tuple[str, ...] | set[str] = (),
 ) -> bool:
-    """Store a detection pass (see assistant_introduction); True when it wrote.
+    """Store a detection pass (see owner_introduction); True when it wrote.
 
     Every worker contributes detected introduction values only when they
     change. Idle passes do not publish. Fields in ``unknown`` keep their last

@@ -92,7 +92,7 @@ window.fetch = async (input, init) => {
 	} else if (path.startsWith('/sessions/cursor')) body = cursorPage(url);
 	else if (path === '/sessions') body = rows;
 	else if (path === '/projects') body = projects;
-	else if (path.startsWith('/assistant/agents')) body = [];
+	else if (path.startsWith('/owner/agents')) body = [];
 	else if (path === '/settings/application-updates/workers') body = { allow_updates: true, update_all_workers: false, workers: [] };
 	else if (path === '/settings/application-updates' && init?.method === 'POST') {
 		window.fixture.updateRequests.push(JSON.parse(String(init.body)));

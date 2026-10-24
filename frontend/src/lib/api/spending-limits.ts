@@ -5,7 +5,7 @@
  * starts (Task workers, StartSession chats, on any worker). Spend is in US
  * dollars at API prices, so subscription use is an estimate. The day resets
  * at midnight in the owner's time zone (else UTC). The server enforces both.
- * The route keeps its historical `/assistant/limits` path (#371 step 5).
+ * Current clients use `/owner/limits`; older installed clients have a server alias.
  */
 import { api } from './client';
 
@@ -25,5 +25,5 @@ export type SpendingLimitsPatch = Partial<Pick<SpendingLimits, 'spend_limit_enab
 	/** Required with spend_limit_enabled: false. */
 	confirm_spend_limit_off?: boolean;
 };
-export const getSpendingLimits = () => api.get<SpendingLimits>('/assistant/limits');
-export const updateSpendingLimits = (patch: SpendingLimitsPatch) => api.patch<SpendingLimits>('/assistant/limits', patch);
+export const getSpendingLimits = () => api.get<SpendingLimits>('/owner/limits');
+export const updateSpendingLimits = (patch: SpendingLimitsPatch) => api.patch<SpendingLimits>('/owner/limits', patch);

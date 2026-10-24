@@ -13,8 +13,8 @@ import json
 
 import pytest
 
-from app.core import assistant_limits as limits, assistant_service as service, orchestration_limits
-from app.db import assistant_limits as limits_db, database as db, session_events, turns
+from app.core import spending_limits as limits, owner_services as service, orchestration_limits
+from app.db import spending_limits as limits_db, database as db, session_events, turns
 from app.db.base import column_exists, get_db, table_exists
 
 HOME = "legacy-home"

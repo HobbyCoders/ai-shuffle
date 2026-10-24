@@ -595,11 +595,11 @@ async def with_assistant_spend(payload: dict, session_id: Optional[str]) -> dict
     Read-only: the assistant answers "how much have you spent today?" from
     the real figures, and only the owner can change the limits.
     """
-    from app.core import assistant_limits
+    from app.core import spending_limits
     from app.db.async_database import run_sync
 
     try:
-        block = await run_sync(assistant_limits.session_usage, session_id)
+        block = await run_sync(spending_limits.session_usage, session_id)
     except Exception:  # noqa: BLE001 - usage is informational
         logger.debug("GetUsage could not read assistant spend for %s", session_id, exc_info=True)
         block = None

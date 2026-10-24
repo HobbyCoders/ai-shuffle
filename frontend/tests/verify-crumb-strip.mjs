@@ -37,7 +37,7 @@ async function measure({ width, actions, title }) {
 	await context.route((u) => u.pathname.startsWith('/api/'), (route) => {
 		const path = new URL(route.request().url()).pathname.replace(/^\/api\/v1/, '');
 		if (path === '/auth/status') return route.fulfill({ json: { authenticated: true, is_admin: true, setup_required: false } });
-		if (path === '/assistant/agents') return route.fulfill({ json: [] });
+		if (path === '/owner/agents') return route.fulfill({ json: [] });
 		if (path === '/assistant') return route.fulfill({ json: { home_session_id: 'assistant' } });
 		const id = decodeURIComponent(path.split('/').pop() || '');
 		return sessions[id] ? route.fulfill({ json: sessions[id] }) : route.fulfill({ status: 404, json: {} });

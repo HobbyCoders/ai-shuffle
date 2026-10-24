@@ -304,7 +304,7 @@ def _mark_pending_flag(interaction_id: str, key: str) -> bool:
 
 def mark_interaction_parked(interaction_id: str) -> bool:
     """An owner-chat approval whose waiting call should be let go "not run
-    yet" (``app.core.assistant_confirm``, #523): the row stays pending and
+    yet" (``app.core.owner_confirm``, #523): the row stays pending and
     answerable, and its waiter (any install) sees the stamp on its next read."""
     return _mark_pending_flag(interaction_id, "parked")
 

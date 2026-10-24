@@ -6,7 +6,7 @@ from pytest import MonkeyPatch
 from unittest.mock import AsyncMock
 import pytest
 
-from app.core import assistant_service as service, session_orchestration as orch, turn_scheduler, session_runtime
+from app.core import owner_services as service, session_orchestration as orch, turn_scheduler, session_runtime
 from app.db import database, sessions, turns
 from tests.db.test_assistant_store import assistant_fixture
 from tests.core.test_session_orchestration import chat
@@ -36,7 +36,7 @@ def test_start_makes_a_normal_unlinked_session_without_replacing_agent(
     turns.settle_turn(created["turn_id"], "completed")
     reply = orch._queue(row["id"], {"session_id": home, "message": "Research complete", "request_id": "return"}, "message")
     assert reply["session_id"] == home
-    from app.db import assistant as store
+    from app.db import owner_state as store
     # Started work is no longer recorded as assistant activity.
     from app.db.watches import list_watches
 
@@ -126,7 +126,7 @@ async def test_task_worker_producer_is_not_linked_as_assistant_activity(
     assert worker.ok, worker.error
     created = database.get_session(worker.session_id)
     assert created["is_worker"] and created["parent_session_id"] == home
-    from app.db import assistant as store
+    from app.db import owner_state as store
     from app.db.watches import list_watches
 
     assert list_watches() == []

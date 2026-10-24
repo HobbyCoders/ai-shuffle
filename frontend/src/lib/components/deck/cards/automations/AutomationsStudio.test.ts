@@ -106,6 +106,13 @@ describe('automation detail state', () => {
         expect(warning.previousElementSibling?.classList.contains('auto-detail-header-actions')).toBe(true);
         expect(container.querySelector('.auto-detail-header-info')!.contains(warning)).toBe(false);
     });
+    it('keeps only the mixed-version retired-ID tombstone exclusion', () => {
+        render(AutomationDetail, detailProps({
+            automation: { ...automation, profile_id: 'builtin_assistant' }, profiles: []
+        }));
+        expect(screen.queryByText(/agent was removed/)).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Pick an agent' })).toBeNull();
+    });
     it('does not claim the agent was removed when it exists or the agent list is not loaded', () => {
         const first = render(AutomationDetail, detailProps({ profiles: agents('general-purpose') }));
         expect(screen.queryByText(/agent was removed/)).toBeNull();

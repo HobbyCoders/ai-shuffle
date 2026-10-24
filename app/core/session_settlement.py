@@ -6,7 +6,7 @@ from app.db.async_database import run_sync
 
 # Settling dismisses the waits; it is not the owner's no. Its own text keeps a
 # settle-made deny from carrying a waiting owner message into a turn that is
-# about to end (assistant_confirm.deny_carries_steers, #523).
+# about to end (owner_confirm.deny_carries_steers, #523).
 SETTLED_DENIAL = "Not approved: the owner settled the session."
 _DENIAL = {"decision": "deny", "behavior": "deny", "message": SETTLED_DENIAL}
 

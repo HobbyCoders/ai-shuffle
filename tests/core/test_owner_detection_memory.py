@@ -11,13 +11,13 @@ from fluid.tools.builtins import recall, remember
 from fluid.tools.registry import ToolCtx
 from pytest import MonkeyPatch
 
-from app.core import assistant_introduction as introductions
-from app.core import assistant_service as service
+from app.core import owner_introduction as introductions
+from app.core import owner_services as service
 from app.core import config, fluid_memory, query_options
 from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.provider.types import SessionOptions
 from app.core.watch_manager import WatchManager
-from app.db import assistant as account_store
+from app.db import owner_state as account_store
 from app.db import database
 from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 

@@ -2391,13 +2391,13 @@ async def _stream_to_websocket_impl(
                     return PermissionResultAllow(updated_input=updated)
 
                 # A high-risk call in an owner's-assistant session: the adapter
-                # set this flag from app.core.assistant_permissions, never the
+                # set this flag from app.core.background_permissions, never the
                 # model. It goes to the owner whatever the mode, past saved
                 # rules; routing puts it in the assistant's conversation, where
-                # only a firm yes approves it (app.core.assistant_confirm).
+                # only a firm yes approves it (app.core.owner_confirm).
                 # The computer-use access request is asked with its own card
                 # instead (the branch below), so the owner answers it once
-                # (assistant_permissions.OWN_CONSENT_TOOLS).
+                # (background_permissions.OWN_CONSENT_TOOLS).
                 from app.core.session_modes import COMPUTER_USE_REQUEST_ACCESS
 
                 _owner_asks = bool(getattr(context, "assistant_owner", False))

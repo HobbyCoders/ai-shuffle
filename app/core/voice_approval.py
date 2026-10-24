@@ -21,7 +21,7 @@ caller. Requests the app keeps on screen (private access, anything carrying a
 secret) are never answered by voice; the voice says they need the screen.
 
 :func:`classify_spoken_answer` is the one decision function; it uses the shared
-``app.core.assistant_confirm.classify``, the same check typed answers get. When
+``app.core.owner_confirm.classify``, the same check typed answers get. When
 a request carries the assistant's own question (``assistant_confirm``), the
 outcome is also recorded the way a typed answer's is, so the conversation and
 the text model see it.
@@ -35,7 +35,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Literal, Optional
 
-from app.core.assistant_confirm import MAX_UNCLEAR, UNCLEAR, YES
+from app.core.owner_confirm import MAX_UNCLEAR, UNCLEAR, YES
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,8 @@ def classify_spoken_answer(text: str) -> str:
     The shared check for answers given in the assistant's conversation, so a
     spoken and a typed answer are judged by the same rule.
     """
-    from app.core import assistant_confirm
-    return assistant_confirm.classify(text)
+    from app.core import owner_confirm
+    return owner_confirm.classify(text)
 
 
 # Tools whose approval belongs to the private-access card, and argument names
@@ -347,13 +347,13 @@ class SpokenApprovals:
         if ask.confirm is None:
             return
         try:
-            from app.core import assistant_confirm
+            from app.core import owner_confirm
             request = {"request_id": ask.request_id, "question": ask.confirm.get("question") or ask.summary,
                        "action": ask.confirm.get("action"), "asker": ask.confirm.get("asker"),
                        "chat_session_id": ask.confirm.get("chat_session_id")}
             outcome = "approved" if decision == "allow" else "declined"
-            assistant_confirm._remember(self.session_id, request, outcome)
-            await assistant_confirm.record_answer(self.session_id, {**request, "decision": outcome})
+            owner_confirm._remember(self.session_id, request, outcome)
+            await owner_confirm.record_answer(self.session_id, {**request, "decision": outcome})
         except Exception:  # noqa: BLE001
             logger.warning("Voice approval: could not record the outcome for %s", self.session_id, exc_info=True)
 

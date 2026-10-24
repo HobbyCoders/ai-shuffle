@@ -122,7 +122,7 @@ def workers(
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from app.core import assistant_service, watch_sources
+    from app.core import owner_services, watch_sources
     from app.core import watch_placement as placement
     from app.core.automation_manager import automation_manager
     from app.core.connectors.manager import ConnectorManager, connector_manager
@@ -183,7 +183,7 @@ def workers(
 
     for module in (store, journal, connectors, profiles, watch_sources):
         monkeypatch.setattr(module, "get_db", db)
-    monkeypatch.setattr(assistant_service, "assistant_id", current.get)
+    monkeypatch.setattr(owner_services, "assistant_id", current.get)
     monkeypatch.setattr(placement, "assistant_id", current.get)
     monkeypatch.setattr(runners, "self_device_id", current.get)
     monkeypatch.setattr(runners, "directory", lambda: {"runners": [

@@ -237,7 +237,7 @@ async def test_genuine_or_richer_task_report_replaces_provisional_without_reopen
 def test_handoff_keeps_cumulative_job_budget_but_resets_display_clock(owner):
     from datetime import UTC, datetime
 
-    from app.core.assistant_limits import _job_over_time
+    from app.core.spending_limits import _job_over_time
     sid = owner["id"]
     for used_minutes in (50, 9):
         with get_db() as conn:

@@ -1,9 +1,9 @@
 """The owner's spending and run-time limits for coordination work.
 
 The app enforces these, never the model. Only the owner-only limits API changes
-them (``/api/v1/assistant/limits``, shown in Settings > Usage); no
-model-facing tool can raise, switch off or reset them. (The module keeps the
-name of the retired personal assistant, whose limits these were, #371.)
+them (``/api/v1/owner/limits``, shown in Settings > Usage); no
+model-facing tool can raise, switch off or reset them. Historical SQL and peer
+accounting identifiers are compatibility, not a dedicated assistant runner.
 
 What counts
 -----------
@@ -67,8 +67,8 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app.core import assistant_service as service
-from app.db import assistant as store, assistant_limits as limits_db
+from app.core import owner_services as service
+from app.db import owner_state as store, spending_limits as limits_db
 from app.db.async_database import run_sync
 from app.db.base import get_db, row_to_dict
 
@@ -86,7 +86,12 @@ CREATED_BY_ASSISTANT = timedelta(minutes=5)
 _CHUNK = 400
 
 # Jobs on another worker (``assistant_remote_jobs``).
-REMOTE_USAGE_ACTION = "remote-usage"
+from app.core.owner_compat import (
+    REMOTE_USAGE_ACTION,
+    SPENDING_INTERRUPT_SOURCE,
+    SPENDING_STOP_REASON_PREFIX,
+    SPENDING_USAGE_SCOPE,
+)
 REMOTE_WIRE_VERSION = 1
 REMOTE_TIMEOUT = 15.0
 MAX_REMOTE_IDS = 200
@@ -492,7 +497,7 @@ def session_usage(session_id):
     state = status()
     return {
         "available": True,
-        "scope": "assistant_today",
+        "scope": SPENDING_USAGE_SCOPE,
         "spent_today_usd": state["spent_today_usd"],
         "daily_limit_usd": state["daily_spend_limit_usd"] if state["spend_limit_enabled"] else None,
         "daily_limit_on": state["spend_limit_enabled"],
@@ -774,7 +779,7 @@ async def _stop_remote(stop):
                         device_id, session_id)
             return False
         text = _STOP_TEXT[stop["reason"]]
-        reason = "assistant_" + stop["reason"]
+        reason = SPENDING_STOP_REASON_PREFIX + stop["reason"]
         record = supervisor.get_worker(dispatch["root_session_id"], session_id) if dispatch else None
         if record is not None:
             result = await supervisor.teardown_worker(record, reason=reason, summary=text,
@@ -789,7 +794,9 @@ async def _stop_remote(stop):
         return True
     stopped = False
     for turn_id in stop["turn_ids"]:
-        answer = await control.interrupt(device_id, session_id, "stop", turn_id=turn_id, source="assistant")
+        answer = await control.interrupt(
+            device_id, session_id, "stop", turn_id=turn_id, source=SPENDING_INTERRUPT_SOURCE,
+        )
         stopped = stopped or bool((answer or {}).get("interrupted"))
     return stopped
 

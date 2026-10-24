@@ -320,7 +320,7 @@ def test_settings_reads_the_pending_state_from_the_plugins_api(svc, monkeypatch)
 def test_the_assistant_asks_before_installing_and_reads_freely(tmp_path):
     """In the owner's assistant sessions: search goes ahead, a check of a
     folder is judged like a read, and an install asks the owner first."""
-    from app.core import assistant_permissions as ap
+    from app.core import background_permissions as ap
 
     scope = {"roots": [str(tmp_path / "proj")], "cwd": str(tmp_path / "proj")}
     levels = ap.TOOL_LEVELS

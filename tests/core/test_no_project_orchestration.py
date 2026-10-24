@@ -178,19 +178,19 @@ def test_foreign_principal_never_gains_authority(
 
 
 async def test_existing_daily_setting_counts_coordinator_and_children_after_settle(owner, monkeypatch):
-    from app.core import assistant_limits, orchestration_limits, assistant_service
-    from app.db import assistant_limits as limits_db
+    from app.core import spending_limits, orchestration_limits, owner_services
+    from app.db import spending_limits as limits_db
     from tests.core.test_assistant_limits import book
     result = await call(owner["id"], "start", title="Work", prompt="Do work", request_id="budget")
     receipt = json.loads(result.text)
-    limits_db.update(assistant_service.assistant_id(), {"spend_limit_enabled": True, "daily_spend_limit_usd": 2})
+    limits_db.update(owner_services.assistant_id(), {"spend_limit_enabled": True, "daily_spend_limit_usd": 2})
     from app.db.analytics import settle_turn_usage
     from app.core.query_persistence import usage_settlement_key
     owner_turn = turns.enqueue_turn(owner["id"], "user", prompt="Owner input", profile_id="agent")
     assert settle_turn_usage(owner["id"], usage_settlement_key(owner["id"], owner_turn), cost_usd=1.25)
     book(receipt["session_id"], 2.25)  # Job spend only; the owner's chat is exempt.
     database.set_session_active(owner["id"], False)
-    assert assistant_limits.status()["spent_today_usd"] == pytest.approx(2.25)
+    assert spending_limits.status()["spent_today_usd"] == pytest.approx(2.25)
     assert orchestration_limits.start_refusal(owner["id"])
     assert orchestration_limits.turn_refusal(owner["id"], "user") is None
     assert orchestration_limits.turn_refusal(receipt["session_id"], "unpark")
@@ -201,7 +201,7 @@ async def test_existing_daily_setting_counts_coordinator_and_children_after_sett
     # Archiving a completed child must not refund the day's spending.
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", (receipt["session_id"],))
-    assert assistant_limits.status()["spent_today_usd"] == pytest.approx(2.25)
+    assert spending_limits.status()["spent_today_usd"] == pytest.approx(2.25)
 
 
 def test_runtime_ceiling_confines_legacy_projectless_rows(owner: dict[str, object]) -> None:

@@ -2,14 +2,12 @@
 
 Scope: owner coordination chats (no-project owner chats; ``query_options``
 stamps the scope dict on their options). Every other session is untouched.
-(The name is historical: these levels began with the retired personal
-assistant, #371.)
 
 Every tool has a risk level, declared once in :data:`TOOL_LEVELS`:
 
 * ``low`` goes ahead.
 * ``high`` asks the owner in the chat and waits for a firm yes
-  (``app.core.assistant_confirm``), whatever the session's mode.
+  (``app.core.owner_confirm``), whatever the session's mode.
 
 A tool with no declared level is high, so a new built-in, MCP or plugin tool
 asks until someone declares it here. Tools whose risk depends on their

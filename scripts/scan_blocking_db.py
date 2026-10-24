@@ -66,8 +66,8 @@ ALLOWLIST_NAMES = frozenset(
         "local_device_id",
         "row_to_dict",
         "rows_to_list",
-        "research_limits",  # app.db.assistant — returns the fixed limits, no I/O
-        "research_allowed",  # app.db.assistant — reads a state dict, no I/O
+        "research_limits",  # app.db.owner_state — returns the fixed limits, no I/O
+        "research_allowed",  # app.db.owner_state — reads a state dict, no I/O
         "decode_pull_requests",  # app.db.sessions — decodes a JSON value, no I/O
         # Pool lifecycle, called once at startup/shutdown before or after
         # the loop serves traffic; not a query.

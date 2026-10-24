@@ -20,7 +20,9 @@ AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
                   "moon", "sun", "bolt", "gem", "drop",
                   "king", "queen", "jack", "joker")
 ACCOUNT_ID = "owner"
-AGENT_ID = "builtin_assistant"  # Retired id; older peers may still send this row.
+from app.core.owner_compat import RETIRED_AGENT_ID
+
+AGENT_ID = RETIRED_AGENT_ID  # Mixed-version tombstone, never a live agent.
 ACCOUNT_DEFAULTS = dict(agent_id=None, enabled=False, paused=False, sources={}, introduction={},
                         home_session_id=None, home_device_id=None, home_created_at=None,
                         assistant_name=None, avatar_id=None)
@@ -48,9 +50,8 @@ def create_schema(cursor: Any) -> None:
         home_session_id TEXT, home_device_id TEXT, home_created_at TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
-    # The assistant's own name and avatar. They used to live on the agent it
-    # ran on; it now runs on a built-in agent nobody edits. NULL on an account
-    # saved before this until reconcile copies them from the old agent.
+    # Historical presentation columns retained for old-peer account rows.
+    # They never create a dedicated agent or a hidden home.
     for column in ("assistant_name", "avatar_id"):
         if not column_exists(cursor, "assistant_account", column):
             cursor.execute(f"ALTER TABLE assistant_account ADD COLUMN {column} TEXT")
@@ -295,7 +296,7 @@ def retention_sweep(
 ) -> dict[str, Any]:
     """Bounded cleanup still required by remote spending and job stops."""
     from app.db.retention import mutate_batches
-    from app.db.assistant_limits import STOP_RETENTION
+    from app.db.spending_limits import STOP_RETENTION
     at = at or now()
     common = dict(stop=stop, batch_size=RETENTION_BATCH)
     return {

@@ -171,10 +171,10 @@ def turn_note(session_id: Optional[str]) -> Optional[str]:
 
 def _confirm_note(session_id: Optional[str]) -> Optional[str]:
     try:
-        from app.core import assistant_confirm
+        from app.core import owner_confirm
         from app.core.session_orchestration import is_owner_session
 
-        return assistant_confirm.context_note(session_id) if is_owner_session(session_id) else None
+        return owner_confirm.context_note(session_id) if is_owner_session(session_id) else None
     except Exception:  # noqa: BLE001 — the reminder is best-effort
         logger.debug("confirmation note failed for %s", session_id, exc_info=True)
         return None

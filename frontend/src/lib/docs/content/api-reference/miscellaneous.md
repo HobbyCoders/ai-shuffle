@@ -8,6 +8,25 @@ order: 18
 
 Additional API endpoints for tags, analytics, git operations, settings, and more.
 
+## Owner identities and spending limits
+
+These shared services use the owner-only `/api/v1/owner` prefix:
+
+- `GET /api/v1/owner/limits` reads the daily spending cap, job time limit and today's spend.
+- `PATCH` or `PUT /api/v1/owner/limits` changes only supplied limit fields. Disabling
+  the daily cap requires `confirm_spend_limit_off: true`; it is not a model-facing tool.
+- `GET /api/v1/owner/agents` lists names and avatar presets for ordinary agents.
+- `PATCH /api/v1/owner/agents/{id}/identity` changes only the name/avatar, preserving
+  the agent's prompts, tools, model and other configuration.
+
+Both reads and writes require owner authentication (API keys are refused), and writes
+require same-origin CSRF validation. Installed clients and older workers can still use
+`/api/v1/assistant/limits` and `/api/v1/assistant/agents` (including the identity suffix)
+as thin aliases with identical authorization. Those aliases can be removed in a later
+release after clients upgrade. They do not restore a hidden home, research API or a
+special live agent. Historical spending tables, peer accounting names and stored
+conversational-approval event subtypes remain unchanged.
+
 ## Tags
 
 Organize sessions with custom tags. **Auth:** Required for every tag endpoint.

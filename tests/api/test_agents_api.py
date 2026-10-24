@@ -2618,7 +2618,7 @@ def test_http_agent_put_preserves_or_deliberately_changes_identity(mock_db, payl
     from fastapi.testclient import TestClient
     from app.api import agents
     from app.db import database
-    from app.api import assistant
+    from app.api import owner_services as assistant
     database.create_profile("identity-editor", "Identity", None, {"extension": "keep"})
     app = FastAPI()
     app.include_router(agents.router)
@@ -2626,7 +2626,7 @@ def test_http_agent_put_preserves_or_deliberately_changes_identity(mock_db, payl
     app.dependency_overrides[agents.require_admin] = lambda: "owner"
     app.dependency_overrides[agents.require_auth] = lambda: "owner"
     with TestClient(app) as client:
-        identity = client.patch("/api/v1/assistant/agents/identity-editor/identity", json={"avatar_id": "robot"})
+        identity = client.patch("/api/v1/owner/agents/identity-editor/identity", json={"avatar_id": "robot"})
         assert identity.status_code == 200, identity.text
         detail = client.get("/api/v1/agents/identity-editor")
         assert detail.status_code == 200 and detail.json()["config"]["avatar_id"] == "robot"

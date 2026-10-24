@@ -31,7 +31,7 @@ def record_overrun(amount):
 
 
 def _record(amount, *, enforce_limit):
-    from app.core import assistant_limits
+    from app.core import spending_limits
 
     from decimal import InvalidOperation
     try:
@@ -40,7 +40,7 @@ def _record(amount, *, enforce_limit):
         raise ValueError("Invalid generation reservation.") from None
     if not amount.is_finite() or amount < 0:
         raise ValueError("Invalid generation reservation.")
-    day = assistant_limits.day_window()[0]
+    day = spending_limits.day_window()[0]
     key = PREFIX + day
     with get_db() as conn:
         cursor = conn.cursor()
@@ -50,8 +50,8 @@ def _record(amount, *, enforce_limit):
         current = Decimal(json.loads(cursor.fetchone()["value"])["reserved"])
         # The locked row serializes generation admission; status sees committed
         # reservations through its own connection and includes ordinary AI usage.
-        state = assistant_limits.status()
-        spent = Decimal(str(assistant_limits._measure()["spent"]))
+        state = spending_limits.status()
+        spent = Decimal(str(spending_limits._measure()["spent"]))
         if enforce_limit and state["spend_limit_enabled"] and spent + amount > Decimal(str(state["daily_spend_limit_usd"])):
             return False
         cursor.execute("UPDATE system_settings SET value=%s WHERE key=%s",

@@ -579,7 +579,7 @@ def proactive_tool_denial(metadata: dict[str, Any], session_id: str, name: str) 
     watch_surface = tool_surface(metadata)
     if leaf not in (watch_surface if watch_surface is not None else PROACTIVE_TOOL_SURFACE):
         return "Background assistant observation is read-only; this tool is denied."
-    from app.core.assistant_service import assert_proactive_allowed
+    from app.core.owner_services import assert_proactive_allowed
     try:
         assert_proactive_allowed(metadata, session_id)
     except (ValueError, PermissionError) as exc:

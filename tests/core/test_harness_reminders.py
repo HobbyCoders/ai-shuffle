@@ -80,11 +80,11 @@ def test_away_notes_are_removed(name):
     ([], [{"question": "Deploy?", "released": True}]),
 ])
 def test_assistant_confirmation_notes_are_removed(monkeypatch, told, pending):
-    from app.core import assistant_confirm
+    from app.core import owner_confirm
 
-    monkeypatch.setitem(assistant_confirm._outcomes, "s1", deque(told))
-    monkeypatch.setattr(assistant_confirm, "pending_requests", lambda _sid: pending)
-    note = assistant_confirm.context_note("s1")
+    monkeypatch.setitem(owner_confirm._outcomes, "s1", deque(told))
+    monkeypatch.setattr(owner_confirm, "pending_requests", lambda _sid: pending)
+    note = owner_confirm.context_note("s1")
     assert note
     assert strip_harness_reminders(_note(note)) == PROMPT
 
@@ -96,11 +96,11 @@ def test_assistant_confirmation_notes_are_removed(monkeypatch, told, pending):
 def test_the_owners_answer_to_a_released_call_is_removed(decision: str, opener: str) -> None:
     """#523: the note the owner's yes or no carries to the engine, about a
     call that was let go "not run yet", never reaches a client read."""
-    from app.core import assistant_confirm
+    from app.core import owner_confirm
     from app.core.harness_reminders import HARNESS_REMINDER_OPENERS
 
     assert opener in HARNESS_REMINDER_OPENERS
-    note = assistant_confirm.engine_note({assistant_confirm.ANSWER_KEY: {
+    note = owner_confirm.engine_note({owner_confirm.ANSWER_KEY: {
         "released": True, "decision": decision, "action": "run `gh pr merge 12`"}})
     assert note.splitlines()[1].startswith(opener)
     assert strip_harness_reminders(_note(note)) == PROMPT

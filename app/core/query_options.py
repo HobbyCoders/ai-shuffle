@@ -1194,7 +1194,7 @@ def build_options_from_profile(
     permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
     # An owner coordination chat (no project): the app asks the owner for the
-    # high-risk calls itself (``app.core.assistant_permissions``).
+    # high-risk calls itself (``app.core.background_permissions``).
     assistant_scope = ({"session_id": session_id, "home_session_id": session_id,
                         "roots": [], "cwd": working_dir} if owner_coordinator else None)
     if owner_coordinator:
@@ -1389,7 +1389,7 @@ def build_options_from_profile(
         else:
             context_window = None
 
-    from app.core.assistant_service import assert_proactive_allowed
+    from app.core.owner_services import assert_proactive_allowed
     from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = overrides.get("_assistant_proactive")
     if assistant_proactive is not None:
@@ -1403,7 +1403,7 @@ def build_options_from_profile(
             "or skill/plugin writes. App configuration writes require owner confirmation. "
             "Read, Glob and Grep are read-only inside registered project roots and chat attachments. "
             "The read-only broker resolves the current registered roots on this worker.")
-    from app.core.assistant_limits import role_context as assistant_limits_context
+    from app.core.spending_limits import role_context as assistant_limits_context
     final_system_prompt = _append_system_block(
         final_system_prompt, assistant_limits_context(session_id),
     )

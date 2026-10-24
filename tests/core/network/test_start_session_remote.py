@@ -478,9 +478,9 @@ async def test_owner_project_runs_on_the_worker_with_the_checkout_and_reports_ba
         assert receipt["payload"]["report_to"] == "caller"
     new_id = result["session_id"]
     with b.active():
-        from app.db import assistant as store
-        from app.core import assistant_service
-        job = store.get_remote_job(assistant_service.assistant_id(), new_id)
+        from app.db import owner_state as store
+        from app.core import owner_services
+        job = store.get_remote_job(owner_services.assistant_id(), new_id)
         assert job["session_id"] == new_id and job["home_session_id"] == "caller"
     with a.active():
         row = database.get_session(new_id)

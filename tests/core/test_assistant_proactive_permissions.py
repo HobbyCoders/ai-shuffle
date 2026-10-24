@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core import assistant_service as service, session_modes as modes, watches
+from app.core import owner_services as service, session_modes as modes, watches
 from app.core import watch_manager
 from app.core.provider import harness_adapter as ha
 from app.core.provider.types import SessionOptions

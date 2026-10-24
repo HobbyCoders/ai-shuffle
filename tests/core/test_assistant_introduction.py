@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import assistant_introduction as introductions, assistant_service as service
+from app.core import owner_introduction as introductions, owner_services as service
 from app.core.watch_manager import WatchManager
-from app.db import assistant as store, checkouts, database, projects_v2
+from app.db import owner_state as store, checkouts, database, projects_v2
 from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
 # conftest stubs github_login for every test; keep the real one for its own test.

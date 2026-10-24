@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from app.core import assistant_service as service, task_registry
+from app.core import owner_services as service, task_registry
 from app.db import database, turns
 from tests.db.test_assistant_store import assistant_fixture
 
@@ -68,6 +68,10 @@ def test_no_production_imports_reintroduce_retired_research_services() -> None:
     retired = {
         "app.core.assistant_manager", "app.core.assistant_research",
         "app.core.assistant_brief", "app.db.assistant_sources",
+        "app.core.assistant_service", "app.core.assistant_introduction",
+        "app.core.assistant_confirm", "app.core.assistant_permissions",
+        "app.core.assistant_limits", "app.db.assistant_limits",
+        "app.db.assistant", "app.api.assistant",
     }
     for path in app.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -78,6 +82,12 @@ def test_no_production_imports_reintroduce_retired_research_services() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported = [node.module, *(node.module + "." + a.name for a in node.names)]
             assert not retired.intersection(imported), str(path)
+            # Also catch importlib / __import__ and string-based patch targets.
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                assert not any(
+                    node.value == name or node.value.startswith(name + ".")
+                    for name in retired
+                ), str(path)
 
 
 def test_legacy_dedicated_metadata_is_not_live_identity_policy(assistant_fixture: Any) -> None:

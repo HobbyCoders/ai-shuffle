@@ -86,7 +86,7 @@ def get_all_profiles() -> List[ProfileRow]:
     ``get_profile`` can still read it by ID for historical accounting. No
     background research or dedicated agent is created or run here.
     """
-    from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+    from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -100,7 +100,7 @@ def get_all_profiles() -> List[ProfileRow]:
 
 def _refuse_assistant_agent(profile_id: str) -> None:
     """Do not revive an ID older peers may still send (compatibility tombstone)."""
-    from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+    from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
 
     if profile_id == ASSISTANT_AGENT_ID:
         raise PermissionError("This agent ID is retired")
