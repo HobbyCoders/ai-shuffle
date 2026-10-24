@@ -1198,6 +1198,10 @@ class Compactor:
         anchors; the rest of the prefix can leave a live session's memory and
         stay durable in its store. See :meth:`window`.
         """
+        # Retire replayed decisions while their endpoints are still present.
+        # Waiting until _render sees the window loses the prefix interior's
+        # node order, leaving every superseded digest resident after a resume.
+        self._settle_replay(nodes)
         if not nodes or not self._summaries:
             return None
         root = nodes[0].node_id

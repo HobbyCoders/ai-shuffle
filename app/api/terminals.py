@@ -28,6 +28,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+import anyio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -488,7 +490,12 @@ async def monitor_socket(websocket: WebSocket, task_id: str,
     finally:
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # A disconnect can finish before the ASGI server cancels this scope.
+        # Shield the drain: cancelling gather() can replace the server's
+        # cancellation with a child's unrelated CancelledError, escaping the
+        # server's cancel scope (and Starlette's WebSocket portal).
+        with anyio.CancelScope(shield=True):
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @router.get("/{terminal_id}")

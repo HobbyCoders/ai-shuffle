@@ -141,6 +141,27 @@ def test_fetch_verifies_the_sha_and_detects_a_moved_tip(origin, tmp_path):
     assert checkout_transfer.fetch_task_branch(target, "chore/task-w1", moved, remote) == moved
 
 
+@pytest.mark.parametrize("version", [(2, 28), (2, 29)])
+def test_task_fetch_uses_no_shared_fetch_head_on_modern_git(origin, tmp_path, monkeypatch, version):
+    from app.core import git_fork_base
+
+    parent = clone(origin, tmp_path / "parent")
+    target = clone(origin, tmp_path / "target")
+    sha = git(parent, "rev-parse", "HEAD")
+    remote = checkout_transfer.publish_task_branch(parent, "chore/task-w1", sha)["remote"]
+    monkeypatch.setattr(git_fork_base, "_git_version", lambda root: version)
+    original = checkout_transfer._run
+    fetches = []
+    def run(cwd, *args, **kwargs):
+        if args[0] == "fetch":
+            fetches.append(args)
+        return original(cwd, *args, **kwargs)
+    monkeypatch.setattr(checkout_transfer, "_run", run)
+    assert checkout_transfer.fetch_task_branch(target, "chore/task-w1", sha, remote) == sha
+    assert len(fetches) == 1
+    assert ("--no-write-fetch-head" in fetches[0]) == (version >= (2, 29))
+
+
 def test_fetch_refuses_a_different_origin(origin, tmp_path):
     parent = clone(origin, tmp_path / "parent")
     target = clone(origin, tmp_path / "target")

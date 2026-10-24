@@ -810,8 +810,12 @@ async def _dispatch(action, mode=None, scope=None):
     if not await run_sync(updates.allowed):
         raise UpdateNotSent("Application updates are disabled in Account settings")
     result = await _send(action, mode, scope)
-    refused = {row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
-               if not row.get("accepted") and row.get("device_id")}
+    # A refused check holds nothing back: the usual reason is a check or download
+    # already running there, whose own result must still show. Disabled or
+    # unsupported workers are already excluded by their status.
+    refused = {} if result.get("sent", action) == "check" else {
+        row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
+        if not row.get("accepted") and row.get("device_id")}
     _refusals.clear()
     _refusals.update(refused)
     _refusals_at = time.time()

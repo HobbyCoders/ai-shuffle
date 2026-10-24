@@ -240,14 +240,16 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
         raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
     branch = branch or worker_branch(worker_session_id)
 
-    with _project_lock(project["id"]):
-        from app.core.git_fork_base import choose_worker_base
+    from app.core.git_fork_base import choose_worker_base
 
-        ref, base_note = choose_worker_base(parent_path, base_commit=base_commit)
-        tip = git_service._run_git(parent_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
-        sha = tip.stdout.strip()
-        if tip.returncode or not _SHA.fullmatch(sha) or (base_commit and sha != base_commit):
-            raise WorkerCheckoutError("The requested base commit is unavailable locally; fetch it before dispatch.")
+    # Network freshness has its own repository lock/coalescing. Do not hold
+    # the project admission lock while waiting on credentials or a fetch.
+    ref, base_note = choose_worker_base(parent_path, base_commit=base_commit)
+    tip = git_service._run_git(parent_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+    sha = tip.stdout.strip()
+    if tip.returncode or not _SHA.fullmatch(sha) or (base_commit and sha != base_commit):
+        raise WorkerCheckoutError("The requested base commit is unavailable locally; fetch it before dispatch.")
+    with _project_lock(project["id"]):
         # Pin the chosen SHA: add_worktree must not prefer another origin tip.
         if not git_service.create_branch(parent_path, branch, start_point=sha):
             raise WorkerCheckoutError(f"Could not create dedicated worker branch {branch}; refusing to reuse it.")
@@ -662,22 +664,24 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
                                   "mismatch); nothing was started.")
     if not sent.pushed or sent.remote is None:
         raise WorkerCheckoutError(f"The calling worker did not publish {branch} to origin; nothing was started.")
-    with _project_lock(project["id"]):
-        try:
-            checkout_transfer.fetch_task_branch(base, branch, sha, sent.remote)
-        except ValueError as exc:
-            raise WorkerCheckoutError(f"{exc} Nothing was started.") from None
-        base_note = "Caller HEAD (legacy peer)."
-        if sent.base_policy == "fresh-default-v1":
-            from app.core.git_fork_base import choose_worker_base
+    # Each fetch owns a distinct remote-tracking ref and does not write
+    # FETCH_HEAD. Pin its validated commit before entering the mutation lock.
+    try:
+        checkout_transfer.fetch_task_branch(base, branch, sha, sent.remote)
+    except ValueError as exc:
+        raise WorkerCheckoutError(f"{exc} Nothing was started.") from None
+    base_note = "Caller HEAD (legacy peer)."
+    if sent.base_policy == "fresh-default-v1":
+        from app.core.git_fork_base import choose_worker_base
 
-            # The source checks its branch/upstream before offering this policy;
-            # the receiver cannot infer that from its unrelated local HEAD.
-            ref, base_note = choose_worker_base(base, sha, default_branch_caller=True)
-            chosen = git_service._run_git(base, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
-            if chosen.returncode or not _SHA.fullmatch(chosen.stdout.strip()):
-                raise WorkerCheckoutError("The chosen worker base is unavailable; nothing was started.")
-            sha = chosen.stdout.strip()
+        # The source checks its branch/upstream before offering this policy;
+        # the receiver cannot infer that from its unrelated local HEAD.
+        ref, base_note = choose_worker_base(base, sha, default_branch_caller=True)
+        chosen = git_service._run_git(base, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+        if chosen.returncode or not _SHA.fullmatch(chosen.stdout.strip()):
+            raise WorkerCheckoutError("The chosen worker base is unavailable; nothing was started.")
+        sha = chosen.stdout.strip()
+    with _project_lock(project["id"]):
         # Pin the receiving worker's chosen base, not its own checkout HEAD.
         if not git_service.create_branch(base, branch, start_point=sha):
             raise WorkerCheckoutError(f"Could not create dedicated worker branch {branch}; refusing to reuse it.")

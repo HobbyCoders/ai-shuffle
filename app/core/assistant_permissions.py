@@ -476,6 +476,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     "ListAgents": LOW, "SendMessage": LOW, "ListSessions": LOW, "MessageSession": LOW,
     "StartSession": _start_session_rule, "SettleSession": LOW, "UnsettleSession": LOW, "ArchiveSession": LOW,
     "HandOffSession": HIGH, "RemoteTrigger": HIGH, "ScheduleWakeup": LOW,
+    "WorkingRecord": LOW,
     "CronList": LOW, "CronCreate": HIGH, "CronDelete": HIGH,
     # CreateWatch asks inside its handler, including bypass sessions.
     "CreateWatch": LOW, "ListWatches": LOW, "PauseWatch": LOW, "StopWatch": LOW,

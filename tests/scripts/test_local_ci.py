@@ -136,7 +136,7 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, press
     assert env["ALLOW_REAL_PG"] == "0"
     assert env["TEST_POSTGRES_DSN"] == ""
     assert env["AI_SHUFFLE_ENV_FILE"] == "/dev/null"
-    expected = "1" if pg_source and ctx.mode == "full" and (pg_optin or pressure_optin) else "0"
+    expected = "1" if pg_source and ctx.mode == "full" else "0"
     assert env["CONTAINER_RUNTIME_TEST_PG"] == expected
     expected_pressure = "1" if expected == "1" and pressure_optin else "0"
     assert env["CONTAINER_RUNTIME_TEST_PRESSURE"] == expected_pressure
@@ -149,9 +149,7 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, press
         assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
         assert "LOCAL_CI_CONTAINER_PG=1" not in coverage_notes[0]
     else:
-        assert len(coverage_notes) == 1
-        assert "LOCAL_CI_CONTAINER_PG=1" in coverage_notes[0]
-        assert "LOCAL_CI_CONTAINER_PRESSURE=1" in coverage_notes[0]
+        assert coverage_notes == []  # missing binaries/check-mode notes are above
     # The pg_ctl folder comes back in the host's path form (\test\pg\bin on
     # Windows) and PATH entries join with the host's separator.
     pg_bin = {"path": str(Path("/test/pg/bin/pg_ctl").parent), "smoke": "/test/pg/bin"}.get(pg_source)
@@ -160,6 +158,23 @@ def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, press
         assert any("Container" in note and "full" in note for note in ctx.notes)
     elif not pg_source:
         assert any("Container" in note and "PostgreSQL" in note for note in ctx.notes)
+
+
+def test_full_container_pg_functional_coverage_needs_no_optin(monkeypatch):
+    commands = []
+    ctx = local_ci.Context(mode="full", base="base", files=None, python=sys.executable)
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PG", raising=False)
+    monkeypatch.delenv("LOCAL_CI_CONTAINER_PRESSURE", raising=False)
+    monkeypatch.delenv("SMOKE_PG_BIN", raising=False)
+    monkeypatch.setattr(local_ci.shutil, "which", lambda name: "/pg/bin/pg_ctl" if name == "pg_ctl" else None)
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kw: commands.append((argv, kw)))
+    monkeypatch.setattr(local_ci, "pytest_args", lambda *a, **kw: ["-q"])
+    local_ci.backend_linux(ctx)
+    [(argv, kw)] = [(argv, kw) for argv, kw in commands if "tests/core/test_container_runtime.py" in argv]
+    assert kw["env"]["CONTAINER_RUNTIME_TEST_PG"] == "1"
+    assert kw["env"]["CONTAINER_RUNTIME_TEST_PRESSURE"] == "0"
+    assert not any("PG coverage is opt-in" in note for note in ctx.notes)
+    assert any("LOCAL_CI_CONTAINER_PRESSURE=1" in note for note in ctx.notes)
 
 
 def test_container_collection_drops_host_handover(tmp_path):
