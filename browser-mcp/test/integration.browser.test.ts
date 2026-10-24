@@ -766,24 +766,52 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       const trigger = kind === "timer" ? "setTimeout(done,150)" : kind === "fetch" ? "fetch('/hydrate').then(r=>r.text()).then(done)" : "const start=performance.now();(function tick(){performance.now()-start>=150?done():requestAnimationFrame(tick)})()";
       // The timer begins inside dispatch, not at the later settle_ms origin.
       // A slow click handler deterministically exposes that accounting mismatch.
-      const page = await load(`<button onclick="go()">Save label</button><p id="status">Waiting</p><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100);function go(){const timing=window.resultTiming={start:performance.now(),finish:0};const done=()=>{document.getElementById('status').textContent='Saved';timing.finish=performance.now();window.done=true};${trigger};const until=performance.now()+${dispatchMs};while(performance.now()<until){}}</script>`);
+      const page = await load(`<button onclick="go()">Save label</button><p id="status">Waiting</p><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100);function go(){const timing=window.resultTiming={start:performance.now(),finish:0,settled:0};const done=()=>{document.getElementById('status').textContent='Saved';timing.finish=performance.now();window.done=true};${trigger};const until=performance.now()+${dispatchMs};while(performance.now()<until){}}</script>`);
       await page.waitForTimeout(250); // the clock, unlike the result, is already churning
-      const result = body(await runAct(session, { kind: "click", ref: await ref("Save label") }));
-      expect(result).toMatchObject({ ok: true, dom_mutated: "minor", settle_capped: false, text_churn_ignored: true });
-      expect(await page.locator("#status").innerText()).toBe("Saved");
-      const timing = await page.evaluate(() => {
-        const { start, finish } = (window as unknown as { resultTiming: { start: number; finish: number } }).resultTiming;
-        return { trigger_ms: finish - start, quiet_ms: performance.now() - finish };
+      const beginWatch = session.beginWatch.bind(session);
+      const captureEndpoint = vi.spyOn(session, "beginWatch").mockImplementation(async (...args) => {
+        await beginWatch(...args);
+        if (args[0]) return; // Only the active action watcher, not passive history.
+        await page.evaluate(key => {
+          const state = (window as unknown as Record<string, { observer: { pause(): void } }>)[key];
+          const pause = state.observer.pause;
+          // collectMutationStats calls pause synchronously at its settle decision,
+          // before resolving to Node. Do not include later CDP/act bookkeeping.
+          state.observer.pause = () => {
+            const timing = (window as unknown as { resultTiming?: { settled: number } }).resultTiming;
+            if (timing && !timing.settled) timing.settled = performance.now();
+            pause();
+          };
+        }, WATCH_KEY);
       });
-      console.info("TICKER_TIMING", JSON.stringify({ kind, dispatchMs, ...timing, settle_ms: result.timings.settle_ms }));
-      // #536: settle_ms excludes dispatch, which already consumed part of the
-      // trigger delay (355 ms settle with a real 307 ms quiet period in the
-      // slow-dispatch regression). Check both phases on the renderer's same
-      // monotonic clock, with only 5 ms timer/clock quantization tolerance.
-      expect(timing.trigger_ms).toBeGreaterThanOrEqual((kind === "fetch" ? 350 : 150) - 5);
-      expect(timing.quiet_ms).toBeGreaterThanOrEqual(300 - 5);
-      expect(result.timings.settle_ms).toBeLessThan(1200);
-      await page.goto("about:blank");
+      const settleAdoptions = session.settleAdoptions.bind(session);
+      const postSettle = vi.spyOn(session, "settleAdoptions").mockImplementation(async (...args) => {
+        await settleAdoptions(...args);
+        await delay(100); // Post-settle work must not count toward the quiet window.
+      });
+      try {
+        const result = body(await runAct(session, { kind: "click", ref: await ref("Save label") }));
+        expect(result).toMatchObject({ ok: true, dom_mutated: "minor", settle_capped: false, text_churn_ignored: true });
+        expect(await page.locator("#status").innerText()).toBe("Saved");
+        const timing = await page.evaluate(() => {
+          const { start, finish, settled } = (window as unknown as {
+            resultTiming: { start: number; finish: number; settled: number };
+          }).resultTiming;
+          return { trigger_ms: finish - start, quiet_ms: settled - finish, post_settle_ms: performance.now() - settled };
+        });
+        console.info("TICKER_TIMING", JSON.stringify({ kind, dispatchMs, ...timing, settle_ms: result.timings.settle_ms }));
+        // #536: trigger and quiet phases share one renderer-monotonic clock.
+        // Only allow 5 ms quantization; none of the deliberate post-settle delay
+        // can hide an early settle (a 250 ms quiet-window mutation must fail).
+        expect(timing.trigger_ms).toBeGreaterThanOrEqual((kind === "fetch" ? 350 : 150) - 5);
+        expect(timing.quiet_ms).toBeGreaterThanOrEqual(300 - 5);
+        expect(timing.post_settle_ms).toBeGreaterThanOrEqual(100 - 5);
+        expect(result.timings.settle_ms).toBeLessThan(1200);
+      } finally {
+        captureEndpoint.mockRestore();
+        postSettle.mockRestore();
+        await page.goto("about:blank");
+      }
     });
     it.each(["plain", "top", "shadow", "frame", "staticshadow", "staticframe", "blankframe", "crossframe"])("avoids repeat sampling for spaced %s actions", async kind => {
       const shapes: Record<string, string> = {
