@@ -66,6 +66,17 @@ async def test_unattended_cannot_save_its_own_choice_even_with_confirmation() ->
     assert result["success"] is False
 
 
+@pytest.mark.parametrize("action", ["get", "remember", "forget", "other", None])
+def test_permission_level_requires_host_approval_for_writes(action: str | None) -> None:
+    from app.core import assistant_permissions as permissions
+
+    name = "mcp__app-config__generationPreferences"
+    assert permissions.declared(name)
+    expected = permissions.LOW if action == "get" else permissions.HIGH
+    # confirm=true is only the tool's acknowledgment flag, not a host-permission bypass.
+    assert permissions.level(name, {"action": action, "confirm": True}, {}) == expected
+
+
 def test_tool_is_registered_and_advertised() -> None:
     assert "mcp__app-config__generationPreferences" in get_app_config_tool_names()
     assert "generationPreferences" in {tool.name for tool in collect_app_config_tools(True)}
