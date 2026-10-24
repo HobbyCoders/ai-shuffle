@@ -160,6 +160,11 @@ jobs:
       - name: Record runner capacity
         run: nproc
 
+      # pull_request + checkout's default ref tests refs/pull/<number>/merge,
+      # not the PR head: duplicate IDs introduced by a clean merge must fail.
+      - name: Validate merged live-smoke catalog and generated table
+        run: python -m scripts.live_smoke render --check
+
       - name: Boot smoke test (real server process)
         # Starts `python -m app.main` as a subprocess against a private
         # PostgreSQL 16 cluster (initialized on a free port by the container
