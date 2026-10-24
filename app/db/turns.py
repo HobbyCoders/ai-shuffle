@@ -388,7 +388,8 @@ def _task_stop(cursor, session_id: str, *, owner: bool = False) -> bool:
     cursor.execute(
         "SELECT * FROM turns WHERE session_id=%s "
         "AND payload ->> 'terminal_task_stop' IS NOT NULL "
-        "ORDER BY position DESC, insert_order DESC, created_at DESC, id DESC LIMIT 1", (session_id,),
+        "ORDER BY position DESC, insert_order DESC, created_at DESC, id DESC LIMIT 1",
+        (session_id,),
     )
     row = _row(cursor.fetchone())
     if not row or not row["payload"].get(TASK_STOP_KEY):
