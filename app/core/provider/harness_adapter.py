@@ -2579,6 +2579,10 @@ class HarnessAdapter(ProviderAdapter):
                         self._turn_floor,
                     )
                     continue
+                if isinstance(translated, ResultMessage):
+                    release = getattr(self._store, "release_resume_memory", None)
+                    if release is not None:
+                        await release()
                 yield translated
                 if isinstance(translated, ResultMessage):
                     return
