@@ -56,6 +56,11 @@ def _stub_wait(monkeypatch, idle=True):
 
     monkeypatch.setattr(turn_manager, "wait_session_idle", _fake_wait)
 
+    async def _fake_settled(turn_id: str, **kwargs: object) -> dict | None:
+        return {"id": turn_id, "state": "completed"} if idle else None
+
+    monkeypatch.setattr(turn_manager, "wait_settled", _fake_settled)
+
 
 def _stub_outcome(monkeypatch, usage=None, text="hello there",
                   error=None, interrupted=False):
@@ -64,11 +69,11 @@ def _stub_outcome(monkeypatch, usage=None, text="hello there",
 
     monkeypatch.setattr(
         turn_outcome, "final_turn_outcome",
-        lambda sid: {"usage": usage or {}, "error": error,
+        lambda sid, turn_id=None: {"usage": usage or {}, "error": error,
                      "interrupted": interrupted},
     )
     monkeypatch.setattr(
-        turn_outcome, "extract_final_assistant_text", lambda sid: text
+        turn_outcome, "extract_final_assistant_text", lambda sid, turn_id=None: text
     )
 
 

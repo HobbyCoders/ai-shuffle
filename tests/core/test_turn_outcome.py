@@ -6,9 +6,35 @@ terminal turn event must be distinguishable from a clean empty completion, or
 a caller that read the log too early stamps a bogus empty success.
 """
 
+import sqlite3
 from unittest.mock import patch
 
 from app.core import turn_outcome
+
+
+def test_explicit_turn_reads_its_latest_attempt_not_another_turn(
+    mock_db: sqlite3.Connection,
+) -> None:
+    from app.db import database, session_events
+
+    database.create_session(session_id="outcome-session", profile_id="default")
+    session_events.append_events("outcome-session", [
+        {"type": "turn.started", "turn_id": "A", "payload": {}},
+        {"type": "assistant.text_delta", "turn_id": "A", "payload": {"text": "old A"}},
+        {"type": "turn.parked", "turn_id": "A", "payload": {}},
+        {"type": "turn.started", "turn_id": "A", "payload": {}},
+        {"type": "assistant.text_delta", "turn_id": "A", "payload": {"text": "new A"}},
+        {"type": "turn.aborted", "turn_id": "A", "payload": {"message": "A failed"}},
+        {"type": "turn.started", "turn_id": "B", "payload": {}},
+        {"type": "assistant.text_delta", "turn_id": "B", "payload": {"text": "reply B"}},
+        {"type": "turn.completed", "turn_id": "B", "payload": {"usage": {"tokens_out": 7}}},
+    ])
+    assert turn_outcome.extract_final_assistant_text("outcome-session", "A") == "new A"
+    assert turn_outcome.final_turn_outcome("outcome-session", "A")["error"] == "A failed"
+    assert turn_outcome.extract_final_assistant_text("outcome-session", "B") == "reply B"
+    assert turn_outcome.final_turn_outcome("outcome-session", "B")["usage"] == {"tokens_out": 7}
+    assert turn_outcome.extract_final_assistant_text("outcome-session", "missing") == ""
+    assert not turn_outcome.final_turn_outcome("outcome-session", "missing")["terminal_found"]
 
 
 def _events(*events):

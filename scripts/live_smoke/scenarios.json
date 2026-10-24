@@ -13,6 +13,14 @@
       "intro": "Disposable candidate workers and throwaway channels only; never publish credentials or private receipts.",
       "rows": [
         {
+          "id": "durable-watches.connector-chat-fifo",
+          "check": "Concurrent connector messages keep one conversation and ordered replies",
+          "kind": "owner",
+          "how": "On a disposable candidate with Telegram, Discord and Slack bots in throwaway allowed chats, send two near-simultaneous first messages asking for distinct replies. While the first turn runs, send a third message, answer a pending connector-action approval and send a message in another chat. Compare inbound message IDs, queued turn IDs, linked AI session IDs and outbound reply targets privately. Repeat on an already-linked chat; archive only disposable sessions.",
+          "pass_when": "Each chat has one linked AI session; every message receives exactly its own turn's reply in arrival order, with no duplicated latest answer. Other chats and approval callbacks dispatch before the blocked turn settles. Missing real provider or channel receipts are not a pass.",
+          "past_bug": "#589: overlapping handlers read the session's latest reply and raced first-message AI-session minting."
+        },
+        {
           "id": "durable-watches.cross-worker-delivery",
           "check": "Creating-chat delivery and shared durable watch notifications",
           "kind": "owner",

@@ -51,6 +51,13 @@ def drain(monkeypatch):
         return True
 
     monkeypatch.setattr(turn_manager, "wait_session_idle", run)
+
+    async def settled(turn_id: str, **kwargs: object) -> dict:
+        row = turns.get_turn(turn_id)
+        await run(row["session_id"])
+        return turns.get_turn(turn_id)
+
+    monkeypatch.setattr(turn_manager, "wait_settled", settled)
     return run, delivered
 
 

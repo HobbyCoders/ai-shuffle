@@ -583,7 +583,7 @@ def turns(monkeypatch):
 
     t = SimpleNamespace(
         submit=AsyncMock(return_value="turn-1"),
-        idle=AsyncMock(return_value=True),
+        idle=AsyncMock(return_value={"id": "turn-1", "state": "completed"}),
         outcome=MagicMock(return_value={"error": None}),
         text=MagicMock(return_value="Here is your answer."),
         real_outcome=turn_outcome.final_turn_outcome,
@@ -591,7 +591,7 @@ def turns(monkeypatch):
         broadcast=AsyncMock(),
     )
     monkeypatch.setattr(turn_manager, "submit_async", t.submit)
-    monkeypatch.setattr(turn_manager, "wait_session_idle", t.idle)
+    monkeypatch.setattr(turn_manager, "wait_settled", t.idle)
     monkeypatch.setattr(turn_outcome, "final_turn_outcome", t.outcome)
     monkeypatch.setattr(turn_outcome, "extract_final_assistant_text", t.text)
     monkeypatch.setattr(sync_engine, "broadcast_user_session_created", t.broadcast)
@@ -628,6 +628,9 @@ class TestIncomingMessage:
         ai_session = created["session_id"]
         routed.update_connector_session_ai_session.assert_called_once_with("cs-1", ai_session)
         turns.broadcast.assert_awaited_once()
+        turns.idle.assert_awaited_once_with("turn-1", timeout=3600)
+        turns.outcome.assert_called_once_with(ai_session, "turn-1")
+        turns.text.assert_called_once_with(ai_session, "turn-1")
 
         args, kwargs = turns.submit.await_args
         assert args == (ai_session, "connector")
@@ -727,7 +730,7 @@ class TestIncomingMessage:
 
     async def test_turn_not_settling_sends_fallback(self, mgr, routed, not_enrolled, turns):
         inst = running(mgr)
-        turns.idle.return_value = False
+        turns.idle.return_value = None
         await mgr.handle_incoming_message(incoming())
         assert [m.text for m in inst.sent] == ["I couldn't generate a response."]
         turns.outcome.assert_not_called()

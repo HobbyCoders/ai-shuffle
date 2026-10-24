@@ -294,8 +294,8 @@ async def test_incoming_message_routing_resolves_off_the_loop_in_one_hop(
          patch.object(database, "update_connector_event_dispatched",
                       lambda cid, success: None), \
          patch("app.core.turn_manager.submit_async", _submit), \
-         patch("app.core.turn_manager.wait_session_idle",
-               new=AsyncMock(return_value=True)), \
+         patch("app.core.turn_manager.wait_settled",
+               new=AsyncMock(return_value={"id": "turn-1", "state": "completed"})), \
          patch("app.core.turn_outcome.final_turn_outcome",
                return_value={"usage": {}, "error": None, "interrupted": False}), \
          patch("app.core.turn_outcome.extract_final_assistant_text",
