@@ -180,9 +180,11 @@ neither stored choice, an unattended run returns `status: "skipped"`,
 `reason: "no_stored_choice"` and a plain-language report, even if an agent
 supplies a source in its tool call. A result that ran the remembered choice has
 `remembered: true`. If an unattended call names a source, account, model or worker
-that differs from the stored choice, it returns `status: "skipped"` and
+that differs from the remembered choice, it returns `status: "skipped"` and
 `reason: "named_choice_differs_from_stored"` before any catalog lookup or submission.
 The owner must select the named choice; tool arguments never replace the stored one.
+A job's own stored choice is the owner's binding for that job: an unattended job run
+uses it whatever the call names, and the result has `job_choice: true`.
 A matching named choice keeps the normal pricing, confirmation and daily-cap checks.
 
 ## Remembered choices

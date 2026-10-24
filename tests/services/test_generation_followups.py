@@ -25,19 +25,38 @@ __all__ = ["backend", "client", "quote_backend"]
     {"account": "another-account"},
     {"worker": "another-worker"},
 ])
-@pytest.mark.parametrize("stored_field", ["remembered_choice", "job_choice"])
 @pytest.mark.parametrize("kind", ["image", "video"])
-async def test_unattended_mismatch_skips_before_any_catalog_access(named, stored_field, kind):
+async def test_unattended_mismatch_skips_before_any_catalog_access(named, kind):
     stored = candidate(kind=kind)
     backend = FakeBackend([stored])
     backend.catalog = AsyncMock(side_effect=AssertionError("Must not discover a different stored route"))
-    context = RunContext(unattended=True, **{stored_field: stored.choice()})
+    context = RunContext(unattended=True, remembered_choice=stored.choice())
     output = await Resolver(backend).generate(kind, {"prompt": "tree", **named}, context)
     assert output["status"] == "skipped"
     assert output["reason"] == "named_choice_differs_from_stored"
     assert "unattended" in output["message"] and "owner" in output["message"]
     backend.catalog.assert_not_awaited()
     assert backend.calls == []
+
+
+@pytest.mark.parametrize("named", [
+    {"source": "supergrok"},
+    {"source": "fal", "model": "kling/v4/text-to-video"},
+    {"account": "another-account"},
+    {"worker": "another-worker"},
+])
+@pytest.mark.parametrize("kind", ["image", "video"])
+async def test_unattended_job_binding_runs_and_ignores_named_route(named, kind):
+    # A job's own stored choice is the owner's binding (#507): it runs, and
+    # nothing named in the call is looked up or charged instead.
+    stored = candidate(kind=kind)
+    backend = FakeBackend([stored])
+    context = RunContext(unattended=True, job_choice=stored.choice())
+    output = await Resolver(backend).generate(kind, {"prompt": "tree", **named}, context)
+    assert output["status"] == "completed" and output["job_choice"] is True
+    assert output["choice"]["account"] == stored.account and output["choice"]["model"] == stored.model
+    assert [c for c in backend.calls if c[0] in ("reserve", "execute")] == [
+        ("reserve", stored.account), ("execute", stored.account)]
 
 
 @pytest.mark.parametrize("source", ["fal", "FAL.AI", "account-a"])

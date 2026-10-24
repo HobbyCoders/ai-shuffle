@@ -27,6 +27,8 @@ SOURCE_ALIASES = {"fal.ai": "fal", "fal-ai": "fal", "grok": "supergrok", "chatgp
 DO_NOT_RETRY = "Do not call again without the user's go-ahead."
 REMEMBERED_MESSAGE = ("Used the user's remembered choice. They can change it from this result in the chat, "
                       "in Settings > Default models, or by naming another source or model.")
+JOB_CHOICE_MESSAGE = ("Used this job's stored choice. Unattended runs ignore the source or model named in the call; "
+                      "the owner changes a job's choice in its settings.")
 UNPRICED_SKIP_MESSAGE = ("Generation skipped: the user's saved choice has no known price right now, and nothing unpriced "
                          "runs unattended. They can pick a priced option again in Settings > Default models.")
 UNREADABLE_SKIP_MESSAGE = ("Generation skipped: the user's saved generation choices could not be read, so this "
@@ -201,9 +203,11 @@ class Resolver:
         if context.unattended and not stored:
             return result("skipped", reason="no_stored_choice", kind=kind,
                           message="Generation skipped: this unattended run has no remembered or job-stored choice.")
-        if context.unattended:
+        if context.unattended and from_memory:
             # Tool arguments cannot select an unattended route, but neither may
-            # we silently charge a different stored source/account/model.
+            # we silently charge a different remembered source/account/model
+            # (#512). A job's own stored choice is the owner's binding for that
+            # job, so it runs and the tool's source/model are ignored (#507).
             named_source = normalize_source(args.get("source"))
             stored_source = normalize_source(stored.get("source") or stored.get("account"))
             differs = any(args.get(key) and args[key] != stored.get(key) for key in ("account", "model", "worker"))
@@ -221,6 +225,9 @@ class Resolver:
                                       "does not match the stored choice. The named choice needs the owner's selection. "
                                       "No source catalog was queried and nothing was submitted.")
         explicit = bool(args.get("source") or args.get("model"))
+        # An unattended job ran its own binding, not what the call named.
+        job_bound = context.unattended and bool(job) and any(
+            args.get(key) for key in ("source", "model", "account", "worker"))
         # The remembered choice is running unasked (nothing named in the call).
         unasked = from_memory and not explicit
 
@@ -365,6 +372,7 @@ class Resolver:
                 price = reported
             return result("completed" if output.get("success") else "failed", price=price,
                           choice=candidate.choice(), result=output,
+                          **({"job_choice": True, "message": JOB_CHOICE_MESSAGE} if job_bound else {}),
                           **({"remembered": True, "message": REMEMBERED_MESSAGE} if from_memory and not explicit else {}))
         except ValueError as exc:
             # Backends raise only safe validation messages, not upstream bodies.
