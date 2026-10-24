@@ -33,7 +33,11 @@ def _emulator_tools_listed(monkeypatch):
 # of the no-Swarm sizing line, and the app-tools note maps Swarm onto its
 # bridged name: +441 chars (14,094 -> 14,535 on a local run of the fixture).
 # Swarm's schema stays deferred: the always-loaded bridge tools are unchanged.
-MEASURED_FULL = 128_050
+# #371 watches adds four deferred schemas (1,790 full-catalog chars); measured
+# combined_full=131,021 and compiled_eager=52,768. Only the deferred tool-name
+# index grows eagerly (+195 chars); no new watch schema is eager and no rule
+# was removed. Keep the existing eager/CLI budgets unchanged.
+MEASURED_FULL = 131_021
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
@@ -174,7 +178,10 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    assert len(specs) == 105
+    assert len(specs) == 109  # Includes the four deferred owner-watch tools.
+    for leaf in ("CreateWatch", "ListWatches", "PauseWatch", "StopWatch"):
+        spec = next(s for s in specs if s.name.rsplit("__", 1)[-1] == leaf)
+        assert spec.description not in compiled.text
     assert first["totals"]["compiled_eager"] < first["totals"]["combined_full"]
     assert "# Deferred tools" in compiled.text
     # Discovery remains available; full schemas remain measurable on demand.

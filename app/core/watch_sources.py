@@ -142,8 +142,13 @@ def gmail_poll(instance, cursor):
 
 async def gh_api(endpoint):
     # No shell, no model, no source-supplied executable/flags, and no credentials in logs.
-    process = await asyncio.create_subprocess_exec("gh","api",endpoint,
-                  stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+    from fluid.tools.child_env import scrub_child_env
+    from app.core.platform import get_gh_executable
+    executable = get_gh_executable()
+    if not executable:
+        raise ValueError('GitHub watches require the GitHub CLI; install or reconnect GitHub on this worker')
+    process = await asyncio.create_subprocess_exec(executable,"api",endpoint,
+                  stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,env=scrub_child_env())
     try:
         stdout,stderr = await asyncio.wait_for(process.communicate(),timeout=30)
     except BaseException:
