@@ -388,7 +388,7 @@ def _task_stop(cursor, session_id: str, *, owner: bool = False) -> bool:
     cursor.execute(
         "SELECT * FROM turns WHERE session_id=%s "
         "AND payload ->> 'terminal_task_stop' IS NOT NULL "
-        "ORDER BY position DESC, id DESC LIMIT 1", (session_id,),
+        "ORDER BY position DESC, insert_order DESC, id DESC LIMIT 1", (session_id,),
     )
     row = _row(cursor.fetchone())
     if not row or not row["payload"].get(TASK_STOP_KEY):
@@ -406,7 +406,8 @@ def _cwd_failure(cursor, session_id: str):
     cursor.execute(
         "SELECT * FROM turns WHERE session_id=%s "
         "AND payload ->> 'working_directory_failure' IS NOT NULL "
-        "ORDER BY ended_at DESC NULLS FIRST, position DESC, id DESC LIMIT 1", (session_id,),
+        "ORDER BY ended_at DESC NULLS FIRST, position DESC, insert_order DESC, id DESC LIMIT 1",
+        (session_id,),
     )
     row = _row(cursor.fetchone())
     failure = (row or {}).get("payload", {}).get(CWD_FAILURE_KEY) or {}
@@ -504,9 +505,10 @@ def enqueue_turn(
     and therefore jumps ahead of anything queued after it — front-of-queue by
     construction, no position rewrite needed.
 
-    Two concurrent enqueues can read the same MAX and tie on ``position``; the
-    queue reads break ties deterministically (created_at, then id), so a tie
-    reorders nothing across processes — it just fixes the order.
+    The session-row admission lock serializes inserts, including ad-hoc
+    history. ``insert_order`` increases independently of position and never
+    changes on requeue/resume. Latest-history reads and equal-position queue
+    ties use it instead of timestamps (which can tie) or random UUIDs.
 
     When ``at_front`` is True the turn is instead placed strictly BEFORE every
     currently-queued row for the session (``MIN(position) - 1`` over the queued
@@ -570,13 +572,16 @@ def enqueue_turn(
         overrides = _session_bound_overrides(overrides, source, cursor.fetchone())
         if at_front:
             cursor.execute(
-                "SELECT COALESCE(MIN(position), 1) - 1 AS pos FROM turns "
-                "WHERE session_id = %s AND state = 'queued'",
+                "SELECT COALESCE(MIN(CASE WHEN state='queued' THEN position END), 1) - 1 AS pos, "
+                "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns "
+                "WHERE session_id = %s",
                 (session_id,),
             )
         else:
             cursor.execute(
-                "SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM turns WHERE session_id = %s",
+                "SELECT COALESCE(MAX(position), 0) + 1 AS pos, "
+                "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns "
+                "WHERE session_id = %s",
                 (session_id,),
             )
         pos_row = cursor.fetchone()
@@ -585,8 +590,8 @@ def enqueue_turn(
             "INSERT INTO turns "
             "(id, session_id, state, source, prompt, profile_id, project_id, "
             "worktree_id, overrides, payload, command_id, parent_turn_id, "
-            "instance_id, position) "
-            "VALUES (%s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "instance_id, position, insert_order) "
+            "VALUES (%s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "RETURNING *",
             (
                 turn_id,
@@ -602,6 +607,7 @@ def enqueue_turn(
                 parent_turn_id,
                 instance_id,
                 position,
+                pos_row["insert_order"],
             ),
         )
         row = _row(cursor.fetchone())
@@ -692,8 +698,12 @@ def record_adhoc_turn(
     turn_id = f"turn-{uuid.uuid4().hex}"
     with get_db() as conn:
         cursor = conn.cursor()
+        # Share enqueue's lock: ad-hoc records participate in the same history
+        # even though they never claim a live slot or a run lease.
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         cursor.execute(
-            "SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM turns WHERE session_id = %s",
+            "SELECT COALESCE(MAX(position), 0) + 1 AS pos, "
+            "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns WHERE session_id = %s",
             (session_id,),
         )
         pos_row = cursor.fetchone()
@@ -701,8 +711,9 @@ def record_adhoc_turn(
         cursor.execute(
             "INSERT INTO turns "
             "(id, session_id, state, source, prompt, profile_id, project_id, "
-            "overrides, payload, position, stop_reason, error, started_at, ended_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "overrides, payload, position, insert_order, stop_reason, error, "
+            "started_at, ended_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
             "COALESCE(%s, NOW()), NOW()) "
             "RETURNING *",
             (
@@ -716,6 +727,7 @@ def record_adhoc_turn(
                 json.dumps(overrides or {}),
                 json.dumps(payload or {}),
                 position,
+                pos_row["insert_order"],
                 stop_reason,
                 error,
                 started_at,
@@ -808,7 +820,8 @@ def start_turn(
                     "AND NOT EXISTS (SELECT 1 FROM session_events e "
                     "WHERE e.session_id=turns.session_id AND e.turn_id=turns.id "
                     "AND e.event_type='turn.started')) "
-                    "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
+                    "ORDER BY position DESC, insert_order DESC, created_at DESC, id DESC "
+                    "LIMIT 1 FOR UPDATE",
                     (candidate["session_id"],),
                 )
                 previous = _row(cursor.fetchone())
@@ -1237,7 +1250,7 @@ def latest_reply_to_turn(
             "SELECT * FROM turns WHERE session_id=%s "
             "AND payload ->> 'agent_message_reply_to' = %s "
             "AND position < %s AND COALESCE(stop_reason, '') <> 'steered' "
-            "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1",
+            "ORDER BY position DESC, insert_order DESC, created_at DESC, id DESC LIMIT 1",
             (session_id, owner, before_position),
         )
         return _row(cursor.fetchone())
@@ -1446,7 +1459,8 @@ def get_turn_by_command(session_id: str, command_id: str, *, _conn=None) -> Opti
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM turns WHERE session_id=%s AND command_id=%s ORDER BY created_at LIMIT 1",
+            "SELECT * FROM turns WHERE session_id=%s AND command_id=%s "
+            "ORDER BY insert_order ASC, id ASC LIMIT 1",
             (session_id, command_id),
         )
         row = cursor.fetchone()
@@ -1480,7 +1494,7 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            "ORDER BY insert_order DESC, id DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()
@@ -1502,7 +1516,7 @@ def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
             "AND NOT (state='completed' AND COALESCE(stop_reason, '')='steered') "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            "ORDER BY insert_order DESC, id DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()
@@ -1516,7 +1530,7 @@ def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s AND state='queued' "
-            "ORDER BY position ASC, created_at ASC, id ASC",
+            "ORDER BY position ASC, insert_order ASC, created_at ASC, id ASC",
             (session_id,),
         )
         rows = cursor.fetchall()
@@ -1579,7 +1593,7 @@ def pop_ready(session_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s AND state='queued' "
-            "ORDER BY position ASC, created_at ASC, id ASC LIMIT 1",
+            "ORDER BY position ASC, insert_order ASC, created_at ASC, id ASC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()

@@ -2148,6 +2148,7 @@ def _run_column_migrations(cursor: Any) -> None:
                 interrupt_mode TEXT,
                 stop_background BOOLEAN NOT NULL DEFAULT FALSE,
                 position DOUBLE PRECISION,
+                insert_order BIGINT NOT NULL DEFAULT 0,
                 instance_id TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 started_at TIMESTAMP WITH TIME ZONE,
@@ -2163,6 +2164,17 @@ def _run_column_migrations(cursor: Any) -> None:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
+    )
+
+    # Immutable insertion order is separate from queue position (front-inserts
+    # deliberately lower position). The source fingerprint runs this additive
+    # migration on existing installs; no SCHEMA_VERSION bump is required.
+    if not column_exists(cursor, "turns", "insert_order"):
+        cursor.execute("ALTER TABLE turns ADD COLUMN insert_order BIGINT NOT NULL DEFAULT 0")
+        migrations_applied.append("turns.insert_order")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_insert_order "
+        "ON turns(session_id, insert_order DESC)"
     )
 
     # Latest generated composer hint; retained even with no watching browser.
@@ -2203,6 +2215,25 @@ def _run_column_migrations(cursor: Any) -> None:
         """)
         if cursor.rowcount and cursor.rowcount > 0:
             migrations_applied.append(f"turns<-queued_messages({cursor.rowcount})")
+
+    # Include legacy queued_messages imports above. Historical same-time ties
+    # cannot be reconstructed: retain timestamp/position/id order ONCE, then
+    # give all new inserts an ordinal under the session-row admission lock.
+    # Only zero/unassigned rows change, so reruns preserve every assigned value.
+    cursor.execute("""
+        WITH ranked AS (
+            SELECT legacy.id,
+                   COALESCE((SELECT MAX(existing.insert_order) FROM turns existing
+                             WHERE existing.session_id=legacy.session_id), 0)
+                   + ROW_NUMBER() OVER (
+                       PARTITION BY legacy.session_id
+                       ORDER BY legacy.created_at, legacy.position, legacy.id
+                   ) AS ordinal
+            FROM turns legacy WHERE legacy.insert_order=0
+        )
+        UPDATE turns SET insert_order=ranked.ordinal
+        FROM ranked WHERE turns.id=ranked.id
+    """)
 
     # Per-session V2 streaming column (v57). Originally a per-session opt-in;
     # the v58 block below forces it TRUE on every session and flips the default.

@@ -41,6 +41,74 @@ def test_enqueue_assigns_increasing_positions_and_reads_back(mock_db):
     assert len(turns.get_queued_turns("s1")) == 3
 
 
+@pytest.mark.parametrize("newer_writer", ["enqueue", "at_front", "adhoc"])
+def test_latest_turn_uses_insert_order_when_created_at_ties(
+    mock_db, monkeypatch, newer_writer,
+):
+    from types import SimpleNamespace
+
+    # Reverse lexical UUID order so the old timestamp/id lookup MUST be wrong.
+    ids = iter(["z-first", "a-second"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
+    first = turns.enqueue_turn("timestamp-tie", "user", command_id="shared")
+    if newer_writer == "adhoc":
+        second = turns.record_adhoc_turn("timestamp-tie", "api")
+    else:
+        second = turns.enqueue_turn(
+            "timestamp-tie", "user", at_front=newer_writer == "at_front", command_id="shared",
+        )
+    mock_db.execute(
+        "UPDATE turns SET created_at=? WHERE session_id=?",
+        ("2026-01-01 00:00:00", "timestamp-tie"),
+    )
+    assert turns.get_turn(first["id"])["created_at"] == turns.get_turn(second["id"])["created_at"]
+    assert turns.get_latest_turn("timestamp-tie")["id"] == second["id"]
+    assert turns.get_latest_run_turn("timestamp-tie")["id"] == second["id"]
+    assert turns.get_turn_by_command("timestamp-tie", "shared")["id"] == first["id"]
+    if newer_writer == "at_front":
+        assert turns.pop_ready("timestamp-tie")["id"] == second["id"]
+
+
+def test_queue_position_ties_use_insert_order(mock_db, monkeypatch):
+    from types import SimpleNamespace
+
+    ids = iter(["z-first", "a-second"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
+    first = turns.enqueue_turn("position-tie", "user", payload={"agent_message_reply_to": "owner"})
+    second = turns.enqueue_turn("position-tie", "user", payload={"agent_message_reply_to": "owner"})
+    mock_db.execute(
+        "UPDATE turns SET created_at=?, position=1 WHERE session_id=?",
+        ("2026-01-01 00:00:00", "position-tie"),
+    )
+    assert [row["id"] for row in turns.get_queued_turns("position-tie")] == [
+        first["id"], second["id"],
+    ]
+    assert turns.pop_ready("position-tie")["id"] == first["id"]
+    reply = turns.latest_reply_to_turn("position-tie", "owner", before_position=2)
+    assert reply["id"] == second["id"]
+
+    # The other position-based history readers must agree too, not fall back
+    # to the older row's lexically greater UUID on a tie.
+    import json
+    from app.core.config import settings
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        for row, stopped in ((first, False), (second, True)):
+            payload = {
+                "terminal_task_stop": stopped,
+                "working_directory_failure": {"instance_id": settings.effective_instance_id},
+            }
+            cur.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+        assert turns._task_stop(cur, "position-tie") is True
+        assert turns._cwd_failure(cur, "position-tie")[0]["id"] == second["id"]
+
+
 def test_enqueue_persists_optional_fields(mock_db):
     t = turns.enqueue_turn(
         "s1",

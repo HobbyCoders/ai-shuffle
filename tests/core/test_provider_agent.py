@@ -1460,8 +1460,19 @@ def test_older_queued_turn_survives_newer_removed_followup(
     from app.core import turn_manager
     from app.db import turns
 
+    from types import SimpleNamespace
+
+    ids = iter(["z-first", "a-newer-aborted"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
     first = turns.enqueue_turn("queued-behind-aborted", "worker", prompt="work")
     followup = turns.enqueue_turn("queued-behind-aborted", "user", prompt="follow up")
+    mock_db.execute(
+        "UPDATE turns SET created_at=? WHERE session_id=?",
+        ("2026-01-01 00:00:00", "queued-behind-aborted"),
+    )
+    assert turns.get_turn(first["id"])["created_at"] == turns.get_turn(followup["id"])["created_at"]
     assert turns.remove_queued_turn(followup["id"])
     assert turns.get_latest_turn("queued-behind-aborted")["id"] == followup["id"]
     assert turns.get_turn(first["id"])["state"] == "queued"
