@@ -218,7 +218,7 @@ def _find_open_pr_for_branch(repo: str, branch: str):
     ``None``: the two are different facts and the caller must not cache the
     second as the first.
     """
-    pulls = github_service.list_pulls(repo, state="open", limit=100)
+    pulls = github_service.list_pulls(repo, state="open", head=branch, limit=1)
     for pr in pulls:
         if pr.head_branch == branch:
             return pr
@@ -1195,6 +1195,8 @@ async def get_operation(
 # PR state (lifecycle for the current branch)
 # =============================================================================
 
+_pr_state_refreshes: dict[tuple, asyncio.Task] = {}
+_pr_state_generation = 0
 _PR_STATE_TTL_SECONDS = 15.0
 # How long a *known-good* answer may still be served after it expired, when the
 # refresh fails (stale-while-revalidate). Beyond this the client is told the
@@ -1215,6 +1217,8 @@ def _invalidate_pr_state_cache(working_dir: Optional[str] = None) -> None:
     ``"<working_dir>:<branch>"``, so this matches on the prefix); without it,
     everything.
     """
+    global _pr_state_generation
+    _pr_state_generation += 1
     if working_dir is None:
         _pr_state_cache.invalidate()
     else:
@@ -1264,9 +1268,10 @@ async def get_pr_state(
 
     working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
 
-    st = await run_git(git_service.get_status, working_dir)
-    branch = (st or {}).get("current_branch") if st else None
-    if not branch or not (st or {}).get("is_git_repo", False):
+    # Branch identity does not require status/diff/index traversal. In
+    # particular, a cache hit must not queue behind full repository scans.
+    branch = await run_git(git_service.get_current_branch, working_dir)
+    if not branch or not await run_git(git_service.is_git_repo, working_dir):
         return PrStateResponse(current_branch=None, has_github=False, open_pr=None)
 
     cache_key = f"{working_dir}:{branch}"
@@ -1277,6 +1282,22 @@ async def get_pr_state(
             schedule_session_pr_reconcile(session_id)
         return PrStateResponse(**cached)
 
+    # Share only an active refresh, not a failure cache. Shielding means one
+    # disconnected poll cannot cancel the lookup for every other waiter.
+    generation = _pr_state_generation
+    flight_key = (asyncio.get_running_loop(), cache_key, generation)
+    flight = _pr_state_refreshes.get(flight_key)
+    if flight is None:
+        flight = asyncio.create_task(_read_pr_state(working_dir, branch, cache_key, project_id, generation))
+        _pr_state_refreshes[flight_key] = flight
+        flight.add_done_callback(lambda done: _pr_state_refreshes.pop(flight_key, None))
+    answer = await asyncio.shield(flight)
+    if session_id and answer.has_github:
+        schedule_session_pr_reconcile(session_id)
+    return answer
+
+
+async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_id: str, generation: int):
     # Base shape when there's nothing to say about GitHub.
     result: Dict[str, Any] = {
         "current_branch": branch,
@@ -1337,9 +1358,10 @@ async def get_pr_state(
         # Only a complete, authoritative answer is cached. "No GitHub remote" /
         # "not signed in" stay uncached so they cost nothing to correct.
         if result["has_github"]:
-            _pr_state_cache.set(cache_key, dict(result))
-            if session_id:
-                schedule_session_pr_reconcile(session_id)
+            # A create/merge may invalidate while gh is running. An older
+            # flight may answer its waiters, but must not repopulate the cache.
+            if generation == _pr_state_generation:
+                _pr_state_cache.set(cache_key, dict(result))
         return PrStateResponse(**result)
 
     # --- failed refresh: never cache, serve the last good value if we have one

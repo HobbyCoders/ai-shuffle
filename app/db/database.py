@@ -2698,6 +2698,8 @@ def _run_column_migrations(cursor):
     migrations_applied.extend(_retire_fal_billing_key(cursor))
     migrations_applied.extend(_retire_secret_named_observations(cursor))
     migrations_applied.extend(_retire_assistant_home(cursor))
+    from app.db.working_record import create_schema as create_working_record_schema
+    create_working_record_schema(cursor)
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -3430,14 +3432,14 @@ def migrations_fingerprint() -> str:
     """
     import hashlib
 
-    from app.db import schema_postgres, mobile_hub, network, assistant
+    from app.db import schema_postgres, mobile_hub, network, assistant, working_record
     from app.core import owner_auth
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
     # The hub and owner helpers also define tables used during encryption init.
     # Include their sources and the network schema so upgrades cannot skip new DDL.
-    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant):
+    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, assistant, working_record):
         path = getattr(module, "__file__", None)
         if not path:
             return ""
