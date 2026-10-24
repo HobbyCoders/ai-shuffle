@@ -893,7 +893,9 @@ HOME_REPAIR_CURSOR = "home-repair-cursor.json"
 
 def home_repair_cursor(data_dir, state=None):
     """Bounded, advisory progress only; never follow a cursor or parent symlink."""
-    parent = open_directory(data_dir)
+    # remap-home runs as root before drop_privileges validates storage. Apply
+    # its mount policy before even reading advisory metadata, not after writing.
+    parent = open_directory(validate_mount_root("DATA_DIR", Path(data_dir)))
     try:
         if state is None:
             fd = os.open(HOME_REPAIR_CURSOR, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)

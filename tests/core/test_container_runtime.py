@@ -1100,6 +1100,23 @@ def test_home_root_repair_resumes_across_restarts(tmp_path, home_ownership, coun
     assert {entry[0] for entry in changed} == set(targets)
 
 
+@pytest.mark.parametrize("state", [None, {"version": 1, "scan": 0, "frames": {}}])
+def test_home_repair_cursor_refuses_image_data_before_any_io(tmp_path, monkeypatch, state):
+    image = tmp_path / "image"
+    image.mkdir()
+    marker = image / "retained"
+    marker.write_text("must remain unchanged")
+    monkeypatch.setattr(runtime.sys, "prefix", str(image))
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
+    opened = Mock(wraps=runtime.open_directory)
+    monkeypatch.setattr(runtime, "open_directory", opened)
+    with pytest.raises(runtime.RuntimeFailure, match="DATA_DIR.*mount a volume.*outside the image trees"):
+        runtime.home_repair_cursor(image, state)
+    opened.assert_not_called()
+    assert list(image.iterdir()) == [marker]
+    assert marker.read_text() == "must remain unchanged"
+
+
 @pytest.mark.parametrize("mask", [0o022, 0o077])
 def test_home_root_repair_cursor_is_readable_by_unprivileged_backup(tmp_path, mask):
     (tmp_path / "existing-install").write_text("initialized earlier")
