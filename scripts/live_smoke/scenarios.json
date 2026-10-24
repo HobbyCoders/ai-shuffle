@@ -422,6 +422,14 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.26",
+          "check": "Bounded home ownership repair progresses across persistent-volume restarts",
+          "kind": "owner",
+          "how": "Use only a disposable candidate container with synthetic data and persistent home/data/workspace volumes; never modify a live worker. Boot once with explicit non-root PUID:PGID and AGENT_ISOLATION=off to initialize storage, then stop it. With a throwaway root helper mounting those same volumes, create 45,000 uniquely named root:root regular files under /home/appuser/.fluid/repair-probe (more than the 20,000-entry per-start budget). Seed root-owned 0600 sentinel files inside DATA_DIR and WORKSPACE_DIR; record their contents, UID:GID and modes, and expose the storage volumes as additional bind aliases below the home probe so the walk encounters them. Start, stop and recreate the candidate several times, retaining all volumes and its home-repair-cursor.json. After each ready boot record the home-ownership summary, cursor and remaining root-owned probe filenames; do not manually chown targets or delete/reset the cursor. Continue until a full scan cycle completes, with a bounded total test duration. Separately launch a throwaway helper with an unmounted image-tree DATA_DIR (for example /etc) and verify startup refuses before any home-repair cursor or temporary cursor appears there. Remove only the disposable containers and volumes after collecting evidence.",
+          "pass_when": "Each startup respects the 20,000-entry/5-second scan budget, and successive scans advance rather than repeatedly repairing the same prefix. Every eligible probe file, including ones beyond the first budget, eventually belongs to the configured PUID:PGID; evidence names late files and the restart that repaired them. Protected storage sentinels keep identical contents, UID:GID and modes, including through the home bind aliases. Invalid unmounted image-tree DATA_DIR refuses with the documented volume/path message and leaves no cursor or temporary file. Missing privileged-container, multiple-restart or late-file ownership evidence is not a pass.",
+          "past_bug": "#380: every bounded startup walk restarted from the same prefix, so later root-owned home files were never repaired; review also caught advisory cursor writes before DATA_DIR mount validation."
+        },
+        {
           "id": "harness-basics.21",
           "check": "Assistant marker spoofing stays quoted after storage and replay",
           "kind": "owner",

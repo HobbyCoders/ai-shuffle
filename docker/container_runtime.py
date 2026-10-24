@@ -888,6 +888,62 @@ def mounted_directory(path):
 HOME_VOLUMES = (".fluid", ".config", ".config/gh", ".claude", ".local", "chrome-profile")
 
 
+HOME_REPAIR_CURSOR = "home-repair-cursor.json"
+
+
+def home_repair_cursor(data_dir, state=None):
+    """Bounded, advisory progress only; never follow a cursor or parent symlink."""
+    # remap-home runs as root before drop_privileges validates storage. Apply
+    # its mount policy before even reading advisory metadata, not after writing.
+    parent = open_directory(validate_mount_root("DATA_DIR", Path(data_dir)))
+    try:
+        if state is None:
+            fd = os.open(HOME_REPAIR_CURSOR, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("not a regular cursor")
+                state = json.loads(stream.read(65537))
+            # The cursor is agent-editable input, not authority to traverse paths.
+            if (not isinstance(state, dict) or state.get("version") != 1
+                    or type(state.get("scan")) is not int or not 0 <= state["scan"] < 16
+                    or not isinstance(state.get("frames"), dict) or len(state["frames"]) > 65):
+                raise ValueError("invalid cursor")
+            for depth, frame in state["frames"].items():
+                if (depth not in {str(i) for i in range(65)} or not isinstance(frame, dict)
+                        or any(type(frame.get(key)) is not int or not 0 <= frame[key] < 2**64
+                               for key in ("dev", "ino", "offset", "index"))
+                        or frame["offset"] >= 2**63 or frame["index"] > 32768
+                        or not isinstance(frame.get("pending"), str)
+                        or len(os.fsencode(frame["pending"])) > 255
+                        or "\0" in frame["pending"]
+                        or "/" in frame["pending"] or frame["pending"] in {".", ".."}):
+                    raise ValueError("invalid cursor frame")
+            return state
+        # Fresh named volumes must stay empty until drop_privileges prepares
+        # their root ownership. The database initializes them later this boot;
+        # advisory progress can start on the following container start.
+        with os.scandir(parent) as entries:
+            if next(entries, None) is None:
+                return
+        temporary = HOME_REPAIR_CURSOR + ".new-" + secrets.token_hex(6)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                # Advisory filenames/cookies, not secrets. appuser's backup
+                # must be able to archive a cursor created by root, even with
+                # a restrictive inherited umask.
+                os.fchmod(stream.fileno(), 0o644)
+                json.dump(state, stream)
+            os.replace(temporary, HOME_REPAIR_CURSOR, src_dir_fd=parent, dst_dir_fd=parent)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(parent)
+
+
 def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entries=20000, max_seconds=5):
     """Best-effort, bounded repair of root writes in the fixed application home.
 
@@ -900,6 +956,11 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
     result = {"repaired": 0, "skipped": 0, "reasons": {}, "visited": 0, "limited": False}
     sample = []
     started = time.monotonic()
+    state = {"version": 1, "scan": 0, "frames": {}}
+    try:
+        state = home_repair_cursor(data_dir)
+    except (OSError, ValueError, TypeError, RecursionError):
+        pass  # Missing/stale state starts a fresh cycle; repair is best-effort.
 
     def skip(reason):
         result["skipped"] += 1
@@ -914,10 +975,19 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
         return result["limited"]
 
     def walk(root, mounts, priority, *, shallow=False):
+        frames = state["frames"]
+
         def visit(fd, name, child, device, depth):
             if limited():
-                return
-            result["visited"] += 1
+                return False
+            process(fd, name, child, device, depth)
+            return str(depth) not in frames
+
+        def process(fd, name, child, device, depth):
+            key = str(depth)
+            resume = frames.pop(key, None)
+            if resume is None:
+                result["visited"] += 1
             try:
                 entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 if storage(child, entry):
@@ -963,17 +1033,45 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
                         if depth >= 64:
                             skip("depth")
                             return
-                        # fwalk eagerly lists a whole directory before yielding. Stream
-                        # from the pinned fd instead, checking the clock during listing.
+                        if resume is None or (resume["dev"], resume["ino"]) != (pinned.st_dev, pinned.st_ino):
+                            resume = {"dev": pinned.st_dev, "ino": pinned.st_ino,
+                                      "offset": 0, "index": 0, "pending": ""}
+                        frames[key] = resume
+                        # A pending child was yielded but not finished last start.
+                        if resume["pending"]:
+                            name = resume["pending"]
+                            if not visit(child_fd, name, child / name, device, depth + 1):
+                                return
+                            resume["pending"] = ""
+                        # Linux scandir buffers getdents results. Save the cookie
+                        # BEFORE the current buffer and an index within it, never
+                        # the fd's end-of-buffer offset alone (which loses entries).
+                        # Replaying at most one buffer avoids an ever-growing
+                        # prefix scan on large directories.
+                        os.lseek(child_fd, resume["offset"], os.SEEK_SET)
                         with os.scandir(child_fd) as entries:
-                            while not limited():
-                                try:
-                                    item = next(entries)
-                                except StopIteration:
-                                    break
+                            for _ in range(resume["index"]):
                                 if limited():
+                                    return
+                                if next(entries, None) is None:
+                                    break  # directory changed; next cycle starts at zero
+                            while not limited():
+                                before = os.lseek(child_fd, 0, os.SEEK_CUR)
+                                item = next(entries, None)
+                                if item is None:
                                     break
-                                visit(child_fd, item.name, child / item.name, device, depth + 1)
+                                after = os.lseek(child_fd, 0, os.SEEK_CUR)
+                                if before != after:
+                                    resume["offset"], resume["index"] = before, 0
+                                resume["index"] += 1
+                                resume["pending"] = item.name
+                                if limited():
+                                    return
+                                if not visit(child_fd, item.name, child / item.name, device, depth + 1):
+                                    return
+                                resume["pending"] = ""
+                        if not result["limited"]:
+                            frames.pop(key, None)
                 finally:
                     os.close(child_fd)
             except OSError:
@@ -1023,25 +1121,52 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
         scans.append((home, True))  # direct home writes precede large package subtrees
         scans += [(home / name, False) for name in HOME_VOLUMES if name not in early]
         scans.append((home, False))
-        for root, shallow in scans:
+        if state["scan"] >= len(scans):
+            state["scan"], state["frames"] = 0, {}
+        for index in range(state["scan"], len(scans)):
             if limited():
                 break
+            root, shallow = scans[index]
             try:
                 walk(root, mounts, priority, shallow=shallow)
             except FileNotFoundError:
                 pass  # absent optional home directories need no repair
             except OSError:
                 skip("unavailable")
+            if result["limited"]:
+                break
+            state["scan"], state["frames"] = index + 1, {}
+        if not result["limited"]:
+            state["scan"], state["frames"] = 0, {}
     except OSError:
         skip("unavailable")
+    try:
+        home_repair_cursor(data_dir, state)
+    except (OSError, ValueError):
+        skip("cursor-unavailable")
     log(f"home ownership repair: repaired={result['repaired']} skipped={result['skipped']} "
         f"reasons={json.dumps(result['reasons'], sort_keys=True)} visited={result['visited']} "
         f"limit_reached={result['limited']} sample={json.dumps(sample)}")
     return result
 
 
+def home_service_uid(mode):
+    """Validate before home preparation, preserving each isolation mode's policy."""
+    module = isolation()
+    try:
+        return module._id(os.environ, "AGENT_ISOLATION_SERVICE_UID")
+    except AttributeError:
+        return 64000  # standalone bootstrap copy without isolation helpers
+    except module.IsolationError as error:
+        if mode == "required":
+            raise RuntimeFailure(f"required agent isolation: startup refused; {error}") from None
+        return module.DEFAULT_SERVICE_ID
+
+
 def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
     """Migrate agent-owned home entries, never service data or shared inodes."""
+    mode = isolation_setting()
+    service_uid = home_service_uid(mode)
     home, data_dir = safe_path(home), safe_path(data_dir)
     try:
         data = data_dir.stat()
@@ -1051,15 +1176,6 @@ def remap_home(home, data_dir, old_uid, old_gid, new_uid, new_gid):
     # Bind aliases on one host mount share this identity. Aliases reached through
     # two distinct host filesystems may not: keep retained data on its own volume.
     mounts = mount_points()
-    module = isolation()
-    try:
-        service_uid = module._id(os.environ, "AGENT_ISOLATION_SERVICE_UID")
-    except AttributeError:
-        service_uid = 64000  # standalone bootstrap copy without isolation helpers
-    except module.IsolationError as error:
-        if module.setting() == "required":
-            raise RuntimeFailure(f"required agent isolation: startup refused; {error}") from None
-        service_uid = module.DEFAULT_SERVICE_ID
     roots = [(home, old_uid, old_gid, False)]
     roots += [(home / name, None, None, True) for name in HOME_VOLUMES if home / name in mounts]
     for root, previous_uid, previous_gid, mounted in roots:
@@ -1716,6 +1832,8 @@ def main(argv=None):
         signal.signal(sig, lambda *_: STOP.set())
     try:
         if args.action == "remap-home":
+            mode = isolation_setting()
+            home_service_uid(mode)
             if os.geteuid() != 0 or min(args.old_uid, args.old_gid, args.new_uid, args.new_gid) <= 0:
                 raise RuntimeFailure("home remapping requires root and non-root account IDs")
             settings = load_startup_settings()
