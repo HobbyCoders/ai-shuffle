@@ -40,7 +40,7 @@ test('first point produces the legacy manifest; next point reads only changed fi
   files.length = 0;
   await fs.writeFile(path.join(root, 'data/base/1/rows'), 'updated rows');
   await fs.writeFile(path.join(root, 'data/new'), 'new');
-  await fs.rm(path.join(root, 'data/empty'), { recursive: true });
+  await fs.rm(path.join(root, 'data/empty'), { recursive: true, maxRetries: 10, retryDelay: 100 });
   await fs.mkdir(path.join(root, 'data/new-empty'));
   await copy.snapshot();
   assert.deepEqual(files.sort(), [path.join('base', '1', 'rows'), 'new'].sort());
@@ -99,7 +99,7 @@ test('removals and file/directory type changes are reflected exactly', async t =
   await fs.rm(path.join(root, 'data/base/1/rows'));
   await fs.mkdir(path.join(root, 'data/base/1/rows'));
   await fs.writeFile(path.join(root, 'data/base/1/rows/child'), 'child');
-  await fs.rm(path.join(root, 'data/empty'), { recursive: true });
+  await fs.rm(path.join(root, 'data/empty'), { recursive: true, maxRetries: 10, retryDelay: 100 });
   await fs.writeFile(path.join(root, 'data/empty'), 'now a file');
   await copy.snapshot(); await legacy(root).validate();
   assert.equal(await fs.readFile(path.join(root, 'update-snapshot/data/empty'), 'utf8'), 'now a file');
