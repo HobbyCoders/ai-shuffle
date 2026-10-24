@@ -11,6 +11,7 @@
 		STOP_STOPS_IT, blockerView, notSent, offerDescribesStaged, operationOutcome, outcomeView, receiptRows, receiptText, refusedWorkers, waitingSummary, waitingView,
 		type ActionResult, type Blocker, type BlockerView, type UpdateOperation, type WaitingFields
 	} from '$lib/components/settings/pages/update-waiting';
+	import { CHECK_IDLE_SETTLE_MS, CHECK_TIMEOUT_MS, OUTCOME_PHASES } from '$lib/components/settings/pages/update-check';
 
 	// Waiting fields (install_state, blocked_by...) come from update-waiting.ts; older peers omit them.
 	type Worker = WaitingFields & { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string | null; running_version?: string | null; percent?: number | null; message?: string | null; error?: string | null; reason?: string | null; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean; notice?: string | null; remedy?: 'installer' | null; data_kept?: boolean };
@@ -85,9 +86,14 @@
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let pollTimer: ReturnType<typeof setTimeout> | undefined;
 	let watchUntil = 0;
-	// A manual check reports its outcome once: an offered update shows the
+	// A manual check reports its outcome once, after every worker it asked has
+	// answered (the same rule as Settings > Updates): an offered update shows the
 	// button, and nothing found says so instead of leaving the user guessing.
 	let manualCheckAt = 0;
+	// Workers seen queued or checking since the request, and the workers that
+	// accepted it (null: a receipt without device ids, so every worker in scope).
+	let checkSeen = new Set<string>();
+	let checkAsked: Set<string> | null = null;
 	// A worker picks a check up within seconds; never call a check finished sooner.
 	const MANUAL_CHECK_SETTLE_MS = 5000;
 	const operation = $derived(snapshot?.operation);
@@ -166,6 +172,9 @@
 	const error = $derived(requestError || operationError || installerMessage || targets.find(row => row.worker.error)?.worker.error || held);
 	const visible = $derived(!!snapshot?.allow_updates && (waiting || celebrating || ready || available || downloading || restartWaits.length > 0 || checkFirst || !!partialNote || !!receipt || !!error));
 	const busy = $derived(pending || downloading || waiting || celebrating || restartLocked);
+	// A manual check is held only by a restart in flight. A worker that is downloading
+	// declines the check itself; every other worker still reads its feed.
+	const checkBlocked = $derived(pending || waiting || celebrating || restartLocked);
 	const action = $derived(ready ? 'Update and restart' : available ? 'Download update' : 'Check for updates');
 	const scope = $derived(snapshot?.update_all_workers ? 'All online workers' : 'Current worker');
 	const showOperation = $derived(!!operation && (waiting || celebrating || !!operationError || !!partialNote));
@@ -299,10 +308,12 @@
 		return true;
 	}
 	/** Remember a request's refusals: not-sent rows are not the worker's refusal, so they only show as the receipt. */
-	function keepReceipt(result: Receipt) {
+	function keepReceipt(result: Receipt, check = false) {
 		receipt = receiptText(receiptRows(result.results));
 		receiptHeld = false;
-		refusals = Object.fromEntries(result.results.filter(w => !w.accepted && !notSent(w) && w.device_id).map(w => [w.device_id!, w.reason]));
+		// A refused check holds nothing back (app/core/update_workers.py _dispatch): a worker already
+		// checking refuses it, and its own result must still show.
+		refusals = check ? {} : Object.fromEntries(result.results.filter(w => !w.accepted && !notSent(w) && w.device_id).map(w => [w.device_id!, w.reason]));
 	}
 	/** "Restart when work finishes" or "Stop running work and restart". */
 	async function restartLater(mode: 'when_idle' | 'stop') {
@@ -385,7 +396,7 @@
 	function schedule() {
 		clearTimeout(pollTimer); pollTimer = undefined;
 		if (!active || document.hidden) return;
-		const moving = pending || waiting || downloading || Date.now() < watchUntil;
+		const moving = pending || waiting || downloading || (manualCheckAt > 0 && Date.now() - manualCheckAt < CHECK_TIMEOUT_MS) || Date.now() < watchUntil;
 		pollTimer = setTimeout(refresh, moving ? FAST_POLL_MS : IDLE_POLL_MS);
 	}
 	async function refresh() {
@@ -448,20 +459,41 @@
 		if (installer.length) { openPanel({ kind: 'installer' }); return; }
 		await activate(true);
 	}
+	/** Start watching a check the server sent: each worker that accepted it is awaited. */
+	function startManualCheck(result: Receipt) {
+		manualCheckAt = Date.now();
+		checkSeen = new Set();
+		const ids = result.results.filter(w => w.accepted && w.device_id).map(w => w.device_id!);
+		checkAsked = ids.length && ids.length === result.results.filter(w => w.accepted).length ? new Set(ids) : null;
+	}
+	/** Whether every worker the check asked has answered, by the rule Settings > Updates uses:
+	 *  queued or checking is not done; afterwards a worker is done once it was seen checking,
+	 *  reports an outcome, or has stayed idle long enough that its check already ran. */
+	function checkSettled(next: Snapshot, elapsed: number): boolean {
+		let settled = true;
+		for (const w of next.workers) {
+			if (!w.online || (!next.update_all_workers && w.is_self === false)) continue;
+			// A worker already checking refuses a second check ("already in progress"),
+			// but its check can still find an update: wait for it either way.
+			if (w.phase === 'checking' || w.request_pending) { checkSeen.add(w.device_id); settled = false; continue; }
+			if (checkAsked && !checkAsked.has(w.device_id)) continue;
+			if (!checkSeen.has(w.device_id) && !OUTCOME_PHASES.has(w.phase) && elapsed < CHECK_IDLE_SETTLE_MS) settled = false;
+		}
+		return settled;
+	}
 	function settleManualCheck(next: Snapshot) {
 		if (!manualCheckAt) return;
 		const elapsed = Date.now() - manualCheckAt;
+		const settled = checkSettled(next, elapsed);
+		if (elapsed < MANUAL_CHECK_SETTLE_MS || (!settled && elapsed < CHECK_TIMEOUT_MS)) return;
+		manualCheckAt = 0;
 		const inScope = rows.filter(row => row.role !== 'excluded');
-		const checking = next.workers.some(w => w.phase === 'checking' || w.request_pending);
 		const found = available || staged > 0 || inScope.some(row => row.role === 'preparing' && row.worker.phase === 'downloading');
 		if (found) {
-			manualCheckAt = 0;
 			notify.info(summary, { title: ready ? 'Update ready' : 'Update found', persist: false });
 			return;
 		}
-		if (elapsed < MANUAL_CHECK_SETTLE_MS || (checking && elapsed < REQUEST_WATCH_MS)) return;
-		manualCheckAt = 0;
-		if (checking) notify.info('Still checking. The update button appears here if an update is found.', { title: 'Checking for updates', persist: false });
+		if (!settled) notify.info('Still checking. The update button appears here if an update is found.', { title: 'Checking for updates', persist: false });
 		else if (error) notify.warning(error, { title: 'Update check needs attention', persist: false,
 			...(installer.length ? { action: { label: INSTALLER_ACTION, onClick: openInstallerPage } } : {}) });
 		else notify.info(snapshot?.update_all_workers ? 'Every included worker is up to date.' : 'This worker is up to date.', { title: 'No updates found', persist: false });
@@ -477,12 +509,10 @@
 			notify.error('Application updates are disabled in Settings.');
 			return;
 		}
-		if (busy) {
+		// Like Settings > Updates, always ask every worker in scope: an update this
+		// worker already offers says nothing about peers that have not read their feed.
+		if (checkBlocked) {
 			notify.info(status, { title: 'Update in progress', persist: false });
-			return;
-		}
-		if (ready || available) {
-			notify.info(summary, { title: ready ? 'Update ready' : 'Update available', persist: false });
 			return;
 		}
 		const result = await activate(false, 'check');
@@ -491,32 +521,32 @@
 			return;
 		}
 		if (result.results.some(w => w.accepted)) {
-			manualCheckAt = Date.now();
+			startManualCheck(result);
 			notify.info('Asking each worker in scope for its latest version.', { title: 'Checking for updates', persist: false });
 		} else {
 			notify.warning(receipt || 'No worker accepted the check.', { title: 'Update check needs attention', persist: false });
 		}
 	}
 	async function activate(announce = false, forced?: 'check'): Promise<Receipt | null> {
-		if (busy || !snapshot?.allow_updates) return null;
+		if ((forced === 'check' ? checkBlocked : busy) || !snapshot?.allow_updates) return null;
 		const requestedAction = forced ?? (ready ? 'install' : available ? 'download' : 'check');
 		watchUntil = Date.now() + REQUEST_WATCH_MS;
 		pending = true; installRequested = requestedAction === 'install'; requestError = ''; receipt = ''; refusals = {};
 		try {
 			const result = await api.post<Receipt>('/settings/application-updates', { action: requestedAction });
 			if (!active) return null;
+			const sentAction = typeof result.sent === 'string' ? result.sent : requestedAction;
 			// Keep only refusals: accepted work shows up in each worker's live phase.
-			keepReceipt(result);
+			keepReceipt(result, sentAction === 'check');
 			if (!result.results.some(w => w.accepted)) installRequested = false;
 			// The server sent less than asked (a check instead of an install): nothing restarts,
 			// so never wait on startup, and say why whether or not this request was announced.
-			const sentAction = typeof result.sent === 'string' ? result.sent : requestedAction;
 			if (sentAction !== requestedAction || result.held) {
 				installRequested = false;
 				const why = result.held?.replace(/\.+$/, '') || 'Nothing was installed';
 				receipt = [why, receipt].filter(Boolean).join('; ');
 				receiptHeld = true;
-				if (sentAction === 'check' && result.results.some(w => w.accepted)) manualCheckAt = Date.now();
+				if (sentAction === 'check' && result.results.some(w => w.accepted)) startManualCheck(result);
 				notify.warning(`${why}.${sentAction === 'check' ? ' Checking for updates first.' : sentAction === 'download' ? ' Downloading first.' : ''}`,
 					{ title: 'Restart held', persist: false });
 				return result;

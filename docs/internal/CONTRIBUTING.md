@@ -192,11 +192,18 @@ Iterate on any failures reported by PR CI before merge. `fast` (affected tests),
 `check`, `full` and `--attest` stay available as explicit commands with their
 existing behavior; the push gate does not run or require them.
 
-For PR screenshots, commit images to `pr-assets` (or `pr-assets/*`) and push
-normally through the hook, from a code checkout containing the hook's scripts
-(for example, `git push origin pr-assets:pr-assets`). Every outgoing commit is
-secret-scanned like any other push. GitHub Contents API uploads are not
-allowed: they bypass the hook and its secret scan.
+Do not publish testing screenshots: none in PR descriptions or comments, none
+committed to the repository or a `pr-assets` branch, and none in gists or other
+public hosts. Describe the rendered check in text instead: what you opened,
+which states and widths you checked, and what you saw. Keep any captures in
+your own scratch space.
+
+This rule is about evidence for a review. Images the product, its docs or its
+tests use do belong in the repository, and a UI change should update them in
+the same PR: app and store icons, the README and docs images under
+`docs/images/`, and the visual-regression reference images in
+`frontend/tests/visual-baselines/` (see "Visual regression screenshots" in
+`docs/ci/pr-checks.md`).
 
 An explicit `check` or `full` run ends by listing what this machine could not
 cover (Windows when not on a Windows worker, Mac-only checks, the container

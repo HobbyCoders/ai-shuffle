@@ -476,6 +476,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     "ListAgents": LOW, "SendMessage": LOW, "ListSessions": LOW, "MessageSession": LOW,
     "StartSession": _start_session_rule, "SettleSession": LOW, "UnsettleSession": LOW, "ArchiveSession": LOW,
     "HandOffSession": HIGH, "RemoteTrigger": HIGH, "ScheduleWakeup": LOW,
+    "WorkingRecord": LOW,
     "CronList": LOW, "CronCreate": HIGH, "CronDelete": HIGH,
     # App status and the owner's own devices.
     "GetUsage": LOW, "DeployStatus": LOW, "WorktreeReport": LOW, "GetAppErrors": LOW, "GetAppLogs": LOW,

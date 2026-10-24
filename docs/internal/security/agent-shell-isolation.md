@@ -129,8 +129,18 @@ preparation as normal startup; populated roots and their contents are never
 re-owned, and maintenance does not prepare `WORKSPACE_DIR`. Optional `on`
 maintenance without a record uses the single-account fallback; `required`
 refuses without a record.
-Unknown values (for example `requried`) warn and run unisolated, preserving
-compatibility; refusing unknown non-empty values remains an owner decision.
+Unknown values (for example `requried`) refuse startup and list the valid
+values. The default remains `off`; optional `on` is a compatibility mode, not
+an assurance that isolation was established or a general-purpose sandbox.
+
+The entrypoint validates `AGENT_ISOLATION` before home remapping, account changes
+or provider setup. In `required` mode it also checks root launch, image helpers,
+both service IDs and collisions with the requested PUID/PGID before any such
+writes. Direct supervisor launches repeat this preflight before preparing mount
+roots. This read-only preflight cannot guarantee later migration succeeds:
+unsupported mounts, ownership or privilege-drop failures still refuse startup
+rather than launch the app. Successful preflight alone is not isolation proof;
+check the established log and run the disposable-image acceptance checks below.
 
 Image code under `/app` stays root-owned in every mode; disabling isolation
 does not release it. The root startup phase reads only mount-path settings
@@ -146,7 +156,16 @@ it rechecks ownership, inode identity and link count before `fchown`. A
 best-effort repair. It scans `.fluid` and `.claude`, then direct home-root
 entries without descending, then the other fixed paths and remaining subtrees;
 pinned-fd directory listings stream entries
-with budget checks instead of eagerly enumerating a large directory. Its one-line
+with budget checks instead of eagerly enumerating a large directory. An advisory,
+atomically replaced `DATA_DIR/home-repair-cursor.json` saves the scan phase and
+bounded directory-buffer positions across starts, so a large tree does not
+permanently hide later files. Each resumed path is reopened and revalidated;
+missing or malformed state starts a new cycle. After a complete cycle the next
+start scans from the beginning again. No cursor is written into an empty data
+volume: first-boot root ownership preparation still requires that volume to be
+empty; progress saving begins on a later start after database initialization.
+If progress cannot be saved, the summary
+includes `cursor-unavailable` and repair remains best-effort. Its one-line
 summary reports repairs, skips by reason, the scan limit and at most five
 relative-path samples; it never logs file contents.
 
@@ -203,6 +222,26 @@ run unisolated; pin a supporting image and check the log after tag changes.
 This startup policy is not evidence of OS-level enforcement; run the
 disposable-image checks below
 before relying on it or considering a default-on change.
+
+### Disposable-image preflight matrix (live smoke `harness-basics.34`)
+
+Use a disposable built candidate image and synthetic home/data/workspace volumes,
+never a live worker. Record sentinel contents, ownership and modes before each
+attempt. With `AGENT_ISOLATION=required`, try invalid service UID, invalid service
+GID, service UID equal to PUID, service GID equal to PGID, and a non-root `--user`
+launch. Also test a throwaway derived image lacking `docker/agent_isolation.py`.
+Each attempt must refuse with `required agent isolation: startup refused`, before
+home remapping, account changes, provider setup or mount-root preparation;
+sentinels and home-repair cursor state must remain unchanged. A misspelled policy
+must refuse and list `off, on, required` before those writes too.
+
+Then start the unmodified image with valid IDs and `required`: require the
+established log, a ready app, and the real agent/service access checks below.
+Inject a migration failure, restart with `required` to resume, and repeat those
+checks. Finally verify optional `on` still rolls back and continues on failure,
+and explicit `off` restores the compatibility path. Passing only the unit tests,
+preflight or readiness check is not a pass for this matrix. Remove only the
+throwaway images, containers and volumes created for the check.
 
 Run these checks from the repository root:
 
