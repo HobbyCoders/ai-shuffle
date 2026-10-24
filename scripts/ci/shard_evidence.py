@@ -9,7 +9,7 @@ import re
 import shutil
 
 
-def select_evidence(source: Path, destination: Path, prefix: str, count: int):
+def select_evidence(source: Path, destination: Path, prefix: str, count: int) -> None:
     pattern = re.compile(re.escape(prefix) + r"-([1-9][0-9]*)-a([1-9][0-9]*)")
     selected = {}
     for path in source.iterdir():
@@ -32,7 +32,7 @@ def select_evidence(source: Path, destination: Path, prefix: str, count: int):
         print(f"Selected {path.name} (attempt {attempt}) -> {target}", flush=True)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)

@@ -8,13 +8,17 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_workflows_namespace_attempts_and_select_before_validation():
+def test_workflows_namespace_attempts_and_select_before_validation() -> None:
     for filename, producer, gate, prefix, count in [
         ("windows-suite.yml", "desktop", "desktop-gate", "windows-desktop", 3),
         ("ci-backend.yml", "backend-shard", "backend", "backend-shard", 4),
     ]:
-        jobs = yaml.load((ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader)["jobs"]
-        upload = next(s for s in jobs[producer]["steps"] if s.get("uses") == "actions/upload-artifact@v4")
+        jobs = yaml.load(
+            (ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader,
+        )["jobs"]
+        upload = next(
+            s for s in jobs[producer]["steps"] if s.get("uses") == "actions/upload-artifact@v4"
+        )
         assert upload["with"]["name"] == prefix + "-${{ matrix.shard }}-a${{ github.run_attempt }}"
         assert upload["with"]["if-no-files-found"] == "error"
         steps = jobs[gate]["steps"]
@@ -26,7 +30,7 @@ def test_workflows_namespace_attempts_and_select_before_validation():
         assert "continue-on-error" not in select
 
 
-def artifact(root, name, content):
+def artifact(root: Path, name: str, content: str) -> Path:
     directory = root / name
     directory.mkdir(parents=True)
     (directory / "result").write_text(content)
@@ -34,7 +38,9 @@ def artifact(root, name, content):
 
 
 @pytest.mark.parametrize("prefix,count", [("windows-desktop", 3), ("backend-shard", 4)])
-def test_partial_rerun_selects_numeric_latest_per_shard(tmp_path, capsys, prefix, count):
+def test_partial_rerun_selects_numeric_latest_per_shard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], prefix: str, count: int,
+) -> None:
     from scripts.ci.shard_evidence import select_evidence
     source, target = tmp_path / "downloads", tmp_path / "selected"
     for shard in range(1, count + 1):
@@ -48,7 +54,7 @@ def test_partial_rerun_selects_numeric_latest_per_shard(tmp_path, capsys, prefix
     assert f"Selected {prefix}-2-a10" in capsys.readouterr().out
 
 
-def test_missing_shard_fails_without_partial_output(tmp_path):
+def test_missing_shard_fails_without_partial_output(tmp_path: Path) -> None:
     from scripts.ci.shard_evidence import select_evidence
     artifact(tmp_path / "downloads", "windows-desktop-1-a1", "success")
     with pytest.raises(ValueError, match="missing.*2.*3"):
@@ -56,7 +62,7 @@ def test_missing_shard_fails_without_partial_output(tmp_path):
     assert not (tmp_path / "selected").exists()
 
 
-def test_latest_failed_or_incomplete_evidence_cannot_fall_back(tmp_path):
+def test_latest_failed_or_incomplete_evidence_cannot_fall_back(tmp_path: Path) -> None:
     from scripts.ci.shard_evidence import select_evidence
     from tests.scripts.test_ci_parallel_gates import desktop_evidence
     source = tmp_path / "downloads"
@@ -80,7 +86,9 @@ def test_latest_failed_or_incomplete_evidence_cannot_fall_back(tmp_path):
         desktop_evidence(target)
 
 
-def test_selector_cli_preserves_nested_receipts_and_refuses_stale_destination(tmp_path):
+def test_selector_cli_preserves_nested_receipts_and_refuses_stale_destination(
+    tmp_path: Path,
+) -> None:
     import subprocess
     import sys
     source, target = tmp_path / "downloads", tmp_path / "selected"
@@ -95,7 +103,7 @@ def test_selector_cli_preserves_nested_receipts_and_refuses_stale_destination(tm
     assert subprocess.run(command, capture_output=True).returncode != 0
 
 
-def test_unversioned_evidence_is_never_used(tmp_path):
+def test_unversioned_evidence_is_never_used(tmp_path: Path) -> None:
     from scripts.ci.shard_evidence import select_evidence
     artifact(tmp_path / "downloads", "windows-desktop-1", "stale")
     with pytest.raises(ValueError, match="missing"):
