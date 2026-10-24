@@ -408,7 +408,7 @@
 		overflow: hidden;
 		transition: border-color 160ms ease, box-shadow 160ms ease;
 	}
-	.bcard:hover { border-color: color-mix(in oklch, var(--primary) 40%, var(--border)); }
+	.bcard:hover { border-color: color-mix(in oklab, var(--primary) 40%, var(--border)); }
 	.bcard.c2 { grid-column: span 2; }
 	.bcard.c4 { grid-column: 1 / -1; }
 	.bcard.r2 { grid-row: span 2; }

@@ -206,7 +206,7 @@ li.autocomplete-section-header {
 }
 
 .autocomplete-item.selected {
-  background: color-mix(in oklch, var(--primary) 8%, var(--popover, var(--card)));
+  background: color-mix(in oklab, var(--primary) 8%, var(--popover, var(--card)));
   border-left-color: var(--primary);
 }
 

@@ -234,7 +234,7 @@
 	}
 
 	.context-selector-btn.unset:hover {
-		background: color-mix(in oklch, var(--warning) 12%, var(--muted));
+		background: color-mix(in oklab, var(--warning) 12%, var(--muted));
 		color: var(--warning);
 	}
 

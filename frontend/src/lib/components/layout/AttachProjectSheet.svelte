@@ -387,7 +387,7 @@
 	}
 	.proj-row:hover:not([aria-disabled='true']) { background: var(--hover-overlay); color: var(--foreground); }
 	.proj-row:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-	.proj-row.selected { color: var(--foreground); background: var(--selection-bg, color-mix(in oklch, var(--primary) 10%, transparent)); border-color: color-mix(in oklch, var(--primary) 40%, var(--border)); }
+	.proj-row.selected { color: var(--foreground); background: var(--selection-bg, color-mix(in oklch, var(--primary) 10%, transparent)); border-color: color-mix(in oklab, var(--primary) 40%, var(--border)); }
 	.proj-row[aria-disabled='true'] { opacity: 0.5; cursor: not-allowed; }
 	.proj-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 	.proj-note { font-size: 11.5px; color: var(--subtle-foreground); }
@@ -429,7 +429,7 @@
 	.btn.ghost { background: transparent; border-color: var(--border); color: var(--foreground); }
 	.btn.ghost:hover:not(:disabled) { background: var(--hover-overlay); }
 	.btn.primary { background: var(--primary); color: var(--primary-foreground); }
-	.btn.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+	.btn.primary:hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
 	.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 	.btn :global(.spin) { animation: spin 0.9s linear infinite; }
 

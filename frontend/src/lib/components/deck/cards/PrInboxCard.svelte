@@ -259,7 +259,7 @@
 	.pri-clear:hover { text-decoration: underline; }
 
 	.pri-error {
-		padding: 12px 14px; border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border));
+		padding: 12px 14px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
 		border-radius: var(--radius, 0.75rem); color: var(--destructive); font-size: 0.875rem;
 	}
 	.pri-empty {
@@ -293,8 +293,8 @@
 	.pri-chip {
 		font-size: 0.6875rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap;
 	}
-	.pri-chip[data-review='approved'] { color: var(--success, #22a06b); border-color: color-mix(in oklch, var(--success, #22a06b) 45%, var(--border)); }
-	.pri-chip[data-review='changes_requested'] { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 45%, var(--border)); }
+	.pri-chip[data-review='approved'] { color: var(--success, #22a06b); border-color: color-mix(in oklab, var(--success, #22a06b) 45%, var(--border)); }
+	.pri-chip[data-review='changes_requested'] { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, var(--border)); }
 	.pri-checks { display: inline-flex; }
 	.pri-checks[data-checks='passing'] { color: var(--success, #22a06b); }
 	.pri-checks[data-checks='failing'] { color: var(--destructive); }
