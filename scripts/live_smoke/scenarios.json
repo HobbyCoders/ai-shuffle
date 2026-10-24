@@ -261,6 +261,15 @@
           "past_bug": "ChatGPT subscription voice offered only Cove although the subscription has 25 voices; an engine switch could keep the previous engine's provider pin."
         },
         {
+          "id": "harness-basics.generation-choice-safety",
+          "check": "Unified generation named-choice safety, quotes and catalog shape",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable account preferences and throwaway chats on two candidate workers; never alter the owner's choices or caps. Remember a fal choice for each tested kind, then make unattended calls through that kind's tool naming SuperGrok or a different fal model. Inspect catalog/submission logs. For matching probes use a declared endpoint priced above the confirmation threshold, never approve a paid retry, and call runFalModel from worker A with the kind's remembered fal choice pinned to worker B, then with its worker omitted. Run default searchModels and searchModels(source=supergrok) with a real subscription account. Compare searchModels for kling/v4/text-to-video with its default choice-card and interactive generateVideo quotes. With the same SuperGrok account on both workers, request choices from each and inspect holders. Compare compact and full_schema searchModels for a large fal schema including generate_audio. Save an unpriced model, then an unavailable-holder choice, through the choices API and inspect the warning and save latency. Archive throwaway chats and discard only disposable preferences.",
+          "pass_when": "Unattended names that differ from a remembered choice skip with named_choice_differs_from_stored before any catalog lookup or submission. Matching runFalModel calls reach the existing price/confirmation/cap decision on the remembered holder, without injecting worker A or switching sources; above-threshold probes skip without billing. Default and SuperGrok-filtered searchModels return subscription options and their allowed values without errors. The single search quote, choice card and generate quote show the same known default price (0.785 USD for the recorded Kling rate; use the current provider rate if changed). Each source/account/model/options tuple appears once, preferring the local holder, and different accounts/options remain separate. Default searchModels JSON is at most 32768 ASCII-escaped characters, truncation is explicit, full_schema returns the complete schema, and generate_audio stays boolean. An unpriced save returns stored_choice_unpriced and a skip warning; unavailable or timed-out quotes retain their error and return stored_choice_unavailable within the two-second quote budget. The pick is saved in both cases. No paid retry is approved. Missing provider/worker evidence is not a pass.",
+          "past_bug": "#512 silently replaced named unattended sources with stored choices; #513 masked prices and misreported unavailable saves; #514 duplicated holders, returned huge schemas and typed booleans as files. Review also caught subscription-schema crashes and runFalModel overriding remembered holders."
+        },
+        {
           "id": "two-worker-smoke.25",
           "check": "New voice session checks its explicit funding key",
           "kind": "owner",
@@ -309,9 +318,18 @@
           "check": "Sidebar Check for updates finds a peer's update like Settings does",
           "kind": "owner",
           "two_worker": true,
-          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking. Install nothing.",
-          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress (Settings may show that refusal on its own repeated click; see #519).",
-          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date."
+          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking, and do the same with Settings > System > Updates > Check for updates. Install nothing.",
+          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress. Settings' repeated click agrees: the peer's row says Checking until its check ends, then shows the update it found, never An update is already in progress.",
+          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date. #519: Settings still counted that refusal as the peer's answer."
+        },
+        {
+          "id": "two-worker-smoke.31",
+          "check": "A download refused mid-check does not hide the update the peer finds",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "With Update all workers on, use a pair where this worker already offers an update and the peer has not read its feed since it was published. Open Settings > System > Updates and click Check for updates, then within a few seconds, while the peer is still checking, click the top Download update button. Watch the button's tooltip rows until the peer's check ends. Install nothing (cancel or leave the staged download).",
+          "pass_when": "The peer refuses the download with An update is already in progress, but once its check ends its row reads Update available (or downloading or staged after another Download click), never Refused: An update is already in progress, and the button offers Download update again rather than holding the restart for the peer.",
+          "past_bug": "#519: a download refused because the peer was checking was recorded as a refusal, so the update that peer then found was labeled Refused and the restart waited for another click."
         },
         {
           "id": "two-worker-smoke.32",
@@ -457,6 +475,14 @@
           "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
         },
         {
+          "id": "harness-basics.27",
+          "check": "Confirmed watches recover cursors and deliver without self-triggering",
+          "kind": "owner",
+          "how": "Use only a disposable candidate worker with its own persistent data directory and a configured real provider; never restart a production worker. In a throwaway live project chat request a 60-second schedule watch with a small daily cap. Confirm the host-owned source/filter, read-only scope, delivery action and budget sentence. Record its id, saved cursor, event ids and stable delivery command ids. After one real delivery, stop only the disposable worker for over 180 seconds, letting scheduled events accrue, then restart with the same data directory. Also interrupt once immediately after event admission but before dispatch using approved candidate diagnostics; retain the original command identity. Confirm all elapsed schedule events arrive once, then restart again and check no event or turn is repeated. Settle the creating chat, let a new schedule event arrive, and inspect the durable bell/push notification and cheap summary rather than a turn waking that chat. Create an investigation watch and verify a new short no-project chat plus notification. Finally create a finished-session watch scoped to its own creating chat; finish one ordinary owner turn, let the watch's real delivery finish, and wait through several polling intervals. Pause and stop every test watch, archive the throwaway chats, and remove only the disposable candidate after saving private receipts; do not publish screenshots.",
+          "pass_when": "No watch exists before the owner's confirmation. Live deliveries are real turns in the creating chat; a settled creator stays settled, alerts are durable notifications, and investigations use a new bounded no-project chat. Persisted cursors recover every elapsed schedule event exactly once across both restarts, including the expired undispatched admission, with unchanged dedupe and command ids. The finished-session watch reports the owner turn once and never re-fires on its own delivery, with no further provider call or cost during idle polling. Current permission revocation, pause/stop and daily budget still prevent dispatch after recovery. Record actual producing-path and provider evidence; mocked/seeded consumer state or an unexecuted restart is not a pass.",
+          "past_bug": "#371 review: expired admitted events were lost across restarts; finished-session watches observed their own delivery turns; only mocked local watch flows had been covered."
+        },
+        {
           "id": "harness-basics.26",
           "check": "Bounded home ownership repair progresses across persistent-volume restarts",
           "kind": "owner",
@@ -523,6 +549,22 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.31",
+          "check": "Phone attach sheet swipe and in-chat card style",
+          "kind": "owner",
+          "how": "On the Android app, open a no-project chat and tap the project pill to open 'Attach a project'. Pull the sheet down a little and let go; pull it fast, hold still for a second, then let go; flick it down. With more projects than fit, scroll the project list up and down, starting with a small downward wobble. Then, in a light and a dark theme, trigger one approval asked in words and one generation choice card.",
+          "pass_when": "Short and held pulls spring back, a flick or a long pull closes the sheet, and the list scrolls normally. The approval and choice cards use the same border, radius, badges and buttons as the question tray in both themes.",
+          "past_bug": "The phone attach sheet could not be swiped closed, and the approval and generation choice cards used their own rails, tints and uppercase badges."
+        },
+        {
+          "id": "harness-basics.approval-self-gated-tools",
+          "check": "Tools with their own consent card ask once in an owner chat",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
+          "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
+          "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
+        },
+        {
           "id": "harness-basics.23",
           "check": "Native wake provenance across context pruning and rewind/resume",
           "kind": "owner",
@@ -570,6 +612,15 @@
           "how": "Use disposable candidate workers ServerWorker and DesktopWorker with one owner-approved, verified Included image account held only by DesktopWorker. On ServerWorker create a disabled throwaway automation and PUT its exact account/worker/model/options to /api/v1/generation/jobs/{automation_id}/choices/image; GET it back. Leave remembered image choices empty or deliberately different. With the disposable cap admitting the request, trigger one scheduled run on ServerWorker with a prompt that calls generateImage without naming source/model/worker. Inspect the scheduler-created session's automation_id, structured generation result, both workers' submission activity and the resulting session artifact. Restore the disposable choices and remove only the throwaway automation/session afterward. No API-key or fal generation is authorized by this check.",
           "pass_when": "The real unattended run uses the saved job choice despite the absent or different remembered choice. Result source/account/model/options and holding worker match the read-back binding; exactly one Included submission occurs on DesktopWorker, none on ServerWorker or another source. Current cap and schema admission run before submission, and the generated artifact is readable from the run session. A fixture that only injects RunContext.job_choices is not a pass.",
           "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
+        },
+        {
+          "id": "harness-basics.32",
+          "check": "Docker runtime overlay acceptance on both architectures",
+          "kind": "owner",
+          "optional": true,
+          "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
+          "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
+          "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
         }
       ]
     }

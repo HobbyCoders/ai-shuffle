@@ -96,6 +96,7 @@
 	let checkAsked: Set<string> | null = null;
 	// A worker picks a check up within seconds; never call a check finished sooner.
 	const MANUAL_CHECK_SETTLE_MS = 5000;
+	const STILL_CHECKING = 'Still checking. The update button appears here if an update is found.';
 	const operation = $derived(snapshot?.operation);
 	// The aggregate outcome first, the legacy phase only for an older server (#344).
 	const outcomeInfo = $derived(operation ? outcomeView(operation) : null);
@@ -410,7 +411,15 @@
 			// Read after the accepted action: the worker's own state now speaks for it.
 			if (optimistic && seq >= lockSeq) optimistic = null;
 			applySnapshot(next);
-		} catch { /* Keep waiting through the worker's restart; never offer a stale install. */ }
+		} catch {
+			// Keep waiting through the worker's restart; never offer a stale install.
+			// A manual check still ends on time: a read that works minutes later must
+			// not bring a late notice, nor keep the 2 s poll going meanwhile (#519).
+			if (manualCheckAt && Date.now() - manualCheckAt >= CHECK_TIMEOUT_MS) {
+				manualCheckAt = 0;
+				notify.info(STILL_CHECKING, { title: 'Checking for updates', persist: false });
+			}
+		}
 		finally { reading = false; schedule(); }
 	}
 	function visibilityChanged() {
@@ -493,7 +502,7 @@
 			notify.info(summary, { title: ready ? 'Update ready' : 'Update found', persist: false });
 			return;
 		}
-		if (!settled) notify.info('Still checking. The update button appears here if an update is found.', { title: 'Checking for updates', persist: false });
+		if (!settled) notify.info(STILL_CHECKING, { title: 'Checking for updates', persist: false });
 		else if (error) notify.warning(error, { title: 'Update check needs attention', persist: false,
 			...(installer.length ? { action: { label: INSTALLER_ACTION, onClick: openInstallerPage } } : {}) });
 		else notify.info(snapshot?.update_all_workers ? 'Every included worker is up to date.' : 'This worker is up to date.', { title: 'No updates found', persist: false });

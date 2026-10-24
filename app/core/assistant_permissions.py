@@ -25,6 +25,10 @@ permission engine, the delegated PreToolUse policy and the bundled-tool
 dispatch), and the approver puts a high call to the owner past any mode or
 saved rule (``query_engine``). The model can ask when the app would not, but it
 cannot lower a level or skip an ask, and the levels are not a setting.
+
+A few tools put their own consent in front of the owner (a private access
+card, a grant, a one-shot approval, the screen-access card). The gate does not
+ask before those as well: :data:`OWN_CONSENT_TOOLS`.
 """
 from __future__ import annotations
 
@@ -455,76 +459,229 @@ def _start_session_rule(data, scope):
 # (:func:`canonical`). A name that is not here is high.
 TOOL_LEVELS: Dict[str, Level] = {
     # Reading and searching inside the projects.
-    "Read": _read_rule, "NotebookRead": _read_rule, "LS": _read_rule, "LSP": _read_rule,
-    "Grep": _read_rule, "Glob": _glob_rule,
+    "Read": _read_rule,
+    "NotebookRead": _read_rule,
+    "LS": _read_rule,
+    "LSP": _read_rule,
+    "Grep": _read_rule,
+    "Glob": _glob_rule,
     # Editing inside the projects.
-    "Write": _write_rule, "Edit": _write_rule, "NotebookEdit": _write_rule, "MultiEdit": _multi_write_rule,
+    "Write": _write_rule,
+    "Edit": _write_rule,
+    "NotebookEdit": _write_rule,
+    "MultiEdit": _multi_write_rule,
     # Commands.
-    "Bash": _command_rule, "PowerShell": _command_rule, "Monitor": _command_rule,
-    "BashOutput": LOW, "KillShell": LOW, "KillBash": LOW,
+    "Bash": _command_rule,
+    "PowerShell": _command_rule,
+    "Monitor": _command_rule,
+    "BashOutput": LOW,
+    "KillShell": LOW,
+    "KillBash": LOW,
     # run_python is decided by _python_level (it needs the engine's sandbox verdict).
     "run_python": HIGH,
     # The harness itself: notes, skills, history, memory, questions.
-    "Skill": LOW, "Note": LOW, "ToolSearch": LOW, "HistoryExpand": LOW, "HistorySearch": LOW,
-    "Ledger": LOW, "SessionSearch": LOW, "SessionView": LOW, "AskUser": LOW, "AskUserQuestion": LOW,
-    "Remember": LOW, "Recall": LOW, "Forget": HIGH, "TodoWrite": LOW, "TodoRead": LOW,
-    "ReportFindings": LOW, "EnterWorktree": LOW, "ExitWorktree": LOW,
+    "Skill": LOW,
+    "Note": LOW,
+    "ToolSearch": LOW,
+    "HistoryExpand": LOW,
+    "HistorySearch": LOW,
+    "Ledger": LOW,
+    "SessionSearch": LOW,
+    "SessionView": LOW,
+    "AskUser": LOW,
+    "AskUserQuestion": LOW,
+    "Remember": LOW,
+    "Recall": LOW,
+    "Forget": HIGH,
+    "TodoWrite": LOW,
+    "TodoRead": LOW,
+    "ReportFindings": LOW,
+    "EnterWorktree": LOW,
+    "ExitWorktree": LOW,
     # Web lookups.
-    "WebSearch": LOW, "WebFetch": LOW,
+    "WebSearch": LOW,
+    "WebFetch": LOW,
     # Starting and steering work.
-    "Task": LOW, "Agent": LOW, "Swarm": LOW, "TaskGet": LOW, "TaskList": LOW, "TaskOutput": LOW, "TaskStop": LOW,
-    "ListAgents": LOW, "SendMessage": LOW, "ListSessions": LOW, "MessageSession": LOW,
-    "StartSession": _start_session_rule, "SettleSession": LOW, "UnsettleSession": LOW, "ArchiveSession": LOW,
-    "HandOffSession": HIGH, "RemoteTrigger": HIGH, "ScheduleWakeup": LOW,
+    "Task": LOW,
+    "Agent": LOW,
+    "Swarm": LOW,
+    "TaskGet": LOW,
+    "TaskList": LOW,
+    "TaskOutput": LOW,
+    "TaskStop": LOW,
+    "ListAgents": LOW,
+    "SendMessage": LOW,
+    "ListSessions": LOW,
+    "MessageSession": LOW,
+    "StartSession": _start_session_rule,
+    "SettleSession": LOW,
+    "UnsettleSession": LOW,
+    "ArchiveSession": LOW,
+    "HandOffSession": HIGH,
+    "RemoteTrigger": HIGH,
+    "ScheduleWakeup": LOW,
     "WorkingRecord": LOW,
-    "CronList": LOW, "CronCreate": HIGH, "CronDelete": HIGH,
+    "CronList": LOW,
+    "CronCreate": HIGH,
+    "CronDelete": HIGH,
+    # CreateWatch asks inside its handler, including bypass sessions.
+    "CreateWatch": LOW,
+    "ListWatches": LOW,
+    "PauseWatch": LOW,
+    "StopWatch": LOW,
     # App status and the owner's own devices.
-    "GetUsage": LOW, "DeployStatus": LOW, "WorktreeReport": LOW, "GetAppErrors": LOW, "GetAppLogs": LOW,
-    "NotifyDevices": LOW, "PushNotification": LOW, "AndroidDevices": LOW, "AndroidAction": HIGH,
-    "Emulator": _emulator_rule, "EmulatorScreenshot": LOW,
+    "GetUsage": LOW,
+    "DeployStatus": LOW,
+    "WorktreeReport": LOW,
+    "GetAppErrors": LOW,
+    "GetAppLogs": LOW,
+    "NotifyDevices": LOW,
+    "PushNotification": LOW,
+    "AndroidDevices": LOW,
+    "AndroidAction": HIGH,
+    "Emulator": _emulator_rule,
+    "EmulatorScreenshot": LOW,
     "DesignSync": HIGH,
     # Plugins (app/mcp/plugin_tools.py): searching and checking read; an
     # install puts files on the worker (switched off, pending review), so it asks.
-    "FindPlugins": LOW, "CheckPlugin": _check_plugin_rule, "InstallPlugin": HIGH,
+    "FindPlugins": LOW,
+    "CheckPlugin": _check_plugin_rule,
+    "InstallPlugin": HIGH,
     # Private access: folders, machines and service credentials.
     "mcp__chat-access__ChatResources": LOW,
-    "mcp__chat-access__RequestChatAccess": HIGH, "mcp__chat-access__ChatListFiles": HIGH,
-    "mcp__chat-access__ChatReadFile": HIGH, "mcp__chat-access__ChatWriteFile": HIGH,
-    "mcp__chat-access__ChatRunCommand": HIGH, "mcp__chat-access__ChatHttpRequest": HIGH,
+    "mcp__chat-access__RequestChatAccess": HIGH,
+    "mcp__chat-access__ChatListFiles": HIGH,
+    "mcp__chat-access__ChatReadFile": HIGH,
+    "mcp__chat-access__ChatWriteFile": HIGH,
+    "mcp__chat-access__ChatRunCommand": HIGH,
+    "mcp__chat-access__ChatHttpRequest": HIGH,
     # Paid generation (spending outside the model calls themselves).
     "mcp__ai-tools__searchModels": LOW,
-    **{f"mcp__ai-tools__{name}": HIGH for name in (
-        "generateImage", "editImage", "generateWithReference", "generateVideo", "imageToVideo",
-        "extendVideo", "textTo3D", "imageTo3D", "generateAudio", "audioToAudio", "runFalModel")},
+    **{
+        f"mcp__ai-tools__{name}": HIGH
+        for name in (
+            "generateImage",
+            "editImage",
+            "generateWithReference",
+            "generateVideo",
+            "imageToVideo",
+            "extendVideo",
+            "textTo3D",
+            "imageTo3D",
+            "generateAudio",
+            "audioToAudio",
+            "runFalModel",
+        )
+    },
     # App configuration: reading is fine, changing it is a security setting.
-    **{f"mcp__app-config__{name}": LOW for name in (
-        "getAutomation", "getAutomationRuns", "getConfigCapabilities", "getConnectorStatus", "getHook",
-        "getProfile", "getSubagent", "listAutomations", "listConnectors", "listHooks", "listMcpServers",
-        "listProfiles", "listSubagents")},
-    **{f"mcp__app-config__{name}": HIGH for name in (
-        "addMcpServer", "createAutomation", "createHook", "createProfile", "createSubagent",
-        "deleteAutomation", "deleteHook", "deleteProfile", "deleteSubagent", "removeMcpServer",
-        "testHook", "toggleAutomation", "toggleConnector", "toggleHook", "toggleMcpServer",
-        "triggerAutomation", "updateAutomation", "updateHook", "updateProfile", "updateSubagent")},
+    **{
+        f"mcp__app-config__{name}": LOW
+        for name in (
+            "getAutomation",
+            "getAutomationRuns",
+            "getConfigCapabilities",
+            "getConnectorStatus",
+            "getHook",
+            "getProfile",
+            "getSubagent",
+            "listAutomations",
+            "listConnectors",
+            "listHooks",
+            "listMcpServers",
+            "listProfiles",
+            "listSubagents",
+        )
+    },
+    **{
+        f"mcp__app-config__{name}": HIGH
+        for name in (
+            "addMcpServer",
+            "createAutomation",
+            "createHook",
+            "createProfile",
+            "createSubagent",
+            "deleteAutomation",
+            "deleteHook",
+            "deleteProfile",
+            "deleteSubagent",
+            "removeMcpServer",
+            "testHook",
+            "toggleAutomation",
+            "toggleConnector",
+            "toggleHook",
+            "toggleMcpServer",
+            "triggerAutomation",
+            "updateAutomation",
+            "updateHook",
+            "updateProfile",
+            "updateSubagent",
+        )
+    },
     # Computer use of the owner's desktop: the access request asks; the
     # actions it grants are gated by that grant. The clipboard can hold secrets.
     "mcp__computer-use__request_access": HIGH,
-    "mcp__computer-use__read_clipboard": HIGH, "mcp__computer-use__write_clipboard": HIGH,
-    **{f"mcp__computer-use__{name}": LOW for name in (
-        "click_element", "computer_batch", "cursor_position", "double_click", "focus_window", "hold_key", "key",
-        "key_down", "key_up", "left_click", "left_click_drag", "left_mouse_down", "left_mouse_up", "list_displays",
-        "list_granted_applications", "list_windows", "middle_click", "mouse_down", "mouse_move", "mouse_up",
-        "open_application", "release_control", "right_click",
-        "screenshot", "scroll", "set_value", "switch_display", "triple_click", "type", "ui_tree", "wait",
-        "window_control", "zoom")},
+    "mcp__computer-use__read_clipboard": HIGH,
+    "mcp__computer-use__write_clipboard": HIGH,
+    **{
+        f"mcp__computer-use__{name}": LOW
+        for name in (
+            "click_element",
+            "computer_batch",
+            "cursor_position",
+            "double_click",
+            "focus_window",
+            "hold_key",
+            "key",
+            "key_down",
+            "key_up",
+            "left_click",
+            "left_click_drag",
+            "left_mouse_down",
+            "left_mouse_up",
+            "list_displays",
+            "list_granted_applications",
+            "list_windows",
+            "middle_click",
+            "mouse_down",
+            "mouse_move",
+            "mouse_up",
+            "open_application",
+            "release_control",
+            "right_click",
+            "screenshot",
+            "scroll",
+            "set_value",
+            "switch_display",
+            "triple_click",
+            "type",
+            "ui_tree",
+            "wait",
+            "window_control",
+            "zoom",
+        )
+    },
     # The app's browser: looking is fine; acting on a page can act on a
     # signed-in account, so it asks.
-    **{f"mcp__browser__{name}": LOW for name in (
-        "browser_status", "browser_snapshot", "browser_screenshot", "browser_read_text", "browser_find",
-        "browser_tabs", "browser_wait", "browser_console", "browser_network", "browser_resize",
-        "browser_navigate")},
-    **{f"mcp__browser__{name}": HIGH for name in (
-        "browser_act", "browser_batch", "browser_eval", "browser_upload")},
+    **{
+        f"mcp__browser__{name}": LOW
+        for name in (
+            "browser_status",
+            "browser_snapshot",
+            "browser_screenshot",
+            "browser_read_text",
+            "browser_find",
+            "browser_tabs",
+            "browser_wait",
+            "browser_console",
+            "browser_network",
+            "browser_resize",
+            "browser_navigate",
+        )
+    },
+    **{
+        f"mcp__browser__{name}": HIGH
+        for name in ("browser_act", "browser_batch", "browser_eval", "browser_upload")
+    },
 }
 # Connector gateways: listing a connector's actions is fine; invoking one
 # reads private data or writes on the owner's behalf (mail, chat, money).
@@ -576,9 +733,94 @@ def level(name: Any, tool_input: Any, scope: Scope, *, spec_risk: Optional[str] 
         return HIGH
 
 
-def needs_owner(name: Any, tool_input: Any, scope: Optional[Scope], *, spec_risk: Optional[str] = None) -> bool:
-    """True when this call must wait for the owner's firm yes."""
-    return bool(scope) and level(name, tool_input, scope, spec_risk=spec_risk) == HIGH
+# ---------------------------------------------------------------------------
+# Tools that put their own consent in front of the owner
+# ---------------------------------------------------------------------------
+
+def _always(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    return True
+
+
+def _outside_bypass(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    return mode != "bypassPermissions"
+
+
+def _chat_http_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    method = data.get("method")
+    if isinstance(method, str) and method.upper() in ("GET", "HEAD"):
+        return True
+    return _outside_bypass(data, mode)
+
+
+def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
+    # Ask and Accept Edits show the access card on every request a saved
+    # Allow rule doesn't already cover. Bypass shows
+    # it on the session's first grant only, and the delegated CLI's Auto
+    # classifier may approve without a prompt, so there the gate stays.
+    return mode not in ("bypassPermissions", "auto")
+
+
+#: The tools whose own card, or the grant behind them, already collects the
+#: owner's decision, and when it does. A yes/no before such a call would be a
+#: second gate for one decision (the owner: "things that still require a
+#: permission step with UI shouldn't also require a yes/no to even call it",
+#: #527).
+#: So the owner gate stands aside for a call its own consent covers in the
+#: session's mode, and still asks where that mode skips it. Outside Bypass a
+#: saved Deny rule still wins (``harness_adapter`` checks it at dispatch);
+#: Bypass skips saved rules for these tools as for every tool. Nothing here
+#: grants access: the card, the grant's scope, its expiry and Away mode decide.
+#:
+#: * RequestChatAccess: the private access card, in every mode. The owner
+#:   approves it there (and types any secret there); Away refuses it.
+#: * ChatListFiles, ChatReadFile, ChatHttpRequest GET/HEAD: inside a grant the
+#:   owner approved; the broker refuses anything outside it or after expiry.
+#: * ChatRunCommand, ChatWriteFile, other ChatHttpRequest methods: the broker's
+#:   one-shot card, outside Bypass. In Bypass the grant card promises no repeat
+#:   approval, so the owner gate asks as before.
+#: * computer-use request_access: the screen-access card on every request in
+#:   Ask and Accept Edits (a saved Allow rule skips it, as in other chats). In Bypass and Auto the gate stays, and the approver
+#:   shows that same card instead of a yes/no (``query_engine``).
+#:
+#: AskUser/AskUserQuestion are low already (questions never pass the gate).
+OWN_CONSENT_TOOLS: Dict[str, Callable[[Mapping[str, Any], Optional[str]], bool]] = {
+    "mcp__chat-access__RequestChatAccess": _always,
+    "mcp__chat-access__ChatListFiles": _always,
+    "mcp__chat-access__ChatReadFile": _always,
+    "mcp__chat-access__ChatHttpRequest": _chat_http_consent,
+    "mcp__chat-access__ChatRunCommand": _outside_bypass,
+    "mcp__chat-access__ChatWriteFile": _outside_bypass,
+    "mcp__computer-use__request_access": _computer_access_consent,
+}
+
+
+def has_own_consent(name: Any) -> bool:
+    """Whether ``name`` is one of :data:`OWN_CONSENT_TOOLS`."""
+    return canonical(name) in OWN_CONSENT_TOOLS
+
+
+def own_consent_covers(name: Any, tool_input: Any, permission_mode: Optional[str]) -> bool:
+    """Whether the tool's own card or grant decides this call in this mode."""
+    rule = OWN_CONSENT_TOOLS.get(canonical(name))
+    if rule is None:
+        return False
+    try:
+        return bool(rule(tool_input if isinstance(tool_input, Mapping) else {}, permission_mode))
+    except Exception:  # noqa: BLE001 — doubt keeps the owner's yes
+        logger.warning("Own-consent rule failed for %s; asking the owner", name, exc_info=True)
+        return False
+
+
+def needs_owner(name: Any, tool_input: Any, scope: Optional[Scope], *, spec_risk: Optional[str] = None,
+                permission_mode: Optional[str] = None) -> bool:
+    """True when this call must wait for the owner's firm yes.
+
+    ``permission_mode`` is the session's live mode; a tool whose own consent
+    covers the call in that mode (:data:`OWN_CONSENT_TOOLS`) does not ask first.
+    """
+    if not scope or own_consent_covers(name, tool_input, permission_mode):
+        return False
+    return level(name, tool_input, scope, spec_risk=spec_risk) == HIGH
 
 
 ASK_REASON = (
