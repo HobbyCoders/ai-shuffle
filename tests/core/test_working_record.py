@@ -203,6 +203,61 @@ async def test_task_report_survives_stopped_coordinator_and_is_deduplicated(owne
     assert not store.items()
 
 
+
+
+@pytest.mark.parametrize("first", [
+    {"status": "killed", "reason": "park_watchdog", "summary": "Watchdog stand-in"},
+    {"status": "completed"},
+])
+async def test_genuine_or_richer_task_report_replaces_provisional_without_reopening(owner, first):
+    from app.core.task_registry import task_registry
+    sid = owner["id"]
+    task_registry.start_task(sid, "late-report", "agent", "Review", tool_use_id="late-tool")
+    task_registry.mark_background_launch(sid, "late-tool")
+    task_registry.complete_task(sid, "late-report", first["status"], notify=False)
+    provisional = {"task_id": "late-report", **first}
+    await turn_scheduler.on_task_terminal(sid, provisional)
+    report = next(row for row in store.items() if row["kind"] == "report")
+    assert store.resolve(report["id"])
+    genuine = {"task_id": "late-report", "status": "completed", "summary": "Genuine review: all checks passed."}
+    await turn_scheduler.on_task_terminal(sid, genuine)
+    rows = [row for row in store.items(include_resolved=True) if row["kind"] == "report"]
+    assert len(rows) == 1 and "Genuine review" in rows[0]["content"]
+    assert rows[0]["status"] == "resolved"
+    # A stale replay, even one carrying a new usage field, cannot restore killed.
+    await turn_scheduler.on_task_terminal(sid, {**provisional, "usage": {"tokens": 1}})
+    assert store.items(include_resolved=True)[0]["content"] == rows[0]["content"]
+    assert not store.items()
+
+
+def test_handoff_keeps_cumulative_job_budget_but_resets_display_clock(owner):
+    from datetime import UTC, datetime
+
+    from app.core.assistant_limits import _job_over_time
+    sid = owner["id"]
+    for used_minutes in (50, 9):
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET work_ms=%s, work_started_at=NULL WHERE id=%s",
+                                  (used_minutes * 60000, sid))
+        sessions.set_session_context_usage(sid, {"totalTokens": 90000, "maxTokens": 100000})
+        turn = turns.enqueue_turn(sid, "user", prompt="Coordinate", profile_id="agent")
+        run(sid, turn["id"], "Continuing")
+        successor = coordinator_handoff._admit(sid, turns.get_turn(turn["id"]), {"stop_reason": "tool_use"})
+        assert successor is not None
+        sid = successor["id"]
+        assert int(sessions.get_session(sid).get("work_ms") or 0) == 0
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT turn_id FROM coordinator_handoffs WHERE successor_session_id=%s", (sid,))
+            wake_id = cur.fetchone()["turn_id"]
+        run(sid, wake_id, "Fresh context")
+    assert not _job_over_time(sid, 60, datetime.now(UTC), coordination=True)
+    assert _job_over_time(sid, 59, datetime.now(UTC), coordination=True)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET work_ms=%s WHERE id=%s", (60000, sid))
+    assert _job_over_time(sid, 60, datetime.now(UTC), coordination=True)
+
+
 async def test_initial_successor_wake_cannot_chain_handoffs(owner):
     sessions.set_session_context_usage(owner["id"], {"totalTokens": 90000, "maxTokens": 100000})
     assert not await coordinator_handoff.on_session_rest(owner["id"],

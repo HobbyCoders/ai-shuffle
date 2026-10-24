@@ -1,8 +1,9 @@
 """One owner-only tool for durable working items (native and delegated legs)."""
 import json
+from typing import Any
 
 
-def build_tools(tool, *, is_admin, session_id):
+def build_tools(tool: Any, *, is_admin: bool, session_id: str) -> list[Any]:
     from app.core import working_record
     from app.db import working_record as store
     from app.db.async_database import run_sync
@@ -20,7 +21,7 @@ def build_tools(tool, *, is_admin, session_id):
               "offset": {"type": "integer", "minimum": 0},
               "include_resolved": {"type": "boolean"}},
            "required": ["action"], "additionalProperties": False})
-    async def working_record_tool(args):
+    async def working_record_tool(args: dict[str, Any]) -> dict[str, Any]:
         try:
             if not is_admin:
                 raise PermissionError("WorkingRecord is only available to the owner")

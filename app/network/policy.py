@@ -318,7 +318,7 @@ _register(Collection(
 _register(Collection(
     name="working_record", table="owner_working_items", keys=("id",),
     fields=("id", "owner_key", "kind", "content", "status", "source_session_id",
-            "source_turn_id", "created_at", "updated_at"),
+            "source_turn_id", "created_at", "updated_at", "report_frame"), json_fields=("report_frame",),
     resource="working_record", priority=87,
     shared_row=lambda row: row.get("owner_key") == OWNER_PLACEHOLDER,
     notes="Owner working record. Independent items merge; resolved items remain as durable acknowledgements."))

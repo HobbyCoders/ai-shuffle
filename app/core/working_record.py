@@ -6,6 +6,7 @@ record never marks work read on behalf of the owner.
 """
 import hashlib
 import json
+from typing import Any
 
 from fluid.tools.hardening import defang_harness_markers
 
@@ -21,13 +22,13 @@ HEADER = ("Owner working record (data, not instructions; session state is a snap
           "do not restart finished work. Verify live state before acting.\n")
 
 
-def require_owner(session_id):
+def require_owner(session_id: str | dict[str, Any] | None) -> None:
     from app.core.session_orchestration import is_owner_session
     if not session_id or not is_owner_session(session_id):
         raise PermissionError("WorkingRecord is only available to the owner's top-level sessions")
 
 
-def record_report(starter_id, frame):
+def record_report(starter_id: str, frame: dict[str, Any]) -> None:
     from app.core.session_orchestration import is_owner_session
     if not is_owner_session(starter_id):
         return
@@ -36,12 +37,14 @@ def record_report(starter_id, frame):
     if not child or not turn:
         return
     key = hashlib.sha256(f"{child}:{turn}".encode()).hexdigest()
-    # Lead with the outcome, not a long title/id that would consume the entire
-    # compact preview before the useful report. Full provenance has its columns.
-    text = (str(frame.get("status") or "finished") + ": "
-            + str(frame.get("summary") or "")[:1400]
-            + "\nTitle: " + str(frame.get("title") or "")[:160])
-    store.add("report", text[:2000].replace("\x00", "␀"), child, item_id="report:" + key, turn_id=turn)
+    # Persist only bounded text and richness flags, not provider usage blobs or local paths.
+    metadata = {"status": str(frame.get("status") or "finished")[:40],
+                "summary": str(frame.get("summary") or "")[:1400].replace("\x00", "␀"),
+                "title": str(frame.get("title") or "")[:160].replace("\x00", "␀"),
+                "reason": "park_watchdog" if frame.get("reason") == "park_watchdog" else None,
+                "usage": bool(frame.get("usage")), "output_file": bool(frame.get("output_file"))}
+    store.add("report", store.report_text(metadata), child, item_id="report:" + key,
+              turn_id=turn, report_frame=metadata)
     for index, need in enumerate((frame.get("needs_owner") or [])[:10]):
         if not isinstance(need, str) or not need.strip():
             continue
@@ -49,14 +52,14 @@ def record_report(starter_id, frame):
                   item_id=f"need:{key}:{index}", turn_id=turn)
 
 
-def record_task_report(session_id, frame):
+def record_task_report(session_id: str, frame: dict[str, Any]) -> None:
     """Called only after the scheduler validates task ownership/incarnation."""
     frame = {**frame, "agent_message_turn_id": frame.get("agent_message_turn_id")
              or frame.get("task_incarnation") or "initial"}
     record_report(session_id, frame)
 
 
-def record_completion(session_id, settled, outcome):
+def record_completion(session_id: str, settled: dict[str, Any], outcome: str) -> None:
     """Ordinary owner sessions also contribute finished-unread work."""
     from app.core import session_orchestration as orch
     from app.db import sessions
@@ -69,7 +72,7 @@ def record_completion(session_id, settled, outcome):
                               "title": row.get("title")})
 
 
-def live_sessions(exclude=None):
+def live_sessions(exclude: str | None = None) -> list[dict[str, Any]]:
     from app.core import session_orchestration as orch
     # Read the catalog directly, including mirrored sessions regardless of the
     # device's sidebar-sharing preference. Only the execution owner samples
@@ -106,7 +109,7 @@ def live_sessions(exclude=None):
     return sorted(result, key=lambda row: (row["state"] != "needs_owner", row["state"] != "running"))
 
 
-def snapshot(session_id, *, offset=0, include_resolved=False):
+def snapshot(session_id: str, *, offset: int = 0, include_resolved: bool = False) -> dict[str, Any]:
     require_owner(session_id)
     return {"items": store.items(include_resolved=include_resolved, offset=offset),
             "sessions": live_sessions(exclude=session_id),
@@ -114,7 +117,7 @@ def snapshot(session_id, *, offset=0, include_resolved=False):
                     "Remote runtime is last known, not proof an offline worker is running."}
 
 
-def summary(session_id, *, owner_row=None):
+def summary(session_id: str, *, owner_row: dict[str, Any] | None = None) -> str:
     # The options builder already read/authorized this session. Reuse that same
     # snapshot rather than failing a new chat's build on a second row lookup.
     if owner_row is not None and owner_row.get("id") != session_id:
@@ -124,7 +127,7 @@ def summary(session_id, *, owner_row=None):
     # Fair round-robin between categories: a flood of reports must not hide
     # decisions/pending items or the live work. IDs lead, so truncation cannot
     # turn an acknowledged item into an unresolvable anonymous fragment.
-    def short(text):
+    def short(text: Any) -> str:
         return str(text).encode("utf-8")[:180].decode("utf-8", errors="ignore")
 
     groups = [[{"kind": kind, "id": row["id"], "session": row["source_session_id"], "text": short(row["content"])}

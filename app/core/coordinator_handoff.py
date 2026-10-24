@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from fluid.tools.hardening import defang_harness_markers
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 THRESHOLD = 0.80
 
 
-def _admit(session_id, settled, terminal):
+def _admit(session_id: str, settled: dict[str, Any], terminal: dict[str, Any]) -> dict[str, Any] | None:
     from app.core import compact_continue
     from app.core import session_orchestration as orch
     from app.core.task_registry import task_registry
@@ -113,9 +114,14 @@ def _admit(session_id, settled, terminal):
         turn = turns.enqueue_turn(successor_id, source, prompt=prompt, command_id=command_id,
                                   profile_id=row["profile_id"], parent_turn_id=settled.get("id"),
                                   payload=payload, _conn=conn)
-        now = datetime.now(UTC).isoformat()
-        cur.execute("INSERT INTO coordinator_handoffs (source_session_id,successor_session_id,turn_id,created_at) "
-                    "VALUES (%s,%s,%s,%s)", (session_id, successor_id, turn["id"], now))
+        from app.core.assistant_limits import _job_minutes
+        now = datetime.now(UTC)
+        cur.execute("SELECT prior_work_ms FROM coordinator_handoffs WHERE successor_session_id=%s", (session_id,))
+        inherited = cur.fetchone()
+        prior_work_ms = (int(inherited["prior_work_ms"]) if inherited else 0) + round(_job_minutes(row, now) * 60000)
+        cur.execute("INSERT INTO coordinator_handoffs "
+                    "(source_session_id,successor_session_id,turn_id,created_at,prior_work_ms) "
+                    "VALUES (%s,%s,%s,%s,%s)", (session_id, successor_id, turn["id"], now.isoformat(), prior_work_ms))
         session_events.append_events(session_id, [{"type": "system.note", "payload": {
             "subtype": "coordinator_handoff", "successor_session_id": successor_id,
             "content": "Context nearly full. Coordination continues in session " + successor_id + "."}}], _conn=conn)
@@ -124,7 +130,7 @@ def _admit(session_id, settled, terminal):
         return successor
 
 
-async def on_session_rest(session_id, settled, terminal, outcome):
+async def on_session_rest(session_id: str, settled: dict[str, Any], terminal: dict[str, Any], outcome: str) -> bool:
     """Scheduler seam: no queued work, before compact-boundary continuation."""
     if outcome != "completed" or (settled.get("payload") or {}).get("coordinator_predecessor"):
         # The initial status wake must never make an automatic hand-off chain,

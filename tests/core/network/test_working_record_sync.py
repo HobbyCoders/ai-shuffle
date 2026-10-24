@@ -1,6 +1,7 @@
 """Working items converge through the real signed owner network transport."""
 from app.db import database
 from app.db import working_record as store
+from app.db.base import parse_jsonb
 from app.network import engine
 from tests.core.network.harness import converge, join
 
@@ -24,6 +25,31 @@ def test_independent_items_and_acknowledgements_follow_owner(workers):
             assert {row["id"] for row in store.items()} == {pending, goal}
             assert next(row for row in store.items(include_resolved=True)
                         if row["id"] == decision)["status"] == "resolved"
+
+
+
+
+def test_richer_report_preserves_an_acknowledgement_received_from_peer(workers):
+    first, second = workers("first"), workers("second")
+    provisional = {"status": "killed", "reason": "park_watchdog", "summary": "Stand-in"}
+    genuine = {"status": "completed", "summary": "Actual result"}
+    with first.active():
+        engine.create_network("Working record")
+        store.add("report", store.report_text(provisional), "child", item_id="report:one", report_frame=provisional)
+    join(first, second)
+    converge([first, second])
+    with second.active():
+        assert store.resolve("report:one")
+    converge([first, second])
+    with first.active():
+        store.add("report", store.report_text(genuine), "child", item_id="report:one", report_frame=genuine)
+    converge([first, second])
+    for worker in (first, second):
+        with worker.active():
+            assert not store.items()
+            report = store.items(include_resolved=True)[0]
+            assert report["status"] == "resolved" and "Actual result" in report["content"]
+            assert parse_jsonb(report["report_frame"])["status"] == "completed"
 
 
 def test_remote_session_state_is_used_without_mirroring_execution_tables(workers, monkeypatch):
