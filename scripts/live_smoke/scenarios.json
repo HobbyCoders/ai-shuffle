@@ -105,6 +105,14 @@
       "intro": "Run before a release (never on a schedule) from the ServerWorker worker with DesktopWorker online; swap roles for a second pass when both are available. Each check maps to a bug the owner previously found by hand (session titles in brackets).",
       "rows": [
         {
+          "id": "harness-basics.desktop-postgres-limits",
+          "check": "Desktop-managed PostgreSQL bounds stuck queries, lock waits and idle transactions",
+          "kind": "owner",
+          "how": "On a disposable desktop install with an existing cluster, update to launcher 8, restart, then run SHOW statement_timeout, lock_timeout and idle_in_transaction_session_timeout on the app database, and start a long agent turn with a large history import.",
+          "pass_when": "The three values are 30s, 5s and 30s after every restart; ordinary turns, boot migrations and maintenance still finish; no turn fails on a statement or lock timeout.",
+          "past_bug": "#580: stalled commits held pooled connections until the app froze; #591 brings the server limits to desktop."
+        },
+        {
           "id": "harness-basics.generation-choice-safety",
           "check": "Unified generation named-choice safety, quotes and catalog shape",
           "kind": "owner",
