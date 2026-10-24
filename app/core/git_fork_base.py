@@ -93,7 +93,10 @@ def caller_uses_default(path: str, default: str | None = None) -> bool:
 def choose_worker_base(path: str, caller: str = "HEAD", *,
                        base_commit: str | None = None,
                        default_branch_caller: bool | None = None) -> tuple[str, str]:
-    """Caller holds the project lock; peers supply eligibility checked at source."""
+    """Fetch coalesces under its own lock; peers supply source-checked eligibility.
+
+    Callers pin the returned ref to a SHA before branch/worktree creation.
+    """
     if base_commit is not None:
         return base_commit, "Explicit base_commit."
     if default_branch_caller is None:
