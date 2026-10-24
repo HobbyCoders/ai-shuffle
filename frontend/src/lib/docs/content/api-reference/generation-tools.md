@@ -155,10 +155,13 @@ preferences:
 
 `GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
 saves a pick (`remember: false` records only the last choice). The save response
-includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when no price
-can be verified: unattended runs will skip that choice. No price is inferred for an
-unpriced model, and saving never reserves or submits a generation. Frontend clients
-must display this warning after saving or remembering a pick.
+includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
+choice cannot run unattended. An unpriced model reports `stored_choice_unpriced`.
+An unavailable account/model or failed quote reports `stored_choice_unavailable`,
+with the quote's error in `quote_error` and the warning. The optional quote has a
+two-second timeout; a failed quote does not lose the saved pick. No price is inferred
+for an unpriced model, and saving never reserves or submits a generation. Frontend
+clients must display this warning after saving or remembering a pick.
 `DELETE /api/v1/generation/choices/{kind}` asks again next time.
 `GET /api/v1/generation/options/{kind}` lists priced options across accounts
 and `POST /api/v1/generation/quote` validates options against the model's

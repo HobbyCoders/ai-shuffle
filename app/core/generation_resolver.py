@@ -204,13 +204,20 @@ class Resolver:
             # we silently charge a different stored source/account/model.
             named_source = normalize_source(args.get("source"))
             stored_source = normalize_source(stored.get("source") or stored.get("account"))
-            differs = (named_source and named_source not in (stored_source, stored.get("account"))) or any(
-                args.get(key) and args[key] != stored.get(key) for key in ("account", "model", "worker"))
+            differs = any(args.get(key) and args[key] != stored.get(key) for key in ("account", "model", "worker"))
+            if not differs and named_source in SOURCE_NAMES and stored_source and stored_source not in SOURCE_NAMES:
+                resolve_source = getattr(self.backend, "source_for_account", None)
+                if resolve_source:
+                    try:
+                        stored_source = await resolve_source(stored.get("account") or stored_source)
+                    except Exception:  # noqa: BLE001 - account identity must fail closed before catalog access
+                        return result("skipped", reason="choices_unreadable", kind=kind, message=UNREADABLE_SKIP_MESSAGE)
+            differs = differs or (named_source and named_source not in (stored_source, stored.get("account")))
             if differs:
                 return result("skipped", reason="named_choice_differs_from_stored", kind=kind,
                               message="Generation skipped: this run is unattended and the named source, account or model "
                                       "does not match the stored choice. The named choice needs the owner's selection. "
-                                      "No source was looked up and nothing was submitted.")
+                                      "No source catalog was queried and nothing was submitted.")
         explicit = bool(args.get("source") or args.get("model"))
         # The remembered choice is running unasked (nothing named in the call).
         unasked = from_memory and not explicit

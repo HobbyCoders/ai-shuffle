@@ -702,6 +702,11 @@ def _compact_generation_option(option):
     if not isinstance(schema, dict):
         view["schema"] = None
         return view
+    # Native capabilities use a mapping of option names to allowed values,
+    # not fal's list of ParamField records. Preserve that selectable schema.
+    if isinstance(schema.get("fields"), dict):
+        view["schema"] = schema
+        return view
     compact = {"primary_text_field": schema.get("primary_text_field"), "fields": [], "compact": True, "truncated": False}
     truncated = False
     for field in schema.get("fields", []):
@@ -903,7 +908,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                                        reason="invalid_request", error=message, message=message))
         request = {"prompt": prompt, "source": "fal", "model": endpoint, "options": values,
                    "confirmed": args.get("confirmed"), "confirmation_token": args.get("confirmation_token")}
-        if fal_local:
+        if fal_local and not context.unattended and not (context.job_choice or context.remembered_for(kind)):
             request["worker"] = backend.local_worker()
         output = await resolver.generate(kind, request, context)
         if context.unattended and output.get("status") == "refused":

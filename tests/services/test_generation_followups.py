@@ -11,7 +11,7 @@ from app.mcp import ai_tools_sdk as sdk
 from app.services.fal_schema import normalize_openapi
 from tests.api.test_generation_choices_api import client, quote_backend
 from tests.core.test_generation_resolver import INTERACTIVE, FakeBackend, candidate
-from tests.mcp.test_unified_generation_tools import payload
+from tests.mcp.test_unified_generation_tools import lane_tools, payload
 from tests.services.test_generation_sources import backend
 
 # Re-export the fixtures pytest discovers in this module.
@@ -209,3 +209,136 @@ def test_saving_priced_pick_returns_quote_without_warning(client, quote_backend)
     assert output["priced"] is True and output["warning"] is None
     assert output["unattended_skip_reason"] is None
     assert output["price"]["total"] == "0.05"
+
+
+@pytest.mark.parametrize("source", [None, "supergrok", "chatgpt"])
+async def test_search_models_handles_real_subscription_capability_fields(backend, monkeypatch, source):
+    from app.core.native_generation_settings import capabilities
+    from app.services import generation_sources
+    backend.fal_key = AsyncMock(return_value=None)
+    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: backend)
+    tools = {t.name: t for t in sdk._create_unified_tools(None, backend.context)}
+    output = payload(await tools["searchModels"].handler({"source": source} if source else {}))
+    subscription = next(o for o in output["options"] if o["source"] == (source or "supergrok") and o["kind"] == "image")
+    expected = capabilities("chatgpt" if source == "chatgpt" else "grok")["image"]
+    assert isinstance(expected["fields"], dict)
+    assert subscription["schema"] == expected
+    assert len(json.dumps(output, ensure_ascii=True)) <= 32768
+    backend.node.call.assert_not_awaited()
+
+
+@pytest.mark.parametrize("worker", ["worker-b", None])
+@pytest.mark.parametrize("unattended", [True, False])
+async def test_run_fal_model_respects_per_kind_remembered_holder(monkeypatch, worker, unattended):
+    from app.services.fal_schema import ModelSchema, ParamField, schema_service
+    entry = replace(candidate(model="fal-ai/x"), worker="worker-b")
+    choice = entry.choice()
+    if worker is None:
+        choice.pop("worker")
+    context = replace(INTERACTIVE, unattended=unattended, remembered_choices={"image": choice})
+    tools, backend, legacy = lane_tools(monkeypatch, [entry], context)
+    backend.fal_key = AsyncMock(return_value="test-key")
+    schema = ModelSchema(entry.model, [ParamField("prompt", is_primary_text=True)], "prompt")
+    monkeypatch.setattr(schema_service, "get_schema", AsyncMock(return_value=schema))
+    output = payload(await tools["runFalModel"].handler({
+        "endpoint_id": entry.model, "input": {"prompt": "tree"}, "output_type": "image"}))
+    assert output["status"] == "completed" and output["choice"]["worker"] == "worker-b"
+    assert ("execute", entry.account) in backend.calls
+    legacy.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source", ["supergrok", "fal"])
+@pytest.mark.parametrize("identity", ["account", "source", "both"])
+async def test_unattended_account_uuid_compares_resolved_source_without_discovery(backend, monkeypatch, source, identity):
+    from app.db import database, model_providers
+    account = "12345678-1234-4321-8765-123456789abc"
+    row = {"id": account, "provider_type": "grok"}
+    metadata_reads = []
+    def get_account(provider_id, include_token=False):
+        metadata_reads.append((provider_id, include_token))
+        return row if provider_id == account else None
+    monkeypatch.setattr(database, "get_model_provider", get_account)
+    monkeypatch.setattr(model_providers, "list_usable_model_providers", lambda: [row])
+    entry = (await backend.local_catalog("image", source=account))[0]
+    choice = {k: v for k, v in entry.choice().items() if k != "source"}
+    if identity in ("source", "both"):
+        choice["source"] = account
+    if identity == "source":
+        choice.pop("account")
+    backend.catalog = AsyncMock(wraps=backend.catalog)
+    backend.reserve = AsyncMock(return_value=True)
+    backend.execute = AsyncMock(return_value={"success": True})
+    output = await Resolver(backend).generate("image", {"prompt": "tree", "source": source},
+        replace(backend.context, unattended=True, remembered_choices={"image": choice}))
+    if source == "supergrok":
+        assert output["status"] == "completed" and output["choice"]["account"] == account
+        assert backend.catalog.await_args.kwargs["source"] == account
+        backend.execute.assert_awaited_once()
+    else:
+        assert output["reason"] == "named_choice_differs_from_stored"
+        backend.catalog.assert_not_awaited()
+        backend.execute.assert_not_awaited()
+    assert metadata_reads and all(not include_token for _, include_token in metadata_reads)
+
+
+def test_save_unavailable_pick_preserves_quote_error(client, quote_backend):
+    choice = quote_backend.entries[0].choice()
+    quote_backend.entries = []
+    output = client.put("/api/v1/generation/choices/image", json={"choice": choice}).json()
+    assert output["remembered"] and not output["priced"]
+    assert output["quote_error"] == "This account or model is not available right now."
+    assert output["quote_error"] in output["warning"]
+    assert "no verified price" not in output["warning"]
+    assert output["unattended_skip_reason"] == "stored_choice_unavailable"
+    assert client.get("/api/v1/generation/choices").json()["remembered"]["image"]["account"] == choice["account"]
+
+
+def test_save_bounds_quote_wait_and_preserves_pick(client, quote_backend, monkeypatch):
+    import asyncio
+
+    from app.api import generation_choices as api
+    cancelled = []
+    async def stalled_catalog(*a, **kw):
+        try:
+            await asyncio.sleep(1)
+            return quote_backend.entries
+        finally:
+            cancelled.append(True)
+    monkeypatch.setattr(api, "_SAVE_QUOTE_TIMEOUT_SECONDS", 0.01)
+    quote_backend.catalog = AsyncMock(side_effect=stalled_catalog)
+    choice = quote_backend.entries[0].choice()
+    response = client.put("/api/v1/generation/choices/image", json={"choice": choice})
+    output = response.json()
+    assert response.status_code == 200 and cancelled
+    assert output["remembered"] and not output["priced"]
+    assert "timed out" in output["quote_error"] and output["quote_error"] in output["warning"]
+    assert output["unattended_skip_reason"] == "stored_choice_unavailable"
+    assert client.get("/api/v1/generation/choices").json()["remembered"]["image"]["account"] == choice["account"]
+    assert not any(call[0] in ("reserve", "execute") for call in quote_backend.calls)
+
+
+async def test_unattended_mismatched_model_does_not_resolve_account_metadata():
+    entry = candidate(source="supergrok")
+    backend = FakeBackend([entry])
+    backend.catalog = AsyncMock(side_effect=AssertionError("No catalog access"))
+    backend.source_for_account = AsyncMock(side_effect=AssertionError("No metadata access"))
+    output = await Resolver(backend).generate("image", {
+        "prompt": "tree", "source": "supergrok", "model": "different-model"},
+        replace(INTERACTIVE, unattended=True, remembered_choices={"image": {
+            "account": entry.account, "model": entry.model}}))
+    assert output["reason"] == "named_choice_differs_from_stored"
+    backend.catalog.assert_not_awaited()
+    backend.source_for_account.assert_not_awaited()
+
+
+async def test_unattended_unreadable_account_metadata_skips_before_catalog():
+    entry = candidate(source="supergrok")
+    backend = FakeBackend([entry])
+    backend.catalog = AsyncMock(side_effect=AssertionError("No catalog access"))
+    backend.source_for_account = AsyncMock(side_effect=RuntimeError("Account metadata unavailable"))
+    output = await Resolver(backend).generate("image", {"prompt": "tree", "source": "supergrok"},
+        replace(INTERACTIVE, unattended=True, remembered_choices={"image": {
+            "account": entry.account, "model": entry.model}}))
+    assert output["status"] == "skipped" and output["reason"] == "choices_unreadable"
+    backend.catalog.assert_not_awaited()
+    assert backend.calls == []

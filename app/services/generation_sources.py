@@ -50,6 +50,21 @@ class Sources:
         from app.network import runners
         return runners.self_device_id() or "local"
 
+    async def source_for_account(self, account):
+        """Resolve an account's public metadata without catalog or provider I/O."""
+        if not self.context.owner:
+            return None
+        from app.core import native_generation_settings as native
+        from app.core.generation_resolver import normalize_source
+        from app.db import database
+        row = await run_sync(database.get_model_provider, account, include_token=False)
+        if row is None:
+            return None
+        try:
+            return normalize_source(native.provider_kind(row))
+        except ValueError:
+            return None
+
     async def fal_key(self):
         if self.context.api_user_id:
             from app.core import fal_credential
