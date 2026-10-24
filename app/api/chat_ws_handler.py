@@ -137,8 +137,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
     positions (the legacy numbering convention) so the float ``turns.position``
     never leaks to the wire. ``id``←turn id (the ``query_queued`` ack carries the
     same turn id, so FE-held ids match for remove), ``content``←prompt,
-    ``created_at``←ISO. The row shape matches ``queued_messages`` so the frontend
-    needs zero changes.
+    ``created_at``←ISO. Valid client command ids are exposed as both
+    ``command_id`` and ``client_message_id`` for snapshot reconciliation.
     """
     rows: List[Dict[str, Any]] = []
     pos = 0
