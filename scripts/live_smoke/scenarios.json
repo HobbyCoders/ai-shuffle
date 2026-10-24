@@ -448,6 +448,14 @@
           "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
         },
         {
+          "id": "harness-basics.27",
+          "check": "Confirmed watches recover cursors and deliver without self-triggering",
+          "kind": "owner",
+          "how": "Use only a disposable candidate worker with its own persistent data directory and a configured real provider; never restart a production worker. In a throwaway live project chat request a 60-second schedule watch with a small daily cap. Confirm the host-owned source/filter, read-only scope, delivery action and budget sentence. Record its id, saved cursor, event ids and stable delivery command ids. After one real delivery, stop only the disposable worker for over 180 seconds, letting scheduled events accrue, then restart with the same data directory. Also interrupt once immediately after event admission but before dispatch using approved candidate diagnostics; retain the original command identity. Confirm all elapsed schedule events arrive once, then restart again and check no event or turn is repeated. Settle the creating chat, let a new schedule event arrive, and inspect the durable bell/push notification and cheap summary rather than a turn waking that chat. Create an investigation watch and verify a new short no-project chat plus notification. Finally create a finished-session watch scoped to its own creating chat; finish one ordinary owner turn, let the watch's real delivery finish, and wait through several polling intervals. Pause and stop every test watch, archive the throwaway chats, and remove only the disposable candidate after saving private receipts; do not publish screenshots.",
+          "pass_when": "No watch exists before the owner's confirmation. Live deliveries are real turns in the creating chat; a settled creator stays settled, alerts are durable notifications, and investigations use a new bounded no-project chat. Persisted cursors recover every elapsed schedule event exactly once across both restarts, including the expired undispatched admission, with unchanged dedupe and command ids. The finished-session watch reports the owner turn once and never re-fires on its own delivery, with no further provider call or cost during idle polling. Current permission revocation, pause/stop and daily budget still prevent dispatch after recovery. Record actual producing-path and provider evidence; mocked/seeded consumer state or an unexecuted restart is not a pass.",
+          "past_bug": "#371 review: expired admitted events were lost across restarts; finished-session watches observed their own delivery turns; only mocked local watch flows had been covered."
+        },
+        {
           "id": "harness-basics.26",
           "check": "Bounded home ownership repair progresses across persistent-volume restarts",
           "kind": "owner",

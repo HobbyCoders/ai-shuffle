@@ -3,6 +3,8 @@
 The personal assistant's own conversation (its "home") was retired in #371
 step 5, so nothing here opens, elects or protects one.
 """
+from __future__ import annotations
+from typing import Any
 import pytest
 
 from app.core import assistant_service as service
@@ -35,40 +37,44 @@ def network(workers):
     return a, b
 
 
-def set_up_owner():
+def set_up_owner() -> None:
     with store.get_db() as conn:
-        store.write_account(conn, {"agent_id":"default", "introduction":{"detected":{"preferred_name":"Owner"}}})
+        store.write_account(
+            conn, {"agent_id": "default", "introduction": {"detected": {"preferred_name": "Owner"}}}
+        )
     service.reconcile()
 
 
-def test_owner_introduction_still_syncs_without_research(workers):
-    a,b=network(workers)
+def test_owner_introduction_still_syncs_without_research(workers: Any) -> None:
+    a, b = network(workers)
     with a.active():
         set_up_owner()
         engine.scan_all()
-    settle([a,b])
-    for worker in (a,b):
+    settle([a, b])
+    for worker in (a, b):
         with worker.active():
-            assert store.get_account()['introduction']['detected']['preferred_name']=='Owner'
-            assert database.get_sessions(include_hidden=True)==[]
+            assert store.get_account()["introduction"]["detected"]["preferred_name"] == "Owner"
+            assert database.get_sessions(include_hidden=True) == []
             from app.db.base import table_exists
+
             with store.get_db() as conn:
-                assert not table_exists(conn.cursor(),'assistant_sources')
+                assert not table_exists(conn.cursor(), "assistant_sources")
 
 
-def test_older_peers_source_optins_sync_without_recreating_watches(workers):
-    a,b=network(workers)
+def test_older_peers_source_optins_sync_without_recreating_watches(workers: Any) -> None:
+    a, b = network(workers)
     with a.active():
         set_up_owner()
         with store.get_db() as conn:
-            store.write_account(conn,{'sources':{'mail':True}})
+            store.write_account(conn, {"sources": {"mail": True}})
         engine.scan_all()
-    settle([a,b])
-    for worker in (a,b):
+    settle([a, b])
+    for worker in (a, b):
         with worker.active():
-            assert store.get_account()['sources']=={'mail':True}
+            assert store.get_account()["sources"] == {"mail": True}
             from app.db.watches import list_watches
-            assert list_watches()==[]
+
+            assert list_watches() == []
 
 
 def test_any_session_can_be_settled_and_archived(workers):

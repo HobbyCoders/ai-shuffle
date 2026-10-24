@@ -4,7 +4,9 @@ Research source/run/event tables are migrated to watches and removed. The
 remaining historical table names are still used by identity, default git author
 and the owner's cross-worker spending limit; they are not a research loop.
 """
+
 from __future__ import annotations
+from typing import Any
 
 import json
 import uuid
@@ -28,11 +30,12 @@ def now():
     return datetime.now(timezone.utc)
 
 
-def create_schema(cursor):
+def create_schema(cursor: Any) -> None:
     cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_state (
         id TEXT PRIMARY KEY, runner_id TEXT NOT NULL,
         agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-        home_session_id TEXT, enabled BOOLEAN NOT NULL DEFAULT FALSE, paused BOOLEAN NOT NULL DEFAULT FALSE,
+        home_session_id TEXT, enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        paused BOOLEAN NOT NULL DEFAULT FALSE,
         introduction JSONB NOT NULL DEFAULT '{}',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
@@ -65,6 +68,8 @@ def create_schema(cursor):
         cost_usd DOUBLE PRECISION NOT NULL, booked_at TIMESTAMPTZ NOT NULL
     )""")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_remote_costs_booked ON assistant_remote_costs(assistant_id, booked_at)")
+
+
 def _parse(row):
     row = row_to_dict(row)
     if row:
@@ -133,7 +138,7 @@ def write_account(conn, changes):
     return _parse(cursor.fetchone())
 
 
-def project(conn, assistant_id, values, sources=None):
+def project(conn: Any, assistant_id: str, values: Any, sources: Any = None) -> Any:
     """Project introduction/identity only. Retired source opt-ins are ignored."""
     return configure(assistant_id, {k: v for k, v in values.items() if k in DEFAULTS}, _conn=conn)
 
@@ -285,15 +290,26 @@ def wake_remote_job(assistant_id, session_id):
 RETENTION_BATCH = 500
 
 
-def retention_sweep(assistant_id, at=None, *, stop=None):
+def retention_sweep(
+    assistant_id: str, at: datetime | None = None, *, stop: Any = None
+) -> dict[str, Any]:
     """Bounded cleanup still required by remote spending and job stops."""
     from app.db.retention import mutate_batches
     from app.db.assistant_limits import STOP_RETENTION
     at = at or now()
-    common = dict(stop=stop,batch_size=RETENTION_BATCH)
+    common = dict(stop=stop, batch_size=RETENTION_BATCH)
     return {
-        'remote_costs_deleted':mutate_batches('assistant_remote_costs',
-            'assistant_id=%s AND booked_at < %s',(assistant_id,at-timedelta(days=35)),**common),
-        'limit_stops_deleted':mutate_batches('assistant_limit_stops',
-            'assistant_id=%s AND created_at < %s',(assistant_id,at-STOP_RETENTION),keys=('turn_id',),**common),
+        "remote_costs_deleted": mutate_batches(
+            "assistant_remote_costs",
+            "assistant_id=%s AND booked_at < %s",
+            (assistant_id, at - timedelta(days=35)),
+            **common,
+        ),
+        "limit_stops_deleted": mutate_batches(
+            "assistant_limit_stops",
+            "assistant_id=%s AND created_at < %s",
+            (assistant_id, at - STOP_RETENTION),
+            keys=("turn_id",),
+            **common,
+        ),
     }

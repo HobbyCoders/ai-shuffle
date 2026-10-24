@@ -1,4 +1,6 @@
 """Retention SQL, commits, cancellation and index plans on disposable PostgreSQL 16."""
+from __future__ import annotations
+from typing import Any
 import threading
 from contextlib import contextmanager
 from uuid import uuid4
@@ -442,11 +444,16 @@ def test_mobile_retention_separately_commits_and_stops(pg, kind, stopping):
 
 @pytest.mark.parametrize("step", ["remote_costs_deleted", "limit_stops_deleted"])
 @pytest.mark.parametrize("stopping", [False, True])
-def test_assistant_retains_per_pass_budget_and_protected_rows(pg, step, stopping):
+def test_assistant_retains_per_pass_budget_and_protected_rows(
+    pg: Any, step: Any, stopping: bool
+) -> None:
     sql, queries, commits, stop, state, _ = pg
     sql("CREATE TABLE assistant_remote_costs(id TEXT PRIMARY KEY, assistant_id TEXT, booked_at TIMESTAMPTZ)")
     sql("CREATE TABLE assistant_limit_stops(turn_id TEXT PRIMARY KEY, assistant_id TEXT, created_at TIMESTAMPTZ)")
-    table = {"remote_costs_deleted": "assistant_remote_costs", "limit_stops_deleted": "assistant_limit_stops"}[step]
+    table = {
+        "remote_costs_deleted": "assistant_remote_costs",
+        "limit_stops_deleted": "assistant_limit_stops",
+    }[step]
     for i in range(6):
         age = "2999-01-01" if i == 5 else "2000-01-01"
         sql(f"INSERT INTO {table} VALUES (%s,'a',%s)", (str(i), age))
@@ -560,5 +567,3 @@ def test_fluid_prune_honours_stop_on_real_postgres(pg, monkeypatch, stopping):
     before = len(queries)
     assert PRUNE_FLUID(stop=stop) == 0
     assert len(queries) == before
-
-

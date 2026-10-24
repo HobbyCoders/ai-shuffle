@@ -103,13 +103,23 @@ CHAT_MODE_APP_TOOLS = [
     "ScheduleWakeup", "CronCreate", "CronList", "CronDelete", "WorkingRecord",
 ]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
-    *CHAT_MODE_BASIC_TOOL_SURFACE, "Glob", "Grep",
-    "mcp__attachments__Glob", "mcp__attachments__Grep", "mcp__app-config__*",
-    *CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS,
-    "CreateWatch", "ListWatches", "PauseWatch", "StopWatch",
-    *(f"mcp__builtins__{name}" for name in ("CreateWatch", "ListWatches", "PauseWatch", "StopWatch")),
-    *(f"mcp__builtins__{name}" for name in
-      [*CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS]),
+    *CHAT_MODE_BASIC_TOOL_SURFACE,
+    "Glob",
+    "Grep",
+    "mcp__attachments__Glob",
+    "mcp__attachments__Grep",
+    "mcp__app-config__*",
+    *CHAT_MODE_ORCHESTRATION_TOOLS,
+    *CHAT_MODE_APP_TOOLS,
+    "CreateWatch",
+    "ListWatches",
+    "PauseWatch",
+    "StopWatch",
+    *(
+        f"mcp__builtins__{name}"
+        for name in ("CreateWatch", "ListWatches", "PauseWatch", "StopWatch")
+    ),
+    *(f"mcp__builtins__{name}" for name in [*CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS]),
 ]
 
 # Where the chat lane's attachments land, under the workspace root. ONE shared
@@ -535,7 +545,7 @@ PROACTIVE_DENIED_TOOLS = [
 ]
 
 
-def proactive_tool_denial(metadata, session_id, name):
+def proactive_tool_denial(metadata: dict[str, Any], session_id: str, name: str) -> Any:
     """Checked by both CLI PreToolUse and bundled/native registry dispatch.
 
     Never trust a source's or child's proposed permission mode. Only durable
@@ -548,6 +558,7 @@ def proactive_tool_denial(metadata, session_id, name):
     # matters because the delegated CLI hook calls this synchronously.
     leaf = name.removeprefix("mcp__fluid_bundled__")
     from app.core.watches import tool_surface
+
     watch_surface = tool_surface(metadata)
     if leaf not in (watch_surface if watch_surface is not None else PROACTIVE_TOOL_SURFACE):
         return "Background assistant observation is read-only; this tool is denied."
@@ -567,12 +578,15 @@ def proactive_tool_denial(metadata, session_id, name):
     return None
 
 
-def narrow_tool_access_for_proactive(access, metadata):
+def narrow_tool_access_for_proactive(access: Any, metadata: dict[str, Any]) -> Any:
     if metadata is None:
         return access
     from app.core.watches import tool_surface
+
     watch_surface = tool_surface(metadata)
-    surface = intersect_tool_surfaces(access.allowed, watch_surface if watch_surface is not None else PROACTIVE_TOOL_SURFACE)
+    surface = intersect_tool_surfaces(
+        access.allowed, watch_surface if watch_surface is not None else PROACTIVE_TOOL_SURFACE
+    )
     return ToolAccess(
         allowed=surface or None,
         disallowed=[*(access.disallowed or []), *PROACTIVE_DENIED_TOOLS,
@@ -580,7 +594,9 @@ def narrow_tool_access_for_proactive(access, metadata):
     )
 
 
-def install_proactive_registry_guard(registry, metadata, session_id):
+def install_proactive_registry_guard(
+    registry: Any, metadata: dict[str, Any], session_id: str
+) -> Any:
     """Dispatch is the final fence even under bypass and safe auto-approval.
 
     No external MCP, arbitrary file reads, delegation or code-mode kernel is
@@ -590,6 +606,7 @@ def install_proactive_registry_guard(registry, metadata, session_id):
         return registry
     import asyncio
     from fluid.tools.registry import ToolOutcome
+
     dispatch = registry.dispatch
 
     async def guarded_dispatch(name, input, ctx=None, **kwargs):

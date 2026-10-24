@@ -3,7 +3,9 @@
 Historical assistant names remain for wire/API compatibility. Email research is
 retired; watches own all background observation and its permission provenance.
 """
+
 from __future__ import annotations
+from typing import Any
 
 import json
 import logging
@@ -83,7 +85,7 @@ def _publish():
         logger.warning("Could not publish the assistant account row", exc_info=True)
 
 
-def _seed(cursor, local):
+def _seed(cursor: Any, local: Any) -> Any:
     return dict(agent_id=local.get("agent_id"), introduction=local.get("introduction") or {})
 
 
@@ -100,7 +102,7 @@ def _project(conn, account):
     store.project(conn, assistant_id(), values, account.get("sources") or {})
 
 
-def reconcile():
+def reconcile() -> Any:
     """Project the synced account onto this worker's runner row.
 
     Only seeding (and moving an older account onto the built-in agent) writes
@@ -198,9 +200,10 @@ def session_stopped(session_id):
         return (turn.get("interrupt_mode") == "stop" and payload.get("interrupt_source") != "assistant") or turn.get("stop_reason") in ("user_stopped", "user_stopped_all", "agent_stopped")
 
 
-def assert_proactive_allowed(metadata, session_id=None):
+def assert_proactive_allowed(metadata: dict[str, Any], session_id: str | None = None) -> Any:
     """Shared harness seam: legacy research provenance is no longer executable."""
     from app.core.watches import assert_allowed
+
     return assert_allowed(metadata, session_id)
 
 
@@ -245,4 +248,3 @@ def apply_detection(detected, unknown=()):
         _project(conn, store.write_account(conn, {"introduction": updated}))
     _publish()
     return True
-

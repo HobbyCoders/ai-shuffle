@@ -1,4 +1,7 @@
 """Owner-only running-agents watch rows and controls; normal CSRF applies."""
+
+from __future__ import annotations
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 from typing import Literal
@@ -9,7 +12,9 @@ from app.core.watch_manager import watch_manager
 from app.db import watches as store
 from app.db.async_database import run_sync
 
-router = APIRouter(prefix="/api/v1/watches",tags=["Watches"],dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api/v1/watches", tags=["Watches"], dependencies=[Depends(require_admin)]
+)
 
 
 class WatchStatus(BaseModel):
@@ -18,15 +23,15 @@ class WatchStatus(BaseModel):
 
 
 @router.get("")
-async def list_watches():
+async def list_watches() -> dict[str, Any]:
     return {"watches": await run_sync(panel_rows)}
 
 
 @router.patch("/{watch_id}")
-async def update_watch(watch_id: str, body: WatchStatus):
+async def update_watch(watch_id: str, body: WatchStatus) -> Any:
     try:
-        row = await run_sync(store.set_status,watch_id,"admin",body.status)
+        row = await run_sync(store.set_status, watch_id, "admin", body.status)
     except ValueError as exc:
-        raise HTTPException(404,str(exc)) from exc
+        raise HTTPException(404, str(exc)) from exc
     watch_manager.notify()
     return row

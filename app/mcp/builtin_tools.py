@@ -1701,6 +1701,7 @@ def create_builtin_tools_server(
 
     all_tools: list = []
     from app.core.watches import tools as watch_tools
+
     all_tools.extend(watch_tools(session_id))
 
     # Native Android tools are visible in NORMAL sessions. Identity comes only
@@ -1774,7 +1775,6 @@ def create_builtin_tools_server(
         all_tools.extend(build_emulator_tools(tool, cwd=cwd))
     except Exception:  # noqa: BLE001 — the emulator never blocks a session
         logger.warning("emulator tool registration failed", exc_info=True)
-
 
     # ------------------------------------------------------------------
     # ScheduleWakeup — pause + resume session after a delay

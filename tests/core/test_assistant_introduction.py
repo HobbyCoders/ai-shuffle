@@ -1,4 +1,7 @@
 """The owner introduction is detected (it sets the default git author); never typed in."""
+from __future__ import annotations
+from typing import Any
+from pytest import MonkeyPatch
 import json
 from types import SimpleNamespace
 
@@ -102,7 +105,9 @@ def test_nothing_is_written_before_setup(monkeypatch):
     assert store.get_account() is None
 
 
-async def test_manager_pass_reads_the_running_gmail_address_not_mail(assistant_fixture, monkeypatch):
+async def test_manager_pass_reads_the_running_gmail_address_not_mail(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch
+) -> None:
     from app.core.connectors.manager import connector_manager
 
     async def running(connector_id):
@@ -185,7 +190,9 @@ def test_repositories_are_sorted_and_worktrees_do_not_crowd_them_out(monkeypatch
     assert introductions.projects_and_repositories(runner)[1] == repositories
 
 
-async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(assistant_fixture, monkeypatch):
+async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch
+) -> None:
     from app.core import auth
     service.apply_detection({"github_username": "ada-gh"})
     monkeypatch.setattr(introductions, "github_login", REAL_GITHUB_LOGIN)
@@ -195,7 +202,7 @@ async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(assis
     assert introduction()["github_username"] == "ada-gh"
 
 
-async def test_no_detection_without_an_assistant_running_here(monkeypatch):
+async def test_no_detection_without_an_assistant_running_here(monkeypatch: MonkeyPatch) -> None:
     def unexpected(*args, **kwargs):
         pytest.fail("detected without an assistant")
     monkeypatch.setattr(introductions, "detect", unexpected)

@@ -1,4 +1,5 @@
 """Retained owner identity and ordinary chat behavior after research retirement."""
+
 import pytest
 from app.core import assistant_service as service, task_registry
 from app.db import database, turns

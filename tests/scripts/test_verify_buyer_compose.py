@@ -1,4 +1,8 @@
 """Buyer acceptance must reach the credential gate, not a missing-agent error."""
+from __future__ import annotations
+from typing import Any
+from collections.abc import Iterator
+from pytest import MonkeyPatch
 import io
 import json
 from unittest.mock import Mock
@@ -39,7 +43,7 @@ class ClientApi(buyer.Api):
 
 
 @pytest.fixture
-def fresh_api(bare_db, monkeypatch, _api_unit_credentials):
+def fresh_api(bare_db: Any, monkeypatch: MonkeyPatch, _api_unit_credentials: Any) -> Iterator[Any]:
     from app.api import agents, api_users, query
     from app.core import assistant_service, claude_auth_mode, claude_cli_status, owner_auth, profiles
     from app.core.builtin_subagents import seed_builtin_subagents

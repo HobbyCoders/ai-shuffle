@@ -7,7 +7,9 @@ The personal assistant's own conversation and settings page were removed in
 * ``/agents``: agent names and avatars (the Agents page and agent card);
 Email sources now live in watches, not under this compatibility prefix.
 """
+
 from __future__ import annotations
+from typing import Any
 
 from typing import Optional
 
@@ -76,7 +78,7 @@ async def read_limits():
 
 @router.put("/limits")
 @router.patch("/limits")
-async def update_limits(body: LimitsUpdate):
+async def update_limits(body: LimitsUpdate) -> Any:
     changes = body.model_dump(exclude_unset=True)
     confirmed = changes.pop("confirm_spend_limit_off", None) is True
     for key, value in changes.items():

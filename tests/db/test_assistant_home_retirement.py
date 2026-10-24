@@ -7,6 +7,8 @@ home, a chat a home started, the home's job links and the limit-notice and
 brief columns. Ordinary sessions must come through untouched, and the chat a
 home started must stay under the spending limits.
 """
+from __future__ import annotations
+from typing import Any
 import json
 
 import pytest
@@ -58,11 +60,16 @@ def _start_marker(sid, sender):
                        command_id=f"orchestration:start:{sid}", payload={"orchestration_sender": sender})
 
 
-def _legacy_install(cursor):
+def _legacy_install(cursor: Any) -> None:
     """What an older build left: homes, their links and the retired columns."""
-    db.create_profile(AGENT,service.AGENT_NAME,service.AGENT_DESCRIPTION,service.AGENT_CONFIG,is_builtin=True)
-    cursor.execute("""CREATE TABLE assistant_runs (
-        id TEXT PRIMARY KEY,assistant_id TEXT,home_session_id TEXT,session_id TEXT,kind TEXT,status TEXT)""")
+    db.create_profile(
+        AGENT, service.AGENT_NAME, service.AGENT_DESCRIPTION, service.AGENT_CONFIG, is_builtin=True
+    )
+    cursor.execute(
+        """CREATE TABLE assistant_runs (
+        id TEXT PRIMARY KEY,assistant_id TEXT,home_session_id TEXT,session_id TEXT,
+        kind TEXT,status TEXT)"""
+    )
     _session(HOME, AGENT, hidden=True)
     _session(PEER_HOME, AGENT, hidden=True)  # Mirrored from a peer; no pointer here.
     _session(HOME_WORKER, AGENT, hidden=True, is_worker=True, parent_session_id=HOME)

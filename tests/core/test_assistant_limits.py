@@ -1,4 +1,7 @@
 """The owner's spending and job time limits for coordination chats and their jobs."""
+from __future__ import annotations
+from typing import Any
+from pytest import MonkeyPatch
 import ast
 import pathlib
 from datetime import datetime, timedelta, timezone
@@ -187,7 +190,9 @@ async def test_reaching_the_limit_blocks_new_work_and_stops_running_work(assista
     assert stops.await_count == 1
 
 
-def test_start_session_and_task_are_refused_at_the_limit(assistant_fixture, monkeypatch):
+def test_start_session_and_task_are_refused_at_the_limit(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch
+) -> None:
     home = assistant_fixture["id"]
     database.set_session_active(home, True)
     turn = turns.enqueue_turn(home, "user", prompt="Coordinate", profile_id="assistant-agent")
@@ -197,20 +202,26 @@ def test_start_session_and_task_are_refused_at_the_limit(assistant_fixture, monk
     with pytest.raises(ValueError, match="spending limit is reached"):
         orch._queue(home, {"title": "More work", "prompt": "Go", "request_id": "over"}, "start")
     from app.db.watches import list_watches
+
     assert list_watches() == []
 
 
-async def test_watch_is_not_admitted_at_the_limit(assistant_fixture, monkeypatch):
+async def test_watch_is_not_admitted_at_the_limit(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch
+) -> None:
     from app.core import watch_manager, watches
     from app.db import watches as watches_db
-    row = watches.prepare(assistant_fixture['id'], {'description':'At cap',
-                          'source':{'kind':'schedule','interval_seconds':60}})
+
+    row = watches.prepare(
+        assistant_fixture["id"],
+        {"description": "At cap", "source": {"kind": "schedule", "interval_seconds": 60}},
+    )
     wid = watches_db.create(**row)
     set_limits(daily_spend_limit_usd=1)
-    book(assistant_fixture['id'],2.0)
+    book(assistant_fixture["id"], 2.0)
     await watch_manager.WatchManager().run_once()
-    assert watches_db.events(wid,('pending',))
-    assert watches_db.events(wid,('running',))==[]
+    assert watches_db.events(wid, ("pending",))
+    assert watches_db.events(wid, ("running",)) == []
 
 
 async def test_a_job_past_its_time_limit_is_stopped(assistant_fixture, stops):

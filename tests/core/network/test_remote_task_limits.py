@@ -3,6 +3,9 @@
 Two in-process workers over the real signed control endpoint: ServerWorker runs the
 jobs, Windows runs the owner's coordination chat ("caller"). No provider.
 """
+from __future__ import annotations
+from typing import Any
+from pytest import MonkeyPatch
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -236,13 +239,16 @@ def test_remote_usage_answers_only_for_jobs_the_asking_worker_started(workers, m
             limits.answer_remote_usage({"version": limits.REMOTE_WIRE_VERSION, "session_ids": []}, b.device_id)
 
 
-def test_the_target_never_counts_a_child_another_worker_started_as_its_own_job(workers, monkeypatch, kicks):
+def test_the_target_never_counts_a_child_another_worker_started_as_its_own_job(
+    workers: Any, monkeypatch: MonkeyPatch, kicks: Any
+) -> None:
     a, b, _ = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
         assert store.get_remote_job(service.assistant_id(), child) is None
         from app.db.watches import list_watches
-        assert list_watches()==[]
+
+        assert list_watches() == []
 
 
 # --- linking ----------------------------------------------------------------------

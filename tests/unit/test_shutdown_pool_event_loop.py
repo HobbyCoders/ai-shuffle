@@ -1,10 +1,15 @@
 """Drive real close_pool from shutdown_services without conftest's DB stubs."""
+from __future__ import annotations
+from typing import Any
+from pytest import MonkeyPatch
 from pathlib import Path
 
 pytest_plugins = ["pytester"]
 
 
-def test_shutdown_services_drains_pool_off_event_loop(pytester, monkeypatch):
+def test_shutdown_services_drains_pool_off_event_loop(
+    pytester: Any, monkeypatch: MonkeyPatch
+) -> None:
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
     pytester.makepyfile("""
 import asyncio
