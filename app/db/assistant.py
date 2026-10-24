@@ -1,24 +1,13 @@
-"""Durable assistant research configuration, observation inbox and remote spend.
+"""Owner introduction, legacy account-wire compatibility and remote job spend.
 
-The synced ``assistant_account`` holds the introduction and source opt-ins.
-``assistant_state`` is this worker's runner row: the research configuration
-and the anchor for the spending limit's remote jobs. Runs, events and source
-watermarks stay on the worker that runs research.
-
-The personal assistant's own conversation (its "home") was retired in #371
-step 5 and the startup migration deleted it
-(``app.db.database._retire_assistant_home``). The ``home_session_id`` /
-``home_*`` columns and the account's ``assistant_name`` / ``avatar_id`` stay
-only so older rows and older peers' synced records still load; nothing reads
-or writes them now.
-
-The runner row is also the per-install admission mutex. A guarded UPDATE
-locks it on PostgreSQL (and serializes writers in the SQLite test shim). No
-configuration or source is seeded by a migration.
+Research source/run/event tables are migrated to watches and removed. The
+remaining historical table names are still used by identity, default git author
+and the owner's cross-worker spending limit; they are not a research loop.
 """
-from __future__ import annotations
 
-import hashlib
+from __future__ import annotations
+from typing import Any
+
 import json
 import uuid
 from contextlib import nullcontext
@@ -26,106 +15,29 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
-# The source of truth is frontend/src/lib/components/agents/avatars/: one
-# SVG per avatar and avatars.json for the order. The backend ships without the
-# frontend sources, so this copy stays here; tests/api/test_assistant_avatars.py
-# fails if it drifts from the manifest.
 AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
                   "owl", "fox", "cat", "bear", "ghost", "cloud",
                   "moon", "sun", "bolt", "gem", "drop",
                   "king", "queen", "jack", "joker")
-# Background research tuning. Owners never set these: this is the one place
-# they live, and every run is admitted under exactly these values:
-#   max_runs_per_day     12    research runs in any rolling 24 hours
-#   max_concurrent_runs   1    runs in progress at once
-#   max_turns             3    agent turns inside one run
-#   timeout_seconds     180    deadline for one run
-#   max_cost_per_run    1.0    USD reserved before a run is admitted
-#   max_cost_per_day    5.0    USD reserved/reported over the 24-hour window
-# The dollar figures are admission checks against costs reported after each
-# run, not provider billing caps. Values an owner saved in older releases are
-# ignored. The limit columns and the paused column stay only so older rows
-# keep working; research_allowed() is the on/off rule.
-RESEARCH_LIMITS = dict(max_runs_per_day=12, max_concurrent_runs=1, max_turns=3,
-                       timeout_seconds=180, max_cost_per_run=1.0, max_cost_per_day=5.0)
-LIMIT_KEYS = tuple(RESEARCH_LIMITS)
-DEFAULTS = dict(agent_id=None, enabled=False, paused=False,
-                **RESEARCH_LIMITS, introduction={})
-ACTIVE = ("admitted", "submitting", "running")
-IN_FLIGHT = ACTIVE + ("cancelling",)
-# Per-"day" admission limits use a rolling window anchored on each run's
-# created_at: a run counts, at whatever cost it later settles at, for 24h after
-# admission. No calendar midnight (UTC or owner-local) can reset the budget.
-USAGE_WINDOW = timedelta(hours=24)
-# Retention: settled/revoked event payloads are scrubbed after 30 days (the row
-# and fingerprint stay, so redelivered items still deduplicate); settled events
-# and terminal proactive runs are deleted after 180 days. Pending events and
-# in-flight runs are never touched. Each pass is bounded per table.
-EVENT_PAYLOAD_RETENTION_DAYS = 30
-HISTORY_RETENTION_DAYS = 180
-RETENTION_BATCH = 500
-SCRUBBED_PAYLOAD = json.dumps({"retention_scrubbed": True})
-# The owner's single assistant row. Every worker uses the same key, so the
-# synced row is one record across the network.
 ACCOUNT_ID = "owner"
-# The built-in agent background research runs on (assistant_service owns its
-# definition). The underscore keeps it out of the id space agent creation
-# uses ([a-z0-9-]), so no owner agent can already hold it. Agent lists leave
-# it out and agent editors refuse it: it is not a chat agent.
-AGENT_ID = "builtin_assistant"
+AGENT_ID = "builtin_assistant"  # Retired id; older peers may still send this row.
 ACCOUNT_DEFAULTS = dict(agent_id=None, enabled=False, paused=False, sources={}, introduction={},
                         home_session_id=None, home_device_id=None, home_created_at=None,
                         assistant_name=None, avatar_id=None)
-
+DEFAULTS = dict(agent_id=None, enabled=False, paused=False, introduction={})
 
 def now():
     return datetime.now(timezone.utc)
 
 
-def create_schema(cursor):
+def create_schema(cursor: Any) -> None:
     cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_state (
         id TEXT PRIMARY KEY, runner_id TEXT NOT NULL,
         agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-        home_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-        enabled BOOLEAN NOT NULL DEFAULT FALSE, paused BOOLEAN NOT NULL DEFAULT FALSE,
-        max_runs_per_day INTEGER NOT NULL DEFAULT 12 CHECK (max_runs_per_day BETWEEN 1 AND 100),
-        max_concurrent_runs INTEGER NOT NULL DEFAULT 1 CHECK (max_concurrent_runs BETWEEN 1 AND 3),
-        max_turns INTEGER NOT NULL DEFAULT 3 CHECK (max_turns BETWEEN 1 AND 20),
-        timeout_seconds INTEGER NOT NULL DEFAULT 180 CHECK (timeout_seconds BETWEEN 30 AND 900),
-        max_cost_per_run DOUBLE PRECISION NOT NULL DEFAULT 1 CHECK (max_cost_per_run > 0 AND max_cost_per_run <= 100),
-        max_cost_per_day DOUBLE PRECISION NOT NULL DEFAULT 5 CHECK (max_cost_per_day > 0 AND max_cost_per_day <= 1000),
+        home_session_id TEXT, enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        paused BOOLEAN NOT NULL DEFAULT FALSE,
+        introduction JSONB NOT NULL DEFAULT '{}',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )""")
-    if not column_exists(cursor, "assistant_state", "introduction"):
-        cursor.execute("ALTER TABLE assistant_state ADD COLUMN introduction JSONB NOT NULL DEFAULT '{}'")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_sources (
-        assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
-        connector_id TEXT NOT NULL REFERENCES connectors(id) ON DELETE CASCADE,
-        enabled BOOLEAN NOT NULL DEFAULT FALSE, watermark JSONB,
-        last_observed_at TIMESTAMPTZ, last_error TEXT,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (assistant_id, connector_id)
-    )""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_runs (
-        id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
-        home_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-        session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-        turn_id TEXT, kind TEXT NOT NULL DEFAULT 'proactive', status TEXT NOT NULL,
-        event_ids JSONB NOT NULL DEFAULT '[]', source_ids JSONB NOT NULL DEFAULT '[]',
-        deadline_at TIMESTAMPTZ, cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-        error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ended_at TIMESTAMPTZ
-    )""")
-    for column, ddl in (("agent_id", "TEXT REFERENCES agents(id) ON DELETE SET NULL"),
-                        ("limits", "JSONB NOT NULL DEFAULT '{}'")):
-        if not column_exists(cursor, "assistant_runs", column):
-            cursor.execute(f"ALTER TABLE assistant_runs ADD COLUMN {column} {ddl}")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_events (
-        id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
-        source_id TEXT NOT NULL, event_type TEXT NOT NULL, fingerprint TEXT NOT NULL,
-        payload JSONB NOT NULL, trust TEXT NOT NULL DEFAULT 'external',
-        status TEXT NOT NULL DEFAULT 'pending', run_id TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
-        observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (assistant_id, source_id, fingerprint)
     )""")
     # Synced (network collection "assistant"). No foreign keys: a peer's row
     # can name an agent or a home session that has not reached this worker yet.
@@ -142,16 +54,6 @@ def create_schema(cursor):
     for column in ("assistant_name", "avatar_id"):
         if not column_exists(cursor, "assistant_account", column):
             cursor.execute(f"ALTER TABLE assistant_account ADD COLUMN {column} TEXT")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_events_pending ON assistant_events(assistant_id, status, observed_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
-    # Jobs the assistant started on another worker (remote Task children and
-    # StartSession chats). Not in assistant_runs: that table's session_id is a
-    # foreign key, and the job's session row reaches this worker only when
-    # its mirror arrives (if ever). ``reported_usd`` is the highest cumulative
-    # cost that worker reported; each increase is booked once, at the time it
-    # was learned, in assistant_remote_costs. ``idle_since`` is when that
-    # worker first said the job was idle with nothing new spent (NULL while it
-    # runs or spends; an unreachable worker never sets it).
     cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_remote_jobs (
         assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
         session_id TEXT NOT NULL, device_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -166,22 +68,6 @@ def create_schema(cursor):
         cost_usd DOUBLE PRECISION NOT NULL, booked_at TIMESTAMPTZ NOT NULL
     )""")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_remote_costs_booked ON assistant_remote_costs(assistant_id, booked_at)")
-
-
-def research_limits(state=None):
-    """The limits a run is admitted under. Stored per-row values are ignored."""
-    return dict(RESEARCH_LIMITS)
-
-
-def research_allowed(state):
-    """Background research is automatic once the account names its agent.
-
-    The owner's only control is which sources are opted in, and every
-    observation and admission also requires a trusted opted-in source that
-    runs on this worker. ``enabled`` on a runner row is no longer an owner
-    switch: reconcile sets it. The legacy ``paused`` column is ignored.
-    """
-    return bool(state and state.get("agent_id") and state.get("enabled"))
 
 
 def _parse(row):
@@ -252,47 +138,9 @@ def write_account(conn, changes):
     return _parse(cursor.fetchone())
 
 
-def project(conn, assistant_id, values, sources):
-    """Copy the account view this worker runs under into its runner row.
-
-    ``values`` holds runner-row columns (agent, flags, introduction).
-    ``sources`` maps connector id to the owner's opt-in. A connector this
-    worker does not know yet is skipped. Switching a source off here revokes
-    its pending events, as an explicit opt-out does.
-    """
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO assistant_state (id, runner_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (assistant_id, assistant_id))
-    state = lock_state(conn, assistant_id)
-    changes = {key: value for key, value in values.items() if state.get(key) != value}
-    if changes:
-        if "introduction" in changes:
-            changes["introduction"] = json.dumps(changes["introduction"])
-        cursor.execute("UPDATE assistant_state SET " + ", ".join(key + "=%s" for key in changes) +
-                       ", updated_at=NOW() WHERE id=%s RETURNING *", (*changes.values(), assistant_id))
-        state = _parse(cursor.fetchone())
-    cursor.execute("SELECT connector_id, enabled FROM assistant_sources WHERE assistant_id=%s", (assistant_id,))
-    local = {row["connector_id"]: bool(row["enabled"]) for row in cursor.fetchall()}
-    wanted = {connector_id: bool(on) for connector_id, on in (sources or {}).items()}
-    for connector_id in sorted(set(local) | set(wanted)):
-        enabled = wanted.get(connector_id, False)
-        if local.get(connector_id, False) == enabled:
-            continue
-        cursor.execute("SELECT 1 FROM connectors WHERE id=%s", (connector_id,))
-        if not cursor.fetchone():
-            continue
-        cursor.execute("""INSERT INTO assistant_sources (assistant_id,connector_id,enabled)
-            VALUES (%s,%s,%s) ON CONFLICT (assistant_id,connector_id) DO UPDATE SET
-            enabled=EXCLUDED.enabled, updated_at=NOW()""", (assistant_id, connector_id, enabled))
-        if not enabled:
-            cursor.execute("UPDATE assistant_events SET status='revoked' WHERE assistant_id=%s AND source_id=%s AND status='pending'", (assistant_id, connector_id))
-    return state
-
-
-def get_sources(assistant_id):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM assistant_sources WHERE assistant_id=%s ORDER BY connector_id", (assistant_id,))
-        return [_parse(row) for row in cursor.fetchall()]
+def project(conn: Any, assistant_id: str, values: Any, sources: Any = None) -> Any:
+    """Project introduction/identity only. Retired source opt-ins are ignored."""
+    return configure(assistant_id, {k: v for k, v in values.items() if k in DEFAULTS}, _conn=conn)
 
 
 def owner_connector(conn, connector):
@@ -328,252 +176,6 @@ def connector_grant_available(conn, connector, agent_id):
     if user["profile_id"]:
         allowed.add(user["profile_id"])
     return not allowed or agent_id in allowed
-
-
-def trusted_source(conn, state, connector_id, require_connected=True):
-    """Recheck the live connector grant, owner and runner inside admission/write.
-
-    ``require_connected=False`` ignores only the transient connection status,
-    so admission can tell a reconnecting source from a withdrawn grant.
-    """
-    cursor = conn.cursor()
-    cursor.execute("""SELECT c.* FROM connectors c JOIN assistant_sources s ON s.connector_id=c.id
-        WHERE s.assistant_id=%s AND c.id=%s AND s.enabled=TRUE AND c.is_active=TRUE
-        AND c.runner_id=%s""" + (" AND c.status='connected'" if require_connected else ""),
-        (state["id"], connector_id, state["runner_id"]))
-    connector = row_to_dict(cursor.fetchone())
-    return connector if connector and connector_grant_available(conn, connector, state["agent_id"]) else None
-
-
-MAX_PAYLOAD_CHARS = 16000
-
-
-def _bounded_payload(payload, encoded):
-    """Replace one oversized payload with a truncation marker, never fail the batch.
-
-    Callers cap the inner text, but re-encoding can still grow quotes,
-    backslashes and control characters. JSON escaping expands a character
-    to at most 6, so a 2,000-character excerpt always fits the bound.
-    """
-    text = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), str) else encoded
-    return json.dumps({"truncated": True, "original_chars": len(encoded), "data": text[:2000]},
-                      sort_keys=True, ensure_ascii=False)
-
-
-def record_observations(assistant_id, connector_id, observations, watermark=None):
-    """Atomic provenance/fingerprint insertion and reconciliation watermark.
-
-    An observation is (event_type, external ID or None, bounded JSON payload).
-    At most 50 are processed, and the pending inbox is capped at 100.
-    """
-    with get_db() as conn:
-        state = lock_state(conn, assistant_id)
-        if not research_allowed(state) or not trusted_source(conn, state, connector_id):
-            return []
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS n FROM assistant_events WHERE assistant_id=%s AND status='pending'", (assistant_id,))
-        remaining = max(0, 100 - cursor.fetchone()["n"])
-        inserted = []
-        overflow = len(observations) > 50
-        for event_type, external_id, payload in observations[:50]:
-            encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-            identity = str(external_id) if external_id else encoded
-            fingerprint = hashlib.sha256((event_type + ":" + identity).encode()).hexdigest()
-            if len(encoded) > MAX_PAYLOAD_CHARS:
-                # Fingerprint the original so redelivery still deduplicates.
-                encoded = _bounded_payload(payload, encoded)
-            if remaining == 0:
-                overflow = True
-                break
-            cursor.execute("""INSERT INTO assistant_events (id,assistant_id,source_id,event_type,fingerprint,payload)
-                VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING *""",
-                (str(uuid.uuid4()), assistant_id, connector_id, event_type, fingerprint, encoded))
-            event = _parse(cursor.fetchone())
-            if event:
-                inserted.append(event)
-                remaining -= 1
-        cursor.execute("UPDATE assistant_sources SET last_observed_at=NOW(),last_error=%s WHERE assistant_id=%s AND connector_id=%s",
-                       ("Observation inbox full; overflow not queued" if overflow else None, assistant_id, connector_id))
-        # A poll watermark acknowledges the whole observed batch. If capacity
-        # excluded any event, leave it unseen so a later bounded scan can retry
-        # after admission drains the inbox; fingerprints suppress redelivery.
-        if watermark is not None and not overflow:
-            cursor.execute("UPDATE assistant_sources SET watermark=%s WHERE assistant_id=%s AND connector_id=%s", (json.dumps(watermark), assistant_id, connector_id))
-        return inserted
-
-
-def source_error(assistant_id, connector_id):
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE assistant_sources SET last_error=%s WHERE assistant_id=%s AND connector_id=%s",
-                              ("Observation failed; check this connector's connection", assistant_id, connector_id))
-
-
-def _window_usage(cursor, assistant_id):
-    """Proactive runs admitted in the rolling window and their reported cost.
-
-    Cost is attributed to the run's admission time, so a run settling after
-    any boundary still counts against the window it was admitted in.
-    """
-    since = (now() - USAGE_WINDOW).isoformat()
-    cursor.execute("SELECT COUNT(*) AS n,COALESCE(SUM(cost_usd),0) AS cost FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND created_at >= %s", (assistant_id, since))
-    return cursor.fetchone()
-
-
-def get_usage(assistant_id):
-    """``runs_today``/``reported_cost_today`` keep their API names but cover
-    the rolling 24-hour window that admission enforces."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        window = _window_usage(cursor, assistant_id)
-        usage = {"runs_today": window["n"], "reported_cost_today": window["cost"], "window_hours": 24}
-        cursor.execute("SELECT COUNT(*) AS n FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        usage["in_flight_runs"] = cursor.fetchone()["n"]
-        return usage
-
-
-def get_activity(assistant_id, limit=50, active_only=False):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        sql = ("SELECT r.*,s.title AS session_title,s.status AS session_status,s.profile_id AS session_agent_id,"
-               "a.name AS agent_name,a.config AS agent_config,s.total_cost_usd AS session_reported_cost,"
-               "t.state AS linked_turn_state,t.error AS linked_turn_error,t.ended_at AS linked_turn_ended_at "
-               "FROM assistant_runs r LEFT JOIN sessions s ON s.id=r.session_id "
-               "LEFT JOIN agents a ON a.id=s.profile_id LEFT JOIN turns t ON t.id=("
-               "SELECT id FROM turns WHERE session_id=s.id ORDER BY position DESC,created_at DESC LIMIT 1) "
-               "WHERE r.assistant_id=%s")
-        if active_only:
-            sql += " AND r.kind='proactive' AND r.status IN ('admitted','submitting','running','cancelling')"
-        cursor.execute(sql + " ORDER BY r.created_at DESC LIMIT %s", (assistant_id, limit))
-        result = []
-        for raw in cursor.fetchall():
-            row = _parse(raw)
-            config = row.pop("agent_config") or {}
-            if isinstance(config, str):
-                config = json.loads(config)
-            avatar = config.get("avatar_id", "robot")
-            row["avatar_id"] = avatar if avatar in AVATAR_PRESETS else "robot"
-            reported_cost = row.pop("session_reported_cost", None)
-            linked_state = row.pop("linked_turn_state", None)
-            linked_error = row.pop("linked_turn_error", None)
-            linked_ended_at = row.pop("linked_turn_ended_at", None)
-            if row["kind"] != "proactive":
-                # A relationship is stored once, not settled as a research run.
-                # Reflect the linked normal session's real latest outcome and
-                # cumulative reported usage rather than perpetual "linked"/$0.
-                row["status"] = linked_state or row["session_status"] or row["status"]
-                row["cost_usd"] = max(0.0, float(reported_cost or 0))
-                row["error"] = linked_error
-                row["ended_at"] = linked_ended_at
-            result.append(row)
-        return result
-
-
-def get_run(run_id):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM assistant_runs WHERE id=%s", (run_id,))
-        return _parse(cursor.fetchone())
-
-
-def admit_run(assistant_id):
-    """Coalesce <=10 events under the install mutex and reserve finite budgets."""
-    with get_db() as conn:
-        state = lock_state(conn, assistant_id)
-        if not research_allowed(state):
-            return None
-        limits = research_limits(state)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS n FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        if cursor.fetchone()["n"] >= limits["max_concurrent_runs"]:
-            return None
-        usage = _window_usage(cursor, assistant_id)
-        # Reserve the configured per-run amount for *every* live run. Provider
-        # billing is reported after a run, so this is not an exact dollar cap.
-        cursor.execute("SELECT limits FROM assistant_runs WHERE assistant_id=%s AND kind='proactive' AND status IN ('admitted','submitting','running','cancelling')", (assistant_id,))
-        reserved = sum((_parse(row).get("limits") or {}).get("max_cost_per_run", limits["max_cost_per_run"]) for row in cursor.fetchall())
-        if usage["n"] >= limits["max_runs_per_day"] or usage["cost"] + reserved + limits["max_cost_per_run"] > limits["max_cost_per_day"]:
-            return None
-        # The inbox is capped at 100, so scanning it all lets events from a
-        # reconnecting source wait without starving other sources' events.
-        cursor.execute("SELECT * FROM assistant_events WHERE assistant_id=%s AND status='pending' ORDER BY observed_at,id LIMIT 100", (assistant_id,))
-        events = [_parse(row) for row in cursor.fetchall()]
-        eligible = []
-        verdicts = {}
-        for event in events:
-            source_id = event["source_id"]
-            if source_id not in verdicts:
-                if trusted_source(conn, state, source_id):
-                    verdicts[source_id] = "trusted"
-                elif trusted_source(conn, state, source_id, require_connected=False):
-                    verdicts[source_id] = "wait"  # Only disconnected: keep pending.
-                else:
-                    verdicts[source_id] = "revoked"  # Opt-out or grant withdrawn.
-            if verdicts[source_id] == "revoked":
-                cursor.execute("UPDATE assistant_events SET status='revoked' WHERE id=%s", (event["id"],))
-            elif verdicts[source_id] == "trusted" and len(eligible) < 10:
-                eligible.append(event)
-        if not eligible:
-            return None
-        # Reserve admission BEFORE minting a normal session: create_session
-        # may read the runner directory through a separate DB transaction.
-        # Keeping that outside the mutex works on PostgreSQL and the shim.
-        run_id = str(uuid.uuid4())
-        event_ids = [e["id"] for e in eligible]
-        source_ids = sorted({e["source_id"] for e in eligible})
-        deadline = (now() + timedelta(seconds=limits["timeout_seconds"])).isoformat()
-        cursor.execute("""INSERT INTO assistant_runs (id,assistant_id,status,event_ids,source_ids,deadline_at,created_at,agent_id,limits)
-            VALUES (%s,%s,'admitted',%s,%s,%s,%s,%s,%s) RETURNING *""",
-            (run_id, assistant_id, json.dumps(event_ids), json.dumps(source_ids), deadline, now().isoformat(), state["agent_id"],
-             json.dumps({k: limits[k] for k in ("max_turns", "max_cost_per_run", "timeout_seconds")})))
-        run = _parse(cursor.fetchone())
-        for event in eligible:
-            cursor.execute("UPDATE assistant_events SET status='admitted',run_id=%s WHERE id=%s AND status='pending'", (run_id, event["id"]))
-        run["events"] = eligible
-        return run
-
-
-def bind_run_session(run_id, session_id):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE assistant_runs SET session_id=%s WHERE id=%s AND status='submitting' AND session_id IS NULL RETURNING *", (session_id, run_id))
-        return _parse(cursor.fetchone())
-
-
-def update_run(run_id, *, status=None, turn_id=None):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE assistant_runs SET status=COALESCE(%s,status),turn_id=COALESCE(%s,turn_id) WHERE id=%s AND status IN ('admitted','submitting','running','cancelling') RETURNING *", (status, turn_id, run_id))
-        return _parse(cursor.fetchone())
-
-
-def mark_cancelling(run_id, error):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE assistant_runs SET status='cancelling',error=%s WHERE id=%s AND status IN ('admitted','submitting','running') RETURNING *", (error, run_id))
-        return _parse(cursor.fetchone())
-
-
-def begin_dispatch(run_id):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE assistant_runs SET status='submitting' WHERE id=%s AND status='admitted' RETURNING *", (run_id,))
-        return _parse(cursor.fetchone())
-
-
-def settle_run(run_id, status, error=None, cost_usd=0):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE assistant_runs SET status=%s,error=%s,cost_usd=%s,ended_at=NOW() WHERE id=%s AND status IN ('admitted','submitting','running','cancelling') RETURNING *", (status, error, max(0, cost_usd), run_id))
-        row = _parse(cursor.fetchone())
-        if row:
-            cursor.execute("UPDATE assistant_events SET status=%s WHERE run_id=%s", (status, run_id))
-        return row
-
-
-# --- jobs on another worker ---------------------------------------------------
-
-#: Ledger rows older than this are pruned; the limits read one day at a time.
-REMOTE_COST_RETENTION = timedelta(days=35)
 
 
 def link_remote_job(assistant_id, session_id, device_id, kind, label=None, *, starter_session_id=None):
@@ -685,42 +287,29 @@ def wake_remote_job(assistant_id, session_id):
         conn.cursor().execute("UPDATE assistant_remote_jobs SET idle_since=NULL WHERE assistant_id=%s "
                               "AND session_id=%s", (assistant_id, session_id))
 
+RETENTION_BATCH = 500
 
-def retention_sweep(assistant_id, at=None, *, stop=None):
-    """Bounded retention pass; returns per-step row counts.
 
-    Linked-activity rows tolerate a missing event (event_ids is plain JSON and
-    events.run_id is ON DELETE SET NULL). Delegated/linked relationships are
-    kept while their session exists; only orphans past the horizon go.
-    """
-    at = at or now()
-    scrub_before = (at - timedelta(days=EVENT_PAYLOAD_RETENTION_DAYS)).isoformat()
-    delete_before = (at - timedelta(days=HISTORY_RETENTION_DAYS)).isoformat()
-    held = ("pending",) + IN_FLIGHT
-    held_sql = ",".join(["%s"] * len(held))
-    in_flight_sql = ",".join(["%s"] * len(IN_FLIGHT))
+def retention_sweep(
+    assistant_id: str, at: datetime | None = None, *, stop: Any = None
+) -> dict[str, Any]:
+    """Bounded cleanup still required by remote spending and job stops."""
     from app.db.retention import mutate_batches
-    common = dict(stop=stop, batch_size=RETENTION_BATCH, max_batches=1)
-    counts = {}
-    counts["events_deleted"] = mutate_batches("assistant_events",
-        f"assistant_id=%s AND status NOT IN ({held_sql}) AND observed_at < %s",
-        (assistant_id, *held, delete_before), **common)
-    counts["runs_deleted"] = mutate_batches("assistant_runs", f"""id IN (
-        SELECT r.id FROM assistant_runs r WHERE r.assistant_id=%s AND r.created_at < %s
-        AND ((r.kind='proactive' AND r.status NOT IN ({in_flight_sql})) OR (r.kind<>'proactive' AND r.session_id IS NULL))
-        AND NOT EXISTS (SELECT 1 FROM assistant_events e WHERE e.run_id=r.id AND e.status IN ({held_sql})))""",
-        (assistant_id, delete_before, *IN_FLIGHT, *held), **common)
-    counts["events_scrubbed"] = mutate_batches("assistant_events",
-        f"assistant_id=%s AND status NOT IN ({held_sql}) AND observed_at < %s AND payload <> %s",
-        (assistant_id, *held, scrub_before, SCRUBBED_PAYLOAD),
-        update="payload=%s", update_params=(SCRUBBED_PAYLOAD,), **common)
-    # Hygiene formerly drained on every booking/stop. Drain it off-loop rather
-    # than applying the event-history budget and falling behind busy assistants.
-    hygiene = dict(stop=stop, batch_size=RETENTION_BATCH)
-    counts["remote_costs_deleted"] = mutate_batches("assistant_remote_costs",
-        "assistant_id=%s AND booked_at < %s", (assistant_id, at - REMOTE_COST_RETENTION), **hygiene)
     from app.db.assistant_limits import STOP_RETENTION
-    counts["limit_stops_deleted"] = mutate_batches("assistant_limit_stops",
-        "assistant_id=%s AND created_at < %s", (assistant_id, at - STOP_RETENTION),
-        keys=("turn_id",), **hygiene)
-    return counts
+    at = at or now()
+    common = dict(stop=stop, batch_size=RETENTION_BATCH)
+    return {
+        "remote_costs_deleted": mutate_batches(
+            "assistant_remote_costs",
+            "assistant_id=%s AND booked_at < %s",
+            (assistant_id, at - timedelta(days=35)),
+            **common,
+        ),
+        "limit_stops_deleted": mutate_batches(
+            "assistant_limit_stops",
+            "assistant_id=%s AND created_at < %s",
+            (assistant_id, at - STOP_RETENTION),
+            keys=("turn_id",),
+            **common,
+        ),
+    }
