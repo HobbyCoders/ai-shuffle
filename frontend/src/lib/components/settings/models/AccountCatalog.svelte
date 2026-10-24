@@ -201,10 +201,11 @@
 		<div class="groups" class:stale={catalog.loading}>
 			{#each groups as group (group.worker)}
 				{@const where = presence(group.worker)}
-				<RowGroup title={workerLabel(group.worker, installs, self)} count="{group.entries.length} {group.entries.length === 1 ? 'route' : 'routes'}">
+				{@const title = workerLabel(group.worker, installs, self)}
+				<RowGroup {title} count="{group.entries.length} {group.entries.length === 1 ? 'route' : 'routes'}">
 					{#snippet actions()}
 						<span class="where" data-online={where.online}>
-							{#if where.online !== null}<StatusDot tone={where.online ? 'ok' : 'off'} />{/if}{where.text}
+							{#if where.online !== null}<StatusDot tone={where.online ? 'ok' : 'off'} label={title === where.text ? 'Online' : undefined} />{/if}{title === where.text ? '' : where.text}
 						</span>
 					{/snippet}
 					{#each group.entries as entry (keyOf(entry))}
@@ -555,7 +556,8 @@
 	.star:active:not(:disabled) {
 		transform: scale(0.92);
 	}
-	.star.on {
+	.star.on,
+	.star.on:hover:not(:disabled) {
 		color: var(--st-warning);
 	}
 	.star.on :global(svg) {
