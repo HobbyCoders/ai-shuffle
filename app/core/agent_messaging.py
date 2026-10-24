@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from fluid.events.ops import AgentMessage
 from fluid.tools.registry import ToolOutcome
@@ -658,7 +659,7 @@ async def _finish_displaced_continuations(session_id, settled):
             )
 
 
-def _continuation_has_followup(session_id, settled):
+def _continuation_has_followup(session_id: str, settled: dict[str, Any]) -> bool:
     """A task-result wake continues this round, unlike a new user/peer turn.
 
     Probe before reading/persisting the report, as for remote children. Include

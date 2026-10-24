@@ -222,8 +222,13 @@ def turn_tool(sid: str, *, question: bool = False) -> None:
             queued = json.loads(response["message"])
             assert queued["status"] == "queued" and queued["request_ids"]
         emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
-            "type": "tool_result", "tool_use_id": "unrelated" if question_result == "different_id" else tid,
-            "content": [{"type": "text", "text": "permission denied" if question_result == "denied" else response["message"]}], "is_error": True,
+            "type": "tool_result",
+            "tool_use_id": "unrelated" if question_result == "different_id" else tid,
+            "content": [{
+                "type": "text",
+                "text": "permission denied" if question_result == "denied" else response["message"],
+            }],
+            "is_error": True,
         }]}})
         emit(assistant_frame(sid, [{"type": "text", "text": "Independent work completed."}], "end_turn", msg_id="msg_fake_2"))
     elif behavior == "allow":
