@@ -22,12 +22,36 @@ const CLUSTER = {
 	]
 };
 
-/** @param {string} url */
-function answer(url) {
+const PRICE = { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' };
+const INCLUDED = { currency: 'USD', unit: 'item', amount: '0', total: '0', status: 'included' };
+const GROK_CHOICE = { source: 'supergrok', account: 'grok-1', worker: 'gamingpc', model: 'grok-imagine-image', options: { size: '1k', format: 'jpeg' } };
+const OPTIONS = [
+	{
+		source: 'fal', account: 'fal-ai', worker: 'gamingpc', model: 'fal-ai/flux/dev', options: { image_size: 'square', num_images: 1 },
+		verified: false, price: PRICE, quick_settings: { image_size: 'square', num_images: 1 }, available: true, reason: null,
+		schema: { fields: [
+			{ name: 'image_size', type: 'enum', title: 'Image size', enum: ['square', 'landscape_16_9'], default: 'square' },
+			{ name: 'num_images', type: 'integer', title: 'Images', minimum: 1, maximum: 4, default: 1 },
+			{ name: 'seed', type: 'integer' }
+		] }
+	},
+	{ ...GROK_CHOICE, verified: true, price: INCLUDED, quick_settings: { size: '1k', format: 'jpeg' }, available: true, reason: null,
+		schema: { fields: { size: [{ value: '1k', verified: true, selectable: true }], format: [{ value: 'jpeg', verified: true, selectable: true }] } } }
+];
+
+/**
+ * @param {string} url
+ * @param {string} page the fixture page that asked (its Referer)
+ */
+function answer(url, page) {
 	const path = url.split('?')[0];
+	if (path.includes('/generation/options/')) return { options: OPTIONS };
 	if (path.endsWith('/projects')) return PROJECTS;
 	if (path.endsWith('/cluster/projects')) return CLUSTER;
-	if (path.endsWith('/generation/choices')) return { remembered: {}, last: {}, worker: 'gamingpc' };
+	if (path.endsWith('/generation/choices')) {
+		const remembered = page.includes('only=settings') ? { image: GROK_CHOICE } : {};
+		return { remembered, last: {}, worker: 'gamingpc' };
+	}
 	if (path.endsWith('/generation/quote')) return { ok: true, price: { currency: 'USD', unit: 'item', amount: '0.05', total: '0.05', status: 'estimated' } };
 	return {};
 }
@@ -53,7 +77,7 @@ export default mergeConfig(
 					server.middlewares.use(async (req, res, next) => {
 						if (req.url?.startsWith('/api/')) {
 							res.setHeader('Content-Type', 'application/json');
-							res.end(JSON.stringify(answer(req.url)));
+							res.end(JSON.stringify(answer(req.url, String(req.headers.referer ?? ''))));
 							return;
 						}
 						if (req.url?.split('?')[0] !== '/tests/chat-prompts.html') return next();

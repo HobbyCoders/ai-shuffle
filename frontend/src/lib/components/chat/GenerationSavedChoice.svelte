@@ -85,7 +85,7 @@
 	}
 	.gsc-error {
 		display: block;
-		color: var(--foreground);
+		color: var(--warning, var(--destructive));
 	}
 	.gsc-actions {
 		display: inline-flex;

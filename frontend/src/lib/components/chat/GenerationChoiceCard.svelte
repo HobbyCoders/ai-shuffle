@@ -409,7 +409,6 @@
 					disabled={!option.available}
 					onclick={() => select(index)}
 					onkeydown={(event) => onRadioKey(event, index)}
-					style="--i: {index}"
 				>
 					<span class="gcc-opt-top">
 						<span class="gcc-source">{sourceLabel(option.source)}</span>
@@ -866,7 +865,9 @@
 		gap: 0.5rem;
 		min-width: 0;
 	}
+	/* The shared input, in the theme's own fonts (it would set Inter / JetBrains Mono). */
 	.gcc-control .card-form-input {
+		font-family: inherit;
 		max-width: 220px;
 		min-height: 32px;
 		padding: 0.3125rem 0.5rem;
@@ -878,6 +879,7 @@
 	}
 	.gcc-control input[type='number'] {
 		max-width: 120px;
+		font-family: var(--font-mono);
 	}
 	.gcc-control select:disabled {
 		opacity: 0.7;

@@ -21,6 +21,8 @@ export const DISMISS_DISTANCE = 70;
 export const FLICK_VELOCITY = 0.5;
 /** The shortest pull a flick may close from, so a tap's jitter never does. */
 export const FLICK_MIN_DISTANCE = 16;
+/** A release this long after the last move was a hold, not a flick. */
+export const FLICK_STALE_MS = 90;
 
 export interface DragPoint {
 	x: number;
@@ -72,11 +74,16 @@ export function moveSheetDrag(state: SheetDrag, point: DragPoint): SheetDragMode
 	return state.mode;
 }
 
-/** Would letting go now close the sheet? */
-export function sheetDragDismisses(state: SheetDrag, distance = DISMISS_DISTANCE): boolean {
+/**
+ * Would letting go at `releaseTime` (the touchend / pointerup `timeStamp`)
+ * close the sheet? A finger held still sends no moves, so the last measured
+ * speed goes stale: past FLICK_STALE_MS without a move, it counts as zero.
+ */
+export function sheetDragDismisses(state: SheetDrag, releaseTime: number, distance = DISMISS_DISTANCE): boolean {
 	if (state.mode !== 'drag') return false;
 	if (state.offset > distance) return true;
-	return state.offset > FLICK_MIN_DISTANCE && state.velocity > FLICK_VELOCITY;
+	const velocity = releaseTime - state.last.time > FLICK_STALE_MS ? 0 : state.velocity;
+	return state.offset > FLICK_MIN_DISTANCE && velocity > FLICK_VELOCITY;
 }
 
 /** Fields and sliders keep their own touch; a drag never starts on them. */

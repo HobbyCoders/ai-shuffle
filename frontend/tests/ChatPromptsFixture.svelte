@@ -13,6 +13,8 @@
 	import GenerationChoiceCard from '../src/lib/components/chat/GenerationChoiceCard.svelte';
 	import GenerationSavedChoice from '../src/lib/components/chat/GenerationSavedChoice.svelte';
 	import AttachProjectSheet from '../src/lib/components/layout/AttachProjectSheet.svelte';
+	import GenerationChoiceDetail from '../src/lib/components/settings/models/GenerationChoiceDetail.svelte';
+	import '../src/lib/components/settings/shell/settings.css';
 	import type { GenerationOption } from '../src/lib/utils/generation-choice';
 	import type { ApprovalCardData } from '../src/lib/utils/assistant-confirm';
 
@@ -161,6 +163,14 @@
 		</section>
 	{/if}
 
+	{#if only === 'settings'}
+		<section class="settings-detail">
+			<h2 class="label">Settings, Default models: image</h2>
+			<!-- The settings shell's classes carry its row and list styles. -->
+			<div class="settings-shell" style="display: block; height: auto"><div class="st-content"><GenerationChoiceDetail kind="image" /></div></div>
+		</section>
+	{/if}
+
 	<section>
 		<h2 class="label">Attach a project</h2>
 		<button type="button" class="open-sheet" onclick={() => (open = true)}>Open the attach sheet</button>
@@ -187,6 +197,9 @@
 		font-size: 11px;
 		font-weight: 600;
 		color: var(--muted-foreground);
+	}
+	.settings-detail {
+		min-height: 640px;
 	}
 	.stack {
 		display: grid;

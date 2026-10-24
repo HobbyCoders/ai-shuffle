@@ -728,10 +728,21 @@ html:root[data-platform='mobile'] .attach-sheet .grab {
 	background: var(--border-strong);
 	cursor: grab;
 }
+/* The drag offset (--sheet-drag, set by the component). `translate` composes
+   with the entry animation's transform; letting go springs back, or slides
+   out, on this transition. */
+html:root[data-platform='mobile'] .attach-sheet {
+	translate: 0 var(--sheet-drag, 0px);
+	transition: translate 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+html:root[data-platform='mobile'] .attach-sheet.dragging { transition: none; user-select: none; }
+html:root[data-platform='mobile'] .attach-sheet.leaving { transition-duration: 0.22s; transition-timing-function: cubic-bezier(0.4, 0, 1, 1); }
+html:root[data-platform='mobile'] .attach-scrim { transition: opacity 0.2s ease; }
 html:root[data-platform='mobile'] .attach-sheet .proj-row { min-height: 48px; font-size: 15px; }
 html:root[data-platform='mobile'] .attach-sheet .icon-btn { width: 44px; height: 44px; }
 html:root[data-platform='mobile'] .attach-sheet .btn { height: 44px; flex: 1; justify-content: center; }
 @keyframes attach-sheet-up { from { transform: translateY(100%); } }
 @media (prefers-reduced-motion: reduce) {
-	html:root[data-platform='mobile'] .attach-sheet { animation: none; }
+	html:root[data-platform='mobile'] .attach-sheet { animation: none; transition: none; }
+	html:root[data-platform='mobile'] .attach-scrim { transition: none; }
 }

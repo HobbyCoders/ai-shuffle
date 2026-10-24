@@ -16,7 +16,8 @@ import { appData } from '../src/lib/stores/app-data.svelte';
  *   ?theme=light|dark     (default dark)
  *   ?shell=mobile         the phone shell: mobile.css and platform.isMobile,
  *                         as in the Android app's bundle
- *   ?only=existing|approvals|generation   one section
+ *   ?only=existing|approvals|generation|settings   one section (settings: the
+ *                         Default models detail for images, with a saved choice)
  *   ?sheet=open           open the attach sheet on load
  */
 const params = new URLSearchParams(location.search);

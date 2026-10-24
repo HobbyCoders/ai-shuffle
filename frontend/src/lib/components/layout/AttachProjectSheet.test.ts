@@ -151,9 +151,10 @@ describe('AttachProjectSheet on the phone: drag down to dismiss', () => {
 	});
 
 	/** One touch event as the WebView sends it; returns it to read defaultPrevented. */
-	function touch(target: Element, type: 'touchstart' | 'touchmove' | 'touchend', y: number, time: number) {
+	function touch(target: Element, type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel', y: number, time: number, fingers = 1) {
 		const event = new Event(type, { bubbles: true, cancelable: true });
-		Object.defineProperty(event, 'touches', { value: type === 'touchend' ? [] : [{ clientX: 20, clientY: y }] });
+		const down = type === 'touchend' || type === 'touchcancel' ? 0 : fingers;
+		Object.defineProperty(event, 'touches', { value: Array.from({ length: down }, (_, i) => ({ clientX: 20 + i * 60, clientY: y })) });
 		Object.defineProperty(event, 'timeStamp', { value: time });
 		target.dispatchEvent(event);
 		return event;
@@ -265,5 +266,110 @@ describe('AttachProjectSheet on the phone: drag down to dismiss', () => {
 		expect(move.defaultPrevented).toBe(false);
 		await new Promise((r) => setTimeout(r, 300));
 		expect(onClose).not.toHaveBeenCalled();
+	});
+
+	it('does not cancel a move inside the slop, so the list keeps a wobbly upward swipe', async () => {
+		render(AttachProjectSheet, { props: props() });
+		const row = screen.getByRole('radio', { name: /site/ });
+
+		touch(row, 'touchstart', 300, 0);
+		expect(touch(row, 'touchmove', 304, 16).defaultPrevented).toBe(false);
+		expect(touch(row, 'touchmove', 270, 60).defaultPrevented).toBe(false);
+		touch(row, 'touchend', 270, 80);
+		await tick();
+		expect(drag()).toBe('0px');
+	});
+
+	it('a quick pull held still before letting go springs back', async () => {
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ onClose }) });
+		const title = screen.getByRole('heading', { name: 'Attach a project' });
+
+		touch(title, 'touchstart', 200, 0);
+		touch(title, 'touchmove', 215, 8);
+		touch(title, 'touchmove', 230, 16);
+		touch(title, 'touchmove', 240, 24);
+		// The finger rests for a second: no moves, then the release.
+		touch(title, 'touchend', 240, 1024);
+		await tick();
+		expect(drag()).toBe('0px');
+		await new Promise((r) => setTimeout(r, 300));
+		expect(onClose).not.toHaveBeenCalled();
+	});
+
+	it('a second finger landing mid-drag springs the sheet back', async () => {
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ onClose }) });
+		const title = screen.getByRole('heading', { name: 'Attach a project' });
+
+		touch(title, 'touchstart', 200, 0);
+		touch(title, 'touchmove', 300, 100);
+		await tick();
+		expect(drag()).toBe('100px');
+		touch(title, 'touchstart', 300, 150, 2);
+		expect(touch(title, 'touchmove', 400, 200, 2).defaultPrevented).toBe(false);
+		touch(title, 'touchend', 400, 250);
+		await tick();
+		expect(drag()).toBe('0px');
+		expect(sheet().classList.contains('dragging')).toBe(false);
+		await new Promise((r) => setTimeout(r, 300));
+		expect(onClose).not.toHaveBeenCalled();
+	});
+
+	it('a cancelled touch springs back instead of closing', async () => {
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ onClose }) });
+		const title = screen.getByRole('heading', { name: 'Attach a project' });
+
+		touch(title, 'touchstart', 200, 0);
+		touch(title, 'touchmove', 320, 100);
+		touch(title, 'touchcancel', 320, 110);
+		await tick();
+		expect(drag()).toBe('0px');
+		await new Promise((r) => setTimeout(r, 300));
+		expect(onClose).not.toHaveBeenCalled();
+	});
+
+	it('a mouse drags it too, capturing the pointer once the drag starts', async () => {
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ onClose }) });
+		const capture = vi.fn();
+		(sheet() as HTMLElement & { setPointerCapture: (id: number) => void }).setPointerCapture = capture;
+		const title = screen.getByRole('heading', { name: 'Attach a project' });
+		const pointer = (type: string, y: number, time: number) => {
+			const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 20, clientY: y, button: 0 });
+			Object.defineProperties(event, {
+				pointerType: { value: 'mouse' },
+				pointerId: { value: 7 },
+				isPrimary: { value: true },
+				timeStamp: { value: time }
+			});
+			title.dispatchEvent(event);
+			return event;
+		};
+
+		pointer('pointerdown', 200, 0);
+		pointer('pointermove', 204, 50);
+		expect(capture).not.toHaveBeenCalled();
+		expect(pointer('pointermove', 260, 300).defaultPrevented).toBe(true);
+		expect(capture).toHaveBeenCalledWith(7);
+		await tick();
+		expect(drag()).toBe('60px');
+		pointer('pointermove', 300, 600);
+		pointer('pointerup', 300, 650);
+		await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+	});
+
+	it('still closes from Escape and the scrim after a spring-back', async () => {
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ onClose }) });
+		pull(screen.getByRole('heading', { name: 'Attach a project' }), 40);
+		await tick();
+		expect(drag()).toBe('0px');
+
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(onClose).toHaveBeenCalledTimes(1);
+		await fireEvent.click(document.querySelector('.attach-scrim')!);
+		expect(onClose).toHaveBeenCalledTimes(2);
 	});
 });

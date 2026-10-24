@@ -90,18 +90,19 @@
 			dragY = gesture.offset;
 			return true;
 		}
-		// Still inside the slop: a downward start at the top must not scroll
-		// the list (or overscroll the page) before the drag takes over.
-		return gesture.eligible && point.y > gesture.start.y;
+		// Inside the slop nothing is cancelled: on Android a cancelled first
+		// move can keep the list from scrolling for the rest of the touch, so a
+		// small downward wobble before an upward swipe must stay the list's.
+		return false;
 	}
 
-	function endDrag() {
+	function endDrag(releaseTime: number) {
 		const done = gesture;
 		gesture = null;
 		if (!done || done.mode !== 'drag') return;
 		dragging = false;
 		swallowNextClick();
-		if (sheetDragDismisses(done) && !attaching) {
+		if (sheetDragDismisses(done, releaseTime) && !attaching) {
 			if (reducedMotion()) { onClose(); return; }
 			// Finish the slide from where the finger let go, then close.
 			leaving = true;
@@ -140,7 +141,7 @@
 			const touch = e.touches[0];
 			if (touch && moveDrag(at(touch, e.timeStamp)) && e.cancelable) e.preventDefault();
 		};
-		const onTouchEnd = () => endDrag();
+		const onTouchEnd = (e: TouchEvent) => endDrag(e.timeStamp);
 		const onTouchCancel = () => cancelDrag();
 		node.addEventListener('touchstart', onTouchStart, { passive: true });
 		// Not passive: cancelling the move is what keeps the list from scrolling.
@@ -173,7 +174,7 @@
 		if (mouseId === null || e.pointerId !== mouseId) return;
 		mouseId = null;
 		if (e.type === 'pointercancel') cancelDrag();
-		else endDrag();
+		else endDrag(e.timeStamp);
 	}
 
 	// Radiogroup keyboard model: one stop in the Tab order (the picked row, else
@@ -369,15 +370,6 @@
 		animation: sheet-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
 	}
 	.attach-sheet:focus { outline: none; }
-	/* The phone's drag offset. `translate` composes with the entry animation's
-	   transform; letting go springs back (or slides out) on this transition. */
-	.attach-sheet {
-		translate: 0 var(--sheet-drag, 0px);
-		transition: translate 0.32s cubic-bezier(0.16, 1, 0.3, 1);
-	}
-	.attach-sheet.dragging { transition: none; user-select: none; }
-	.attach-sheet.leaving { transition-duration: 0.22s; transition-timing-function: cubic-bezier(0.4, 0, 1, 1); }
-	.attach-scrim { transition: opacity 0.2s ease; }
 	.grab { display: none; }
 	.sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 	h2 { font-family: var(--font-display, Georgia, serif); font-size: 1.375rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
@@ -448,7 +440,6 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.attach-scrim, .attach-sheet, .gains li { animation: none; }
-		.attach-scrim, .attach-sheet { transition: none; }
 		.proj-row, .btn { transition: none; }
 	}
 </style>

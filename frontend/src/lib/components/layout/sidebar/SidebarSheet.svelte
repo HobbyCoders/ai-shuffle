@@ -79,7 +79,7 @@
 		start = null;
 		if (!dragging) return;
 		dragging = false;
-		const dismiss = e.type !== 'pointercancel' && sheetDragDismisses(drag);
+		const dismiss = e.type !== 'pointercancel' && sheetDragDismisses(drag, e.timeStamp);
 		dragY = 0;
 		if (dismiss) onClose();
 		// The pointerup that ends a drag must not also click a pill under it.
