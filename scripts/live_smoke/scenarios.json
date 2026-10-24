@@ -379,6 +379,22 @@
           "past_bug": "#436: an interpreter freeze ended in SIGKILL without a durable last-tick time or recovery context; WAL/checkpoint pressure lacked a non-destructive sampler."
         },
         {
+          "id": "harness-basics.14",
+          "check": "Incremental desktop update restore points",
+          "kind": "owner",
+          "how": "Use only a disposable Windows candidate install with synthetic data, never a live install or database. Install two updates with identical dependency inputs. After the first healthy startup, keep its cold-copy cache. Change one synthetic relation file, update again and inspect restore-point copied/reused counts and phase durations. Confirm the installed launcher validates all snapshot hashes before selecting the update. Corrupt a same-size snapshot file and repeat selection; then use a fresh valid point, fail the candidate first start after a synthetic migration and retry recovery. Run the synthetic benchmark with at least 3072 MiB before release.",
+          "pass_when": "Only changed files are copied and hashed in the app; unchanged files are independent of writable live data. The launcher rejects corruption before select, failed-start recovery restores exact previous data before lowering the migration floor, and a healthy update retains at most one disposable cold-copy cache. Timings separate app preparation from the launcher full hash; no sub-60-second live acceptance is claimed without measuring it.",
+          "past_bug": "#430: every update recopied and repeatedly hashed a multi-GB cluster."
+        },
+        {
+          "id": "harness-basics.15",
+          "check": "Desktop native runtime keys ignore script-only edits",
+          "kind": "owner",
+          "how": "On a disposable Windows candidate install with synthetic data only, build one source update, then build another changing only comments in native runtime scripts. Compare runtime keys, dependency install commands and build durations. Repeat with changed native contract pins, a Python dependency lock and an npm lock, one at a time. Never inspect or rebuild an installed live worker's runtimes for this check.",
+          "pass_when": "Script-only edits keep the same native runtime key and reuse dependencies. Native version/build or archive-pin changes produce a new native key; Python dependency lock changes install the required Python environment; npm lock changes invalidate that package cache. Signed archive/tree validation and hash-pinned dependency installation remain enabled. Launcher version and start-floor decisions are reviewed before publishing a launcher-closure change.",
+          "past_bug": "#430: native runtime script text was part of the runtime key, so script edits rebuilt all runtimes and their scoped dependency caches."
+        },
+        {
           "id": "harness-basics.13",
           "check": "One-time cleanup of leftover Git fsmonitor daemons",
           "kind": "owner",

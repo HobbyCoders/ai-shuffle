@@ -3,17 +3,13 @@
  * Never fetch checksums at build time: only these reviewed pins are trusted.
  */
 import { chmod, cp, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-export const GH_VERSION = '2.102.0';
+const native = JSON.parse(readFileSync(new URL('../runtime-contract.json', import.meta.url), 'utf8')).native;
+export const GH_VERSION = native.gh.version;
 const RELEASE = `https://github.com/cli/cli/releases/download/v${GH_VERSION}`;
-export const GH_ASSETS = {
-	'linux-x64': ['linux_amd64.tar.gz', 'bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386'],
-	'linux-arm64': ['linux_arm64.tar.gz', '7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484'],
-	'win32-x64': ['windows_amd64.zip', 'ae64e556ecc240b200f7eba60d550e4bb60d78e860e69dd88c449405b86067f4'],
-	'darwin-x64': ['macOS_amd64.zip', 'b245f24eb2bf5f75b426b4c26da3651a107f8d5b6f4fddfbfccc5679041378b3'],
-	'darwin-arm64': ['macOS_arm64.zip', 'da922c20d1792e5b2cbf375593d7a658acf034c12c84e007e71c76ef959c337e']
-};
+export const GH_ASSETS = native.gh.assets;
 
 export function ghAsset(platform, arch) {
 	const pin = GH_ASSETS[`${platform}-${arch}`];
