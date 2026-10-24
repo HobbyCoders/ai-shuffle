@@ -273,7 +273,7 @@ def check(image: str, port: int, timeout: int, artifacts: Path | None) -> None:
         container = wait_healthy(folder, timeout)
         host = container["HostConfig"]
         assert host["ShmSize"] == 1024**3, f"shm_size is {host['ShmSize']}"
-        assert container["Config"].get("StopTimeout") == 90, f"stop timeout is {container['Config'].get('StopTimeout')}"
+        assert container["Config"].get("StopTimeout") == 120, f"stop timeout is {container['Config'].get('StopTimeout')}"
         bindings = host["PortBindings"]["8000/tcp"]
         assert bindings == [{"HostIp": "127.0.0.1", "HostPort": str(port)}], bindings
         mounts = {mount["Destination"]: mount for mount in container["Mounts"]}
@@ -289,7 +289,7 @@ def check(image: str, port: int, timeout: int, artifacts: Path | None) -> None:
         run(*compose, "up", "-d", "--pull", "never", "--force-recreate", cwd=folder)
         wait_healthy(folder, timeout)
         owner_login(api, password)
-        print(f"buyer compose install: healthy on 127.0.0.1:{port}, 1g shm, 90 s stop, "
+        print(f"buyer compose install: healthy on 127.0.0.1:{port}, 1g shm, 120 s stop, "
               f"{len(VOLUMES)} named volumes and a workspace folder, survives recreation")
         for line in report + ["owner password still signs in after recreation"]:
             print(f"  - {line}")

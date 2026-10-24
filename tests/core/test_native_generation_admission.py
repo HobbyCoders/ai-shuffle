@@ -26,7 +26,6 @@ from app.services.generation_sources import Sources
 
 KINDS = [("GenerateNativeImage", "image"), ("GenerateNativeVideo", "video")]
 IDENTITY = ("account", "test-owner")
-JOB_ID = "00000000-0000-0000-0000-000000000001"
 
 
 @dataclass
@@ -106,20 +105,33 @@ def probe(monkeypatch: pytest.MonkeyPatch) -> Probe:
     return value
 
 
-def context(*, unattended: bool, kind: str | None = None, job: bool = False) -> RunContext:
+@pytest.fixture
+async def automation_id() -> str:
+    from app.core.automation_service import create_automation
+
+    automation = await create_automation(
+        name="Native admission fixture", trigger_type="interval",
+        trigger_config={"seconds": 300}, profile_id="default", prompt="hi",
+    )
+    return automation["id"]
+
+
+def context(
+    *, unattended: bool, kind: str | None = None, job_id: str | None = None,
+) -> RunContext:
     if kind:
         choice = {
             "source": "supergrok", "account": "plan-a", "worker": "worker-a",
             "model": "grok-imagine-image" if kind == "image" else "grok-imagine-video-1.5-lite",
             "options": {},
         }
-        if job:
-            generation_choices.save_job(IDENTITY, JOB_ID, kind, choice)
+        if job_id is not None:
+            generation_choices.save_job(IDENTITY, job_id, kind, choice)
         else:
             generation_choices.save(IDENTITY, kind, choice, remember=True)
     # Exercise the saved-choice producing path even with only native grants.
     return query_options._generation_context(
-        {}, {"id": "session-a", **({"automation_id": JOB_ID} if job else {})}, None,
+        {}, {"id": "session-a", **({"automation_id": job_id} if job_id is not None else {})}, None,
         session_id="session-a", unattended=unattended, chat_mode=True, native_generation=True,
     )
 
@@ -164,8 +176,12 @@ async def test_real_saved_choice_reaches_budget_then_same_adapter(
 
 
 @pytest.mark.parametrize("name,kind", KINDS)
-async def test_unattended_job_choice_submits_once(probe: Probe, name: str, kind: str) -> None:
-    registry = await probe.registry(context(unattended=True, kind=kind, job=True))
+async def test_unattended_job_choice_submits_once(
+    probe: Probe, name: str, kind: str, automation_id: str,
+) -> None:
+    registry = await probe.registry(
+        context(unattended=True, kind=kind, job_id=automation_id),
+    )
     output = await call(registry, name)
     assert output["status"] == "completed" and not output.get("remembered")
     probe.submitted_once(kind)
@@ -173,11 +189,11 @@ async def test_unattended_job_choice_submits_once(probe: Probe, name: str, kind:
 
 @pytest.mark.parametrize("name,kind", KINDS)
 async def test_unreadable_saved_choice_skips_unattended(
-    probe: Probe, name: str, kind: str,
+    probe: Probe, name: str, kind: str, automation_id: str,
 ) -> None:
-    key = generation_choices._job_key(JOB_ID, kind)
+    key = generation_choices._job_key(automation_id, kind)
     database.set_user_preference(*IDENTITY, key, {"broken": True})
-    current = context(unattended=True, job=True)
+    current = context(unattended=True, job_id=automation_id)
     assert current.choices_unreadable
     output = await call(await probe.registry(current), name, {"source": "plan-a"})
     assert output["status"] == "skipped" and output["reason"] == "choices_unreadable"
