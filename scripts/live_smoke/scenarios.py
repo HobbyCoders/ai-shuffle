@@ -1,18 +1,24 @@
 """Load and validate the smoke scenarios, and render the human-readable table.
 
 ``scripts/live_smoke/scenarios.json`` is the one source of truth;
-``scenarios.md`` next to it is generated from it (``python -m
+``docs/internal/live-smoke-scenarios.md`` is generated from it (``python -m
 scripts.live_smoke render``) and a unit test keeps the two in sync.
+New row IDs use stable ``<group>.<slug>`` names; legacy numeric IDs stay valid.
 """
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIOS_JSON = Path(__file__).with_name("scenarios.json")
 SCENARIOS_MD = ROOT / "docs" / "internal" / "live-smoke-scenarios.md"
 
+ROW_ID = re.compile(
+    r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\."
+    r"(?:[0-9]+|[a-z][a-z0-9]*(?:-[a-z0-9]+)*)"
+)
 KINDS = ("script", "browser", "owner")
 OPS = ("workers", "start", "message", "await", "compact", "tool_catalog", "peer_delivery")
 EXPECT_KEYS = ("expect_reply", "expect_tool", "expect_owner", "expect_files", "user_messages", "replies")
@@ -42,8 +48,10 @@ def validate(data: dict) -> None:
     for suite in data.get("suites") or []:
         for row in suite.get("rows") or []:
             rid = row.get("id")
-            if not rid or rid in seen:
+            if not isinstance(rid, str) or not rid or rid in seen:
                 raise ScenarioError(f"row id missing or duplicated: {rid!r}")
+            if not ROW_ID.fullmatch(rid):
+                raise ScenarioError(f"{rid!r}: row id must be <group>.<number-or-slug>")
             seen.add(rid)
             if row.get("kind") not in KINDS:
                 raise ScenarioError(f"{rid}: kind must be one of {KINDS}")
