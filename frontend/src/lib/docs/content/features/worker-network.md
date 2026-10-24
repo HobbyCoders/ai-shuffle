@@ -35,6 +35,12 @@ Invites are meant for your home network or a VPN such as Tailscale. Workers sign
 
 The composer's worker picker lists every online worker. Pick one, and the chat runs there.
 
+After the receiving worker's online index upgrade finishes, moved chat history is
+indexed in small background batches rather than holding up the move. Older text
+may not appear in search or agent recall until those batches catch up. You can
+still open and read the conversation. New live messages remain searchable as
+usual, and indexing resumes automatically if the worker restarts.
+
 From any other worker you can read that chat, send messages, answer prompts and stop it. Attachments are passed along too. Git buttons (Commit, Push, Pull, Create PR, Finish and Ship It) act on the owning worker's copy of the project.
 
 If the owning worker is offline, the chat is read-only and offers **Fork here**, which starts a new chat on your current worker with the conversation so far. The original is never changed.
