@@ -3064,7 +3064,9 @@ class HarnessAdapter(ProviderAdapter):
         """Whether this call in an owner's-assistant session needs the owner's yes."""
         from app.core.assistant_permissions import needs_owner
 
-        return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk)
+        mode = effective_permission_mode(self.permission_mode, delegated=self._is_delegated)
+        return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk,
+                           permission_mode=mode)
 
     async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any]) -> Optional[str]:
         """Put a high-risk assistant call to the owner; None when approved.
@@ -5126,25 +5128,40 @@ class HarnessAdapter(ProviderAdapter):
         # by _delegated_tool_policy.
         from app.core.checkout_lock import install_registry_guard
         install_registry_guard(registry, options.extra.get("app_session_id"), options.cwd)
-        if not native and _assistant_scope(options) is not None:
+        if _assistant_scope(options) is not None:
             # The claude CLI skips PreToolUse for the bundled app tools and
             # this leg has no permission engine, so the owner check for them
-            # runs at dispatch (the native leg asks through its engine).
-            self._guard_assistant_dispatch(registry, options)
+            # runs at dispatch (the native leg asks through its engine). On
+            # both legs a saved Deny on a tool with its own consent is
+            # enforced here, since the owner gate no longer asks before it.
+            self._guard_assistant_dispatch(registry, options, native=native)
         return registry
 
-    def _guard_assistant_dispatch(self, registry: ToolRegistry, options: SessionOptions) -> None:
+    def _guard_assistant_dispatch(self, registry: ToolRegistry, options: SessionOptions, *,
+                                  native: bool = False) -> None:
         from fluid.tools.registry import ToolOutcome
 
         dispatch = registry.dispatch
 
         async def guarded_dispatch(name, input, ctx=None, **kwargs):
-            from app.core.assistant_permissions import needs_owner
+            from app.core.assistant_permissions import has_own_consent
 
-            if needs_owner(name, input, _assistant_scope(options)):
+            denial = None
+            if not native and self._owner_needed(name, input):
                 denial = await self._ask_owner(name, input)
-                if denial:
-                    return ToolOutcome(text=denial, is_error=True)
+            elif has_own_consent(name) and self.permission_mode != "bypassPermissions":
+                # The tool's own card or grant is the owner's consent
+                # (assistant_permissions.OWN_CONSENT_TOOLS); a saved Deny still
+                # wins, as it does over every mode short of Bypass.
+                try:
+                    if await self._saved_rule_decision(name, input) == "deny":
+                        denial = SAVED_RULE_DENIAL
+                except Exception:  # noqa: BLE001 — fail closed: the call may be one the owner saved as Deny
+                    logger.warning("[HarnessAdapter] saved-rule lookup failed for %s; denying it",
+                                   name, exc_info=True)
+                    denial = "Denied: the saved permission rules could not be read"
+            if denial:
+                return ToolOutcome(text=denial, is_error=True)
             return await dispatch(name, input, ctx, **kwargs)
 
         registry.dispatch = guarded_dispatch  # type: ignore[method-assign]
@@ -6001,7 +6018,9 @@ class _AssistantPermissionEngine(PermissionEngine):
         verdict = super().decide(spec, input, cwd=cwd)
         if verdict.decision == "deny":
             return verdict
-        if needs_owner(spec.name, input, self.assistant_scope, spec_risk=verdict.risk):
+        # The native leg runs ``auto`` as Ask, so the policy tells Bypass apart.
+        mode = "bypassPermissions" if self.approval_policy == "never_ask" else "default"
+        if needs_owner(spec.name, input, self.assistant_scope, spec_risk=verdict.risk, permission_mode=mode):
             return Verdict("ask", "policy", verdict.risk, verdict.rule)
         return verdict
 
