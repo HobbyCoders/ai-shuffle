@@ -302,6 +302,22 @@ async def test_sdk_options_project_same_trusted_context_to_native_aliases(
     assert projected.extra["generation_context"] is current
 
 
+@pytest.mark.parametrize("explicit_none", [False, True])
+async def test_sdk_options_without_generation_context_leave_extra_empty(
+    monkeypatch: pytest.MonkeyPatch, explicit_none: bool,
+) -> None:
+    from app.core.agent_types import AgentOptions
+
+    sdk_options = AgentOptions(model="test-chat")
+    if explicit_none:
+        sdk_options.aih_generation_context = None
+    adapter = ha.HarnessAdapter()
+    connect = AsyncMock()
+    monkeypatch.setattr(adapter, "connect", connect)
+    await adapter.connect_with_sdk_options(sdk_options)
+    assert connect.call_args.args[0].extra == {}
+
+
 @pytest.mark.parametrize("name,kind", KINDS)
 async def test_native_grants_do_not_offer_or_execute_fal(
     probe: Probe, monkeypatch: pytest.MonkeyPatch, name: str, kind: str,

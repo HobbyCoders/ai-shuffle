@@ -1328,7 +1328,9 @@ class HarnessAdapter(ProviderAdapter):
         # ``query_options.build_options_from_profile``).
         # It is what lets _build_provider_client authenticate a native leg from
         # the app's encrypted ``model_providers`` row.
-        opts.extra["generation_context"] = getattr(sdk_options, "aih_generation_context", None)
+        generation_context = getattr(sdk_options, "aih_generation_context", None)
+        if generation_context is not None:
+            opts.extra["generation_context"] = generation_context
         provider_id = getattr(sdk_options, "aih_provider_id", None)
         if provider_id:
             opts.extra["provider_id"] = provider_id
