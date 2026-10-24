@@ -530,6 +530,14 @@
           "past_bug": "#402: a disconnect followed by ASGI cancellation during Monitor child-task cleanup propagated a child CancelledError through WebSocket teardown."
         },
         {
+          "id": "harness-basics.24",
+          "check": "Learned prose workflow across separately synthesized sessions",
+          "kind": "owner",
+          "how": "Use a disposable local-owner Fluid install and project, never the installed worker's skill store. Complete the same harmless fixture-summary workflow in two separate non-code sessions, confirming each completed result with the exact user receipt workflow accepted: fixture-summary. Let synthesis drain after each session. Inspect fluid workflows list/show in a separate owner terminal. Before approval verify a fresh session cannot discover the skill; attempt approval from a managed agent shell and verify refusal. In the owner terminal approve the exact reviewed digest, then start fresh native and delegated sessions, load Skill(fixture-summary), and summarize a new fixture result. In another disposable project repeat with workflow corrected: fixture-summary or reject the proposal before approval. Remove only these disposable installs/projects.",
+          "pass_when": "The second synthesis creates one pending, project-scoped proposal with two source session IDs, ordered successful steps and evidence hashes, without installing it or adding another synthesis call. Only separate interactive local-owner approval installs SKILL.md. Fresh native and delegated sessions discover/load it and use its Checked: format for the new result. Corrected/rejected, private-path, secret-bearing and duplicate workflows do not promote. API-owned stores remain fail-closed pending an authenticated approval surface; this is not a test of an app approval UI.",
+          "past_bug": "#206: separately consumed journal slices could not ground repeated prose workflow proposals, although same-slice synthesis and manual promotion tests passed."
+        },
+        {
           "id": "harness-basics.25",
           "check": "Large native cold-resume memory retention",
           "kind": "owner",
