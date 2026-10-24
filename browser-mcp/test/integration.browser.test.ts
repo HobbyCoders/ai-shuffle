@@ -761,17 +761,27 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Frame result") });
       await cdp.detach();
     });
-    it.each(["timer", "raf", "fetch"])("settles a %s text result on a ticker once non-baseline text is quiet", async kind => {
+    it.each(["timer", "raf", "fetch"].flatMap(kind => [0, 100].map(dispatchMs => ({ kind, dispatchMs }))))(
+      "settles a $kind text result on a ticker once non-baseline text is quiet (dispatch delay: $dispatchMs ms)", async ({ kind, dispatchMs }) => {
       const trigger = kind === "timer" ? "setTimeout(done,150)" : kind === "fetch" ? "fetch('/hydrate').then(r=>r.text()).then(done)" : "const start=performance.now();(function tick(){performance.now()-start>=150?done():requestAnimationFrame(tick)})()";
-      const page = await load(`<button onclick="go()">Save label</button><p id="status">Waiting</p><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100);function go(){const done=()=>{document.getElementById('status').textContent='Saved';window.done=true};${trigger}}</script>`);
+      // The timer begins inside dispatch, not at the later settle_ms origin.
+      // A slow click handler deterministically exposes that accounting mismatch.
+      const page = await load(`<button onclick="go()">Save label</button><p id="status">Waiting</p><span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100);function go(){const timing=window.resultTiming={start:performance.now(),finish:0};const done=()=>{document.getElementById('status').textContent='Saved';timing.finish=performance.now();window.done=true};${trigger};const until=performance.now()+${dispatchMs};while(performance.now()<until){}}</script>`);
       await page.waitForTimeout(250); // the clock, unlike the result, is already churning
       const result = body(await runAct(session, { kind: "click", ref: await ref("Save label") }));
       expect(result).toMatchObject({ ok: true, dom_mutated: "minor", settle_capped: false, text_churn_ignored: true });
       expect(await page.locator("#status").innerText()).toBe("Saved");
-      // Hosted Chromium delivered the 150 ms timer + 300 ms quiet window in
-      // 448 ms (issue #454). Timers and rounded cross-process timings are not
-      // exact clocks: allow 5 ms granularity, not another polling interval.
-      expect(result.timings.settle_ms).toBeGreaterThanOrEqual((kind === "fetch" ? 650 : 450) - 5);
+      const timing = await page.evaluate(() => {
+        const { start, finish } = (window as unknown as { resultTiming: { start: number; finish: number } }).resultTiming;
+        return { trigger_ms: finish - start, quiet_ms: performance.now() - finish };
+      });
+      console.info("TICKER_TIMING", JSON.stringify({ kind, dispatchMs, ...timing, settle_ms: result.timings.settle_ms }));
+      // #536: settle_ms excludes dispatch, which already consumed part of the
+      // trigger delay (355 ms settle with a real 307 ms quiet period in the
+      // slow-dispatch regression). Check both phases on the renderer's same
+      // monotonic clock, with only 5 ms timer/clock quantization tolerance.
+      expect(timing.trigger_ms).toBeGreaterThanOrEqual((kind === "fetch" ? 350 : 150) - 5);
+      expect(timing.quiet_ms).toBeGreaterThanOrEqual(300 - 5);
       expect(result.timings.settle_ms).toBeLessThan(1200);
       await page.goto("about:blank");
     });
