@@ -230,7 +230,9 @@ async def handle(body: dict[str, Any], from_device: str) -> dict[str, Any]:
         row = await run_sync(execution_row, snapshot["watch"],
                              stopped_connector="journal" in snapshot)
         source = await run_sync(canonical, body.get("source") or from_device)
-        await journal_transfer.prepare(row | {"id": snapshot["watch"]["id"]}, source, exporting=False)
+        await journal_transfer.prepare(
+            row | {"id": snapshot["watch"]["id"]}, source, exporting=False,
+        )
         await run_sync(journal_transfer.validate_import, snapshot, row, source)
         imported = await run_sync(store.import_watch, snapshot, row, source)
         # Import commits both the rebased cursor/tail and the open receive gate.
