@@ -16,8 +16,13 @@ one hop per query.
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from functools import partial
+from itertools import cycle
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import Any, Callable, Iterator
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -217,23 +222,63 @@ async def test_get_integration_settings_does_not_stall_the_loop(mock_db):
     assert ticks >= 5, f"the event loop was stalled during the reads ({ticks} ticks)"
 
 
+@pytest.fixture
+def distinct_offload_threads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep both executors alive so consecutive offloads cannot reuse a thread ID."""
+    with ThreadPoolExecutor(max_workers=1) as first, ThreadPoolExecutor(max_workers=1) as second:
+        executors = cycle((first, second))
+
+        async def to_thread(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+            call = partial(copy_context().run, fn, *args, **kwargs)
+            return await asyncio.get_running_loop().run_in_executor(next(executors), call)
+
+        monkeypatch.setattr(asyncio, "to_thread", to_thread)
+        yield
+
+
 async def test_update_voice_settings_validates_and_writes_in_one_hop(
-    mock_db, loop_thread
-):
+    mock_db: Any, loop_thread: int, distinct_offload_threads: None
+) -> None:
     """Validation, the writes and the closing re-read share one hop."""
     write = _ThreadSpy(settings_api.database.set_system_setting)
     read = _ThreadSpy(settings_api.database.get_system_setting)
 
-    with patch.object(settings_api.database, "set_system_setting", write), \
+    from app.core import voice_availability
+
+    # Availability warming has separate offloads before the read/validate/write
+    # closure; only that closure is covered by the single-hop guarantee.
+    with patch.object(
+        voice_availability, "refresh_from_settings", new_callable=AsyncMock
+    ) as refresh, patch.object(settings_api.database, "set_system_setting", write), \
          patch.object(settings_api.database, "get_system_setting", read):
         response = await settings_api.update_voice_settings(
             settings_api.VoiceSettingsUpdateRequest(voice_voice="quartz"),
             token=None,
         )
 
+    refresh.assert_awaited_once_with()
     assert response.voice_model == "gpt-live-1"
     assert response.voice_voice == "quartz"
     _assert_one_worker_hop(loop_thread, write, read)
+
+
+async def test_voice_availability_pre_read_is_off_loop(
+    mock_db: Any, loop_thread: int, distinct_offload_threads: None
+) -> None:
+    """The separate availability hop reads the saved pin before warming its cache."""
+    from app.core import voice_availability
+
+    settings_api.database.set_system_setting("voice_provider_id", " pinned-provider ")
+    read = _ThreadSpy(settings_api.database.get_system_setting)
+    with (
+        patch.object(settings_api.database, "get_system_setting", read),
+        patch.object(voice_availability, "refresh", new_callable=AsyncMock) as refresh,
+    ):
+        await voice_availability.refresh_from_settings()
+
+    refresh.assert_awaited_once_with("pinned-provider")
+    assert len(read.threads) == 1
+    _assert_one_worker_hop(loop_thread, read)
 
 
 @pytest.mark.parametrize("model", ["not-a-model", "gpt-realtime"])
