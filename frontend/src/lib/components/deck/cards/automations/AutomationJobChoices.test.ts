@@ -220,6 +220,18 @@ describe('AutomationJobChoices', () => {
 		expect(alert.textContent).toMatch(/Runs fail closed/);
 		expect(rowFor('image').dataset.tier).toBe('unreadable');
 		expect(within(rowFor('image')).queryByText('Use remembered choice; otherwise skip and report.')).toBeNull();
+		expect(within(rowFor('image')).getByRole('button', { name: 'Clear what is stored' })).toBeTruthy();
+	});
+
+	it('does not offer to clear a record when the job could not be loaded at all', async () => {
+		routes({ job: Object.assign(new Error('x'), { detail: 'Unknown job.', status: 404 }) });
+		render(AutomationJobChoices, { props: { jobId: JOB, mode: 'live' } });
+
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toMatch(/Unknown job\./);
+		expect(alert.textContent).toMatch(/could not be loaded/);
+		expect(rowFor('image').dataset.tier).toBe('unreadable');
+		expect(within(rowFor('image')).queryByRole('button', { name: 'Clear what is stored' })).toBeNull();
 	});
 
 	it('keeps the row unpinned and shows the error when saving a pick fails', async () => {

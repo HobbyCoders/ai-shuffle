@@ -578,6 +578,8 @@
 			else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This automation was deleted elsewhere.'; }
 			return;
 		}
+		// Only an open editor follows remote changes; after Save the list stays put.
+		if (currentView !== 'edit') return;
 		if (formSaving || snapshot !== remoteSnapshot() || remoteSnapshot() !== remoteBaseline) {
 			if (!fresh || JSON.stringify(fresh) !== JSON.stringify(selected)) remoteChange = fresh
 				? 'This item changed elsewhere. Your unsaved changes are kept here.'

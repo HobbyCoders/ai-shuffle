@@ -59,6 +59,8 @@
 	let saved = $state<JobChoices>({});
 	let loadState = $state<'idle' | 'loading' | 'ok' | 'error'>('idle');
 	let loadError = $state('');
+	/** 503: a stored record failed validation; the server reads it as "skip". */
+	let unreadableRecord = $state(false);
 	let openKind = $state<GenerationKind | null>(null);
 	let options = $state<Partial<Record<GenerationKind, GenerationOption[]>>>({});
 	let optionsError = $state<Partial<Record<GenerationKind, string>>>({});
@@ -78,6 +80,7 @@
 		const mine = ++loadSeq;
 		loadState = 'loading';
 		loadError = '';
+		unreadableRecord = false;
 		try {
 			const choices = await getJobChoices(id);
 			if (mine !== loadSeq) return;
@@ -88,6 +91,7 @@
 			saved = {};
 			loadState = 'error';
 			loadError = getErrorMessage(e, "This job's generation choices could not be read.");
+			unreadableRecord = (e as { status?: number } | null)?.status === 503;
 		}
 	}
 
@@ -269,7 +273,11 @@
 			<TriangleAlert aria-hidden="true" />
 			<div>
 				<p class="ajc-alert-title">{loadError}</p>
-				<p>Runs fail closed: generation steps are skipped and reported until this is fixed. Pin a choice below to replace it.</p>
+				{#if unreadableRecord}
+					<p>Runs fail closed: generation steps are skipped and reported until this is fixed. Pin a choice below to replace it.</p>
+				{:else}
+					<p>This job's media generation choices could not be loaded, so they are not shown. Runs fail closed on choices they cannot read.</p>
+				{/if}
 			</div>
 			<button type="button" class="ajc-btn sm" onclick={() => jobId && load(jobId)}>Retry</button>
 		</div>
@@ -292,7 +300,7 @@
 							{#each LADDER as rung (rung.tier)}
 								<li
 									class:on={tier === rung.tier}
-									class:overridden={rung.tier === 'remembered' && tier === 'job' && !!fallback}
+									class:overridden={rung.tier === 'remembered' && tier === 'job' && !!fallback && !sameChoice(fallback, job)}
 									aria-current={tier === rung.tier ? 'true' : undefined}
 								>
 									{rung.text}
@@ -347,7 +355,7 @@
 							<div><dt>Account</dt><dd class="mono">{job.account}</dd></div>
 							<div><dt>Worker</dt><dd>{workerLabel(job.worker, $workerInstalls, here)}</dd></div>
 							<div><dt>Model</dt><dd class="mono">{job.model}</dd></div>
-							<div><dt>Options</dt><dd>{describe(job)}</dd></div>
+							<div><dt>Options</dt><dd title={describe(job)}>{describe(job)}</dd></div>
 						</dl>
 						<p class="ajc-quote" aria-live="polite">
 							{#if quote === undefined || quote === 'loading'}
@@ -379,14 +387,14 @@
 				{:else if tier === 'unreadable'}
 					<p class="ajc-empty warn">
 						Could not be read. Runs skip {plural} and report it.
-						<button
+						{#if unreadableRecord}<button
 							type="button"
 							class="ajc-link"
 							disabled={busyKind === kind}
 							onclick={() => clear(kind)}
 						>
 							Clear what is stored
-						</button>
+						</button>{/if}
 					</p>
 				{:else}
 					<div class="ajc-none">
@@ -626,6 +634,7 @@
 	}
 	.ajc-ladder li + li::before {
 		content: '›';
+		display: inline-block;
 		margin: 0 4px 0 -8px;
 		color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
 	}

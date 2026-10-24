@@ -28,7 +28,12 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 }));
 vi.mock('$lib/api/connectors', () => ({ getConnectors: vi.fn(async () => []), getConnectorTypes: vi.fn(async () => []) }));
 vi.mock('$lib/api/claude-auth', () => ({ getClaudeAuth: vi.fn(async () => ({ authenticated: true })) }));
-vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
+const watchers = vi.hoisted(() => new Map<string, () => Promise<void>>());
+vi.mock('$lib/services/watch-resources', () => ({
+	watchResources: vi.fn((kinds: string[], fn: () => Promise<void>) => {
+		for (const kind of kinds) watchers.set(kind, fn);
+	})
+}));
 vi.mock('$lib/components/settings/ModelPicker.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/stores/worker-presence', async () => {
 	const { readable } = await import('svelte/store');
@@ -136,6 +141,10 @@ describe('creating an automation with a pinned generation choice', () => {
 		});
 		expect(automationsApi.enableAutomation).not.toHaveBeenCalled();
 		await waitFor(() => expect(document.querySelector('.ajc-row')).toBeNull());
+		// The save's own change notification must not reopen the editor.
+		await watchers.get('automations')!();
+		await waitFor(() => expect(screen.getAllByText('Poster run').length).toBeGreaterThan(0));
+		expect(document.querySelector('.ajc-row')).toBeNull();
 	});
 
 	it('writes nothing to the job API when no choice was staged', async () => {
