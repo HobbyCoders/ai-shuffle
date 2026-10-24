@@ -114,10 +114,10 @@ def test_handoff_producer_searches_after_durable_catchup(
     for row in data["history"]["fluid_session_nodes"]:
         row["message"]["role"] = "user"
         row["message"]["content"] = [{"kind": "text", "text":
-            "handoffneedle café The owner is away. Do not ask questions"}]
+            "handoffneedle nativeonly café The owner is away. Do not ask questions"}]
     data["history"]["session_store_entries"] = [{
         "project_key": "history-producer", "subpath": None,
-        "entry": {"type": "assistant", "message": {"content": "handoffneedle café"}},
+        "entry": {"type": "assistant", "message": {"content": "handoffneedle delegatedonly café"}},
         "created_at": "2026-10-19T00:00:00Z",
     }]
     with base.get_db() as conn:
@@ -170,6 +170,8 @@ def test_handoff_producer_searches_after_durable_catchup(
         if not hi.promote_batch(rows=2):
             break
     assert fluid_pg_store._search_sync(["handoffneedle", "café"], 10, None)
+    assert fluid_pg_store._search_sync(["nativeonly"], 10, None)
+    assert fluid_pg_store._search_sync(["delegatedonly"], 10, None)
     from app.db import sessions
     assert sessions.search_sessions("handoffneedle")
     assert sessions.search_sessions_paginated("handoffneedle")
