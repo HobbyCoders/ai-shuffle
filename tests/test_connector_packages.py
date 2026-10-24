@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import sys
 from pathlib import Path
@@ -135,13 +136,15 @@ async def test_telegram_ingress_commit_ack_crosses_isolated_package(
     monkeypatch.setattr(automation_manager, "handle_connector_trigger", AsyncMock())
     monkeypatch.setattr(package_proxy, "interpreter", lambda _: Path(sys.executable))
     cls = package_proxy.proxy_class("telegram", tmp_path, spec)
-    incoming = AsyncMock()
+    dispatched = asyncio.Event()
+    incoming = AsyncMock(side_effect=lambda _: dispatched.set())
     instance = cls("fake-telegram", "telegram", {}, incoming, AsyncMock(),
                    on_trigger=connector_manager._handle_trigger)
     try:
         assert await instance.connect()
         await instance.poll_watch({}, {})
         assert attempts == 3
+        await asyncio.wait_for(dispatched.wait(), timeout=2)
         incoming.assert_awaited_once()
         events, cursor = store.connector_page("fake-telegram", "123", {"seq": 0})
         assert len(events) == 1

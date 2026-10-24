@@ -98,8 +98,8 @@ class TelegramConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
@@ -109,6 +109,8 @@ class TelegramConnector(BaseConnector):
         self._dp: Optional[Any] = None
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
         self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
+        self._chat_tasks: set[asyncio.Task[None]] = set()
+        self._stopping = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -116,9 +118,11 @@ class TelegramConnector(BaseConnector):
 
     _SDK_AVAILABLE = AIOGRAM_AVAILABLE
     _SDK_NAME = "aiogram"
+    MAX_CHAT_TASKS = 32
 
     async def _do_connect(self) -> None:
         """Start the Telegram bot and begin polling for updates."""
+        self._stopping = False
         token = self.config["bot_token"]
 
         self._bot = Bot(token=token)
@@ -150,7 +154,13 @@ class TelegramConnector(BaseConnector):
                 logger.debug("Failed to update DB status after polling error", exc_info=True)
 
     async def disconnect(self) -> None:
-        """Stop polling and close the bot session."""
+        """Cancel tracked chat execution, stop polling and close the bot session."""
+        self._stopping = True
+        tasks = tuple(self._chat_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         try:
             if self._dp is not None:
                 await self._dp.stop_polling()
@@ -196,10 +206,29 @@ class TelegramConnector(BaseConnector):
             "platform_user_name": msg.platform_user_name,
             "text": msg.text,
         })
+        if self._stopping:
+            return
+        if len(self._chat_tasks) >= self.MAX_CHAT_TASKS:
+            # Never wait for a chat slot here: its turn may need an approval
+            # arriving on this same sequential polling loop.
+            logger.warning("Telegram chat capacity reached for %s", self.connector_id)
+            try:
+                await asyncio.wait_for(self.send_message(OutgoingMessage(
+                    platform_chat_id=chat_id,
+                    text="Too many chats are running. Please try again after one finishes.",
+                )), timeout=5)
+            except Exception:
+                logger.exception("Could not send Telegram chat capacity notice")
+            return
+        task = asyncio.create_task(self._dispatch_chat(msg), name="telegram-chat")
+        self._chat_tasks.add(task)
+        task.add_done_callback(self._chat_tasks.discard)
+
+    async def _dispatch_chat(self, message: IncomingMessage) -> None:
+        """Keep polling free for approvals while a journaled message runs a turn."""
         try:
-            await self._on_incoming_message(msg)
+            await self._on_incoming_message(message)
         except Exception:
-            # Chat dispatch is best-effort only after watch ingress has committed.
             logger.exception("Error handling journaled Telegram message")
 
     def _chat_allowed(self, chat_id: Optional[str]) -> bool:

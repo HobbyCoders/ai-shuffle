@@ -218,7 +218,110 @@ async def test_telegram_durable_ingress_retries_before_offset_advance(
     assert len(events) == 1
     assert events[0][1]["text"] == "important"
     assert store.connector_page(connector["id"], "123", cursor) == ([], cursor)
+    await asyncio.gather(*instance._chat_tasks)
     instance._on_incoming_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("messaging", ["telegram"], indirect=True)
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+async def test_telegram_approval_and_other_chat_dispatch_while_turn_is_running(
+    messaging: tuple[dict[str, Any], Any, Any], monkeypatch: MonkeyPatch, decision: str
+) -> None:
+    from app.core.connectors import telegram
+    from app.core.connectors.base import ActionDef, IncomingMessage
+
+    _, instance, sdk = messaging
+    instance.config["allowed_chat_ids"] = ["123", "456"]
+    monkeypatch.setattr(telegram, "InlineKeyboardMarkup", SimpleNamespace, raising=False)
+    monkeypatch.setattr(telegram, "InlineKeyboardButton", SimpleNamespace, raising=False)
+    prompted = asyncio.Event()
+    answered = asyncio.Event()
+    other_chat = asyncio.Event()
+    finish_turn = asyncio.Event()
+    outcomes: list[bool] = []
+    buttons: list[Any] = []
+
+    async def send_message(**kwargs: Any) -> None:
+        buttons.extend(kwargs["reply_markup"].inline_keyboard[0])
+        prompted.set()
+
+    async def turn(message: IncomingMessage) -> None:
+        if message.platform_chat_id == "456":
+            other_chat.set()
+            return
+        action = ActionDef("remove", "Remove", "Destructive test action", risk="destructive")
+        approved, _ = await instance.request_action_approval("123", action, {}, timeout=2)
+        outcomes.append(approved)
+        answered.set()
+        await finish_turn.wait()  # Host still waits for this turn to go idle.
+
+    instance._on_incoming_message = turn
+    instance._bot = SimpleNamespace(send_message=send_message, session=SimpleNamespace(
+        close=AsyncMock()
+    ))
+
+    async def start_polling(bot: Any, *, handle_as_tasks: bool) -> None:
+        assert handle_as_tasks is False
+        await incoming(instance, sdk, {}, "request a destructive action")
+        await asyncio.wait_for(prompted.wait(), timeout=2)
+        assert len(instance._chat_tasks) == 1
+        button = buttons[0 if decision == "approve" else 1]
+        callback = SimpleNamespace(
+            data=button.callback_data, message=SimpleNamespace(chat=SimpleNamespace(id=123)),
+            answer=AsyncMock(),
+        )
+        await instance._handle_callback_query(callback)
+        callback.answer.assert_awaited_once()
+        await asyncio.wait_for(answered.wait(), timeout=2)
+        assert outcomes == [decision == "approve"]
+        assert len(instance._chat_tasks) == 1  # Approval did not end the requesting turn.
+        await instance._handle_message(SimpleNamespace(
+            chat=SimpleNamespace(id=456, type="group"), from_user=None,
+            text="another chat", message_id=2,
+        ))
+        await asyncio.wait_for(other_chat.wait(), timeout=2)
+        assert not finish_turn.is_set()
+
+    instance._dp = SimpleNamespace(start_polling=start_polling, stop_polling=AsyncMock())
+    try:
+        await instance._run_polling()
+        assert outcomes == [decision == "approve"] and other_chat.is_set()
+        finish_turn.set()
+        await asyncio.gather(*instance._chat_tasks)
+    finally:
+        await instance.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("messaging", ["telegram"], indirect=True)
+async def test_telegram_chat_dispatch_is_bounded_and_cancelled_on_stop(
+    messaging: tuple[dict[str, Any], Any, Any], monkeypatch: MonkeyPatch
+) -> None:
+    _, instance, sdk = messaging
+    monkeypatch.setattr(instance, "MAX_CHAT_TASKS", 1)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def turn(message: Any) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    instance._on_incoming_message = turn
+    instance.send_message = AsyncMock(return_value=True)
+    await incoming(instance, sdk, {}, "first")
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await incoming(instance, sdk, {}, "capacity reached")
+    assert len(instance._chat_tasks) == 1
+    instance.send_message.assert_awaited_once()
+    assert "Too many chats" in instance.send_message.call_args.args[0].text
+    await instance.disconnect()
+    assert cancelled.is_set() and not instance._chat_tasks
+    await incoming(instance, sdk, {}, "after stop")
+    assert not instance._chat_tasks
 
 
 @pytest.mark.asyncio
