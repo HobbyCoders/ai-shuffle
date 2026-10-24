@@ -203,7 +203,7 @@ class Resolver:
             # Tool arguments cannot select an unattended route, but neither may
             # we silently charge a different stored source/account/model.
             named_source = normalize_source(args.get("source"))
-            stored_source = normalize_source(stored.get("source"))
+            stored_source = normalize_source(stored.get("source") or stored.get("account"))
             differs = (named_source and named_source not in (stored_source, stored.get("account"))) or any(
                 args.get(key) and args[key] != stored.get(key) for key in ("account", "model", "worker"))
             if differs:

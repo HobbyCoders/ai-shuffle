@@ -51,6 +51,17 @@ async def test_unattended_matching_identity_still_runs(source):
     assert ("execute", entry.account) in backend.calls
 
 
+@pytest.mark.parametrize("source", ["fal", "FAL.AI"])
+async def test_unattended_matching_account_only_fal_choice_still_runs(source):
+    entry = candidate(account="fal-ai")
+    backend = FakeBackend([entry])
+    output = await Resolver(backend).generate("image", {
+        "prompt": "tree", "source": source, "model": entry.model},
+        RunContext(unattended=True, job_choice={"account": "fal-ai", "model": entry.model}))
+    assert output["status"] == "completed" and output["choice"] == entry.choice()
+    assert ("execute", entry.account) in backend.calls
+
+
 async def test_catalog_collapses_holders_but_preserves_accounts_and_options(backend, monkeypatch):
     from app.network import generation
     local = candidate(source="supergrok")
