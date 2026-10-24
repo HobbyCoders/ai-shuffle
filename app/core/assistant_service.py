@@ -1,27 +1,11 @@
-"""Owner assistant research policy and public integration seams (no provider execution).
+"""Owner identity, detected introduction and cross-worker spending integration.
 
-The personal assistant's own conversation (its "home") and settings page were
-retired in #371 step 5. What is left here serves the parts that stay:
-
-* the background research loop on opted-in email sources
-  (``assistant_manager``), until watches (#371 step 3) replace it;
-* the "about you" detection that sets the default git author;
-* agent identities (names and avatars on the Agents page);
-* linking work a coordination chat starts on another worker to the owner's
-  spending limit.
-
-Orchestration must register_proactive_guard(1) ONLY after it enforces the
-_assistant_proactive read-only ceiling, including MCP/native tools and delegated
-work, and rechecks assert_proactive_allowed before starting/resuming a turn.
-The marker lives in turn.overrides AND turn.payload; it is never trusted from
-source content. Configured bypass permissions do not waive this ceiling.
-
-Research runs on the built-in agent ``store.AGENT_ID``. Owners never pick or
-edit it; agent lists leave it out. The synced ``assistant_account`` holds the
-introduction and the source opt-ins; research, observations and limits stay
-local to the worker and its connected sources.
+Historical assistant names remain for wire/API compatibility. Email research is
+retired; watches own all background observation and its permission provenance.
 """
+
 from __future__ import annotations
+from typing import Any
 
 import json
 import logging
@@ -101,35 +85,8 @@ def _publish():
         logger.warning("Could not publish the assistant account row", exc_info=True)
 
 
-def _seed(cursor, local):
-    """Seed shared identity from this worker without sharing its conversation."""
-    cursor.execute("SELECT connector_id FROM assistant_sources WHERE assistant_id=%s AND enabled=TRUE", (assistant_id(),))
-    return dict(agent_id=local.get("agent_id"), introduction=local.get("introduction") or {},
-                sources={row["connector_id"]: True for row in cursor.fetchall()})
-
-
-def ensure_agent(cursor):
-    """Create the built-in assistant agent, or put it back to its definition.
-
-    Each worker writes the same row, so it needs no election. A row a stale
-    peer or a manual edit changed is restored on the next pass.
-    """
-    cursor.execute("SELECT * FROM agents WHERE id=%s", (AGENT_ID,))
-    row = row_to_dict(cursor.fetchone())
-    if row is None:
-        stamp = datetime.now(timezone.utc).isoformat()
-        cursor.execute("""INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
-            VALUES (%s,%s,%s,%s,TRUE,'[]',%s,%s) ON CONFLICT (id) DO NOTHING""",
-            (AGENT_ID, AGENT_NAME, AGENT_DESCRIPTION, json.dumps(AGENT_CONFIG), stamp, stamp))
-        return
-    tools = row.get("mcp_tools")
-    if isinstance(tools, str):
-        tools = json.loads(tools)
-    if (row.get("is_builtin") and row.get("name") == AGENT_NAME and row.get("description") == AGENT_DESCRIPTION
-            and _config(row) == AGENT_CONFIG and not tools):
-        return
-    cursor.execute("UPDATE agents SET name=%s,description=%s,config=%s,is_builtin=TRUE,mcp_tools='[]',updated_at=NOW() WHERE id=%s",
-                   (AGENT_NAME, AGENT_DESCRIPTION, json.dumps(AGENT_CONFIG), AGENT_ID))
+def _seed(cursor: Any, local: Any) -> Any:
+    return dict(agent_id=local.get("agent_id"), introduction=local.get("introduction") or {})
 
 
 def _project(conn, account):
@@ -145,7 +102,7 @@ def _project(conn, account):
     store.project(conn, assistant_id(), values, account.get("sources") or {})
 
 
-def reconcile():
+def reconcile() -> Any:
     """Project the synced account onto this worker's runner row.
 
     Only seeding (and moving an older account onto the built-in agent) writes
@@ -163,12 +120,6 @@ def reconcile():
             account = store.write_account(conn, _seed(cursor, local))
             publish = True
             logger.info("Assistant: shared this worker's assistant configuration with the account")
-        if account.get("agent_id"):
-            if account.get("agent_id") != AGENT_ID:
-                account = store.write_account(conn, {"agent_id": AGENT_ID})
-                publish = True
-                logger.info("Assistant: moved research to the built-in assistant agent")
-            ensure_agent(cursor)
         _project(conn, account)
     if publish:
         _publish()
@@ -249,142 +200,11 @@ def session_stopped(session_id):
         return (turn.get("interrupt_mode") == "stop" and payload.get("interrupt_source") != "assistant") or turn.get("stop_reason") in ("user_stopped", "user_stopped_all", "agent_stopped")
 
 
-def source_catalog():
-    """Owner connectors with the account's opt-ins.
+def assert_proactive_allowed(metadata: dict[str, Any], session_id: str | None = None) -> Any:
+    """Shared harness seam: legacy research provenance is no longer executable."""
+    from app.core.watches import assert_allowed
 
-    ``available`` means usable by research on this worker: the connector runs
-    here, is connected and its grant covers the research agent.
-    """
-    from app.core.connectors.registry import get_connector_class
-    selections = {s["connector_id"]: s for s in store.get_sources(assistant_id())}
-    account = store.get_account()
-    if account is not None:
-        opted = {cid for cid, on in (account.get("sources") or {}).items() if on}
-    else:
-        opted = {cid for cid, selected in selections.items() if selected.get("enabled")}
-    # Availability is local even though source opt-ins sync with the identity.
-    agent_id = (account or store.get_state(assistant_id()) or {}).get("agent_id")
-    result = []
-    for connector in database.get_all_connectors():
-        with get_db() as conn:
-            if not store.owner_connector(conn, connector):
-                continue
-            grant_available = store.connector_grant_available(conn, connector, agent_id)
-        selected = selections.get(connector["id"], {})
-        try:
-            trigger_ids = [t.id for t in get_connector_class(connector["type"]).TRIGGERS]
-        except ValueError:
-            trigger_ids = []
-        on_runner = connector.get("runner_id") == assistant_id() and connector["status"] == "connected"
-        available = bool(grant_available and trigger_ids and connector["is_active"] and on_runner)
-        result.append(dict(id=connector["id"], connector_id=connector["id"], name=connector["name"], type=connector["type"],
-                           enabled=connector["id"] in opted, available=available,
-                           status=connector["status"], trigger_ids=trigger_ids,
-                           observation_mode="poll_and_events" if connector["type"] == "gmail" else "events",
-                           last_observed_at=selected.get("last_observed_at"), last_error=selected.get("last_error")))
-    return result
-
-
-def set_source(connector_id, enabled):
-    source = next((s for s in source_catalog() if s["id"] == connector_id), None)
-    if not source:
-        raise ValueError("Owner connector does not exist")
-    if enabled and not source["available"]:
-        raise ValueError("Connector is unavailable on this runner or has no observation triggers")
-    reconcile()
-    with get_db() as conn:
-        account = store.lock_account(conn)
-        if account is None:
-            raise ValueError("Choose an assistant agent first")
-        sources = dict(account.get("sources") or {})
-        if enabled:
-            sources[connector_id] = True
-        else:
-            sources.pop(connector_id, None)
-        _project(conn, store.write_account(conn, {"sources": sources}))
-    _publish()
-    return next(s for s in source_catalog() if s["id"] == connector_id)
-
-
-def record_proactive_event(connector_id, event_type, payload):
-    """Real connector callbacks enter here; external text is never authorization."""
-    connector = database.get_connector(connector_id)
-    if not connector:
-        return []
-    from app.core.connectors.registry import get_connector_class
-    try:
-        known = {t.id for t in get_connector_class(connector["type"]).TRIGGERS}
-    except ValueError:
-        return []
-    if event_type not in known:
-        return []
-    # Serialize a bounded data envelope, not instructions or source-controlled
-    # role/permissions/overrides. The ID suppresses redelivery across restarts.
-    safe_payload = {"data": json.dumps(payload, ensure_ascii=False, default=str)[:12000]}
-    external_id = payload.get("message_id") or payload.get("event_id") or payload.get("id")
-    return store.record_observations(assistant_id(), connector_id, [(event_type, external_id, safe_payload)])
-
-
-def proactive_metadata(run):
-    # ``home_session_id`` is kept so metadata stamped on an older run's turn
-    # still compares equal; runs admitted now carry None.
-    deadline = run["deadline_at"]
-    return dict(version=1, assistant_id=run["assistant_id"], run_id=run["id"],
-                home_session_id=run["home_session_id"], event_ids=run["event_ids"],
-                source_ids=run["source_ids"], read_only=True,
-                deadline_at=deadline.isoformat() if isinstance(deadline, datetime) else deadline)
-
-
-def assert_proactive_allowed(metadata, session_id=None):
-    """Fail closed at turn start/tool boundaries, including after pause/revoke.
-
-    Successor's enforced ceiling must reject mutation/delegation tools even
-    under bypass. Call this for wakes/retries as well as original admission.
-    """
-    if not isinstance(metadata, dict) or metadata.get("version") != 1 or metadata.get("read_only") is not True:
-        raise ValueError("Invalid proactive provenance")
-    run = store.get_run(metadata.get("run_id"))
-    if not run or run["assistant_id"] != assistant_id() or run["status"] not in store.ACTIVE:
-        raise ValueError("Proactive run is no longer admitted")
-    if metadata != proactive_metadata(run) or (session_id is not None and run["session_id"] != session_id):
-        raise ValueError("Proactive provenance does not match the admitted run")
-    deadline = run["deadline_at"]
-    if not isinstance(deadline, datetime):
-        deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-    if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=timezone.utc)
-    if deadline <= store.now():
-        raise ValueError("Proactive run deadline expired")
-    with get_db() as conn:
-        # A read-only recheck: never take the install mutex here. Tool hooks
-        # call this per tool call and must not queue behind admission writers.
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM assistant_state WHERE id=%s", (assistant_id(),))
-        state = store._parse(cursor.fetchone())
-        if not store.research_allowed(state):
-            raise ValueError("Assistant research does not run on this worker" if state and state.get("agent_id")
-                             else "Assistant is missing its agent")
-        cursor.execute("SELECT id FROM agents WHERE id=%s", (state["agent_id"],))
-        if not cursor.fetchone() or state["agent_id"] != run["agent_id"]:
-            raise ValueError("Assistant is missing its agent")
-        if state["runner_id"] != assistant_id():
-            raise ValueError("Assistant placement changed")
-        for source_id in run["source_ids"]:
-            if not store.trusted_source(conn, state, source_id):
-                raise ValueError("Proactive source grant is no longer available")
-    if run["session_id"]:
-        if not _owned_here(database.get_session(run["session_id"])):
-            raise ValueError("Proactive session owner or runner changed")
-        if session_stopped(run["session_id"]):
-            raise ValueError("The research session was stopped")
-    return run
-
-
-def assert_proactive_source(metadata, connector_id, session_id=None):
-    run = assert_proactive_allowed(metadata, session_id)
-    if connector_id not in run["source_ids"]:
-        raise ValueError("Connector is not in this proactive run's opted-in sources")
-    return run
+    return assert_allowed(metadata, session_id)
 
 
 def link_remote_job(caller_session_id, session_id, device_id, kind, label=None):
@@ -396,10 +216,6 @@ def link_remote_job(caller_session_id, session_id, device_id, kind, label=None):
         return None
     return store.link_remote_job(assistant_id(), session_id, device_id, kind, label,
                                  starter_session_id=caller_session_id)
-
-
-# A research turn with nothing worth telling the owner answers with exactly this.
-NOTHING_TO_REPORT = "NOTHING_TO_REPORT"
 
 
 def detection_wanted():
@@ -432,4 +248,3 @@ def apply_detection(detected, unknown=()):
         _project(conn, store.write_account(conn, {"introduction": updated}))
     _publish()
     return True
-

@@ -71,10 +71,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import functools
 import hashlib
 import json
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -980,6 +983,11 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
                    created=True)
 
 
+# Provisioning can block on Git/worktree locks for seconds. Keep its waiters
+# out of asyncio's default pool, which also serves short DB reads (swarms,
+# auth, catalog, etc.). In particular small-core workers have far fewer than
+# 31 default threads. Admission stays bounded without starving those reads.
+_start_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="task-start")
 _start_locks: Dict[str, List[Any]] = {}
 
 
@@ -1000,17 +1008,20 @@ async def _start_lock(key: str):
 async def handle_task_start(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     """``task-start`` control action: start a Task child another worker asked for."""
     from app.core import turn_scheduler
-    from app.db.async_database import run_sync
 
     key = str((body or {}).get("worker_session_id") or "")[:64]
     async with _start_lock(key):
-        answer = await run_sync(prepare_task_start, body, from_device)
+        prepare = functools.partial(contextvars.copy_context().run, prepare_task_start, body, from_device)
+        answer = await asyncio.get_running_loop().run_in_executor(_start_executor, prepare)
     if answer["created"]:
         turn_scheduler.kick(answer["worker_session_id"])
         try:
-            from app.network import catalog
+            from app.network import transport
 
-            await run_sync(catalog.publish_owned)
+            # The transaction is already durable. Wake the coalescing scanner;
+            # never make each child wait for a whole-catalog publication (and
+            # the network sequence lock) behind all the other starting children.
+            transport.request_scan(["sessions"], session_ids=[answer["worker_session_id"]])
         except Exception:  # noqa: BLE001 — the child runs; the mirror catches up
             logger.exception("remote_task: child %s started, but publishing it failed",
                              answer["worker_session_id"])
