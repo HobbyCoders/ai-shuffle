@@ -43,6 +43,7 @@
 	import {
 		commitJobChoiceDraft,
 		hasDraftChanges,
+		type JobChoiceCommit,
 		type JobChoiceDraft
 	} from '$lib/api/generation-job-choices';
 	import type { Project } from '$lib/stores/types';
@@ -130,6 +131,9 @@
 	// automation itself (a new automation is created paused, so it cannot run
 	// before its choices are stored).
 	let generationDraft: JobChoiceDraft = $state({});
+	// Writes that landed during a partial save, handed to the open editor so it
+	// shows what the server now holds before the staged entries are dropped.
+	let generationCommit: JobChoiceCommit | null = $state(null);
 
 	// Test result
 	let testResult: AutomationTestResult | null = $state(null);
@@ -233,6 +237,7 @@
 		formModel = '';
 		formActionSteps = [];
 		generationDraft = {};
+		generationCommit = null;
 		formError = '';
 		testResult = null;
 	}
@@ -274,6 +279,7 @@
 		formRequiresApproval = automation.requires_approval;
 		formModel = automation.model || '';
 		generationDraft = {};
+		generationCommit = null;
 		formError = '';
 		testResult = null;
 		currentView = 'edit';
@@ -391,7 +397,7 @@
 				? await createAutomation(data)
 				: await updateAutomation(selectedAutomation!.id, data as AutomationUpdate);
 			if (saved?.id && hasDraftChanges(generationDraft)) {
-				const { remaining, errors } = await commitJobChoiceDraft(saved.id, generationDraft, (e) =>
+				const { remaining, applied, errors } = await commitJobChoiceDraft(saved.id, generationDraft, (e) =>
 					getErrorMessage(e, 'not saved')
 				);
 				if (errors.length) {
@@ -401,6 +407,7 @@
 					await loadData(true);
 					selectedAutomation = automations.find((a) => a.id === saved.id) ?? saved;
 					currentView = 'edit';
+					generationCommit = { seq: (generationCommit?.seq ?? 0) + 1, applied };
 					generationDraft = remaining;
 					remoteBaseline = remoteSnapshot({});
 					const state = saved.is_enabled ? 'saved' : 'saved, paused';
@@ -688,6 +695,7 @@
 				onUpdateFormModel={(val) => formModel = val}
 				onUpdateFormActionSteps={(val) => formActionSteps = val}
 				{generationDraft}
+				{generationCommit}
 				onUpdateGenerationDraft={(val) => generationDraft = val}
 				onToggleSection={toggleSection}
 				onToggleTriggerExpand={toggleTriggerExpand}

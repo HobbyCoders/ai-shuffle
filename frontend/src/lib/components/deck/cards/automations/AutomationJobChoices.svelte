@@ -22,6 +22,7 @@
 		clearJobChoice,
 		getJobChoices,
 		saveJobChoice,
+		type JobChoiceCommit,
 		type JobChoiceDraft,
 		type JobChoices
 	} from '$lib/api/generation-job-choices';
@@ -50,9 +51,14 @@
 		/** Draft mode: staged edits, written by the form after the automation saves. */
 		draft?: JobChoiceDraft;
 		onDraftChange?: (draft: JobChoiceDraft) => void;
+		/**
+		 * Draft mode: writes the form already committed (a partial save). They are
+		 * applied before the parent drops them from `draft`, then re-read.
+		 */
+		committed?: JobChoiceCommit | null;
 	}
 
-	let { jobId, mode = 'draft', draft = {}, onDraftChange }: Props = $props();
+	let { jobId, mode = 'draft', draft = {}, onDraftChange, committed = null }: Props = $props();
 
 	type Tier = 'job' | 'remembered' | 'skip' | 'unreadable';
 
@@ -76,18 +82,24 @@
 			.catch(() => {});
 	});
 
-	async function load(id: string) {
+	/** `quiet`: keep the rows as they are while re-reading (no loading line). */
+	async function load(id: string, quiet = false) {
 		const mine = ++loadSeq;
-		loadState = 'loading';
-		loadError = '';
-		unreadableRecord = false;
+		if (!quiet) {
+			loadState = 'loading';
+			loadError = '';
+			unreadableRecord = false;
+		}
 		try {
 			const choices = await getJobChoices(id);
 			if (mine !== loadSeq) return;
 			saved = choices;
 			loadState = 'ok';
+			loadError = '';
+			unreadableRecord = false;
 		} catch (e) {
-			if (mine !== loadSeq) return;
+			// A failed quiet re-read keeps the rows: the writes it follows were accepted.
+			if (mine !== loadSeq || quiet) return;
 			saved = {};
 			loadState = 'error';
 			loadError = getErrorMessage(e, "This job's generation choices could not be read.");
@@ -103,6 +115,27 @@
 			saved = {};
 			loadState = 'ok';
 		}
+	});
+
+	// A partial save leaves this editor open on the same job, so the jobId
+	// effect does not re-read. Apply the accepted writes first (pre-DOM, so no
+	// stale frame once the parent drops them from the draft), then re-read.
+	let appliedSeq = 0;
+	$effect.pre(() => {
+		const commit = committed;
+		if (!commit || commit.seq === appliedSeq) return;
+		appliedSeq = commit.seq;
+		untrack(() => {
+			const next: JobChoices = { ...saved };
+			for (const kind of GENERATION_KINDS) {
+				const value = commit.applied[kind];
+				if (value === undefined) continue;
+				if (value === null) delete next[kind];
+				else next[kind] = value;
+			}
+			saved = next;
+			if (jobId) void load(jobId, true);
+		});
 	});
 
 	const remembered = $derived(generationChoices.remembered);

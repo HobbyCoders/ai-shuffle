@@ -49,12 +49,21 @@ export async function saveJobChoice(
 	if (!choice.account || !choice.worker || !choice.model) {
 		throw new Error('A job choice must name its account, holding worker and model.');
 	}
-	const data = await api.put<{ choice: GenerationChoice }>(path(jobId, kind), body(choice));
-	return data.choice;
+	const data = await api.put<{ choice?: GenerationChoice }>(path(jobId, kind), body(choice));
+	return data?.choice ?? choice;
 }
 
 export async function clearJobChoice(jobId: string, kind: GenerationKind): Promise<void> {
 	await api.delete(path(jobId, kind));
+}
+
+/**
+ * Writes a parent already committed for the open job. `seq` changes on every
+ * commit so the same `applied` map can be delivered twice.
+ */
+export interface JobChoiceCommit {
+	seq: number;
+	applied: JobChoiceDraft;
 }
 
 export function hasDraftChanges(draft: JobChoiceDraft): boolean {
@@ -64,6 +73,8 @@ export function hasDraftChanges(draft: JobChoiceDraft): boolean {
 export interface DraftCommitResult {
 	/** Kinds whose write failed, still staged so a retry sends them again. */
 	remaining: JobChoiceDraft;
+	/** Kinds the server accepted: the stored choice, or `null` when cleared. */
+	applied: JobChoiceDraft;
 	/** `kind: message` for every failed write, in kind order. */
 	errors: string[];
 }
@@ -78,17 +89,22 @@ export async function commitJobChoiceDraft(
 	describeError: (e: unknown) => string
 ): Promise<DraftCommitResult> {
 	const remaining: JobChoiceDraft = {};
+	const applied: JobChoiceDraft = {};
 	const errors: string[] = [];
 	for (const kind of KIND_ORDER) {
 		const value = draft[kind];
 		if (value === undefined) continue;
 		try {
-			if (value === null) await clearJobChoice(jobId, kind);
-			else await saveJobChoice(jobId, kind, value);
+			if (value === null) {
+				await clearJobChoice(jobId, kind);
+				applied[kind] = null;
+			} else {
+				applied[kind] = await saveJobChoice(jobId, kind, value);
+			}
 		} catch (e) {
 			remaining[kind] = value;
 			errors.push(`${kind}: ${describeError(e)}`);
 		}
 	}
-	return { remaining, errors };
+	return { remaining, applied, errors };
 }

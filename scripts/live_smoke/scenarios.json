@@ -386,6 +386,14 @@
           "past_bug": "#558: UUID validation rejected every app-created automation ID."
         },
         {
+          "id": "generation-379.job-choice-editor",
+          "check": "Automation editor pins, clears and reads back generation job choices",
+          "kind": "browser",
+          "how": "On a disposable candidate worker (fixture accounts, no paid generation), create a paused automation in the Automations editor, pin an image choice under Media generation with Pin to this job, and Save. Reopen the editor and the detail view, then GET /api/v1/generation/jobs/{automation_id}/choices and GET /api/v1/generation/choices. Clear the pin in the detail view and read back again. Re-pin, start one run whose prompt names no source, and inspect only the run's generation context and result, approving no submission. Repeat the views at a phone width. Delete only the throwaway automation and archive its sessions.",
+          "pass_when": "The editor writes only the job-choice API (remembered choices and favourites unchanged) and the automation stays paused. Pin, replace and clear read back identically in the editor, the detail view and the API; the empty state reads \"Use remembered choice; otherwise skip and report\". The run's production context binds the job choice ahead of the remembered one. No provider submission, reservation or charge occurs.",
+          "past_bug": "#543: production read job choices but the automation editor had no UI for them."
+        },
+        {
           "id": "harness-basics.4",
           "check": "Away off cancels compacted instructions",
           "kind": "owner",

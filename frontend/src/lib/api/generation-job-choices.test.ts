@@ -40,6 +40,7 @@ describe('generation job choices API', () => {
 		);
 		expect(result.remaining).toEqual({ video: CHOICE });
 		expect(result.errors).toEqual(['video: worker offline']);
+		expect(result.applied).toEqual({ image: CHOICE, audio: null });
 		expect(mocks.put).toHaveBeenCalledWith(`/generation/jobs/${JOB}/choices/image`, CHOICE);
 		expect(mocks.del).toHaveBeenCalledWith(`/generation/jobs/${JOB}/choices/audio`);
 	});

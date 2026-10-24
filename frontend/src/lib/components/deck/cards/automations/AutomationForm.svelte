@@ -28,7 +28,11 @@
 	} from 'lucide-svelte';
 	import AutomationTriggerConfig from './AutomationTriggerConfig.svelte';
 	import AutomationJobChoices from './AutomationJobChoices.svelte';
-	import { hasDraftChanges, type JobChoiceDraft } from '$lib/api/generation-job-choices';
+	import {
+		hasDraftChanges,
+		type JobChoiceCommit,
+		type JobChoiceDraft
+	} from '$lib/api/generation-job-choices';
 	import Banner from '$lib/components/Banner.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { onMount } from 'svelte';
@@ -62,6 +66,8 @@
 		savedAutomation?: Automation | null;
 		/** Pinned generation job choices staged until Save (written after the automation). */
 		generationDraft?: JobChoiceDraft;
+		/** Writes already committed for this job during a partial save. */
+		generationCommit?: JobChoiceCommit | null;
 		onUpdateGenerationDraft?: (draft: JobChoiceDraft) => void;
 		profiles: Profile[];
 		projects: Project[];
@@ -119,6 +125,7 @@
 		formActionSteps,
 		savedAutomation = null,
 		generationDraft = {},
+		generationCommit = null,
 		onUpdateGenerationDraft,
 		profiles,
 		projects,
@@ -618,6 +625,7 @@
 					jobId={currentView === 'edit' ? selectedAutomationId : null}
 					mode="draft"
 					draft={generationDraft}
+					committed={generationCommit}
 					onDraftChange={(draft) => onUpdateGenerationDraft?.(draft)}
 				/>
 			</div>

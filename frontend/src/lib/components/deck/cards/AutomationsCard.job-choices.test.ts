@@ -147,6 +147,74 @@ describe('creating an automation with a pinned generation choice', () => {
 		expect(document.querySelector('.ajc-row')).toBeNull();
 	});
 
+	it.each([
+		['the re-read returns what the server now holds', false],
+		['the re-read fails', true]
+	])('shows the accepted writes after a partial save on an existing job when %s', async (_label, failReread) => {
+		const OLD = { source: 'fal', account: 'fal-ai', worker: 'worker-b', model: 'fal-ai/flux/dev', options: {} };
+		const AUDIO = { source: 'fal', account: 'fal-ai', worker: 'worker-b', model: 'fal-ai/elevenlabs/tts', options: {} };
+		const GROK = {
+			source: 'supergrok', account: 'grok-1', worker: 'worker-a', model: 'grok-imagine-image', kind: 'image',
+			options: {}, verified: true, price: PRICE, schema: null, available: true, reason: null
+		};
+		const VIDEO = { ...GROK, model: 'grok-imagine-video', kind: 'video' };
+		const server: Record<string, unknown> = { image: OLD, audio: AUDIO };
+		let saves = 0;
+		listed = [created];
+		api.get.mockImplementation(async (path: string) => {
+			if (path === '/agents') return [{ id: 'general-purpose', name: 'General Purpose' }];
+			if (path === '/generation/choices') return { remembered: {}, last: {}, migrated: true, worker: 'worker-a' };
+			if (path === `/generation/jobs/${JOB}/choices`) {
+				if (failReread && saves > 0) throw { detail: 'Network down.', status: 0 };
+				return { job_id: JOB, choices: { ...server } };
+			}
+			if (path.startsWith('/generation/options/image')) return { options: [FAL_OPTION, GROK] };
+			if (path.startsWith('/generation/options/video')) return { options: [VIDEO] };
+			return [];
+		});
+		api.put.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+			saves++;
+			if (path.endsWith('/video')) throw { detail: 'Worker offline.', status: 503 };
+			server[path.split('/').pop()!] = body;
+			return { choice: body };
+		});
+		api.delete.mockImplementation(async (path: string) => {
+			saves++;
+			delete server[path.split('/').pop()!];
+			return {};
+		});
+		const row = (kind: string) => document.querySelector<HTMLElement>(`.ajc-row[data-kind="${kind}"]`)!;
+
+		render(AutomationsCard, { props: { mobile: false } });
+		await fireEvent.click((await screen.findAllByTitle('Edit'))[0]);
+		await waitFor(() => expect(row('image')?.dataset.tier).toBe('job'));
+		expect(within(row('image')).getByText('fal.ai · Flux Dev')).toBeTruthy();
+		expect(row('audio').dataset.tier).toBe('job');
+
+		// Replace image (A -> B), clear audio, pin video (this write fails).
+		await fireEvent.click(within(row('image')).getByRole('button', { name: 'Change' }));
+		await fireEvent.click(await screen.findByRole('radio', { name: /SuperGrok/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /Pin to this job/ }));
+		await fireEvent.click(within(row('audio')).getByRole('button', { name: /Clear the job choice/ }));
+		await fireEvent.click(within(row('video')).getByRole('button', { name: /Pin a choice/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Pin to this job/ }));
+		await waitFor(() => expect(within(row('video')).getByText('Unsaved')).toBeTruthy());
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+		await waitFor(() => expect(screen.getByText(/some media generation choices were not saved/)).toBeTruthy());
+		expect(screen.getByText(/video: Worker offline\./)).toBeTruthy();
+
+		// Image shows the new pin, audio stays cleared, video keeps its staged pick.
+		await waitFor(() => expect(within(row('image')).getByText('SuperGrok · Grok Imagine Image')).toBeTruthy());
+		expect(within(row('image')).queryByText('fal.ai · Flux Dev')).toBeNull();
+		expect(within(row('image')).queryByText('Unsaved')).toBeNull();
+		expect(row('audio').dataset.tier).not.toBe('job');
+		expect(within(row('audio')).queryByText(/cleared when you save/)).toBeNull();
+		expect(row('video').dataset.tier).toBe('job');
+		expect(within(row('video')).getByText('Unsaved')).toBeTruthy();
+		expect(server).toEqual({ image: expect.objectContaining({ model: 'grok-imagine-image' }) });
+	});
+
 	it('writes nothing to the job API when no choice was staged', async () => {
 		render(AutomationsCard, { props: { mobile: false } });
 		await fireEvent.click((await screen.findAllByRole('button', { name: /New automation/ }))[0]);
