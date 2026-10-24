@@ -43,6 +43,12 @@ def _caller(worker, session_id="caller", **fields):
 
 def network(workers, monkeypatch, *, online=True):
     """A ("ServerWorker") owns the new chat; B ("Windows") runs the caller."""
+    # This relay runs real authentication/SQL through an in-process TestClient,
+    # not a network with bounded latency. Don't turn eligibility assertions into
+    # a race against the production discovery watchdog (1 s for stale presence).
+    # Deadline tests explicitly install finite budgets after constructing it.
+    monkeypatch.setattr(orch, "PEERS_TIMEOUT", None)
+    monkeypatch.setattr(orch, "OFFLINE_PEERS_TIMEOUT", None)
     a, b = workers("unraid"), workers("windows")
     served = connect_owner(monkeypatch, a)
     with a.active():
