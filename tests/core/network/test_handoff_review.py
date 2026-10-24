@@ -391,6 +391,7 @@ async def test_progress_flows_from_move_polling_to_get_handoff(mock_db, monkeypa
     async def receive(payload, peer):
         timing = handoff._Timing("import", sid)
         timing.waiting("install_history.session_messages")
+        timing.rows(200, 401)
         await finish.wait()
         timing.log("committed")
         return {"moved": True}
@@ -418,6 +419,7 @@ async def test_progress_flows_from_move_polling_to_get_handoff(mock_db, monkeypa
         assert response.status_code == 200
         progress = response.json()["pending"]["progress"]
         assert progress["step"] == "install_history.session_messages"
+        assert (progress["rows_completed"], progress["rows_total"]) == (200, 401)
         assert progress["elapsed_seconds"] >= progress["step_elapsed_seconds"] >= 0
     finally:
         finish.set()

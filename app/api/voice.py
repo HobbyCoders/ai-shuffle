@@ -887,6 +887,7 @@ async def create_voice_session(
     api_key = await _provider_api_key(provider_row, api_user=api_user)
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
+    model = await _available_call_model(model, provider_row, api_key)
     options = voice_settings.get("voice_options", {})
     selected_model, selected_effort = request.model, request.effort
     if model in _DELEGATING_STREAM_MODELS and not (selected_model or "").strip():
@@ -1082,6 +1083,15 @@ def _stored_binding(row: Dict[str, Any]) -> Dict[str, Any]:
     return json.loads(config) if isinstance(config, str) else dict(config)
 
 
+async def _available_call_model(model: str, provider_row: Dict[str, Any], api_key: str) -> str:
+    """Apply the GPT-Live-1.1 gate to the key actually funding a new call."""
+    if model == LIVE_11_MODEL:
+        from app.core import voice_availability
+        if not await voice_availability.probe(provider_row["id"], api_key):
+            return LIVE_MODEL  # Same voices and shared options.
+    return model
+
+
 async def _bind_new_call(
     row: Dict[str, Any], voice_settings: Dict[str, Any],
     api_user: Optional[Dict[str, Any]], requested_provider_id: Optional[str] = None,
@@ -1106,10 +1116,7 @@ async def _bind_new_call(
     api_key = await _provider_api_key(provider_row, api_user=api_user)
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
-    if model == LIVE_11_MODEL:
-        from app.core import voice_availability
-        if not await voice_availability.probe(provider_row["id"], api_key):
-            model = LIVE_MODEL  # Same voices and shared options.
+    model = await _available_call_model(model, provider_row, api_key)
     binding = {
         **previous,
         "model": model,
