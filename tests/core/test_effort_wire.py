@@ -89,7 +89,8 @@ for kind in ("openai", "chatgpt", "xai", "openrouter", "custom"):
 @pytest.mark.parametrize("source", ["session", "override"])
 async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
                               kind, model, row, pick, expected, source,
-                              thinking_mode="default", expected_thinking=None, local_extra=None):
+                              thinking_mode="default", expected_thinking=None, local_extra=None,
+                              worker=None):
     from app.core.config import settings
     captured = []
     destinations = []
@@ -125,21 +126,28 @@ async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
     monkeypatch.setattr(model_providers, "get_model_provider", lambda *a, **kw: row)
     monkeypatch.setattr(database, "get_model_provider", lambda *a, **kw: row)
     bound_model = f"prov:fixture:{model}" if row else model
-    database.create_profile("wire-profile", "Wire", None, {"model": bound_model})
-    database.create_session(session_id="wire", profile_id="wire-profile", model=bound_model,
-                            effort=pick if source == "session" else None)
+    if worker is None:
+        database.create_profile("wire-profile", "Wire", None, {"model": bound_model})
+        database.create_session(session_id="wire", profile_id="wire-profile", model=bound_model,
+                                effort=pick if source == "session" else None)
+        profile = {"id": "wire-profile", "name": "Wire",
+                   "config": {"model": bound_model, "thinking_mode": thinking_mode}}
+        session_id = "wire"
+        overrides = {"effort": pick} if source == "override" and pick else {}
+    else:
+        # Consume the actual dispatch producer's persisted binding and turn,
+        # not a fixture seeded with the expected effort at the consumer.
+        session_id, overrides = worker
+        profile = database.get_profile(database.get_session(session_id)["profile_id"])
     opts, _ = build_options_from_profile(
-        {"id": "wire-profile", "name": "Wire",
-         "config": {"model": bound_model, "thinking_mode": thinking_mode}},
-        session_id="wire", overrides={"cwd": str(tmp_path),
-            **({"effort": pick} if source == "override" and pick else {})},
+        profile, session_id=session_id, overrides={"cwd": str(tmp_path), **overrides},
     )
-    if row:
+    if row and worker is None:
         opts.aih_provider_id = "fixture"
         opts.aih_provider_type = row["provider_type"]
         opts.aih_provider_auth_mode = row["auth_mode"]
         opts.aih_provider_dialect = row.get("api_dialect")
-    elif kind == "anthropic":
+    elif kind == "anthropic" and worker is None:
         # Native API route, as opposed to the no-row subscription default.
         opts.aih_provider_id = "fixture"
         opts.aih_provider_type = "anthropic"
