@@ -341,6 +341,9 @@ def assert_proactive_allowed(metadata, session_id=None):
     Successor's enforced ceiling must reject mutation/delegation tools even
     under bypass. Call this for wakes/retries as well as original admission.
     """
+    if isinstance(metadata, dict) and metadata.get("kind") == "watch":
+        from app.core.watches import assert_allowed
+        return assert_allowed(metadata, session_id)
     if not isinstance(metadata, dict) or metadata.get("version") != 1 or metadata.get("read_only") is not True:
         raise ValueError("Invalid proactive provenance")
     run = store.get_run(metadata.get("run_id"))

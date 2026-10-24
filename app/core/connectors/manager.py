@@ -373,6 +373,13 @@ class ConnectorManager:
             "Connector %s emitted trigger '%s'", connector_id, trigger_id
         )
         try:
+            from app.core.watch_sources import record_connector
+            from app.core.watch_manager import watch_manager
+            await run_sync(record_connector, connector_id, trigger_id, payload)
+            watch_manager.notify()
+        except Exception:
+            logger.exception("Failed to record watch observation for %s/%s", connector_id, trigger_id)
+        try:
             from app.core import assistant_service
             from app.core.assistant_manager import assistant_manager
             recorded = await run_sync(assistant_service.record_proactive_event, connector_id, trigger_id, payload)

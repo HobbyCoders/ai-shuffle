@@ -1700,6 +1700,8 @@ def create_builtin_tools_server(
     from app.mcp.sdk_compat import patch_sdk_server
 
     all_tools: list = []
+    from app.core.watches import tools as watch_tools
+    all_tools.extend(watch_tools(session_id))
 
     # Native Android tools are visible in NORMAL sessions. Identity comes only
     # from this runtime session id, never from model-supplied account/admin flags.
@@ -3081,6 +3083,10 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ListAgents",
         "mcp__builtins__SendMessage",
         "mcp__builtins__NotifyDevices",
+        "mcp__builtins__CreateWatch",
+        "mcp__builtins__ListWatches",
+        "mcp__builtins__PauseWatch",
+        "mcp__builtins__StopWatch",
         "mcp__builtins__CronCreate",
         "mcp__builtins__CronList",
         "mcp__builtins__CronDelete",

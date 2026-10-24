@@ -106,6 +106,8 @@ CHAT_MODE_TOOL_SURFACE: List[str] = [
     *CHAT_MODE_BASIC_TOOL_SURFACE, "Glob", "Grep",
     "mcp__attachments__Glob", "mcp__attachments__Grep", "mcp__app-config__*",
     *CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS,
+    "CreateWatch", "ListWatches", "PauseWatch", "StopWatch",
+    *(f"mcp__builtins__{name}" for name in ("CreateWatch", "ListWatches", "PauseWatch", "StopWatch")),
     *(f"mcp__builtins__{name}" for name in
       [*CHAT_MODE_ORCHESTRATION_TOOLS, *CHAT_MODE_APP_TOOLS]),
 ]
@@ -545,7 +547,9 @@ def proactive_tool_denial(metadata, session_id, name):
     # Decide by name first: most denials need no database round trip, which
     # matters because the delegated CLI hook calls this synchronously.
     leaf = name.removeprefix("mcp__fluid_bundled__")
-    if leaf not in PROACTIVE_TOOL_SURFACE:
+    from app.core.watches import tool_surface
+    watch_surface = tool_surface(metadata)
+    if leaf not in (watch_surface if watch_surface is not None else PROACTIVE_TOOL_SURFACE):
         return "Background assistant observation is read-only; this tool is denied."
     from app.core.assistant_service import assert_proactive_allowed
     try:
@@ -566,7 +570,9 @@ def proactive_tool_denial(metadata, session_id, name):
 def narrow_tool_access_for_proactive(access, metadata):
     if metadata is None:
         return access
-    surface = intersect_tool_surfaces(access.allowed, PROACTIVE_TOOL_SURFACE)
+    from app.core.watches import tool_surface
+    watch_surface = tool_surface(metadata)
+    surface = intersect_tool_surfaces(access.allowed, watch_surface if watch_surface is not None else PROACTIVE_TOOL_SURFACE)
     return ToolAccess(
         allowed=surface or None,
         disallowed=[*(access.disallowed or []), *PROACTIVE_DENIED_TOOLS,
