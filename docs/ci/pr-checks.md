@@ -389,6 +389,10 @@ and existing preview mutation/transport limits still apply. Owner and protected
 listeners stay on separate loopback-only ports even with `--host 0.0.0.0`.
 It creates its own HOME, data directory, PostgreSQL and hidden access session
 without inheriting credentials, keys, sessions or data from the installed worker.
+The launcher completes local setup and workspace onboarding only in its marked,
+disposable preview data directory, so the access link opens the app rather than
+the setup wizard. Installed apps and caller-managed preview data are unchanged;
+the preview cookie still cannot mutate setup or onboarding.
 The access token expires with the requested TTL; teardown removes its disposable
 key and database. A preview listener bind failure refuses startup rather than
 printing an unusable link. Keep the launcher alive: parent loss, task termination, Ctrl-C or

@@ -44,6 +44,10 @@ def preview_environment(
     home.mkdir()
     workspace = directory / "workspace"
     workspace.mkdir()
+    data = directory / "data"
+    # Keep the lease marker outside DATA_DIR: PostgreSQL refuses nonempty,
+    # unrecognized data directories on first boot.
+    (directory / ".branch-preview").write_text(str(data.resolve()))
     empty = directory / "empty.env"
     empty.write_text("")
     root = Path(__file__).resolve().parents[1]
@@ -79,6 +83,23 @@ def initialize_preview_access() -> None:
     port = preview_access.listener_port()
     if port is None:
         raise RuntimeError("Branch preview requires its token-only listener")
+
+    from app.core import owner_auth
+    from app.core.auth import auth_service
+    from app.core.config import settings
+    from app.db import database
+
+    # Only the owned launcher marks its fresh data directory. Raw preview mode
+    # against caller-managed data must not silently configure an installation.
+    data = settings.effective_data_dir.resolve()
+    marker = data.parent / ".branch-preview"
+    if marker.is_file() and marker.read_text() == str(data):
+        owner_auth.configure_installation()
+        database.set_system_setting(
+            f"workspace_path:{settings.effective_instance_id}", str(data.parent / "workspace"),
+        )
+        auth_service.set_onboarding_complete()
+
     profiles = get_all_profiles()
     profile_id = profiles[0]["id"] if profiles else "branch-preview-access"
     if not profiles:
