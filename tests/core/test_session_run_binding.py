@@ -17,6 +17,8 @@ Covers:
 """
 
 import asyncio
+from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -190,11 +192,14 @@ class TestSetSessionRunBinding:
 
 
 class TestTurnResolution:
-    def test_session_binding_drives_the_turn(self, mock_db, tmp_path):
+    def test_session_binding_drives_the_turn(self, mock_db: Any, tmp_path: Path) -> None:
         make_profile("agent", {"cwd": str(tmp_path)})
+        # #553: Accept Edits is a project setting, not a no-project capability.
+        db.create_project("binding-project", "Binding project", None, str(tmp_path))
         db.create_session(
             "s-bound",
             profile_id="agent",
+            project_id="binding-project",
             model="opus",
             effort="high",
             permission_mode="acceptEdits",
@@ -238,11 +243,14 @@ class TestTurnResolution:
         assert opts.effort == "max"
         assert opts.permission_mode == "bypassPermissions"
 
-    def test_per_turn_override_still_wins(self, mock_db, tmp_path):
+    def test_per_turn_override_still_wins(self, mock_db: Any, tmp_path: Path) -> None:
         make_profile("agent", {"cwd": str(tmp_path)})
+        # Keep this binding-precedence test on the full project tool surface.
+        db.create_project("binding-project", "Binding project", None, str(tmp_path))
         db.create_session(
             "s-ovr",
             profile_id="agent",
+            project_id="binding-project",
             model="opus",
             permission_mode="plan",
             context_window=200_000,

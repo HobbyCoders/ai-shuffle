@@ -310,6 +310,8 @@ export type StartedAt1 = string | null;
 export type Status3 = 'queued' | 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'interrupted';
 export type TaskId4 = string | null;
 export type Title = string;
+export type DeviceId = string;
+export type Name2 = string;
 export type WorkerSessionId1 = string | null;
 export type Tasks = SwarmTask[];
 export type Title1 = string;
@@ -791,7 +793,16 @@ export interface SwarmTask {
   status: Status3;
   task_id?: TaskId4;
   title: Title;
+  worker?: SwarmWorker | null;
   worker_session_id?: WorkerSessionId1;
+  [k: string]: unknown;
+}
+/**
+ * The network worker a remotely dispatched Swarm task runs on.
+ */
+export interface SwarmWorker {
+  device_id: DeviceId;
+  name: Name2;
   [k: string]: unknown;
 }
 export interface SystemNote {

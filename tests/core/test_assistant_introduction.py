@@ -1,11 +1,15 @@
-"""The owner introduction is detected (it sets the default git author); never typed in."""
+"""Detected introduction/Git-author compatibility stays unchanged when memory is fed."""
+from __future__ import annotations
+from typing import Any
+from pytest import MonkeyPatch
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.core import assistant_introduction as introductions, assistant_service as service
-from app.core.assistant_manager import AssistantManager
+from app.core.watch_manager import WatchManager
 from app.db import assistant as store, checkouts, database, projects_v2
 from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
@@ -102,40 +106,51 @@ def test_nothing_is_written_before_setup(monkeypatch):
     assert store.get_account() is None
 
 
-async def test_manager_pass_reads_the_running_gmail_address_not_mail(assistant_fixture, monkeypatch):
+async def test_manager_pass_reads_the_running_gmail_address_not_mail(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch
+) -> None:
     from app.core.connectors.manager import connector_manager
 
     async def running(connector_id):
         assert connector_id == "conn-mail"
         return SimpleNamespace(_email_address="ada@example.com")
     monkeypatch.setattr(connector_manager, "get_running_connector", running)
-    manager = AssistantManager()
-    task = manager.detect_owner()
-    assert manager.detect_owner() is task  # single flight
-    await task
-    assert manager.detect_owner(max_age=3600) is None  # fresh enough
+    manager = WatchManager()
+    await manager.detect_owner()
+    await manager.detect_owner()  # fresh enough: cached periodic detection
     assert introduction()["email"] == "ada@example.com"
 
 
-def test_builtin_agent_gets_default_tools_and_every_enabled_plugin(assistant_fixture, monkeypatch, tmp_path):
-    """A research turn on the built-in agent loads the install's plugins like any agent."""
+def test_ordinary_project_agent_gets_default_tools_and_enabled_plugins(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch, tmp_path: Path,
+) -> None:
+    """#557: plugin defaults belong to ordinary agents, not a retired research agent."""
     from app.core import mcp_config, plugin_service
     from app.core.query_options import build_options_from_profile
     plugin_dir = tmp_path / "helper"
     (plugin_dir / ".claude-plugin").mkdir(parents=True)
     (plugin_dir / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     installed = tmp_path / "installed_plugins.json"
-    installed.write_text(json.dumps({"plugins": {"helper@market": [{"installPath": str(plugin_dir)}]}}), encoding="utf-8")
+    installed.write_text(
+        json.dumps({"plugins": {"helper@market": [{"installPath": str(plugin_dir)}]}}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(plugin_service, "get_plugin_service", lambda: SimpleNamespace(
         INSTALLED_FILE=installed, get_enabled_plugins=lambda: {"helper@market": True, "off@market": False}))
-    agent = database.get_profile(service.AGENT_ID)
+    agent = database.create_profile("ordinary-agent", "Agent", None, {
+        "tool_selection_mode": "all", "agent_invoke_mode": "all",
+    })
     config = agent["config"]
-    assert config["tool_selection_mode"] == "all" and config["agent_invoke_mode"] == "all"
     assert "enabled_plugins" not in config and "setting_sources" not in config
-    run = database.create_session("research-run", service.AGENT_ID, is_active=True)
+    database.create_project("plugin-project", "Project", None, str(tmp_path))
+    run = database.create_session(
+        "project-run", "ordinary-agent", project_id="plugin-project", is_active=True,
+    )
     options, _ = build_options_from_profile(agent, session_id=run["id"])
     assert {"type": "local", "path": str(plugin_dir)} in (options.plugins or [])
-    assert mcp_config._build_plugins_list(config.get("enabled_plugins"), config.get("setting_sources")) == options.plugins
+    assert mcp_config._build_plugins_list(
+        config.get("enabled_plugins"), config.get("setting_sources"),
+    ) == options.plugins
 
 
 def test_a_source_that_cannot_answer_keeps_its_last_value():
@@ -187,18 +202,20 @@ def test_repositories_are_sorted_and_worktrees_do_not_crowd_them_out(monkeypatch
     assert introductions.projects_and_repositories(runner)[1] == repositories
 
 
-async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(assistant_fixture, monkeypatch):
+async def test_signed_in_gh_that_cannot_answer_is_not_a_missing_connection(
+    assistant_fixture: Any, monkeypatch: MonkeyPatch
+) -> None:
     from app.core import auth
     service.apply_detection({"github_username": "ada-gh"})
     monkeypatch.setattr(introductions, "github_login", REAL_GITHUB_LOGIN)
     monkeypatch.setattr(auth, "is_github_authenticated_cached", lambda probe=None: True)
     monkeypatch.setattr(auth.auth_service, "github_login", lambda: None)
-    await AssistantManager().detect_owner()
+    await WatchManager().detect_owner()
     assert introduction()["github_username"] == "ada-gh"
 
 
-async def test_no_detection_without_an_assistant_running_here(monkeypatch):
+async def test_no_detection_without_an_assistant_running_here(monkeypatch: MonkeyPatch) -> None:
     def unexpected(*args, **kwargs):
         pytest.fail("detected without an assistant")
     monkeypatch.setattr(introductions, "detect", unexpected)
-    await AssistantManager().detect_owner()
+    await WatchManager().detect_owner()

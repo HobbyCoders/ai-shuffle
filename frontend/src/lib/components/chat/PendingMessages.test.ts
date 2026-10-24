@@ -18,10 +18,10 @@ function makeMessage(over: Partial<QueuedMessage> = {}): QueuedMessage {
 	};
 }
 
-function renderPending(messages: QueuedMessage[]) {
+function renderPending(messages: QueuedMessage[], extra: { stale?: boolean; ownerName?: string | null } = {}) {
 	const onRemove = vi.fn();
 	const onInterrupt = vi.fn();
-	const result = render(PendingMessages, { props: { messages, onRemove, onInterrupt } });
+	const result = render(PendingMessages, { props: { messages, onRemove, onInterrupt, ...extra } });
 	return { ...result, onRemove, onInterrupt };
 }
 
@@ -215,5 +215,42 @@ describe('PendingMessages', () => {
 				expect((b as HTMLButtonElement).disabled).toBe(false);
 			}
 		});
+	});
+});
+
+describe('PendingMessages — unconfirmed queue (#524)', () => {
+	it('keeps every bubble and its controls, swapping only the hint and outline', async () => {
+		const { container, onRemove, onInterrupt } = renderPending(
+			[makeMessage({ id: 'q-1', content: 'first' }), makeMessage({ id: 'q-2', content: 'second' })],
+			{ stale: true, ownerName: 'ServerWorker' }
+		);
+		expect(container.querySelectorAll('.bubble')).toHaveLength(2);
+		expect(container.querySelector('.pending-messages')?.classList.contains('is-stale')).toBe(true);
+		expect(screen.queryByText('Not seen yet')).toBeNull();
+		const hint = screen.getByText('Unconfirmed · retrying…');
+		expect(hint.getAttribute('title')).toContain("Can't reach ServerWorker");
+		await fireEvent.click(screen.getByText('Interrupt'));
+		expect(onInterrupt).toHaveBeenCalledTimes(1);
+		const remove = container.querySelector('.pending-remove') as HTMLButtonElement;
+		await fireEvent.click(remove);
+		expect(onRemove).toHaveBeenCalledWith('q-2');
+	});
+
+	it('names no worker when the session runs here', () => {
+		renderPending([makeMessage()], { stale: true });
+		expect(screen.getByText('Unconfirmed · retrying…').getAttribute('title'))
+			.toContain("Can't reach the worker running this chat");
+	});
+
+	it('a status verdict still wins over the stale hint', () => {
+		renderPending([makeMessage({ status: 'cancelling' })], { stale: true });
+		expect(screen.getByText('Cancelling…')).toBeTruthy();
+		expect(screen.queryByText('Unconfirmed · retrying…')).toBeNull();
+	});
+
+	it('reads as before when confirmed', () => {
+		const { container } = renderPending([makeMessage()], { stale: false });
+		expect(container.querySelector('.pending-messages')?.classList.contains('is-stale')).toBe(false);
+		expect(screen.getByText('Not seen yet')).toBeTruthy();
 	});
 });

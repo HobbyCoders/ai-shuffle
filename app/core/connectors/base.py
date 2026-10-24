@@ -427,6 +427,25 @@ class BaseConnector(ABC):
         """Execute a named tool call.  Override in subclasses that declare TOOLS."""
         raise NotImplementedError(f"Tool '{tool_id}' not implemented by {self.connector_type}")
 
+    async def emit_durable_trigger(self, trigger_id: str, payload: dict[str, Any]) -> None:
+        """Do not release a non-replayable update until the host commits ingress.
+
+        The isolated worker's callback protocol acknowledges only after the host
+        returns. Retry identical event IDs on failure or acknowledgement loss;
+        cancellation stops polling without advancing the provider's offset.
+        """
+        delay = 0.1
+        while True:
+            try:
+                if self._on_trigger is None:
+                    raise RuntimeError("Durable connector ingress is not configured")
+                await self._on_trigger(self.connector_id, trigger_id, payload)
+                return
+            except Exception:
+                logger.exception("Durable ingress pending for connector %s", self.connector_id)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+
     async def emit_trigger(self, trigger_id: str, payload: Dict[str, Any]) -> None:
         """Emit a trigger event.  Called by connector logic when an event occurs."""
         if self._on_trigger:

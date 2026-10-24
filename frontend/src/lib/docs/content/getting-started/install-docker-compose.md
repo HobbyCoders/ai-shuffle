@@ -52,9 +52,9 @@ services:
     restart: unless-stopped
 
     # The app stops its agents first, then its private PostgreSQL database
-    # writes a clean checkpoint. That can take up to 90 seconds; Docker's
+    # writes a clean checkpoint. That can take up to 120 seconds; Docker's
     # default of 10 seconds would cut it off.
-    stop_grace_period: 90s
+    stop_grace_period: 120s
 
     # The built-in browser (Chromium) needs more shared memory than Docker's
     # 64 MB default.
@@ -263,7 +263,7 @@ mkdir -p ~/ai-shuffle/workspace
 docker run -d \
   --name ai-shuffle \
   --restart unless-stopped \
-  --stop-timeout 90 \
+  --stop-timeout 120 \
   --shm-size 1g \
   --pids-limit 8192 \
   --security-opt seccomp=unconfined \
@@ -285,7 +285,7 @@ docker run -d \
 
 - Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).
 - Add `-e OWNER_PASSWORD=...` to set the owner password on the first start.
-- Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
+- Keep `--stop-timeout 120`. AI Shuffle needs up to 120 seconds to shut down cleanly.
 - Set `PUID` and `PGID` to the owner of your workspace folder.
 - Keep `--restart unless-stopped`. When AI Shuffle stops answering, the container restarts it on its own. If that keeps failing, the container exits so that Docker can start it again. Without a restart policy it stays stopped until you start it.
 
@@ -293,7 +293,7 @@ docker run -d \
 
 If you create the container in a web interface instead of a terminal, set the same options as the `docker run` command above. Most important is the restart policy: many of these tools create containers with no restart policy, and then AI Shuffle stays down after a failure.
 
-- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 90 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
+- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 120 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
 - **Portainer:** under **Restart policy**, choose **Unless stopped**.
 
 For an existing hand-created install, change the policy on the **Docker host**, not inside the container: `docker update --restart=unless-stopped <container-name>`. This does not restart it. Verify with `docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' <container-name>`; it must print `unless-stopped`. Save the same policy in Unraid's template or Portainer's configuration so recreating the container preserves it. In-app source updates restart the application, not the Docker container, and cannot change its host restart policy.
@@ -387,7 +387,7 @@ If startup reports `Bundled tool assets are missing`, replace or rebuild the ima
 
 If startup says `DATA_DIR` or `WORKSPACE_DIR` is inside an image tree, mount a volume at that exact path or choose a path outside the image’s application, tool, Python and system directories. For example, a volume mounted at `/app/data` still works; an unmounted directory there is not prepared by root. The default `/data` and `/workspace` paths are unchanged.
 
-For a home-volume ownership error, stop the container and set the host directory’s ownership to the configured PUID:PGID. Keep home and retained data on separate volumes. Startup migrates the previous account’s own single-link files and automatically repairs root-owned directories and single-link regular files in the application home, including its fixed `.fluid`, `.config`, `.config/gh`, `.claude`, `.local` and `chrome-profile` volumes. It never follows symlinks or repairs data/workspace storage, shared files or other nested mounts. Repair scans `.fluid` and `.claude` first, then the home root’s direct entries without descending, followed by the other fixed home paths and remaining subtrees, so caches and package installs do not precede those common destinations. It uses a 20,000-entry/five-second scan budget and a 64-level depth limit, then logs a summary and continues if a limit is reached. Use `docker exec -u appuser` for home-file writes; for multi-link files, other mounts or files left beyond the repair limit, stop the container and manually set only the affected files’ host ownership to PUID:PGID when needed.
+For a home-volume ownership error, stop the container and set the host directory’s ownership to the configured PUID:PGID. Keep home and retained data on separate volumes. Startup migrates the previous account’s own single-link files and automatically repairs root-owned directories and single-link regular files in the application home, including its fixed `.fluid`, `.config`, `.config/gh`, `.claude`, `.local` and `chrome-profile` volumes. It never follows symlinks or repairs data/workspace storage, shared files or other nested mounts. Repair scans `.fluid` and `.claude` first, then the home root’s direct entries without descending, followed by the other fixed home paths and remaining subtrees, so caches and package installs do not precede those common destinations. It uses a 20,000-entry/five-second scan budget and a 64-level depth limit, then logs a summary and continues if a limit is reached. An advisory `DATA_DIR/home-repair-cursor.json` resumes the scan on later starts; once the tree has been covered, the next start begins a new cycle. Saving progress is deferred while the data volume is empty so first-boot volume ownership can be initialized safely. Missing or malformed progress starts a fresh scan; `cursor-unavailable` in the summary means progress could not be saved. Use `docker exec -u appuser` for home-file writes; for multi-link files, other mounts, or files needing repair before a later scan reaches them, stop the container and manually set only the affected files’ host ownership to PUID:PGID when needed.
 
 ## Optional settings
 
@@ -428,7 +428,26 @@ Set `AGENT_ISOLATION: "required"` under `environment:` (or `-e AGENT_ISOLATION=r
 
 **Valid values:** `off`, `on` and `required`. Values are trimmed and case-insensitive (`ON` and ` required ` work); empty or unset means `off`. Legacy spellings `1`, `true` and `yes` mean `on`; `0`, `false` and `no` mean `off`. Any other value, including `isolated` or a misspelling, **refuses container startup** with a message listing the valid values. This also applies to non-root container launches and maintenance commands; desktop and native installs ignore this container-only setting.
 
-The default is still **off**. `on` retains the optional, rollback-and-continue behavior above. To deliberately opt out, set `off` and recreate the container. Required mode separates the install's keys and database from agent processes; it is not a general-purpose sandbox or protection from denial of service. Validate on disposable data before enabling it on retained volumes.
+The default is still **off**.
+
+- `on` retains the optional rollback-and-continue behavior above.
+- To deliberately opt out, set `off` and recreate the container.
+- Neither mode is a general-purpose sandbox or protection from denial of service.
+- Validate on disposable data before enabling isolation on retained volumes.
+
+The entrypoint validates the mode before home remapping, account changes or provider setup.
+
+In `required` mode, startup refuses before those writes if:
+
+- The container did not start as root.
+- Image isolation helpers are missing.
+- The service UID **or GID** is invalid or collides with the requested PUID/PGID.
+
+Direct supervisor launches repeat these checks before preparing mount roots.
+
+Passing preflight is not proof of isolation: migration or privilege-drop failures also stop startup.
+
+Only the successful split reports `required agent isolation established`.
 
 **Turn it off**
 

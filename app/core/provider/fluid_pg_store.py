@@ -31,8 +31,8 @@ from psycopg2.extras import Json
 
 from app.core import api_user_scope, artifact_access
 from app.db import session_recall
-from app.db.async_database import run_sync
-from app.db.base import get_db
+from app.db.async_database import run_sync, run_event_write
+from app.db.base import get_db, get_turn_db, get_event_db
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
@@ -339,7 +339,16 @@ def _events_since_sync(session_id: str, seq: int) -> List[Event]:
 EVENT_PAGE_BYTES = 8 * 1024 * 1024
 
 
-def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> List[Event]:
+def _events_page_sync(
+    session_id: str, seq: int, through: int, limit: int,
+    classes: Optional[tuple[str, ...]] = None,
+) -> List[Event]:
+    if classes == ():
+        return []
+    class_filter = ""
+    if classes is not None:
+        class_filter = " AND event ->> '_cls' IN (" + ", ".join("%s" for _ in classes) + ")"
+    params = (session_id, seq, through, *(classes or ()))
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -348,18 +357,17 @@ def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> Li
             # The running sum still enforces the budget for mixed row sizes.
             "WITH first_size AS MATERIALIZED ("
             "SELECT octet_length(CAST(event AS TEXT)) AS bytes FROM fluid_session_events "
-            "WHERE session_id = %s AND seq > %s AND seq <= %s ORDER BY seq LIMIT 1"
+            f"WHERE session_id = %s AND seq > %s AND seq <= %s{class_filter} ORDER BY seq LIMIT 1"
             "), candidates AS MATERIALIZED ("
             "SELECT seq, event FROM fluid_session_events WHERE session_id = %s "
-            "AND seq > %s AND seq <= %s ORDER BY seq "
+            f"AND seq > %s AND seq <= %s{class_filter} ORDER BY seq "
             "LIMIT LEAST(%s, COALESCE((SELECT GREATEST(1, %s / bytes) FROM first_size), 1))"
             "), sized AS (SELECT seq, event, "
             "SUM(octet_length(CAST(event AS TEXT))) OVER (ORDER BY seq "
             "ROWS UNBOUNDED PRECEDING) AS page_bytes, "
             "ROW_NUMBER() OVER (ORDER BY seq) AS row_num FROM candidates) "
             "SELECT event FROM sized WHERE page_bytes <= %s OR row_num = 1 ORDER BY seq",
-            (session_id, seq, through, session_id, seq, through,
-             limit, EVENT_PAGE_BYTES, EVENT_PAGE_BYTES),
+            (*params, *params, limit, EVENT_PAGE_BYTES, EVENT_PAGE_BYTES),
         )
         rows = cur.fetchall()
     return [event_from_dict(_as_dict(r["event"])) for r in rows]
@@ -390,7 +398,7 @@ def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool
         # the transformed content, rather than persisting stale offsets.
         pinned = _scrub_pg_illegal(scrub_url_credentials(node.message.pinned_text()))
         message = Message.from_dict(message).pin_context(pinned).to_dict()
-    with get_db() as conn:
+    with get_turn_db() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO fluid_session_nodes "
@@ -417,7 +425,7 @@ def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
 
 
 def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> None:
-    with get_db() as conn:
+    with get_turn_db() as conn:
         conn.cursor().execute(
             "UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s",
             (cli_session_id, session_id),
@@ -428,7 +436,7 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
     # One transaction for consecutive reconstructible deltas and their barrier.
     payloads = [(e.seq, _scrub_pg_illegal(scrub_url_credentials(event_to_dict(e))))
                 for e in events]
-    with get_db() as conn:
+    with get_event_db() as conn:
         cur = conn.cursor()
         for seq, payload in payloads:
             cur.execute(
@@ -768,9 +776,11 @@ def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: L
     # (including terms whose index did not select the row). UNION ALL retains
     # duplicate patterns and LIKE wildcards exactly as the old hit sum did.
     # Keep only row keys in the materialized CTE, never transcript bytes.
+    from app.db.history_indexing import search_table
+    search_source = search_table(cur, table)
     key = "node_id" if table == "fluid_session_nodes" else "id"
     matches = " UNION ALL ".join(
-        f"SELECT session_id, {key}, {ts} AS t, 1 AS h FROM {table} "
+        f"SELECT session_id, {key}, {ts} AS t, 1 AS h FROM {search_source} "
         f"WHERE {where} AND {column} ILIKE %s" for _ in patterns
     )
     if len(patterns) > 1:
@@ -838,7 +848,7 @@ _MARKER_TEXT = {
 
 
 def _recall_matches(source: str, where: str, where_params: List[Any],
-                    patterns: List[str]) -> tuple:
+                    patterns: List[str], table: str = "session_recall_text") -> tuple:
     """SQL (and params) for an arm's candidate rows: session_id, row_key, t, h."""
     groups = [[p] for p in patterns]
     if len(patterns) > 1:
@@ -848,7 +858,7 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
     for group in groups:
         cond = " AND ".join(["body LIKE %s"] * len(group))
         arms.append(
-            "(SELECT session_id, row_key, part, ts, body FROM session_recall_text "
+            f"(SELECT session_id, row_key, part, ts, body FROM {table} "
             f"WHERE source = %s AND part >= 0 AND {where} AND {cond} "
             f"ORDER BY ts DESC LIMIT {_SEARCH_TERM_ROWS})"
         )
@@ -858,7 +868,7 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
         "(SELECT o.session_id, o.row_key, o.part, o.ts, x.body FROM ("
         "SELECT * FROM (SELECT session_id, row_key, part, ts, raw, "
         "SUM(chars) OVER (ORDER BY ts DESC, session_id, row_key) - chars AS before "
-        f"FROM session_recall_text WHERE source = %s AND part = {session_recall.PENDING} AND {where}) m "
+        f"FROM {table} WHERE source = %s AND part = {session_recall.PENDING} AND {where}) m "
         f"WHERE before < {_MARKER_CHARS}) o "
         f"CROSS JOIN LATERAL (SELECT {_MARKER_TEXT[source]} AS body) x WHERE {any_term})"
     )
@@ -878,7 +888,9 @@ def _indexed_top_rows(cur, source: str, table: str, key: str, where: str,
                       patterns: List[str], fetch_sessions: int) -> List[Dict[str, Any]]:
     """``_top_rows`` over the projection: same session cap, row cap and
     deterministic tie-breaks, then the JSON of just the capped rows."""
-    matches, params = _recall_matches(source, where, where_params, patterns)
+    from app.db.history_indexing import search_table
+    matches, params = _recall_matches(source, where, where_params, patterns,
+                                     search_table(cur, "session_recall_text"))
     # The row's own key order breaks exact ties, as the legacy query did.
     order_key = "m.row_key::bigint" if key == "id" else "m.row_key"
     join_key = "d.id = r.row_key::bigint" if key == "id" else f"d.{key} = r.row_key"
@@ -921,7 +933,10 @@ def _indexed_event_candidates(conn, cur, me: str, excluded: List[str],
               if r["id"] not in excluded and (allowed is None or r["id"] in allowed)}
     if not owners:
         return [], []
-    matches, params = _recall_matches(session_recall.EVENT, "session_id = ANY(%s)", [sorted(owners)], patterns)
+    from app.db.history_indexing import search_table
+    matches, params = _recall_matches(session_recall.EVENT, "session_id = ANY(%s)",
+                                     [sorted(owners)], patterns,
+                                     search_table(cur, "session_recall_text"))
     cur.execute(
         f"WITH m AS ({matches}) SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
         "GROUP BY session_id ORDER BY best DESC, last DESC, session_id "
@@ -1096,10 +1111,13 @@ def _search_sync(
                 found, events = _indexed_event_candidates(conn, cur, me, excluded, likes, scope)
             else:
                 event_column = "recall_text" if cached else "payload"
+                from app.db.history_indexing import search_table
+                event_source = search_table(cur, "session_events", "e")
                 source = (
                     f"(SELECT e.session_id, e.created_at, e.{event_column}, s.owner_device_id AS owner "
-                    "FROM session_events e JOIN sessions s ON s.id = e.session_id "
-                    f"WHERE {_remote_sql('s.')} AND e.event_type IN ({_in(types)})) ev"
+                    f"FROM {event_source} JOIN sessions s ON s.id = e.session_id "
+                    f"WHERE {_remote_sql('s.')} "
+                    f"AND e.event_type IN ({_in(types)})) ev"
                 )
                 found = _candidate_sessions(
                     cur, source, [me, *types], "recall_text" if cached else "payload::text", "created_at",
@@ -1503,6 +1521,7 @@ class PgFluidStore:
         self._loaded: set = set()
         self._load_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
+        self._resume_trim_pending = False
 
     async def _ensure_loaded(self, session_id: str) -> bool:
         async with self._load_lock:
@@ -1515,6 +1534,8 @@ class PgFluidStore:
                 self._nodes[session_id] = data["nodes"]
                 self._node_sizes[session_id] = data["node_sizes"]
                 self._node_json_bytes[session_id] = sum(data["node_sizes"].values())
+                if self._node_json_bytes[session_id] >= 8 * 1024 * 1024:
+                    self._resume_trim_pending = True
             self._loaded.add(session_id)
             return data is not None
 
@@ -1536,6 +1557,17 @@ class PgFluidStore:
                     message_json_bytes=sum(self._node_json_bytes.values()),
                     event_cache_estimated_bytes=sum(self._event_bytes.values()),
                     windowed_sessions=len(self._windows))
+
+    async def release_resume_memory(self) -> None:
+        # Only a large cold load followed by actual prefix eviction qualifies.
+        # The adapter calls this at the first live turn terminal, after the
+        # full-path hydration's temporary lists have left the engine stack.
+        if not self._resume_trim_pending or not self._windows:
+            return
+        self._resume_trim_pending = False
+        from app.core.resume_memory import release_cold_resume_memory
+
+        await release_cold_resume_memory()
 
     def _uncache_node(self, session_id: str, node_id: str) -> None:
         self._nodes.get(session_id, {}).pop(node_id, None)
@@ -1576,7 +1608,7 @@ class PgFluidStore:
         self._events.pop(session_id, None)
         self._event_floor.pop(session_id, None)
         self._event_bytes.pop(session_id, None)
-        await run_sync(_append_events_sync, session_id, events)
+        await run_event_write(_append_events_sync, session_id, events)
         self._pending_events.pop(session_id, None)
         self._pending_since.pop(session_id, None)
         self._pending_bytes.pop(session_id, None)
@@ -1817,8 +1849,22 @@ class PgFluidStore:
         async with self._event_lock:
             await self._write_pending(session_id, event)
 
+    async def iter_events_of_class(
+        self, session_id: str, seq: int, classes: tuple[type[Event], ...], *,
+        page_size: int = EVENT_CACHE_LIMIT,
+    ) -> AsyncIterator[Event]:
+        """Class-filtered replay with the same finite prefix and page budgets."""
+        if not classes:
+            return
+        async for event in self.iter_events(
+            session_id, seq, page_size=page_size,
+            classes=tuple(cls.__name__ for cls in classes),
+        ):
+            yield event
+
     async def iter_events(
         self, session_id: str, seq: int, *, page_size: int = EVENT_CACHE_LIMIT,
+        classes: Optional[tuple[str, ...]] = None,
     ) -> AsyncIterator[Event]:
         """Replay a finite committed prefix without retaining the whole history.
 
@@ -1832,7 +1878,10 @@ class PgFluidStore:
             await self._write_pending(session_id)
             through = await run_sync(_last_event_seq_sync, session_id)
         while seq < through:
-            page = await run_sync(_events_page_sync, session_id, seq, through, page_size)
+            if classes is None:
+                page = await run_sync(_events_page_sync, session_id, seq, through, page_size)
+            else:
+                page = await run_sync(_events_page_sync, session_id, seq, through, page_size, classes)
             if not page:
                 break
             for event in page:

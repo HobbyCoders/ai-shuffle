@@ -106,3 +106,24 @@ describe('PendingStatusAnnouncer', () => {
 		}
 	});
 });
+
+describe('PendingStatusAnnouncer — unconfirmed queue (#524)', () => {
+	it('says once when the queue goes unconfirmed and once when it is confirmed again', async () => {
+		const view = render(PendingStatusAnnouncer, { props: { messages: [msg('a')], sessionId: 's1', stale: false } });
+		const region = view.container.querySelector('[role="status"]') as HTMLElement;
+		const text = () => region.textContent?.replace(/\u00a0/g, '');
+		expect(text()).toBe('');
+		await view.rerender({ messages: [msg('a')], sessionId: 's1', stale: true });
+		expect(text()).toBe("Queued messages can't be confirmed right now. Retrying.");
+		await view.rerender({ messages: [msg('a')], sessionId: 's1', stale: false });
+		expect(text()).toBe('Queued messages confirmed.');
+	});
+
+	it('stays silent while there is nothing on screen to vouch for', async () => {
+		const view = render(PendingStatusAnnouncer, { props: { messages: [], sessionId: 's1', stale: true } });
+		const region = view.container.querySelector('[role="status"]') as HTMLElement;
+		expect(region.textContent).toBe('');
+		await view.rerender({ messages: [], sessionId: 's1', stale: false });
+		expect(region.textContent).toBe('');
+	});
+});

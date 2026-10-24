@@ -120,6 +120,77 @@ describe('check for updates', () => {
 		}
 	});
 
+	// #519: the sidebar's rule. A worker already checking refuses a second
+	// check, but its own check answers this one: wait for it, then show it.
+	describe('a worker that refused because its own check was running', () => {
+		const peer = (phase: string, extra: Record<string, unknown> = {}) => ({
+			...self(phase, extra),
+			device_id: 'peer',
+			device_name: 'ServerWorker'
+		});
+		const refusedBy = (reason: string) => ({
+			results: [
+				{ device_id: 'peer', device_name: 'ServerWorker', accepted: false, reason },
+				{ device_id: 'self', device_name: 'Current worker', accepted: true, reason: 'Request queued' }
+			]
+		});
+		const found = { version: 'cccccccccccc', running_version: 'a'.repeat(40) };
+
+		it('waits while it checks, then shows the update it found', async () => {
+			await ready();
+			transport.post.mockResolvedValueOnce(refusedBy('An update is already in progress'));
+			snapshots = [
+				[peer('checking'), self('checking')],
+				[peer('checking'), self('idle')],
+				[peer('available', found), self('idle')]
+			];
+			await state.check();
+			expect(state.rows?.[0]).toMatchObject({ name: 'ServerWorker', tone: 'busy', text: 'Checking' });
+			await vi.advanceTimersByTimeAsync(CHECK_POLL_MS);
+			expect(state.checking).toBe(true);
+			await vi.advanceTimersByTimeAsync(CHECK_POLL_MS);
+			expect(state.checking).toBe(false);
+			expect(state.rows?.map((r) => [r.name, r.text])).toEqual([
+				['ServerWorker', 'Version cccccccccccc available'],
+				['Current worker', 'Up to date']
+			]);
+		});
+
+		it('shows its own result when its check finished before the first poll', async () => {
+			await ready();
+			transport.post.mockResolvedValueOnce(refusedBy('An update is already in progress'));
+			snapshots = [[peer('idle'), self('checking')], [peer('idle'), self('idle')]];
+			await state.check();
+			expect(state.rows?.[0]).toMatchObject({ name: 'ServerWorker', tone: 'ok', text: 'Up to date' });
+			await vi.advanceTimersByTimeAsync(CHECK_POLL_MS);
+			expect(state.checking).toBe(false);
+			expect(state.rows?.some((r) => r.text.includes('already in progress'))).toBe(false);
+		});
+
+		it('shows a download that was running rather than the refusal', async () => {
+			await ready();
+			transport.post.mockResolvedValueOnce(refusedBy('An update is already in progress'));
+			snapshots = [
+				[peer('downloading', { ...found, percent: 40 }), self('checking')],
+				[peer('downloading', { ...found, percent: 60 }), self('idle')]
+			];
+			await state.check();
+			expect(state.rows?.[0]).toMatchObject({ name: 'ServerWorker', text: 'Downloading, 40%' });
+			await vi.advanceTimersByTimeAsync(CHECK_POLL_MS);
+			expect(state.checking).toBe(false);
+			expect(state.rows?.[0]).toMatchObject({ name: 'ServerWorker', text: 'Downloading, 60%' });
+		});
+
+		it('still names any other refusal at once', async () => {
+			await ready();
+			transport.post.mockResolvedValueOnce(refusedBy('Updates disabled'));
+			snapshots = [[peer('idle'), self('available', found)]];
+			await state.check();
+			expect(state.checking).toBe(false);
+			expect(state.rows?.[0]).toMatchObject({ name: 'ServerWorker', tone: 'off', text: 'Updates disabled' });
+		});
+	});
+
 	it('keeps waiting on a worker that never takes the request', async () => {
 		await ready();
 		snapshots = [[self('idle', { request_pending: true })]];

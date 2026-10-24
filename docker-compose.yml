@@ -40,7 +40,7 @@ services:
       - SETTINGS_IMPORT_ALLOWED_HOMES=${SETTINGS_IMPORT_ALLOWED_HOMES:-/imports/provider-settings}
 
     # Allow ordered application drain, then PostgreSQL shutdown and checkpoint.
-    stop_grace_period: 90s
+    stop_grace_period: 120s
 
     # Fresh installs need no .env; existing connection/provider settings survive.
     env_file:

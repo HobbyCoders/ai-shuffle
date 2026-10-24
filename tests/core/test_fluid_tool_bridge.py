@@ -296,7 +296,7 @@ def test_every_static_risk_map_tool_name_is_current(monkeypatch):
 
     module_files = {
         "builtins": ["app/mcp/builtin_tools.py", "app/mcp/plugin_tools.py",
-                     "app/mcp/emulator_tools.py"],
+                     "app/mcp/emulator_tools.py", "app/mcp/working_record_tools.py"],
         "app-config": [
             "app/mcp/app_config_sdk.py", "app/mcp/config_automations.py",
             "app/mcp/config_connectors.py", "app/mcp/config_hooks.py",
