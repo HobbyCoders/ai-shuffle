@@ -108,6 +108,16 @@ export const entries: SettingEntry[] = [
 		default: 240
 	},
 	{
+		id: 'voice.micGate',
+		category: 'voice',
+		section: 'Voice calls',
+		label: 'Microphone gate',
+		hint: 'Quieter sound counts as silence',
+		help: 'Microphone audio quieter than this level is sent to the voice engine as silence, so room noise and breathing do not interrupt it. Lower it if the voice misses quiet speech; -80 dBFS turns the gate off.',
+		keywords: ['noise gate', 'mic threshold', 'dbfs', 'background noise', 'sensitivity'],
+		default: -42
+	},
+	{
 		id: 'voice.opening',
 		category: 'voice',
 		section: 'Voice calls',

@@ -10,7 +10,7 @@ Voice mode adds a spoken conversation to a chat. You talk, the assistant answers
 
 ## Set up
 
-1. **Add an API key** under **Settings → Providers**: OpenAI for GPT Live, or xAI for Grok Voice. To use a ChatGPT subscription instead, connect your ChatGPT login under **Settings → Providers** and choose **ChatGPT voice (ChatGPT subscription)** as the voice engine in **Settings → Voice** (`voice_model: "gpt-live-1-codex"` in the API). It uses your ChatGPT subscription login; it doesn't fall back to an API key. It stays off until you select it, uses the Cove voice, and has no voice samples or automatic provider retry. See the [Voice API](/docs/api-reference/voice). To use a SuperGrok subscription instead of an xAI API key, connect your SuperGrok login under **Settings → Providers** and choose **Grok voice (SuperGrok subscription)**; it never falls back to an xAI API key.
+1. **Add an API key** under **Settings → Providers**: OpenAI for GPT Live, or xAI for Grok Voice. To use a ChatGPT subscription instead, connect your ChatGPT login under **Settings → Providers** and choose **GPT-Live-1.1 · ChatGPT subscription** as the voice engine in **Settings → Voice** (`voice_model: "gpt-live-1-codex"` in the API). It uses your ChatGPT subscription login; it doesn't fall back to an API key. It stays off until you select it, offers the 25 ChatGPT voices (Cove by default), and has no voice samples or automatic provider retry. When your OpenAI API key can use GPT-Live-1.1, it also appears in the engine list as **GPT-Live-1.1**. See the [Voice API](/docs/api-reference/voice). To use a SuperGrok subscription instead of an xAI API key, connect your SuperGrok login under **Settings → Providers** and choose **Grok voice (SuperGrok subscription)**; it never falls back to an xAI API key.
 2. **Turn on Voice calls** under **Settings → Voice**. Choose **GPT Live 1**, **Grok Voice** or **Grok voice (SuperGrok subscription)**, then a voice (the play button plays a sample; the SuperGrok engine has no samples), set **Max call length**, and change the **Call prompts** if you like. Both Grok engines default to **Eve**, use server voice activity detection, and delegate work to the same chat agent. Calls keep the engine, provider, voice and prompts they started with.
 3. In the voice chat's composer, **choose the model** that does the work, with its effort and permission mode.
 
@@ -20,7 +20,7 @@ The **Dictation** settings on the same page, including the **Voice input hotkey*
 
 ## Start a call
 
-Choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer.
+Choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer. Each new call uses your current voice settings, so changing the engine or voice in Settings applies to the next call in any chat. A call that is already running keeps its engine and voice until you hang up.
 
 During a call, the call dock shows whether it is connected and who is speaking, how long the call has run, and buttons to:
 

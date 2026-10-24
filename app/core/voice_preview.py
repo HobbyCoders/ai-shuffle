@@ -10,7 +10,7 @@ import wave
 
 from websockets.asyncio.client import connect
 
-from app.core.voice_models import LIVE_MODEL
+from app.core.voice_models import LIVE_MODEL, LIVE_MODELS
 from app.core.voice_stream import live_opening_event
 
 # Only two funded preview connections at once per process. No background queue.
@@ -26,12 +26,12 @@ async def generate_live_preview(api_key: str, voice: str, model: str = LIVE_MODE
     try:
         async with asyncio.timeout(30):
             from app.core.voice_models import GROK_MODEL
-            return await _generate_grok(api_key, voice) if model == GROK_MODEL else await _generate(api_key, voice)
+            return await _generate_grok(api_key, voice) if model == GROK_MODEL else await _generate(api_key, voice, model)
     finally:
         _active_previews -= 1
 
 
-async def _generate(api_key: str, voice: str) -> bytes:
+async def _generate(api_key: str, voice: str, model: str = LIVE_MODEL) -> bytes:
     async with connect(
         "wss://api.openai.com/v1/live/sessions",
         additional_headers={"Authorization": f"Bearer {api_key}"},
@@ -41,7 +41,7 @@ async def _generate(api_key: str, voice: str) -> bytes:
             await ws.send(json.dumps(event))
 
         await send({"type": "session.start", "session": {
-            "model": LIVE_MODEL,
+            "model": model if model in LIVE_MODELS else LIVE_MODEL,
             "instructions": "You are demonstrating your voice. Speak only the requested short greeting in English, then stay quiet. Do not delegate or take any actions.",
             "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": voice}},
             "delegation": {"type": "client"}, "input": [],

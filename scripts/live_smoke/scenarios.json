@@ -251,6 +251,14 @@
           "how": "In a throwaway chat without a project, pick Bypass. Ask it to start one read-only Task subagent here, one on the other worker, a two-task Swarm, and a StartSession chat in a registered project. Open each child and read its Tool access. Repeat with the chat in Auto (on a Claude model), then in Ask. In the Bypass chat, also ask a child to generate an image priced above the confirmation threshold, with no remembered choice. Archive the chats afterwards.",
           "pass_when": "Every child shows the chat's mode (Bypass, Auto or Ask), on both workers, and the Bypass children run their tools without approval prompts in the chat. The priced generation is skipped or asks; it never runs unconfirmed. A new private-access request still shows the access card.",
           "past_bug": "#486: a Bypass chat's subagents all started on Ask, so delegating work raised an approval prompt for every Bash, Write, Edit and SendMessage."
+        },
+        {
+          "id": "two-worker-smoke.24",
+          "check": "Voice engine, voice and provider changes reach the next call",
+          "kind": "owner",
+          "how": "In Settings > Voice pick GPT-Live-1.1 · ChatGPT subscription with a connected ChatGPT login, choose a non-default voice (for example Juniper), set opening words and a -55 dBFS microphone gate, then start a call in a throwaway chat and listen. Hang up, switch to GPT Live 1 and confirm the voice becomes Marin; call again. Repeat the switch with Grok Voice and with Grok voice (SuperGrok subscription) when those providers exist. Check whether GPT-Live-1.1 is listed for the OpenAI API key (it stays hidden while OpenAI's models lookup answers 404). Archive the throwaway chats.",
+          "pass_when": "Each call speaks in the voice Settings shows and greets with the saved opening words; GET /voice/sessions/{id}/config reports the chosen engine, voice and provider; GPT-Live-1.1 is listed only when GET https://api.openai.com/v1/models/gpt-live-1.1 succeeds for that key, and no Settings or error text calls subscription voice unofficial or unsupported.",
+          "past_bug": "ChatGPT subscription voice offered only Cove although the subscription has 25 voices; an engine switch could keep the previous engine's provider pin."
         }
       ]
     },

@@ -37,7 +37,7 @@
 
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
-import { usesAudioStream, usesDelegation } from '$lib/constants/voice-engines';
+import { isLiveApiModel, usesAudioStream, usesDelegation } from '$lib/constants/voice-engines';
 import { createVoiceOutput } from './voiceVolume';
 import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
@@ -870,7 +870,7 @@ export async function startCall(
 					// call explicitly (an error or ended message) otherwise.
 					// GPT Live resumes from the saved conversation; PersonaPlex
 					// would start over, so its call ends as before.
-					if (reason === 'connection-dropped' && cred.model === 'gpt-live-1') void restoreStream();
+					if (reason === 'connection-dropped' && isLiveApiModel(cred.model)) void restoreStream();
 					else endStream(message, reason);
 				},
 			}, signal, cred.options?.mic_threshold_db, resume);
@@ -995,8 +995,9 @@ export async function startCallForSession(sessionIdIn: string, options: { attach
 	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
 	try {
 		// Only an explicit call action creates a normal conversation's audio binding.
-		// Historical voice sessions and timed reconnects retain the secret endpoint.
-		cred = options.attach ? await prepareConversationCall(sessionIdIn) : await mintVoiceSecret(sessionIdIn);
+		// Historical voice sessions use the secret endpoint; starting a call there
+		// binds the current voice settings, while timed reconnects keep the call's.
+		cred = options.attach ? await prepareConversationCall(sessionIdIn) : await mintVoiceSecret(sessionIdIn, { newCall: true });
 		if (attempt !== generation) return;
 	} catch (e) {
 		if (attempt !== generation) return;

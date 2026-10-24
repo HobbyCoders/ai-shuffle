@@ -882,18 +882,39 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # The realtime models a voice session may run on. Anything outside this
 # allowlist is rejected on write, so a typo can never reach OpenAI.
 from app.core.voice_models import (
-    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, SUPERGROK_MODEL, voices_for,
+    ENGINE_IDS, ENGINES, FAL_PROVIDER_ID, LIVE_11_MODEL, LIVE_MODEL, LIVE_MODELS,
+    default_voice_for, voices_for,
 )
-DEFAULT_VOICE_MODEL = "gpt-live-1"
+DEFAULT_VOICE_MODEL = LIVE_MODEL
 # New calls may choose only these engines; legacy bindings stay readable.
-VOICE_ENGINES = (DEFAULT_VOICE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
+VOICE_ENGINES = ENGINE_IDS
 
 # Voice names are validated per model by ``voices_for(model)``.
 DEFAULT_VOICE_VOICE = "marin"
 
 
 def _default_voice_for(model: str) -> str:
-    return "cove" if model == CODEX_MODEL else "eve" if model in (GROK_MODEL, SUPERGROK_MODEL) else DEFAULT_VOICE_VOICE
+    return default_voice_for(model)
+
+
+def _options_key(model: str) -> str:
+    # GPT-Live-1.1 shares GPT Live 1's saved prompts and controls, so moving
+    # between them (or falling back) keeps what the owner wrote.
+    return f"voice_options:{LIVE_MODEL if model in LIVE_MODELS else model}"
+
+
+def _live_11_available(pinned_provider_id: Optional[str]) -> bool:
+    from app.core import voice_availability
+    return voice_availability.selected_available(pinned_provider_id)
+
+
+def offered_voice_engines(pinned_provider_id: Optional[str]) -> list[dict]:
+    """Engines Settings offers now; gated ones only once their check passed."""
+    return [
+        {"id": engine["id"], "label": engine["label"], "funding": engine["funding"]}
+        for engine in ENGINES
+        if not engine.get("gated") or (engine["id"] == LIVE_11_MODEL and _live_11_available(pinned_provider_id))
+    ]
 # Total wall-clock budget for one call. OpenAI's own 60-minute session cap is
 # bridged by reconnect; this is the separate "don't leave a call running
 # all week" ceiling.
@@ -921,6 +942,8 @@ class VoiceSettingsResponse(BaseModel):
     voice_app_tools_enabled: bool = True
     model_details: dict = Field(default_factory=dict)
     voice_options: dict = Field(default_factory=dict)
+    # Engines Settings may offer now: ``[{id, label, funding}]``.
+    voice_engines: list[dict] = Field(default_factory=list)
 
 
 class VoiceSettingsUpdateRequest(BaseModel):
@@ -952,11 +975,12 @@ def get_voice_options(model: str) -> dict:
     import json
     from app.core.voice_options import validate_options
     retired = ("delegation_type", "delegation_model", "delegation_effort")
+    from app.core.voice_models import CODEX_MODEL
     try:
-        value = json.loads(database.get_system_setting(f"voice_options:{model}") or "{}")
+        value = json.loads(database.get_system_setting(_options_key(model)) or "{}")
         if not isinstance(value, dict):
             raise ValueError("Voice options must be an object")
-        if model in ("gpt-live-1", CODEX_MODEL):
+        if model in (*LIVE_MODELS, CODEX_MODEL):
             # Retire settings-level overrides without discarding saved prompts.
             for key in retired:
                 value.pop(key, None)
@@ -964,7 +988,7 @@ def get_voice_options(model: str) -> dict:
     except (ValueError, TypeError):
         logger.warning("Invalid saved options for voice model %s; using defaults", model)
         options = validate_options(model, {})
-    if model == "gpt-live-1":
+    if model in LIVE_MODELS:
         for key in retired:
             options.pop(key, None)
     return options
@@ -1001,13 +1025,17 @@ def get_voice_settings() -> dict:
     if model not in VOICE_ENGINES:
         model = DEFAULT_VOICE_MODEL
 
-    voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
-    if voice not in voices_for(model):
-        voice = _default_voice_for(model)
-
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
     if provider_id == FAL_PROVIDER_ID:
         provider_id = None
+    if model == LIVE_11_MODEL and not _live_11_available(provider_id):
+        # Not (or no longer) visible to this key: calls quietly use GPT Live 1,
+        # which has the same voices and shares its saved options.
+        model = LIVE_MODEL
+
+    voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
+    if voice not in voices_for(model):
+        voice = _default_voice_for(model)
 
     return {
         "voice_mode_enabled": _truthy_setting(database.get_system_setting(VOICE_MODE_ENABLED_KEY)),
@@ -1033,14 +1061,22 @@ def _voice_settings_response(value: dict) -> VoiceSettingsResponse:
             for model_id, info in STT_MODELS.items()
         ],
         model_details=model_details(value["voice_model"], value.get("voice_options")),
+        voice_engines=offered_voice_engines(value.get("voice_provider_id")),
     )
+
+
+def _read_voice_settings_response() -> VoiceSettingsResponse:
+    return _voice_settings_response(get_voice_settings())
 
 
 @router.get("/voice", response_model=VoiceSettingsResponse)
 async def get_voice_settings_endpoint(token: str = Depends(require_auth)):
     """Get the current voice-mode settings (defaults applied)."""
+    from app.core import voice_availability
+    # Whether GPT-Live-1.1 is offered depends on the selected OpenAI key (cached).
+    await voice_availability.refresh_from_settings()
     # Keep all synchronous settings reads in one worker hop.
-    return _voice_settings_response(await run_sync(get_voice_settings))
+    return await run_sync(_read_voice_settings_response)
 
 
 @router.put("/voice", response_model=VoiceSettingsResponse)
@@ -1074,12 +1110,19 @@ async def update_voice_settings(
         provider = request.voice_provider_id if "voice_provider_id" in supplied else current["voice_provider_id"]
         provider = (provider or "").strip() or None
         if model not in VOICE_ENGINES:
-            raise HTTPException(400, "Choose GPT Live 1, Grok Voice, Grok voice (SuperGrok subscription), or ChatGPT voice.")
-        if "voice_provider_id" in supplied and provider:
+            raise HTTPException(400, "Choose one of the listed voice engines.")
+        if provider:
             from app.api.voice import _eligible_provider_row, provider_matches_model
             row = _eligible_provider_row(provider)
             if not row or not provider_matches_model(row, model):
-                raise HTTPException(400, "Choose a provider for the selected voice engine; ChatGPT and SuperGrok voice need their connected subscription login.")
+                if "voice_provider_id" in supplied:
+                    raise HTTPException(400, "Choose a provider for the selected voice engine; ChatGPT and SuperGrok voice need their connected subscription login.")
+                # Switching engine leaves the old engine's pin behind; the new
+                # engine picks its own provider rather than keeping a pin no
+                # call on it would use.
+                provider = None
+        if model == LIVE_11_MODEL and "voice_model" in supplied and not _live_11_available(provider):
+            raise HTTPException(400, "GPT-Live-1.1 isn't available for this OpenAI API key yet.")
         voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]
         if voice not in voices_for(model):
             if "voice_voice" in supplied:
@@ -1104,6 +1147,11 @@ async def update_voice_settings(
                 raise HTTPException(400, f"Invalid voice options: {exc}") from exc
 
         if supplied & {"voice_model", "voice_provider_id", "voice_voice"}:
+            stored_model = database.get_system_setting(VOICE_MODEL_KEY)
+            if "voice_model" not in supplied and stored_model == LIVE_11_MODEL and model == LIVE_MODEL:
+                # Keep a GPT-Live-1.1 choice that is only falling back for now;
+                # both engines share voices, so the voice stays valid.
+                model = LIVE_11_MODEL
             database.set_system_setting(VOICE_MODEL_KEY, model)
             database.set_system_setting(VOICE_VOICE_KEY, voice)
             if provider:
@@ -1114,7 +1162,7 @@ async def update_voice_settings(
             import json
             for key in ("delegation_type", "delegation_model", "delegation_effort"):
                 options.pop(key, None)
-            database.set_system_setting(f"voice_options:{model}", json.dumps(options))
+            database.set_system_setting(_options_key(model), json.dumps(options))
         if "voice_max_call_minutes" in supplied:
             database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
         if "voice_mode_enabled" in supplied:
@@ -1122,9 +1170,15 @@ async def update_voice_settings(
         for key in ("voice_input_model", "voice_input_mode", "voice_input_silence_seconds"):
             if key in supplied:
                 database.set_system_setting(key, str(getattr(request, key)))
-        return get_voice_settings()
+        return _voice_settings_response(get_voice_settings())
 
-    return _voice_settings_response(await run_sync(_apply))
+    from app.core import voice_availability
+    # Check GPT-Live-1.1 against the provider this save would leave pinned.
+    if "voice_provider_id" in request.model_fields_set:
+        await voice_availability.refresh((request.voice_provider_id or "").strip() or None)
+    else:
+        await voice_availability.refresh_from_settings()
+    return await run_sync(_apply)
 
 
 # ============================================================================

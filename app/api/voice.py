@@ -4,7 +4,7 @@ Deliberately small surface:
 
 * ``GET  /api/v1/voice/providers`` — which ``model_providers`` rows can fund a
   realtime call. Supported engines require API keys. ChatGPT subscriptions
-  are eligible only for the explicitly selected, unofficial Codex engine;
+  are eligible only for the explicitly selected ChatGPT subscription engine;
   they are never used for API-key engines.
 * ``POST /api/v1/voice/sessions`` — create the session row (a voice
   session is a REAL ``sessions`` row, created eagerly, ``mode='voice'``) and
@@ -46,12 +46,12 @@ from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
-    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, SUPERGROK_MODEL, session_config,
-    transport_for,
+    CODEX_MODEL, FAL_PROVIDER_ID, GROK_MODEL, LIVE_11_MODEL, LIVE_MODEL, LIVE_MODELS, PERSONAPLEX_MODEL, SUPERGROK_MODEL,
+    session_config, transport_for,
 )
 
 # Engines that converse on the server audio stream and hand work to the chat.
-_DELEGATING_STREAM_MODELS = (LIVE_MODEL, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
+_DELEGATING_STREAM_MODELS = (*LIVE_MODELS, GROK_MODEL, SUPERGROK_MODEL, CODEX_MODEL)
 SUPERGROK_LOGIN_REQUIRED = (
     "Connect your SuperGrok login in Settings > Providers to use this voice engine. "
     "It does not use an xAI API key."
@@ -268,6 +268,11 @@ class VoiceSecretResponse(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
+class VoiceSecretRequest(BaseModel):
+    # True when the user starts a call; reconnects of a running call omit it.
+    new_call: bool = False
+
+
 class VoiceCallRequest(BaseModel):
     """The ``call_id`` the client got back from OpenAI's WebRTC handshake.
 
@@ -393,7 +398,7 @@ async def preview_voice(
     from app.core.voice_preview import generate_live_preview
 
     voice = (request.voice or "").strip()
-    if request.model not in (LIVE_MODEL, GROK_MODEL) or voice not in voices_for(request.model):
+    if request.model not in (*LIVE_MODELS, GROK_MODEL) or voice not in voices_for(request.model):
         raise HTTPException(400, "Choose a supported voice and engine.")
     voice_settings = await run_sync(get_voice_settings)
     api_user = get_api_user_from_request(http_request)
@@ -401,6 +406,10 @@ async def preview_voice(
         _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"], api_user, request.model
     )
     api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if request.model == LIVE_11_MODEL:
+        from app.core import voice_availability
+        if not await voice_availability.probe(provider_row["id"], api_key):
+            raise HTTPException(400, "GPT-Live-1.1 isn't available for this OpenAI API key yet.")
 
     finished = asyncio.Event()
 
@@ -460,7 +469,7 @@ def _resolve_provider_row(
                 raise HTTPException(400, chatgpt_login_required)
             if model == SUPERGROK_MODEL:
                 raise HTTPException(400, SUPERGROK_LOGIN_REQUIRED)
-            raise HTTPException(400, "Choose an enabled API-key provider for this voice engine. Subscription voice access is not verified; an API key is required.")
+            raise HTTPException(400, "Choose an enabled API-key provider for this voice engine.")
         return row
 
     pinned = (settings_provider_id or "").strip()
@@ -481,7 +490,7 @@ def _resolve_provider_row(
             status_code=400,
             detail=(
                 f"No {'xAI' if model == GROK_MODEL else 'OpenAI'} provider with a stored API key is configured. "
-                "Add one in Settings > Providers. Subscription voice access is not verified; an API key is required."
+                "Add one in Settings > Providers."
             ),
         )
     eligible.sort(key=lambda p: (p["name"].casefold(), p["id"]))
@@ -698,7 +707,10 @@ async def _provider_api_key(
 async def _require_voice_enabled() -> Dict[str, Any]:
     """The voice settings, or a 403 when the mode is switched off."""
     from app.api.settings import get_voice_settings
+    from app.core import voice_availability
 
+    # A saved GPT-Live-1.1 choice needs its (cached) access check first.
+    await voice_availability.refresh_from_settings(only_if_stored=True)
     voice_settings = await run_sync(get_voice_settings)
     if not voice_settings["voice_mode_enabled"]:
         raise HTTPException(
@@ -859,12 +871,7 @@ async def create_voice_session(
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
 
-    voice_settings = await run_sync(get_voice_settings)
-    if not voice_settings["voice_mode_enabled"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Voice mode is disabled. Enable it in Settings > Voice.",
-        )
+    voice_settings = await _require_voice_enabled()
 
     provider_row = await run_sync(
         _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"],
@@ -1056,6 +1063,65 @@ def _check_attachable_conversation(row):
         raise HTTPException(403, "Background observation cannot acquire a voice surface.")
 
 
+def _call_in_progress(session_id: str) -> bool:
+    """Whether this session has a call running now (stream or WebRTC sideband).
+
+    Its reconnects (the secret refresh near the 60-minute wall, audio socket
+    restores) keep the binding the call started with.
+    """
+    from app.core import voice_bridge, voice_stream
+    stream = voice_stream.calls.get(session_id)
+    if stream is not None and not stream.closed:
+        return True
+    bridge = voice_bridge.registry.get(session_id)
+    return bool(bridge is not None and bridge.active)
+
+
+def _stored_binding(row: Dict[str, Any]) -> Dict[str, Any]:
+    config = row.get("voice_config") or {}
+    return json.loads(config) if isinstance(config, str) else dict(config)
+
+
+async def _bind_new_call(
+    row: Dict[str, Any], voice_settings: Dict[str, Any],
+    api_user: Optional[Dict[str, Any]], requested_provider_id: Optional[str] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Bind a call that is starting now to the current Settings → Voice choices.
+
+    ``voice_settings`` already carries the validated engine, the engine's
+    default voice when the saved one does not fit, and the GPT-Live-1.1
+    fallback. Returns ``(binding, provider_row, api_key)``; the caller stores
+    the binding so the rest of this call (reconnects included) reads it.
+    """
+    previous = _stored_binding(row)
+    model = voice_settings["voice_model"]
+    provider_row = await run_sync(
+        _resolve_provider_row, requested_provider_id, voice_settings.get("voice_provider_id"), api_user, model,
+    )
+    if model == CODEX_MODEL:
+        from app.core.voice_dependencies import ensure_available
+        available, reason = await ensure_available()
+        if not available:
+            raise HTTPException(400, reason)
+    api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
+        raise HTTPException(400, "The voice model does not belong to the selected provider.")
+    if model == LIVE_11_MODEL:
+        from app.core import voice_availability
+        if not await voice_availability.probe(provider_row["id"], api_key):
+            model = LIVE_MODEL  # Same voices and shared options.
+    binding = {
+        **previous,
+        "model": model,
+        "voice": voice_settings["voice_voice"],
+        "provider_id": provider_row["id"],
+        "options": voice_settings.get("voice_options", {}),
+        "greet": bool(previous.get("greet", False)),
+        "conversation_surface": row.get("mode") != "voice",
+    }
+    return binding, provider_row, api_key
+
+
 class VoiceAttachRequest(BaseModel):
     # Call funding only; never rebinds the conversation agent/text provider.
     provider_id: Optional[str] = None
@@ -1068,35 +1134,29 @@ async def prepare_voice_attachment(
 ):
     """Attach audio to an existing conversation without creating another history.
 
-    Same response/handshake as POST /sessions. Saved voice bindings are reused;
-    first attachment pins current voice settings independently of text bindings.
+    Same response/handshake as POST /sessions. Each new call binds the current
+    Settings → Voice engine, voice, provider and options (independently of the
+    chat's text bindings); a call already running keeps the binding it has.
     """
     voice_settings = await _require_voice_enabled()
     row = await run_sync(database.get_session, session_id)
     if not row:
         raise HTTPException(404, "Session not found.")
-    _check_voice_session_access(get_api_user_from_request(http_request), row)
+    api_user = get_api_user_from_request(http_request)
+    _check_voice_session_access(api_user, row)
     if row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
     _reject_when_capped(session_id)
-    config = row.get("voice_config")
-    if isinstance(config, str):
-        config = json.loads(config)
-    if not config:
-        config = {
-            "model": voice_settings["voice_model"], "voice": voice_settings["voice_voice"],
-            "provider_id": request.provider_id or voice_settings.get("voice_provider_id"),
-            "options": voice_settings.get("voice_options", {}), "greet": False,
-        }
-    elif request.provider_id and request.provider_id != config.get("provider_id"):
-        raise HTTPException(400, "This conversation already has a saved voice provider binding.")
-    api_user = get_api_user_from_request(http_request)
-    provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user, config["model"])
-    api_key = await _provider_api_key(provider_row, api_user=api_user)
-    if (config["model"] == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
-        raise HTTPException(400, "The voice model does not belong to the selected provider.")
-    config = {**config, "provider_id": provider_row["id"],
-              "conversation_surface": row.get("mode") != "voice"}
+    if _call_in_progress(session_id) and _stored_binding(row):
+        config = _stored_binding(row)
+        if request.provider_id and request.provider_id != config.get("provider_id"):
+            raise HTTPException(409, "A call is already running in this conversation. Hang up to change its provider.")
+        provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user, config["model"])
+        api_key = await _provider_api_key(provider_row, api_user=api_user)
+        config = {**config, "provider_id": provider_row["id"],
+                  "conversation_surface": row.get("mode") != "voice"}
+    else:
+        config, provider_row, api_key = await _bind_new_call(row, voice_settings, api_user, request.provider_id)
     secret, expires_at = "", None
     if transport_for(config["model"]) == "webrtc":
         body = await _mint_client_secret(api_key, config["model"], config["voice"], config.get("options"))
@@ -1113,6 +1173,7 @@ async def prepare_voice_attachment(
 async def mint_voice_session_secret(
     http_request: Request,
     session_id: str,
+    request: Optional[VoiceSecretRequest] = None,
     token: str = Depends(require_auth),
 ):
     """Re-mint the browser's realtime credential for an EXISTING voice session.
@@ -1122,17 +1183,23 @@ async def mint_voice_session_secret(
     a fresh secret, gets a new ``call_id``, and posts it to ``/call``, which
     replaces the sideband and reseeds context.
 
-    The session's own ``provider_id`` (stamped at creation) leads the provider
-    resolution, so a call keeps being funded by the row it started on.
+    Reconnects keep the stored binding, so a running call keeps its engine,
+    voice and funding row. ``new_call`` (the Start call button) with no call
+    running binds the current Settings → Voice choices, like POST /attach.
     """
     voice_settings = await _require_voice_enabled()
     api_user = get_api_user_from_request(http_request)
     session_row = await _require_voice_session(http_request, session_id)
     _reject_when_capped(session_id)
 
-    config = session_config(session_row, voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
-    api_key = await _provider_api_key(provider_row, api_user=api_user)
+    if not (request and request.new_call) or _call_in_progress(session_id):
+        config = session_config(session_row, voice_settings)
+        provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
+        api_key = await _provider_api_key(provider_row, api_user=api_user)
+    else:
+        config, provider_row, api_key = await _bind_new_call(session_row, voice_settings, api_user)
+        from app.db.sessions import set_session_voice_binding
+        await run_sync(set_session_voice_binding, session_id, config)
 
     model = config["model"]
     client_secret, expires_at = "", None

@@ -1,4 +1,4 @@
-"""Unofficial Codex WebRTC transport; subscription credentials stay server-side.
+"""Codex WebRTC transport for ChatGPT voice; subscription credentials stay server-side.
 
 Wire contract: openai/codex 430a16799d90e296fb27b1e94f206023902b7e56,
 realtime_call.rs and methods_frameless_bidi.rs. Never log upstream bodies,

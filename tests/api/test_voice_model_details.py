@@ -38,6 +38,6 @@ class TestVoiceModelDetails:
         assert saved["model_details"]["transport"] == "stream"
         assert "ChatGPT subscription login" in saved["model_details"]["preview_note"]
         assert "nofficial" not in saved["model_details"]["preview_note"]
-        assert saved["model_details"]["label"] == "ChatGPT voice (ChatGPT subscription)"
+        assert saved["model_details"]["label"] == "GPT-Live-1.1 · ChatGPT subscription"
         assert saved["voice_mode_enabled"] is False
         assert c.put(VOICE_SETTINGS, json={"voice_model":"gpt-live-1", "voice_provider_id":None}).status_code == 200
