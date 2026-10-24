@@ -44,6 +44,16 @@ def test_upgrade_confines_only_ordinary_projectless_rows(mock_db: Any, mode: str
         assert row["mode"] == ("chat" if sid == "owner" else mode)
         assert database.get_session_messages(sid)[0]["content"] == "preserved history"
 
+    # The same scope must hold for a subsequent upsert from an older peer.
+    from app.network import engine, policy
+
+    with get_db() as conn:
+        for sid in rows:
+            result = engine.materialize(
+                conn.cursor(), policy.collection("sessions"), sid, {"mode": mode},
+            )
+            assert result["mode"] == ("chat" if sid == "owner" else mode)
+
 
 @pytest.mark.parametrize("mode", [None, "code"])
 def test_runtime_fences_old_peer_before_next_upgrade(mock_db: Any, mode: str | None) -> None:
@@ -76,6 +86,15 @@ def test_migration_keeps_foreign_principals_unchanged(
     assert owner["mode"] == "chat"
     assert foreign["mode"] is None
     assert runtime_session_mode(foreign) == "code"
+
+    from app.network import engine, policy
+
+    with get_db() as conn:
+        for sid, expected in (("owner-phone", "chat"), ("foreign-phone", None)):
+            result = engine.materialize(
+                conn.cursor(), policy.collection("sessions"), sid, {"mode": None},
+            )
+            assert result["mode"] == expected
 
 
 def test_upgraded_owner_can_attach_without_losing_history(mock_db: Any) -> None:
