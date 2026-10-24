@@ -176,7 +176,9 @@ async def create_from_conversation(session_id: str, data: dict[str, Any]) -> dic
         _, cursor = await sources.poll(dict(row, cursor={}))
     wid = await run_sync(
         store.create, **row, cursor=cursor,
-        creating_device_id=await run_sync(watch_placement.canonical, watch_placement.assistant_id()),
+        creating_device_id=await run_sync(
+            watch_placement.canonical, watch_placement.assistant_id()
+        ),
     )
     return dict(
         watch=await run_sync(store.get, wid), confirmation="Watching " + row["description"] + "."

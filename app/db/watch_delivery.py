@@ -99,6 +99,27 @@ def pending() -> list[dict[str, Any]]:
         ]
 
 
+def batch(limit: int, excluded: list[str]) -> list[dict[str, Any]]:
+    """One oldest pending report per eligible peer, with a bounded result set."""
+    with get_db() as conn:
+        c = conn.cursor()
+        exclusion = ""
+        if excluded:
+            exclusion = " AND target NOT IN (" + ",".join(["%s"] * len(excluded)) + ")"
+        c.execute(
+            "SELECT event_id,target,body FROM (SELECT event_id,target,body,"
+            " ROW_NUMBER() OVER (PARTITION BY target ORDER BY event_id) AS ordinal"
+            " FROM watch_notification_outbox WHERE acknowledged=FALSE"
+            + exclusion
+            + ") pending WHERE ordinal=1 ORDER BY target LIMIT %s",
+            (*excluded, limit),
+        )
+        return [
+            dict(row, body=json.loads(row["body"]) if isinstance(row["body"], str) else row["body"])
+            for row in c.fetchall()
+        ]
+
+
 def acknowledge(event_id: str, target: str) -> None:
     with get_db() as conn:
         conn.cursor().execute(

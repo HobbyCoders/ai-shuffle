@@ -114,6 +114,7 @@ def peers(
 
     monkeypatch.setattr(runners, "directory", directory)
     monkeypatch.setattr(control, "call", rpc)
+    monkeypatch.setattr(watch_delivery, "_retry_after", {})
     monkeypatch.setattr(watch_manager, "summarize", AsyncMock(return_value=("A reminder.", 0.002)))
     from app.services import push_notification
 
@@ -224,6 +225,7 @@ async def test_offline_settled_creator_and_notification_ack_loss(peers: dict[str
         assert renewed["id"] == event["id"]
     database.set_session_active(peers["session"]["id"], False)
     peers["faults"]["offline"] = False
+    watch_delivery._retry_after.clear()  # A restart discards in-memory backoff.
     peers["faults"]["lose_report"] = True
     with peers["on"]("dev_server"):
         await watch_manager.WatchManager().run_once()
@@ -235,6 +237,7 @@ async def test_offline_settled_creator_and_notification_ack_loss(peers: dict[str
     await watch_manager.WatchManager().run_once()
     assert not delivery.pending()
     with peers["on"]("dev_server"):
+        watch_delivery._retry_after.clear()
         await watch_manager.WatchManager().run_once()
         assert not delivery.pending()
     assert not database.get_session(peers["session"]["id"])["is_active"]
@@ -298,3 +301,177 @@ async def test_revoked_expired_ack_loss_cannot_pin_transfer(peers: dict[str, Any
         await asyncio.to_thread(
             watches.assert_allowed, turn["payload"]["_assistant_proactive"], peers["session"]["id"]
         )
+
+
+@pytest.mark.asyncio
+async def test_remote_watch_booked_usage_counts_on_both_workers(
+    peers: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    from app.core import assistant_limits
+    from app.core.query_persistence import usage_settlement_key
+    from app.db import analytics
+    from app.db import assistant_limits as limits_db
+
+    sid = peers["session"]["id"]
+    project = database.create_project(uuid4().hex, "Ordinary project", None, str(tmp_path))
+    database.set_session_project(sid, project["id"])
+    limits_db.update("DesktopWorker", {"daily_spend_limit_usd": 2})
+    wid = await create_watch(peers)
+    with peers["on"]("dev_server"):
+        limits_db.update("ServerWorker", {"daily_spend_limit_usd": 2})
+        await watch_manager.WatchManager().run_once()
+        event = store.events(wid)[0]
+    turn = turns.get_turn_by_command(sid, event["id"])
+    turns.start_turn(turn["id"])
+    turns.settle_turn(turn["id"], "completed")
+    ordinary = turns.enqueue_turn(sid, "user", prompt="Owner coding", profile_id="watch-agent")
+    turns.start_turn(ordinary["id"])
+    turns.settle_turn(ordinary["id"], "completed")
+    for booked, cost in ((turn, 2.25), (ordinary, 9.0)):
+        key = usage_settlement_key(sid, booked)
+        assert analytics.settle_turn_usage(sid, key, model="test", cost_usd=cost)
+        assert not analytics.settle_turn_usage(sid, key, model="test", cost_usd=cost)
+    state = assistant_limits.status()
+    assert state["spent_today_usd"] == 2.25  # Never the owner's unrelated $9 turn.
+    assert state["limit_reached"]
+    with pytest.raises(ValueError, match="budget"):
+        await asyncio.to_thread(
+            watches.assert_allowed, turn["payload"]["_assistant_proactive"], sid
+        )
+    with peers["on"]("dev_server"):
+        await watch_manager.WatchManager().run_once()
+        await watch_manager.WatchManager().run_once()
+        assert store.events(wid, ("delivered",))[0]["cost_usd"] == 2.25
+        assert assistant_limits.status()["spent_today_usd"] == 2.25
+        assert assistant_limits.status()["limit_reached"]
+        snapshot = store.export_watch(wid, "dev_desktop")
+    await placement.call("dev_desktop", "import", snapshot=snapshot, source="dev_server")
+    assert assistant_limits.status()["spent_today_usd"] == 2.25  # No transfer double-booking.
+
+
+@pytest.mark.asyncio
+async def test_outbox_bounds_backlog_and_backs_off_only_failed_target(
+    peers: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    for i in range(40):
+        delivery.enqueue(str(i), ["dev_absent"], {"message": "report", "title": "watch"})
+    for i in range(2):
+        delivery.enqueue(str(i), ["dev_healthy"], {"message": "report", "title": "watch"})
+
+    async def call(worker: str, operation: str, **body: Any) -> dict[str, Any]:
+        calls.append(worker)
+        if worker == "dev_absent":
+            await asyncio.Event().wait()
+        return {"acknowledged": True}
+
+    monkeypatch.setattr(placement, "call", call)
+    monkeypatch.setattr(watch_delivery, "REPORT_TIMEOUT_SECONDS", 0.02)
+    await asyncio.wait_for(watch_delivery.flush(), 1)
+    assert calls == ["dev_absent", "dev_healthy"]
+    await asyncio.wait_for(watch_delivery.flush(), 1)
+    assert calls == ["dev_absent", "dev_healthy", "dev_healthy"]
+    assert len(delivery.pending()) == 40
+    assert not delivery.batch(16, ["dev_absent"])
+
+
+@pytest.mark.asyncio
+async def test_outbox_peer_io_does_not_hold_reconciliation_lock(
+    peers: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def flush() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+
+    monkeypatch.setattr(watch_delivery, "flush", flush)
+    manager = watch_manager.WatchManager()
+    first = asyncio.create_task(manager.run_once())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert not manager._lock.locked()
+        await asyncio.wait_for(manager.run_once(), 1)
+        assert calls == 2
+    finally:
+        release.set()
+        await first
+
+
+@pytest.mark.asyncio
+async def test_overlapping_delivery_waits_for_original_admission_commit(
+    peers: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import queue
+    import threading
+    import time
+
+    from app.core import watch_sources
+
+    wid = await create_watch(peers)
+    with peers["on"]("dev_server"):
+        watch = store.get(wid)
+        observed, cursor = await watch_sources.poll(watch)
+        assert store.checkpoint(watch, observed, cursor)
+        event = store.events(wid)[0]
+        assert store.reserve(wid, event["id"], 1)
+    original = turns.enqueue_turn
+    inserted, release = threading.Event(), threading.Event()
+    second_pid: queue.Queue[int] = queue.Queue()
+    lock = threading.Lock()
+    calls = 0
+
+    def enqueue(session_id: str, source: str, **kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        with lock:
+            calls += 1
+            number = calls
+        with base.get_db() as conn:
+            if number == 2:
+                second_pid.put(conn.get_backend_pid())
+            result = original(session_id, source, _conn=conn, **kwargs)
+            if number == 1:
+                inserted.set()  # Row exists, but its admission transaction is still uncommitted.
+                assert release.wait(5), "test did not release the first admission"
+            return result
+
+    def wait_for_lock(pid: int) -> None:
+        deadline = time.monotonic() + 5
+        with base.get_db() as conn:
+            while time.monotonic() < deadline:
+                c = conn.cursor()
+                c.execute("SELECT 1 FROM pg_locks WHERE pid=%s AND NOT granted", (pid,))
+                if c.fetchone():
+                    return
+                time.sleep(0.01)
+        raise AssertionError("retry did not wait for the original admission transaction")
+
+    monkeypatch.setattr(turns, "enqueue_turn", enqueue)
+    body = {"operation": "deliver", "watch_id": wid, "event_id": event["id"]}
+    first = asyncio.create_task(watch_delivery.handle(body, "dev_server"))
+    second = None
+    try:
+        assert await asyncio.to_thread(inserted.wait, 5)
+        assert delivery.receipt(event["id"]) is not None
+        assert turns.get_turn_by_command(peers["session"]["id"], event["id"]) is None
+        second = asyncio.create_task(watch_delivery.handle(body, "dev_server"))
+        pid = await asyncio.to_thread(second_pid.get, True, 5)
+        await asyncio.to_thread(wait_for_lock, pid)
+        assert not second.done()
+    finally:
+        release.set()
+        answers = await asyncio.gather(first, *([second] if second is not None else []))
+    assert len(answers) == 2
+    assert answers[0]["turn_id"] == answers[1]["turn_id"]
+    with base.get_db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT count(*) AS n FROM turns WHERE command_id=%s", (event["id"],))
+        assert c.fetchone()["n"] == 1

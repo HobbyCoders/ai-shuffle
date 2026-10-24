@@ -221,10 +221,12 @@ class WatchManager:
                     if current["status"] == "paused":
                         await self._status_notice(current)
 
-            from app.core.watch_delivery import flush
-
-            await flush()
             await run_sync(publish)
+        # Peer I/O must not hold up another reconciliation pass's polling or
+        # delivery admission. The dispatcher also bounds each pass and peer.
+        from app.core.watch_delivery import flush
+
+        await flush()
 
     async def _status_notice(self, watch: dict[str, Any]) -> None:
         await run_sync(

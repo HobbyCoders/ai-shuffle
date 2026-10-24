@@ -7,6 +7,7 @@ that executor at every harness authorization seam, and never run a mirrored watc
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from app.core import assistant_service, watch_values, watches
@@ -16,6 +17,12 @@ from app.db import watch_delivery as delivery
 from app.db import watches as store
 from app.db.async_database import run_sync
 from app.network import control, runners
+
+REPORTS_PER_PASS = 16
+REPORT_TIMEOUT_SECONDS = 3.0
+FLUSH_TIMEOUT_SECONDS = 5.0
+RETRY_SECONDS = 30.0
+_retry_after: dict[tuple[str, str], float] = {}
 
 
 def remote_metadata(sender: str, watch: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
@@ -271,12 +278,31 @@ def save_report(event_id: str, report: dict[str, Any]) -> None:
 
 
 async def flush() -> None:
-    for row in await run_sync(delivery.pending):
-        try:
-            if placement.local(row["target"]):
-                await run_sync(save_report, row["event_id"], row["body"])
-            else:
-                await placement.call(row["target"], "report", event_id=row["event_id"])
-            await run_sync(delivery.acknowledge, row["event_id"], row["target"])
-        except (control.RunnerUnreachable, control.ControlRefused):
-            continue
+    """Bound work and retry an unavailable target once, not once per report."""
+    worker = assistant_service.assistant_id()
+    stamp = time.monotonic()
+    excluded = [
+        target
+        for (runner, target), until in _retry_after.items()
+        if runner == worker and until > stamp
+    ]
+    rows = await run_sync(delivery.batch, REPORTS_PER_PASS, excluded)
+    try:
+        async with asyncio.timeout(FLUSH_TIMEOUT_SECONDS):
+            for row in rows:
+                key = (worker, row["target"])
+                # Also fences overlapping flushes; cancellation/uncertain replies
+                # leave the outbox unacknowledged and the target backed off.
+                _retry_after[key] = time.monotonic() + RETRY_SECONDS
+                try:
+                    async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
+                        if placement.local(row["target"]):
+                            await run_sync(save_report, row["event_id"], row["body"])
+                        else:
+                            await placement.call(row["target"], "report", event_id=row["event_id"])
+                        await run_sync(delivery.acknowledge, row["event_id"], row["target"])
+                    _retry_after.pop(key, None)
+                except (TimeoutError, control.RunnerUnreachable, control.ControlRefused):
+                    continue
+    except TimeoutError:
+        return

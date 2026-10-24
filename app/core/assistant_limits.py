@@ -206,8 +206,19 @@ def _watch_turns(cursor: Any) -> dict[str, set[str]]:
         "WHERE w.worker_id=%s AND e.route='live' AND e.session_id IS NOT NULL",
         (assistant_id(),),
     )
+    rows = list(cursor.fetchall())
+    # Remote executors never replicate executable watch rows. Their receiver
+    # receipts identify only the host-admitted watch commands, not owner turns
+    # elsewhere in the same (possibly project-bound) creating chat.
+    cursor.execute(
+        "SELECT t.session_id,t.id AS turn_id FROM watch_receipts r "
+        "JOIN turns t ON t.command_id=r.event_id AND t.source='watch' "
+        "JOIN sessions s ON s.id=t.session_id WHERE s.instance_id=%s",
+        (assistant_id(),),
+    )
+    rows.extend(cursor.fetchall())
     tracked: dict[str, set[str]] = {}
-    for row in cursor.fetchall():
+    for row in rows:
         if row["turn_id"]:
             tracked.setdefault(row["session_id"], set()).add(row["turn_id"])
     return tracked
@@ -299,7 +310,9 @@ def _remote_booked(cursor, start):
     return sum(max(0.0, float(row["cost_usd"] or 0)) for row in cursor.fetchall())
 
 
-def _measure(now: datetime | None = None, limits: dict[str, Any] | None = None) -> dict:
+def _measure(
+    now: datetime | None = None, limits: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Spend today plus what enforcement needs, from one connection.
 
     Coordination chats and their jobs only matter to a limit that is on, so
@@ -334,8 +347,10 @@ def _measure(now: datetime | None = None, limits: dict[str, Any] | None = None) 
         spent += _remote_booked(cursor, start)
         cursor.execute(
             "SELECT e.cost_usd,e.reserved_usd,e.status FROM watch_events e JOIN watches w ON"
-            " w.id=e.watch_id WHERE w.worker_id=%s AND e.route='alert' AND"
-            " COALESCE(e.admitted_at,e.created_at)>=%s",
+            " w.id=e.watch_id WHERE w.worker_id=%s AND e.route IN ('alert','remote') AND"
+            " COALESCE(e.admitted_at,e.created_at)>=%s AND (e.route='alert' OR NOT EXISTS ("
+            " SELECT 1 FROM watch_receipts r JOIN turns t ON t.command_id=r.event_id "
+            " AND t.source='watch' WHERE r.event_id=e.id))",
             (assistant_id(), start),
         )
         spent += sum(
