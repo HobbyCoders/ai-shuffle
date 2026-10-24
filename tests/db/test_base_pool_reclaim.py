@@ -45,7 +45,9 @@ async def test_turn_writes_outlast_ordinary_pool_deadline(
     pool._reserved = 2
     monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
     monkeypatch.setattr(base, "_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.05)
-    monkeypatch.setattr(base, "_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS", 2.0)
+    # Room for all 45 queued writes to drain on a loaded worker; the native
+    # cases alone take up to ~2 s on Windows under -n 2.
+    monkeypatch.setattr(base, "_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS", 10.0)
 
     def commit(self: _PhysicalConn) -> None:
         pass
@@ -234,6 +236,11 @@ async def test_event_backpressure_keeps_pool_capacity_free(
     try:
         assert await asyncio.to_thread(saturated.wait, 2)
         assert len(pool._used) == 4
+        # time.monotonic() moves in 15.6 ms steps on Windows: read the ages
+        # only once it has moved past the step the four writes started in.
+        saturated_at = time.monotonic()
+        while time.monotonic() <= saturated_at:
+            await asyncio.sleep(0.001)
         pressure = base.event_pressure_stats()
         assert pressure["active"] == 4
         assert pressure["oldest_write_seconds"] > 0

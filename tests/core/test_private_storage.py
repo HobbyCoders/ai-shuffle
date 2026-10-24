@@ -1,9 +1,9 @@
 """Only disposable generated keys are used; never inspect an install's secrets."""
 import errno
-import json
 import stat
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,38 +13,90 @@ from app.core import credential_keys, managed_credentials, preview_access, priva
 from app.network import identity
 
 
+def _current_user_sid() -> str:
+    system_root = os.environ.get("SYSTEMROOT") or r"C:\Windows"
+    whoami = os.path.join(system_root, "System32", "whoami.exe")
+    result = subprocess.run([whoami, "/user", "/fo", "csv", "/nh"], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, check=True, timeout=30)
+    return result.stdout.strip().rsplit(",", 1)[-1].strip('"')
+
+
+def _windows_dacl_sddl(path: Path) -> str:
+    """The DACL of ``path`` as SDDL, read straight from Win32 (metadata only).
+
+    Not PowerShell's Get-Acl: starting PowerShell on a loaded hosted runner
+    has taken over 90 seconds.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
+                                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi.GetFileSecurityW.restype = wintypes.BOOL
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.c_void_p]
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    dacl = 0x4  # DACL_SECURITY_INFORMATION
+    size = wintypes.DWORD()
+    advapi.GetFileSecurityW(str(path), dacl, None, 0, ctypes.byref(size))
+    assert size.value, ctypes.WinError(ctypes.get_last_error())
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not advapi.GetFileSecurityW(str(path), dacl, descriptor, size, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    text = wintypes.LPWSTR()
+    if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, dacl, ctypes.byref(text), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return text.value
+    finally:
+        kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+
+
+def _full_sid(trustee: str) -> str:
+    """An SDDL trustee in S-1-... form. SDDL writes well-known accounts as
+    aliases: a hosted runner's built-in Administrator is "LA"."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    advapi.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    sid, text = ctypes.c_void_p(), wintypes.LPWSTR()
+    if not advapi.ConvertStringSidToSidW(trustee, ctypes.byref(sid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        kernel.LocalFree(sid)
+
+
 def assert_private(path, *, directory=False):
     if os.name != "nt":
         assert path.stat().st_mode & 0o777 == (0o700 if directory else 0o600)
         return
-    # Query ACL metadata, not file bytes. Pass paths as data, never script text.
-    script = (
-        '$ErrorActionPreference = "Stop"; '
-        '$acl = Get-Acl -LiteralPath $env:SHUFFLE_TEST_PATH; '
-        '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; '
-        '$rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])); '
-        '@{protected=$acl.AreAccessRulesProtected; count=$rules.Count; '
-        'onlyUser=(@($rules | Where-Object {$_.IdentityReference.Value -ne $sid}).Count -eq 0); '
-        'fullControl=(@($rules | Where-Object {$_.FileSystemRights -ne "FullControl"}).Count -eq 0); '
-        'inherited=(@($rules | Where-Object {$_.IsInherited}).Count -gt 0)} | ConvertTo-Json -Compress'
-    )
-    env = {k: v for k, v in os.environ.items()
-           if k.upper() in {"SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP"}}
-    env["SHUFFLE_TEST_PATH"] = str(path)
-    # Only the built-in modules: with no module cache in this bare
-    # environment, PowerShell otherwise scans every installed module to find
-    # Get-Acl, which takes minutes on a machine with thousands of them.
-    system_root = env.get("SYSTEMROOT") or env.get("SystemRoot") or r"C:\Windows"
-    env["PSModulePath"] = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "Modules")
-    # A closed stdin: Windows PowerShell can wait on an inherited pipe that
-    # never closes (a CI step's stdin) instead of exiting. 90 seconds: its
-    # first start on a fresh machine (a hosted runner) can take over 30.
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                            check=True, timeout=90)
-    assert json.loads(result.stdout) == {
-        "protected": True, "count": 1, "onlyUser": True, "fullControl": True, "inherited": False,
-    }
+    # Protected ("P": nothing inherited), and exactly one allow ACE granting
+    # this user full access (FA), inheritable by a directory's children only.
+    inheritance = "OICI" if directory else ""
+    sddl = _windows_dacl_sddl(path)
+    prefix = f"D:P(A;{inheritance};FA;;;"
+    assert sddl.startswith(prefix) and sddl.endswith(")") and sddl.count("(") == 1, sddl
+    assert _full_sid(sddl[len(prefix):-1]) == _current_user_sid()
 
 
 def test_private_permissions_and_repeated_protection(tmp_path):

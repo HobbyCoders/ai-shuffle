@@ -779,6 +779,18 @@ def test_clean_shutdown_downtime_is_not_a_stall(tmp_path, caplog):
     assert "previous run stopped ticking" not in caplog.text
 
 
+def _pong_on_a_new_tick(wd: LoopStallWatchdog) -> None:
+    """Pong once the wall clock has moved past the tick last written.
+
+    The writer skips a tick it already persisted. time.time() advances in
+    15.6 ms steps on Windows, so a pong right after a write can record that
+    same tick and the next write would not be attempted at all.
+    """
+    while time.time() <= wd._heartbeat_written_tick:
+        time.sleep(0.001)
+    wd._pong()
+
+
 def test_heartbeat_rate_limit_and_atomic_failure(tmp_path, monkeypatch):
     from app.core import loop_watchdog
 
@@ -790,7 +802,7 @@ def test_heartbeat_rate_limit_and_atomic_failure(tmp_path, monkeypatch):
         wd._write_heartbeat(0)
         path = tmp_path / "loop-heartbeat.json"
         initial = path.read_bytes()
-        wd._pong()
+        _pong_on_a_new_tick(wd)
         wd._write_heartbeat(1)
         assert path.read_bytes() == initial
 
@@ -817,7 +829,7 @@ def test_heartbeat_failure_uses_no_wakeup_and_logs_on_normal_ping(tmp_path, monk
         wd._boot_heartbeat()
         wd._pong()
         wd._write_heartbeat(0)
-        wd._pong()
+        _pong_on_a_new_tick(wd)
         wakeup = Mock(wraps=loop.call_soon_threadsafe)
         monkeypatch.setattr(loop, "call_soon_threadsafe", wakeup)
 

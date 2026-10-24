@@ -1,5 +1,7 @@
 """Supersession is retained evidence, not deletion or last-write-wins."""
 import json
+from pathlib import Path
+
 import pytest
 from fluid.codemode.skills import SkillStore
 from fluid.codemode.facts import global_id
@@ -92,6 +94,20 @@ def test_replication_keeps_link_archive_and_conflict_across_stale_replay(tmp_pat
     b._facts.merge(a._facts.export())
     assert "unresolved conflict" not in b.render_memory_section("project:fixture")
     assert next(e for e in a.memories() if e.id == old.id).text == OLD
+
+
+def test_replacement_saved_in_the_same_clock_step_still_supersedes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows' time.time() moves in ~16 ms steps: two saves can read one instant.
+    from types import SimpleNamespace
+    from fluid.codemode import facts
+    monkeypatch.setattr(facts, "time", SimpleNamespace(time=lambda: 1_800_000_000.0))
+    store = SkillStore(tmp_path)
+    old, new = pair(store)
+    old_now = next(e for e in store.memories() if e.id == old.id)
+    assert old_now.superseded_by == global_id(vars(new))
+    assert OLD not in store.render_memory_section("project:fixture")
 
 
 def test_owner_can_correct_predecessor_and_invalid_links_are_rejected(tmp_path):

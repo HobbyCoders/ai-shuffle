@@ -11,6 +11,7 @@ from dataclasses import fields
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -659,7 +660,8 @@ class FactStore:
             clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
             if len(clock) > 64:
                 raise ValueError("Memory has too many concurrent writers; no correction was saved")
-            entry.update(clock=clock, alternatives=[], text=text, updated_at=now, revision=entry["revision"] + 1,
+            entry.update(clock=clock, alternatives=[], text=text,
+                         updated_at=self._write_time(doc, now), revision=entry["revision"] + 1,
                          scope=scope or entry.get("scope", "global"),
                          provenance=provenance or entry.get("provenance", "session"),
                          protected=protected, conflicted=False, key=key or entry.get("key"),
@@ -723,6 +725,18 @@ class FactStore:
         from fluid.codemode.skills import MemoryEntry
         allowed = {f.name for f in fields(MemoryEntry)}
         return MemoryEntry(**{k: v for k, v in entry.items() if k in allowed})
+
+    @staticmethod
+    def _write_time(doc: dict, now: float) -> float:
+        """``now``, or the next instant after the newest write this store holds.
+
+        Supersession treats only a strictly later fact as a replacement. The
+        Windows clock moves in ~16 ms steps, so two saves in one step would
+        tie and the newer one would never replace the older.
+        """
+        newest = max((float(e.get("updated_at") or 0) for e in doc["entries"] + doc["archived"]),
+                     default=0.0)
+        return now if now > newest else math.nextafter(newest, math.inf)
 
     @staticmethod
     def _bump_metadata(doc, entry):

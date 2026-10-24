@@ -836,6 +836,14 @@
           "past_bug": "#553: deferred mode migration left legacy projectless owners on the code surface."
         },
         {
+          "id": "harness-basics.memory-same-tick-correction",
+          "check": "A memory correction saved right after the original replaces it, on Windows and Linux workers",
+          "kind": "owner",
+          "how": "On a disposable Windows worker and a disposable Linux worker, ask an agent to remember a fact, then immediately correct it in the same turn; open a fresh chat and ask for the fact, and check Recall and the memory list.",
+          "pass_when": "Only the corrected value is current in the fresh chat, Recall and the memory list; the original shows as superseded, never as a second current fact.",
+          "past_bug": "#381: Windows' 15.6 ms clock gave a same-tick correction the original's timestamp, leaving the old memory visible."
+        },
+        {
           "id": "harness-basics.migration-timeout-budget",
           "check": "Offline database work outlives ordinary SQL deadlines",
           "kind": "owner",

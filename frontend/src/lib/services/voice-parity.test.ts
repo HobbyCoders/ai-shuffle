@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-const source = (path: string) => readFileSync(`src/lib/${path}`, 'utf8');
+// LF either way: a Windows checkout with core.autocrlf has CRLF sources.
+const source = (path: string) =>
+	readFileSync(`src/lib/${path}`, 'utf8').replace(/\r\n/g, '\n');
 
 describe('voice composer parity', () => {
 	it('keeps one composer mounted before and during calls', () => {

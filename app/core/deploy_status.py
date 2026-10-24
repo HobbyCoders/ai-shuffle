@@ -343,7 +343,12 @@ def _source_checkouts(repo: Optional[Path], rows: List[Dict[str, Any]]) -> List[
     seen = set()
     for path in ([repo] if repo else []) + _project_checkouts():
         top = _out(path, "rev-parse", "--show-toplevel", timeout=5)
-        if not top or top in seen:
+        if not top:
+            continue
+        # Git prints forward slashes on Windows; report the native path the
+        # rest of the app (projects, worktrees) uses for the same checkout.
+        top = str(Path(top))
+        if top in seen:
             continue
         seen.add(top)
         if repo is None or Path(top) != repo.resolve():
