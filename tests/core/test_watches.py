@@ -36,6 +36,9 @@ def owner(monkeypatch: MonkeyPatch) -> Iterator[Any]:
         is_active=True,
         target_instance_id=settings.effective_instance_id,
     )
+    # Source/delivery tests explicitly choose their local executor on every OS.
+    # Default-placement behavior has separate two-worker coverage.
+    database.set_system_setting("watch_preferred_worker", settings.effective_instance_id)
     turn_manager.register_kick(None)
     yield session
     turn_manager.register_kick(None)
@@ -565,12 +568,13 @@ async def test_email_page_cursor_and_revocation(owner: dict[str, Any], mail: Any
 
 
 @pytest.mark.parametrize("kind", ["slack", "discord", "telegram"])
-def test_non_emitting_connector_types_are_explicitly_unsupported(
+def test_connector_types_require_explicit_channel(
     owner: dict[str, Any], monkeypatch: MonkeyPatch, kind: str
 ) -> None:
     monkeypatch.setattr(database, "get_connector", lambda _: dict(id="other", type=kind))
-    with pytest.raises(ValueError, match="Unsupported"):
+    with pytest.raises(ValueError, match="channel_id"):
         sources.validate({"kind": "connector", "connector_id": "other"}, {})
+    sources.validate({"kind": "connector", "connector_id": "other", "channel_id": "123"}, {})
 
 
 @pytest.mark.asyncio

@@ -31,8 +31,8 @@ from psycopg2.extras import Json
 
 from app.core import api_user_scope, artifact_access
 from app.db import session_recall
-from app.db.async_database import run_sync
-from app.db.base import get_db
+from app.db.async_database import run_sync, run_event_write
+from app.db.base import get_db, get_turn_db, get_event_db
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
@@ -398,7 +398,7 @@ def _append_node_sync(session_id: str, node: SessionNode, *, measure_bytes: bool
         # the transformed content, rather than persisting stale offsets.
         pinned = _scrub_pg_illegal(scrub_url_credentials(node.message.pinned_text()))
         message = Message.from_dict(message).pin_context(pinned).to_dict()
-    with get_db() as conn:
+    with get_turn_db() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO fluid_session_nodes "
@@ -425,7 +425,7 @@ def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
 
 
 def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> None:
-    with get_db() as conn:
+    with get_turn_db() as conn:
         conn.cursor().execute(
             "UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s",
             (cli_session_id, session_id),
@@ -436,7 +436,7 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
     # One transaction for consecutive reconstructible deltas and their barrier.
     payloads = [(e.seq, _scrub_pg_illegal(scrub_url_credentials(event_to_dict(e))))
                 for e in events]
-    with get_db() as conn:
+    with get_event_db() as conn:
         cur = conn.cursor()
         for seq, payload in payloads:
             cur.execute(
@@ -776,9 +776,11 @@ def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: L
     # (including terms whose index did not select the row). UNION ALL retains
     # duplicate patterns and LIKE wildcards exactly as the old hit sum did.
     # Keep only row keys in the materialized CTE, never transcript bytes.
+    from app.db.history_indexing import search_table
+    search_source = search_table(cur, table)
     key = "node_id" if table == "fluid_session_nodes" else "id"
     matches = " UNION ALL ".join(
-        f"SELECT session_id, {key}, {ts} AS t, 1 AS h FROM {table} "
+        f"SELECT session_id, {key}, {ts} AS t, 1 AS h FROM {search_source} "
         f"WHERE {where} AND {column} ILIKE %s" for _ in patterns
     )
     if len(patterns) > 1:
@@ -846,7 +848,7 @@ _MARKER_TEXT = {
 
 
 def _recall_matches(source: str, where: str, where_params: List[Any],
-                    patterns: List[str]) -> tuple:
+                    patterns: List[str], table: str = "session_recall_text") -> tuple:
     """SQL (and params) for an arm's candidate rows: session_id, row_key, t, h."""
     groups = [[p] for p in patterns]
     if len(patterns) > 1:
@@ -856,7 +858,7 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
     for group in groups:
         cond = " AND ".join(["body LIKE %s"] * len(group))
         arms.append(
-            "(SELECT session_id, row_key, part, ts, body FROM session_recall_text "
+            f"(SELECT session_id, row_key, part, ts, body FROM {table} "
             f"WHERE source = %s AND part >= 0 AND {where} AND {cond} "
             f"ORDER BY ts DESC LIMIT {_SEARCH_TERM_ROWS})"
         )
@@ -866,7 +868,7 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
         "(SELECT o.session_id, o.row_key, o.part, o.ts, x.body FROM ("
         "SELECT * FROM (SELECT session_id, row_key, part, ts, raw, "
         "SUM(chars) OVER (ORDER BY ts DESC, session_id, row_key) - chars AS before "
-        f"FROM session_recall_text WHERE source = %s AND part = {session_recall.PENDING} AND {where}) m "
+        f"FROM {table} WHERE source = %s AND part = {session_recall.PENDING} AND {where}) m "
         f"WHERE before < {_MARKER_CHARS}) o "
         f"CROSS JOIN LATERAL (SELECT {_MARKER_TEXT[source]} AS body) x WHERE {any_term})"
     )
@@ -886,7 +888,9 @@ def _indexed_top_rows(cur, source: str, table: str, key: str, where: str,
                       patterns: List[str], fetch_sessions: int) -> List[Dict[str, Any]]:
     """``_top_rows`` over the projection: same session cap, row cap and
     deterministic tie-breaks, then the JSON of just the capped rows."""
-    matches, params = _recall_matches(source, where, where_params, patterns)
+    from app.db.history_indexing import search_table
+    matches, params = _recall_matches(source, where, where_params, patterns,
+                                     search_table(cur, "session_recall_text"))
     # The row's own key order breaks exact ties, as the legacy query did.
     order_key = "m.row_key::bigint" if key == "id" else "m.row_key"
     join_key = "d.id = r.row_key::bigint" if key == "id" else f"d.{key} = r.row_key"
@@ -929,7 +933,10 @@ def _indexed_event_candidates(conn, cur, me: str, excluded: List[str],
               if r["id"] not in excluded and (allowed is None or r["id"] in allowed)}
     if not owners:
         return [], []
-    matches, params = _recall_matches(session_recall.EVENT, "session_id = ANY(%s)", [sorted(owners)], patterns)
+    from app.db.history_indexing import search_table
+    matches, params = _recall_matches(session_recall.EVENT, "session_id = ANY(%s)",
+                                     [sorted(owners)], patterns,
+                                     search_table(cur, "session_recall_text"))
     cur.execute(
         f"WITH m AS ({matches}) SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
         "GROUP BY session_id ORDER BY best DESC, last DESC, session_id "
@@ -1104,10 +1111,13 @@ def _search_sync(
                 found, events = _indexed_event_candidates(conn, cur, me, excluded, likes, scope)
             else:
                 event_column = "recall_text" if cached else "payload"
+                from app.db.history_indexing import search_table
+                event_source = search_table(cur, "session_events", "e")
                 source = (
                     f"(SELECT e.session_id, e.created_at, e.{event_column}, s.owner_device_id AS owner "
-                    "FROM session_events e JOIN sessions s ON s.id = e.session_id "
-                    f"WHERE {_remote_sql('s.')} AND e.event_type IN ({_in(types)})) ev"
+                    f"FROM {event_source} JOIN sessions s ON s.id = e.session_id "
+                    f"WHERE {_remote_sql('s.')} "
+                    f"AND e.event_type IN ({_in(types)})) ev"
                 )
                 found = _candidate_sessions(
                     cur, source, [me, *types], "recall_text" if cached else "payload::text", "created_at",
@@ -1598,7 +1608,7 @@ class PgFluidStore:
         self._events.pop(session_id, None)
         self._event_floor.pop(session_id, None)
         self._event_bytes.pop(session_id, None)
-        await run_sync(_append_events_sync, session_id, events)
+        await run_event_write(_append_events_sync, session_id, events)
         self._pending_events.pop(session_id, None)
         self._pending_since.pop(session_id, None)
         self._pending_bytes.pop(session_id, None)
