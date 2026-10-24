@@ -273,5 +273,5 @@ HEALTHCHECK --interval=120s --timeout=10s --start-period=40s --retries=3 \
 # container's pids cgroup fills and ALL forks fail (provider/MCP spawns, git worktree,
 # even `docker exec`). Forward only to the lifecycle supervisor: it must stop
 # the app before PostgreSQL so database-dependent app shutdown can finish.
-# Use --stop-timeout 90 (Compose already sets stop_grace_period: 90s).
+# Use --stop-timeout 120 (Compose already sets stop_grace_period: 120s).
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
