@@ -328,7 +328,7 @@ def session_poll(watch: dict[str, Any]) -> tuple[list[tuple[str, dict[str, Any]]
             if source.get("session_id") and sid != source["session_id"]:
                 continue
 
-            def add(identity):
+            def add(identity: str | None) -> None:
                 key = f"{sid}:{identity}:{state}"
                 events[key] = dict(
                     event_type="session_state",

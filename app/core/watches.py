@@ -239,6 +239,7 @@ def panel_rows(owner: str = "admin") -> list[dict[str, Any]]:
 
 def tools(session_id: str) -> list[Any]:
     from app.mcp.inproc import tool
+    from fluid.tools.inproc import InprocTool
 
     def wrap(value: Any) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": store.encode(value)}]}
@@ -288,13 +289,13 @@ def tools(session_id: str) -> list[Any]:
     result = [create, listing]
     for name, status in [("PauseWatch", "paused"), ("StopWatch", "stopped")]:
 
-        def build(name, status):
+        def build(name: str, status: str) -> InprocTool:
             @tool(
                 name,
                 "Pause or permanently stop an owner watch. Use the exact id from ListWatches.",
                 {"watch_id": str},
             )
-            async def change(args):
+            async def change(args: dict[str, Any]) -> dict[str, Any]:
                 await run_sync(owner_session, session_id)
                 return wrap(await run_sync(store.set_status, args["watch_id"], "admin", status))
 
