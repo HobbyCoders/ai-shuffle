@@ -66,6 +66,8 @@ async def _exercise_stall(
     monkeypatch: pytest.MonkeyPatch,
     *,
     dumps: int = 1,
+    checks_after_dump: int = 0,
+    records: list[logging.LogRecord] | None = None,
     gate_boot: bool = False,
 ) -> None:
     """Real boot/pong -> blocked loop -> outstanding ping -> dump -> recovery."""
@@ -76,6 +78,8 @@ async def _exercise_stall(
     blocking = threading.Event()
     ping_sent = threading.Event()
     dumped = threading.Event()
+    requested_dump_finished = threading.Event()
+    additional_checks = 0
     recovered = asyncio.Event()
     boot, pong, send_ping, dump, check = (
         wd._boot_heartbeat, wd._pong, wd._send_ping, wd._dump, wd._check,
@@ -104,10 +108,21 @@ async def _exercise_stall(
     def observed_dump(age: float, *, first: bool) -> None:
         dump(age, first=first)
         if wd.dump_count == dumps:
-            dumped.set()  # Both the durable write and normal logging have finished.
+            # Both the durable write and normal logging have finished.
+            requested_dump_finished.set()
+            if checks_after_dump == 0:
+                dumped.set()
 
     def observed_check(now: float) -> None:
+        nonlocal additional_checks
+        after_requested_dump = requested_dump_finished.is_set()
         check(now)
+        # Do not count the check that produced the requested dump. Keep the
+        # same real ping unanswered through further production budget checks.
+        if after_requested_dump:
+            additional_checks += 1
+            if additional_checks >= checks_after_dump:
+                dumped.set()
         if wd.last_stall_seconds is not None:
             loop.call_soon_threadsafe(recovered.set)
 
@@ -127,6 +142,11 @@ async def _exercise_stall(
         assert wd.dump_count == 0
         _block_the_loop_for_dump(dumped, blocking)
         assert ping_sent.is_set(), "dump did not follow a real outstanding ping"
+        assert additional_checks >= checks_after_dump
+        assert wd.dump_count == dumps, "continuing stall exceeded its dump budget"
+        if records is not None:
+            assert sum("still stalled" in record.getMessage() for record in records) == 1
+        # Only now may the loop yield to the outstanding pong and recover.
         await asyncio.wait_for(recovered.wait(), timeout=5)
     finally:
         boot_release.set()
@@ -210,7 +230,7 @@ async def test_persistent_stall_redumps(
         ping_interval_s=0.02,
         second_threshold_s=0.15,
     )
-    await _exercise_stall(wd, monkeypatch, dumps=2)
+    await _exercise_stall(wd, monkeypatch, dumps=2, checks_after_dump=5, records=caplog.records)
     assert wd.stall_count == 1
     assert wd.dump_count == 2
     still = [r for r in caplog.records if "still stalled" in r.getMessage()]
