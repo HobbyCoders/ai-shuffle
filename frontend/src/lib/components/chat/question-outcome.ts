@@ -40,3 +40,39 @@ export function isDismissedQuestion(
 	if (!result) return false;
 	return result.includes(QUESTION_DISMISS_MESSAGE);
 }
+
+/**
+ * Mirrors the "queued" reply the delegated Claude engine gives the CLI's
+ * AskUserQuestion call (fluid/fluid/engine/delegated.py). The question card is
+ * posted and the answer arrives later as a message, so the engine has to
+ * DENY the CLI's own tool to stop it waiting for an answer. The CLI then
+ * marks the result as an error, even though posting the question worked.
+ */
+export const QUESTION_POSTED_MESSAGE = 'Questions posted.';
+
+/**
+ * Mirrors the start of `AWAY_NOTE` (app/core/away_mode.py). When the owner is
+ * away the host answers at once, and the delegated engine sends that answer
+ * back through the same deny, so it too arrives flagged as an error.
+ */
+export const QUESTION_AWAY_ANSWER_PREFIX = 'Owner is away — recommended default applied';
+
+/**
+ * True when this tool card is an AskUserQuestion call the host handled (the
+ * questions were posted, or answered for an away owner), even though the
+ * result arrived flagged as an error.
+ *
+ * Requires the question tool, the error outcome and one of the host's own
+ * reply texts, so any other denial keeps the error rendering.
+ */
+export function isPostedQuestion(
+	toolName: string | undefined,
+	status: string | undefined,
+	result: string | undefined
+): boolean {
+	if (toolName !== 'AskUserQuestion' && toolName !== 'AskUser') return false;
+	if (status !== 'error') return false;
+	if (!result) return false;
+	if (result.includes(QUESTION_AWAY_ANSWER_PREFIX)) return true;
+	return result.includes(QUESTION_POSTED_MESSAGE) && /"status":\s*"queued"/.test(result);
+}

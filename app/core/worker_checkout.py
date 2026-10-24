@@ -543,6 +543,9 @@ def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowl
     sha = tip.stdout.strip()
     if tip.returncode or not _SHA.fullmatch(sha):
         raise WorkerCheckoutError("The caller has no valid committed HEAD to fork a worker from.")
+    from app.core.git_fork_base import caller_uses_default
+
+    fresh_base = fresh_base and caller_uses_default(parent_path)
     published = checkout_transfer.publish_task_branch(parent_path, branch, sha)
     return RemoteWorkerBranch(
         REMOTE_BRANCH, project_v2_id=project["id"], branch=branch, base_commit=sha,
@@ -668,7 +671,9 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
         if sent.base_policy == "fresh-default-v1":
             from app.core.git_fork_base import choose_worker_base
 
-            ref, base_note = choose_worker_base(base, sha)
+            # The source checks its branch/upstream before offering this policy;
+            # the receiver cannot infer that from its unrelated local HEAD.
+            ref, base_note = choose_worker_base(base, sha, default_branch_caller=True)
             chosen = git_service._run_git(base, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
             if chosen.returncode or not _SHA.fullmatch(chosen.stdout.strip()):
                 raise WorkerCheckoutError("The chosen worker base is unavailable; nothing was started.")
@@ -903,9 +908,12 @@ def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str,
 
             dispatch = remote_tasks.get_dispatch(worker_session_id) or {}
             published = dispatch.get("published_base")
-            # The receiver may fork from a newer default tip. Delete only the
-            # SHA we actually published, never a ref observed after dispatch.
-            expected = published if isinstance(published, str) and _SHA.fullmatch(published) else base
+            # The receiver may fork from a newer default tip. Without the
+            # dispatch receipt we cannot know which SHA we published.
+            if not isinstance(published, str) or not _SHA.fullmatch(published):
+                outcome["reason"] = "The dispatch published base is unavailable; the remote branch was left alone."
+                return outcome
+            expected = published
             released = checkout_transfer.delete_untouched_task_branch(repo, branch, expected)
             outcome["released"] = bool(released.get("deleted"))
             outcome["reason"] = released.get("reason")

@@ -7,7 +7,9 @@
  * `.sha256` sidecar next to it.
  */
 
-export const POSTGRES_VERSION = '16.10.0';
+import { readFileSync } from 'node:fs';
+
+export const POSTGRES_VERSION = JSON.parse(readFileSync(new URL('../runtime-contract.json', import.meta.url), 'utf8')).native.postgres;
 export const POSTGRES_RELEASES = 'https://github.com/theseus-rs/postgresql-binaries/releases/download';
 
 export const POSTGRES_TARGETS = {

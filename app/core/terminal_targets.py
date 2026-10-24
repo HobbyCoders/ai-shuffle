@@ -145,9 +145,9 @@ class PeerTerminal(StreamTerminal):
         try:
             info = (await self.call("open", options=options))["terminal"]
         except BaseException as exc:
-            # A rejected folder has not spawned a PTY or consumed B's consent.
-            # Keep A's matching lease so the owner can correct it and retry.
-            if not isinstance(exc, TerminalError) or exc.code != "bad_folder":
+            # Only the recipient's pre-spawn folder checks preserve consent.
+            # A spawn-time folder race consumes it and must drop this lease.
+            if not isinstance(exc, TerminalError) or exc.code != "bad_folder" or not exc.retryable:
                 terminal_relay.forget(self.lease)
             raise
         self.shell, self.cwd = info["shell"], info["cwd"]
@@ -163,7 +163,10 @@ class PeerTerminal(StreamTerminal):
             raise TerminalError("peer_unavailable", "The terminal worker is unavailable or owner access expired.", 503) from exc
         if "error" in result:
             error = result["error"]
-            raise TerminalError(error["code"], error["message"], error["status"])
+            # Previous recipients omit the flag on retryable folder checks.
+            # Preserve that contract; newer peers explicitly distinguish races.
+            raise TerminalError(error["code"], error["message"], error["status"],
+                                retryable=error.get("retryable", error["code"] == "bad_folder") is True)
         return result
 
     async def pump(self):
