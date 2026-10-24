@@ -1552,9 +1552,9 @@ def install_history(sid, data, cwd):
                                              for c, v in zip(columns, r[1:])]) for r in part]
                         from app.db.history_indexing import importing
                         with importing(cur, table) as deferred:
+                            conflict = _history_conflict(table, ("session_id", *columns), deferred)
                             _insert_rows(cur, table, ("session_id", *columns), adapted,
-                                         _history_conflict(table, ("session_id", *columns), deferred),
-                                         batch=200)
+                                         conflict, batch=200)
                     written = monotonic()
                 metrics["commit_seconds"] += monotonic() - written
                 if timing:

@@ -218,3 +218,75 @@ def test_catchup_yields_before_migration_and_between_batches(
     idle = iter((True, True, False))
     assert not hi.run_pass(pause=0, can_work=lambda: next(idle))
     assert calls == [1]
+
+
+@pytest.mark.parametrize("opted_in", [False, True])
+def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
+    opted_in: bool, request: pytest.FixtureRequest,
+) -> None:
+    from app.db import sessions
+    from app.network import handoff
+    from tests.db.test_handoff_import_postgres import snapshot
+
+    finish_migration()
+    sid = f"history-repair-{opted_in}"
+    needle = f"repairneedle{opted_in}"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        if not opted_in:
+            cur.execute("DELETE FROM system_settings WHERE key=%s", (hi.KEY,))
+        cur.execute("INSERT INTO sessions(id,title) VALUES (%s,'Projection repair')", (sid,))
+    data = snapshot(events=1, nodes=1, transcript=1, messages=1)
+    for row in data["history"]["session_events"]:
+        row["id"] = sid + row["id"]
+    for row in data["history"]["fluid_session_nodes"]:
+        row["message"] = {"role": "user", "content": [{"kind": "text", "text": needle}]}
+    sdk = handoff.install_history(sid, data, "/tmp/history-repair")
+
+    def cleanup() -> None:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM sessions WHERE id=%s", (sid,))
+            for table in ("session_events", "session_event_counters", "session_recall_text",
+                          "fluid_session_nodes", "fluid_session_events", "fluid_sessions",
+                          "session_store_entries"):
+                cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s,%s)", (sid, sdk))
+
+    request.addfinalizer(cleanup)
+    assert bool(sessions.search_sessions(needle)) == (not opted_in)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT history_index_state AS state FROM fluid_session_nodes "
+                    "WHERE session_id=%s", (sdk,))
+        assert cur.fetchone()["state"] == (1 if opted_in else 0)
+        cur.execute("DROP TABLE session_recall_text")
+
+    # Match startup order: repair/backfill recall BEFORE the history worker.
+    for _ in range(20):
+        if session_recall.run_backfill(max_seconds=1, pause_seconds=0):
+            break
+    else:
+        pytest.fail("projection repair did not finish")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
+        marker = cur.fetchone()
+        assert marker == ({"value": "building"} if opted_in else None)
+
+    # No explicit opt-in or direct migrator call may mask a lost request here.
+    for _ in range(20):
+        if hi.run_pass(seconds=1, pause=0):
+            break
+    else:
+        pytest.fail("automatic history catch-up did not finish after projection repair")
+    assert any(row["id"] == sid for row in sessions.search_sessions(needle))
+    paginated, total = sessions.search_sessions_paginated(needle)
+    assert any(row["id"] == sid for row in paginated)
+    assert total == 1
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT history_index_state AS state FROM fluid_session_nodes "
+                    "WHERE session_id=%s", (sdk,))
+        assert cur.fetchone()["state"] == (2 if opted_in else 0)
+        cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
+        assert cur.fetchone() == ({"value": "ready"} if opted_in else None)

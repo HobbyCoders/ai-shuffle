@@ -125,7 +125,8 @@ _PUT_SIGNATURE = "session_recall_put(text, text, text, double precision, text, b
 _FUNCTIONS = (
     "recall_node_text(jsonb)", "recall_entry_text(jsonb)", "recall_event_raw(text, jsonb)",
     "recall_pieces(text)", _PUT_SIGNATURE,
-    "session_recall_background_put(text,text,text,double precision,text,bigint,text,text,text,integer)",
+    "session_recall_background_put(text,text,text,double precision,text,"
+    "bigint,text,text,text,integer)",
     "session_recall_nodes_sync()", "session_recall_entries_sync()", "session_recall_events_sync()",
 )
 
@@ -444,9 +445,9 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
         if not schema or "'" in schema:
             raise ValueError("no usable current schema")
         if not present:
-            # A rebuilt projection needs fresh deferred indexes before imports
-            # can bypass GIN maintenance again. Do not trust the old ready stamp.
-            cursor.execute("DELETE FROM system_settings WHERE key = %s",
+            # Preserve existing opt-in so automatic maintenance rebuilds the
+            # indexes and resumes pending imports. Never opt in a new worker.
+            cursor.execute("UPDATE system_settings SET value = 'building' WHERE key = %s",
                            ("migration:history_indexing_v1",))
         for statement in _DDL if present else [*_TABLE_DDL, *_DDL]:
             cursor.execute(statement.replace(_S, f"{schema}."))
