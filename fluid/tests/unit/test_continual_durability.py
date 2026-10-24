@@ -160,12 +160,26 @@ def test_reap_aborts_when_a_line_lands_between_read_and_replace(
     store.set_synth_cursor(10)
     journal = tmp_path / "journal.jsonl"
     real_fsync = os.fsync
+    real_rewrite = skills_mod._rewrite_dropping_prefix
+    rewriting_journal = False
+
+    def rewrite_journal(*args, **kwargs):
+        nonlocal rewriting_journal
+        rewriting_journal = True
+        try:
+            return real_rewrite(*args, **kwargs)
+        finally:
+            rewriting_journal = False
+
+    monkeypatch.setattr(skills_mod, "_rewrite_dropping_prefix", rewrite_journal)
 
     def append_during_rewrite(fd):
         # Runs after reap has copied the journal into the temp file and
         # before it re-checks the size: the window a lock-ignoring writer
         # can hit.
         real_fsync(fd)
+        if not rewriting_journal:
+            return  # workflow-loss metadata is persisted before the journal copy
         with journal.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"code": "late = 1"}) + "\n")
 

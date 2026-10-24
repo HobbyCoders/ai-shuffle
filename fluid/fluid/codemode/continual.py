@@ -1567,7 +1567,9 @@ class Synthesizer:
                         if e.get("ts", 0) > forgotten and e.get("project") == self._project]
             excluded = {r["name"] for r in WorkflowProposals(self._store).list()
                         if r["project"] == self._project}
-            evidence = repeated_evidence(retained, entries, self._project, excluded)
+            from fluid.codemode.workflow_loss import load_loss
+            evidence = repeated_evidence(retained, entries, self._project, excluded,
+                                         lost=load_loss(self._store.root))
         except (ValueError, OSError):
             return prompt, _SYNTH_SYSTEM, []
         if not evidence:

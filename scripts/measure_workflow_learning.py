@@ -19,7 +19,8 @@ from fluid.codemode.continual import Synthesizer
 from fluid.codemode.skills import SkillStore
 
 
-def episode(session, surface="native"):
+def episode(session: str, surface: str = "native") -> list[dict[str, object]]:
+    """Build a fixed successful episode in the selected producer's journal shape."""
     common = {"project": "fixture-project", "session": session, "ts": 1}
     execution = ({"kind": "cell", "code": "result = 'fixture-ok'", "value": "fixture-ok"}
                  if surface == "code" else
@@ -33,7 +34,8 @@ def episode(session, surface="native"):
     ]]
 
 
-def render(root, surface="native", repeated=True):
+def render(root: Path, surface: str = "native", repeated: bool = True) -> dict[str, str]:
+    """Render exact synthesis inputs using an isolated fixture-backed store."""
     store = SkillStore(root)
     rows = episode("first", surface)
     if repeated:
@@ -50,7 +52,8 @@ def render(root, surface="native", repeated=True):
     return {"system": system, "request": prompt}
 
 
-def measure():
+def measure() -> dict[str, dict[str, dict[str, int | float]]]:
+    """Measure characters and estimated tokens by surface and request section."""
     results = {}
     with tempfile.TemporaryDirectory() as temporary:
         for surface in ("native", "code", "delegated"):

@@ -6,8 +6,12 @@ acceptance receipts ground repeated successful work, but never grant approval.
 """
 from __future__ import annotations
 
+from collections.abc import Collection
 import hashlib
 import json
+from typing import Any
+
+from fluid.codemode.workflow_loss import load_loss, session_lost
 from pathlib import Path
 import re
 import time
@@ -64,7 +68,7 @@ def _content(body):
     return f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n\n{workflow.strip()}\n"
 
 
-def _evidence(entries, sessions, name, project):
+def _evidence(entries, sessions, name, project, *, lost=0):
     if not isinstance(sessions, list) or len(sessions) != 2 or any(not isinstance(s, str) or not s for s in sessions) or len(set(sessions)) != 2:
         raise ValueError("Cite exactly two distinct successful sessions")
     for entry in entries:
@@ -74,6 +78,8 @@ def _evidence(entries, sessions, name, project):
                 raise ValueError("Corrected or rejected workflow cannot be promoted")
     evidence = []
     for session in sessions:
+        if session_lost(lost, project, session):
+            raise ValueError("Workflow session has incomplete or unverifiable journal evidence")
         rows = [e for e in entries if e.get("session") == session and e.get("project") == project]
         if not rows or len(rows) > MAX_EVIDENCE_ENTRIES:
             raise ValueError("Workflow evidence is missing or exceeds the review bound")
@@ -106,7 +112,10 @@ def _evidence(entries, sessions, name, project):
     return evidence
 
 
-def repeated_evidence(entries, current, project, excluded=()):
+def repeated_evidence(
+    entries: list[dict[str, Any]], current: list[dict[str, Any]], project: str,
+    excluded: Collection[str] = (), *, lost: int,
+) -> list[dict[str, Any]]:
     """Complete retained episodes for at most two newly accepted workflows.
 
     Reuse the bounded journal tail, not another persistent copy of session
@@ -130,7 +139,7 @@ def repeated_evidence(entries, current, project, excluded=()):
                     and row.get("session") and row["session"] not in sessions):
                 sessions.append(row["session"])
         try:
-            evidence = _evidence(entries, sessions[-2:], name, project)
+            evidence = _evidence(entries, sessions[-2:], name, project, lost=lost)
         except ValueError:
             continue
         for episode in evidence:
@@ -175,7 +184,8 @@ class WorkflowProposals:
         content = _content(body)
         if cwd is not None:
             self._deduplicate(cwd, body["name"], body["description"])
-        evidence = _evidence(entries, body["evidence_sessions"], body["name"], project)
+        evidence = _evidence(entries, body["evidence_sessions"], body["name"], project,
+                             lost=load_loss(self.store.root))
         identity = {"owner": self.owner, "project": project, "content": content}
         proposal_id = _hash(identity)
         with file_transaction(self.lock):
@@ -225,7 +235,8 @@ class WorkflowProposals:
             if _hash({k: row[k] for k in ("owner", "project", "content")}) != proposal_id:
                 raise ValueError("Workflow content changed since proposal")
             # Revalidate original producer evidence, including later corrections.
-            evidence = _evidence(self.store.journal_entries(), [e["session"] for e in row["evidence"]], row["name"], row["project"])
+            evidence = _evidence(self.store.journal_entries(), [e["session"] for e in row["evidence"]],
+                                 row["name"], row["project"], lost=load_loss(self.store.root))
             if evidence != row["evidence"]:
                 raise ValueError("Workflow evidence changed; do not promote stale proposals")
             fields, workflow = parse_frontmatter(row["content"])

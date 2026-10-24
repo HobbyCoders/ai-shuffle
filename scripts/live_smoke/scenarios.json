@@ -379,7 +379,7 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
-          "id": "harness-basics.14",
+          "id": "harness-basics.24",
           "check": "Learned prose workflow across separately synthesized sessions",
           "kind": "owner",
           "how": "Use a disposable local-owner Fluid install and project, never the installed worker's skill store. Complete the same harmless fixture-summary workflow in two separate non-code sessions, confirming each completed result with the exact user receipt workflow accepted: fixture-summary. Let synthesis drain after each session. Inspect fluid workflows list/show in a separate owner terminal. Before approval verify a fresh session cannot discover the skill; attempt approval from a managed agent shell and verify refusal. In the owner terminal approve the exact reviewed digest, then start fresh native and delegated sessions, load Skill(fixture-summary), and summarize a new fixture result. In another disposable project repeat with workflow corrected: fixture-summary or reject the proposal before approval. Remove only these disposable installs/projects.",

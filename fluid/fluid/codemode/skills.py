@@ -30,6 +30,9 @@ Alongside the skills the store keeps:
   that were not recorded or were dropped unsynthesized (quota, busy lock,
   backlog overflow), so coverage loss outlives the process that saw it.
   Never content. Rewritten at most once per warning window per process.
+- ``.workflow-loss.json`` — a fixed-size, monotone hash filter of sessions
+  whose journal evidence was trimmed; prevents learning from partial tails
+  that happen to start at a later user request. No session content or IDs.
 
 Every one of those files is BOUNDED and the harness owns the cleanup. The
 model has no reaping control at all. Reaping is deterministic, best-effort (a
@@ -776,6 +779,14 @@ class SkillStore:
         self._journal_tag: dict[str, str] = {}
         self._journal_cwd: str | None = None
         self._journal_backoff_key = os.path.normcase(os.path.realpath(self._journal_path))
+        # Existing tails cannot prove that an earlier correction survived an
+        # old reap. Quarantine those sessions once; future trims record loss
+        # before removal. Metadata failure disables only workflow learning.
+        from fluid.codemode.workflow_loss import initialize_loss
+        try:
+            initialize_loss(self.root, self._journal_path)
+        except OSError:
+            _log.warning("Workflow completeness metadata unavailable; prose learning disabled")
 
     def journal_context(
         self, *, session_id: str | None = None, agent: str | None = None,
@@ -1183,13 +1194,19 @@ class SkillStore:
             backlog: list[int] = []
             if size > JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
                 backlog = self._backlog_to_drop(drop, size, target)
+            removed = set(range(drop)) | set(backlog)
+            if removed:
+                from fluid.codemode.workflow_loss import record_loss
+                try:
+                    with self._journal_path.open(encoding="utf-8") as stream:
+                        record_loss(self.root, (line for i, line in enumerate(stream) if i in removed))
+                except OSError:
+                    return 0  # never discard evidence without durable loss tracking
             if backlog:
-                removed = set(range(drop)) | set(backlog)
                 ok = _rewrite_dropping_lines(
                     self._journal_path, removed, expect_size=size
                 )
             else:
-                removed = set(range(drop))
                 ok = drop > 0 and _rewrite_dropping_prefix(
                     self._journal_path, drop, expect_size=size
                 )
@@ -1489,6 +1506,7 @@ class SkillStore:
                 lines = self._journal_path.read_text(encoding="utf-8").splitlines()
                 cursor = max(0, self.synth_cursor())
                 kept = []
+                removed = []
                 behind = 0  # dropped lines the cursor had already passed
                 for index, line in enumerate(lines):
                     try:
@@ -1497,8 +1515,11 @@ class SkillStore:
                             continue
                     except (ValueError, AttributeError):
                         pass
+                    removed.append(line)
                     behind += index < cursor
                 if len(kept) != len(lines):
+                    from fluid.codemode.workflow_loss import record_loss
+                    record_loss(self.root, removed)
                     atomic_write_text(self._journal_path, "".join(line + "\n" for line in kept))
                 # Rebase like reap_journal does, then clamp: entries kept
                 # past the cursor stay unsynthesized.
