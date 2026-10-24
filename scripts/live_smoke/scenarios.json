@@ -585,6 +585,15 @@
           "how": "Use disposable candidate workers ServerWorker and DesktopWorker with one owner-approved, verified Included image account held only by DesktopWorker. On ServerWorker create a disabled throwaway automation and PUT its exact account/worker/model/options to /api/v1/generation/jobs/{automation_id}/choices/image; GET it back. Leave remembered image choices empty or deliberately different. With the disposable cap admitting the request, trigger one scheduled run on ServerWorker with a prompt that calls generateImage without naming source/model/worker. Inspect the scheduler-created session's automation_id, structured generation result, both workers' submission activity and the resulting session artifact. Restore the disposable choices and remove only the throwaway automation/session afterward. No API-key or fal generation is authorized by this check.",
           "pass_when": "The real unattended run uses the saved job choice despite the absent or different remembered choice. Result source/account/model/options and holding worker match the read-back binding; exactly one Included submission occurs on DesktopWorker, none on ServerWorker or another source. Current cap and schema admission run before submission, and the generated artifact is readable from the run session. A fixture that only injects RunContext.job_choices is not a pass.",
           "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
+        },
+        {
+          "id": "harness-basics.32",
+          "check": "Docker runtime overlay acceptance on both architectures",
+          "kind": "owner",
+          "optional": true,
+          "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
+          "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
+          "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
         }
       ]
     }

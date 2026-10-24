@@ -197,6 +197,8 @@ MAX_RUNTIME_EXPANDED = 2 * 1024**3
 MAX_RUNTIME_STORE = 8 * 1024**3
 RUNTIME_RESERVE = 256 * 1024**2
 RUNTIME_KINDS = ("python", "node", "chromium", "tools")
+# How the build starts an interpreter overlay once before using it.
+RUNTIME_PROBES = {"python": ("-I", "-c", "pass"), "node": ("--version",)}
 
 
 def runtime_platform():
@@ -519,6 +521,9 @@ class RuntimeOverlays:
                         with path.open("xb") as output:
                             shutil.copyfileobj(stream, output, 1024 * 1024)
                         path.chmod(0o755 if member.mode & 0o111 else 0o644)
+                        # The signed time, not the unpack time: Python checks
+                        # the archive's .pyc files against their source times.
+                        os.utime(path, (member.mtime, member.mtime))
                 else:
                     raise UpdateError("Runtime archive contains a special file")
             # tarfile stops at its end marker. Still consume the decompressor
@@ -583,13 +588,17 @@ class RuntimeOverlays:
                     raise UpdateError("Runtime overlay executable is missing or not executable")
                 if "library_path" in item and not (payload / item["library_path"]).is_dir():
                     raise UpdateError("Runtime overlay library directory is missing")
-                for path in [stage, payload, *payload.rglob("*")]:
+                stage.chmod(0o755)
+                # Nothing writes into a signed runtime once it is installed:
+                # an interpreter would otherwise rewrite or add bytecode in its
+                # own library, and the next verification refuses the overlay.
+                for path in [payload, *payload.rglob("*")]:
                     if path.is_dir() and not path.is_symlink():
-                        path.chmod(0o755)
+                        path.chmod(0o555)
                 stage.rename(directory)
             finally:
                 if stage.exists():
-                    shutil.rmtree(stage)
+                    remove_tree(stage)
 
     def environment(self, items, env):
         env = dict(env)
@@ -613,7 +622,15 @@ class RuntimeOverlays:
         for path in self.root.iterdir():
             if (DIGEST.fullmatch(path.name) or path.name.startswith(".staging-")) and path.name not in keep:
                 if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path)
+                    remove_tree(path)
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree for an overlay, whose payload directories are read-only."""
+    for directory, _, _ in os.walk(path):
+        if not os.path.islink(directory):
+            os.chmod(directory, 0o755)
+    shutil.rmtree(path)
 
 
 # What a hand-over runs from the update's source (docker/container_runtime.py).
@@ -1107,6 +1124,26 @@ class ContainerUpdates:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
 
+    def probe_runtimes(self, selected: list[dict], cwd: Path, env: dict[str, str]) -> None:
+        """Start each selected interpreter once before building on it. An
+        overlay this image cannot execute (built for another processor or for
+        newer system libraries) is then refused by name instead of as a failed
+        build, before anything is activated."""
+        for item in selected:
+            if item["kind"] not in RUNTIME_PROBES:
+                continue
+            executable = self.overlays.directory(item) / "payload" / item["executable"]
+            try:
+                self.run_build([str(executable), *RUNTIME_PROBES[item["kind"]]], cwd, env)
+            except (UpdateError, OSError) as exc:
+                if self.stop.is_set():
+                    raise
+                raise UpdateError(
+                    f"The {item['capability']} runtime this update needs does not start on "
+                    f"this image ({runtime_platform()}); it may be built for another "
+                    "processor or newer system libraries. This version keeps working; a "
+                    "newer Docker image or a corrected release is needed.") from exc
+
     def build(self, directory, revision, version=None):
         source = directory / "source"
         home = directory / "build-home"
@@ -1119,7 +1156,9 @@ class ContainerUpdates:
         if not (source / "requirements.lock").is_file():
             raise UpdateError("This source update has no hash-pinned requirements.lock; install a newer image")
         manifest = self.manifest(revision)
-        env, runtime_python = self.overlays.environment(selected_overlays(manifest["container"], self.image), env)
+        selected = selected_overlays(manifest["container"], self.image)
+        env, runtime_python = self.overlays.environment(selected, env)
+        self.probe_runtimes(selected, source, env)
         self.run_build([runtime_python or IMAGE_PYTHON, "-m", "venv", str(directory / "venv")], source, env)
         verify_venv_python(directory, runtime_python)
         # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
