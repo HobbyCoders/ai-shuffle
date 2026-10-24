@@ -624,7 +624,7 @@ for (const launcher of ['4', '5', '6', '7']) test(`restarting with launcher ${la
 	assert.deepEqual(main.errors, []);
 	const before = main.window.sent.length;
 	await main.updater.prepared.prepare();
-	assert.deepEqual([...events], [['copy', 'SinglePassClusterCopy']]);
+	assert.deepEqual([...events], [['copy', 'IncrementalClusterCopy']]);
 	assert.equal(main.window.currentPage, 'status');
 	const steps = main.window.sent.slice(before).filter(([channel]) => channel === 'desktop:worker-state').map(([, state]) => state.startupStep);
 	assert.deepEqual(steps, ['restore-point', undefined], 'the status page says the restore point is being prepared, then stops saying so');
@@ -654,7 +654,7 @@ test('a fresh Windows packaged install prepares its first update restore point i
   assert.equal(typeof main.updater.prepared?.prepare, 'function', 'the installer keeps the in-app copy before quitting');
   const before = main.window.sent.length;
   await main.updater.prepared.prepare();
-  assert.deepEqual(events, ['SinglePassClusterCopy']);
+  assert.deepEqual(events, ['IncrementalClusterCopy']);
   assert.equal(main.window.currentPage, 'status');
   const steps = main.window.sent.slice(before).filter(([channel]) => channel === 'desktop:worker-state').map(([, state]) => state.startupStep);
   assert.deepEqual(steps, ['restore-point', undefined]);

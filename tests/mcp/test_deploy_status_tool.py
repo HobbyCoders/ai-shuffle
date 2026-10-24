@@ -36,6 +36,8 @@ def test_description_marks_it_on_demand():
     description = _handlers()["DeployStatus"].description
     assert "when the owner asks" in description
     assert "not as a routine step after a merge" in description
+    assert "compare checkout HEAD/dirty with runtime revision" in description
+    assert "source_guidance" in description
 
 
 def _body(result):

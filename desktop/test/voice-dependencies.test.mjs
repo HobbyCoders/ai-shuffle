@@ -73,7 +73,7 @@ for (const failedVoice of [false, true]) {
     const calls = [];
     const context = {
       args: {}, platform: 'linux', arch: 'x64', PYTHON_TRIPLES: { 'linux-x64': 'test' },
-      PYTHON_VERSION: 'test', PYTHON_BUILD: 'test', cacheDir: '/fake/cache', outDir: '/fake/out', repoDir: '/fake/repo',
+      PYTHON_VERSION: 'test', PYTHON_BUILD: 'test', native: { pip: '26.2.1' }, cacheDir: '/fake/cache', outDir: '/fake/out', repoDir: '/fake/repo',
       path, process: { env: {} }, log() {}, pythonExe: root => path.join(root, 'bin/python'),
       fetchText: async () => 'hash  cpython-test+test-test-install_only.tar.gz',
       download: async () => {}, extract: async () => {},
