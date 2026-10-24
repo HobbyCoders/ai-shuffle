@@ -38,6 +38,15 @@
           "past_bug": "#575: Gmail watches called a native SDK method absent from installed connector proxies."
         },
         {
+          "id": "durable-watches.panel-placement-controls",
+          "check": "Watch panel shows placement, owner preference and honest move states",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On two disposable candidates (DesktopWorker, ServerWorker), create one schedule watch on each from an owner chat. Open the running-tasks panel on a 1440px desktop and in the phone sheet at 375px: each row names its executing worker with Always on/Server/May sleep. Open New watches in the Watches heading: Automatic names the server it would pick; choose DesktopWorker, then clear it, and confirm the choice shows on the other worker. Stop the ServerWorker candidate: its row reads offline with Pause, Stop and Move disabled, and choosing it as the preference is offered only as disabled with a reason. Bring it back and Move the DesktopWorker watch to ServerWorker; watch the pending note, then the row naming ServerWorker. Repeat a move while the destination drops the connection after import (block its port briefly): the row must read not confirmed or Move unfinished, never Moved, until Retry move completes it. Try moving a Telegram watch and read the refusal reason. Never restart production workers.",
+          "pass_when": "Rows name the executing worker and tier on desktop and phone. The preference picker lists offline workers disabled with a reason and saves and clears through the synced setting. A move is reported as Moved only after the server answers with the row; unanswered or fenced moves stay as warnings with Retry move, refusals show the server's reason, and an offline worker's synced row never accepts Pause, Stop or Move.",
+          "past_bug": "#565: the watch panel had no placement indicator, preference picker or move control after placement shipped backend-only."
+        },
+        {
           "id": "durable-watches.real-connectors",
           "check": "Real Slack, Discord and Telegram watch cursors",
           "kind": "owner",

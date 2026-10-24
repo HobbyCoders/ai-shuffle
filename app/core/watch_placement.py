@@ -137,7 +137,14 @@ async def change(wid: str, status: str) -> dict[str, Any]:
     raise ValueError("Watch does not exist on an available worker")
 
 
-async def move(wid: str, target: str) -> dict[str, Any]:
+async def move(wid: str, target: str, *, confirm_only: bool = False) -> dict[str, Any]:
+    """Move a watch to ``target``, or with ``confirm_only`` only finish one.
+
+    ``confirm_only`` is the panel's automatic follow-up to a move whose answer
+    was lost: it closes the source's transfer receipt when the watch already
+    executes on ``target`` and never starts a transfer, so a stale view cannot
+    pull a watch back from where a newer move put it.
+    """
     target = await run_sync(canonical, await run_sync(resolve, target))
     for row in await rows():
         if row["id"] != wid:
@@ -151,6 +158,8 @@ async def move(wid: str, target: str) -> dict[str, Any]:
                 await call(receipt["source"], "complete", watch_id=wid,
                            target=target, token=receipt["token"])
             return row
+        if confirm_only:
+            raise ValueError("Watch is no longer on that worker; nothing was moved")
         # Read-only prerequisite checks must not strand either stopped receiver.
         # Only export commits the source fence, atomically with its snapshot.
         prepared = await call(source, "prepare_export", watch_id=wid, target=target)

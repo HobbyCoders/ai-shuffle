@@ -11,6 +11,7 @@ import type { ChatMessage, Task } from '$lib/stores/types';
 import { isSwarmActive, type SwarmSnapshot, type SwarmTask } from '$lib/utils/swarm';
 import { linkedTranscripts, transcriptForTask } from '$lib/utils/background-work';
 import { taskModel, type TaskModel } from '$lib/utils/task-model';
+import { transferTarget } from './watch-placement';
 
 export type RunFilter = 'all' | 'agents' | 'shell' | 'watches';
 export type RowState = 'running' | 'stopping' | 'stopped';
@@ -295,6 +296,14 @@ export interface WatchListRow {
 	dailyBudgetUsd: number | null;
 	/** The chat that made it, which it fires into. */
 	sessionId: string | null;
+	/** The device that reported it (where it executes) and its install id (#565). */
+	placementDeviceId: string | null;
+	workerId: string | null;
+	/**
+	 * Set while a move to that device is unfinished: the row is fenced on its
+	 * old worker and does not run; only retrying the move finishes it.
+	 */
+	transferTo: string | null;
 	canPause: boolean;
 	canResume: boolean;
 	canStop: boolean;
@@ -310,9 +319,12 @@ export interface WatchSource {
 	cost_usd?: number | null;
 	daily_budget_usd?: number | null;
 	creating_session_id?: string | null;
+	worker_id?: string | null;
+	placement_device_id?: string | null;
 	can_pause?: boolean;
 	can_stop?: boolean;
 }
+
 
 export const watchKey = (id: string) => `watch:${id}`;
 
@@ -334,20 +346,27 @@ export function buildWatchRows(
 		const state: WatchRowState = stopped ? 'stopped' : stopping?.has(key) ? 'stopping' : paused ? 'paused' : 'active';
 		const cost = Number(w.cost_usd);
 		const budget = Number(w.daily_budget_usd);
+		const transferTo = stopped ? null : transferTarget(w.worker_id);
+		const fenced = transferTo !== null;
 		rows.push({
 			type: 'watch',
 			key,
 			id: w.id,
 			name: plain(w.what) || plain(w.description) || 'Watch',
 			state,
-			reason: paused ? plain(w.reason) || null : null,
+			// A fenced row's "Transfer pending" is said by its move note instead.
+			reason: paused && !fenced ? plain(w.reason) || null : null,
 			lastFiredAt: time(w.last_fired_at),
 			costUsd: Number.isFinite(cost) && cost > 0 ? cost : 0,
 			dailyBudgetUsd: Number.isFinite(budget) && budget > 0 ? budget : null,
 			sessionId: w.creating_session_id || null,
-			canPause: state === 'active' && w.can_pause !== false,
-			canResume: state === 'paused' && w.can_stop !== false,
-			canStop: (state === 'active' || state === 'paused') && w.can_stop !== false
+			placementDeviceId: w.placement_device_id || null,
+			workerId: fenced ? null : w.worker_id || null,
+			transferTo,
+			// The server ignores Pause, Resume and Stop on a fenced row.
+			canPause: !fenced && state === 'active' && w.can_pause !== false,
+			canResume: !fenced && state === 'paused' && w.can_stop !== false,
+			canStop: !fenced && (state === 'active' || state === 'paused') && w.can_stop !== false
 		});
 	}
 	return rows;
