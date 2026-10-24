@@ -158,13 +158,13 @@ def owner_name(unknown=None):
     ``unknown`` so the last detected name is kept instead of the admin's.
     """
     try:
-        from app.core import owner_auth, account_hub
+        from app.core import account_hub, owner_auth
         binding = owner_auth.linked_binding()
         if binding:
             name = _clean_text(((account_hub.account_display(binding) or {}).get("account") or {}).get("username"))
             if name:
                 return name
-    except Exception:  # noqa: BLE001 - the hub may be unreachable; fall back
+    except Exception:  # The hub may be unreachable; fall back.
         logger.debug("Assistant: account username unavailable", exc_info=True)
         if unknown is not None:
             unknown.add("preferred_name")
@@ -223,7 +223,8 @@ def projects_and_repositories(runner_id: str) -> tuple[list[str], list[str]]:
 
 def owner_gmail_connectors(runner_id):
     """Connected owner Gmail connectors on this worker (ids only)."""
-    from app.db import assistant as store, database
+    from app.db import assistant as store
+    from app.db import database
     from app.db.base import get_db
     result = []
     for connector in database.get_all_connectors():
@@ -256,7 +257,7 @@ def detect(runner_id, emails=(), unknown=None):
         unknown.add("email")
     try:
         found["projects"], found["repository_refs"] = projects_and_repositories(runner_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("Assistant: could not read projects for the owner introduction", exc_info=True)
         unknown.update(("projects", "repository_refs"))
     return {k: v for k, v in found.items() if not _empty(v)}
