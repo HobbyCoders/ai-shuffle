@@ -765,7 +765,7 @@
 	.panel-actions a { display: inline-flex; align-items: center; text-decoration: none; }
 	.panel-actions button:focus-visible, .panel-actions a:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.panel-primary { color: var(--primary-foreground); background: var(--primary); }
-	.panel-primary:hover { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+	.panel-primary:hover { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
 	.panel-actions .panel-danger { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, transparent); border-color: color-mix(in oklch, var(--destructive) 30%, transparent); }
 	.panel-danger:hover { background: color-mix(in oklch, var(--destructive) 18%, transparent); }
 	.panel-quiet { color: var(--muted-foreground); background: transparent; }

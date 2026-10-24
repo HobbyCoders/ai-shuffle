@@ -931,7 +931,7 @@
 	   distinguishable from the local one. */
 	.ctx-chip.runner {
 		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 12%, var(--muted));
+		background: color-mix(in oklab, var(--primary) 12%, var(--muted));
 	}
 
 	.ctx-chip.runner :global(svg) {
@@ -950,7 +950,7 @@
 	   under every theme (#1809). The tick carries the meaning. */
 	.ctx-chip.runner.done {
 		color: var(--foreground);
-		background: color-mix(in oklch, var(--primary) 18%, var(--muted));
+		background: color-mix(in oklab, var(--primary) 18%, var(--muted));
 	}
 
 	/* Long device names in the progress label must not push the row wider
@@ -963,7 +963,7 @@
 	   reads as an advisory (informational — there is no adopt/action here). */
 	.ctx-chip.degraded {
 		color: var(--warning);
-		background: color-mix(in oklch, var(--warning) 12%, var(--muted));
+		background: color-mix(in oklab, var(--warning) 12%, var(--muted));
 	}
 
 	.ctx-chip.degraded :global(svg) {

@@ -1046,7 +1046,7 @@
 	}
 	.ns-item:hover { background: var(--hover-overlay); }
 	.ns-item.on {
-		background: color-mix(in oklch, var(--primary) 14%, var(--card));
+		background: color-mix(in oklab, var(--primary) 14%, var(--card));
 		border-left-color: var(--primary);
 	}
 	.ns-item-title {

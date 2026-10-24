@@ -472,7 +472,7 @@
 	.pc-btn--sm { height: 30px; padding: 0 11px; font-size: 0.78rem; }
 	.pc-btn--primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
 	.pc-btn--primary:hover { filter: brightness(1.08); background: var(--primary); }
-	.pc-btn--danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 35%, var(--border)); }
+	.pc-btn--danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 35%, var(--border)); }
 	.pc-btn--danger:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 
 	/* List */
@@ -515,7 +515,7 @@
 	.pc-chev { display: grid; place-items: center; color: var(--muted-foreground); flex-shrink: 0; }
 
 	/* Inline confirm row */
-	.pc-row--confirm { justify-content: space-between; cursor: default; background: color-mix(in oklch, var(--destructive) 6%, var(--card)); flex-wrap: wrap; }
+	.pc-row--confirm { justify-content: space-between; cursor: default; background: color-mix(in oklab, var(--destructive) 6%, var(--card)); flex-wrap: wrap; }
 	.pc-confirm-body { display: flex; align-items: center; gap: 8px; min-width: 0; }
 	.pc-confirm-ic { color: var(--warning, #d97706); flex-shrink: 0; display: grid; place-items: center; }
 	.pc-confirm-actions { display: flex; gap: 8px; flex-shrink: 0; }

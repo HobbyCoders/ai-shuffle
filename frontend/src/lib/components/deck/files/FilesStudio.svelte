@@ -660,7 +660,7 @@
 		margin: 0 28px 10px;
 		padding: 8px 14px;
 		border: 1px solid var(--border); border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklch, var(--primary) 6%, var(--card));
+		background: color-mix(in oklab, var(--primary) 6%, var(--card));
 		font-size: 0.8125rem; font-weight: 500;
 	}
 	.fs-bulkbar span:first-child { color: var(--foreground); }
@@ -703,8 +703,8 @@
 		display: flex; align-items: flex-start; gap: 10px;
 		width: max-content; max-width: min(520px, calc(100% - 24px));
 		padding: 9px 8px 9px 14px; border-radius: calc(var(--radius, 0.75rem) - 2px);
-		background: color-mix(in oklch, var(--destructive) 14%, var(--card));
-		border: 1px solid color-mix(in oklch, var(--destructive) 45%, var(--border));
+		background: color-mix(in oklab, var(--destructive) 14%, var(--card));
+		border: 1px solid color-mix(in oklab, var(--destructive) 45%, var(--border));
 		color: var(--foreground); font-size: 0.8125rem; line-height: 1.45;
 		box-shadow: 0 10px 28px -12px rgb(0 0 0 / 0.45);
 		animation: fs-toast-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);

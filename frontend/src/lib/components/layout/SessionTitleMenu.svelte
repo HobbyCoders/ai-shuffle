@@ -544,7 +544,7 @@
 	.stm-btn { min-width: 72px; min-height: 44px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--card); color: var(--foreground); font: inherit; font-size: 13.5px; cursor: pointer; }
 	.stm-btn:hover:not(:disabled) { background: var(--hover-overlay); }
 	.stm-btn.primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); font-weight: 600; }
-	.stm-btn.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+	.stm-btn.primary:hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
 	.stm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 	.stm-list { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-subtle, var(--border)); border-radius: var(--radius); background: var(--card); }
 	.sheet-row {

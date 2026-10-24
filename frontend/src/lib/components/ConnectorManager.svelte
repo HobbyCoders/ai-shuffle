@@ -1856,12 +1856,12 @@
 	}
 
 	.connector-item:hover {
-		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 30%, var(--border));
 	}
 
 	.connector-item--active {
-		border-color: color-mix(in oklch, var(--success) 45%, var(--border));
-		background: color-mix(in oklch, var(--success) 7%, var(--muted));
+		border-color: color-mix(in oklab, var(--success) 45%, var(--border));
+		background: color-mix(in oklab, var(--success) 7%, var(--muted));
 	}
 
 	.connector-item--deleting {
@@ -1959,7 +1959,7 @@
 	}
 	.connector-action-btn.active {
 		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
 	}
 	.connector-action-btn:disabled {
 		opacity: 0.5;
