@@ -84,6 +84,25 @@ describe('GenerationChoiceDetail', () => {
 		expect(generationChoices.remembered.image?.model).toBe('fal-ai/nano-banana-2');
 	});
 
+	it('keeps the remembered choice and its warning when forgetting fails', async () => {
+		render(GenerationChoiceDetail, { props: { kind: 'image' } });
+		mocks.put.mockImplementation(async (_url: string, body: { choice: GenerationChoice }) => ({
+			kind: 'image',
+			choice: { ...body.choice, origin: 'settings' },
+			remembered: true,
+			...UNPRICED
+		}));
+		mocks.del.mockRejectedValue(new Error('Could not reach the server.'));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remember' }));
+		await waitFor(() => expect(banner()?.textContent).toContain(WARNING));
+		await fireEvent.click(screen.getByRole('button', { name: 'Ask every time' }));
+		await waitFor(() => expect(screen.getByText('Could not reach the server.')).toBeTruthy());
+		expect(mocks.del).toHaveBeenCalledWith('/generation/choices/image');
+		expect(banner()?.textContent).toContain(WARNING);
+		expect(generationChoices.remembered.image?.model).toBe('fal-ai/nano-banana-2');
+		expect(screen.getByRole('button', { name: 'Ask every time' })).toBeTruthy();
+	});
+
 	it('clears the Remember warning when the choice is forgotten', async () => {
 		render(GenerationChoiceDetail, { props: { kind: 'image' } });
 		mocks.put.mockImplementation(async (_url: string, body: { choice: GenerationChoice }) => ({

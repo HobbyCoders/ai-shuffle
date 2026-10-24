@@ -72,9 +72,10 @@
 	async function forget() {
 		busy = true;
 		actionError = '';
-		saveWarning = null;
 		try {
 			await generationChoices.forget(kind);
+			// Only once the server forgot it: a failed DELETE leaves the pick and its warning.
+			saveWarning = null;
 		} catch (e) {
 			actionError = getErrorMessage(e, 'Could not clear the saved choice.');
 		} finally {
