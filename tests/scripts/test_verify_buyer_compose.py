@@ -44,14 +44,13 @@ def fresh_api(bare_db, monkeypatch, _api_unit_credentials):
     from app.core import assistant_service, claude_auth_mode, claude_cli_status, owner_auth, profiles
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.db import database
-    from app.db.base import get_db
 
     # Run the producing startup paths, not a fixture that pretends the list is empty.
     profiles.run_migrations()
     seed_builtin_subagents()
-    with get_db() as conn:
-        assistant_service.ensure_agent(conn.cursor())
-    assert database.get_all_profiles() == []  # internal assistant is not selectable
+    # Watch startup no longer seeds the retired research-only agent.
+    assert database.get_profile(assistant_service.AGENT_ID) is None
+    assert database.get_all_profiles() == []
 
     # Only the external CLI probe / worker mode are pinned; the gate itself runs.
     monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: "subscription")
