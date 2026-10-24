@@ -284,6 +284,12 @@ class TestVoiceSettings:
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
             "voice_options": {"instructions":"", "opening":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
+            "voice_engines": [
+                {"id": "gpt-live-1", "label": "GPT Live 1", "funding": "openai"},
+                {"id": "grok-voice-latest", "label": "Grok Voice", "funding": "xai"},
+                {"id": "grok-voice-supergrok", "label": "Grok voice (SuperGrok subscription)", "funding": "grok"},
+                {"id": "gpt-live-1-codex", "label": "GPT-Live-1.1 · ChatGPT subscription", "funding": "chatgpt"},
+            ],
         }
         assert resp.json()["model_details"]["model"] == "gpt-live-1"
 
@@ -311,6 +317,12 @@ class TestVoiceSettings:
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
             "voice_options": {"instructions":"", "opening":"", "delegation_instructions":"", "mic_threshold_db":-42.0},
+            "voice_engines": [
+                {"id": "gpt-live-1", "label": "GPT Live 1", "funding": "openai"},
+                {"id": "grok-voice-latest", "label": "Grok Voice", "funding": "xai"},
+                {"id": "grok-voice-supergrok", "label": "Grok voice (SuperGrok subscription)", "funding": "grok"},
+                {"id": "gpt-live-1-codex", "label": "GPT-Live-1.1 · ChatGPT subscription", "funding": "chatgpt"},
+            ],
         }
         assert resp.json()["model_details"]["model"] == "gpt-live-1"
         # Persisted: a fresh GET returns the same values.
