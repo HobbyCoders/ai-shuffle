@@ -12,6 +12,98 @@ from scripts import local_ci
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("refills", [1, 100])
+@pytest.mark.parametrize("failure", [False, True])
+def test_pytest_reports_late_basetemp_writer(tmp_path, refills, failure):
+    """A real child refills the directory after rmtree's scan, before rmdir."""
+    import json
+    import shutil
+
+    suite = tmp_path / "test_late_writer.py"
+    record = tmp_path / "late-writes.json"
+    suite.write_text(
+        "import json, os, pathlib, subprocess, sys\n"
+        "def test_payload(tmp_path_factory):\n"
+        "    base = tmp_path_factory.getbasetemp()\n"
+        "    original = os.rmdir\n"
+        "    writes = 0\n"
+        "    def rmdir(path, *args, **kwargs):\n"
+        "        nonlocal writes\n"
+        f"        if pathlib.Path(path).name == 'pytest' and writes < {refills}:\n"
+        "            writes += 1\n"
+        "            late = base / ('late-write-' + str(writes))\n"
+        "            subprocess.run([sys.executable, '-c',\n"
+        "                            'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(\"late\")',\n"
+        "                            str(late)], check=True, timeout=10)\n"
+        f"            pathlib.Path({str(record)!r}).write_text(json.dumps([str(base.parent), writes]))\n"
+        "        return original(path, *args, **kwargs)\n"
+        "    os.rmdir = rmdir\n"
+        f"    assert {not failure!r}\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "scripts.ci.test_scratch",
+         str(suite), "--rootdir", str(tmp_path), "--confcutdir", str(tmp_path),
+         "-q", "-o", "addopts=", "-W", "error"],
+        cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True, text=True, timeout=60,
+    )
+    output = result.stdout + result.stderr
+    owner, writes = json.loads(record.read_text())
+    owner = Path(owner)
+    try:
+        assert result.returncode == int(failure), output
+        assert ("1 failed" if failure else "1 passed") in output
+        assert "WARNING: pytest scratch refilled during cleanup" in output
+        assert str(owner) in output
+        assert "Traceback (most recent call last)" not in result.stderr
+        if refills == 1:
+            assert writes == 1
+            assert not owner.exists()
+            assert "removed after retry" in output
+        else:
+            assert 1 < writes < refills  # cleanup is bounded, not a retry loop forever
+            assert "leftover" in output
+            assert f"late-write-{writes}" in output
+            assert (owner / "pytest" / f"late-write-{writes}").read_text() == "late"
+            if Path("/proc/self/stat").exists():
+                receipt = json.loads((owner / ".ai-shuffle-scratch-owner").read_text())
+                assert receipt["pid"] != os.getpid()
+                assert receipt["version"] == 1
+    finally:
+        # Only remove this test's owner, including on the unfixed baseline.
+        shutil.rmtree(owner, ignore_errors=True)
+
+
+@pytest.mark.parametrize("error_name", ["EACCES", "EIO"])
+@pytest.mark.parametrize("after_refill", [False, True])
+def test_pytest_scratch_does_not_hide_other_cleanup_errors(tmp_path, monkeypatch, error_name, after_refill):
+    from contextlib import contextmanager
+    import errno
+    from scripts.ci import test_scratch
+
+    failure = OSError(getattr(errno, error_name), "cleanup must still fail", str(tmp_path))
+    retries = []
+
+    @contextmanager
+    def scratch(*args, **kwargs):
+        yield str(tmp_path)
+        if after_refill:
+            raise OSError(errno.ENOTEMPTY, "refilled", str(tmp_path))
+        raise failure
+
+    def retry(directory):
+        retries.append(directory)
+        raise failure
+
+    monkeypatch.setattr(test_scratch, "scratch_directory", scratch)
+    monkeypatch.setattr(test_scratch.shutil, "rmtree", retry)
+    with pytest.raises(OSError) as raised:
+        with test_scratch._session_scratch():
+            pass
+    assert raised.value is failure
+    assert len(retries) == int(after_refill)
+
+
 def test_retention_is_explicit():
     config = configparser.ConfigParser()
     config.read(ROOT / "pytest.ini")

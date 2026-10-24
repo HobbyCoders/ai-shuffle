@@ -596,6 +596,14 @@
           "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
         },
         {
+          "id": "harness-basics.pytest-scratch-refill",
+          "check": "Pytest teardown reports a late basetemp writer without losing the result",
+          "kind": "owner",
+          "how": "In a disposable candidate checkout on each worker, run PYTHONPATH=fluid pytest tests/scripts/test_local_ci_stages.py::test_kill_mid_stage_resumes_from_the_heartbeat tests/scripts/test_test_scratch.py -o addopts= -q. The crash regression checks that its heartbeat writer stops and signal handlers are restored without releasing the crash receipt. The late-writer regression starts a real child to refill basetemp between the cleanup scan and rmdir, once and repeatedly, for passing and failing child sessions. Do not restart the installed app or clean unrelated scratch.",
+          "pass_when": "All scratch regressions pass. A passing child exits 0 even when basetemp refills; a failing child still exits 1. Diagnostics identify the owner and report recovered cleanup or bounded leftover entries; a persistent leftover retains its ownership receipt for the reaper. Serial, xdist, explicit basetemp and standalone Fluid ownership checks still pass.",
+          "past_bug": "#570: backend-security passed every test then exited 1 when a directory refilled during pytest session scratch cleanup."
+        },
+        {
           "id": "harness-basics.32",
           "check": "Docker runtime overlay acceptance on both architectures",
           "kind": "owner",

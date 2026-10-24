@@ -458,7 +458,34 @@ class Killed(BaseException):
     """An uncatchable stop (SIGKILL, TerminateProcess): no handler or finally runs."""
 
 
-def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, capsys):
+def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, capsys, request):
+    import signal
+
+    previous = {number: signal.getsignal(number) for name in ("SIGTERM", "SIGHUP", "SIGBREAK")
+                if (number := getattr(signal, name, None)) is not None}
+    started = []
+    real_start = stages._Heartbeat.start
+
+    def start(heartbeat):
+        started.append(heartbeat)
+        real_start(heartbeat)
+
+    def assert_no_process_state_leaked():
+        leaked = [heartbeat for heartbeat in started if heartbeat._thread.is_alive()]
+        handlers = {number: signal.getsignal(number) for number in previous}
+        try:
+            assert not leaked, f"live scratch writers after test: {[h.path for h in leaked]}"
+            assert handlers == previous, "staged stop handlers leaked into later tests"
+        finally:
+            # Keep the regression safe even on the unfixed baseline.
+            for heartbeat in leaked:
+                heartbeat._stop.set()
+                heartbeat._thread.join(timeout=5)
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+
+    monkeypatch.setattr(stages._Heartbeat, "start", start)
+    request.addfinalizer(assert_no_process_state_leaked)
     calls, args = gate
     args.budget = 40
     sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
@@ -475,12 +502,21 @@ def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, 
 
     real_fluid, real_stop = ci.SUITES[1].run, stages._Heartbeat.stop
     monkeypatch.setattr(ci.SUITES[1], "run", killed)
-    monkeypatch.setattr(stages._Heartbeat, "stop", lambda self: None)  # a killed process cleans nothing
-    monkeypatch.setattr(stages, "_restore_signals", lambda previous: None)
+
+    def crash_stop(heartbeat):
+        # SIGKILL leaves an unreleased receipt, but cannot leave a live thread.
+        # A no-op here recreated removed pytest scratch every 30 seconds.
+        heartbeat._stop.set()
+        heartbeat._thread.join()
+
+    monkeypatch.setattr(stages._Heartbeat, "stop", crash_stop)
     with pytest.raises(Killed):
         step(args)
     left = _state()
     assert left["attempt"]["stage"] == "fluid" and left["completed"][-1] == "backend-2"
+    receipt = json.loads(beat.read_text())
+    assert receipt["pid"] is not None  # preserve the simulated crash, not a normal release
+    assert receipt["attempt"] == left["attempt"]["id"]
     monkeypatch.setattr(ci.SUITES[1], "run", real_fluid)
     monkeypatch.setattr(stages._Heartbeat, "stop", real_stop)
     outputs = sim.drive(args, capsys)
