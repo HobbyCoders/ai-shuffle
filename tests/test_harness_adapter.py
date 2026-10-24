@@ -130,6 +130,18 @@ async def _collect(adapter, limit: int = 100) -> list:
 
 
 @pytest.mark.asyncio
+async def test_assistant_sanitization_is_a_visible_nonterminal_system_event():
+    warning = lm.AssistantTextSanitized(session_id=SID)
+    events = [warning, lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1)]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    system = next(event for event in got if isinstance(event, SystemMessage))
+    assert system.subtype == "assistant_text_sanitized"
+    assert system.data["content"] == warning.message
+    assert any(isinstance(event, ResultMessage) for event in got)
+    assert type(lm.event_from_dict(lm.event_to_dict(warning))) is lm.AssistantTextSanitized
+
+
+@pytest.mark.asyncio
 async def test_host_background_completion_clears_fluid_without_double_wake():
     engine = FakeEngine([])
     adapter = _adapter_with(engine)
