@@ -25,20 +25,10 @@ async def persist(snapshot, *, run_id=None, fence_token=None):
 
 async def snapshots(session_id: str) -> list[dict]:
     """Read the latest durable publications; observing is never recovery."""
-    from app.db.session_events import get_events
-    async with _locks.setdefault(session_id, asyncio.Lock()):
-        latest, cursor = {}, 0
-        while True:
-            page = await asyncio.to_thread(get_events, session_id, cursor, 500)
-            if not page:
-                break
-            for event in page:
-                if event["event_type"] == "swarm.updated":
-                    snapshot = event["payload"].get("swarm")
-                    if isinstance(snapshot, dict):
-                        latest[snapshot["id"]] = snapshot
-            cursor = page[-1]["seq"]
-        return list(latest.values())
+    from app.db.session_events import get_latest_swarm_snapshots
+    # One MVCC statement observes a consistent projection. Readers neither
+    # mutate nor recover anything, so they need no coordinator/session lock.
+    return await asyncio.to_thread(get_latest_swarm_snapshots, session_id)
 
 async def bind_worker(worker_id, owner_session_id, *, worker=None):
     """Called by the real dispatch producer before each admitted attempt."""
