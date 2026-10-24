@@ -106,7 +106,7 @@
 	{/if}
 
 	{#if waiting && active}
-		<p class="hint">Reply <strong>yes</strong> or <strong>no</strong> in the message box.</p>
+		<p class="hint">Reply <strong>yes</strong> or <strong>no</strong> in the message box. Other messages go to the agent and leave this open.</p>
 	{:else if waiting}
 		<p class="hint">Asked after the request before it. Answer that one first.</p>
 	{/if}

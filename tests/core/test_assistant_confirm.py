@@ -2,6 +2,7 @@
 owner's own message, decided by the app, one request at a time."""
 import asyncio
 import json
+from typing import Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -188,16 +189,22 @@ async def test_firm_no_declines(home):  # noqa: F811
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultDeny)
 
 
-async def test_unclear_asks_once_more_then_declines(home):  # noqa: F811
+async def test_unclear_never_approves_or_declines(home: Tuple[str, str]) -> None:  # noqa: F811
+    """#523 (owner decision): only a firm yes or no answers. However many other
+    messages arrive, the request stays pending and answerable, records no
+    outcome, and the started chat that asked keeps waiting on it."""
     home_id, _ = home
     task = _ask(await _started_chat(home_id))
-    await _pending(home_id)
-    await owner_says(home_id, "I'm not sure, you decide")
-    [request] = confirm.pending_requests(home_id)
-    assert request["unclear"] == 1 and not task.done()
-    assert "the app has asked again" in away_mode.turn_note(home_id)
-    assert [a["decision"] for a in _answers(home_id)] == ["asked_again"]
-    await owner_says(home_id, "probably fine")
+    [request] = await _pending(home_id)
+    for text in ("I'm not sure, you decide", "probably fine", "what will it push?"):
+        await owner_says(home_id, text)
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    [still] = confirm.pending_requests(home_id)
+    assert still["request_id"] == request["request_id"] and not still["parked"]
+    assert _answers(home_id) == [] and _outcomes(home_id) == []
+    assert "Only a plain yes or no answers it" in away_mode.turn_note(home_id)
+    await owner_says(home_id, "no")
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultDeny)
     assert confirm.pending_requests(home_id) == []
 
@@ -343,7 +350,7 @@ async def test_voice_delegated_turns_never_answer(home):  # noqa: F811
     await asyncio.sleep(0.05)
     assert not task.done()
     [still] = confirm.pending_requests(home_id)
-    assert still["request_id"] == request["request_id"] and still["unclear"] == 0
+    assert still["request_id"] == request["request_id"] and not still["parked"]
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source='user'", (home_id,))

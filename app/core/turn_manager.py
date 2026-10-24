@@ -541,6 +541,7 @@ async def submit_async(
     unchanged: the turn is durably ``queued`` before the kick.
     """
     answered: Optional[Dict[str, Any]] = None
+    held: Optional[Dict[str, Any]] = None
     if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):
         # The owner's own message is the only thing that can answer a question
         # the assistant is waiting on (app/core/assistant_confirm). The request
@@ -552,6 +553,10 @@ async def submit_async(
         from app.core import assistant_confirm
 
         answered = await assistant_confirm.on_owner_message(session_id, prompt)
+        if answered is not None and answered.get("decision") == assistant_confirm.HELD:
+            # Not an answer: the requests stay pending, and the calls this chat
+            # waits on are let go once this message is queued (#523).
+            held, answered = answered, None
         if answered is not None:
             payload = {**(payload or {}), assistant_confirm.ANSWER_KEY: answered}
     window_pin: Dict[str, int] = {}
@@ -585,6 +590,12 @@ async def submit_async(
     finally:
         if reactivated:
             await _announce_reactivated(session_id, reactivated["user_id"])
+    if held is not None:
+        # The message is durably queued now, so the waiting call's release
+        # can hand it to the engine before answering the call "not run yet".
+        from app.core import assistant_confirm
+
+        await assistant_confirm.park(session_id, held.get("park") or ())
     if not no_kick:
         _kick(session_id)
     if window_pin:

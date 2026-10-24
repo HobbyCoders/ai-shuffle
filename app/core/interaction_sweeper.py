@@ -74,6 +74,15 @@ async def sweep_once() -> int:
             row["session_id"], row["id"], request_id, "ttl"
         )
 
+    # An owner-chat approval whose call was answered "not run yet" has no
+    # waiter left to see the expiry: wake the agent to tell it (#523).
+    try:
+        from app.core import assistant_confirm
+
+        await assistant_confirm.on_expired(rows)
+    except Exception:  # noqa: BLE001 — a wake never fails the sweep
+        logger.warning("interaction_sweeper: expired-approval wake failed", exc_info=True)
+
     logger.debug("interaction_sweeper: expired %d interaction(s)", len(rows))
     return len(rows)
 

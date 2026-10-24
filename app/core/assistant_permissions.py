@@ -455,6 +455,11 @@ def _start_session_rule(data, scope):
     return HIGH
 
 
+def _generation_preferences_rule(data: dict[str, Any], scope: Scope) -> str:
+    """Reading picks is ordinary work; changing future generation consent asks."""
+    return LOW if data.get("action") == "get" else HIGH
+
+
 # Every tool reachable from an assistant session, by its canonical name
 # (:func:`canonical`). A name that is not here is high.
 TOOL_LEVELS: Dict[str, Level] = {
@@ -574,6 +579,7 @@ TOOL_LEVELS: Dict[str, Level] = {
         )
     },
     # App configuration: reading is fine, changing it is a security setting.
+    "mcp__app-config__generationPreferences": _generation_preferences_rule,
     **{
         f"mcp__app-config__{name}": LOW
         for name in (
