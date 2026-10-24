@@ -708,7 +708,8 @@ html:root[data-platform='mobile'] .add-project-row .add-project { height: 44px; 
 html:root[data-platform='mobile'] .add-project-row .add-project-hint { padding-left: 12px; }
 
 /* frontend/src/lib/components/layout/AttachProjectSheet.svelte — a bottom
-   sheet with a grab handle and touch-sized rows. */
+   sheet with touch-sized rows and the sidebar sheet's grab handle; dragging
+   it down (or flicking it) dismisses the sheet. */
 html:root[data-platform='mobile'] .attach-layer { place-items: end stretch; padding: 0; }
 html:root[data-platform='mobile'] .attach-sheet {
 	width: 100%;
@@ -720,11 +721,12 @@ html:root[data-platform='mobile'] .attach-sheet {
 }
 html:root[data-platform='mobile'] .attach-sheet .grab {
 	display: block;
-	width: 36px;
-	height: 4px;
-	margin: 2px auto 10px;
-	border-radius: 4px;
+	width: 38px;
+	height: 5px;
+	margin: 4px auto 12px;
+	border-radius: 3px;
 	background: var(--border-strong);
+	cursor: grab;
 }
 html:root[data-platform='mobile'] .attach-sheet .proj-row { min-height: 48px; font-size: 15px; }
 html:root[data-platform='mobile'] .attach-sheet .icon-btn { width: 44px; height: 44px; }

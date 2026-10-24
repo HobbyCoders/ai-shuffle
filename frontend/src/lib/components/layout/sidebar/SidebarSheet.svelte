@@ -3,7 +3,8 @@
 	 * SidebarSheet — the panel's one overlay surface.
 	 *
 	 * On the phone it is a bottom sheet over a dimmed scrim: drag it down past
-	 * 70px (or tap the scrim) to dismiss. On desktop the same content becomes a
+	 * 70px, flick it down, or tap the scrim to dismiss ($lib/components/ui/sheet-drag).
+	 * On desktop the same content becomes a
 	 * small popover; the caller places it with `placement` (the More flyout sits
 	 * beside the rail, the filter popover under the filter button), and the
 	 * scrim turns transparent so it only catches the outside click.
@@ -12,6 +13,7 @@
 	 * with the mobile drawer and never covers the chat beside a docked sidebar.
 	 */
 	import { tick, type Snippet } from 'svelte';
+	import { moveSheetDrag, sheetDragDismisses, startSheetDrag, type SheetDrag } from '$lib/components/ui/sheet-drag';
 
 	interface Props {
 		open: boolean;
@@ -28,12 +30,10 @@
 
 	let { open, label, role = 'dialog', phone, placement = 'popover', onClose, children }: Props = $props();
 
-	const DISMISS_AT = 70;
-
 	let sheetRef = $state<HTMLDivElement | null>(null);
 	let dragY = $state(0);
 	let dragging = $state(false);
-	let start: { y: number; id: number } | null = null;
+	let start: { drag: SheetDrag; id: number } | null = null;
 	let returnFocus: HTMLElement | null = null;
 
 	// Focus moves into the sheet when it opens and back to the opener when it
@@ -55,30 +55,31 @@
 
 	function onPointerDown(e: PointerEvent) {
 		if (!phone || !e.isPrimary || e.button !== 0) return;
-		start = { y: e.clientY, id: e.pointerId };
+		start = { drag: startSheetDrag({ x: e.clientX, y: e.clientY, time: e.timeStamp }), id: e.pointerId };
 	}
 
 	function onPointerMove(e: PointerEvent) {
 		if (!start || e.pointerId !== start.id) return;
-		const dy = e.clientY - start.y;
+		// Only a downward pull drags the sheet; anything else is a tap or a
+		// scroll of its content.
+		const mode = moveSheetDrag(start.drag, { x: e.clientX, y: e.clientY, time: e.timeStamp });
+		if (mode === 'scroll') { start = null; return; }
+		if (mode !== 'drag') return;
 		if (!dragging) {
-			if (Math.abs(dy) < 8) return;
-			// Only a downward pull drags the sheet; anything else is a tap or a
-			// scroll of its content.
-			if (dy < 0) { start = null; return; }
 			dragging = true;
 			sheetRef?.setPointerCapture?.(e.pointerId);
 		}
 		e.preventDefault();
-		dragY = Math.max(0, dy);
+		dragY = start.drag.offset;
 	}
 
 	function onPointerEnd(e: PointerEvent) {
 		if (!start || e.pointerId !== start.id) return;
+		const drag = start.drag;
 		start = null;
 		if (!dragging) return;
 		dragging = false;
-		const dismiss = dragY > DISMISS_AT;
+		const dismiss = e.type !== 'pointercancel' && sheetDragDismisses(drag);
 		dragY = 0;
 		if (dismiss) onClose();
 		// The pointerup that ends a drag must not also click a pill under it.
