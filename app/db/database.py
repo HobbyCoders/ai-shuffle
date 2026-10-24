@@ -2148,6 +2148,7 @@ def _run_column_migrations(cursor: Any) -> None:
                 interrupt_mode TEXT,
                 stop_background BOOLEAN NOT NULL DEFAULT FALSE,
                 position DOUBLE PRECISION,
+                insert_order BIGINT NOT NULL DEFAULT 0,
                 instance_id TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 started_at TIMESTAMP WITH TIME ZONE,
@@ -2164,6 +2165,16 @@ def _run_column_migrations(cursor: Any) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
     )
+
+    # Immutable insertion order is separate from queue position (front-inserts
+    # deliberately lower position). The source fingerprint runs this additive
+    # migration on existing installs; no SCHEMA_VERSION bump is required.
+    if not column_exists(cursor, "turns", "insert_order"):
+        cursor.execute("ALTER TABLE turns ADD COLUMN insert_order BIGINT NOT NULL DEFAULT 0")
+        migrations_applied.append("turns.insert_order")
+    # Do not rewrite history or build an index under ADD COLUMN's table lock.
+    # Existing session-prefixed indexes cover these reads. Allocation of legacy
+    # history is lazy, scoped to one session's admission lock (turns.py).
 
     # Latest generated composer hint; retained even with no watching browser.
     cursor.execute("""

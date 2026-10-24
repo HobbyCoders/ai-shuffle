@@ -2019,6 +2019,7 @@ def create_postgres_schema(cursor: Any) -> None:
             interrupt_mode TEXT,
             stop_background BOOLEAN NOT NULL DEFAULT FALSE,
             position DOUBLE PRECISION,
+            insert_order BIGINT NOT NULL DEFAULT 0,
             instance_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             started_at TIMESTAMP WITH TIME ZONE,
@@ -2037,6 +2038,9 @@ def create_postgres_schema(cursor: Any) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_position ON turns(session_id, position DESC)"
     )
+
+    # The existing session-prefixed indexes also cover insertion-order reads.
+    # No history rewrite or new writer-blocking index build belongs in bootstrap.
 
     # Latest generated composer hint; retained even with no watching browser.
     cursor.execute("""
