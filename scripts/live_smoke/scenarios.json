@@ -259,6 +259,15 @@
           "how": "In Settings > Voice pick GPT-Live-1.1 · ChatGPT subscription with a connected ChatGPT login, choose a non-default voice (for example Juniper), set opening words and a -55 dBFS microphone gate, then start a call in a throwaway chat and listen. Hang up, switch to GPT Live 1 and confirm the voice becomes Marin; call again. Repeat the switch with Grok Voice and with Grok voice (SuperGrok subscription) when those providers exist. Check whether GPT-Live-1.1 is listed for the OpenAI API key (it stays hidden while OpenAI's models lookup answers 404). Archive the throwaway chats.",
           "pass_when": "Each call speaks in the voice Settings shows and greets with the saved opening words; GET /voice/sessions/{id}/config reports the chosen engine, voice and provider; GPT-Live-1.1 is listed only when GET https://api.openai.com/v1/models/gpt-live-1.1 succeeds for that key, and no Settings or error text calls subscription voice unofficial or unsupported.",
           "past_bug": "ChatGPT subscription voice offered only Cove although the subscription has 25 voices; an engine switch could keep the previous engine's provider pin."
+        },
+        {
+          "id": "two-worker-smoke.25",
+          "check": "Long hand-off reports committed import row counts",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Move a throwaway long chat (thousands of transcript events, including large tool results) to the other worker with HandOffSession. While it sends, inspect GET /api/v1/sessions/{id}/handoff on the source. Capture pending.progress across multiple polls in an install_history table step; archive the throwaway chat afterwards.",
+          "pass_when": "The progress has rows_completed and rows_total for the current import table; counts advance in committed chunks without exceeding the total. A new step clears the previous table's counts. Ownership and the complete transcript appear only after successful publication; a failed import does not replace the old mirror. Row counts are API evidence, not a claim that the current frontend renders them.",
+          "past_bug": "#295: importing a long chat spent minutes in install_history with no row-count progress, making the move look stuck."
         }
       ]
     },
