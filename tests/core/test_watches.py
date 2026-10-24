@@ -36,6 +36,9 @@ def owner(monkeypatch: MonkeyPatch) -> Iterator[Any]:
         is_active=True,
         target_instance_id=settings.effective_instance_id,
     )
+    # Source/delivery tests explicitly choose their local executor on every OS.
+    # Default-placement behavior has separate two-worker coverage.
+    database.set_system_setting("watch_preferred_worker", settings.effective_instance_id)
     turn_manager.register_kick(None)
     yield session
     turn_manager.register_kick(None)

@@ -22,6 +22,7 @@ from tests.pg_shim import ShimConnection
 def network(
     owner: dict[str, Any], test_db: sqlite3.Connection, monkeypatch: MonkeyPatch
 ) -> Iterator[Any]:
+    database.delete_system_setting(placement.PREFERENCE)
     remote = sqlite3.connect(":memory:", check_same_thread=False)
     remote.row_factory = sqlite3.Row
     test_db.backup(remote)
