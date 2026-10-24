@@ -85,6 +85,50 @@ def test_online_migration_and_restart_safe_import() -> None:
         cur.execute("DELETE FROM sessions WHERE id='history-index-test'")
 
 
+def test_state_only_event_promotion_keeps_projection_in_its_own_queue() -> None:
+    session_recall.install_triggers()
+    with base.get_db() as conn:
+        assert session_recall.install_objects(conn.cursor())
+    finish_migration()
+    sid = "history-state-only"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "session_events"):
+            cur.execute("INSERT INTO session_events(id,session_id,seq,event_type,payload) "
+                        "VALUES (%s,%s,1,'message.user',%s)",
+                        (sid, sid, Json({"content": "stateonlyneedle"})))
+        cur.execute("SELECT ctid::text AS tid FROM session_recall_text WHERE session_id=%s",
+                    (sid,))
+        before = cur.fetchone()["tid"]
+    try:
+        assert hi.promote_batch(rows=1) == 1
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT ctid::text AS tid, history_index_state AS state "
+                        "FROM session_recall_text WHERE session_id=%s", (sid,))
+            assert cur.fetchone() == {"tid": before, "state": 1}
+        # Simulate a restart between source and projection promotion. The source
+        # is indexed, but the independently persisted text queue is still pending.
+        base.close_pool()
+        base.init_pool(min_conn=1, max_conn=6)
+        assert hi.promote_batch() == 1
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT history_index_state AS state FROM session_recall_text "
+                        "WHERE session_id=%s", (sid,))
+            assert cur.fetchone()["state"] == 2
+            # A live no-op edit must NOT take the state-only maintenance shortcut.
+            with hi.importing(cur, "session_events"):
+                cur.execute("UPDATE session_events SET payload=payload WHERE id=%s", (sid,))
+            cur.execute("UPDATE session_events SET payload=payload WHERE id=%s", (sid,))
+            cur.execute("SELECT history_index_state AS state FROM session_recall_text "
+                        "WHERE session_id=%s", (sid,))
+            assert cur.fetchone()["state"] == 0
+    finally:
+        with base.get_db() as conn:
+            conn.cursor().execute("DELETE FROM session_events WHERE session_id=%s", (sid,))
+
+
 def test_import_rollback_and_live_setting_isolation() -> None:
     finish_migration()
     with pytest.raises(RuntimeError, match="rollback"):
@@ -207,7 +251,7 @@ def test_catchup_yields_before_migration_and_between_batches(
 ) -> None:
     calls: list[int] = []
 
-    def promote() -> int:
+    def promote(**kwargs: Any) -> int:
         calls.append(1)
         return 1
 

@@ -76,3 +76,51 @@ def test_cli_requests_restart_safe_worker_local_migration(
         assert not hi.enabled(cur)
     monkeypatch.setattr(hi, "migrate", lambda: False)
     assert not hi.run_pass()
+
+
+@pytest.mark.parametrize("budget", ["rows", "bytes", "time", "foreground"])
+def test_promotion_budget_is_global_and_yields_between_rows(
+    monkeypatch: pytest.MonkeyPatch, budget: str,
+) -> None:
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+
+    updates: list[str] = []
+
+    class Cursor:
+        def execute(self, sql: str, args: Any = None) -> None:
+            if sql.startswith("UPDATE"):
+                updates.append(sql)
+
+        def fetchall(self) -> list[dict[str, int]]:
+            return [{"id": 1, "bytes": 10}, {"id": 2, "bytes": 10}]
+
+    class Connection:
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    @contextmanager
+    def database() -> Iterator[Connection]:
+        yield Connection()
+
+    monkeypatch.setattr(hi, "get_db", database)
+    monkeypatch.setattr(hi, "enabled", lambda _: True)
+    monkeypatch.setattr(hi, "TABLES", {"first": ("id", "body"), "second": ("id", "body")})
+    monkeypatch.setattr(hi.time, "monotonic", lambda: float(len(updates)))
+    count = hi.promote_batch(
+        rows=2 if budget == "rows" else 8,
+        byte_budget=10 if budget == "bytes" else 128_000,
+        seconds=1 if budget == "time" else 100,
+        can_work=lambda: budget != "foreground" or not updates,
+    )
+    assert count == (2 if budget == "rows" else 1)
+    assert len(updates) == count
+    assert all("UPDATE first " in sql for sql in updates)
+
+
+def test_no_promotion_opens_database_during_active_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden_database() -> Any:
+        pytest.fail("promotion borrowed a connection while foreground work was active")
+
+    monkeypatch.setattr(hi, "get_db", forbidden_database)
+    assert hi.promote_batch(can_work=lambda: False) == 0
