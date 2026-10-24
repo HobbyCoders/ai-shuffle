@@ -805,11 +805,11 @@
 	.lane.l { justify-content: flex-start; }
 	.lane.r { justify-content: flex-end; }
 	.lane.toggle {
-		background: color-mix(in oklch, var(--primary) 28%, var(--sidebar));
+		background: color-mix(in oklab, var(--primary) 28%, var(--sidebar));
 		color: var(--primary);
 	}
 	.lane.archive {
-		background: color-mix(in oklch, var(--info) 22%, var(--sidebar));
+		background: color-mix(in oklab, var(--info) 22%, var(--sidebar));
 		color: var(--info);
 	}
 	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
@@ -861,7 +861,7 @@
 		transform: scale(0.985);
 	}
 	.scard-frame.selected .scard,
-	.scard-frame.selected:hover .scard { background: color-mix(in oklch, var(--primary) 9%, var(--sidebar)); }
+	.scard-frame.selected:hover .scard { background: color-mix(in oklab, var(--primary) 9%, var(--sidebar)); }
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 	/* Selection checkmark, in the lead glyph's column. */

@@ -78,7 +78,8 @@ export const MOVED_MODEL_ITEMS: Readonly<Record<string, string>> = {
 /** A target whose anchor moved, rewritten to where that row lives now. */
 export function redirectTarget(target: SettingsTarget): SettingsTarget {
 	const item = target.category === 'models' && target.item ? MOVED_MODEL_ITEMS[target.item] : undefined;
-	if (item) return { category: 'models', item };
+	// Transform tools are pinned from the catalog's fal.ai tab.
+	if (item) return { category: 'models', item, ...(item === 'catalog' ? { tab: 'fal' } : {}) };
 	const moved = target.anchor ? MOVED_ANCHORS[target.anchor] : undefined;
 	if (!moved) return target;
 	const open = target.open && MOVED_ANCHORS[target.open]?.anchor;

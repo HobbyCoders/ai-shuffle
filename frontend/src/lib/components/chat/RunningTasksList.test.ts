@@ -62,6 +62,8 @@ vi.mock('$lib/stores/swarms', () => ({
 }));
 vi.mock('$lib/stores/usage-target', () => ({ usageTargetDeviceName: mocks.deviceName }));
 vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask }));
+// No watches here (RunningTasksList.watches.test.ts covers them).
+vi.mock('$lib/api/watches', () => ({ listWatches: vi.fn(async () => []), setWatchStatus: vi.fn() }));
 vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.notifyError } }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession, openSessionLink: vi.fn() }));
 vi.mock('$lib/utils/platform', () => ({ buildShell: () => (mocks.mobile ? 'mobile' : 'desktop') }));

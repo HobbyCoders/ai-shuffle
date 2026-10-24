@@ -3,6 +3,9 @@
 After building this checkout's frontend: ``python -m app.preview stamp``.
 On Linux, ``python -m app.preview run --port 18080`` owns an isolated app and
 throwaway PostgreSQL under a parent/TTL lease, without inheriting credentials.
+For a browser on another host, add ``--host 0.0.0.0 --browser-host <worker-IP>``
+and open the printed preview-access link once. The named port requires its
+preview token; owner/protected listeners remain on separate loopback ports.
 Raw AI_SHUFFLE_PREVIEW=1 remains caller-managed: use only an isolated instance,
 never start a second worker against an existing instance's data directory.
 """

@@ -165,15 +165,21 @@ async def test_code_mode_bridge_reports_allowed_calls_only() -> None:
 # ─── the delegated leg's bundled bridge ─────────────────────────────────────
 
 
-async def test_bundled_bridge_reports_calls_the_cli_sends_through() -> None:
+@pytest.mark.parametrize("ctx_extra", [{}, {"agent_id": None}, {"agent_id": "cli-agent-559"}])
+async def test_bundled_bridge_reports_calls_the_cli_sends_through(
+    ctx_extra: dict[str, str | None],
+) -> None:
     bus, registry, seen, ran = _recording_bus(hook=HookDecision(permission_decision="allow"))
-    ctx = ToolCtx(session_id="ses_dl")
+    ctx = ToolCtx(session_id="ses_dl", extra=ctx_extra)
     call = {"op": "call", "name": TOOL, "arguments": {"n": 3}}
     answered = await _answer(
         registry, ctx, call, permissions=PermissionEngine("always_ask"), hooks=bus,
     )
     assert answered["is_error"] is False
-    assert seen == [{"session_id": "ses_dl", "name": TOOL, "input": {"n": 3}, "tool_use_id": None}]
+    expected = {"session_id": "ses_dl", "name": TOOL, "input": {"n": 3}, "tool_use_id": None}
+    if ctx_extra.get("agent_id") is not None:
+        expected["agent_id"] = ctx_extra["agent_id"]
+    assert seen == [expected]
     assert ran == [1]
 
     # Without the hook's allow the bridge cannot prompt: denied, unreported.

@@ -162,8 +162,8 @@
 	.voice-dock-wrapper.compact { padding: 4px 0 8px; }
 	.voice-ring { position: relative; width: 148px; height: 144px; isolation: isolate; }
 	.ring-track, .ring-halo { position: absolute; inset: 5px 14px 19px; border-radius: 50%; pointer-events: none; }
-	.ring-track { border: 1px solid var(--border); background: radial-gradient(circle, color-mix(in oklch, var(--primary) 9%, var(--background)), var(--background) 72%); }
-	.live .ring-track { border-color: color-mix(in oklch, var(--primary) 42%, var(--border)); }
+	.ring-track { border: 1px solid var(--border); background: radial-gradient(circle, color-mix(in oklab, var(--primary) 9%, var(--background)), var(--background) 72%); }
+	.live .ring-track { border-color: color-mix(in oklab, var(--primary) 42%, var(--border)); }
 	.ring-halo { border: 2px solid transparent; opacity: 0; transition: opacity 160ms, transform 100ms; }
 	.speaking .ring-halo { opacity: .8; border-color: var(--primary); box-shadow: 0 0 18px color-mix(in oklch, var(--primary) 22%, transparent); animation: breathe 1.5s ease-in-out infinite; }
 	.hearing:not(.speaking) .ring-halo { opacity: .35; border-color: var(--primary); transform: scale(calc(1 + (var(--mic-scale) - 1) * .2)); }
@@ -177,10 +177,10 @@
 	.vp-btn { position: absolute; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--border); border-radius: 50%; background: var(--background); color: var(--foreground); cursor: pointer; box-shadow: 0 2px 8px #00000012; }
 	.vp-btn.mic { left: 1px; bottom: 19px; }
 	.vp-btn.audio { right: 1px; bottom: 19px; }
-	.vp-btn.danger { left: 52px; bottom: 0; color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, var(--background)); border-color: color-mix(in oklch, var(--destructive) 32%, var(--border)); }
+	.vp-btn.danger { left: 52px; bottom: 0; color: var(--destructive); background: color-mix(in oklab, var(--destructive) 10%, var(--background)); border-color: color-mix(in oklab, var(--destructive) 32%, var(--border)); }
 	.vp-btn:hover { background: var(--muted); border-color: var(--primary); }
 	.vp-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
-	.vp-btn.active { color: var(--warning, #d97706); background: color-mix(in oklch, var(--warning, #d97706) 12%, var(--background)); }
+	.vp-btn.active { color: var(--warning, #d97706); background: color-mix(in oklab, var(--warning, #d97706) 12%, var(--background)); }
 	.vp-status, .vp-working { margin: 0; font-size: 11px; line-height: 1.4; color: var(--muted-foreground); }
 	.vp-status.speaking { color: var(--primary); }
 	.vp-status.mic-problem { color: var(--warning); }

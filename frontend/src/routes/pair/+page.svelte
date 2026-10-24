@@ -137,7 +137,7 @@
 
 <style>
 	.pair-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 0%, color-mix(in oklch, var(--primary) 13%, transparent), transparent 42%), var(--background); color: var(--foreground); }
-	.pair-card { width: min(100%, 430px); padding: 34px; border: 1px solid var(--border); border-radius: 20px; background: color-mix(in oklch, var(--background) 96%, var(--primary)); box-shadow: 0 24px 70px rgba(0,0,0,.18); }
+	.pair-card { width: min(100%, 430px); padding: 34px; border: 1px solid var(--border); border-radius: 20px; background: color-mix(in oklab, var(--background) 96%, var(--primary)); box-shadow: 0 24px 70px rgba(0,0,0,.18); }
 	.mark { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 14px; color: var(--primary-foreground); background: var(--primary); margin-bottom: 22px; }
 	.eyebrow { margin: 0 0 5px; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--primary); }
 	h1 { margin: 0; font-family: var(--font-serif, serif); font-size: 31px; line-height: 1.08; }

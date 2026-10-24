@@ -258,6 +258,29 @@ rebuilds and refills it. A term matching more than a couple of thousand pieces
 is read newest-first, so a very common word ranks recent sessions rather than
 scanning the whole history.
 
+Experimental deferred indexing is off by default pending latency acceptance.
+`python -m app.maintenance.history_indexing --apply` requests the online upgrade
+on a disposable candidate; its worker-local migration stamp resumes interrupted
+work after restart. No migration or deferral runs without that explicit opt-in.
+Hand-off imports defer search indexing after the online migration has replaced
+transcript and recall GIN indexes with disjoint live/history partial indexes.
+Existing rows remain live-indexed; adding the state columns is metadata-only.
+Indexes are built and retired concurrently, with a 250 ms lock-acquisition limit.
+Before the migration completes, imports use the original synchronous path.
+Imported rows persist as pending (`history_index_state = 1`); background batches
+promote them to state 2, while ordinary writes use state 0. Search prefilters use
+UNION ALL over states 0 and 2 so each arm can use its partial GIN index. Imported
+text may be absent from search until catch-up, but transcript viewing is unchanged.
+The queue survives restarts. History GIN indexes have separate pending lists,
+limited to 1 MiB per index. Live inserts and edits always enter state 0, so they
+cannot inherit a history pending-list flush. Live GIN settings are unchanged.
+Batches select at most eight
+rows and 128 KB per table (one oversize row may progress), with pauses and short
+transactions. Startup checks for active foreground runs before migration and
+between catch-up batches, yielding while turns are running. An index build
+already in progress still finishes concurrently. No global GIN pending-list
+limit is increased.
+
 The table takes roughly the size of the searchable text once more, plus its
 trigram index; text from mirrored sessions (event rows) is kept twice, as
 pieces and as the original text the search folds. An app version from before

@@ -125,6 +125,8 @@ _PUT_SIGNATURE = "session_recall_put(text, text, text, double precision, text, b
 _FUNCTIONS = (
     "recall_node_text(jsonb)", "recall_entry_text(jsonb)", "recall_event_raw(text, jsonb)",
     "recall_pieces(text)", _PUT_SIGNATURE,
+    "session_recall_background_put(text,text,text,double precision,text,"
+    "bigint,text,text,text,integer)",
     "session_recall_nodes_sync()", "session_recall_entries_sync()", "session_recall_events_sync()",
 )
 
@@ -300,6 +302,21 @@ _DDL = [
     END
     $fn$
     """,
+    f"""
+    CREATE OR REPLACE FUNCTION session_recall_background_put(
+        src text, sid text, rkey text, rts double precision, body text,
+        eseq bigint, etype text, eraw text, estamp text, history_state integer) RETURNS void
+    LANGUAGE plpgsql AS $fn$
+    DECLARE previous text;
+    BEGIN
+        previous := COALESCE(current_setting('aishuffle.history_index_state', true), '0');
+        PERFORM set_config('aishuffle.history_index_state', history_state::text, true);
+        PERFORM {_S}session_recall_put(src, sid, rkey, rts, body, eseq, etype,
+                                     eraw, estamp, {INDEX_MAX_CHARS});
+        PERFORM set_config('aishuffle.history_index_state', previous, true);
+    END
+    $fn$
+    """,
 ]
 
 
@@ -418,11 +435,20 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
         if present and _table_tag(cursor) != _TABLE_TAG:
             cursor.execute(f"DROP TABLE {TABLE}")
             present = False
-        intact = present and not _missing_functions(cursor)
+        missing = _missing_functions(cursor)
+        # Adding the background state wrapper does not change extracted text;
+        # install it without replaying every existing transcript.
+        intact = present and not [f for f in missing if not f.startswith(
+            "session_recall_background_put(")]
         cursor.execute("SELECT quote_ident(current_schema()) AS s")
         schema = cursor.fetchone()["s"]
         if not schema or "'" in schema:
             raise ValueError("no usable current schema")
+        if not present:
+            # Preserve existing opt-in so automatic maintenance rebuilds the
+            # indexes and resumes pending imports. Never opt in a new worker.
+            cursor.execute("UPDATE system_settings SET value = 'building' WHERE key = %s",
+                           ("migration:history_indexing_v1",))
         for statement in _DDL if present else [*_TABLE_DDL, *_DDL]:
             cursor.execute(statement.replace(_S, f"{schema}."))
         if not intact:
@@ -548,12 +574,14 @@ _ARGS = {
 _ARG_NAMES = ("sid", "rkey", "rts", "t", "eseq", "etype", "eraw", "estamp")
 
 
-def _rows(source: str, where: str, tail: str = "") -> str:
+def _rows(source: str, where: str, tail: str = "", *, history: bool = False) -> str:
     """The share-locked rows matching ``where`` (plus ``tail``: ORDER BY,
     LIMIT), with their key columns and session_recall_put's arguments. The
     text is extracted only from the rows returned."""
     keys = ", ".join(f"x.{c}" for c in _KEY_COLUMNS[source])
-    return (f"SELECT {keys}, {_ARGS[source]} FROM (SELECT * FROM {_SOURCE_TABLE[source]} "
+    state = "x.history_index_state" if history else "0"
+    return (f"SELECT {keys}, {_ARGS[source]}, {state} AS history_state "
+            f"FROM (SELECT * FROM {_SOURCE_TABLE[source]} "
             f"WHERE {where} AND {_COPY_FILTER[source]} {tail} FOR SHARE NOWAIT) x")
 
 
@@ -567,8 +595,8 @@ _START_KEY = {NATIVE: ["", ""], ENTRY: [0], EVENT: ["", -1]}
 
 
 def _put(source: str) -> str:
-    return (f"session_recall_put('{source}', b.sid, b.rkey, b.rts, b.t, b.eseq, b.etype, b.eraw, b.estamp, "
-            f"{INDEX_MAX_CHARS})")
+    return (f"session_recall_background_put('{source}', b.sid, b.rkey, b.rts, b.t, "
+            "b.eseq, b.etype, b.eraw, b.estamp, b.history_state::integer)")
 
 
 def _row(columns) -> str:
@@ -626,14 +654,16 @@ def backfill_step(cursor, source: str, batch: int | None = None, max_bytes: int 
     # each row once, and stops after the first row that brings its text to the
     # character budget; the rows walked are then cut up from what was
     # extracted. Rows past the stop are neither read nor locked.
+    from app.db.base import column_exists
+    history = column_exists(cursor, _SOURCE_TABLE[source], "history_index_state")
     weight = f"LEAST(COALESCE(length(n.t), 0), {INDEX_MAX_CHARS})"
 
     def next_row(after: str) -> str:
         return _rows(source, f"{_row(columns)} > {after} AND {_row(columns)} <= {_params(new_key)}",
-                     f"ORDER BY {order} LIMIT 1")
+                     f"ORDER BY {order} LIMIT 1", history=history)
 
     cursor.execute(
-        f"WITH RECURSIVE c({order}, {', '.join(_ARG_NAMES)}, total) AS ("
+        f"WITH RECURSIVE c({order}, {', '.join(_ARG_NAMES)}, history_state, total) AS ("
         f"SELECT n.*, {weight} FROM ({next_row(_params(key))}) n "
         f"UNION ALL SELECT n.*, c.total + {weight} FROM c CROSS JOIN LATERAL ("
         f"{next_row(_row([f'c.{col}' for col in columns]))}"
@@ -673,8 +703,10 @@ def promote_overflow(*, max_seconds: float = 10.0, pause_seconds: float = 0.1) -
                     break
                 source, sid, key = todo[0]
                 where, params = _ROW_MATCH[source]
-                cur.execute(f"SELECT COUNT({_put(source)}) AS n FROM ({_rows(source, where)}) b",
-                            params(sid, key))
+                from app.db.base import column_exists
+                history = column_exists(cur, _SOURCE_TABLE[source], "history_index_state")
+                sql = _rows(source, where, history=history)
+                cur.execute(f"SELECT COUNT({_put(source)}) AS n FROM ({sql}) b", params(sid, key))
                 if not cur.fetchone()["n"]:
                     # Its row is gone or no longer scored: the marker is stale.
                     cur.execute(f"DELETE FROM {TABLE} WHERE source = %s AND session_id = %s AND row_key = %s",

@@ -9,6 +9,7 @@ so patch there — the lazy-import-mock-freeze rule).
 
 import asyncio
 import threading
+from collections.abc import AsyncIterator
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1747,7 +1748,10 @@ async def test_interrupt_escalation_evict_cancels_wedged_pump(mock_db):
     assert not session_runtime.get_reader_lock("s8").locked()
 
 
-async def test_interrupt_escalation_keep_drains_without_deadlock(mock_db):
+@pytest.mark.parametrize("startup_delay", [0, 1.1], ids=["normal-start", "slow-start"])
+async def test_interrupt_escalation_keep_drains_without_deadlock(
+    mock_db: object, startup_delay: float,
+) -> None:
     """Escalation-keep (the review blocker): the wedged pump holds the reader
     token; interrupt() must cancel it so the drain reader — started by
     execute() under the still-live lease — can acquire the token and settle
@@ -1756,7 +1760,7 @@ async def test_interrupt_escalation_keep_drains_without_deadlock(mock_db):
     pump_entered = asyncio.Event()
     drain_calls = []
 
-    async def _fake_drain(session_id, *, drain_turn_id=None):
+    async def _fake_drain(session_id: str, *, drain_turn_id: str | None = None) -> None:
         # Stands in for idle_reader.run_idle_reader: acquire the reader token
         # (proving the wedged pump released it), then settle like _settle_drained.
         async with session_runtime.get_reader_lock(session_id):
@@ -1765,15 +1769,23 @@ async def test_interrupt_escalation_keep_drains_without_deadlock(mock_db):
             if settled is not None:
                 await session_runtime._fire_on_turn_settled(session_id, drain_turn_id, "aborted")
 
+    async def slow_start_pump(**kwargs: object) -> AsyncIterator[dict[str, object]]:
+        await asyncio.sleep(startup_delay)
+        async for event in _wedged_pump(pump_entered)(**kwargs):
+            yield event
+
     with _runtime_env(
-        pump=_wedged_pump(pump_entered),
+        pump=slow_start_pump,
         bg_work=[{"id": "bg-1"}],  # live background work → the keep branch
         patch_idle=False,          # real start_idle_reader, fake drain body
     ) as env, _interrupt_env(evict=False), \
             patch("app.core.idle_reader.run_idle_reader", new=_fake_drain):
         rt = session_runtime.SessionRuntime(turn)
         exec_task = asyncio.create_task(rt.execute())
-        await asyncio.wait_for(pump_entered.wait(), 1.0)
+        # CI #609 expired here, before interrupt/escalation even started.
+        # Startup does real threaded DB work; await pump entry with I/O slack.
+        # Keep the separate 2s interrupt/drain deadlock guards unchanged.
+        await asyncio.wait_for(pump_entered.wait(), 10.0)
         assert turns_db.interrupt_turn("s9", "stop") is not None
 
         state = await asyncio.wait_for(rt.interrupt(escalation_timeout=0.05), 2.0)

@@ -109,6 +109,19 @@ These should be defined using `color-mix()` from core variables:
 --status-info-bg: color-mix(in oklch, var(--info) 15%, transparent);
 ```
 
+Mixing against `transparent` (or `white`/`black`) is fine in `oklch`. An
+opaque tint, a status colour mixed with a theme neutral such as `--card`,
+`--background` or `--border`, must mix in `oklab`:
+
+```css
+background: color-mix(in oklab, var(--warning) 9%, var(--card));
+```
+
+The neutrals have an explicit hue at near-zero chroma (`oklch(1 0 0)` is hue 0),
+and an `oklch` mix drags the tint's hue towards it, so a green or amber tint
+turns pink in the light theme. `src/lib/themes/status-tints.test.ts` fails on
+that pattern.
+
 ---
 
 ## Color Roles & Usage

@@ -693,7 +693,7 @@
 
 	.always-option.selected {
 		border-color: var(--selection-ring);
-		background: color-mix(in oklch, var(--selection) 8%, var(--card));
+		background: color-mix(in oklab, var(--selection) 8%, var(--card));
 		box-shadow: var(--selection-shadow-subtle);
 	}
 

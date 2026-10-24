@@ -109,6 +109,14 @@ class SlackConnector(BaseConnector):
     _SDK_AVAILABLE = SLACK_SDK_AVAILABLE
     _SDK_NAME = "slack_sdk"
 
+    async def poll_watch(
+        self, source: dict[str, Any], cursor: dict[str, Any]
+    ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+        from app.core.connectors.watch_history import poll
+
+        return await poll(self.connector_type, self, source, cursor)
+
+
     async def _do_connect(self) -> None:
         """Start the Slack Socket Mode client."""
         bot_token = self.config["bot_token"]

@@ -7,7 +7,14 @@
  * this store mirrors them and refreshes when another device changes them.
  */
 import { api } from '$lib/api/client';
-import type { GenerationChoice, GenerationKind, GenerationOption, GenerationPrice } from '$lib/utils/generation-choice';
+import type {
+	CatalogEntry,
+	GenerationChoice,
+	GenerationKind,
+	GenerationOption,
+	GenerationPrice,
+	SaveQuote
+} from '$lib/utils/generation-choice';
 
 export const GENERATION_KINDS: readonly GenerationKind[] = ['image', 'video', 'audio', '3d'];
 
@@ -16,6 +23,22 @@ interface ChoicesResponse {
 	last: Partial<Record<GenerationKind, GenerationChoice>>;
 	migrated: boolean;
 	worker: string;
+}
+
+interface CatalogResponse {
+	entries: CatalogEntry[];
+	favourites: Partial<Record<GenerationKind, GenerationChoice>>;
+	kinds: GenerationKind[];
+	limit: number;
+}
+
+export type { SaveQuote, UnattendedSkipReason } from '$lib/utils/generation-choice';
+
+/** `PUT /generation/choices/{kind}`: the stored pick plus the save-time quote. */
+export interface SavedChoice extends SaveQuote {
+	kind: GenerationKind;
+	choice: GenerationChoice;
+	remembered: boolean;
 }
 
 export interface Quote {
@@ -29,6 +52,8 @@ export interface Quote {
 class GenerationChoices {
 	remembered = $state<Partial<Record<GenerationKind, GenerationChoice>>>({});
 	last = $state<Partial<Record<GenerationKind, GenerationChoice>>>({});
+	/** Catalog bookmarks (`generation.favourite.<kind>`); they never run anything. */
+	favourites = $state<Partial<Record<GenerationKind, GenerationChoice>>>({});
 	/** This worker's device id: picks made in Settings run here. */
 	worker = $state<string>('');
 	status = $state<'idle' | 'loading' | 'ok' | 'error'>('idle');
@@ -54,18 +79,22 @@ class GenerationChoices {
 		return this.#inflight;
 	}
 
-	/** Record a pick (always the last choice; remembered when `remember`). */
-	async save(kind: GenerationKind, choice: GenerationChoice, remember: boolean, origin: 'card' | 'settings' = 'card'): Promise<GenerationChoice> {
+	/**
+	 * Record a pick (always the last choice; remembered when `remember`). The
+	 * response carries the server's fresh quote and, when unattended runs will
+	 * skip the pick, why. It never submits or approves anything.
+	 */
+	async save(kind: GenerationKind, choice: GenerationChoice, remember: boolean, origin: 'card' | 'settings' = 'card'): Promise<SavedChoice> {
 		const { origin: _drop, ...body } = choice;
 		void _drop;
-		const response = await api.put<{ choice: GenerationChoice }>(`/generation/choices/${encodeURIComponent(kind)}`, {
+		const response = await api.put<SavedChoice>(`/generation/choices/${encodeURIComponent(kind)}`, {
 			choice: body,
 			remember,
 			origin
 		});
 		this.last = { ...this.last, [kind]: response.choice };
 		if (remember) this.remembered = { ...this.remembered, [kind]: response.choice };
-		return response.choice;
+		return response;
 	}
 
 	/** Ask again next time for this kind. */
@@ -81,6 +110,44 @@ class GenerationChoices {
 		const { origin: _drop, ...body } = choice;
 		void _drop;
 		return api.post<Quote>('/generation/quote', { kind, choice: body, prompt: prompt || undefined });
+	}
+
+	/**
+	 * Every connected account on every worker for one kind, including routes
+	 * that cannot run (with the reason), plus the saved favourites. Prices are
+	 * live estimates for default options; nothing is reserved or submitted.
+	 */
+	async catalog(kind: GenerationKind, query?: string, limit = 15): Promise<CatalogEntry[]> {
+		const params = new URLSearchParams({ kind, limit: String(limit) });
+		if (query?.trim()) params.set('query', query.trim());
+		const data = await api.get<CatalogResponse>(`/generation/catalog?${params}`);
+		this.favourites = data.favourites ?? {};
+		return (data.entries ?? []).map((e) => ({
+			...e,
+			kind: e.kind ?? kind,
+			options: e.options ?? {},
+			available: e.available !== false,
+			status: e.status ?? (e.available === false ? 'unavailable' : 'available')
+		}));
+	}
+
+	/** Bookmark one account/model per kind. Never a remembered or job choice. */
+	async setFavourite(kind: GenerationKind, choice: GenerationChoice): Promise<GenerationChoice | null> {
+		const { origin: _drop, ...body } = choice;
+		void _drop;
+		const response = await api.put<{ favourite: GenerationChoice | null }>(`/generation/favourites/${encodeURIComponent(kind)}`, body);
+		const next = { ...this.favourites };
+		if (response.favourite) next[kind] = response.favourite;
+		else delete next[kind];
+		this.favourites = next;
+		return response.favourite;
+	}
+
+	async clearFavourite(kind: GenerationKind): Promise<void> {
+		await api.delete(`/generation/favourites/${encodeURIComponent(kind)}`);
+		const next = { ...this.favourites };
+		delete next[kind];
+		this.favourites = next;
 	}
 
 	/** Priced options across accounts, for picking from Settings. */

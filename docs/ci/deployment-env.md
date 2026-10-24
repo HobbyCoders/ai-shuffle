@@ -229,6 +229,7 @@ host semantics and do not imply a credential import.
 | `SHUFFLE_DESKTOP_WORKER_DIR` | Development-only assembled worker bundle root |
 | `SHUFFLE_LOCAL_ACCESS` | Allow owner access from the configured local transport |
 | `SHUFFLE_LOCAL_HOSTNAMES` | Hostnames accepted by local-owner access policy |
+| `SHUFFLE_PREVIEW_HOST` | Bind address of the token-only preview listener; defaults to the local listener address, independent of owner/protected binds |
 | `SHUFFLE_PREVIEW_PORT` | Port for isolated branch preview (also used by desktop preview tooling) |
 | `SHUFFLE_PREVIEW_PROTECTED_PORT` | Private listener port of the isolated desktop preview |
 | `SHUFFLE_PREVIEW_PYTHON` | Select development-preview interpreter |

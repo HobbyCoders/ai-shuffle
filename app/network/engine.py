@@ -624,8 +624,10 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
                                 ("openai_admin_key", "openai_billing_instance_id")))
 
 
-def materialize(cursor, coll: policy.Collection, record_id: str, record: Optional[Mapping[str, Any]],
-                *, origin_device_id: Optional[str] = None) -> Optional[dict]:
+def materialize(
+    cursor: Any, coll: policy.Collection, record_id: str,
+    record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
 
     ``origin_device_id`` is the device that signed the record, when known.
@@ -783,6 +785,13 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             f"Built-in {retired_automation} was removed; choose an agent before re-enabling.", keys[0]))
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
+    if row and coll.name == "sessions":
+        from app.db.session_mode_migration import normalize_legacy_owner
+
+        # Old peers can arrive after the startup fingerprint is satisfied.
+        # Project only the local row, never the signed operation or its clock.
+        if normalize_legacy_owner(cursor, row):
+            row["mode"] = "chat"
     return dict(row) if row else None
 
 

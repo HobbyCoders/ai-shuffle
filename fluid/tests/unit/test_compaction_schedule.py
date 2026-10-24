@@ -507,7 +507,7 @@ async def test_unpark_cache_signal_uses_known_gap(tmp_path, monkeypatch, gap, re
             session_id=sid, node_id="wake", seq=1, source="unpark",
             model="m", provider="fake",
         ))
-        await loop._note_wake_turn_starts(sid)
+        await loop._note_wake_turn_starts(sid, [_node("wake", "user", [Text("wake")])])
         now += gap
         signal = loop._cache_signal(sid, overhead_tokens=0, turn_start="wake")
         assert signal.resumed and signal.gap_s == gap

@@ -192,11 +192,18 @@ Iterate on any failures reported by PR CI before merge. `fast` (affected tests),
 `check`, `full` and `--attest` stay available as explicit commands with their
 existing behavior; the push gate does not run or require them.
 
-For PR screenshots, commit images to `pr-assets` (or `pr-assets/*`) and push
-normally through the hook, from a code checkout containing the hook's scripts
-(for example, `git push origin pr-assets:pr-assets`). Every outgoing commit is
-secret-scanned like any other push. GitHub Contents API uploads are not
-allowed: they bypass the hook and its secret scan.
+Do not publish testing screenshots: none in PR descriptions or comments, none
+committed to the repository or a `pr-assets` branch, and none in gists or other
+public hosts. Describe the rendered check in text instead: what you opened,
+which states and widths you checked, and what you saw. Keep any captures in
+your own scratch space.
+
+This rule is about evidence for a review. Images the product, its docs or its
+tests use do belong in the repository, and a UI change should update them in
+the same PR: app and store icons, the README and docs images under
+`docs/images/`, and the visual-regression reference images in
+`frontend/tests/visual-baselines/` (see "Visual regression screenshots" in
+`docs/ci/pr-checks.md`).
 
 An explicit `check` or `full` run ends by listing what this machine could not
 cover (Windows when not on a Windows worker, Mac-only checks, the container
@@ -236,7 +243,20 @@ Include in your PR description:
 A PR whose description says it was "not tried on real workers" also adds a
 row to `scripts/live_smoke/scenarios.json` that would catch the bug on
 the real workers, so the pre-release live smoke covers it (see
-[live-smoke.md](live-smoke.md)).
+[live-smoke.md](live-smoke.md)). New rows use a stable named ID such as
+`harness-basics.pr521-merged-catalog`, never the next free number. Keep all
+existing numeric IDs unchanged. Insert rows in lexicographic ID order within
+their suite (including legacy numeric IDs, so `.10` sorts before `.2`) rather
+than appending; the catalog test enforces this to reduce parallel-edit conflicts.
+Regenerate `docs/internal/live-smoke-scenarios.md` with
+`python -m scripts.live_smoke render`, then run it with `--check`.
+
+CI Backend runs `render --check` on every pull request, including drafts, with
+`actions/checkout`'s default merge ref (`refs/pull/<number>/merge`). Thus two
+branches that pass independently but introduce duplicate IDs when combined fail
+on the merged catalog, not just on the branch head. The full backend suite also
+loads and validates that catalog. Resolve any generated-table conflicts by
+keeping both source rows and regenerating, never by renumbering existing IDs.
 
 ### 3. PR Template
 

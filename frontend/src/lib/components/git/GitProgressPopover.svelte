@@ -86,7 +86,7 @@
 	.git-progress { margin: 12px 14px; padding: 12px; border: 1px solid var(--border); border-radius: .625rem; background: color-mix(in oklch, var(--muted) 30%, transparent); }
 
 	.git-progress.error {
-		border-color: color-mix(in oklch, var(--destructive) 55%, var(--border));
+		border-color: color-mix(in oklab, var(--destructive) 55%, var(--border));
 	}
 
 	.gp-header {
