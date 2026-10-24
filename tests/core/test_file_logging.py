@@ -209,6 +209,17 @@ def test_freeze_dump_then_normal_boot_is_no_crash_report(fake_settings, tmp_path
     assert (log_dir / "fatal.log").stat().st_size == 0
     assert (log_dir / "freeze.log").stat().st_size > 0
 
+    # A new process has no handles from the previous boot. POSIX permits
+    # renaming an open file, but Windows correctly refuses that simulation.
+    file_logging.cancel_freeze_dump()
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.unregister(signal.SIGUSR1)
+    faulthandler.disable()
+    for stream in (file_logging._fatal_file, file_logging._freeze_file):
+        stream.close()
+    file_logging._fatal_file = file_logging._freeze_file = None
+    faulthandler.enable()  # keep crash diagnostics enabled, now on stderr
+
     # The next ordinary boot of the same install runs both boot checks.
     file_logging._pending_fatal_warning = None
     with caplog.at_level(logging.WARNING, logger=file_logging.logger.name):

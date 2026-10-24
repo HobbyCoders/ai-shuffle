@@ -23,6 +23,7 @@ import json
 import logging
 import time
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -539,10 +540,15 @@ async def test_user_forget_during_a_pass_does_not_strand_the_cursor(tmp_path) ->
                         project=PROJECT, min_new_entries=1)
     apply = synth._apply
 
-    async def apply_while_the_user_forgets(text, group):
+    async def apply_while_the_user_forgets(
+        text: str, group: list[dict[str, Any]], *,
+        workflow_entries: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
         # Another session's Forget lands while this pass applies its output.
+        # This ordinary cell pass must not receive retained workflow evidence.
+        assert workflow_entries == []
         store.delete_memory(fact.id, explicit=True)
-        return await apply(text, group)
+        return await apply(text, group, workflow_entries=workflow_entries)
 
     synth._apply = apply_while_the_user_forgets
     await synth.run()

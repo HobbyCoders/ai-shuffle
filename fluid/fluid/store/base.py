@@ -41,6 +41,26 @@ async def iter_events(store: SessionStore, session_id: str, seq: int) -> AsyncIt
             yield event
 
 
+async def iter_events_of_class(
+    store: SessionStore, session_id: str, seq: int, classes: tuple[type[Event], ...],
+) -> AsyncIterator[Event]:
+    """Ordered replay of selected classes, using store-side filtering if offered.
+
+    Older/in-memory stores retain the exact isinstance semantics. Durable
+    stores can avoid fetching and decoding unrelated (often large) payloads.
+    """
+    if not classes:
+        return
+    replay = getattr(store, "iter_events_of_class", None)
+    if callable(replay):
+        async for event in replay(session_id, seq, classes):
+            yield event
+    else:
+        async for event in iter_events(store, session_id, seq):
+            if isinstance(event, classes):
+                yield event
+
+
 def replay_source(store: SessionStore) -> Any:
     """The EventBus replay source for ``store``: one bounded page per call.
 

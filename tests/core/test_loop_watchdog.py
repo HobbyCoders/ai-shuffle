@@ -3,9 +3,11 @@
 import asyncio
 import json
 import logging
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -51,8 +53,115 @@ def _block_the_loop_for(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def _block_the_loop_for_dump(dumped: threading.Event, blocking: threading.Event) -> None:
+    # Keep the sleeping frame (including its source marker) stable for the dump.
+    deadline = time.monotonic() + 5
+    blocking.set()
+    while not dumped.is_set() and time.monotonic() < deadline: time.sleep(0.01)  # noqa: E701
+    assert dumped.is_set(), "watchdog did not finish the requested dump while the loop was blocked"
+
+
+async def _exercise_stall(
+    wd: LoopStallWatchdog,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dumps: int = 1,
+    checks_after_dump: int = 0,
+    records: list[logging.LogRecord] | None = None,
+    gate_boot: bool = False,
+) -> None:
+    """Real boot/pong -> blocked loop -> outstanding ping -> dump -> recovery."""
+    loop = asyncio.get_running_loop()
+    boot_entered = asyncio.Event()
+    boot_release = threading.Event()
+    warmed = asyncio.Event()
+    blocking = threading.Event()
+    ping_sent = threading.Event()
+    dumped = threading.Event()
+    requested_dump_finished = threading.Event()
+    additional_checks = 0
+    recovered = asyncio.Event()
+    boot, pong, send_ping, dump, check = (
+        wd._boot_heartbeat, wd._pong, wd._send_ping, wd._dump, wd._check,
+    )
+
+    def gated_boot() -> None:
+        loop.call_soon_threadsafe(boot_entered.set)
+        assert boot_release.wait(5), "loop did not release watchdog startup"
+        boot()
+
+    def observed_pong() -> None:
+        pong()
+        warmed.set()
+
+    def gated_ping(now: float) -> None:
+        after_warmup = warmed.is_set() and not ping_sent.is_set()
+        if after_warmup:
+            assert blocking.wait(5), "loop never entered the blocking frame"
+        # Do not age the ping by the time spent waiting at the test gate.
+        send_ping(time.monotonic())
+        if after_warmup:
+            with wd._lock:
+                assert wd._pending_since is not None, "blocked loop answered the ping"
+            ping_sent.set()
+
+    def observed_dump(age: float, *, first: bool) -> None:
+        dump(age, first=first)
+        if wd.dump_count == dumps:
+            # Both the durable write and normal logging have finished.
+            requested_dump_finished.set()
+            if checks_after_dump == 0:
+                dumped.set()
+
+    def observed_check(now: float) -> None:
+        nonlocal additional_checks
+        after_requested_dump = requested_dump_finished.is_set()
+        check(now)
+        # Do not count the check that produced the requested dump. Keep the
+        # same real ping unanswered through further production budget checks.
+        if after_requested_dump:
+            additional_checks += 1
+            if additional_checks >= checks_after_dump:
+                dumped.set()
+        if wd.last_stall_seconds is not None:
+            loop.call_soon_threadsafe(recovered.set)
+
+    if gate_boot:
+        monkeypatch.setattr(wd, "_boot_heartbeat", gated_boot)
+    monkeypatch.setattr(wd, "_pong", observed_pong)
+    monkeypatch.setattr(wd, "_send_ping", gated_ping)
+    monkeypatch.setattr(wd, "_dump", observed_dump)
+    monkeypatch.setattr(wd, "_check", observed_check)
+    wd.start()
+    try:
+        if gate_boot:
+            await asyncio.wait_for(boot_entered.wait(), timeout=5)
+            assert not warmed.is_set(), "startup gate must prevent the first ping"
+            boot_release.set()
+        await asyncio.wait_for(warmed.wait(), timeout=5)
+        assert wd.dump_count == 0
+        _block_the_loop_for_dump(dumped, blocking)
+        assert ping_sent.is_set(), "dump did not follow a real outstanding ping"
+        assert additional_checks >= checks_after_dump
+        assert wd.dump_count == dumps, "continuing stall exceeded its dump budget"
+        if records is not None:
+            assert sum("still stalled" in record.getMessage() for record in records) == 1
+        # Only now may the loop yield to the outstanding pong and recover.
+        await asyncio.wait_for(recovered.wait(), timeout=5)
+    finally:
+        boot_release.set()
+        blocking.set()
+        wd.stop()
+
+
 @pytest.mark.asyncio
-async def test_blocked_loop_dumps_sleeping_frame(caplog, diagnostic_logs):
+@pytest.mark.parametrize("gate_boot", [False, True], ids=["normal-boot", "gated-boot"])
+async def test_blocked_loop_dumps_sleeping_frame(
+    caplog: pytest.LogCaptureFixture,
+    diagnostic_logs: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    gate_boot: bool,
+) -> None:
     caplog.set_level(logging.ERROR, logger="app.core.loop_watchdog")
     wd = LoopStallWatchdog(
         asyncio.get_running_loop(),
@@ -60,18 +169,7 @@ async def test_blocked_loop_dumps_sleeping_frame(caplog, diagnostic_logs):
         ping_interval_s=0.05,
         second_threshold_s=45.0,
     )
-    wd.start()
-    try:
-        await asyncio.sleep(0.15)  # let the first ping be answered normally
-        assert wd.dump_count == 0
-        _block_the_loop_for(0.5)  # the loop is frozen here
-        # Let the watchdog observe the answered ping. A fixed 0.2 s was too
-        # short on a loaded Windows machine, so wait for it, up to 5 s.
-        deadline = time.monotonic() + 5
-        while wd.last_stall_seconds is None and time.monotonic() < deadline:
-            await asyncio.sleep(0.05)
-    finally:
-        wd.stop()
+    await _exercise_stall(wd, monkeypatch, gate_boot=gate_boot)
 
     assert wd.stall_count == 1
     assert wd.dump_count == 1  # below the second threshold
@@ -122,7 +220,9 @@ async def test_healthy_loop_never_dumps(caplog):
 
 
 @pytest.mark.asyncio
-async def test_persistent_stall_redumps(caplog):
+async def test_persistent_stall_redumps(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     caplog.set_level(logging.ERROR, logger="app.core.loop_watchdog")
     wd = LoopStallWatchdog(
         asyncio.get_running_loop(),
@@ -130,13 +230,7 @@ async def test_persistent_stall_redumps(caplog):
         ping_interval_s=0.02,
         second_threshold_s=0.15,
     )
-    wd.start()
-    try:
-        await asyncio.sleep(0.05)
-        _block_the_loop_for(0.5)
-        await asyncio.sleep(0.1)
-    finally:
-        wd.stop()
+    await _exercise_stall(wd, monkeypatch, dumps=2, checks_after_dump=5, records=caplog.records)
     assert wd.stall_count == 1
     assert wd.dump_count == 2
     still = [r for r in caplog.records if "still stalled" in r.getMessage()]
@@ -238,21 +332,72 @@ def test_freeze_dump_timer_stays_off_without_a_freeze_log(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil(tmp_path, monkeypatch):
-    """The C watchdog writes all stacks even while this thread never yields."""
-    from app.core import file_logging
+_FREEZE_DUMP_CHILD = r"""
+import sys
+import threading
+from pathlib import Path
 
-    with (tmp_path / "freeze.log").open("a", encoding="utf-8") as stream:
-        monkeypatch.setattr(file_logging, "_freeze_file", stream)
-        assert file_logging.arm_freeze_dump(0.2) is True
+sys.path.insert(0, sys.argv[2])
+from app.core import file_logging
+
+path = Path(sys.argv[1])
+dumped = threading.Event()
+stop = threading.Event()
+
+
+def _observe_freeze_dump() -> None:
+    while not stop.wait(0.01):
+        if "Timeout (0:00:00.200000)!" in path.read_text(encoding="utf-8"):
+            dumped.set()
+            stop.wait()  # Keep this thread alive until the native dumper is cancelled.
+            return
+
+
+def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil() -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        file_logging._freeze_file = stream
+        observer = threading.Thread(target=_observe_freeze_dump, name="dump-observer")
+        observer.start()
         try:
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline and "Timeout" not in (tmp_path / "freeze.log").read_text():
-                time.sleep(0.05)
+            assert file_logging.arm_freeze_dump(0.2) is True
+            # Native wait releases the GIL; only an actual C watchdog dump releases us.
+            assert dumped.wait(5), "C watchdog did not write freeze.log"
         finally:
             file_logging.cancel_freeze_dump()
-    text = (tmp_path / "freeze.log").read_text()
-    assert "Timeout (0:00:00.200000)!" in text and "test_faulthandler_dumps_a_frozen_interpreter" in text
+            stop.set()
+            observer.join(timeout=1)
+        assert not observer.is_alive()
+
+
+test_faulthandler_dumps_a_frozen_interpreter_without_the_gil()
+"""
+
+
+def test_faulthandler_dumps_a_frozen_interpreter_without_the_gil(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native all-thread dump must not run inside the xdist worker process."""
+    from app.core import file_logging
+
+    def unexpected_worker_timer(timeout_s: float) -> bool:
+        pytest.fail("the process-global C dump timer must only be armed in the child")
+
+    # Regression guard: a return to the in-worker arm/cancel sequence must fail.
+    monkeypatch.setattr(file_logging, "arm_freeze_dump", unexpected_worker_timer)
+    freeze = tmp_path / "freeze.log"
+    result = subprocess.run(
+        [sys.executable, "-c", _FREEZE_DUMP_CHILD, str(freeze),
+         str(Path(__file__).resolve().parents[2])],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    text = freeze.read_text(encoding="utf-8") if freeze.exists() else "<no freeze.log>"
+    assert result.returncode == 0, (
+        f"freeze-dump child exited {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}\nfreeze.log:\n{text}"
+    )
+    assert "Timeout (0:00:00.200000)!" in text
+    assert "test_faulthandler_dumps_a_frozen_interpreter_without_the_gil" in text
+    assert "threading.py" in text  # The main thread is blocked in Event.wait.
 
 
 @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGUSR1"), reason="SIGUSR1 is POSIX only")
@@ -320,37 +465,62 @@ def test_a_gil_held_in_native_code_still_leaves_every_stack_in_the_freeze_log(tm
     assert "threading.py" in text, "the bystander thread's stack is dumped too"
 
 @pytest.mark.asyncio
-async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch):
+@pytest.mark.parametrize("write_delay", [0, 0.3], ids=["normal-io", "delayed-io"])
+async def test_heartbeat_tracks_ticks_not_watchdog_wakeups(tmp_path, monkeypatch, write_delay):
     from app.core import loop_watchdog
 
-    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.04)
+    # Rate limiting has its own test. Here every watchdog wakeup may write,
+    # so an unchanged heartbeat proves tick gating, not a short rate-limit gap.
+    monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0)
     path = tmp_path / "loop-heartbeat.json"
     loop_thread = threading.get_ident()
     writers = []
     replace = loop_watchdog.os.replace
+    progressed = threading.Condition()
+    wakeups = 0
 
     def record_replace(source, target):
-        writers.append(threading.get_ident())
+        # Regression: persistence can finish after the old fixed 0.1 s window.
+        if write_delay:
+            time.sleep(write_delay)
         replace(source, target)
+        writers.append(threading.get_ident())
 
     monkeypatch.setattr(loop_watchdog.os, "replace", record_replace)
     wd = LoopStallWatchdog(asyncio.get_running_loop(), threshold_s=5, ping_interval_s=0.01)
+    write_heartbeat = wd._write_heartbeat
+
+    def completed_write(*args, **kwargs):
+        nonlocal wakeups
+        write_heartbeat(*args, **kwargs)
+        with progressed:
+            wakeups += 1
+            progressed.notify_all()
+
+    monkeypatch.setattr(wd, "_write_heartbeat", completed_write)
+
+    def wait_for(predicate):
+        with progressed:
+            assert progressed.wait_for(predicate, timeout=5), "watchdog did not progress"
+
     wd.start()
     try:
-        deadline = time.monotonic() + 5
-        while len(writers) < 2 and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
+        await asyncio.to_thread(wait_for, lambda: len(writers) >= 2)
         first_tick = json.loads(path.read_text())["last_tick"]
-        await asyncio.sleep(0.1)
+        await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick > first_tick)
         assert json.loads(path.read_text())["last_tick"] > first_tick
-        # Real loop stall: allow any pre-stall tick to flush, then prove that
-        # neither the record nor its mtime changes while the thread keeps waking.
-        _block_the_loop_for(0.1)
+        # Block the loop, but first drain its last answered tick. fsync/replace
+        # can take arbitrarily longer than 0.1 s without implying another pong.
+        with wd._lock:
+            final_tick = wd._last_tick
+        wait_for(lambda: wd._heartbeat_written_tick == final_tick)
         during = path.read_bytes(), path.stat().st_mtime_ns
-        _block_the_loop_for(0.1)
+        with progressed:
+            after_wakeups = wakeups + 3
+        wait_for(lambda: wakeups >= after_wakeups)
         assert (path.read_bytes(), path.stat().st_mtime_ns) == during
         stalled_tick = json.loads(during[0])["last_tick"]
-        await asyncio.sleep(0.15)
+        await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick > stalled_tick)
         assert json.loads(path.read_text())["last_tick"] > stalled_tick
     finally:
         wd.stop()
@@ -569,39 +739,83 @@ def test_recovery_thread_context_is_bounded(monkeypatch):
 
 
 _HEARTBEAT_CHILD = r"""
-import asyncio, sys, time
+import asyncio, sys, threading
+from collections.abc import Callable
 from pathlib import Path
 from app.core import file_logging, loop_watchdog
+
 file_logging.get_log_dir = lambda: Path(sys.argv[1])
-loop_watchdog.HEARTBEAT_INTERVAL_S = 0.02
-async def main():
+loop_watchdog.HEARTBEAT_INTERVAL_S = 0
+
+
+async def main() -> None:
+    progressed = threading.Condition()
+    wakeups = 0
+    replace = loop_watchdog.os.replace
+
+    def delayed_replace(source: str, target: str) -> None:
+        # Exercise writes that outlive the parent's former 100 ms flush window.
+        threading.Event().wait(float(sys.argv[2]))
+        replace(source, target)
+
+    loop_watchdog.os.replace = delayed_replace
     wd = loop_watchdog.LoopStallWatchdog(asyncio.get_running_loop(), ping_interval_s=0.01)
+    write_heartbeat = wd._write_heartbeat
+
+    def completed_write(now: float, *, stopped_at: float | None = None) -> None:
+        nonlocal wakeups
+        write_heartbeat(now, stopped_at=stopped_at)
+        with progressed:
+            wakeups += 1
+            progressed.notify_all()
+
+    def wait_for(predicate: Callable[[], bool]) -> None:
+        with progressed:
+            assert progressed.wait_for(predicate, timeout=5), "heartbeat did not progress"
+
+    wd._write_heartbeat = completed_write
     wd.start()
-    while not (Path(sys.argv[1]) / "loop-heartbeat.json").exists():
-        await asyncio.sleep(0.01)
-    print("stalled", flush=True)
-    time.sleep(30)
+    await asyncio.to_thread(wait_for, lambda: wd._heartbeat_written_tick is not None)
+    # From here until SIGKILL the event loop cannot answer another real ping.
+    with wd._lock:
+        final_tick = wd._last_tick
+    wait_for(lambda: wd._heartbeat_written_tick == final_tick)
+    print("stalled", flush=True)  # Acknowledges the completed final pre-stall write.
+    assert sys.stdin.readline().strip() == "sampled"
+    with progressed:
+        after_wakeups = wakeups + 10
+    wait_for(lambda: wakeups >= after_wakeups)
+    print("woke", flush=True)  # More writes/checks ran, without a new loop tick.
+    threading.Event().wait(30)
+
+
 asyncio.run(main())
 """
 
 
-def test_killed_stalled_process_leaves_a_boot_readable_heartbeat(tmp_path, monkeypatch, caplog):
-    import subprocess
-
+@pytest.mark.parametrize("write_delay", [0, 0.3], ids=["normal-io", "delayed-io"])
+def test_killed_stalled_process_leaves_a_boot_readable_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, write_delay: float,
+) -> None:
     from app.core import loop_watchdog
 
-    child = subprocess.Popen([sys.executable, "-c", _HEARTBEAT_CHILD, str(tmp_path)],
-                             stdout=subprocess.PIPE, text=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HEARTBEAT_CHILD, str(tmp_path), str(write_delay)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
     try:
         assert child.stdout.readline().strip() == "stalled"
-        time.sleep(0.1)  # let the last pre-stall tick flush
         path = tmp_path / "loop-heartbeat.json"
         frozen = path.read_bytes()
-        time.sleep(0.15)
+        child.stdin.write("sampled\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "woke"
         assert path.read_bytes() == frozen
     finally:
         child.kill()  # no Python cleanup / watchdog stop; SIGKILL on POSIX
         child.wait(timeout=5)
+        child.stdin.close()
         child.stdout.close()
     assert json.loads(frozen)["stopped_at"] is None
     monkeypatch.setattr(loop_watchdog, "HEARTBEAT_INTERVAL_S", 0.02)
