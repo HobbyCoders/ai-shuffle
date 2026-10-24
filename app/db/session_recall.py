@@ -330,10 +330,28 @@ def _sync_function(source: str, name: str, old_key: str, put: str, needs: tuple,
     """
     present = " AND ".join(
         [f"to_regclass('{_S}{TABLE}') IS NOT NULL", *[f"to_regprocedure('{_S}{fn}') IS NOT NULL" for fn in needs]])
+    # Event triggers see every UPDATE (unlike nodes/entries' column-specific
+    # triggers). State-only promotion must not delete/reinsert the text pieces:
+    # they already have their own durable queue. Do not skip ordinary live edits,
+    # including a no-op edit that moves pending history back to the live index.
+    promotion_guard = ""
+    if source == EVENT:
+        fields = ["id", "session_id", "seq", "event_type", "payload", "created_at"]
+        old = ", ".join(f"OLD.{field}" for field in fields)
+        new = ", ".join(f"NEW.{field}" for field in fields)
+        promotion_guard = f"""
+        IF TG_OP = 'UPDATE' THEN
+            IF current_setting('aishuffle.history_index_state', true) = '2'
+                AND ROW({old}) IS NOT DISTINCT FROM ROW({new}) THEN
+                RETURN NULL;
+            END IF;
+        END IF;
+        """
     return f"""
     CREATE OR REPLACE FUNCTION {name}() RETURNS trigger
     LANGUAGE plpgsql AS $fn$
     BEGIN
+        {promotion_guard}
         IF NOT ({present}) THEN
             RETURN NULL;
         END IF;
