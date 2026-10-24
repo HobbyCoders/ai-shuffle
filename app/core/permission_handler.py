@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # TTL lapses.
 PERMISSION_KIND = "permission"
 PERMISSION_TTL_SECONDS = 300
+# The deny text a person's "deny" answer gives the call (card, voice or a typed
+# no in an owner chat).
+OWNER_DENIAL = "User denied permission"
 
 class PermissionDecision(str, Enum):
     ALLOW = "allow"
@@ -379,6 +382,13 @@ class PermissionHandler:
         from app.core import interaction_wait
         from app.db import interactions
 
+        # This chat's own call in an owner chat (not a worker's redirected
+        # prompt): the owner answers it in words, and another message from the
+        # owner answers it "not run yet" instead of holding that message (#523).
+        own_confirm = assistant_confirm is not None and provider_agent is None
+        if own_confirm:
+            from app.core import assistant_confirm as confirm_flow
+
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
         rule = None if skip_saved_rules else self._check_rules(
@@ -401,6 +411,18 @@ class PermissionHandler:
             deferred = None
         if deferred:
             return PermissionResultDeny(message=deferred)
+
+        if own_confirm and agent_id is None and not blocked_path:
+            # The owner said yes after this exact call was answered "not run
+            # yet": that yes stands in for the ask itself, once, in the turn
+            # that told the agent to run it again. It never outranks a saved
+            # Deny, Away or a blocked path, and a subagent never spends the
+            # main chat's pass (#523).
+            saved = self._check_rules(session_id, profile_id, tool_name, tool_input)
+            if not (saved and saved.decision == PermissionDecision.DENY) and (
+                confirm_flow.take_approved_once(session_id, tool_name, tool_input)
+            ):
+                return PermissionResultAllow(updated_input=tool_input)
 
         payload = self._build_permission_payload(
             request_id, profile_id, tool_name, tool_input, tool_use_id,
@@ -500,10 +522,28 @@ class PermissionHandler:
             if state and state.is_connected:
                 await self.resolve_mode_permissions(session_id, state)
         result_row = await interaction_wait.await_interaction(
-            interaction_id, session_id, float(ttl_seconds)
+            interaction_id, session_id, float(ttl_seconds),
+            release=confirm_flow.is_parked if own_confirm else None,
         )
 
         state = (result_row or {}).get("state")
+        if own_confirm and state == "pending" and confirm_flow.is_parked(result_row):
+            # The owner sent another message while this call waited. The card
+            # stays pending and answerable; the call is let go now with a
+            # placeholder result, so the owner's message reaches the model.
+            # ``released`` is written first, guarded on the row still being
+            # pending: a yes or no that won meanwhile is returned below as
+            # usual instead, so one yes never both runs the call and admits it
+            # again (#523).
+            if await asyncio.to_thread(interactions.mark_interaction_released, interaction_id):
+                from app.core import session_runtime
+
+                # Handed to the engine FIRST, so the engine folds it into this
+                # very result.
+                await session_runtime.try_steer_pending(session_id)
+                return PermissionResultDeny(message=confirm_flow.NOT_RUN_YET)
+            result_row = await asyncio.to_thread(interactions.get_interaction, interaction_id)
+            state = (result_row or {}).get("state")
         if result_row is None or state in ("expired", "pending"):
             # Timed out — durably expired, or the local deadline lapsed with the
             # row still pending. Dismiss the modal + deny.
@@ -621,7 +661,7 @@ class PermissionHandler:
         if decision == "allow":
             answer = {"decision": "allow", "behavior": "allow", "updatedInput": tool_input}
         else:
-            answer = {"decision": "deny", "behavior": "deny", "message": "User denied permission"}
+            answer = {"decision": "deny", "behavior": "deny", "message": OWNER_DENIAL}
         # Ride a session-remember hint on the shared answer JSONB so the
         # EXECUTING runner (possibly a different install than the one answering)
         # learns the rule and short-circuits identical follow-ups. Stamp BEFORE
@@ -693,6 +733,27 @@ class PermissionHandler:
             await interaction_events.emit_interaction_answered(
                 session_id, emit_interaction_id, emit_request_id, emit_answer,
             )
+        # An owner-chat approval whose call was let go "not run yet" has no
+        # waiter: the agent is told (#523). That covers the row answered here
+        # and every sibling a remembered rule just answered with it. Each is
+        # read back as answered and judged on ``released`` alone (a park and
+        # release from another device may land after the read above), so only
+        # a call its waiter really let go counts.
+        settled = [(row["id"], decision)] if payload.get("assistant_confirm") else []
+        settled += [
+            (emit_id, (emit_answer or {}).get("decision"))
+            for emit_id, _rid, emit_answer in resolved_emits
+        ]
+        if settled:
+            from app.core import assistant_confirm
+            from app.db import interactions as interactions_db
+
+            for settled_id, settled_decision in settled:
+                answered = await run_sync(interactions_db.get_interaction, settled_id)
+                if assistant_confirm.is_released(answered):
+                    await assistant_confirm.answered_elsewhere(
+                        session_id, answered, settled_decision,
+                    )
 
         return {
             "resolved": True,

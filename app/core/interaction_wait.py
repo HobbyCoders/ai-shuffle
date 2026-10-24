@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from app.core.detached_tasks import spawn_detached
 
@@ -197,6 +197,7 @@ async def await_interaction(
     session_id: str,
     ttl_seconds: float,
     poll_seconds: float = POLL_SECONDS,
+    release: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Block until the interaction leaves ``pending`` (or the local TTL lapses).
 
@@ -204,6 +205,9 @@ async def await_interaction(
     real transition, or a still-``pending`` row once the LOCAL deadline is
     reached (the caller treats that as expired; the sweeper flips the durable
     row within its cadence). Returns ``None`` if the row vanished.
+
+    ``release``, when given, also ends the wait on a still-``pending`` row it
+    answers True for (an owner-chat approval answered "not run yet", #523).
     """
     from app.db import interactions
 
@@ -219,6 +223,8 @@ async def await_interaction(
         while True:
             row = await asyncio.to_thread(interactions.get_interaction, interaction_id)
             if row is None or row.get("state") != "pending":
+                return row
+            if release is not None and release(row):
                 return row
             remaining = deadline - loop.time()
             if remaining <= 0:

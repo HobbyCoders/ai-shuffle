@@ -18,20 +18,23 @@ value lives in the synced account row's ``introduction`` column::
 An introduction saved before detection existed is a flat dict the owner typed;
 it is read as corrections so nothing the owner said is lost.
 
-Detection reads names and addresses only, never mail, and gives the model no
-new access: the role context labels all of it as context, not grants.
+Detection reads account identity and connector metadata, never mail. Only
+bounded names and GitHub logins feed ordinary owner memory; addresses, project
+metadata and legacy free-form notes stay out. Facts do not grant access.
 """
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # Fields detection fills, in display order.
 DETECTED = ("preferred_name", "email", "github_username", "repository_refs", "projects")
 # Fields the owner may correct. notes and project_ids only come from older
-# introductions; they are kept and still reach the role context.
+# introductions; they remain available to account compatibility consumers.
 CORRECTABLE = ("preferred_name", "email", "github_username", "repository_refs", "notes", "project_ids")
 LIST_FIELDS = ("repository_refs", "projects", "project_ids")
 MAX_ITEMS = 20
@@ -76,13 +79,15 @@ def correct(stored, changes):
     return {"detected": detected, "corrections": corrections}
 
 
-def with_detected(stored, detected, unknown=()):
+def with_detected(
+    stored: dict[str, Any], detected: dict[str, Any], unknown: Iterable[str] = (),
+) -> dict[str, dict[str, Any]]:
     """The stored introduction after a detection pass (corrections untouched).
 
     ``unknown`` names fields whose source could not answer this pass (gh or
     the account hub unreachable, Gmail not started yet). Those keep their last
-    detected value, so a blip neither drops a field from the role context nor
-    publishes a change.
+    detected value, so a blip neither drops an account field nor publishes a
+    change.
     """
     old, corrections = split(stored)
     fresh = {k: v for k, v in detected.items() if not _empty(v)}
@@ -90,6 +95,48 @@ def with_detected(stored, detected, unknown=()):
         if not _empty(old.get(key)):
             fresh[key] = old[key]
     return {"detected": fresh, "corrections": corrections}
+
+
+def remember_identity(stored: dict[str, Any]) -> None:
+    """Backfill safe effective identity through the ordinary owner's memory store.
+
+    Do not copy arbitrary notes, email/street addresses, project names or remotes.
+    The allowlist is intentionally smaller than the introduction/Git-author data.
+    Structured owner configuration is recorded as session evidence with an explicit
+    detection source, never as an owner-requested Remember or a permission grant.
+    """
+    from fluid.context.screening import looks_like_secret, screen_findings
+
+    from app.core.fluid_memory import save_detected_owner_fact
+
+    values = effective(stored)
+    _, corrections = split(stored)
+    for field, key, label in (
+        ("preferred_name", "profile.name", "preferred name"),
+        ("github_username", "profile.github_username", "GitHub username"),
+    ):
+        value = values.get(field)
+        if not isinstance(value, str) or not value or len(value) > 80:
+            continue
+        if field == "preferred_name":
+            # Human names only: reject addresses, paths, markup and token strings.
+            if not all(ch.isalpha() or ch in " '-.’" for ch in value):
+                continue
+        elif not GITHUB_LOGIN.fullmatch(value):
+            continue
+        if looks_like_secret(value) or screen_findings(value):
+            continue
+        source = "correction" if field in corrections else "detected"
+        try:
+            save_detected_owner_fact(
+                f"The user's {label} is {value}.", key, f"about-you:{source}:{field}",
+            )
+        except ValueError:
+            # A forgotten/suppressed fact must not be restored by a periodic pass.
+            continue
+        except (OSError, TimeoutError):
+            # Retry next pass without publishing private facts or exception text.
+            logger.warning("Owner identity memory write unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +195,7 @@ def github_login(unknown=None):
     return None
 
 
-def projects_and_repositories(runner_id):
+def projects_and_repositories(runner_id: str) -> tuple[list[str], list[str]]:
     """Project names, and the GitHub repositories of this worker's checkouts."""
     from app.core.github_service import github_service
     from app.db.base import get_db
@@ -170,8 +217,7 @@ def projects_and_repositories(runner_id):
             repositories.append(repo)
         if len(repositories) >= MAX_ITEMS:
             break
-    # Sorted: the role context is part of the system prompt and must not
-    # change (or publish) just because the checkouts were read in another order.
+    # Stable ordering avoids account publications when only query order changes.
     return [n for n in names if n], sorted(repositories, key=str.lower)
 
 
