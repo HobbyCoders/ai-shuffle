@@ -588,9 +588,18 @@ def fetch_task_branch(cwd, branch, sha, remote):
     if local != remote:
         raise ValueError("This worker's origin is a different repository from the calling worker's origin; "
                          "clone the project from the same origin to run tasks here.")
+    # Distinct task refs can fetch concurrently, but shared FETCH_HEAD cannot.
+    # Keep compatibility with old Git by serializing that fallback only.
+    from contextlib import nullcontext
+    from app.core.git_fork_base import _git_version
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    modern = _git_version(str(Path(cwd).resolve())) >= (2, 29)
+    flags = ["--no-tags", "--no-write-fetch-head"] if modern else ["--no-tags"]
     try:
-        fetched = _run(cwd, "fetch", "--no-tags", "origin",
-                       "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
+        with nullcontext() if modern else repo_worktree_lock(cwd):
+            fetched = _run(cwd, "fetch", *flags, "origin",
+                           "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
     except ValueError:
         raise ValueError(f"Git timed out fetching {branch} from origin on this worker.") from None
     if fetched.returncode:

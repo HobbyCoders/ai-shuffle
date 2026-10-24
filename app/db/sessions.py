@@ -2658,12 +2658,16 @@ def _search_literal_pattern(text: str) -> str:
     return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def _native_search_cte(projection: str, placeholder: str, instance_sql: str) -> str:
+def _native_search_cte(
+    projection: str, placeholder: str, instance_sql: str, cursor: Any,
+) -> str:
     """Search visible user/assistant text, never tool payloads or system prompts.
 
     The raw JSON prefilter uses the existing trigram index. The extracted text
     predicate is authoritative so metadata cannot produce a false match.
     """
+    from app.db.history_indexing import search_table
+    native_source = search_table(cursor, "fluid_session_nodes", "n")
     return f"""
         native_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -2672,7 +2676,7 @@ def _native_search_cte(projection: str, placeholder: str, instance_sql: str) -> 
                 substring(texts.content FROM greatest(1, strpos(lower(texts.content), lower({placeholder})) - 60)
                     FOR 240) as match_snippet,
                 to_timestamp(n.ts) as match_time
-            FROM fluid_session_nodes n
+            FROM {native_source}
             INNER JOIN sessions s ON s.sdk_session_id = n.session_id
             CROSS JOIN LATERAL (
                 SELECT string_agg(block->>'text', ' ' ORDER BY ord) AS content
@@ -2726,6 +2730,9 @@ def search_sessions(
 
     with get_db() as conn:
         cursor = get_cursor(conn)
+        from app.db.history_indexing import search_table
+        message_source = search_table(cursor, "session_messages", "sm")
+        entry_source = search_table(cursor, "session_store_entries", "sse")
 
         # Search titles with ILIKE, legacy message content + full store history
         # with tsvector FTS. Use DISTINCT ON (id) to deduplicate sessions that
@@ -2736,7 +2743,11 @@ def search_sessions(
         # session_messages. Joined to sessions on sdk_session_id.
         # match_count = COUNT(*) OVER (PARTITION BY id) taken BEFORE the final
         # dedupe, i.e. how many of {title, legacy-content, store-content} hit.
-        native_cte = _native_search_cte("s.id, s.project_id, s.profile_id, s.api_user_id, s.title, s.status, s.is_active, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out, s.turn_count, s.created_at, s.updated_at", _ph, inst_sql)
+        native_cte = _native_search_cte(
+            "s.id, s.project_id, s.profile_id, s.api_user_id, s.title, s.status, s.is_active, "
+            "s.total_cost_usd, s.total_tokens_in, s.total_tokens_out, s.turn_count, "
+            "s.created_at, s.updated_at", _ph, inst_sql, cursor,
+        )
         sql = f"""
         WITH title_matches AS (
             SELECT
@@ -2759,7 +2770,7 @@ def search_sessions(
                 ts_headline('english', sm.content, plainto_tsquery('english', {_ph}),
                     'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
                 sm.created_at as match_time
-            FROM session_messages sm
+            FROM {message_source}
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
@@ -2775,7 +2786,7 @@ def search_sessions(
                 ts_headline('english', sse_entry_text(sse.entry), plainto_tsquery('english', {_ph}),
                     'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
                 sse.created_at as match_time
-            FROM session_store_entries sse
+            FROM {entry_source}
             INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
             WHERE sse.subpath IS NULL
             AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
@@ -2871,6 +2882,9 @@ def search_sessions_paginated(
 
     with get_db() as conn:
         cursor = get_cursor(conn)
+        from app.db.history_indexing import search_table
+        message_source = search_table(cursor, "session_messages", "sm")
+        entry_source = search_table(cursor, "session_store_entries", "sse")
 
         # Build the base CTE using Postgres tsvector FTS.
         # Uses DISTINCT ON (id) to deduplicate sessions, preferring title
@@ -2881,7 +2895,7 @@ def search_sessions_paginated(
         # sessions on sdk_session_id. match_count = COUNT(*) OVER (PARTITION BY
         # id) taken BEFORE the final dedupe, i.e. how many of {title,
         # legacy-content, store-content} hit.
-        native_cte = _native_search_cte("s.*", _ph, inst_sql)
+        native_cte = _native_search_cte("s.*", _ph, inst_sql, cursor)
         base_cte = f"""
         WITH title_matches AS (
             SELECT
@@ -2900,7 +2914,7 @@ def search_sessions_paginated(
                 ts_headline('english', sm.content, plainto_tsquery('english', {_ph}),
                     'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
                 sm.created_at as match_time
-            FROM session_messages sm
+            FROM {message_source}
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
@@ -2914,7 +2928,7 @@ def search_sessions_paginated(
                 ts_headline('english', sse_entry_text(sse.entry), plainto_tsquery('english', {_ph}),
                     'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
                 sse.created_at as match_time
-            FROM session_store_entries sse
+            FROM {entry_source}
             INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
             WHERE sse.subpath IS NULL
             AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})

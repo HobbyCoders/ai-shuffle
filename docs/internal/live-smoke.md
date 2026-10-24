@@ -217,11 +217,20 @@ must go into the release notes. The ship-release skill does this.
 
 ## Adding a row
 
-Edit `scenarios.json` only. A row:
+Edit `scenarios.json` only. New rows use stable `<group>.<slug>` IDs: lowercase
+letters/digits with single hyphens separating words, starting with a letter.
+Use a descriptive slug, optionally prefixed by the issue/PR number to distinguish
+related checks (for example `harness-basics.pr521-merged-catalog`). Never allocate
+the next number or change an existing numeric ID; legacy numeric IDs remain valid.
+Insert in lexicographic ID order within the suite, not at the end (`.10` before
+`.2`). This spreads parallel changes across insertion points; the catalog test
+enforces ordering and the loader rejects duplicate IDs globally.
+
+A row:
 
 ```json
 {
-  "id": "two-worker-smoke.16",
+  "id": "two-worker-smoke.peer-follow-up",
   "check": "Short name",
   "kind": "script",
   "how": "what the row does, one line",

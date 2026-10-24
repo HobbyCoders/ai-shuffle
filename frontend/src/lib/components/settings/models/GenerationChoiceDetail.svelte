@@ -16,6 +16,7 @@
 		modelLabel,
 		sameChoice,
 		sourceLabel,
+		type GenerationChoice,
 		type GenerationKind,
 		type GenerationOption
 	} from '$lib/utils/generation-choice';
@@ -40,6 +41,13 @@
 	let loadingOptions = $state(false);
 	let busy = $state(false);
 	let actionError = $state('');
+	/**
+	 * The server's save-time warning for "Remember" (the card shows its own).
+	 * Any later save or forget replaces it, and it hides once another pick is
+	 * remembered elsewhere.
+	 */
+	let saveWarning = $state<{ choice: GenerationChoice; text: string } | null>(null);
+	const rememberWarning = $derived(saveWarning && sameChoice(remembered, saveWarning.choice) ? saveWarning.text : '');
 	let generation = 0;
 
 	async function loadOptions() {
@@ -66,6 +74,8 @@
 		actionError = '';
 		try {
 			await generationChoices.forget(kind);
+			// Only once the server forgot it: a failed DELETE leaves the pick and its warning.
+			saveWarning = null;
 		} catch (e) {
 			actionError = getErrorMessage(e, 'Could not clear the saved choice.');
 		} finally {
@@ -77,8 +87,10 @@
 		if (!last) return;
 		busy = true;
 		actionError = '';
+		saveWarning = null;
 		try {
-			await generationChoices.save(kind, last, true, 'settings');
+			const saved = await generationChoices.save(kind, last, true, 'settings');
+			saveWarning = saved?.warning ? { choice: saved.choice ?? last, text: saved.warning } : null;
 		} catch (e) {
 			actionError = getErrorMessage(e, 'Could not save this choice.');
 		} finally {
@@ -117,6 +129,9 @@
 	{/if}
 	{#if actionError}
 		<InlineBanner tone="warn">{actionError}</InlineBanner>
+	{/if}
+	{#if rememberWarning}
+		<InlineBanner tone="warn">Remembered. {rememberWarning}</InlineBanner>
 	{/if}
 {/snippet}
 
@@ -169,7 +184,7 @@
 				</p>
 			{:else}
 				{#key options}
-					<GenerationChoiceCard {kind} {options} variant="settings" />
+					<GenerationChoiceCard {kind} {options} variant="settings" onsaved={() => (saveWarning = null)} />
 				{/key}
 			{/if}
 			<p class="gcd-foot">

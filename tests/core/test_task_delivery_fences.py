@@ -1,5 +1,6 @@
 """Delivery fences must survive awaits, not just the initial wake snapshot."""
 from types import SimpleNamespace
+from typing import Any, Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -114,7 +115,9 @@ async def test_card_fence_survives_recorder_lock_wait(mock_db, monkeypatch, deli
 
 
 @pytest.mark.parametrize("delivery", ["claimed", "drained"])
-async def test_card_fence_survives_database_admission(mock_db, monkeypatch, delivery):
+async def test_card_fence_survives_database_admission(
+    mock_db: Any, monkeypatch: pytest.MonkeyPatch, delivery: str,
+) -> None:
     """The old terminal has passed the recorder guard before DB admission stalls."""
     import asyncio
     import threading
@@ -134,19 +137,19 @@ async def test_card_fence_survives_database_admission(mock_db, monkeypatch, deli
     reg.complete_task(SID, "A", "completed")
     recorder = await _recorder()
     entered, release = threading.Event(), threading.Event()
-    original_get_db = se.get_db
+    original_event_db = se.get_event_db
 
     @contextmanager
-    def blocked_admission():
+    def blocked_admission() -> Iterator[Any]:
         # Block only the old terminal, inside append_events but before it gets
         # a connection. The restarted task's running write must proceed first.
         if not entered.is_set():
             entered.set()
             assert release.wait(10), "test did not release database admission"
-        with original_get_db() as conn:
+        with original_event_db() as conn:
             yield conn
 
-    monkeypatch.setattr(se, "get_db", blocked_admission)
+    monkeypatch.setattr(se, "get_event_db", blocked_admission)
     if delivery == "claimed":
         pending = recorder.record_task_terminal([{
             "task_id": "A", "status": "completed", "summary": "old terminal",

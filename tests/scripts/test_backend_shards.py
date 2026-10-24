@@ -118,6 +118,7 @@ def test_actual_xdist_collection_producing_path(tmp_path):
         output = tmp_path / f"shard-{index}"
         result = subprocess.run([
             sys.executable, "-m", "pytest", str(fixture), "--rootdir", str(tmp_path),
+            "--confcutdir", str(tmp_path),
             "-o", "addopts=", "-p", "scripts.ci.backend_shards", "-n", "2",
             "--backend-shard", str(index), "--backend-durations", str(manifest),
             "--backend-results", str(output), "-q"],
@@ -200,22 +201,26 @@ def test_refresh_rejects_untrusted_or_failed_runs(monkeypatch, tmp_path, field, 
     with pytest.raises(ValueError, match="successful main"):
         bs.refresh("123", tmp_path / "new", tmp_path / "manifest.json")
 
-@pytest.mark.parametrize("fault", [None, "wrong-selected", "wrong-collection", "missing-shard", "missing-node", "duplicate-node"])
-def test_main_refresh_downloads_and_validates_complete_execution(monkeypatch, tmp_path, fault):
+@pytest.mark.parametrize("rerun", ["single", "full-rerun", "partial-rerun"])
+@pytest.mark.parametrize("fault", [
+    None, "wrong-selected", "wrong-collection", "missing-shard", "missing-node", "duplicate-node",
+])
+def test_main_refresh_downloads_and_validates_complete_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str | None, rerun: str,
+) -> None:
     run = {"conclusion": "success", "headBranch": "main", "event": "workflow_dispatch",
            "workflowName": "CI Backend", "headSha": "head", "url": "https://example.invalid/run"}
     monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
     nodes = [f"test_a.py::test_{i}" for i in range(8)]
     shards = bs.partition(nodes, {})
     destination = tmp_path / "download"
-    def download(command, check):
+    def download(command: list[str], check: bool) -> None:
         assert command[:4] == ["gh", "run", "download", "123"] and check is True
+        assert command[command.index("--pattern") + 1] == "backend-shard-*-a*"
         assert str(destination) == command[-1]
         for index, shard in enumerate(shards, 1):
             if fault == "missing-shard" and index == 4:
                 continue
-            folder = destination / str(index)
-            folder.mkdir(parents=True)
             receipt = {"shard": index, "head": "head", "count": len(shard), "total": len(nodes),
                        "collection": bs.digest(sorted(nodes)), "partition": bs.digest(shards),
                        "selected": bs.digest(shard), "workers": 2}
@@ -229,8 +234,16 @@ def test_main_refresh_downloads_and_validates_complete_execution(monkeypatch, tm
             if fault == "duplicate-node" and index == 2:
                 timings = {node: 0.5 for node in shards[0]}
                 receipt["selected"] = bs.digest(sorted(timings))
-            (folder / "receipt.json").write_text(json.dumps(receipt))
-            (folder / "durations.json").write_text(json.dumps(timings))
+            attempts = [1, 2] if rerun == "full-rerun" or (
+                rerun == "partial-rerun" and index == 2
+            ) else [1]
+            for attempt in attempts:
+                folder = destination / f"backend-shard-{index}-a{attempt}" / "backend-results"
+                folder.mkdir(parents=True)
+                (folder / "receipt.json").write_text(json.dumps(receipt))
+                (folder / "durations.json").write_text(json.dumps({
+                    node: seconds * attempt for node, seconds in timings.items()
+                }))
     monkeypatch.setattr(bs.subprocess, "run", download)
     output = tmp_path / "manifest.json"
     if fault:
@@ -242,7 +255,13 @@ def test_main_refresh_downloads_and_validates_complete_execution(monkeypatch, tm
         result = json.loads(output.read_text())
         assert result["source"] == run
         assert result["format"] == bs.MANIFEST_FORMAT
-        assert result["durations"] == bs.hashed_durations({node: 0.5 for node in nodes})
+        expected = {
+            node: 1.0 if rerun == "full-rerun" or (
+                rerun == "partial-rerun" and index == 2
+            ) else 0.5
+            for index, shard in enumerate(shards, 1) for node in shard
+        }
+        assert result["durations"] == bs.hashed_durations(expected)
         assert not (set(result["durations"]) & set(nodes))
 
 

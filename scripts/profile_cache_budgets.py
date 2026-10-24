@@ -67,6 +67,52 @@ def trim_lab():
     return dict(available=True, returned=changed, before=before, after=resident())
 
 
+async def resume_exercise(get_db, args):
+    """Pair the old client-side scans with SQL-filtered scans over identical rows."""
+    from app.core.provider import fluid_pg_store as module
+    from fluid.events import ToolResult, Usage, TurnStarted, ContextCompaction
+    from fluid.store.base import iter_events_of_class
+
+    module.get_db = get_db
+    store = module.PgFluidStore()
+    await store.create_session("resume")
+    for index in range(args.events):
+        seq = index * 2 + 1
+        await store.append_event("resume", ToolResult(session_id="resume", seq=seq,
+            tool_use_id=str(index), name="synthetic", output="x" * args.event_bytes))
+        if index % 16 == 0:
+            await store.append_event("resume", Usage(session_id="resume", seq=seq + 1))
+    await store.flush_events("resume")
+    decoded = 0
+    original = module.event_from_dict
+    def decode(row):
+        nonlocal decoded
+        decoded += 1
+        return original(row)
+    module.event_from_dict = decode
+    try:
+        gc.collect()
+        tracemalloc.start()
+        started = time.perf_counter()
+        sequences = []
+        # Resume's usage, provenance, compaction and fingerprint scans.
+        for classes in ((Usage,), (TurnStarted,), (ContextCompaction,), (Usage,)):
+            if args.resume_filter == "sql":
+                stream = iter_events_of_class(store, "resume", 0, classes)
+            else:
+                stream = store.iter_events("resume", 0)
+            sequences.append([e.seq async for e in stream if isinstance(e, classes)])
+        seconds = time.perf_counter() - started
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        expected = [index * 2 + 2 for index in range(args.events) if index % 16 == 0]
+        assert sequences == [expected, [], [], expected]
+        return dict(resume_filter=args.resume_filter, seconds=seconds, rows_decoded=decoded,
+                    traced_peak_bytes=peak, **resident())
+    finally:
+        module.event_from_dict = original
+
+
 async def exercise(get_db, args):
     from app.core.provider import fluid_pg_store as module
     from fluid.events import ToolResult
@@ -195,6 +241,8 @@ def main():
     parser.add_argument("--read-path-every", type=int, default=1)
     parser.add_argument("--replay-path", choices=("events_page", "iter_events", "events_since"),
                         default="events_page")
+    parser.add_argument("--resume-filter", choices=("client", "sql"),
+                        help="measure only synthetic native resume scans")
     parser.add_argument("--events", type=int, default=128)
     parser.add_argument("--event-bytes", type=int, default=1024 * 1024)
     args = parser.parse_args()
@@ -240,7 +288,8 @@ def main():
                             "ts TEXT, message JSONB, PRIMARY KEY(session_id, node_id))")
                 cur.execute("CREATE TABLE fluid_session_events (session_id TEXT, seq BIGINT, event JSONB, "
                             "PRIMARY KEY(session_id, seq))")
-            result = asyncio.run(exercise(get_db, args))
+            result = asyncio.run(resume_exercise(get_db, args) if args.resume_filter
+                                 else exercise(get_db, args))
         finally:
             if connection is not None:
                 connection.close()

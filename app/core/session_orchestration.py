@@ -1837,7 +1837,9 @@ def build_started_report(session_id, settled, outcome):
 
 
 async def record_started_report(starter_id, frame):
-    """Step 2 hook: feed the owner working record; deliberately a no-op for now."""
+    """Retain report-backs independently of the disposable starter chat."""
+    from app.core.working_record import record_report
+    await asyncio.to_thread(record_report, starter_id, frame)
 
 
 async def defer_started_report(starter_id, frame):
@@ -1875,7 +1877,6 @@ async def defer_started_report(starter_id, frame):
             return True
     if await asyncio.to_thread(record):
         from app.services.notification_service import emit_notification
-        await record_started_report(starter_id, frame)
         await emit_notification("admin", title="Session work finished",
             message=f"{frame.get('title') or 'Started session'}: {frame.get('status') or 'finished'}. Open the child session for its report.",
             category="session_report:" + str(frame.get("task_id")), session_id=frame.get("task_id"), push=True)

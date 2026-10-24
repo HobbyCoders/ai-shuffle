@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * AttachProjectSheet — give a running no-project session its project
-	 * (#371 step 4). A centred sheet on desktop, a bottom sheet on the phone.
+	 * (#371 step 4). A centred sheet on desktop, a bottom sheet on the phone
+	 * (mobile/src/mobile.css) that a downward drag or flick dismisses.
 	 *
 	 * Lists the projects this worker has a checkout of (others show which
 	 * worker has them, greyed), says what appears once attached, and states
@@ -15,6 +16,15 @@
 	import { getErrorMessage } from '$lib/api/client';
 	import { notify } from '$lib/stores/notifications';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import {
+		canStartSheetDrag,
+		moveSheetDrag,
+		sheetDragDismisses,
+		startSheetDrag,
+		type DragPoint,
+		type SheetDrag
+	} from '$lib/components/ui/sheet-drag';
+	import { platform } from '$lib/stores/platform.svelte';
 	import { buildWorkspacePickerItems } from './workspace-catalog';
 	import { ATTACH_GAINS, attachWarning } from '$lib/components/chat/session-scope';
 
@@ -39,8 +49,133 @@
 	const canAttach = $derived(!!pickedItem && !pickedItem.remoteOnly && !blockedReason && !attaching);
 
 	$effect(() => {
-		if (!open) { picked = null; error = null; attaching = false; }
+		if (!open) { picked = null; error = null; attaching = false; dragY = 0; dragging = false; leaving = false; gesture = null; }
 	});
+
+	// ── Phone: drag the sheet down to dismiss it ──────────────────────
+	// Touch Events decide before the browser pans, so a pull from the handle,
+	// the header or a list already at its top moves the sheet, while a list
+	// scrolled down keeps scrolling. A mouse drives the same gesture through
+	// Pointer Events. Nothing moves while the attach is in flight.
+	const LEAVE_MS = 220;
+	let sheetRef = $state<HTMLDivElement | null>(null);
+	let dragY = $state(0);
+	let dragging = $state(false);
+	let leaving = $state(false);
+	let gesture: SheetDrag | null = null;
+	let mouseId: number | null = null;
+	const scrimOpacity = $derived(
+		dragY > 0 && sheetRef ? Math.max(0, 1 - dragY / Math.max(1, sheetRef.offsetHeight)) : undefined
+	);
+
+	function reducedMotion(): boolean {
+		return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+	}
+
+	function beginDrag(target: EventTarget | null, point: DragPoint): boolean {
+		gesture = null;
+		if (!platform.isMobile || attaching || leaving || !sheetRef) return false;
+		gesture = startSheetDrag(point, canStartSheetDrag(target, sheetRef));
+		return true;
+	}
+
+	/** True when the move belongs to the sheet and the page must not scroll. */
+	function moveDrag(point: DragPoint): boolean {
+		if (!gesture) return false;
+		if (attaching) { cancelDrag(); return false; }
+		const mode = moveSheetDrag(gesture, point);
+		if (mode === 'scroll') { gesture = null; return false; }
+		if (mode === 'drag') {
+			dragging = true;
+			dragY = gesture.offset;
+			return true;
+		}
+		// Inside the slop nothing is cancelled: on Android a cancelled first
+		// move can keep the list from scrolling for the rest of the touch, so a
+		// small downward wobble before an upward swipe must stay the list's.
+		return false;
+	}
+
+	function endDrag(releaseTime: number) {
+		const done = gesture;
+		gesture = null;
+		if (!done || done.mode !== 'drag') return;
+		dragging = false;
+		swallowNextClick();
+		if (sheetDragDismisses(done, releaseTime) && !attaching) {
+			if (reducedMotion()) { onClose(); return; }
+			// Finish the slide from where the finger let go, then close.
+			leaving = true;
+			dragY = (sheetRef?.offsetHeight ?? 600) + 24;
+			setTimeout(onClose, LEAVE_MS);
+		} else {
+			dragY = 0;
+		}
+	}
+
+	function cancelDrag() {
+		gesture = null;
+		dragging = false;
+		dragY = 0;
+	}
+
+	// The release that ends a drag must not also pick the row under it.
+	function swallowNextClick() {
+		const node = sheetRef;
+		if (!node) return;
+		const swallow = (ev: Event) => { ev.stopPropagation(); ev.preventDefault(); };
+		node.addEventListener('click', swallow, { capture: true, once: true });
+		setTimeout(() => node.removeEventListener('click', swallow, { capture: true }), 0);
+	}
+
+	const at = (t: { clientX: number; clientY: number }, time: number): DragPoint => ({ x: t.clientX, y: t.clientY, time });
+
+	$effect(() => {
+		const node = sheetRef;
+		if (!node) return;
+		const onTouchStart = (e: TouchEvent) => {
+			if (e.touches.length !== 1) { cancelDrag(); return; }
+			beginDrag(e.target, at(e.touches[0], e.timeStamp));
+		};
+		const onTouchMove = (e: TouchEvent) => {
+			const touch = e.touches[0];
+			if (touch && moveDrag(at(touch, e.timeStamp)) && e.cancelable) e.preventDefault();
+		};
+		const onTouchEnd = (e: TouchEvent) => endDrag(e.timeStamp);
+		const onTouchCancel = () => cancelDrag();
+		node.addEventListener('touchstart', onTouchStart, { passive: true });
+		// Not passive: cancelling the move is what keeps the list from scrolling.
+		node.addEventListener('touchmove', onTouchMove, { passive: false });
+		node.addEventListener('touchend', onTouchEnd);
+		node.addEventListener('touchcancel', onTouchCancel);
+		return () => {
+			node.removeEventListener('touchstart', onTouchStart);
+			node.removeEventListener('touchmove', onTouchMove);
+			node.removeEventListener('touchend', onTouchEnd);
+			node.removeEventListener('touchcancel', onTouchCancel);
+		};
+	});
+
+	function onPointerDown(e: PointerEvent) {
+		if (e.pointerType === 'touch' || !e.isPrimary || e.button !== 0) return;
+		if (beginDrag(e.target, at(e, e.timeStamp))) mouseId = e.pointerId;
+	}
+
+	function onPointerMove(e: PointerEvent) {
+		if (mouseId === null || e.pointerId !== mouseId) return;
+		const wasDragging = dragging;
+		if (moveDrag(at(e, e.timeStamp))) {
+			e.preventDefault();
+			if (!wasDragging && dragging) sheetRef?.setPointerCapture?.(e.pointerId);
+		}
+	}
+
+	function onPointerUp(e: PointerEvent) {
+		if (mouseId === null || e.pointerId !== mouseId) return;
+		mouseId = null;
+		if (e.type === 'pointercancel') cancelDrag();
+		else endDrag(e.timeStamp);
+	}
 
 	// Radiogroup keyboard model: one stop in the Tab order (the picked row, else
 	// the first one this worker can attach), and the arrow keys move the pick
@@ -111,8 +246,23 @@
 
 {#if open}
 	<div class="attach-layer" use:portal>
-		<button type="button" class="attach-scrim" aria-label="Close" tabindex="-1" onclick={() => !attaching && onClose()}></button>
-		<div class="attach-sheet" role="dialog" aria-modal="true" aria-labelledby="attach-title" tabindex="-1" use:focusTrap>
+		<button type="button" class="attach-scrim" aria-label="Close" tabindex="-1" style:opacity={scrimOpacity} onclick={() => !attaching && onClose()}></button>
+		<div
+			bind:this={sheetRef}
+			class="attach-sheet"
+			class:dragging
+			class:leaving
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="attach-title"
+			tabindex="-1"
+			style:--sheet-drag="{dragY}px"
+			use:focusTrap
+			onpointerdown={onPointerDown}
+			onpointermove={onPointerMove}
+			onpointerup={onPointerUp}
+			onpointercancel={onPointerUp}
+		>
 			<div class="grab" aria-hidden="true"></div>
 			<header class="sheet-head">
 				<div>

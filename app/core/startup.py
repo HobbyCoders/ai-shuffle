@@ -421,8 +421,9 @@ async def start_services() -> None:
     from app.core.automation_manager import automation_manager
     await automation_manager.start()
 
-    from app.core.assistant_manager import assistant_manager
-    await assistant_manager.start()
+    from app.core.watch_manager import watch_manager
+
+    await watch_manager.start()
 
     from app.services.fal_catalog import catalog_service
     # Reads the whole model catalog; keep it off the loop so boot does not stall
@@ -564,7 +565,13 @@ def start_background_tasks() -> List[asyncio.Task]:
         while True:
             try:
                 ready = await asyncio.to_thread(session_recall.run_backfill)
-                await asyncio.sleep(60 if ready else 1)
+                from app.db import history_indexing
+                from app.core import streaming_status
+                history_ready = await asyncio.to_thread(
+                    history_indexing.run_pass,
+                    can_work=lambda: not streaming_status.has_any_active_run(),
+                )
+                await asyncio.sleep(60 if ready and history_ready else 1)
             except asyncio.CancelledError:
                 break
             except Exception as e:  # noqa: BLE001 — recall keeps its legacy queries
@@ -810,8 +817,9 @@ async def shutdown_services() -> None:
     """
     global is_shutting_down
     is_shutting_down = True
-    from app.core.assistant_manager import assistant_manager
-    await assistant_manager.shutdown()
+    from app.core.watch_manager import watch_manager
+
+    await watch_manager.shutdown()
     from app.core.global_events import global_events
     await global_events.shutdown()
     from app.core import composer_suggestions
@@ -902,7 +910,18 @@ async def shutdown_services() -> None:
     # step above may still persist durable state (terminal chips, reap
     # attribution, parked markers) and would otherwise die on a closed pool.
     from app.db.base import close_pool
-    # Keep the loop running so coroutine-held connections can return during
-    # the bounded drain, and cancellation/socket close cannot block the loop.
-    await asyncio.to_thread(close_pool)
+    # A stuck query can occupy every default-executor worker. Draining must
+    # not queue behind the borrowers it needs to cancel, nor block the loop
+    # while coroutine-held connections return.
+    from concurrent.futures import ThreadPoolExecutor
 
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-shutdown")
+    try:
+        try:
+            drain = asyncio.get_running_loop().run_in_executor(executor, close_pool)
+        except RuntimeError:  # executor/loop teardown already started
+            close_pool()
+        else:
+            await drain
+    finally:
+        executor.shutdown(wait=False)

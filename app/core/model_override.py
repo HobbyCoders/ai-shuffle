@@ -785,6 +785,12 @@ async def _ask_owner(session_id: str, profile_id: Optional[str], *, model: str,
     if isinstance(result, PermissionResultAllow) or getattr(result, "behavior", None) == "allow":
         return APPROVED
     message = str(getattr(result, "message", "") or "")
+    from app.core.assistant_confirm import NOT_RUN_YET
+
+    if message == NOT_RUN_YET:
+        # The owner sent another message instead of answering; the request
+        # stays open in the chat (#523). Not a decline.
+        return ("the owner has not answered yet and sent another message meanwhile. " + NOT_RUN_YET)
     if message.startswith("Owner away") or "away" in message.casefold():
         return "the owner is away, so no approval prompt was shown and the switch was refused."
     if "timed out" in message:

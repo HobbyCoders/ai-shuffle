@@ -1,6 +1,7 @@
 """Owner coordination from ordinary no-project sessions (issue #371, step 1)."""
 import json
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -79,11 +80,13 @@ def test_chat_surface_only_widens_for_owner(owner):
 
 @pytest.mark.parametrize("native", [True, False])
 @pytest.mark.parametrize("legacy", [True, False])
-async def test_registered_project_reads_through_real_registry(owner, tmp_path, monkeypatch, native, legacy):
+@pytest.mark.parametrize("mode", [None, "code", "chat"])
+async def test_registered_project_reads_through_real_registry(
+    owner: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    native: bool, legacy: bool, mode: str | None,
+) -> None:
     from app.core.provider.harness_adapter import HarnessAdapter, _delegated_allowed
-    from app.core.provider.types import SessionOptions
-    from app.core.session_modes import CHAT_MODE_TOOL_SURFACE
-    from app.core import config
+    from app.core import config, query_options
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "workspace")
     project_path = tmp_path / "project"
     project_path.mkdir()
@@ -104,16 +107,23 @@ async def test_registered_project_reads_through_real_registry(owner, tmp_path, m
     else:
         project = projects_v2.upsert_project("folder:example", name="Example")
         checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(project_path))
-    options = SessionOptions(model="test", cwd=str(tmp_path), tool_allowlist=list(CHAT_MODE_TOOL_SURFACE),
-        extra={"session_mode": "chat", "owner_coordinator": True, "app_session_id": owner["id"]})
-    options.extra["assistant_scope"] = {"session_id": owner["id"], "home_session_id": owner["id"],
-                                        "roots": [str(project_path)], "cwd": str(tmp_path)}
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET mode=%s WHERE id=%s", (mode, owner["id"]))
+    sdk_options, _ = query_options.build_options_from_profile(
+        database.get_profile("agent"), session_id=owner["id"],
+    )
     adapter = HarnessAdapter()
+    adapter.connect = AsyncMock()
+    await adapter.connect_with_sdk_options(sdk_options)
+    options = adapter.connect.await_args.args[0]
+    assert options.extra["session_mode"] == "chat"
+    for tool in ("Bash", "Monitor", "Edit", "Write", "run_python"):
+        assert not tool_permitted(tool, options.tool_allowlist, options.disallowed_tools)
     adapter._options = options
     monkeypatch.setattr(adapter, "_ask_owner", AsyncMock(return_value="Unexpected permission prompt"))
     registry = await adapter._build_registry(options, native=native)
     ctx = ToolCtx(cwd=str(tmp_path))
-    def name(tool):
+    def name(tool: str) -> str:
         return tool if native else "mcp__attachments__" + tool
     for tool, args in [("Read", {"file_path": str(source)}),
                        ("Glob", {"path": str(project_path), "pattern": "**/*.py"}),
@@ -157,10 +167,13 @@ async def test_app_config_write_waits_for_owner_on_delegated_bridge(owner, monke
     ask.assert_awaited_once()
 
 
-def test_foreign_principal_never_gains_authority(owner, monkeypatch):
+def test_foreign_principal_never_gains_authority(
+    owner: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(orch, "_principal", lambda sid: {"owner": "account:someone-else"})
     assert not orch.is_owner_session(owner)
     from app.core.session_modes import runtime_session_mode
+    # #553 changes ordinary owner rows only, not a foreign paired principal.
     assert runtime_session_mode({**owner, "mode": None}) == "code"
 
 
@@ -191,15 +204,21 @@ async def test_existing_daily_setting_counts_coordinator_and_children_after_sett
     assert assistant_limits.status()["spent_today_usd"] == pytest.approx(2.25)
 
 
-def test_runtime_ceiling_preserves_legacy_code_until_step_four(owner):
+def test_runtime_ceiling_confines_legacy_projectless_rows(owner: dict[str, object]) -> None:
+    # #553: step four shipped without its promised migration; legacy owners
+    # must not retain a shell merely because their stored mode predates chat.
     from app.core.session_modes import runtime_session_mode
-    assert runtime_session_mode({**owner, "mode": None}) == "code"
+    assert runtime_session_mode({**owner, "mode": None}) == "chat"
+    assert runtime_session_mode({**owner, "mode": "code"}) == "chat"
     assert runtime_session_mode({**owner, "mode": None, "project_v2_id": "project"}) == "code"
 
 
-@pytest.mark.parametrize("mode", [None, "chat"])
+@pytest.mark.parametrize("mode", [None, "code", "chat"])
 @pytest.mark.parametrize("permission", ["default", "acceptEdits", "bypassPermissions"])
-def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, monkeypatch, tmp_path, mode, permission):
+def test_selected_agent_effort_and_runtime_ceiling_are_built_together(
+    owner: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: "Path",
+    mode: str | None, permission: str,
+) -> None:
     from app.core import query_options, config
     from app.core.session_modes import CHAT_MODE_TOOL_SURFACE
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
@@ -210,12 +229,9 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=owner["id"])
     assert options.effort == "high"
     assert options.aih_profile_id == "agent"
-    assert options.aih_owner_coordinator == (mode == "chat")
-    # A no-project session keeps Ask and Bypass; Accept Edits runs as Ask.
-    assert options.permission_mode == ("default" if mode == "chat" and permission == "acceptEdits" else permission)
-    if mode is None:
-        assert "# No-project coordination" not in str(options.system_prompt)
-        return  # Step 4, not step 1, migrates stored code sessions to chat.
+    assert options.aih_owner_coordinator
+    # #553: NULL/code legacy owners now have the same ceiling as new chats.
+    assert options.permission_mode == ("default" if permission == "acceptEdits" else permission)
     from app.core.session_modes import chat_uploads_dir
     assert str(chat_uploads_dir()) in options.aih_assistant_scope["roots"]
     assert "app-config" in options.mcp_servers
@@ -225,6 +241,31 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(owner, mon
     for tool in ("StartSession", "Task", "Glob", "Grep", "GetAppLogs", "ScheduleWakeup"):
         assert tool in options.aih_tool_allowlist
     assert "# No-project coordination" in str(options.system_prompt)
+    assert "Use StartSession(project=...) for project work" in str(options.system_prompt)
+
+
+@pytest.mark.parametrize("v2", [False, True])
+def test_project_bound_legacy_owner_keeps_checkout_and_full_surface(
+    owner: dict, tmp_path: Path, v2: bool,
+) -> None:
+    from app.core import query_options
+
+    database.create_project("bound-project", "Project", None, str(tmp_path))
+    project = projects_v2.upsert_project("folder:bound-project", name="Project")
+    checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(tmp_path))
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET mode=NULL, project_id=%s, project_v2_id=%s WHERE id=%s",
+            (None if v2 else "bound-project", project["id"] if v2 else None, owner["id"]),
+        )
+    options, _ = query_options.build_options_from_profile(
+        database.get_profile("agent"), project=database.get_project("bound-project"),
+        session_id=owner["id"],
+    )
+    assert not options.aih_owner_coordinator
+    assert options.cwd == str(tmp_path)
+    for tool in ("Bash", "Edit", "Write", "run_python"):
+        assert tool_permitted(tool, options.aih_tool_allowlist, options.disallowed_tools)
 
 
 def test_owner_approval_marker_skips_api(owner):

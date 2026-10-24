@@ -43,7 +43,7 @@ Archive limits apply before tar parsing: decompressed bytes may exceed the signe
 
 The application revision selects its runtimes. If its first start fails and the database snapshot is restored, the previous revision and its runtime selection return together. Active, staged, previous, retained failed-build and currently running supervisor runtimes are retained; unreferenced overlays are cleaned up. Downloads are limited to 512 MiB each, expanded payloads to 2 GiB each, and the overlay store to 8 GiB, with 256 MiB of free disk space reserved. Insufficient space leaves the current version running.
 
-This is delivery support, not a claim that every installed image can already update forever. Releases do not request overlays by default. Older images whose baked startup code rejects missing capabilities still need an overlay-aware bootstrap image before they can cold-start such a release. Runtime artifacts need acceptance on both supported architectures before publication. PostgreSQL stays on the image's existing major version; PostgreSQL major upgrades and incompatible operating-system/ABI changes are not attempted through overlays.
+This is delivery support, not a claim that every installed image can already update forever. Releases do not request overlays by default. Older images whose baked startup code rejects missing capabilities still need an overlay-aware bootstrap image before they can cold-start such a release. Runtime artifacts need acceptance on both supported architectures before publication. PostgreSQL stays on the image's existing major version; PostgreSQL major upgrades and incompatible operating-system/ABI changes are not attempted through overlays. Before building on a runtime overlay, the updater starts it once; one that does not start on the image (built for another processor or for newer system libraries) is refused by name before anything is built or activated, and the current version keeps working.
 
 ## Updating the Docker image
 
@@ -52,7 +52,7 @@ When no compatible runtime overlay can satisfy a release, the in-app update says
 - **Docker Compose:** set `AI_SHUFFLE_VERSION` in `.env` to the new version and run `docker compose up -d`.
 - **docker run:** pull the new version, remove the container and start it again with the new version. See [Install with Docker](/docs/getting-started/install-docker-compose#update).
 
-Your data stays in its volumes. Give the container up to 90 seconds to stop cleanly.
+Your data stays in its volumes. Give the container up to 120 seconds to stop cleanly.
 
 Updating the image always works, even when an in-app update would have, and it is the way to jump several versions at once.
 
