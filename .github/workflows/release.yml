@@ -247,7 +247,7 @@ jobs:
             ```bash
             docker pull ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}
             docker run -d --name ai-shuffle --restart unless-stopped \
-              --stop-timeout 90 --shm-size 1g \
+              --stop-timeout 120 --shm-size 1g \
               -p 127.0.0.1:8000:8000 \
               -v ai-shuffle-data:/data \
               -v ai-shuffle-workspace:/workspace \
@@ -271,7 +271,7 @@ jobs:
             **Updating an existing install:** back up first and keep your existing
             mounts and configuration; do not substitute the new-install volume
             names above. Change only the image tag to `${{ env.RELEASE_VERSION }}`
-            and recreate the container with a 90-second shutdown timeout. Existing
+            and recreate the container with a 120-second shutdown timeout. Existing
             deployments using an external database must stay on their previous
             release until a separately tested migration is approved.
 

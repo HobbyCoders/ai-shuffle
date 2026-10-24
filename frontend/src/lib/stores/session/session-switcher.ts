@@ -34,6 +34,7 @@ import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { pendingQueue } from './pending-queue';
+import { queueHydration } from './queue-hydration';
 import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
@@ -635,6 +636,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const leavingKey = state.sessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
 		if (state.sessionId !== sessionId) rememberLeaving(state);
+		// #524: park the leaving session's not-yet-seen bubbles, then take the
+		// target's back (the same session's, on a re-open). They render at once
+		// and the watch_session snapshot below confirms or replaces them.
+		pendingQueue.park(state.sessionId, state.queuedMessages);
+		queueHydration.cancel();
+		const parkedQueue = pendingQueue.unpark(sessionId);
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
@@ -795,7 +802,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
-			queuedMessages: [],
+			queuedMessages: parkedQueue,
+			queueStale: false,
 			pendingPeerMessages: [],  // Populated from backend via history/queue_updated
 			// A send in flight belongs to the session being LEFT (S6).
 			optimisticStreaming: false,
@@ -812,7 +820,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Keep isLoadingSession true until this feed's caught_up sentinel folds the
 		// complete transcript atomically. Merely starting the fetch is not loaded.
 		// Register with SyncEngine so cross-device broadcast events reach this tab.
-		wsSend({ type: 'watch_session', session_id: sessionId });
+		if (wsSend({ type: 'watch_session', session_id: sessionId })) queueHydration.watching(sessionId);
 		// Request pending permissions/questions UNCONDITIONALLY (not gated on
 		// streaming): a session parked on a permission/question reports
 		// isStreaming=false, so gating would hide the modal until a reconnect. The
@@ -1043,6 +1051,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const leavingKey = leavingSessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
 		rememberLeaving(state);
+		// #524: the leaving session's bubbles come back when it is re-opened.
+		pendingQueue.park(leavingSessionId, state.queuedMessages);
+		queueHydration.cancel();
 
 		// Tell backend to release session lock
 		if (leavingSessionId) {
@@ -1131,6 +1142,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			deferredPermissions: [],
 			pendingQuestions: [],
 			queuedMessages: [],
+			queueStale: false,
 			pendingPeerMessages: [],
 			// Clear another session's running tasks so they don't flash in the
 			// ActiveTasks strip on the fresh compose screen (mirrors defaultState).

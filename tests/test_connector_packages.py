@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import sys
 from pathlib import Path
@@ -6,6 +7,159 @@ import pytest
 from app.core import connector_packages as packages
 from app.core.connectors import get_connector_class
 from app.core.connectors.base import ConnectorStatus
+
+
+
+@pytest.mark.asyncio
+async def test_watch_history_roundtrips_through_isolated_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    from app.core.connectors import package_proxy
+    from app.core.watch_connector_sources import poll
+
+    # The fake SDK is inside a real isolated worker process. No vendor service,
+    # installed connector package or native SDK is contacted.
+    source = (
+        'from typing import Any\n'
+        'from app.core.connectors.base import BaseConnector, ConnectorStatus\n'
+        'from app.core.connectors.watch_history import poll\n'
+        '\n'
+        '\n'
+        'class FakeSDK:\n'
+        '    async def conversations_history(self, **kwargs: Any) -> dict[str, Any]:\n'
+        '        return {"messages": [{"ts": "200", "text": "important"}]\n'
+        '                if kwargs["oldest"] < "200" else []}\n'
+        '\n'
+        '\n'
+        'class FakeConnector(BaseConnector):\n'
+        '    def __init__(self, connector_id: str, connector_type: str,\n'
+        '                 config: dict[str, Any], **kwargs: Any) -> None:\n'
+        '        super().__init__(connector_id, connector_type, config, **kwargs)\n'
+        '        self._web_client = FakeSDK()\n'
+        '        self._status = ConnectorStatus.CONNECTED\n'
+        '\n'
+        '    async def connect(self) -> bool:\n'
+        '        return True\n'
+        '\n'
+        '    async def disconnect(self) -> None:\n'
+        '        pass\n'
+        '\n'
+        '    async def send_message(self, *args: Any, **kwargs: Any) -> bool:\n'
+        '        return True\n'
+        '\n'
+        '    send_permission_prompt = send_notification = send_message\n'
+        '\n'
+        '    def get_context_instructions(self, channel: str) -> str:\n'
+        '        return ""\n'
+        '\n'
+        '    async def poll_watch(self, source: dict[str, Any], cursor: dict[str, Any]) -> Any:\n'
+        '        return await poll(self.connector_type, self, source, cursor)\n'
+    )
+    (tmp_path / "fake_watch.py").write_text(source, encoding="utf-8")
+    helper = Path(packages.__file__).with_name("connectors") / "watch_history.py"
+    (tmp_path / "watch_history.py").write_bytes(helper.read_bytes())
+    spec = {
+        "module": "fake_watch", "class": "FakeConnector", "files": {
+            filename: hashlib.sha256((tmp_path / filename).read_bytes()).hexdigest()
+            for filename in ("fake_watch.py", "watch_history.py")
+        }
+    }
+    monkeypatch.setattr(package_proxy, "interpreter", lambda _: Path(sys.executable))
+    cls = package_proxy.proxy_class("slack", tmp_path, spec)
+    instance = cls("fake-watch", "slack", {}, AsyncMock(), AsyncMock())
+    try:
+        assert await instance.connect()
+        assert not hasattr(instance, "_web_client")
+        events, cursor = await poll("slack", instance, {"channel_id": "test"}, {"after": "100"})
+        assert events[0][0] == "message_received:test:200"
+        assert cursor == {"after": "200"}
+        replay, checkpoint = await poll("slack", instance, {"channel_id": "test"}, cursor)
+        assert replay == [] and checkpoint == cursor
+    finally:
+        await instance.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_telegram_ingress_commit_ack_crosses_isolated_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    from app.core.connectors import package_proxy
+    from app.core.connectors.manager import connector_manager
+    from app.core.automation_manager import automation_manager
+    from app.db import watches as store
+
+    source = (
+        'from types import SimpleNamespace\n'
+        'from typing import Any\n'
+        'from app.core.connectors.telegram import TelegramConnector\n'
+        'from app.core.connectors.base import ConnectorStatus\n'
+        '\n'
+        '\n'
+        'class FakeConnector(TelegramConnector):\n'
+        '    async def connect(self) -> bool:\n'
+        '        self._status = ConnectorStatus.CONNECTED\n'
+        '        return True\n'
+        '\n'
+        '    async def poll_watch(self, source: dict[str, Any], cursor: dict[str, Any]) -> Any:\n'
+        '        await self._handle_message(SimpleNamespace(\n'
+        '            chat=SimpleNamespace(id=123, type="group"),\n'
+        '            from_user=SimpleNamespace(id=7, full_name="Test member"),\n'
+        '            text="important", message_id=1,\n'
+        '        ))\n'
+        '        return [], cursor\n'
+    )
+    (tmp_path / "fake_telegram.py").write_text(source, encoding="utf-8")
+    source_dir = Path(packages.__file__).with_name("connectors")
+    for filename in ("telegram.py", "telegram_actions.py"):
+        (tmp_path / filename).write_bytes((source_dir / filename).read_bytes())
+    spec = {
+        "module": "fake_telegram", "class": "FakeConnector", "files": {
+            filename: hashlib.sha256((tmp_path / filename).read_bytes()).hexdigest()
+            for filename in ("fake_telegram.py", "telegram.py", "telegram_actions.py")
+        }
+    }
+    persist = store.record_connector_event
+    attempts = 0
+
+    def record(connector_id: str, key: str, payload: dict[str, object]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary persistence failure")
+        persist(connector_id, key, payload)
+        if attempts == 2:
+            raise RuntimeError("commit succeeded, acknowledgement lost")
+
+    monkeypatch.setattr(store, "record_connector_event", record)
+    monkeypatch.setattr(automation_manager, "handle_connector_trigger", AsyncMock())
+    monkeypatch.setattr(package_proxy, "interpreter", lambda _: Path(sys.executable))
+    cls = package_proxy.proxy_class("telegram", tmp_path, spec)
+    dispatched = asyncio.Event()
+    incoming = AsyncMock(side_effect=lambda _: dispatched.set())
+    instance = cls("fake-telegram", "telegram", {}, incoming, AsyncMock(),
+                   on_trigger=connector_manager._handle_trigger)
+    try:
+        assert await instance.connect()
+        await instance.poll_watch({}, {})
+        assert attempts == 3
+        await asyncio.wait_for(dispatched.wait(), timeout=2)
+        incoming.assert_awaited_once()
+        events, cursor = store.connector_page("fake-telegram", "123", {"seq": 0})
+        assert len(events) == 1
+        assert events[0][1]["text"] == "important"
+        assert store.connector_page("fake-telegram", "123", cursor) == ([], cursor)
+    finally:
+        await instance.disconnect()
+
+
+def test_watch_helpers_are_shipped_in_verified_packages() -> None:
+    for kind in ("slack", "discord"):
+        assert "watch_history.py" in packages.CATALOG["packages"][kind]["files"]
+        packages._verify(packages._SOURCE_DIR, kind)
+    packages._verify(packages._SOURCE_DIR, "telegram")
+
 
 @pytest.fixture
 def local_package(monkeypatch):

@@ -1904,7 +1904,7 @@
 
 <div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2}>
 <!-- Unsend verdicts are announced here, outside the busy log region below. -->
-<PendingStatusAnnouncer messages={pendingMessages} sessionId={$activeSession.sessionId} />
+<PendingStatusAnnouncer messages={pendingMessages} sessionId={$activeSession.sessionId} stale={!!$activeSession.queueStale} />
 <!-- role="log" is a polite live region. aria-busy while a reply streams keeps
      screen readers from announcing every streamed token; the settled turn is
      read once the stream ends. -->
@@ -2043,6 +2043,8 @@
 			{#if pendingMessages.length > 0}
 				<PendingMessages
 					messages={pendingMessages}
+					stale={!!$activeSession.queueStale}
+					ownerName={$activeSession.isRemote ? $activeSession.ownerDeviceName : null}
 					onRemove={(id) => activeSession.unsendQueuedMessage(id)}
 					onInterrupt={() => activeSession.interruptForQueuedMessages()}
 				/>

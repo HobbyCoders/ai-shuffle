@@ -21,9 +21,27 @@ with a 15-second limit; a request pinned to this worker does not ask them. A
 malformed peer reply marks only that worker unavailable, and the fal catalog
 search is returned even when the priced lookup fails.
 
-Every call to the four generation tools or `runFalModel` that can spend money
-goes through the guard below: a known price, confirmation above the threshold
-and the daily cap. Nothing unpriced is submitted, including unattended calls.
+The same source/account/model/options on several workers is one option: a usable
+local holder is preferred, otherwise the holder is chosen by worker ID. Different
+accounts or options remain separate. A single quoted match exposes its price both
+on the option and at the top level; with several matches, read each option's price.
+Default options are resolved by the same pricing code used for generation. Prices
+that depend on missing call inputs (for example text length) remain unknown.
+
+`searchModels` returns compact schemas by default: declared field names, types,
+required flags, enums, defaults and numeric bounds, without descriptions or the
+raw OpenAPI document. Each schema is limited to 32 fields and 4 KiB, with individual
+values limited to 512 characters of JSON. Omitted values/fields set
+`schema.truncated: true`; oversized option defaults set `options_omitted: true`.
+The default response is at most 32 KiB of ASCII-escaped JSON; omitted results set
+`truncated: true` and match counts remain unchanged. Pass `full_schema: true` to
+request complete schemas and defaults. Choice cards still receive complete schemas.
+Media-related boolean switches such as `generate_audio` stay boolean, not file inputs.
+
+Every call to the four generation tools or `runFalModel`, including subscription
+images priced **Included**, goes through the guard below: a known price,
+confirmation above the threshold and the daily cap. Nothing unpriced is
+submitted, including unattended calls.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -45,7 +63,7 @@ and the daily cap. Nothing unpriced is submitted, including unattended calls.
   priced request still runs through the guard. The built-in fal default is not a choice: with nothing
   saved, the user is asked. The ChatGPT-plan image setting
   stays a provider rule and is not migrated. Chat mode has no Settings default.
-- **Named choices** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
+- **Named choices in interactive runs** outrank a remembered choice for that request and go through the resolver below: price, confirmation and the
   daily cap. A named model the guard cannot price or resolve is refused, never
   run on another path. Outside chat mode, a guarded fal result run on this worker
   also returns the workspace `file_path`, so `editImage` and `imageToVideo`
@@ -53,8 +71,9 @@ and the daily cap. Nothing unpriced is submitted, including unattended calls.
   is refused before submission, so no worker-local path is ever returned.
 - **ChatGPT-plan images.** While Image generation is set to the ChatGPT plan,
   `generateImage` keeps main's rule (#1796): no fal source or fal model, on
-  this worker or a peer, and no fal options in a choice card. The configured
-  plan model ID (or its model tail) is accepted as before. A worker that holds
+  this worker or a peer, and no fal options in a choice card. The legacy Settings
+  handler is never used by unified generation: choose a verified account/model
+  from the card or Catalog and remember it to run unasked. A worker that holds
   a fal key applies its own setting too: if its Image generation is the
   ChatGPT plan, it lists no fal image models for peers and refuses to run one.
 - **`runFalModel`** runs fal endpoints with a declared text prompt, including
@@ -71,9 +90,93 @@ and the daily cap. Nothing unpriced is submitted, including unattended calls.
 - **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
   registered for sessions running on a verified ChatGPT or SuperGrok account.
 - **Stored Native generation settings** decide eligibility per account. A
-  `null` group is never offered or run. Unreadable stored JSON keeps the
+  `null` group is shown as unavailable and never run. Unreadable stored JSON keeps the
   verified image default and disables video; an account with no stored row keeps
   the provider defaults, including SuperGrok video.
+
+## Catalog and job-choice APIs
+
+`GET /api/v1/generation/catalog` returns `entries`, `favourites`, `kinds` and
+`limit`. Optional filters are `kind` (`image`, `video`, `audio`, `3d`), `source`,
+`model`, `query` and `limit` (1–50, default 15, per kind/source/holding worker).
+With no kind it queries all four. Use search filters to browse large fal catalogs;
+this is a bounded on-demand view, not a complete offline model inventory.
+Each entry contains `source`, `account`, `worker` (the holding worker ID),
+`model`, `kind`, `verified`, `available`, `reason`, `options`, `schema`,
+`quick_settings`, `price` and `status` (`available`, `unpriced`, `unavailable`).
+Prices retain `currency`, `unit`, decimal-string `amount`/`total` and `status`;
+unknown amounts are null, never zero. Native account-disabled routes remain
+visible with their verified combination and price but `available: false`.
+Ordinary API users see only their own permitted sources, not owner accounts.
+Catalog lookup submits no generation; a quote/admission must still recheck cost.
+
+`PUT /api/v1/generation/favourites/{kind}` accepts a choice directly
+(`source` or `account`, `model`, optional `worker`, `options`).
+`DELETE` clears it. There is one optional favourite per account/kind, returned
+in the catalog's `favourites` map. It is a bookmark only: it never updates
+remembered/last choices or authorizes unattended generation.
+
+For scheduled automation jobs, owner-only
+`GET /api/v1/generation/jobs/{automation_id}/choices` returns `job_id` and a
+per-kind `choices` map. `PUT .../choices/{kind}` stores a choice directly;
+it must pin `account`, `worker` and `model` (and may include `source`, `options`).
+`DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
+protection as preferences. Job choices are account-scoped preferences, separate
+from favourites and remembered picks. A run session's stored `automation_id`
+binds these choices in the production RunContext; tool arguments cannot invent
+a job binding. Each kind uses its job choice first, then its remembered choice.
+Unreadable job choices fail closed; current options, price and cap are checked
+at execution time, not assumed from the save.
+
+OpenAI/xAI API-key images remain unavailable until a reviewed live-probe record
+is added to `app/core/native_image_verification.py`. The initially empty table
+pins one exact image combination and explicit output/text-input USD rates per
+provider; it drives native settings, catalog eligibility, admission pricing and
+the official `images/generations` adapter. No subscription, custom gateway,
+redirect, automatic retry or other-provider fallback is used for these API calls.
+A table record is not evidence of access on every account: provider rejection
+still fails without a second submission. No paid probe is part of this change.
+
+## Conversational preferences
+
+Owner sessions with the app-config tools enabled can call
+`app-config.generationPreferences` with `action: "get"`, `"remember"` or `"forget"`.
+`get` returns remembered picks (optionally filtered by `kind`) without migrating
+legacy settings. Writes require a kind and `confirm: true` after the user's
+acknowledgment; `remember` also requires a `choice` using discovered source/account,
+model, worker and declared options. No caller-supplied preference identity is used.
+Only interactive owner turns can write: unattended runs (including automation,
+background, delegated, hidden and voice sessions) cannot save their own choices,
+even with `confirm: true`. Discovery callers default to read-only.
+
+An optional `job_id` targets an existing automation instead of the remembered pick.
+A job choice must pin account, worker and model. Read/remember/forget use the same
+store as the HTTP APIs and the production run context; favourites remain separate.
+Writes take effect in subsequent turns, not the current turn's already-bound context.
+Saving is not a quote, availability verification, generation or spend approval.
+Every execution still validates the stored choice, current price, confirmation and
+cap. API-user sessions do not get owner app-config tools; their existing scoped
+choices API is unchanged.
+
+## Pending API-image verification (disabled)
+
+`VERIFIED_API_IMAGES` stays empty. These are **probe candidates**, not verified
+capabilities or enabled table records. After owner approval, run each exactly once;
+record a named smoke-run ID, revision, sanitized account alias, actual model/options,
+decoded artifact/container/dimensions, usage/billing and reviewed conservative output
+and input USD rates. Only then propose a code-reviewed `Verification` record. An
+error or uncertain outcome must not trigger a retry or a different provider.
+
+| Named probe | Endpoint and exact candidate options | Planning allowance | Enablement |
+| --- | --- | --- | --- |
+| `generation-379.openai-image` | OpenAI `/v1/images/generations`; `gpt-image-2.5-sunburst-2026-09-08`, `size=1024x1024`, `quality=low`, `output_format=png`, `n=1` | About $0.10, including input; recheck current pricing and entitlement first | Pending owner OK and live evidence |
+| `generation-379.xai-image` | xAI `/v1/images/generations`; `grok-imagine-image`, `resolution=1k`, `aspect_ratio=1:1`, `response_format=b64_json`, `n=1` | About $0.02; recheck current pricing first | Pending owner OK and live evidence |
+
+The $0.12 combined planning allowance is not a guaranteed charge or permission to
+spend. Candidate IDs/rates come from the #507 probe plan and must be rechecked before
+submission. Public documentation is not account-specific capability evidence. Other
+models, sizes, formats, quality levels or API video routes need separate verification;
+no result may be extrapolated to an untested combination.
 
 ## Selection contract
 
@@ -117,7 +220,15 @@ tool arguments. A job choice takes precedence over a remembered choice. With
 neither stored choice, an unattended run returns `status: "skipped"`,
 `reason: "no_stored_choice"` and a plain-language report, even if an agent
 supplies a source in its tool call. A result that ran the remembered choice has
-`remembered: true`.
+`remembered: true`. If an unattended call names a source, account, model or worker
+that differs from the remembered choice, it returns `status: "skipped"` and
+`reason: "named_choice_differs_from_stored"` before any catalog lookup or submission.
+The owner must select the named choice; tool arguments never replace the stored one.
+A job's own stored choice is the owner's binding for that job: an unattended job run
+uses it whatever source, account, model or worker the call names (declared options in
+the call still apply, under the same price, confirmation and cap checks), and the
+result has `job_choice: true`.
+A matching named choice keeps the normal pricing, confirmation and daily-cap checks.
 
 ## Remembered choices
 
@@ -133,7 +244,14 @@ preferences:
   copied. A remembered choice is never overwritten by the migration.
 
 `GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
-saves a pick (`remember: false` records only the last choice);
+saves a pick (`remember: false` records only the last choice). The save response
+includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
+choice cannot run unattended. An unpriced model reports `stored_choice_unpriced`.
+An unavailable account/model or failed quote reports `stored_choice_unavailable`,
+with the quote's error in `quote_error` and the warning. The optional quote has a
+two-second timeout; a failed quote does not lose the saved pick. No price is inferred
+for an unpriced model, and saving never reserves or submits a generation. Frontend
+clients must display this warning after saving or remembering a pick.
 `DELETE /api/v1/generation/choices/{kind}` asks again next time.
 `GET /api/v1/generation/options/{kind}` lists priced options across accounts
 and `POST /api/v1/generation/quote` validates options against the model's

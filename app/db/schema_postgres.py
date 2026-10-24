@@ -12,6 +12,8 @@ Usage::
         cursor = conn.cursor()
         create_postgres_schema(cursor)
 """
+from __future__ import annotations
+from typing import Any
 
 import logging
 
@@ -93,7 +95,7 @@ def create_session_recall_text(cursor) -> None:
     cursor.execute("DROP INDEX IF EXISTS idx_session_events_recall_trgm")
 
 
-def create_postgres_schema(cursor) -> None:
+def create_postgres_schema(cursor: Any) -> None:
     """Create all PostgreSQL tables, indexes, triggers, and seed data.
 
     Parameters
@@ -111,6 +113,8 @@ def create_postgres_schema(cursor) -> None:
     # to this worker's database; nothing in them depends on other tables.
     from app.db.network import create_schema as create_network_schema
     create_network_schema(cursor)
+    from app.db.working_record import create_schema as create_working_record_schema
+    create_working_record_schema(cursor)
 
     # 1. Schema version
     # ------------------------------------------------------------------
@@ -1547,7 +1551,6 @@ def create_postgres_schema(cursor) -> None:
     # -- user_preferences
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
 
-
     # -- permission_rules
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_tool ON permission_rules(tool_name)")
@@ -2052,7 +2055,6 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
 
-
     # ------------------------------------------------------------------
     # 57. git_ops — the durable cross-install git-operation queue.
     #
@@ -2159,6 +2161,9 @@ def create_postgres_schema(cursor) -> None:
     create_assistant_schema(cursor)
     from app.db.assistant_limits import create_schema as create_assistant_limits_schema
     create_assistant_limits_schema(cursor)
+    from app.db.watches import create_schema as create_watches_schema
+
+    create_watches_schema(cursor)
 
     # ==================================================================
     # SEED DATA

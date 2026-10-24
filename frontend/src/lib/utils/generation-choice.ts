@@ -85,6 +85,35 @@ export interface GenerationChoice {
 	origin?: string;
 }
 
+/**
+ * One row of the all-account catalog (`GET /generation/catalog`): a source on
+ * the worker that holds the account, with its verification, live price and
+ * whether it can run. `unpriced` rows are refused at run time like
+ * `unavailable` ones; only `available` can generate.
+ */
+export type CatalogStatus = 'available' | 'unpriced' | 'unavailable';
+
+export interface CatalogEntry extends GenerationOption {
+	status: CatalogStatus;
+}
+
+/**
+ * A short name for the worker holding an account: its device name when the
+ * install registry knows it, `This worker` for the local one, else a clipped
+ * id. `self` is the local worker's device id.
+ */
+export function workerLabel(
+	worker: string | undefined,
+	installs: readonly { id: string; device_id?: string; device_name: string; is_self?: boolean }[] | null,
+	self: string
+): string {
+	if (!worker) return 'Unknown worker';
+	const install = installs?.find((i) => i.device_id === worker || i.id === worker);
+	if (install?.device_name) return install.device_name;
+	if (worker === self || worker === 'local') return 'This worker';
+	return worker.length > 14 ? `${worker.slice(0, 12)}…` : worker;
+}
+
 export interface ChooseResult {
 	kind: GenerationKind;
 	tool: string;
