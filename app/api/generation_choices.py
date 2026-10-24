@@ -11,7 +11,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_auth
+from app.api.auth import require_admin, require_auth
 from app.api.preferences import require_preference_write
 from app.core import generation_choices
 from app.core.preference_identity import request_preference_identity
@@ -118,6 +118,104 @@ async def list_options(kind: str, request: Request, query: Optional[str] = None,
     limit = max(1, min(limit, 12))
     catalog = await Resolver(Sources(None, _context(request))).catalog(kind, query=query or None, limit=limit)
     return {"kind": kind, "options": catalog.get("options", [])[: limit * 2]}
+
+
+@router.get("/catalog")
+async def catalog(request: Request, kind: Optional[str] = None, source: Optional[str] = None,
+                  model: Optional[str] = None, query: Optional[str] = None, limit: int = 15,
+                  token: str = Depends(require_auth)) -> dict:
+    """All connected accounts/holding workers, including unavailable routes.
+
+    Limit is per kind/source, capped at 50; use query/model to narrow the fal
+    catalog. Prices are live estimates for default options, not admission.
+    No generation is submitted. Favourites never imply consent to generate.
+    """
+    import asyncio
+    from app.core.generation_resolver import Resolver, price_total
+    from app.services.generation_sources import Sources
+
+    kinds = [_kind(kind)] if kind else list(generation_choices.KINDS)
+    limit = max(1, min(limit, 50))
+    resolver = Resolver(Sources(None, _context(request)))
+    catalogs = await asyncio.gather(*(
+        resolver.catalog(k, source=source, model=model, query=query, limit=limit)
+        for k in kinds
+    ))
+    entries = []
+    for result in catalogs:
+        for entry in result.get("options", []):
+            status = (
+                "unavailable" if not entry["available"] else
+                "unpriced" if price_total(entry["price"]) is None else "available"
+            )
+            entries.append({**entry, "status": status})
+    saved = await run_sync(lambda: generation_choices.favourites(_identity(request)))
+    return {"entries": entries, "favourites": saved, "kinds": kinds, "limit": limit}
+
+
+@router.put("/favourites/{kind}")
+async def save_favourite(kind: str, body: ChoiceBody, request: Request,
+                         token: str = Depends(require_preference_write)) -> dict:
+    _kind(kind)
+    try:
+        choice = await run_sync(lambda: generation_choices.set_favourite(
+            _identity(request), kind, body.model_dump(exclude_none=True)))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"kind": kind, "favourite": choice}
+
+
+@router.delete("/favourites/{kind}")
+async def delete_favourite(kind: str, request: Request,
+                           token: str = Depends(require_preference_write)) -> dict:
+    _kind(kind)
+    await run_sync(lambda: generation_choices.set_favourite(_identity(request), kind, None))
+    return {"kind": kind, "favourite": None}
+
+
+async def _job(job_id: str) -> str:
+    from uuid import UUID
+    from app.db import database
+
+    try:
+        canonical = str(UUID(job_id))
+    except ValueError:
+        raise HTTPException(404, "Unknown job.") from None
+    if await run_sync(database.get_automation, canonical) is None:
+        raise HTTPException(404, "Unknown job.")
+    return canonical
+
+
+@router.get("/jobs/{job_id}/choices")
+async def job_choices(job_id: str, request: Request, token: str = Depends(require_admin)) -> dict:
+    job_id = await _job(job_id)
+    try:
+        choices = await run_sync(lambda: generation_choices.load_job(_identity(request), job_id))
+    except ValueError:
+        raise HTTPException(503, "The job's generation choices could not be read.") from None
+    return {"job_id": job_id, "choices": choices}
+
+
+@router.put("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])
+async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Request,
+                          token: str = Depends(require_preference_write)) -> dict:
+    _kind(kind)
+    job_id = await _job(job_id)
+    try:
+        choice = await run_sync(lambda: generation_choices.save_job(
+            _identity(request), job_id, kind, body.model_dump(exclude_none=True)))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"job_id": job_id, "kind": kind, "choice": choice}
+
+
+@router.delete("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])
+async def delete_job_choice(job_id: str, kind: str, request: Request,
+                            token: str = Depends(require_preference_write)) -> dict:
+    _kind(kind)
+    job_id = await _job(job_id)
+    await run_sync(lambda: generation_choices.save_job(_identity(request), job_id, kind, None))
+    return {"job_id": job_id, "kind": kind, "choice": None}
 
 
 @router.post("/quote")

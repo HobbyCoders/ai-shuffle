@@ -1529,6 +1529,17 @@
           "title": "Title",
           "type": "string"
         },
+        "worker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SwarmWorker"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "worker_session_id": {
           "anyOf": [
             {
@@ -1624,6 +1635,25 @@
         "swarm"
       ],
       "title": "SwarmUpdated",
+      "type": "object"
+    },
+    "SwarmWorker": {
+      "description": "The network worker a remotely dispatched Swarm task runs on.",
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "device_id"
+      ],
+      "title": "SwarmWorker",
       "type": "object"
     },
     "SystemCompactionBoundary": {

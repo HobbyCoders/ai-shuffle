@@ -8,6 +8,11 @@ if [ "$(/usr/bin/id -u)" = "0" ]; then
     export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 fi
 
+# Validate policy and the requested identity before remapping home, changing
+# accounts, or installing anything (including on direct non-root launches).
+/usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py validate-isolation \
+    --new-uid "${PUID:-99}" --new-gid "${PGID:-100}"
+
 # Tool code and production dependencies are supplied by the image. Startup
 # validates them, but never repairs or installs packages with root privileges.
 require_bundled_tools() {
