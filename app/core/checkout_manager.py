@@ -286,9 +286,9 @@ def _branch_plan(
           fabricating an empty branch off the base HEAD (the pre-fix bug).
     """
     if create_new_branch:
-        from app.core.git_fork_base import fetch_base
+        from app.core.git_fork_base import CHAT_FETCH_TIMEOUT, fetch_base
 
-        fetched_branch, fetched = fetch_base(base_dir, base_branch)
+        fetched_branch, fetched = fetch_base(base_dir, base_branch, timeout=CHAT_FETCH_TIMEOUT)
         if base_branch or fetched:
             return True, base_branch or fetched_branch
         # Offline, prefer the same default branch if either cached ref exists;

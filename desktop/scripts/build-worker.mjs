@@ -43,7 +43,7 @@
  * SHUFFLE_DESKTOP_POSTGRES_DIR); the manifest says so.
  */
 import { createHash } from 'node:crypto';
-import { createWriteStream, existsSync } from 'node:fs';
+import { createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
@@ -66,9 +66,11 @@ import {
 import { validateBundledSymlinks } from './bundled-symlinks.mjs';
 import { installGh } from './gh-binaries.mjs';
 
-const PYTHON_VERSION = '3.12.14';
-const PYTHON_BUILD = '20260901';
-const NODE_VERSION = '22.23.2';
+// Versions are dependency inputs, not part of this script's cache identity.
+const native = JSON.parse(readFileSync(new URL('../runtime-contract.json', import.meta.url), 'utf8')).native;
+const PYTHON_VERSION = native.python.version;
+const PYTHON_BUILD = native.python.build;
+const NODE_VERSION = native.node;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const desktopDir = path.resolve(here, '..');
@@ -253,7 +255,7 @@ async function installPython() {
 	run(py, ['--version']);
 
 	const env = { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: '1', PYTHONNOUSERSITE: '1' };
-	run(py, ['-m', 'pip', 'install', '--no-cache-dir', '--upgrade', 'pip==26.2.1'], { env });
+	run(py, ['-m', 'pip', 'install', '--no-cache-dir', '--upgrade', `pip==${native.pip}`], { env });
 	// Hash-pinned, the same way the container image and updater install: every
 	// package, including fluid's build backend, must match a hash in the locks.
 	const pip = ['-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', '--timeout', '120', '--retries', '10'];

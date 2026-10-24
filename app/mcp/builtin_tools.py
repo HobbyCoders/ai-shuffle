@@ -2889,7 +2889,8 @@ def create_builtin_tools_server(
         "whether Android needs a new Play build (only for android/ changes). "
         "Read-only. Pass pr OR commit; with neither it reports drift from main. "
         "Call it when the owner asks whether a change is live, not as a "
-        "routine step after a merge.",
+        "routine step after a merge. Before diagnosis, compare checkout HEAD/dirty with "
+        "runtime revision; follow source_guidance on mismatch.",
         {
             "type": "object",
             "properties": {
