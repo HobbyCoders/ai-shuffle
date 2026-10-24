@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.api import generation_choices as api
 from app.core.generation_resolver import Candidate
+from app.services.generation_sources import Sources as ProductionSources
 from tests.core.test_generation_resolver import FakeBackend, candidate
 
 IDENTITY = ("account", "origin#owner")
@@ -52,7 +53,10 @@ def test_catalog_uses_production_sources_and_lists_peer_and_disabled_account(
     from app.core.generation_resolver import INCLUDED_PRICE
     from app.db import database, model_providers
     from app.network import generation
+    from app.services import generation_sources
 
+    # The client fixture stubs Sources; this test exercises the production one.
+    monkeypatch.setattr(generation_sources, "Sources", ProductionSources)
     rows = [{"id": "local-plan", "provider_type": "chatgpt"},
             {"id": "unverified-api", "provider_type": "openai", "auth_mode": "api_key"}]
     monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)
@@ -102,7 +106,7 @@ def test_job_writer_binds_real_session_to_unattended_tool(
 ) -> None:
     import asyncio
     import json
-    from uuid import uuid4
+    from app.api import automations
     from app.core import generation_choices, model_effort, query_options
     from app.db import database
     from app.mcp import ai_tools_sdk
@@ -110,10 +114,17 @@ def test_job_writer_binds_real_session_to_unattended_tool(
 
     client.app.dependency_overrides[api.require_admin] = lambda: "owner"
     monkeypatch.setattr(model_effort, "_caller_preference_identity", lambda row: IDENTITY)
-    job_id = str(uuid4())
-    database.create_automation(
-        job_id, "Draw", "interval", {"seconds": 3600}, "default", prompt="Draw a tree",
-    )
+    client.app.include_router(automations.router)
+    created = client.post("/api/v1/automations", json={
+        "name": "Draw", "trigger_type": "interval", "trigger_config": {"seconds": 3600},
+        "profile_id": "default", "prompt": "Draw a tree",
+    })
+    assert created.status_code == 201, created.text
+    job_id = created.json()["id"]
+    assert job_id.startswith("auto-") and len(job_id) == 13
+    assert client.get(f"/api/v1/generation/jobs/{job_id}/choices").json() == {
+        "job_id": job_id, "choices": {},
+    }
     entry = candidate()
     pick = entry.choice()
     route = f"/api/v1/generation/jobs/{job_id}/choices/image"
@@ -142,20 +153,34 @@ def test_job_writer_binds_real_session_to_unattended_tool(
     assert generation_choices.load_job(IDENTITY, job_id) == {}
     assert client.put(route, json={"source": "fal", "model": "m"}).status_code == 422
     assert client.put(
-        f"/api/v1/generation/jobs/{uuid4()}/choices/image", json=pick,
+        "/api/v1/generation/jobs/auto-ffffffff/choices/image", json=pick,
     ).status_code == 404
 
 
+@pytest.mark.parametrize("job_id", [
+    "auto-ffffffff", "auto-12345678.image", "x" * 129, "auto-12345678' OR '1'='1",
+])
+def test_job_routes_reject_unknown_or_unsafe_ids(client: TestClient, job_id: str) -> None:
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    route = f"/api/v1/generation/jobs/{job_id}/choices"
+    assert client.get(route).status_code == 404
+    assert client.put(route + "/image", json={"source": "fal", "model": "m"}).status_code == 404
+    assert client.delete(route + "/image").status_code == 404
+
+
 def test_job_choices_require_owner_even_for_preference_writers(client: TestClient) -> None:
-    from uuid import uuid4
-    route = f"/api/v1/generation/jobs/{uuid4()}/choices/image"
-    assert client.put(route, json={"source": "fal", "model": "x"}).status_code == 403
+    route = "/api/v1/generation/jobs/auto-12345678/choices"
+    assert client.get(route).status_code == 403
+    assert client.put(route + "/image", json={"source": "fal", "model": "x"}).status_code == 403
+    assert client.delete(route + "/image").status_code == 403
 
 
 
 @pytest.fixture
 def client(mock_db, monkeypatch):
     from app.network import runners
+    from app.services import generation_sources
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: FakeBackend([]))
     monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
     monkeypatch.setattr(api, "request_preference_identity", lambda request: IDENTITY)
     app = FastAPI()
