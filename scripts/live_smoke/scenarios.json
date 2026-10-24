@@ -338,6 +338,22 @@
       "intro": "Single-worker checks of the turn loop.",
       "rows": [
         {
+          "id": "harness-basics.cli-subagent-owner-pass",
+          "check": "CLI bundled calls cannot spend the main chat approval",
+          "kind": "owner",
+          "how": "On disposable candidate + #535, park HandOffSession to an offline test worker.",
+          "pass_when": "Approve, then rerun via CLI subagent: asks with identity; main uses pass.",
+          "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
+        },
+        {
+          "id": "harness-basics.native-owner-pass",
+          "check": "Native owner approval retains its caller scope",
+          "kind": "owner",
+          "how": "On disposable native candidate + #535, park and approve the same offline call.",
+          "pass_when": "Main rerun uses its pass once; another agent session needs its own yes.",
+          "past_bug": "#559: CLI identity plumbing must not change native approval scope."
+        },
+        {
           "id": "harness-basics.generation-conversation-preferences",
           "check": "Generation preferences can be read and edited in conversation without submission",
           "kind": "owner",
