@@ -9,7 +9,7 @@ from typing import Literal
 from app.api.auth import require_admin
 from app.core import watch_placement
 from app.core.watch_manager import watch_manager
-from app.network.control import RunnerUnreachable
+from app.network.control import ControlRefused, RunnerUnreachable
 from app.db.async_database import run_sync
 
 router = APIRouter(
@@ -64,9 +64,13 @@ async def update_watch(watch_id: str, body: WatchStatus) -> Any:
             await watch_placement.move(watch_id, body.worker_id) if body.worker_id
             else await watch_placement.change(watch_id, body.status)
         )
-    except ValueError as exc:
+    except (ValueError, ControlRefused) as exc:
+        # A refusal, local or from the peer: nothing applied that a retry fixes
+        # by itself. The watch list says whether a move left the source fenced.
         raise HTTPException(409, str(exc)) from exc
     except RunnerUnreachable as exc:
-        raise HTTPException(409, "Watch worker is unavailable; retry the same operation") from exc
+        # Unreachable, or reached with no answer (MaybeApplied): the outcome is
+        # unknown, so the client must not report success. 503, not 409.
+        raise HTTPException(503, "Watch worker is unavailable; retry the same operation") from exc
     watch_manager.notify()
     return row

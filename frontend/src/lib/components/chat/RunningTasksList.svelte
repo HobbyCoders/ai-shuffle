@@ -19,7 +19,11 @@
 	 * Watches (#371 step 3) are the owner's, not this chat's, so every chat
 	 * lists all of them: what each watches, when it last fired and its cost,
 	 * with Pause / Resume and Stop (terminal, so it confirms). Stop all never
-	 * stops a watch.
+	 * stops a watch. Each names the worker it runs on (#565) and can Move to
+	 * another; the Watches head says where new watches run and changes it. A
+	 * move shows pending, unconfirmed, refused and fenced states as they are:
+	 * only the server's answer makes it "Moved". A row whose worker is offline
+	 * is the synced copy, not the watch itself, so its controls wait.
 	 *
 	 * Reads the session store's activeTasks, the swarms store and the watches
 	 * store; it keeps no
@@ -33,9 +37,12 @@
 	import {
 		Activity,
 		ArrowLeft,
+		ArrowRightLeft,
 		Bot,
 		ChevronDown,
 		CircleCheck,
+		CircleX,
+		CloudOff,
 		Eye,
 		LoaderCircle,
 		MessageSquareText,
@@ -43,6 +50,7 @@
 		Play,
 		Search,
 		Terminal,
+		TriangleAlert,
 		Workflow,
 		X
 	} from 'lucide-svelte';
@@ -50,6 +58,7 @@
 	import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 	import { swarms } from '$lib/stores/swarms';
 	import { watches } from '$lib/stores/watches';
+	import { watchWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { cancelLimitResume } from '$lib/api/limit-resume';
@@ -59,6 +68,18 @@
 	import { buildShell } from '$lib/utils/platform';
 	import { isSwarmActive } from '$lib/utils/swarm';
 	import SwarmHistory from './SwarmHistory.svelte';
+	import WatchWorkerPicker from './WatchWorkerPicker.svelte';
+	import {
+		automaticWorker,
+		findWorker,
+		moveOptions,
+		placementOf,
+		preferenceSummary,
+		tierLabel,
+		workerChoices,
+		type PickerOption,
+		type WatchPlacement
+	} from './watch-placement';
 	import {
 		buildRows,
 		buildWatchRows,
@@ -127,6 +148,13 @@
 	let stoppedWatches = $state<Set<string>>(new Set());
 	/** Watch rows whose Pause or Resume is in flight. */
 	let watchBusy = $state<Set<string>>(new Set());
+	/** The watch row whose Move picker is open. */
+	let movingWatch = $state<string | null>(null);
+	/** Which list's "where new watches run" picker is open. */
+	let prefOpen = $state<'compact' | 'roomy' | null>(null);
+	/** The preference being saved (`undefined` = none), and why the last save failed. */
+	let prefBusy = $state<string | null | undefined>(undefined);
+	let prefError = $state<string | null>(null);
 	// Collapsed or open is the owner's choice for every chat, kept with the
 	// account (ui:running_tasks_open): a session switch, a remount or a task
 	// starting or ending never reopens a list they collapsed.
@@ -157,6 +185,9 @@
 		confirmingWatch = null;
 		stoppedWatches = new Set();
 		watchBusy = new Set();
+		movingWatch = null;
+		prefOpen = null;
+		prefError = null;
 		ownSheetOpen = false;
 	}
 
@@ -183,6 +214,13 @@
 	const allRowCount = $derived(rows.length + watchRows.length);
 	/** The watch list has never loaded: an empty list here is unknown, not "none". */
 	const watchesUnknown = $derived($watches.error && !$watches.fetched);
+	// ── Placement (#565): the worker directory, shared with the runner pickers.
+	const installs = $derived($workerInstalls);
+	const workers = $derived(workerChoices(installs));
+	/** Moving and choosing only mean something with a second worker. */
+	const multiWorker = $derived(workers.length > 1);
+	const preference = $derived(preferenceSummary($watches.preferredWorkerId, workers, installs));
+	const showPreference = $derived(multiWorker || !!$watches.preferredWorkerId);
 	const inlineLineCount = $derived(
 		rows.reduce((n, r) => n + 1 + (r.type === 'swarm' && expanded[r.key] ? r.members.length : 0), 0) +
 			watchRows.length
@@ -258,6 +296,10 @@
 	});
 	onDestroy(() => {
 		if (timer !== null) clearInterval(timer);
+	});
+	// Worker presence (online, always on) only while a watch row is on screen.
+	$effect(() => {
+		if (onScreen && (watchRows.length > 0 || filter === 'watches')) return watchWorkerPresence();
 	});
 
 	function elapsedOf(row: { startedAt: number | null; endedAt: number | null }): string {
@@ -351,6 +393,7 @@
 
 	async function toggleWatch(row: WatchListRow) {
 		if (watchBusy.has(row.key) || !(row.canPause || row.canResume)) return;
+		if (watchLock(row, placementOf(row, installs))) return;
 		const pausing = row.state === 'active';
 		markWatchBusy(row.key, true);
 		try {
@@ -364,7 +407,7 @@
 
 	async function stopWatch(row: WatchListRow) {
 		confirmingWatch = null;
-		if (!row.canStop || stopping.has(row.key)) return;
+		if (!row.canStop || stopping.has(row.key) || watchLock(row, placementOf(row, installs))) return;
 		markStopping(row.key, true);
 		// Kept before the stop lands, so the row reads "Stopped" instead of vanishing.
 		stoppedWatches = new Set([...stoppedWatches, row.id]);
@@ -377,6 +420,92 @@
 			notify.error("Couldn't stop the watch. Try again.");
 		} finally {
 			markStopping(row.key, false);
+		}
+	}
+
+	/**
+	 * Why this row's Pause, Stop and Move wait, or null when they do not. A row
+	 * whose worker is offline is the synced copy: only that worker can act.
+	 */
+	function watchLock(row: WatchListRow, place: WatchPlacement): string | null {
+		if ($watches.moves[row.id]?.phase === 'pending') return 'Moving: wait for the move to finish';
+		if (row.transferTo !== null) return 'Finish the move first';
+		if (place.worker && !place.worker.online) return `${place.worker.name} is offline`;
+		return null;
+	}
+
+	function workerName(id: string | null | undefined): string {
+		return findWorker(installs, id)?.name ?? 'another worker';
+	}
+
+	function moveChoices(place: WatchPlacement): PickerOption[] {
+		return moveOptions(workers, place.worker?.id ?? null).map((w) => ({
+			id: w.id,
+			name: w.name,
+			tier: w.tier,
+			online: w.online,
+			unavailable: w.unavailable,
+			detail: w.isSelf ? 'This worker' : null
+		}));
+	}
+
+	function moveWatchTo(row: WatchListRow, target: string | null) {
+		movingWatch = null;
+		if (!target) return;
+		void watches.move(row.id, target);
+	}
+
+	// A move whose answer was lost, now listed on its target, did land.
+	$effect(() => {
+		for (const row of watchRows) {
+			const move = $watches.moves[row.id];
+			if (!move || (move.phase !== 'uncertain' && move.phase !== 'failed') || row.transferTo !== null) continue;
+			const at = placementOf(row, installs).worker;
+			if (at && at.id === move.target) untrack(() => watches.settleMove(row.id));
+		}
+	});
+
+	/** Where new watches can go, as picker rows; offline ones say why. */
+	const automatic = $derived(automaticWorker(workers));
+	const preferenceChoices = $derived<PickerOption[]>([
+		{
+			id: null,
+			name: 'Automatic',
+			detail: automatic
+				? `An always-on worker or server · now ${automatic.name}`
+				: 'No always-on worker or server is online now'
+		},
+		...workers.map((w) => ({
+			id: w.id,
+			name: w.name,
+			tier: w.tier,
+			online: w.online,
+			unavailable: w.online ? null : 'Offline: cannot be chosen until it is back',
+			detail: w.isSelf ? 'This worker' : null
+		}))
+	]);
+	/** The stored preference as a picker id (it may be an install id). */
+	const preferenceCurrent = $derived(
+		$watches.preferredWorkerId ? (findWorker(installs, $watches.preferredWorkerId)?.id ?? $watches.preferredWorkerId) : null
+	);
+
+	function togglePreference(size: 'compact' | 'roomy') {
+		prefError = null;
+		prefOpen = prefOpen === size ? null : size;
+	}
+
+	async function choosePreference(id: string | null) {
+		if (prefBusy !== undefined) return;
+		prefBusy = id;
+		prefError = null;
+		try {
+			await watches.setPreference(id);
+			prefOpen = null;
+		} catch (error) {
+			const detail = (error as { detail?: unknown } | null)?.detail;
+			prefError = typeof detail === 'string' && detail ? detail : "Couldn't save where new watches run. Try again.";
+		} finally {
+			prefBusy = undefined;
 		}
 	}
 
@@ -403,6 +532,8 @@
 		confirmingAll = false;
 		confirmingSwarm = null;
 		confirmingWatch = null;
+		movingWatch = null;
+		prefOpen = null;
 		if (variant === 'sheet') {
 			onClose?.();
 			return;
@@ -430,6 +561,8 @@
 			if (confirmingAll) confirmingAll = false;
 			else if (confirmingSwarm) confirmingSwarm = null;
 			else if (confirmingWatch) confirmingWatch = null;
+			else if (movingWatch) movingWatch = null;
+			else if (prefOpen) prefOpen = null;
 			else closeSheet();
 			return;
 		}
@@ -677,16 +810,29 @@
 	</li>
 {/snippet}
 
-<!-- ── One watch: what it watches, last fired, cost; Pause / Resume, Stop ── -->
+<!-- ── One watch: what it watches, last fired, cost, where it runs; Pause / Resume, Move, Stop ── -->
 {#snippet watchView(row: WatchListRow, size: 'compact' | 'roomy')}
 	{@const iconSize = size === 'roomy' ? 18 : 13}
 	{@const busy = watchBusy.has(row.key)}
 	{@const fired = row.state === 'stopped' ? 'Stopped' : formatFired(row.lastFiredAt, now)}
+	{@const place = placementOf(row, installs)}
+	{@const move = $watches.moves[row.id]}
+	{@const lock = watchLock(row, place)}
+	{@const live = row.state === 'active' || row.state === 'paused'}
+	{@const canMove = multiWorker && live && row.transferTo === null}
+	<!-- A standalone worker has no directory rows: the watch is this worker's. -->
+	{@const placeName = place.worker?.name ?? (installs ? (workers.length ? 'Unknown worker' : defaultWorker) : null)}
+	{@const placeTitle = place.worker
+		? `Runs on ${place.worker.name} · ${tierLabel(place.worker.tier)} · ${place.worker.online ? 'online' : 'offline'}`
+		: `Runs on a worker this list does not know${place.reportedId ? ` (${place.reportedId})` : ''}`}
+	{@const fencedTo = row.transferTo !== null ? workerName(row.transferTo) : null}
+	{@const landed = move?.phase === 'moved'}
 	<li
 		class="row watch size-{size}"
 		class:is-stopped={row.state === 'stopped'}
 		class:is-stopping={row.state === 'stopping'}
 		class:is-paused={row.state === 'paused'}
+		class:is-moving={move?.phase === 'pending' || row.transferTo !== null}
 		data-row={row.key}
 		data-state={row.state}
 	>
@@ -695,18 +841,43 @@
 			<span class="watch-text">
 				<span class="row-name" title={row.name}>
 					<span class="name-text">{row.name}</span>
-					{#if row.state === 'paused'}<span class="state-chip on-name" class:roomy={size === 'roomy'}>Paused</span>{/if}
+					{#if row.state === 'paused'}<span class="state-chip on-name" class:roomy={size === 'roomy'}>{row.transferTo !== null ? 'Moving' : 'Paused'}</span>{/if}
 				</span>
 				<span class="row-meta">
 					<!-- In the one-line sheet row the chip leads the meta line instead,
 					     so the name keeps its room (CSS picks one of the two). -->
-					{#if row.state === 'paused' && size === 'roomy'}<span class="state-chip on-meta">Paused</span>{/if}
+					{#if row.state === 'paused' && size === 'roomy'}<span class="state-chip on-meta">{row.transferTo !== null ? 'Moving' : 'Paused'}</span>{/if}
 					<b
 						class="meta-time"
 						title={row.lastFiredAt ? `Last fired ${new Date(row.lastFiredAt).toLocaleString()}` : undefined}
 					>{#if fired.startsWith('Fired ')}<span class="fired-word">{'Fired '}</span>{fired.slice(6)}{:else}{fired}{/if}</b>
 					<span class="meta-worker meta-cost" title={watchCostTitle(row)}>{formatWatchCost(row.costUsd)}</span>
+					{#if size === 'compact' && placeName}
+						<span class="meta-worker meta-place" title={placeTitle} data-testid="watch-worker">
+							<span class="place-dot" class:online={place.worker?.online === true} class:offline={place.worker?.online === false} aria-hidden="true"></span>{placeName}
+						</span>
+					{/if}
 				</span>
+				{#if size === 'roomy' && placeName}
+					<span class="watch-place" title={placeTitle} data-testid="watch-worker">
+						<span class="place-dot" class:online={place.worker?.online === true} class:offline={place.worker?.online === false} aria-hidden="true"></span>
+						<span class="place-name">{placeName}</span>
+						{#if place.worker}
+							<span class="place-tier tier-{place.worker.tier}">{place.worker.online ? tierLabel(place.worker.tier) : 'Offline'}</span>
+						{/if}
+						{#if canMove}
+							<button
+								type="button"
+								class="place-move"
+								disabled={!!lock}
+								title={lock ?? 'Move to another worker'}
+								aria-label="Move watch: {row.name}"
+								aria-expanded={movingWatch === row.key}
+								onclick={() => (movingWatch = movingWatch === row.key ? null : row.key)}
+							><ArrowRightLeft size={13} strokeWidth={2} aria-hidden="true" />Move</button>
+						{/if}
+					</span>
+				{/if}
 			</span>
 			<span class="row-actions">
 				{#if row.sessionId && row.sessionId !== sessionId && row.state !== 'stopped'}
@@ -720,14 +891,27 @@
 				{:else}
 					<span class="icon-slot" aria-hidden="true"></span>
 				{/if}
+				{#if size === 'compact' && canMove}
+					<button
+						type="button"
+						class="icon-btn"
+						disabled={!!lock}
+						title={lock ?? 'Move to another worker'}
+						aria-label="Move watch: {row.name}"
+						aria-expanded={movingWatch === row.key}
+						onclick={() => (movingWatch = movingWatch === row.key ? null : row.key)}
+					><ArrowRightLeft size={iconSize} strokeWidth={2} /></button>
+				{:else if size === 'compact' && multiWorker}
+					<span class="icon-slot" aria-hidden="true"></span>
+				{/if}
 				{#if busy}
 					<span class="icon-btn busy" role="status" aria-label="Updating {row.name}"><LoaderCircle size={size === 'roomy' ? 17 : 13} class="spin" /></span>
 				{:else if row.canPause}
-					<button type="button" class="icon-btn" title="Pause" aria-label="Pause watch: {row.name}" onclick={() => toggleWatch(row)}>
+					<button type="button" class="icon-btn" title={lock ?? 'Pause'} aria-label="Pause watch: {row.name}" disabled={!!lock} onclick={() => toggleWatch(row)}>
 						<Pause size={iconSize} strokeWidth={2} />
 					</button>
 				{:else if row.canResume}
-					<button type="button" class="icon-btn resume" title="Resume" aria-label="Resume watch: {row.name}" onclick={() => toggleWatch(row)}>
+					<button type="button" class="icon-btn resume" title={lock ?? 'Resume'} aria-label="Resume watch: {row.name}" disabled={!!lock} onclick={() => toggleWatch(row)}>
 						<Play size={iconSize} strokeWidth={2} />
 					</button>
 				{:else}
@@ -739,9 +923,10 @@
 					<button
 						type="button"
 						class="icon-btn stop"
-						title="Stop"
+						title={lock ?? 'Stop'}
 						aria-label="Stop watch: {row.name}"
 						aria-expanded={confirmingWatch === row.key}
+						disabled={!!lock}
 						onclick={() => (confirmingWatch = confirmingWatch === row.key ? null : row.key)}
 					><X size={size === 'roomy' ? 18 : 13} strokeWidth={2.5} /></button>
 				{:else}
@@ -751,6 +936,62 @@
 		</div>
 		{#if row.reason}
 			<div class="paused-note in-row" role="status">Paused: {row.reason}</div>
+		{/if}
+		{#if live || row.transferTo !== null}
+			{#if move?.phase === 'pending'}
+				<div class="move-note pending in-row" role="status" data-testid="watch-move">
+					<span class="lane" aria-hidden="true"><span>{placeName ?? 'This worker'}</span><i></i><span>{workerName(move.target)}</span></span>
+					<span>Moving to {workerName(move.target)}. It pauses first and runs nowhere else until {workerName(move.target)} takes it over.</span>
+				</div>
+			{:else if row.transferTo !== null}
+				<div class="move-note warn in-row" role="status" data-testid="watch-move">
+					<TriangleAlert size={14} class="note-icon" aria-hidden="true" />
+					<span>
+						<b>Move to {fencedTo} unfinished.</b>
+						It is paused on {placeName ?? 'its worker'} and runs nowhere until the move completes.
+						{#if move?.phase === 'failed' && move.message}Last try: {move.message}{:else if move?.phase === 'uncertain'}{fencedTo} did not answer the last try.{/if}
+					</span>
+					{#if row.transferTo}
+						<span class="note-actions">
+							<button type="button" class="btn ghost" onclick={() => watches.move(row.id, row.transferTo!)}>Retry move</button>
+						</span>
+					{/if}
+				</div>
+			{:else if landed}
+				<div class="move-note ok in-row" role="status" data-testid="watch-move"><CircleCheck size={14} class="note-icon" aria-hidden="true" />Moved to {workerName(move.target)}.</div>
+			{:else if move?.phase === 'uncertain'}
+				<div class="move-note warn in-row" role="status" data-testid="watch-move">
+					<TriangleAlert size={14} class="note-icon" aria-hidden="true" />
+					<span><b>Move to {workerName(move.target)} not confirmed.</b> No answer came back, so it may not have finished. Retry the same move; it never runs on two workers.</span>
+					<span class="note-actions">
+						<button type="button" class="btn ghost" onclick={() => watches.dismissMove(row.id)}>Dismiss</button>
+						<button type="button" class="btn ghost strong" onclick={() => watches.move(row.id, move.target)}>Retry move</button>
+					</span>
+				</div>
+			{:else if move?.phase === 'failed'}
+				<div class="move-note error in-row" role="alert" data-testid="watch-move">
+					<CircleX size={14} class="note-icon" aria-hidden="true" />
+					<span><b>Couldn't move to {workerName(move.target)}.</b> {move.message}</span>
+					<span class="note-actions">
+						<button type="button" class="btn ghost" onclick={() => watches.dismissMove(row.id)}>Dismiss</button>
+						<button type="button" class="btn ghost strong" onclick={() => watches.move(row.id, move.target)}>Try again</button>
+					</span>
+				</div>
+			{:else if place.worker && !place.worker.online}
+				<div class="move-note muted in-row" role="status"><CloudOff size={14} class="note-icon" aria-hidden="true" />{place.worker.name} is offline. This is its last synced state; Pause, Stop and Move come back when it does.</div>
+			{/if}
+		{/if}
+		{#if movingWatch === row.key && canMove && !lock}
+			<WatchWorkerPicker
+				label="Move {row.name} to"
+				title="Move to another worker"
+				{size}
+				options={moveChoices(place)}
+				confirmLabel="Move"
+				note="It pauses on {placeName ?? 'this worker'} first and runs nowhere else until the new worker takes it over. If the move can't be confirmed, it stays paused until you retry."
+				onPick={(id) => moveWatchTo(row, id)}
+				onCancel={() => (movingWatch = null)}
+			/>
 		{/if}
 		{#if confirmingWatch === row.key && row.canStop}
 			<div class="confirm in-row" role="alertdialog" aria-label="Stop watch {row.name}">
@@ -762,12 +1003,53 @@
 	</li>
 {/snippet}
 
+<!-- ── Where new watches run (the owner's preference, synced) ───────────── -->
+{#snippet preferenceButton(size: 'compact' | 'roomy')}
+	{#if showPreference}
+		<button
+			type="button"
+			class="pref-btn"
+			class:problem={!!preference.problem}
+			aria-expanded={prefOpen === size}
+			aria-label="New watches run on: {preference.label}. Change"
+			title={preference.problem ?? 'Where new watches run'}
+			onclick={() => togglePreference(size)}
+		>
+			<span class="pref-lead">{size === 'roomy' ? 'New watches:' : 'New:'}</span>
+			<span class="pref-value">{preference.label}</span>
+			<ChevronDown size={12} class={prefOpen === size ? 'pref-chev open' : 'pref-chev'} aria-hidden="true" />
+		</button>
+	{/if}
+{/snippet}
+
+{#snippet preferencePicker(size: 'compact' | 'roomy')}
+	{#if showPreference && prefOpen === size}
+		<WatchWorkerPicker
+			label="Where new watches run"
+			title="Where new watches run"
+			{size}
+			options={preferenceChoices}
+			current={preferenceCurrent}
+			problem={preference.problem}
+			error={prefError}
+			busyId={prefBusy}
+			note="Applies to watches created from now on, on every device. Existing watches stay where they are; use Move for those."
+			onPick={choosePreference}
+			onCancel={() => (prefOpen = null)}
+		/>
+	{/if}
+{/snippet}
+
 {#snippet watchGroup(list: WatchListRow[], size: 'compact' | 'roomy')}
 	{#if list.length}
 		<section class="group" aria-labelledby="{titleId}-watches-{size}">
-			<h3 class="group-head" id="{titleId}-watches-{size}">
-				<span>Watches</span> <span class="group-count">{list.filter((r) => r.state !== 'stopped').length}</span>
-			</h3>
+			<div class="group-head watch-head">
+				<h3 class="group-title" id="{titleId}-watches-{size}">
+					<span>Watches</span> <span class="group-count">{list.filter((r) => r.state !== 'stopped').length}</span>
+				</h3>
+				{@render preferenceButton(size)}
+			</div>
+			{@render preferencePicker(size)}
 			<ul class="rows" role="list">
 				{#each list as row (row.key)}
 					{@render watchView(row, size)}
@@ -865,6 +1147,10 @@
 						{#if confirmedEmpty}<CircleCheck size={28} aria-hidden="true" />{/if}
 						<p>{emptyMessage}</p>
 					</div>
+					{#if filter === 'watches' && !watchesUnknown && showPreference}
+						<div class="empty-pref">{@render preferenceButton('roomy')}</div>
+						{@render preferencePicker('roomy')}
+					{/if}
 				{:else}
 					{@render groupView('Agents', groups.agents, 'roomy', 'agents')}
 					{@render groupView('Shell', groups.shell, 'roomy', 'shell')}
@@ -1458,7 +1744,7 @@
 	@media (max-width: 480px) {
 		.size-roomy.watch .row-inner {
 			grid-template-columns: 28px minmax(0, 1fr) auto;
-			grid-template-areas: 'icon name name' 'icon meta actions';
+			grid-template-areas: 'icon name name' 'icon meta actions' 'icon place place';
 			row-gap: 0;
 			padding-top: 8px;
 			padding-bottom: 0;
@@ -1468,7 +1754,9 @@
 		.size-roomy.watch .row-name { grid-area: name; }
 		.size-roomy.watch .row-meta { grid-area: meta; }
 		.size-roomy.watch .row-actions { grid-area: actions; }
+		.size-roomy.watch .watch-place { grid-area: place; padding-bottom: 8px; }
 		.size-roomy.watch .paused-note { margin-top: 0; }
+		.size-roomy .move-note { margin-left: 14px; }
 		.state-chip.on-name.roomy { display: inline; }
 		.size-roomy.watch .row-meta .state-chip.on-meta { display: none; }
 		/* "3h ago · $1.87" fits beside three actions at 320px; screen readers
@@ -1495,6 +1783,157 @@
 		.size-compact.watch .row-actions { grid-area: actions; }
 	}
 	.watch .paused-note { color: color-mix(in oklch, var(--warning) 72%, var(--foreground)); }
+
+	/* ── Watch placement (#565) ────────────────────────────────────────────── */
+	/* Tints mix in oklab: oklch drifts the hue toward pink against a hue-0 background. */
+	.icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.icon-btn:disabled:hover { background: transparent; color: var(--muted-foreground); }
+	.place-dot {
+		display: inline-block;
+		flex: none;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		border: 1.5px solid var(--muted-foreground);
+		vertical-align: middle;
+	}
+	.place-dot.online { border-color: var(--success); background: var(--success); }
+	.place-dot.offline { border-style: dashed; }
+	.meta-place { display: inline-flex; align-items: center; gap: 4px; }
+	/* Roomy rows: a line of its own under "Fired 3h ago · $1.87". */
+	.watch-place {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		font-size: 0.71875rem;
+		line-height: 1.4;
+		color: var(--muted-foreground);
+	}
+	.place-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); font-weight: 500; }
+	.place-tier {
+		flex: none;
+		font-size: 0.65625rem;
+		font-weight: 600;
+		line-height: 1.5;
+		padding: 0 6px;
+		border-radius: 999px;
+		color: var(--muted-foreground);
+		background: var(--muted);
+		white-space: nowrap;
+	}
+	.place-tier.tier-always_on { color: color-mix(in oklab, var(--success) 70%, var(--foreground)); background: color-mix(in oklab, var(--success) 14%, transparent); }
+	.place-tier.tier-server { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); }
+	/* Compact pill; the ::before stretches the touch target to 44px tall. */
+	.place-move {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex: none;
+		margin-left: auto;
+		height: 26px;
+		padding: 0 10px;
+		border-radius: 999px;
+		border: 1px solid var(--border);
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 0.75rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background-color 0.12s ease, border-color 0.12s ease;
+	}
+	.place-move::before { content: ''; position: absolute; inset: -9px -4px; }
+	.place-move:hover:not(:disabled) { background: var(--hover-overlay); border-color: var(--border-strong, var(--border)); }
+	.place-move[aria-expanded='true'] { border-color: var(--primary); color: var(--primary); }
+	.place-move:disabled { opacity: 0.45; cursor: not-allowed; }
+	.place-move:focus-visible, .pref-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	.watch.is-moving .row-icon { color: var(--warning); }
+
+	/* What a move is doing. Pending carries a moving lane between the two
+	   workers; unconfirmed and unfinished are warnings, never a success. */
+	.move-note {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px 10px;
+		line-height: 1.35;
+		border-radius: calc(var(--radius, 0.75rem) * 0.7);
+		border: 1px solid var(--border-subtle, var(--border));
+		color: var(--foreground);
+	}
+	.move-note > span:not(.lane):not(.note-actions) { flex: 1 1 14rem; min-width: 0; }
+	.move-note b { font-weight: 600; }
+	.move-note :global(.note-icon) { flex: none; align-self: flex-start; margin-top: 2px; }
+	.move-note.warn :global(.note-icon) { color: color-mix(in oklab, var(--warning) 72%, var(--foreground)); }
+	.move-note.error :global(.note-icon) { color: var(--destructive); }
+	/* Text beside the icon wraps instead of dropping under it. */
+	.move-note { flex-wrap: nowrap; }
+	.move-note:has(.note-actions), .move-note.pending { flex-wrap: wrap; }
+	.move-note:has(.note-actions) > span:first-of-type { flex: 1 1 12rem; }
+	.size-compact .move-note { margin: 2px 0 6px 28px; padding: 6px 8px; font-size: 0.75rem; }
+	.size-roomy .move-note { margin: 0 12px 10px 52px; padding: 8px 10px; font-size: 0.8125rem; }
+	.move-note.pending { background: color-mix(in oklab, var(--primary) 7%, var(--background)); border-color: color-mix(in oklab, var(--primary) 30%, var(--border)); }
+	.move-note.warn { background: color-mix(in oklab, var(--warning) 10%, var(--background)); border-color: color-mix(in oklab, var(--warning) 40%, var(--border)); }
+	.move-note.warn b { color: color-mix(in oklab, var(--warning) 72%, var(--foreground)); }
+	.move-note.error { background: color-mix(in oklab, var(--destructive) 9%, var(--background)); border-color: color-mix(in oklab, var(--destructive) 40%, var(--border)); }
+	.move-note.error b { color: var(--destructive); }
+	.move-note.ok { color: color-mix(in oklab, var(--success) 70%, var(--foreground)); background: color-mix(in oklab, var(--success) 9%, var(--background)); border-color: color-mix(in oklab, var(--success) 35%, var(--border)); }
+	.move-note.muted { color: var(--muted-foreground); border-style: dashed; }
+	.note-actions { display: flex; gap: 6px; margin-left: auto; }
+	.size-compact .move-note .btn { padding: 3px 10px; }
+	.size-roomy .move-note .btn { min-height: 40px; padding: 0 12px; }
+	.move-note .btn.strong { border-color: var(--border-strong, var(--border)); }
+	.lane {
+		display: inline-grid;
+		grid-template-columns: auto minmax(28px, 64px) auto;
+		align-items: center;
+		gap: 6px;
+		flex: none;
+		max-width: 100%;
+		font-weight: 600;
+		font-size: 0.92em;
+	}
+	.lane > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 9rem; }
+	.lane i {
+		height: 2px;
+		border-radius: 2px;
+		background: repeating-linear-gradient(90deg, var(--primary) 0 6px, transparent 6px 11px);
+		background-size: 11px 2px;
+		animation: rt-lane 0.7s linear infinite;
+	}
+	@keyframes rt-lane { to { background-position: 11px 0; } }
+
+	/* Watches head: the title, and where new watches run. */
+	.watch-head { justify-content: space-between; align-items: center; }
+	.group-title { display: flex; align-items: baseline; gap: inherit; margin: 0; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; }
+	.pref-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 0;
+		max-width: 65%;
+		padding: 2px 6px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		letter-spacing: normal;
+		text-transform: none;
+		cursor: pointer;
+	}
+	.pref-btn:hover { color: var(--foreground); background: var(--hover-overlay); }
+	.pref-lead { flex: none; }
+	.pref-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); }
+	.pref-btn.problem .pref-value { color: color-mix(in oklab, var(--warning) 72%, var(--foreground)); }
+	.pref-btn :global(.pref-chev) { flex: none; transition: transform 0.15s ease; }
+	.pref-btn :global(.pref-chev.open) { transform: rotate(180deg); }
+	.rt-list .pref-btn { min-height: 32px; font-size: 0.75rem; padding: 0 8px; }
+	.empty-pref { display: flex; justify-content: center; margin: -32px 16px 8px; }
 
 	/* Phone: the sheet is a full-height page. */
 	.rt-layer.mobile { align-items: stretch; justify-content: stretch; }
@@ -1523,5 +1962,7 @@
 		.rt-scrim, .rt-sheet, .rt-layer.mobile .rt-sheet { animation: none; }
 		.size-roomy .row-inner, .inline-toggle, .icon-btn, .row :global(.swarm-chev), .inline :global(.inline-chev) { transition: none; }
 		.spinner, .icon-btn :global(.spin), .member[data-status='running'] .member-dot { animation-duration: 2.4s; }
+		.lane i { animation: none; }
+		.place-move, .pref-btn :global(.pref-chev) { transition: none; }
 	}
 </style>

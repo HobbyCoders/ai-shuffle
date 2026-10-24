@@ -5,15 +5,42 @@
  * desktop inline panel, the sheet and the phone controls. The server sends no
  * live event for them: while at least one view tracks the list it is fetched
  * on mount, every POLL_MS while the page is visible, when the page becomes
- * visible again, and after each Pause, Resume or Stop.
+ * visible again, and after each Pause, Resume, Stop or Move.
+ *
+ * Moves (#565) are kept here rather than in a panel, so the inline list, the
+ * sheet and a remount all show the same pending, uncertain or failed move.
+ * A move is never reported as done unless the server answered with the row.
  */
 import { get, writable } from 'svelte/store';
-import { listWatches, setWatchStatus, type WatchRow, type WatchStatus } from '$lib/api/watches';
+import {
+	listWatches,
+	moveWatch,
+	setWatchPreference,
+	setWatchStatus,
+	type WatchRow,
+	type WatchStatus
+} from '$lib/api/watches';
 
 export const WATCH_POLL_MS = 30_000;
 
+/**
+ * A move this browser asked for. `pending` while the request runs; `uncertain`
+ * when no answer says whether it landed (the worker was unreachable or did not
+ * answer); `failed` when it was refused, with the reason; `moved` briefly after
+ * the server confirmed it.
+ */
+export interface WatchMove {
+	target: string;
+	phase: 'pending' | 'uncertain' | 'failed' | 'moved';
+	message: string | null;
+}
+
 export interface WatchesState {
 	list: WatchRow[];
+	/** Where new watches run; `null` is automatic. */
+	preferredWorkerId: string | null;
+	/** Moves by watch id. */
+	moves: Record<string, WatchMove>;
 	/** A request has finished, whether or not it worked. */
 	loaded: boolean;
 	/**
@@ -26,7 +53,9 @@ export interface WatchesState {
 	error: boolean;
 }
 
-const EMPTY: WatchesState = { list: [], loaded: false, fetched: false, error: false };
+const EMPTY: WatchesState = { list: [], preferredWorkerId: null, moves: {}, loaded: false, fetched: false, error: false };
+/** How long a confirmed move says "Moved to …" before the row speaks for itself. */
+export const MOVED_NOTE_MS = 6_000;
 const state = writable<WatchesState>({ ...EMPTY });
 
 let inflight: Promise<void> | null = null;
@@ -37,8 +66,8 @@ function refresh(): Promise<void> {
 	if (inflight) return inflight;
 	inflight = (async () => {
 		try {
-			const list = await listWatches();
-			state.set({ list, loaded: true, fetched: true, error: false });
+			const listing = await listWatches();
+			state.update((s) => ({ ...s, list: listing.watches, preferredWorkerId: listing.preferredWorkerId, loaded: true, fetched: true, error: false }));
 		} catch {
 			state.update((s) => ({ ...s, loaded: true, error: true }));
 		} finally {
@@ -107,7 +136,94 @@ async function setStatus(id: string, status: WatchStatus): Promise<void> {
 	}
 }
 
-export const watches = { subscribe: state.subscribe, refresh, track, setStatus };
+function setMove(id: string, move: WatchMove | null) {
+	state.update((s) => {
+		const moves = { ...s.moves };
+		if (move) moves[id] = move;
+		else delete moves[id];
+		return { ...s, moves };
+	});
+}
+
+const movedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** What a failed move means: refused (409, a reason) or unknown (anything else). */
+export function moveFailure(error: unknown): Pick<WatchMove, 'phase' | 'message'> {
+	const e = error as { status?: unknown; detail?: unknown } | null;
+	const detail = typeof e?.detail === 'string' && e.detail.trim() ? e.detail.trim() : null;
+	if (e && e.status === 409) return { phase: 'failed', message: detail ?? 'The worker refused the move.' };
+	// 503 (unreachable or no answer), a dropped connection or a server error:
+	// the move may have started, so it must not read as done or as refused.
+	return { phase: 'uncertain', message: null };
+}
+
+/**
+ * Move one watch to `target`. Resolves with the outcome; never throws. The
+ * list is refetched either way: a refused or unanswered move may still have
+ * left the watch fenced on its old worker, which only the server can say.
+ */
+async function move(id: string, target: string): Promise<WatchMove['phase']> {
+	const current = get(state).moves[id];
+	if (current?.phase === 'pending') return 'pending';
+	clearTimeout(movedTimers.get(id));
+	movedTimers.delete(id);
+	setMove(id, { target, phase: 'pending', message: null });
+	let phase: WatchMove['phase'];
+	try {
+		await moveWatch(id, target);
+		phase = 'moved';
+		markMoved(id, target);
+	} catch (error) {
+		const failure = moveFailure(error);
+		phase = failure.phase;
+		setMove(id, { target, ...failure });
+	}
+	await (inflight ?? Promise.resolve()).then(refresh);
+	return phase;
+}
+
+function markMoved(id: string, target: string) {
+	clearTimeout(movedTimers.get(id));
+	setMove(id, { target, phase: 'moved', message: null });
+	movedTimers.set(
+		id,
+		setTimeout(() => {
+			movedTimers.delete(id);
+			if (get(state).moves[id]?.phase === 'moved') setMove(id, null);
+		}, MOVED_NOTE_MS)
+	);
+}
+
+/**
+ * The list now shows the watch on the move's target: an unconfirmed (or
+ * refused-late) move did land, so say "Moved" and let the note go.
+ */
+function settleMove(id: string) {
+	const current = get(state).moves[id];
+	if (current && (current.phase === 'uncertain' || current.phase === 'failed')) markMoved(id, current.target);
+}
+
+/** Forget a failed or uncertain move note (the row's own state remains). */
+function dismissMove(id: string) {
+	if (get(state).moves[id]?.phase !== 'pending') setMove(id, null);
+}
+
+/** Where new watches run. Rejects with the server's reason when refused. */
+async function setPreference(workerId: string | null): Promise<void> {
+	const preferredWorkerId = await setWatchPreference(workerId);
+	state.update((s) => ({ ...s, preferredWorkerId }));
+}
+
+export const watches = {
+	subscribe: state.subscribe,
+	refresh,
+	track,
+	setStatus,
+	move,
+	settleMove,
+	dismissMove,
+	setPreference
+};
 
 /** Test hook: forget everything between cases. */
 export function __resetWatches() {
@@ -115,6 +231,8 @@ export function __resetWatches() {
 	timer = null;
 	users = 0;
 	inflight = null;
+	for (const t of movedTimers.values()) clearTimeout(t);
+	movedTimers.clear();
 	if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
-	state.set({ ...EMPTY });
+	state.set({ ...EMPTY, moves: {} });
 }

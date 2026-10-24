@@ -5,6 +5,11 @@
  * Created only in conversation (CreateWatch, confirmed by the owner); the UI
  * lists them in the running-tasks panel and pauses, resumes or stops them.
  * Stop is terminal.
+ *
+ * Placement (#565): every row names the worker that executes it. The owner can
+ * set where new watches run (`PUT /watches/preference`) and move one
+ * (`PATCH /watches/{id}` with `worker_id`). A move fences the old worker first;
+ * a 409 is a refusal (with the reason), a 503 means the outcome is unknown.
  */
 import { api } from './client';
 
@@ -25,19 +30,47 @@ export interface WatchRow {
 	cost_usd: number;
 	daily_budget_usd?: number | null;
 	creating_session_id?: string | null;
+	/**
+	 * The executing worker's install id, or `transfer:<device id>` while a
+	 * move to that worker is unfinished (the row is fenced: it does not run).
+	 */
 	worker_id?: string | null;
+	/** The network device that reported the row: where it executes. */
+	placement_device_id?: string | null;
 	ends_at?: string | null;
 	created_at?: string | null;
 	can_pause: boolean;
 	can_stop: boolean;
 }
 
-export async function listWatches(): Promise<WatchRow[]> {
-	const body = await api.get<{ watches?: WatchRow[] }>('/watches', { cache: 'no-store' });
-	return Array.isArray(body?.watches) ? body.watches : [];
+export interface WatchListing {
+	watches: WatchRow[];
+	/** Where new watches run; `null` is automatic (an always-on worker). */
+	preferredWorkerId: string | null;
+}
+
+export async function listWatches(): Promise<WatchListing> {
+	const body = await api.get<{ watches?: WatchRow[]; preferred_worker_id?: string | null }>('/watches', {
+		cache: 'no-store'
+	});
+	return {
+		watches: Array.isArray(body?.watches) ? body.watches : [],
+		preferredWorkerId: body?.preferred_worker_id || null
+	};
 }
 
 /** Pause, resume (`active`) or stop a watch. Returns the stored row. */
 export function setWatchStatus(id: string, status: WatchStatus): Promise<WatchRow> {
 	return api.patch(`/watches/${encodeURIComponent(id)}`, { status });
+}
+
+/** Move a watch to another worker. Resolves with the destination's row. */
+export function moveWatch(id: string, workerId: string): Promise<WatchRow> {
+	return api.patch(`/watches/${encodeURIComponent(id)}`, { worker_id: workerId });
+}
+
+/** Where new watches run: a worker id, or `null` for automatic. */
+export async function setWatchPreference(workerId: string | null): Promise<string | null> {
+	const body = await api.put<{ preferred_worker_id?: string | null }>('/watches/preference', { worker_id: workerId });
+	return body?.preferred_worker_id || null;
 }

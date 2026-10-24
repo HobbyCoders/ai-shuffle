@@ -219,6 +219,32 @@ def test_owner_preference_api(owner: dict[str, Any], network: Any) -> None:
         assert client.get("/api/v1/watches").json()["preferred_worker_id"] is None
 
 
+@pytest.mark.parametrize(("error", "status", "detail"), [
+    (control.ControlRefused("Telegram watches cannot move"), 409, "Telegram watches cannot move"),
+    (ValueError("Wait for in-flight deliveries"), 409, "Wait for in-flight deliveries"),
+    (control.MaybeApplied("ServerWorker did not answer in time"), 503, "retry the same operation"),
+    (control.RunnerUnreachable("offline"), 503, "retry the same operation"),
+])
+def test_move_api_separates_refusal_from_unknown_outcome(
+    owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch,
+    error: Exception, status: int, detail: str,
+) -> None:
+    """The panel shows a refusal's reason; an unknown outcome must not read as done."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api import watches as api
+    from app.api.auth import require_admin
+
+    monkeypatch.setattr(placement, "move", AsyncMock(side_effect=error))
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[require_admin] = lambda: {"id": "admin"}
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.patch("/api/v1/watches/w1", json={"worker_id": "ServerWorker"})
+    assert response.status_code == status
+    assert detail in response.json()["detail"]
+
+
 @pytest.mark.asyncio
 async def test_owner_confirmed_move_keeps_scope(
     owner: dict[str, Any], network: Any, monkeypatch: MonkeyPatch
