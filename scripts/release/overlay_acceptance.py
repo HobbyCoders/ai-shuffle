@@ -321,8 +321,11 @@ class Acceptance:
         # The supervisor probes every 30 s in production; the decisions are the
         # same at 1 s and the run takes minutes instead of an hour.
         self.runtime.READY_PROBE_INTERVAL = 1.0
-        self.work = Path(args.work or tempfile.mkdtemp(prefix="overlay-acceptance-")).resolve()
-        self.work.mkdir(parents=True, exist_ok=True)
+        # A directory of this run's own, inside --work when given: removal at
+        # the end never reaches the caller's files beside it.
+        if args.work:
+            Path(args.work).mkdir(parents=True, exist_ok=True)
+        self.work = Path(tempfile.mkdtemp(prefix="overlay-acceptance-", dir=args.work)).resolve()
         self.platform = self.updates.runtime_platform()
         self.image_record = read_json(self.docker_dir / "image.json")
         self.provides = list(self.image_record.get("provides") or self.contract.PROVIDES)
@@ -684,11 +687,17 @@ class Acceptance:
         return report
 
     def remove_work(self) -> None:
-        # Installed overlays are read-only; the updater's own removal handles them.
-        try:
-            getattr(self.updates, "remove_tree", shutil.rmtree)(self.work)
-        except OSError:
-            shutil.rmtree(self.work, ignore_errors=True)
+        """Delete this run's own directory only, never the caller's --work."""
+        remove_tree(self.work)
+
+
+def remove_tree(path: Path) -> None:
+    """rmtree that first gives back the write bits installed overlays drop
+    (an image's own updater may predate its remove_tree)."""
+    for directory, _, _ in os.walk(path):
+        if not os.path.islink(directory):
+            os.chmod(directory, 0o755)
+    shutil.rmtree(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -705,7 +714,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="the capability it provides, e.g. python-3.13")
     parser.add_argument("--executable", default="python/bin/python3",
                         help="interpreter path inside the archive")
-    parser.add_argument("--work", type=Path, help="scratch directory (default: a new temp dir)")
+    parser.add_argument("--work", type=Path,
+                        help="where to create this run's own scratch directory "
+                             "(default: the system temp dir); only that directory is removed")
     parser.add_argument("--keep", action="store_true", help="keep the scratch directory")
     parser.add_argument("--timeout", type=float, default=600, help="seconds allowed per wait")
     args = parser.parse_args(argv)

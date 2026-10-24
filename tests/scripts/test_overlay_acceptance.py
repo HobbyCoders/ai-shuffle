@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,6 +74,40 @@ def test_foreign_binary_names_the_other_processor_and_does_not_run(tmp_path: Pat
     except OSError:
         return  # ENOEXEC: the kernel refused it
     assert result.returncode != 0  # an emulator registered for that processor refused it
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="loads the Linux container supervisor")
+@pytest.mark.parametrize("outcome", ["passed", "setup-failed"])
+def test_run_removes_only_its_own_directory_inside_work(
+        tmp_path: Path, outcome: str) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    saved = work / "candidate.tar.gz"
+    saved.write_bytes(b"the caller's archive")
+    args = SimpleNamespace(docker_dir=ROOT / "docker", overlay=saved, capability="python-test",
+                           executable="python/bin/python3", work=work, keep=False, timeout=5.0)
+    run = harness.Acceptance(args)
+    assert run.work.parent == work.resolve()
+
+    def setup() -> None:
+        # What an installed overlay leaves: read-only payload directories.
+        payload = run.work / "data/application-updates/runtime-overlays/x/payload/lib"
+        payload.mkdir(parents=True)
+        (payload / "os.py").write_text("# stdlib")
+        payload.chmod(0o555)
+        payload.parent.chmod(0o555)
+        if outcome == "setup-failed":
+            raise RuntimeError("synthetic setup failure")
+        run.db = SimpleNamespace(query=lambda sql: "16", close=lambda: None)
+        run.candidate = {"sha256": "0" * 64, "url": "https://overlays.invalid/x"}
+
+    run.setup = setup
+    run.apply = run.rollback = run.refuse = lambda: {}
+    report = run.run()
+    assert report["passed"] is (outcome == "passed")
+    assert ("setup_error" in report) is (outcome == "setup-failed")
+    assert sorted(work.iterdir()) == [saved]
+    assert saved.read_bytes() == b"the caller's archive"
 
 
 def postgres_16() -> bool:
