@@ -1503,6 +1503,7 @@ class PgFluidStore:
         self._loaded: set = set()
         self._load_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
+        self._resume_trim_pending = False
 
     async def _ensure_loaded(self, session_id: str) -> bool:
         async with self._load_lock:
@@ -1515,6 +1516,8 @@ class PgFluidStore:
                 self._nodes[session_id] = data["nodes"]
                 self._node_sizes[session_id] = data["node_sizes"]
                 self._node_json_bytes[session_id] = sum(data["node_sizes"].values())
+                if self._node_json_bytes[session_id] >= 8 * 1024 * 1024:
+                    self._resume_trim_pending = True
             self._loaded.add(session_id)
             return data is not None
 
@@ -1536,6 +1539,17 @@ class PgFluidStore:
                     message_json_bytes=sum(self._node_json_bytes.values()),
                     event_cache_estimated_bytes=sum(self._event_bytes.values()),
                     windowed_sessions=len(self._windows))
+
+    async def release_resume_memory(self) -> None:
+        # Only a large cold load followed by actual prefix eviction qualifies.
+        # The adapter calls this at the first live turn terminal, after the
+        # full-path hydration's temporary lists have left the engine stack.
+        if not self._resume_trim_pending or not self._windows:
+            return
+        self._resume_trim_pending = False
+        from app.core.resume_memory import release_cold_resume_memory
+
+        await release_cold_resume_memory()
 
     def _uncache_node(self, session_id: str, node_id: str) -> None:
         self._nodes.get(session_id, {}).pop(node_id, None)

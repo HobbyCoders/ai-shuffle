@@ -8,7 +8,7 @@
 
 ## Running-app checks
 
-<!-- Say what you exercised in the app, or explicitly say it was tested only with fixtures. Add screenshots for visible changes. Never include secrets or private data. -->
+<!-- Say what you exercised in the app, or explicitly say it was tested only with fixtures. For visible changes, describe in text what you checked and at which widths; do not attach or link screenshots. Never include secrets or private data. -->
 
 ## Not covered here
 
