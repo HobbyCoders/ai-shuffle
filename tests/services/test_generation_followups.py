@@ -5,11 +5,12 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from app.core.generation_resolver import UNKNOWN_PRICE, Resolver, RunContext
 from app.mcp import ai_tools_sdk as sdk
 from app.services.fal_schema import normalize_openapi
-from tests.api.test_generation_choices_api import IDENTITY, client, quote_backend
+from tests.api.test_generation_choices_api import IDENTITY, QuoteBackend, client, quote_backend
 from tests.core.test_generation_resolver import INTERACTIVE, FakeBackend, candidate
 from tests.mcp.test_unified_generation_tools import lane_tools, payload
 from tests.services.test_generation_sources import backend
@@ -312,7 +313,9 @@ def test_save_unavailable_pick_preserves_quote_error(client, quote_backend):
     assert client.get("/api/v1/generation/choices").json()["remembered"]["image"]["account"] == choice["account"]
 
 
-def test_job_choice_save_reports_the_same_save_time_quote(client, quote_backend, monkeypatch):
+def test_job_choice_save_reports_the_same_save_time_quote(
+    client: TestClient, quote_backend: QuoteBackend, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # #542: the automation editor shows the quote its pin was saved with, so
     # the job route reports what the remembered-choice route does.
     from app.api import generation_choices as api
@@ -327,7 +330,8 @@ def test_job_choice_save_reports_the_same_save_time_quote(client, quote_backend,
     assert priced["unattended_skip_reason"] is None
     quote_backend.entries = [replace(entry, price=dict(UNKNOWN_PRICE))]
     unpriced = client.put(route, json=entry.choice()).json()
-    assert unpriced["priced"] is False and unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
+    assert unpriced["priced"] is False
+    assert unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
     assert "Unattended runs will skip" in unpriced["warning"]
     quote_backend.entries = []
     gone = client.put(route, json=entry.choice()).json()

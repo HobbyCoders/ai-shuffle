@@ -178,6 +178,30 @@ describe('AutomationJobChoices', () => {
 		expect(mocks.post).not.toHaveBeenCalled();
 	});
 
+	it('keeps the save-time quote when an older row quote for the same choice resolves later', async () => {
+		routes({ job: { image: PINNED } });
+		// The row's first quote for the stored pin is still in flight during the re-pin.
+		let resolveStale!: (q: unknown) => void;
+		mocks.post.mockImplementation(() => new Promise((resolve) => (resolveStale = resolve)));
+		const fresh = { ...PRICE, amount: '0.03', total: '0.03', status: 'quoted' };
+		mocks.put.mockImplementation((_url: string, body: GenerationChoice) =>
+			Promise.resolve({ job_id: JOB, kind: 'image', choice: body, price: fresh, priced: true, quote_error: null, unattended_skip_reason: null, warning: null })
+		);
+		render(AutomationJobChoices, { props: { jobId: JOB, mode: 'live' } });
+
+		await waitFor(() => expect(rowFor('image').dataset.tier).toBe('job'));
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+		await fireEvent.click(within(rowFor('image')).getByRole('button', { name: 'Change' }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Pin to this job/ }));
+		await waitFor(() => expect(within(rowFor('image')).getByText('$0.03')).toBeTruthy());
+
+		resolveStale({ ok: true, price: PRICE, priced: true, options: {} });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(within(rowFor('image')).getByText('$0.03')).toBeTruthy();
+		expect(within(rowFor('image')).queryByText('$0.025')).toBeNull();
+		expect(mocks.post).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([
 		[
 			'unpriced',

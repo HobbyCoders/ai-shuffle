@@ -167,6 +167,10 @@
 	function quoteKey(kind: GenerationKind, choice: GenerationChoice): string {
 		return JSON.stringify([kind, choice.account, choice.worker, choice.model, choice.options ?? {}]);
 	}
+	// The latest writer per key. A save-time quote replaces the token, so a row
+	// quote still in flight for the same choice can no longer overwrite it.
+	const quoteTokens = new Map<string, number>();
+	let quoteToken = 0;
 	$effect(() => {
 		const pinned = GENERATION_KINDS.map((kind) => [kind, jobChoice(kind)] as const);
 		untrack(() => {
@@ -175,12 +179,15 @@
 				const key = quoteKey(kind, choice);
 				if (quotes[key] !== undefined) continue;
 				quotes[key] = 'loading';
+				const token = ++quoteToken;
+				quoteTokens.set(key, token);
 				Promise.resolve()
 					.then(() => generationChoices.quote(kind, choice))
 					.then((q) => {
-						quotes[key] = q ?? { ok: false };
+						if (quoteTokens.get(key) === token) quotes[key] = q ?? { ok: false };
 					})
 					.catch((e) => {
+						if (quoteTokens.get(key) !== token) return;
 						quotes[key] = { ok: false, error: getErrorMessage(e, 'Could not get a fresh quote.') };
 					});
 			}
@@ -239,7 +246,11 @@
 			const result = await pinJobChoice(jobId, kind, pinned);
 			const stored = result.choice ?? pinned;
 			const reported = quoteFromSave(result);
-			if (reported) quotes[quoteKey(kind, stored)] = reported;
+			if (reported) {
+				const key = quoteKey(kind, stored);
+				quoteTokens.set(key, ++quoteToken);
+				quotes[key] = reported;
+			}
 			saved = { ...saved, [kind]: stored };
 			if (!result.warning) openKind = null;
 			return result;

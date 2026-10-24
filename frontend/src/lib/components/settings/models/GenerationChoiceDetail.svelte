@@ -42,8 +42,9 @@
 	let busy = $state(false);
 	let actionError = $state('');
 	/**
-	 * The server's save-time warning for "Remember" (the card shows its own),
-	 * shown while that pick is still the remembered one.
+	 * The server's save-time warning for "Remember" (the card shows its own).
+	 * Any later save or forget replaces it, and it hides once another pick is
+	 * remembered elsewhere.
 	 */
 	let saveWarning = $state<{ choice: GenerationChoice; text: string } | null>(null);
 	const rememberWarning = $derived(saveWarning && sameChoice(remembered, saveWarning.choice) ? saveWarning.text : '');
@@ -71,6 +72,7 @@
 	async function forget() {
 		busy = true;
 		actionError = '';
+		saveWarning = null;
 		try {
 			await generationChoices.forget(kind);
 		} catch (e) {
@@ -181,7 +183,7 @@
 				</p>
 			{:else}
 				{#key options}
-					<GenerationChoiceCard {kind} {options} variant="settings" />
+					<GenerationChoiceCard {kind} {options} variant="settings" onsaved={() => (saveWarning = null)} />
 				{/key}
 			{/if}
 			<p class="gcd-foot">
