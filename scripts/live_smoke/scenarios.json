@@ -259,6 +259,16 @@
           "how": "In Settings > Voice pick GPT-Live-1.1 · ChatGPT subscription with a connected ChatGPT login, choose a non-default voice (for example Juniper), set opening words and a -55 dBFS microphone gate, then start a call in a throwaway chat and listen. Hang up, switch to GPT Live 1 and confirm the voice becomes Marin; call again. Repeat the switch with Grok Voice and with Grok voice (SuperGrok subscription) when those providers exist. Check whether GPT-Live-1.1 is listed for the OpenAI API key (it stays hidden while OpenAI's models lookup answers 404). Archive the throwaway chats.",
           "pass_when": "Each call speaks in the voice Settings shows and greets with the saved opening words; GET /voice/sessions/{id}/config reports the chosen engine, voice and provider; GPT-Live-1.1 is listed only when GET https://api.openai.com/v1/models/gpt-live-1.1 succeeds for that key, and no Settings or error text calls subscription voice unofficial or unsupported.",
           "past_bug": "ChatGPT subscription voice offered only Cove although the subscription has 25 voices; an engine switch could keep the previous engine's provider pin."
+        },
+        {
+          "id": "two-worker-smoke.25",
+          "check": "Concurrent remote starts and workflow reads remain responsive",
+          "kind": "owner",
+          "two_worker": true,
+          "optional": true,
+          "how": "On disposable paired branch workers (including Windows), use an isolated in-process harness with task execution suppressed, not 31 real model agents. Submit 31 concurrent task-start requests with distinct child ids to one project; during admission poll that project's git/pr-state (including a branch beyond the first 100 open PRs, with gh mocked) and a session's swarms after 120 publications of 30 tasks interleaved with at least 12000 transcript events. Repeat the same child ids and inspect durable turns and report obligations. Time handler and fetch spans, then repeat with branch and default checkout modes; never use the installed app's data directory.",
+          "pass_when": "Task-start receipts return within a few seconds, each child has exactly one queued turn and report obligation after retries, worktrees retain their validated base and branch, and pr-state and swarms stay under 1 second. A burst wakes the coalescing catalog scanner rather than awaiting 31 whole-catalog passes; distinct branch fetches overlap, while worktree mutations remain protected.",
+          "past_bug": "#482: 31 simultaneous remote starts took about 90 seconds on Windows; full status and unfiltered PR scans delayed pr-state, while serial full-transcript replays delayed swarms."
         }
       ]
     },
