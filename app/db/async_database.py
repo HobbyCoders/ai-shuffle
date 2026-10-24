@@ -22,6 +22,15 @@ T = TypeVar("T")
 # heartbeat dispatch. Pool admission still caps the total connection budget;
 # transaction-local SQL timeouts bound lock waits and callers bound queue time.
 _lease_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="db-lease")
+# Event backpressure must not occupy every ordinary DB/filesystem executor
+# thread. The synchronous gate also bounds event callers outside this executor.
+_event_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db-event")
+
+
+async def run_event_write(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run an event transaction off-loop without starving ordinary DB dispatch."""
+    call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(_event_executor, call)
 
 
 async def run_lease(fn: Callable[..., T], *args: Any) -> T:

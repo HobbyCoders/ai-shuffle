@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import BinaryIO
 
 
 MAJOR = "16"
@@ -93,7 +94,15 @@ PG_FAST_SHUTDOWN_TIMEOUT = 60
 # (#436). The PGDG postgresql-16 package is built with lz4. Keep in step with
 # walSettingArgs in desktop/src/main/postgres.ts.
 WAL_SETTINGS = ("max_wal_size=4GB", "checkpoint_timeout=15min",
-    "checkpoint_completion_target=0.9", "wal_compression=lz4")
+    "checkpoint_completion_target=0.9", "wal_compression=lz4",
+    # Per-start defaults also reach existing managed clusters. Maintenance may
+    # explicitly raise statement_timeout; lease transactions set shorter limits.
+    "statement_timeout=30s", "lock_timeout=5s", "idle_in_transaction_session_timeout=30s")
+# Offline commands retain their existing 900s/1800s process deadlines. Do not
+# cancel an index restore or FILE_COPY at the ordinary 30s query deadline.
+OFFLINE_SQL_OPTIONS = (
+    "-c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0"
+)
 
 
 def _rollback_name(name, kind):
@@ -351,6 +360,13 @@ def client_env(url):
     return env
 
 
+def offline_client_env(url: str) -> dict[str, str]:
+    """Sanitized libpq environment for dump/restore with a process deadline."""
+    env = client_env(url)
+    env["PGOPTIONS"] = OFFLINE_SQL_OPTIONS
+    return env
+
+
 class Database:
     def __init__(self, settings, *, port=5432):
         self.settings = settings
@@ -403,9 +419,11 @@ class Database:
         env = self.admin_env() if admin else client_env(self.url)
         return self.command(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=env, text=sql, timeout=10).strip()
 
-    def admin_script(self, sql, *, timeout=10):
-        """Statements run one at a time (psql autocommit) on the admin socket."""
-        return self.command(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=self.admin_env(),
+    def admin_script(self, sql: str, *, timeout: int = 10) -> str:
+        """Offline admin work uses its command deadline, not ordinary SQL limits."""
+        env = self.admin_env()
+        env["PGOPTIONS"] = OFFLINE_SQL_OPTIONS
+        return self.command(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=env,
                             text=sql, timeout=timeout).strip()
 
     # Update rollback copies (docker/application_updates.py). Only these names
@@ -625,20 +643,21 @@ class Database:
             STOP.wait(0.2)
         raise RuntimeFailure("authenticated database readiness timed out or was interrupted")
 
-    def dump(self, filename):
+    def dump(self, filename: str) -> None:
         args = ["pg_dump", "--format=custom", "--no-owner", "--no-privileges"]
         if filename == "-":
-            self.command(args, env=client_env(self.url), output=sys.stdout.buffer, timeout=900)
+            self.command(args, env=offline_client_env(self.url),
+                         output=sys.stdout.buffer, timeout=900)
         else:
             # Never truncate an existing backup, follow a symlink, or copy its input.
             fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as stream:
-                self.command(args, env=client_env(self.url), output=stream, timeout=900)
+                self.command(args, env=offline_client_env(self.url), output=stream, timeout=900)
                 stream.flush()
                 os.fsync(stream.fileno())
         log("logical dump completed")
 
-    def restore(self, source):
+    def restore(self, source: BinaryIO) -> None:
         # Check more than tables: sequences, views, custom functions/types,
         # schemas and extensions are state too. Fresh public is permitted.
         empty = self.query("""SELECT NOT (
@@ -652,7 +671,7 @@ class Database:
             raise RuntimeFailure("restore target is not verified empty")
         write_private(self.pg / "restore-incomplete", "restore in progress; retained on failure\n")
         self.command(["pg_restore", "--exit-on-error", "--single-transaction", "--no-owner", "--no-privileges", "--dbname=" + APP_DB],
-            env=client_env(self.url), source=source, timeout=900)
+            env=offline_client_env(self.url), source=source, timeout=900)
         (self.pg / "restore-incomplete").unlink()
         log("database-only restore completed; application was not started")
 
