@@ -96,7 +96,19 @@ async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
             remember=body.remember, origin=body.origin))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"kind": kind, "choice": choice, "remembered": body.remember}
+    # Report a fresh server-side quote, never a client-supplied price. Failure
+    # to quote does not lose the owner's pick or imply it is free.
+    from app.core.generation_resolver import UNKNOWN_PRICE
+    try:
+        quoted = await quote(QuoteRequest(kind=kind, choice=body.choice), request, token=token)
+    except Exception:  # noqa: BLE001 - optional provider quote must not lose a saved pick
+        quoted = {"ok": False}
+    eligible = bool(quoted.get("ok") and quoted.get("priced"))
+    return {"kind": kind, "choice": choice, "remembered": body.remember,
+            "price": quoted.get("price") or dict(UNKNOWN_PRICE), "priced": eligible,
+            "unattended_skip_reason": None if eligible else "stored_choice_unpriced",
+            "warning": None if eligible else
+                "This saved choice has no verified price. Unattended runs will skip it until a price is available."}
 
 
 @router.delete("/choices/{kind}")

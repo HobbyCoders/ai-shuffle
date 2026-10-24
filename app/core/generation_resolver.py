@@ -163,7 +163,8 @@ class Resolver:
         if kind not in KINDS:
             return result("refused", error="Unknown generation kind.")
         entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit)
-        return result("catalog", options=[entry.view() for entry in entries])
+        return result("catalog", price=entries[0].price if len(entries) == 1 else None,
+                      options=[entry.view() for entry in entries])
 
     async def _saved_options_valid(self, candidate, choice) -> bool:
         try:
@@ -198,6 +199,18 @@ class Resolver:
         if context.unattended and not stored:
             return result("skipped", reason="no_stored_choice", kind=kind,
                           message="Generation skipped: this unattended run has no remembered or job-stored choice.")
+        if context.unattended:
+            # Tool arguments cannot select an unattended route, but neither may
+            # we silently charge a different stored source/account/model.
+            named_source = normalize_source(args.get("source"))
+            stored_source = normalize_source(stored.get("source"))
+            differs = (named_source and named_source not in (stored_source, stored.get("account"))) or any(
+                args.get(key) and args[key] != stored.get(key) for key in ("account", "model", "worker"))
+            if differs:
+                return result("skipped", reason="named_choice_differs_from_stored", kind=kind,
+                              message="Generation skipped: this run is unattended and the named source, account or model "
+                                      "does not match the stored choice. The named choice needs the owner's selection. "
+                                      "No source was looked up and nothing was submitted.")
         explicit = bool(args.get("source") or args.get("model"))
         # The remembered choice is running unasked (nothing named in the call).
         unasked = from_memory and not explicit

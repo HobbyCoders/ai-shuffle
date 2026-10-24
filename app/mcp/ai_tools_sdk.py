@@ -689,6 +689,43 @@ def _lane_label(tool_env: Optional[Dict[str, str]]) -> str:
     return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
 
 
+def _compact_generation_option(option):
+    """Bound discovery schemas; execution and choice cards retain the full one."""
+    import json
+
+    view = {k: v for k, v in option.items() if k not in ("schema", "quick_settings", "options")}
+    if len(json.dumps(option.get("options", {}), ensure_ascii=True)) <= 1024:
+        view["options"] = option.get("options", {})
+    else:
+        view["options_omitted"] = True
+    schema = option.get("schema")
+    if not isinstance(schema, dict):
+        view["schema"] = None
+        return view
+    compact = {"primary_text_field": schema.get("primary_text_field"), "fields": [], "compact": True, "truncated": False}
+    truncated = False
+    for field in schema.get("fields", []):
+        if len(compact["fields"]) >= 32:
+            truncated = True
+            break
+        item = {}
+        for key in ("name", "type", "required", "is_file", "is_primary_text", "enum", "default", "minimum", "maximum"):
+            value = field.get(key)
+            if value is None:
+                continue
+            if len(json.dumps(value, ensure_ascii=True)) > 512:
+                truncated = True
+                continue
+            item[key] = value
+        if len(json.dumps({**compact, "fields": [*compact["fields"], item]}, ensure_ascii=True)) > 4096:
+            truncated = True
+            break
+        compact["fields"].append(item)
+    compact["truncated"] = truncated
+    view["schema"] = compact
+    return view
+
+
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     from app.core.generation_resolver import Resolver, RunContext, normalize_source
     from app.services.generation_sources import Sources
@@ -781,11 +818,12 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
 
-    @tool("searchModels", "On-demand accounts, exact model IDs, holding workers, schemas, prices, verified status; no prompt catalogs. Unknown prices refuse, never free.", {
+    @tool("searchModels", "Look up accounts, exact model IDs, workers, prices and compact declared fields. Use full_schema=true for complete schemas. Unknown prices are never free.", {
         "type": "object", "properties": {
             "query": {"type": "string"}, "source": {"type": "string"}, "model": {"type": "string"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "full_schema": {"type": "boolean", "default": False},
         }, "additionalProperties": False,
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def search_models(args):
@@ -809,7 +847,10 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         needle = query.casefold()
         options = [o for o in options if o["source"] == "fal" or not needle
                    or needle in (o["source"] + " " + o["account"] + " " + o["model"]).casefold()]
-        output = result("catalog", options=options[:limit], total_matches=len(options))
+        # A single quote has a real price; do not mask it with result()'s
+        # unknown-price envelope default. Multiple choices have no single price.
+        output = result("catalog", price=options[0]["price"] if len(options) == 1 else None,
+                        options=options[:limit], total_matches=len(options))
         if failed is not None:
             output["priced_lookup_error"] = "Some accounts or workers could not be listed."
         if source in (None, "fal") and (query or not model) and await backend.fal_key():
@@ -818,6 +859,18 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
             fal = await _search_catalog(query, args.get("output_type"), limit)
             output.update(fal_models=fal["models"], fal_total_matches=fal["total_matches"],
                           hint="Quote a fal model with source \"fal\" and its endpoint_id as model, or run it with runFalModel.")
+        if not args.get("full_schema", False):
+            import json
+            output["options"] = [_compact_generation_option(o) for o in output["options"]]
+            output["schema_hint"] = "Use full_schema=true for complete schemas and defaults."
+            # Bound the complete default result too, including fal discovery.
+            # Preserve original match counts and explicitly signal omissions.
+            while len(json.dumps(output, indent=2, default=_json_default)) > 32768:
+                key = "fal_models" if output.get("fal_models") else "options"
+                if not output.get(key):
+                    break
+                output[key].pop()
+                output["truncated"] = True
         return _tool_result(output)
 
     tools.append(search_models)

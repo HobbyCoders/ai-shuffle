@@ -7,6 +7,7 @@ visible but unavailable; discovering a text model is not media verification.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -67,7 +68,14 @@ class Sources:
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
             entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt, worker=worker))
-        return entries
+        # Workers are execution holders, not distinct owner choices. Keep
+        # different accounts/options separate, and prefer a usable local holder.
+        unique = {}
+        for entry in sorted(entries, key=lambda c: (not c.available, c.worker != here, c.worker)):
+            key = (entry.source, entry.account, entry.model, entry.kind,
+                   json.dumps(entry.options, sort_keys=True, separators=(",", ":")))
+            unique.setdefault(key, entry)
+        return list(unique.values())
 
     async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
         from app.core import native_generation_settings as native
@@ -145,7 +153,13 @@ class Sources:
             schema = await schema_service.get_schema(model, await self.fal_key())
             if schema is None or not rate.is_finite() or rate < 0:
                 return dict(UNKNOWN_PRICE)
-            quantity, count = schema.pricing_quantity(row["unit"], options, prompt)
+            # Discovery and execution must resolve exactly the same defaults.
+            # Partial validation permits models with required per-call media;
+            # missing quantities or prompt-dependent prices still stay unknown.
+            defaults = {f.name: f.default for f in schema.fields
+                        if not f.is_primary_text and f.default is not None}
+            values = schema.validate_options({**defaults, **options}, "", partial=True)
+            quantity, count = schema.pricing_quantity(row["unit"], values, prompt)
             amount = rate * quantity
             return {"currency": "USD", "unit": "item", "amount": str(amount), "total": str(amount * count), "status": "estimated"}
         except (httpx.HTTPError, ValueError, TypeError, KeyError, ArithmeticError, AttributeError):

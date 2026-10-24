@@ -93,8 +93,10 @@ async def test_job_choice_wins_and_unattended_never_guesses_from_tool_args():
     a, b = candidate(), candidate(account="account-b", model="model-b")
     context = replace(INTERACTIVE, unattended=True, remembered_choice=a.choice(), job_choice=b.choice())
     resolver = Resolver(FakeBackend([a, b]))
-    output = await resolver.generate("image", {"prompt": "make it", "source": a.account}, context)
+    output = await resolver.generate("image", {"prompt": "make it"}, context)
     assert output["choice"]["account"] == b.account
+    output = await resolver.generate("image", {"prompt": "make it", "source": a.account}, context)
+    assert output["status"] == "skipped" and output["reason"] == "named_choice_differs_from_stored"
     output = await resolver.generate("image", {"prompt": "make it", "source": a.account}, RunContext())
     assert output == {"status": "skipped", "success": False, "price": UNKNOWN_PRICE, "reason": "no_stored_choice", "kind": "image",
                       "message": "Generation skipped: this unattended run has no remembered or job-stored choice."}

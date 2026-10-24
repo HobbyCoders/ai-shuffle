@@ -14,6 +14,8 @@ IDENTITY = ("account", "origin#owner")
 @pytest.fixture
 def client(mock_db, monkeypatch):
     from app.network import runners
+    from app.services import generation_sources
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: FakeBackend([]))
     monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
     monkeypatch.setattr(api, "request_preference_identity", lambda request: IDENTITY)
     app = FastAPI()

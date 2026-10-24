@@ -331,6 +331,15 @@
           "past_bug": "#469: unattended runFalModel calls and interactive pricing/resolution refusals fell back to the raw fal handler without a known price, confirmation or daily cap."
         },
         {
+          "id": "harness-basics.generation-choice-safety",
+          "check": "Unified generation named-choice safety, quotes and catalog shape",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable account preferences and throwaway chats on two candidate workers; never alter the owner's choices or caps. Bind a fal image job choice, then make unattended calls naming SuperGrok and a different fal video model. Inspect catalog/submission logs. Use searchModels for kling/v4/text-to-video with default options, then an interactive generateVideo quote only (do not approve a paid retry). Compare the choice-card and generation prices. With the same SuperGrok account on both workers, request choices from each worker and inspect holders. Compare compact and full_schema searchModels for a large fal schema, including a generate_audio boolean. Save an unpriced model through the choices API, inspect its response, and attempt it unattended. Archive throwaway chats and discard only disposable preferences.",
+          "pass_when": "Mismatched unattended names skip with named_choice_differs_from_stored before any catalog lookup or submission. A matching job choice follows the existing price/confirmation/cap guard without switching sources. The single search quote, choice card and generate quote show the same known default price (0.785 USD for the recorded Kling rate; use the current provider rate if changed). Each source/account/model/options tuple appears once, preferring the local holder, and differing accounts/options remain separate. Default searchModels JSON is at most 32768 ASCII-escaped characters, truncation is explicit, full_schema returns the complete schema, and generate_audio is boolean, not file. Saving an unpriced choice returns priced false, unattended_skip_reason stored_choice_unpriced and a skip warning; unattended use skips without billing. No paid retry is approved. Missing provider/worker evidence is not a pass.",
+          "past_bug": "#512 silently replaced named unattended sources with paid stored choices; #513 masked option prices with an unknown catalog envelope and did not warn on save; #514 duplicated worker holders, returned huge schemas and typed media booleans as files."
+        },
+        {
           "id": "harness-basics.8",
           "check": "Remembered generation choice with required call input",
           "kind": "owner",
