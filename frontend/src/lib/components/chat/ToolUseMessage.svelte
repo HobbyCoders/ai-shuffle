@@ -24,7 +24,7 @@
 	import ToolIcon from './ToolIcon.svelte';
 	import { displayToolName } from '$lib/utils/tool-icons';
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
-	import { isDismissedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
+	import { isDismissedQuestion, isPostedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
 	import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
 	import { phonePanel, isEmulatorTool } from '$lib/stores/phone-panel.svelte';
 	import { PhoneSidePanel } from '$lib/components/deck/lazy/panels';
@@ -45,7 +45,12 @@
 		previewTitle?: string;
 	}
 
-	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot, previewTitle }: Props = $props();
+	let { name, sessionId, input, partialInput, result, status: rawStatus, streaming = false, serverSide = false, screenshot, previewTitle }: Props = $props();
+
+	// The delegated Claude engine posts a question card and then has to deny the
+	// CLI's own AskUserQuestion call, so the result arrives flagged as an error.
+	// Posting worked, so the row shows it as complete.
+	const status = $derived(isPostedQuestion(name, rawStatus, result) ? 'complete' : rawStatus);
 
 	const prefs = $derived(chatPreferences.current);
 	// Scalar boundaries stop replay's store-backed prop getters from making

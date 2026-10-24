@@ -23,7 +23,8 @@ vi.mock('$lib/api/emulator', async (orig) => ({
 import {
 	QUESTION_DISMISS_MESSAGE,
 	QUESTION_DISMISSED_LABEL,
-	isDismissedQuestion
+	isDismissedQuestion,
+	isPostedQuestion
 } from './question-outcome';
 
 afterEach(() => {
@@ -90,6 +91,42 @@ describe('ToolUseMessage — dismissed AskUserQuestion', () => {
 
 		expect(screen.queryByText(QUESTION_DISMISSED_LABEL)).toBeNull();
 		expect(container.querySelector('[data-testid="tool-status-ok"]')).not.toBeNull();
+	});
+});
+
+describe('ToolUseMessage — posted AskUserQuestion', () => {
+	// What the Claude CLI records after the delegated engine posts the card and
+	// denies the CLI's own tool with the queued reply.
+	const posted =
+		'<tool_use_error>{"status": "queued", "request_ids": ["q-1"], "message": "Questions posted. ' +
+		'Continue independent work or end your turn if blocked; answers arrive automatically. Do not poll."}' +
+		'</tool_use_error>';
+
+	it('shows a posted question as complete, not failed', () => {
+		const { container } = renderTool({ result: posted });
+
+		expect(container.querySelector('[data-testid="tool-status-ok"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="tool-status-error"]')).toBeNull();
+		expect(screen.queryByText('Failed')).toBeNull();
+	});
+
+	it('still fails a question call denied for another reason', () => {
+		const { container } = renderTool({ result: 'Questions must be a non-empty list' });
+
+		expect(container.querySelector('[data-testid="tool-status-error"]')).not.toBeNull();
+	});
+});
+
+describe('isPostedQuestion', () => {
+	const posted = '{"status": "queued", "request_ids": ["q-1"], "message": "Questions posted. Continue."}';
+
+	it('requires the question tool, the error outcome, the posted text and the queued status', () => {
+		expect(isPostedQuestion('AskUserQuestion', 'error', posted)).toBe(true);
+		expect(isPostedQuestion('AskUser', 'error', posted)).toBe(true);
+		expect(isPostedQuestion('AskUserQuestion', 'complete', posted)).toBe(false);
+		expect(isPostedQuestion('Bash', 'error', posted)).toBe(false);
+		expect(isPostedQuestion('AskUserQuestion', 'error', 'Questions posted.')).toBe(false);
+		expect(isPostedQuestion('AskUserQuestion', 'error', undefined)).toBe(false);
 	});
 });
 
