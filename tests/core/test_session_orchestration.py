@@ -1,5 +1,8 @@
 """Drive real session and turn producers, without provider inference."""
+import asyncio
 import json
+from typing import Any
+
 import pytest
 
 from app.core import session_orchestration as orch
@@ -28,7 +31,9 @@ def peers(mock_db, monkeypatch):
 
 
 @pytest.mark.parametrize("busy", [False, True])
-async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkeypatch, busy):
+async def test_real_message_producer_bootstrap_and_single_delivery(
+    peers: tuple[Any, Any], monkeypatch: pytest.MonkeyPatch, busy: bool,
+) -> None:
     from unittest.mock import AsyncMock, MagicMock
     from fluid.tools.registry import ToolCtx
     from fluid.context.peer import format_peer_message
@@ -63,6 +68,8 @@ async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkey
     handler = ChatWebSocketHandler(websocket=MagicMock(), device_id="watcher", user_id="admin", api_user_id=None)
     handler.send_json = AsyncMock()
     await handler.handle_watch_session({"session_id": "peer"})
+    assert handler._queue_watch_task is not None
+    await asyncio.wait_for(handler._queue_watch_task, 1)
     assert handler.send_json.await_args.args[0]["data"]["pending_peer_messages"] == view
     if busy:
         assert turns.start_turn(row["id"]) is None

@@ -330,6 +330,15 @@
           "how": "With Update all workers on, use a pair where this worker already offers an update and the peer has not read its feed since it was published. Open Settings > System > Updates and click Check for updates, then within a few seconds, while the peer is still checking, click the top Download update button. Watch the button's tooltip rows until the peer's check ends. Install nothing (cancel or leave the staged download).",
           "pass_when": "The peer refuses the download with An update is already in progress, but once its check ends its row reads Update available (or downloading or staged after another Download click), never Refused: An update is already in progress, and the button offers Download update again rather than holding the restart for the peer.",
           "past_bug": "#519: a download refused because the peer was checking was recorded as a refusal, so the update that peer then found was labeled Refused and the restart waited for another click."
+        },
+        {
+          "id": "two-worker-smoke.32",
+          "check": "Remote pending message survives switching and is delivered once",
+          "kind": "browser",
+          "two_worker": true,
+          "how": "On desktop and mobile layouts, start a throwaway session executed on the peer worker and keep its agent busy in a foreground tool long enough to queue a unique instruction. Capture its client_message_id and accepted turn id. Switch to a different chat and back before the agent reads it, then reconnect/reload and repeat from a second tab. Inspect watch_session's sync/queue_updated frame from the viewing worker. Let the remote agent finish and acknowledge the unique instruction; correlate the owner turn/steer delivery receipt and model request with that command id. Re-watch after consumption. Repeat with a queued worker move and a message held for the move. Separately disconnect the executing worker while the message is pending, switch back, then restore the connection and re-watch. Archive only the throwaway sessions.",
+          "pass_when": "Before consumption exactly one pending chip returns on every viewer; available snapshots come from the executing owner and carry the same turn id, command_id and client_message_id, including held messages. The viewer creates no executable turn. The instruction reaches the model once, with one owner delivery/consumption and one transcript user entry, then the pending chip disappears and a later authoritative snapshot is empty. An unreachable owner produces queue_status=unavailable without queue arrays, never an authoritative-looking empty queue; restoring the owner and re-watching recovers the pending chip or confirms its delivery. Record receipt/model-boundary evidence as well as screenshots; display restoration alone is not a delivery pass.",
+          "past_bug": "#524: switching cleared the optimistic queue, then the viewing worker hydrated a remote session from its own empty turns table instead of the executing owner's durable queue."
         }
       ]
     },
