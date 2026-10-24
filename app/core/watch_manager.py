@@ -257,6 +257,23 @@ class WatchManager:
             )
             await run_sync(store.mark_creator_notified, watch["id"])
         observed, cursor = await watch_sources.poll(watch)
+        if gap := cursor.get("history_gap"):
+            # Persist this deterministic, model-free warning BEFORE the cursor.
+            # A failed checkpoint retries the same notice, even for nonmatching mail.
+            await run_sync(
+                notifications.create_notification,
+                "admin",
+                notification_id="watch-gap-" + watch["id"] + "-" + gap["expired_history_id"],
+                category="watch",
+                title="Gmail watch history gap",
+                severity="warning",
+                message=(
+                    watch["description"] + ": Gmail history expired. Resynced at most "
+                    + str(gap["max_messages"]) + " recent messages in the configured labels. "
+                    + ("More messages were omitted. " if gap["truncated"] else "")
+                    + "Mail from the missing history interval may not be recoverable."
+                ),
+            )
         matched = [(k, v) for k, v in observed if watch_sources.matches(watch["filter"], v)]
         await run_sync(store.checkpoint, watch, matched, cursor)
         for event in await run_sync(store.events, watch["id"], ("pending",)):
