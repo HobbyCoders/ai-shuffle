@@ -190,6 +190,13 @@ class TelegramConnector(BaseConnector):
                 platform_message_id=str(message.message_id),
                 metadata={"chat_type": message.chat.type},
             )
+            await self.emit_trigger("message_received", {
+                "message_id": chat_id + ":" + str(message.message_id),
+                "platform_chat_id": chat_id,
+                "platform_user_id": msg.platform_user_id,
+                "platform_user_name": msg.platform_user_name,
+                "text": msg.text,
+            })
             await self._on_incoming_message(msg)
 
         except Exception as exc:

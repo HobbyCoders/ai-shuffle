@@ -29,16 +29,23 @@ def owner_session(session_id: str) -> dict[str, Any]:
     return session
 
 
-def prepare(session_id: str, data: dict[str, Any]) -> dict[str, Any]:
+def prepare(
+    session_id: str | None, data: dict[str, Any], *,
+    _session: dict[str, Any] | None = None, _worker: str | None = None,
+) -> dict[str, Any]:
     from app.core.assistant_service import assistant_id
 
-    session = owner_session(session_id)
+    from app.core import watch_placement
+
+    session = _session if _session is not None else owner_session(session_id)
+    worker = _worker or watch_placement.resolve(data.get("worker_id"))
     description = str(data.get("description", "")).strip()
     if not description or len(description) > 200 or any(ord(c) < 32 for c in description):
         raise ValueError("description must be 1-200 printable characters")
     source = dict(data.get("source") or {})
     filter = dict(data.get("filter") or {})
-    sources.validate(source, filter)
+    if worker == assistant_id():
+        sources.validate(source, filter)
     budget = data.get("daily_budget_usd", 1.0)
     if (
         isinstance(budget, bool)
@@ -63,12 +70,6 @@ def prepare(session_id: str, data: dict[str, Any]) -> dict[str, Any]:
     ends_at = data.get("ends_at")
     if ends_at and store.at(ends_at) <= store.now():
         raise ValueError("ends_at must be in the future")
-    worker = data.get("worker_id") or assistant_id()
-    if worker != assistant_id():
-        raise ValueError(
-            "Create this watch in an owner chat on the always-on worker; remote watch placement is"
-            " unsupported"
-        )
     row = dict(
         owner="admin",
         creating_session_id=session_id,
@@ -82,12 +83,12 @@ def prepare(session_id: str, data: dict[str, Any]) -> dict[str, Any]:
         daily_budget_usd=float(budget),
         ends_at=ends_at,
     )
-    if source["kind"] == "connector":
+    if source["kind"] == "connector" and worker == assistant_id():
         sources.connector_allowed(row)
     return row
 
 
-def confirmation(row: dict[str, Any]) -> str:
+def confirmation(row: dict[str, Any], worker_name: str | None = None) -> str:
     scope = ", ".join(row["permissions"]["tools"]) or "event context only"
     until = f" until {row['ends_at']}" if row.get("ends_at") else ""
     source = row["source"]
@@ -109,7 +110,9 @@ def confirmation(row: dict[str, Any]) -> str:
         )
     )
     return (
-        f"May I watch {row['description']} ({target}) on this worker{until}, {row['action']} when"
+        f"May I watch {row['description']} ({target}) on worker "
+        f"{worker_name or row['worker_id']}{until},"
+        f" {row['action']} when"
         f" it matches {store.encode(row['filter'])}, with read-only {scope} and a"
         f" ${row['daily_budget_usd']:g} daily cap?"
     )
@@ -121,8 +124,25 @@ async def create_from_conversation(session_id: str, data: dict[str, Any]) -> dic
     from app.core.permission_handler import permission_handler
     from app.core.agent_types import PermissionResultAllow
 
+    from app.core import watch_placement
+
+    move_id = data.get("move_watch_id")
+    if move_id:
+        await run_sync(owner_session, session_id)
+        existing = next((w for w in await watch_placement.rows() if w["id"] == move_id), None)
+        if not existing or "source" not in existing:
+            raise ValueError("Watch is not available for moving")
+        if not data.get("worker_id"):
+            raise ValueError("Moving a watch requires worker_id")
+        data = dict(existing, worker_id=data["worker_id"], permissions={
+            "tools": existing["permissions"]["tools"]
+        })
     row = await run_sync(prepare, session_id, data)
-    sentence = confirmation(row)
+    target = row["worker_id"]
+    if not watch_placement.local(target):
+        await watch_placement.call(target, "validate", row=row)
+    worker_name = await run_sync(watch_placement.label, target)
+    sentence = ("Move this existing watch? " if move_id else "") + confirmation(row, worker_name)
 
     async def broadcast(event: dict[str, Any]) -> None:
         pass  # permission_handler also broadcasts to the authenticated owner.
@@ -142,18 +162,18 @@ async def create_from_conversation(session_id: str, data: dict[str, Any]) -> dic
     if not isinstance(decision, PermissionResultAllow):
         raise PermissionError("Watch not created: owner confirmation was not granted")
     # Grants and ownership may have changed while the owner was answering.
-    row = await run_sync(prepare, session_id, data)
-    # Gmail baseline is captured at approval, not whenever the first loop runs.
+    row = await run_sync(prepare, session_id, dict(data, worker_id=target))
+    if move_id:
+        return {"watch": await watch_placement.move(move_id, target)}
+    if not watch_placement.local(target):
+        result = await watch_placement.call(
+            target, "create", row=row, watch_id=str(uuid.uuid4())
+        )
+        return dict(result, confirmation="Watching " + row["description"] + ".")
+    # Connector baselines are captured at approval, not on the first loop.
     cursor = {}
     if row["source"]["kind"] == "connector":
-        connector = await run_sync(sources.connector_allowed, row)
-        if connector["type"] == "gmail":
-            from app.core.connectors.manager import connector_manager
-
-            instance = await connector_manager.get_running_connector(connector["id"])
-            if instance is None:
-                raise ValueError("Gmail is offline; reconnect and create the watch again")
-            _, cursor = await run_sync(sources.gmail_poll, instance, {})
+        _, cursor = await sources.poll(dict(row, cursor={}))
     wid = await run_sync(store.create, **row, cursor=cursor)
     return dict(
         watch=await run_sync(store.get, wid), confirmation="Watching " + row["description"] + "."
@@ -234,6 +254,7 @@ def panel_rows(owner: str = "admin") -> list[dict[str, Any]]:
             can_stop=row["status"] != "stopped",
         )
         for row in store.list_watches(owner)
+        if row.get("reason") != "Transferred"
     ]
 
 
@@ -246,9 +267,12 @@ def tools(session_id: str) -> list[Any]:
 
     @tool(
         "CreateWatch",
-        "Create a durable watch on this worker (prefer an always-on worker). The host asks one"
+        "Create a durable watch, defaulting to an available always-on worker. Override worker_id."
+        " To move an existing watch, provide move_watch_id; the host confirms placement."
+        " It asks one"
         " plain confirmation sentence; the owner must answer yes, even in bypass mode. Never invent"
-        " a confirmed flag. No inference while polling. source kinds: connector {connector_id};"
+        " a confirmed flag. No inference while polling. Source kinds:"
+        " connector {connector_id,channel_id?};"
         " github {repo,resource:issues|pulls|ci}; session"
         " {state:stuck|waiting_on_owner|finished,session_id?,stuck_seconds?}; usage"
         " {metric:utilization|credit_remaining,threshold,provider_id?,window?,credit_field?};"
@@ -260,6 +284,8 @@ def tools(session_id: str) -> list[Any]:
             "type": "object",
             "properties": {
                 "description": {"type": "string"},
+                "worker_id": {"type": "string"},
+                "move_watch_id": {"type": "string"},
                 "source": {"type": "object"},
                 "filter": {"type": "object"},
                 "action": {"type": "string", "enum": ["alert", "investigate"]},
@@ -284,7 +310,9 @@ def tools(session_id: str) -> list[Any]:
     )
     async def listing(args: Any) -> dict[str, Any]:
         await run_sync(owner_session, session_id)
-        return wrap(await run_sync(panel_rows))
+        from app.core.watch_placement import rows
+
+        return wrap(await rows())
 
     result = [create, listing]
     for name, status in [("PauseWatch", "paused"), ("StopWatch", "stopped")]:
@@ -297,7 +325,9 @@ def tools(session_id: str) -> list[Any]:
             )
             async def change(args: dict[str, Any]) -> dict[str, Any]:
                 await run_sync(owner_session, session_id)
-                return wrap(await run_sync(store.set_status, args["watch_id"], "admin", status))
+                from app.core.watch_placement import change
+
+                return wrap(await change(args["watch_id"], status))
 
             return change
 

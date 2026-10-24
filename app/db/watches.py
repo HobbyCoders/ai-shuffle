@@ -49,6 +49,14 @@ def create_schema(cursor: Any) -> None:
         lease_until TIMESTAMPTZ, lease_owner TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(watch_id, event_key)
     )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS watch_connector_inbox (
+        seq BIGSERIAL PRIMARY KEY, connector_id TEXT NOT NULL, event_key TEXT NOT NULL,
+        payload JSONB NOT NULL, UNIQUE(connector_id,event_key)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS watch_transfers (
+        watch_id TEXT PRIMARY KEY, token TEXT NOT NULL, target TEXT NOT NULL,
+        snapshot JSONB NOT NULL, completed BOOLEAN NOT NULL DEFAULT FALSE
+    )""")
     # Watches first ship with all columns above. Do not probe the hard-coded
     # public schema and ALTER this new table: migrations also create private
     # search_path schemas for atomic worker snapshots.
@@ -105,6 +113,120 @@ def create(
     return wid
 
 
+def export_watch(wid: str, target: str) -> dict[str, Any]:
+    """Fence polling/admission under reserve's row lock before taking a snapshot."""
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM watches WHERE id=%s FOR UPDATE", (wid,))
+        watch = parse(c.fetchone())
+        if not watch or watch["owner"] != "admin":
+            raise ValueError("Watch does not exist")
+        c.execute("SELECT * FROM watch_transfers WHERE watch_id=%s", (wid,))
+        previous = c.fetchone()
+        if previous and str(previous["target"]).startswith("import:"):
+            c.execute("DELETE FROM watch_transfers WHERE watch_id=%s", (wid,))
+            previous = None
+        if previous:
+            if previous["target"] != target or previous["completed"]:
+                raise ValueError("Watch has already moved or is moving to another worker")
+            snapshot = previous["snapshot"]
+            return json.loads(snapshot) if isinstance(snapshot, str) else snapshot
+        if watch["status"] == "stopped":
+            raise ValueError("Stopped watches cannot move")
+        c.execute("SELECT * FROM watch_events WHERE watch_id=%s ORDER BY created_at,id", (wid,))
+        rows = [parse(row) for row in c.fetchall()]
+        if any(row["status"] in ("admitted", "running") for row in rows):
+            raise ValueError("Wait for in-flight deliveries to finish before moving this watch")
+        if len(rows) > 10000:
+            raise ValueError("Watch history is too large for a single transfer")
+        snapshot = dict(watch=watch, events=rows, token=str(uuid.uuid4()), target=target)
+        if len(encode(snapshot).encode()) > 3 * 1024 * 1024:
+            raise ValueError("Watch history exceeds the transfer payload limit")
+        c.execute(
+            "INSERT INTO watch_transfers (watch_id,token,target,snapshot) VALUES (%s,%s,%s,%s)",
+            (wid, snapshot["token"], target, encode(snapshot)),
+        )
+        c.execute(
+            "UPDATE watches SET status='paused',reason='Transfer pending',"
+            "worker_id=%s,revision=revision+1 WHERE id=%s", ("transfer:" + target, wid),
+        )
+    return snapshot
+
+
+def import_watch(
+    snapshot: dict[str, Any], row: dict[str, Any], from_device: str
+) -> dict[str, Any]:
+    """Import once, including past reports for dedupe, caps and accounting continuity."""
+    original = snapshot["watch"]
+    wid = original["id"]
+    token = snapshot["token"]
+    with get_db() as conn:
+        c = conn.cursor()
+        # Serialize even two first imports of a previously absent id.
+        lock_id = int(hashlib.sha256(("watch-import:" + wid).encode()).hexdigest()[:15], 16)
+        c.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+        c.execute("SELECT * FROM watches WHERE id=%s", (wid,))
+        existing = parse(c.fetchone())
+        if existing:
+            c.execute("SELECT token FROM watch_transfers WHERE watch_id=%s", (wid,))
+            receipt = c.fetchone()
+            if receipt and receipt["token"] == token:
+                return existing
+            c.execute("SELECT * FROM watch_transfers WHERE watch_id=%s", (wid,))
+            previous = c.fetchone()
+            if not (
+                existing["worker_id"].startswith("transfer:") and previous
+                and previous["completed"] and previous["target"] == from_device
+            ):
+                raise ValueError("Watch id is already owned here")
+            # Returning to a former executor replaces only its fenced tombstone.
+            c.execute("DELETE FROM watch_events WHERE watch_id=%s", (wid,))
+            c.execute("DELETE FROM watches WHERE id=%s", (wid,))
+            c.execute("DELETE FROM watch_transfers WHERE watch_id=%s", (wid,))
+        create(
+            **row, watch_id=wid, cursor=original["cursor"], status=original["status"], conn=conn
+        )
+        c.execute(
+            "UPDATE watches SET cost_usd=%s,last_fired_at=%s,created_at=%s,reason=%s "
+            "WHERE id=%s",
+            (original["cost_usd"], original["last_fired_at"], original["created_at"],
+             original.get("reason"), wid),
+        )
+        for event in snapshot["events"]:
+            if event["status"] in ("admitted", "running") or event["watch_id"] != wid:
+                raise ValueError("Invalid transfer event")
+            fields = tuple(event)
+            if not set(fields) <= {
+                "id", "watch_id", "event_key", "payload", "status", "session_id", "turn_id",
+                "command_id", "route", "reserved_usd", "cost_usd", "summary",
+                "summary_attempted", "notification_sent", "deadline_at", "admitted_at",
+                "lease_until", "lease_owner", "created_at",
+            }:
+                raise ValueError("Invalid transfer fields")
+            c.execute(
+                "INSERT INTO watch_events (" + ",".join(fields) + ") VALUES ("
+                + ",".join(["%s"] * len(fields)) + ")",
+                tuple(encode(event[f]) if f == "payload" else event[f] for f in fields),
+            )
+        c.execute(
+            "INSERT INTO watch_transfers (watch_id,token,target,snapshot,completed) "
+            "VALUES (%s,%s,%s,%s,TRUE)", (wid, token, "import:" + from_device, encode(snapshot)),
+        )
+    return get(wid)
+
+
+def complete_transfer(wid: str, target: str) -> None:
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE watch_transfers SET completed=TRUE WHERE watch_id=%s AND target=%s",
+            (wid, target),
+        )
+        if not c.rowcount:
+            raise ValueError("Transfer does not exist")
+        c.execute("UPDATE watches SET reason='Transferred' WHERE id=%s", (wid,))
+
+
 def get(wid: str) -> dict[str, Any] | None:
     with get_db() as conn:
         c = conn.cursor()
@@ -132,7 +254,7 @@ def set_status(wid: str, owner: str, status: str, reason: str | None = None) -> 
         # Stop is terminal: a new confirmation is needed to create another watch.
         c.execute(
             "UPDATE watches SET status=%s,reason=%s,revision=revision+1,updated_at=NOW() "
-            "WHERE id=%s AND owner=%s AND status <> 'stopped'",
+            "WHERE id=%s AND owner=%s AND status <> 'stopped' AND worker_id NOT LIKE 'transfer:%%'",
             (status, reason, wid, owner),
         )
         changed = c.rowcount
@@ -145,6 +267,40 @@ def set_status(wid: str, owner: str, status: str, reason: str | None = None) -> 
     if not row or row["owner"] != owner:
         raise ValueError("Watch does not exist")
     return row
+
+
+def record_connector_event(connector_id: str, key: str, payload: dict[str, Any]) -> None:
+    """Commit before the connector acknowledges the incoming update."""
+    if len(encode(payload)) > 16000:
+        payload = dict(payload, text=str(payload.get("text", ""))[:4000])
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO watch_connector_inbox (connector_id,event_key,payload) "
+            "VALUES (%s,%s,%s) ON CONFLICT(connector_id,event_key) DO NOTHING",
+            (connector_id, key, encode(payload)),
+        )
+
+
+def connector_page(
+    connector_id: str, channel_id: str, cursor: dict[str, Any]
+) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+    with get_db() as conn:
+        c = conn.cursor()
+        if not cursor:
+            c.execute(
+                "SELECT COALESCE(MAX(seq),0) AS seq FROM watch_connector_inbox "
+                "WHERE connector_id=%s", (connector_id,),
+            )
+            return [], {"seq": c.fetchone()["seq"]}
+        c.execute(
+            "SELECT * FROM watch_connector_inbox WHERE connector_id=%s AND seq>%s "
+            "ORDER BY seq LIMIT 100", (connector_id, cursor["seq"]),
+        )
+        rows = [parse(row) for row in c.fetchall()]
+    return [
+        (row["event_key"], row["payload"]) for row in rows
+        if str(row["payload"].get("platform_chat_id")) == channel_id
+    ], {"seq": rows[-1]["seq"] if rows else cursor["seq"]}
 
 
 def event_id(wid: str, key: str) -> str:

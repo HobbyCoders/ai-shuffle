@@ -542,7 +542,14 @@ def _terminal_owner_handler():
     return handle_owner
 
 
+def _watches_handler() -> Any:
+    from app.core.watch_placement import handle
+
+    return handle
+
+
 _LAZY_HANDLERS = {
+    "watches": _watches_handler,
     "terminal": _terminal_handler,
     "terminal-owner": _terminal_owner_handler,
     "app-logs": _app_logs_handler,
