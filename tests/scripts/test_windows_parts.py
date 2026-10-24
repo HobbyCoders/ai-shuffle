@@ -124,12 +124,36 @@ def retrying(monkeypatch):
 
 
 def pytest_command(*targets):
-    return [sys.executable, "-m", "pytest", *map(str, targets), "-o", "addopts=", "-q", "-p", "no:cacheprovider"]
+    # The checkout and temporary suite may be on different Windows drives.
+    # Bound collection/config discovery to the fixture, not a whole drive;
+    # rootdir also gives the failure recorder a real file in each node id.
+    root = str(Path(targets[0]).parent)
+    return [sys.executable, "-m", "pytest", *map(str, targets),
+            "--rootdir", root, "--confcutdir", root,
+            "-o", "addopts=", "-q", "-p", "no:cacheprovider"]
 
 
 def write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def test_temporary_pytest_suite_does_not_load_parent_conftest(tmp_path):
+    # A fixture outside the checkout must not import unrelated ancestor config.
+    # This also models a temporary directory on a different Windows drive.
+    (tmp_path / "conftest.py").write_text("raise AssertionError('outside fixture root')\n")
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    tests = write(suite / "test_isolated.py", """
+from pathlib import Path
+
+def test_root(pytestconfig):
+    assert pytestconfig.rootpath == Path(__file__).parent
+""")
+    result = subprocess.run(pytest_command(tests), env={**os.environ, **local_ci.python_env()},
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
 
 
 def test_a_test_that_passes_on_the_rerun_is_flaky_not_failed(tmp_path, retrying):

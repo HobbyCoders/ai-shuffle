@@ -118,6 +118,7 @@ def test_actual_xdist_collection_producing_path(tmp_path):
         output = tmp_path / f"shard-{index}"
         result = subprocess.run([
             sys.executable, "-m", "pytest", str(fixture), "--rootdir", str(tmp_path),
+            "--confcutdir", str(tmp_path),
             "-o", "addopts=", "-p", "scripts.ci.backend_shards", "-n", "2",
             "--backend-shard", str(index), "--backend-durations", str(manifest),
             "--backend-results", str(output), "-q"],
