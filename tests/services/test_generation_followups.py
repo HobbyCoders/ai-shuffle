@@ -9,7 +9,7 @@ import pytest
 from app.core.generation_resolver import UNKNOWN_PRICE, Resolver, RunContext
 from app.mcp import ai_tools_sdk as sdk
 from app.services.fal_schema import normalize_openapi
-from tests.api.test_generation_choices_api import client, quote_backend
+from tests.api.test_generation_choices_api import IDENTITY, client, quote_backend
 from tests.core.test_generation_resolver import INTERACTIVE, FakeBackend, candidate
 from tests.mcp.test_unified_generation_tools import lane_tools, payload
 from tests.services.test_generation_sources import backend
@@ -310,6 +310,32 @@ def test_save_unavailable_pick_preserves_quote_error(client, quote_backend):
     assert "no verified price" not in output["warning"]
     assert output["unattended_skip_reason"] == "stored_choice_unavailable"
     assert client.get("/api/v1/generation/choices").json()["remembered"]["image"]["account"] == choice["account"]
+
+
+def test_job_choice_save_reports_the_same_save_time_quote(client, quote_backend, monkeypatch):
+    # #542: the automation editor shows the quote its pin was saved with, so
+    # the job route reports what the remembered-choice route does.
+    from app.api import generation_choices as api
+    from app.core import generation_choices
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    entry = quote_backend.entries[0]
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    priced = client.put(route, json=entry.choice()).json()
+    assert priced["choice"] == entry.choice() and priced["priced"] is True
+    assert priced["price"]["total"] == "0.05" and priced["warning"] is None
+    assert priced["unattended_skip_reason"] is None
+    quote_backend.entries = [replace(entry, price=dict(UNKNOWN_PRICE))]
+    unpriced = client.put(route, json=entry.choice()).json()
+    assert unpriced["priced"] is False and unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
+    assert "Unattended runs will skip" in unpriced["warning"]
+    quote_backend.entries = []
+    gone = client.put(route, json=entry.choice()).json()
+    assert gone["unattended_skip_reason"] == "stored_choice_unavailable"
+    assert gone["quote_error"] in gone["warning"]
+    assert generation_choices.load_job(IDENTITY, "auto-12345678") == {"image": entry.choice()}
+    assert client.get("/api/v1/generation/choices").json()["remembered"] == {}
+    assert not any(call[0] in ("reserve", "execute") for call in quote_backend.calls)
 
 
 def test_save_bounds_quote_wait_and_preserves_pick(client, quote_backend, monkeypatch):

@@ -161,6 +161,56 @@ describe('AutomationJobChoices', () => {
 		await waitFor(() => expect(row.getByText('$0.025')).toBeTruthy());
 	});
 
+	it('shows the save-time price on a live pin and closes the picker, without quoting again', async () => {
+		routes();
+		const fresh = { ...PRICE, amount: '0.03', total: '0.03', status: 'quoted' };
+		mocks.put.mockImplementation((_url: string, body: GenerationChoice) =>
+			Promise.resolve({ job_id: JOB, kind: 'image', choice: body, price: fresh, priced: true, quote_error: null, unattended_skip_reason: null, warning: null })
+		);
+		render(AutomationJobChoices, { props: { jobId: JOB, mode: 'live' } });
+
+		await waitFor(() => expect(rowFor('image').dataset.tier).toBe('skip'));
+		await fireEvent.click(within(rowFor('image')).getByRole('button', { name: /Pin a choice/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Pin to this job/ }));
+
+		await waitFor(() => expect(within(rowFor('image')).getByText('$0.03')).toBeTruthy());
+		expect(rowFor('image').querySelector('.ajc-picker')).toBeNull();
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		[
+			'unpriced',
+			{ price: { ...PRICE, amount: null, total: null, status: 'unknown' }, priced: false, quote_error: null, unattended_skip_reason: 'stored_choice_unpriced', warning: 'This saved choice has no verified price. Unattended runs will skip it until a price is available.' },
+			/Price unknown\. Runs skip it until it has a price\./
+		],
+		[
+			'quote timeout',
+			{ price: { ...PRICE, amount: null, total: null, status: 'unknown' }, priced: false, quote_error: "The saved choice's quote timed out. Its worker or provider may be unavailable.", unattended_skip_reason: 'stored_choice_unavailable', warning: "The saved choice's quote timed out. Its worker or provider may be unavailable. Unattended runs will skip it." },
+			/quote timed out\. Its worker or provider may be unavailable\. Runs skip it and report why\./
+		]
+	])('keeps the picker open on a live %s pin and warns on the row', async (_name, quote, rowText) => {
+		routes();
+		mocks.put.mockImplementation((_url: string, body: GenerationChoice) =>
+			Promise.resolve({ job_id: JOB, kind: 'image', choice: body, ...quote })
+		);
+		render(AutomationJobChoices, { props: { jobId: JOB, mode: 'live' } });
+
+		await waitFor(() => expect(rowFor('image').dataset.tier).toBe('skip'));
+		await fireEvent.click(within(rowFor('image')).getByRole('button', { name: /Pin a choice/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Pin to this job/ }));
+
+		await waitFor(() => expect(rowFor('image').dataset.tier).toBe('job'));
+		const row = within(rowFor('image'));
+		expect(row.getByText(rowText)).toBeTruthy();
+		// The picker stays open with the card's notice, so the warning is not collapsed away.
+		const alert = within(rowFor('image').querySelector('.ajc-picker') as HTMLElement).getByRole('alert');
+		expect(alert.textContent).toContain('Pinned to this job:');
+		expect(alert.textContent).toContain(quote.warning);
+		expect(mocks.put).toHaveBeenCalledTimes(1);
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
 	it('shows a job override against the remembered choice it replaces', async () => {
 		routes({ remembered: { image: REMEMBERED }, job: { image: PINNED } });
 		render(AutomationJobChoices, { props: { jobId: JOB, mode: 'live' } });

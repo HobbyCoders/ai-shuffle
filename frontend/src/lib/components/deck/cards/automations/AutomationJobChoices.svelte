@@ -21,7 +21,7 @@
 	import {
 		clearJobChoice,
 		getJobChoices,
-		saveJobChoice,
+		pinJobChoice,
 		type JobChoiceCommit,
 		type JobChoiceDraft,
 		type JobChoices
@@ -34,12 +34,14 @@
 		formatValue,
 		modelLabel,
 		priceView,
+		quoteFromSave,
 		sameChoice,
 		sourceLabel,
 		workerLabel,
 		type GenerationChoice,
 		type GenerationKind,
-		type GenerationOption
+		type GenerationOption,
+		type SaveQuote
 	} from '$lib/utils/generation-choice';
 	import GenerationChoiceCard from '$lib/components/chat/GenerationChoiceCard.svelte';
 	import { GENERATION_ICONS, GENERATION_NAMES } from '$lib/components/settings/models/icons';
@@ -215,7 +217,12 @@
 		onDraftChange?.(next);
 	}
 
-	async function pick(kind: GenerationKind, choice: GenerationChoice): Promise<void> {
+	/**
+	 * Live mode returns the server's save-time quote so the card can show it.
+	 * The row reuses that quote instead of asking again, and a warning keeps
+	 * the picker open so it stays in view.
+	 */
+	async function pick(kind: GenerationKind, choice: GenerationChoice): Promise<Partial<SaveQuote> | void> {
 		if (!choice.account || !choice.worker) {
 			throw new Error('This option does not name its account and holding worker, so it cannot be pinned.');
 		}
@@ -229,9 +236,13 @@
 		if (!jobId) throw new Error('Save the automation before pinning a choice.');
 		busyKind = kind;
 		try {
-			const stored = await saveJobChoice(jobId, kind, pinned);
-			saved = { ...saved, [kind]: stored ?? pinned };
-			openKind = null;
+			const result = await pinJobChoice(jobId, kind, pinned);
+			const stored = result.choice ?? pinned;
+			const reported = quoteFromSave(result);
+			if (reported) quotes[quoteKey(kind, stored)] = reported;
+			saved = { ...saved, [kind]: stored };
+			if (!result.warning) openKind = null;
+			return result;
 		} finally {
 			busyKind = null;
 		}

@@ -16,6 +16,7 @@
 		modelLabel,
 		sameChoice,
 		sourceLabel,
+		type GenerationChoice,
 		type GenerationKind,
 		type GenerationOption
 	} from '$lib/utils/generation-choice';
@@ -40,6 +41,12 @@
 	let loadingOptions = $state(false);
 	let busy = $state(false);
 	let actionError = $state('');
+	/**
+	 * The server's save-time warning for "Remember" (the card shows its own),
+	 * shown while that pick is still the remembered one.
+	 */
+	let saveWarning = $state<{ choice: GenerationChoice; text: string } | null>(null);
+	const rememberWarning = $derived(saveWarning && sameChoice(remembered, saveWarning.choice) ? saveWarning.text : '');
 	let generation = 0;
 
 	async function loadOptions() {
@@ -77,8 +84,10 @@
 		if (!last) return;
 		busy = true;
 		actionError = '';
+		saveWarning = null;
 		try {
-			await generationChoices.save(kind, last, true, 'settings');
+			const saved = await generationChoices.save(kind, last, true, 'settings');
+			saveWarning = saved?.warning ? { choice: saved.choice ?? last, text: saved.warning } : null;
 		} catch (e) {
 			actionError = getErrorMessage(e, 'Could not save this choice.');
 		} finally {
@@ -117,6 +126,9 @@
 	{/if}
 	{#if actionError}
 		<InlineBanner tone="warn">{actionError}</InlineBanner>
+	{/if}
+	{#if rememberWarning}
+		<InlineBanner tone="warn">Remembered. {rememberWarning}</InlineBanner>
 	{/if}
 {/snippet}
 
