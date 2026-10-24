@@ -1,4 +1,4 @@
-"""The owner introduction is detected (it sets the default git author); never typed in."""
+"""Detected introduction/Git-author compatibility stays unchanged when memory is fed."""
 from __future__ import annotations
 from typing import Any
 from pytest import MonkeyPatch

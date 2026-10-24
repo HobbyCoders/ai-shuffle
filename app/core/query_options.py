@@ -763,11 +763,16 @@ def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
 def _generation_context(
     ai_tools_config: dict[str, Any], session_row: dict[str, Any] | None,
     api_user_id: str | None, *, session_id: str | None,
-    unattended: bool, chat_mode: bool = False,
+    unattended: bool, chat_mode: bool = False, native_generation: bool = False,
 ) -> "RunContext":
     from app.core.generation_resolver import RunContext
 
-    choices = _generation_choices(ai_tools_config, session_row, api_user_id)
+    # Native-only grants still need the same saved choices, without enabling
+    # any additional MCP tools on the session's permitted surface.
+    choice_config = dict(ai_tools_config)
+    if native_generation:
+        choice_config["image_generation"] = True
+    choices = _generation_choices(choice_config, session_row, api_user_id)
     return RunContext(session_id=session_id, unattended=unattended,
                       owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
                       chat_mode=chat_mode, remembered_choices=choices["remembered"],
@@ -1656,6 +1661,10 @@ def build_options_from_profile(
         ai_tools_server_config, session_row, api_user_id, session_id=session_id,
         unattended=not _is_interactive_run(overrides, session_row),
         chat_mode=session_mode == "chat",
+        native_generation=any(
+            tool_permitted(name, access.allowed, access.disallowed)
+            for name in ("GenerateNativeImage", "GenerateNativeVideo")
+        ),
     )
     mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
         project_dir=Path(working_dir) if working_dir else None,
@@ -1943,6 +1952,7 @@ def build_options_from_profile(
     # instead of failing with a missing-credential 401. Always stamped (None for
     # a native Anthropic session) so the attribute's presence is not a signal.
     options.aih_provider_id = provider_id
+    options.aih_generation_context = generation_context
     options.aih_automatic_workflows = True
     # A user-selected input window is fixed when the provider loop connects.
     # The harness adapter uses this for native-loop compaction/usage accounting;

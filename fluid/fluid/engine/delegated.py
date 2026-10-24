@@ -703,6 +703,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # loop is never handed a coroutine it would read as a denial text.
     supports_async_tool_policy = True
 
+    # Which host denials may carry the user steers and peers waiting for a tool
+    # boundary (``_deny_boundary``): called with the deny's text, True to carry.
+    # None (the default) carries nothing, so a deny caused by Stop, settle, a
+    # timeout or a cancelled prompt never receipts a steer the dying turn will
+    # not deliver. A host sets it after construction; an older loop simply
+    # lacks the behaviour.
+    deny_carries_steers: Callable[[str], bool] | None = None
+
     def __init__(
         self,
         *,
@@ -2533,15 +2541,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return []  # a subagent's call, whatever id it reuses
         if asyncio.get_running_loop().time() - asked_at > PEER_BOUNDARY_HOOK_BUDGET:
             return []
-        from fluid.context.peer import format_peer_message
-        from fluid.context.steering import format_steer
-
         peers, self._pending_peers = self._pending_peers, []
-        context = "".join(
-            format_steer(op.text) if isinstance(op, Steer)
-            else format_peer_message(op.sender, op.text, op.provenance)
-            for op in peers
-        ).strip()
+        context = self._boundary_text(peers)
         specific = output.get("hookSpecificOutput")
         if not isinstance(specific, dict):
             specific = {"hookEventName": event}
@@ -2549,6 +2550,92 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         existing = specific.get("additionalContext")
         specific["additionalContext"] = f"{existing}\n\n{context}" if existing else context
         return peers
+
+    @staticmethod
+    def _boundary_text(peers: list[AgentMessage | Steer]) -> str:
+        """``peers`` in arrival order: a peer in its peer marker, a user steer
+        in fluid's steering marker."""
+        from fluid.context.peer import format_peer_message
+        from fluid.context.steering import format_steer
+
+        return "".join(
+            format_steer(op.text) if isinstance(op, Steer)
+            else format_peer_message(op.sender, op.text, op.provenance)
+            for op in peers
+        ).strip()
+
+    def _deny_boundary(
+        self, tool_use_id: str | None, mapper: StreamJsonMapper | None,
+        message: str | None,
+    ) -> list[AgentMessage | Steer]:
+        """Take the waiting peers and user steers a main-thread DENY may carry.
+
+        A call the host denies (a permission prompt answered with a deny, or
+        a PreToolUse deny) never runs, so no PostToolUse boundary follows it;
+        held text would wait for a later tool call or the next turn. The deny
+        message is that call's ``tool_result``, so it carries them instead:
+        NativeLoop folds steers into a denied call's result the same way. An
+        owner chat relies on this when it answers a call waiting on approval
+        with "not run yet" so the owner's other message reaches the model in
+        the same turn (#523).
+
+        Only a deny the host opted in carries anything
+        (:attr:`deny_carries_steers` answers True for ``message``). Same guards
+        as :meth:`_peer_boundary`, minus the hook budget (a permission reply has
+        no CLI timeout, and a PreToolUse answer is bounded by
+        ``PRE_TOOL_USE_HOOK_BUDGET``): never after a Stop or a hook stop, never
+        for another turn's call, never off the main thread. A PreToolUse deny
+        that ends the query (``continue: false``) or names a subagent
+        (``agent_id``) is refused earlier, in :meth:`_pre_tool_use_deny_boundary`.
+        """
+        if not self._pending_peers or mapper is None:
+            return []
+        carries = self.deny_carries_steers
+        try:
+            if carries is None or not carries(message or ""):
+                return []
+        except Exception:  # noqa: BLE001 — a failing predicate carries nothing
+            logger.warning("deny_carries_steers failed; the deny carries nothing", exc_info=True)
+            return []
+        if (
+            not self._peer_admission_open
+            or self._interrupted.is_set()
+            or self._hook_stop_reason is not None
+            or mapper.turn_id != self._active_turn_id
+        ):
+            return []
+        if not tool_use_id or tool_use_id not in mapper.main_tool_use_ids:
+            return []
+        peers, self._pending_peers = self._pending_peers, []
+        return peers
+
+    def _forget_boundary(self, peers: list[AgentMessage | Steer]) -> None:
+        """The CLI never got ``peers``: no receipt, and the host's queued row
+        runs through ordinary scheduling."""
+        for op in peers:
+            if op.id is not None:
+                self._turn_peer_ids.discard(op.id)
+
+    async def _receipt_boundary(
+        self, peers: list[AgentMessage | Steer], tool_use_id: str | None,
+    ) -> None:
+        """``SteerDelivered`` for text a tool-boundary answer carried.
+
+        A user steer names the tool result it rode on: the CLI keeps the text
+        as a hook attachment (or inside a denial) and never echoes it on
+        stream-json, so this receipt is the only record that places it in
+        the transcript.
+        """
+        await self._emit(SteerDelivered(
+            session_id=self.session_id, turn_id=self._active_turn_id,
+            steers=[
+                {"id": op.id, "text": op.text, "tool_use_id": tool_use_id}
+                if isinstance(op, Steer)
+                else {"id": op.id, "text": op.text, "from": op.sender,
+                      **({"origin": op.provenance} if op.provenance != "peer" else {})}
+                for op in peers
+            ],
+        ))
 
     def _persist_cli_session_id(
         self, session_id: str, cli_session_id: str | None,
@@ -3013,7 +3100,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         mapped.permission.cli_request_id, True, mapped.permission.input,
                     )
                 else:
-                    await self._handle_permission(mapped.permission)
+                    await self._handle_permission(mapped.permission, mapper=mapper)
             if mapped.control_reply is not None:
                 # A control call issued while this turn runs: the turn owns
                 # stdout, so its reader is what delivers the answer.
@@ -3058,9 +3145,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._pending_permissions[bridge.fluid_request_id] = fut
         return fut
 
-    async def _handle_permission(self, bridge: PermissionBridge) -> None:
+    async def _handle_permission(
+        self, bridge: PermissionBridge, *, mapper: StreamJsonMapper | None = None,
+    ) -> None:
         """Answer a ``can_use_tool`` request by parking on the host's
         ``RespondPermission`` (the reader emitted the PermissionRequest).
+
+        A deny for a main-thread call also carries the peers and user steers
+        waiting for a tool boundary (``_deny_boundary``; ``mapper`` is the
+        running turn's, passed by its reader).
 
         The wait also ends on an Interrupt. The turn's reader is what is
         parked here, holding stdout, so without that exit an interrupt could
@@ -3152,10 +3245,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if resp.decision == "allow_always":
             self._remember_allow(bridge.tool_name, input)
             suggestions = bridge.suggestions
-        await self._write_control_response(
-            bridge.cli_request_id, allow, input, message=resp.message,
-            permissions=suggestions,
-        )
+        message = resp.message
+        carried = [] if allow else self._deny_boundary(bridge.tool_use_id, mapper, message)
+        if carried:
+            message = f"{message or 'permission denied'}\n\n{self._boundary_text(carried)}"
+        try:
+            await self._write_control_response(
+                bridge.cli_request_id, allow, input, message=message,
+                permissions=suggestions,
+            )
+        except BaseException:
+            self._forget_boundary(carried)
+            raise
+        if carried:
+            await self._receipt_boundary(carried, bridge.tool_use_id)
 
     async def _watch_parked_stdout(self, cli_request_id: str) -> str:
         """Read stdout while the turn's reader is parked on a permission.
@@ -3434,9 +3537,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 raise ValueError(f"unknown hook callback: {request.callback_id!r}")
             if event == "PreToolUse":
                 output = await self._guarded_pre_tool_use(request)
+                peers = self._pre_tool_use_deny_boundary(request, output, mapper)
             else:
                 output = await self._run_cli_hook(event, request.input, request.tool_use_id)
-            peers = self._peer_boundary(request, event, output, mapper, asked_at)
+                peers = self._peer_boundary(request, event, output, mapper, asked_at)
             response = {
                 "subtype": "success",
                 "request_id": request.cli_request_id,
@@ -3453,27 +3557,37 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._write_frame({"type": "control_response", "response": response})
         except (OSError, RuntimeError):
             logger.debug("could not answer the CLI's hook callback", exc_info=True)
-            # The CLI never got the text: no receipt, and the host's queued
-            # row runs through ordinary scheduling.
-            for op in peers:
-                if op.id is not None:
-                    self._turn_peer_ids.discard(op.id)
+            self._forget_boundary(peers)
             return
         if peers:
-            # A user steer names the tool result it rode on: the CLI keeps the
-            # text as a hook attachment and never echoes it on stream-json, so
-            # this receipt is the only record that places it in the transcript.
-            tool_use_id = request.tool_use_id or request.input.get("tool_use_id")
-            await self._emit(SteerDelivered(
-                session_id=self.session_id, turn_id=self._active_turn_id,
-                steers=[
-                    {"id": op.id, "text": op.text, "tool_use_id": tool_use_id}
-                    if isinstance(op, Steer)
-                    else {"id": op.id, "text": op.text, "from": op.sender,
-                          **({"origin": op.provenance} if op.provenance != "peer" else {})}
-                    for op in peers
-                ],
-            ))
+            await self._receipt_boundary(
+                peers, request.tool_use_id or request.input.get("tool_use_id"),
+            )
+
+    def _pre_tool_use_deny_boundary(
+        self, request: HookCallbackRequest, output: dict[str, Any],
+        mapper: StreamJsonMapper | None,
+    ) -> list[AgentMessage | Steer]:
+        """Carry waiting text on a PreToolUse DENY (see :meth:`_deny_boundary`).
+
+        The CLI reads ``permissionDecisionReason`` back to the model as the
+        denied call's result. A deny that also ends the query carries nothing.
+        """
+        specific = output.get("hookSpecificOutput")
+        if (
+            not isinstance(specific, dict)
+            or specific.get("permissionDecision") != "deny"
+            or output.get("continue") is False
+            or request.input.get("agent_id")
+        ):
+            return []
+        reason = str(specific.get("permissionDecisionReason") or "denied")
+        peers = self._deny_boundary(
+            request.tool_use_id or request.input.get("tool_use_id"), mapper, reason,
+        )
+        if peers:
+            specific["permissionDecisionReason"] = f"{reason}\n\n{self._boundary_text(peers)}"
+        return peers
 
     async def _guarded_pre_tool_use(self, request: HookCallbackRequest) -> dict[str, Any]:
         """PreToolUse, failing closed. The CLI treats a failed or late
@@ -3560,12 +3674,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     async def _policy_denial(
         self, tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+        agent_id: str | None = None,
     ) -> str | None:
         """Why the deny policy refuses this call, or None.
 
         ``cwd`` is the CLI's working directory for this call, from the hook
         payload: its shell keeps a ``cd`` between calls, so it can differ from
         the session's. It reaches a policy that takes a ``cwd`` keyword.
+        ``agent_id`` names the subagent making the call (None on the main
+        thread); it reaches a policy that names an ``agent_id`` parameter.
 
         Fails closed: a ``tool_policy`` that raises, or returns an awaitable
         that raises, denies the call. Letting it through instead would turn
@@ -3577,7 +3694,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # A sync policy may block on a DB read (the app's saved-rule
                 # lookup), so it runs off the loop; an async policy returns
                 # its coroutine from the thread and is awaited here.
-                extra = {"cwd": cwd} if _accepts_cwd(self.tool_policy) else {}
+                extra: dict[str, Any] = {"cwd": cwd} if _accepts_cwd(self.tool_policy) else {}
+                if _names_param(self.tool_policy, "agent_id"):
+                    extra["agent_id"] = agent_id
                 verdict = await asyncio.to_thread(self.tool_policy, tool_name, tool_input, **extra)
                 if inspect.isawaitable(verdict):
                     verdict = await verdict
@@ -3637,8 +3756,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if decision.additional_context:
                 specific["additionalContext"] = decision.additional_context
         cli_cwd = data.get("cwd")
+        agent = data.get("agent_id")
         denial = await self._policy_denial(
             name, tool_input, cli_cwd if isinstance(cli_cwd, str) and cli_cwd else None,
+            agent_id=agent if isinstance(agent, str) and agent else None,
         )
         if denial is not None:
             return {"hookSpecificOutput": {
@@ -4451,6 +4572,15 @@ def _accepts_cwd(policy: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _names_param(policy: Any, name: str) -> bool:
+    """Whether ``policy`` names parameter ``name`` explicitly (a ``**kwargs``
+    catch-all does not count, so existing policies see no new keyword)."""
+    try:
+        return name in inspect.signature(policy).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _hook_text(value: Any) -> str:

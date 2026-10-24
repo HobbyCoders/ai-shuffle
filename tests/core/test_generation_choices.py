@@ -12,9 +12,9 @@ OTHER = ("api_user", "user-b")
 
 @pytest.mark.parametrize("kind", choices.KINDS)
 def test_job_choices_and_favourites_are_account_isolated_and_never_default(kind: str) -> None:
-    from uuid import uuid4
-    job_id = str(uuid4())
-    pick = {"source": "fal", "account": "fal-ai", "worker": "w", "model": "m", "options": {}}
+    job_id = "auto-12345678"
+    database.create_automation(job_id, "Draw", "interval", {"seconds": 3600}, "default")
+    pick = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "m", "options": {}}
     choices.set_favourite(OWNER, kind, pick)
     choices.save_job(OWNER, job_id, kind, pick)
     assert choices.load_job(OWNER, job_id) == {kind: pick}
@@ -24,12 +24,41 @@ def test_job_choices_and_favourites_are_account_isolated_and_never_default(kind:
     assert choices.favourites(OWNER) == {kind: pick}
 
 
+@pytest.mark.parametrize("job_id", [
+    "auto-87654321", "12345678-1234-1234-1234-123456789abc", "imported-job",
+])
+def test_job_choices_accept_existing_safe_automation_ids(job_id: str) -> None:
+    database.create_automation(job_id, "Draw", "interval", {"seconds": 3600}, "default")
+    pick = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "m"}
+    choices.save_job(OWNER, job_id, "image", pick)
+    assert choices.load_job(OWNER, job_id) == {"image": {**pick, "options": {}}}
+    choices.save_job(OWNER, job_id, "image", None)
+    assert choices.load_job(OWNER, job_id) == {}
+
+
+@pytest.mark.parametrize("job_id", [
+    "auto-ffffffff", "", "../auto-12345678", "auto-12345678.image", "x" * 129,
+    "auto-12345678' OR '1'='1", "auto-12345678/choices", "auto-12345678\n",
+])
+def test_job_choices_reject_unknown_or_unsafe_ids(job_id: str) -> None:
+    # Even an imported definition must not escape the preference-key namespace.
+    if job_id != "auto-ffffffff":
+        database.create_automation(job_id, "Draw", "interval", {"seconds": 3600}, "default")
+    pick = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "m"}
+    with pytest.raises(ValueError, match="Unknown job"):
+        choices.load_job(OWNER, job_id)
+    for value in (pick, None):
+        with pytest.raises(ValueError, match="Unknown job"):
+            choices.save_job(OWNER, job_id, "image", value)
+    assert database.get_all_user_preferences(*OWNER) == []
+
+
 def test_unreadable_job_choice_fails_closed_in_production_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from uuid import uuid4
     from app.core import model_effort, query_options
-    job_id = str(uuid4())
+    job_id = "auto-12345678"
+    database.create_automation(job_id, "Draw", "interval", {"seconds": 3600}, "default")
     monkeypatch.setattr(model_effort, "_caller_preference_identity", lambda row: OWNER)
     choices.save(OWNER, "image", {"source": "fal", "model": "remembered"}, remember=True)
     database.set_user_preference(*OWNER, choices._job_key(job_id, "image"), {"broken": True})

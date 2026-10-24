@@ -209,7 +209,9 @@ def detection_wanted():
         return True
 
 
-def apply_detection(detected, unknown=()):
+def apply_detection(
+    detected: dict[str, Any], unknown: tuple[str, ...] | set[str] = (),
+) -> bool:
     """Store a detection pass (see assistant_introduction); True when it wrote.
 
     Every worker contributes detected introduction values only when they
@@ -222,8 +224,12 @@ def apply_detection(detected, unknown=()):
             return False
         stored = account.get("introduction") or {}
         updated = introductions.with_detected(stored, detected, unknown)
-        if updated == stored:
-            return False
-        _project(conn, store.write_account(conn, {"introduction": updated}))
-    _publish()
-    return True
+        changed = updated != stored
+        if changed:
+            _project(conn, store.write_account(conn, {"introduction": updated}))
+    if changed:
+        _publish()
+    # Also run on unchanged accounts: upgrade backfill and failed writes retry
+    # without changing introduction/Git-author projection or publishing idle passes.
+    introductions.remember_identity(updated)
+    return changed

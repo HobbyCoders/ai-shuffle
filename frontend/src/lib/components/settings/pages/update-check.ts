@@ -12,3 +12,10 @@ export const CHECK_IDLE_SETTLE_MS = 10_000;
 
 /** Phases that already say how a check ended. */
 export const OUTCOME_PHASES = new Set(['available', 'ready', 'error', 'image-required', 'unsupported', 'downloading']);
+
+/**
+ * A worker's refusal while its own check or download runs
+ * (app/core/update_workers.py IN_PROGRESS_REASON). That worker is waited for
+ * like one that accepted, and its own result is shown, not the refusal.
+ */
+export const IN_PROGRESS_REASON = 'An update is already in progress';
