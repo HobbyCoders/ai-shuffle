@@ -56,7 +56,7 @@ vi.mock('$lib/utils/platform', () => ({ buildShell: () => (mocks.mobile ? 'mobil
 
 import RunningTasksList from './RunningTasksList.svelte';
 import { runningTasksOpen } from '$lib/stores/expansion-preferences';
-import { __resetWatches } from '$lib/stores/watches';
+import { __resetWatches, watches as watchesStore } from '$lib/stores/watches';
 
 function watch(id: string, over: Partial<WatchRow> = {}): WatchRow {
 	const status = over.status ?? 'active';
@@ -245,6 +245,51 @@ describe('RunningTasksList watches', () => {
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await waitFor(() => expect(mocks.listWatches).toHaveBeenCalled());
 		expect(within(sheet()).queryByRole('button', { name: /^Watches/ })).toBeNull();
+	});
+
+	it('a failed first load shows the error and Retry, not an all-clear', async () => {
+		mocks.listWatches.mockRejectedValueOnce(new Error('offline'));
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		const warn = await screen.findByTestId('watches-error');
+		expect(warn.textContent).toContain('Watches could not be loaded.');
+		const dialog = sheet();
+		expect(within(dialog).queryByText('Nothing running')).toBeNull();
+		expect(within(dialog).getByText('No tasks running. Your watches could not be loaded.')).toBeTruthy();
+		expect(within(dialog).getByText('No tasks running · watches unavailable')).toBeTruthy();
+		expect(dialog.querySelector('.rt-empty svg')).toBeNull();
+
+		// Retry loads them.
+		serve([watch('w1')]);
+		await fireEvent.click(within(warn).getByRole('button', { name: 'Retry' }));
+		expect(await within(dialog).findByText('Watch w1')).toBeTruthy();
+		expect(screen.queryByTestId('watches-error')).toBeNull();
+	});
+
+	it('the phone sheet (the mobile shell opens this one) shows the same load error', async () => {
+		mocks.mobile = true;
+		mocks.listWatches.mockRejectedValueOnce(new Error('offline'));
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		expect((await screen.findByTestId('watches-error')).textContent).toContain('Watches could not be loaded.');
+		expect(within(sheet()).queryByText('Nothing running')).toBeNull();
+	});
+
+	it('a confirmed empty list says Nothing running with no error', async () => {
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await waitFor(() => expect(mocks.listWatches).toHaveBeenCalled());
+		const dialog = sheet();
+		await waitFor(() => expect(dialog.querySelector('.rt-empty svg')).not.toBeNull());
+		expect(within(dialog).getAllByText('Nothing running').length).toBeGreaterThan(0);
+		expect(screen.queryByTestId('watches-error')).toBeNull();
+	});
+
+	it('a failed refresh keeps the last rows and says they could not be refreshed', async () => {
+		serve([watch('w1')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await screen.findByText('Watch w1');
+		mocks.listWatches.mockRejectedValueOnce(new Error('offline'));
+		await watchesStore.refresh();
+		expect((await screen.findByTestId('watches-error')).textContent).toContain('Watches could not be refreshed.');
+		expect(screen.getByText('Watch w1')).toBeTruthy();
 	});
 
 	it('on a phone a watch alone gets the summary row that opens the list', async () => {

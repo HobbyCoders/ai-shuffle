@@ -14,12 +14,20 @@ export const WATCH_POLL_MS = 30_000;
 
 export interface WatchesState {
 	list: WatchRow[];
+	/** A request has finished, whether or not it worked. */
 	loaded: boolean;
-	/** The last refresh failed; the list shown is the previous one. */
+	/**
+	 * A request has succeeded at least once. With `error`, it tells a list that
+	 * could not be refreshed (the rows shown are the last good ones, maybe
+	 * none) from one that never loaded (nothing is known about the watches).
+	 */
+	fetched: boolean;
+	/** The last request failed. */
 	error: boolean;
 }
 
-const state = writable<WatchesState>({ list: [], loaded: false, error: false });
+const EMPTY: WatchesState = { list: [], loaded: false, fetched: false, error: false };
+const state = writable<WatchesState>({ ...EMPTY });
 
 let inflight: Promise<void> | null = null;
 let users = 0;
@@ -30,7 +38,7 @@ function refresh(): Promise<void> {
 	inflight = (async () => {
 		try {
 			const list = await listWatches();
-			state.set({ list, loaded: true, error: false });
+			state.set({ list, loaded: true, fetched: true, error: false });
 		} catch {
 			state.update((s) => ({ ...s, loaded: true, error: true }));
 		} finally {
@@ -108,5 +116,5 @@ export function __resetWatches() {
 	users = 0;
 	inflight = null;
 	if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
-	state.set({ list: [], loaded: false, error: false });
+	state.set({ ...EMPTY });
 }

@@ -181,13 +181,16 @@
 	/** Something to show: running work, or a watch that is not stopped. */
 	const hasContent = $derived(hasRunning || liveWatches > 0);
 	const allRowCount = $derived(rows.length + watchRows.length);
+	/** The watch list has never loaded: an empty list here is unknown, not "none". */
+	const watchesUnknown = $derived($watches.error && !$watches.fetched);
 	const inlineLineCount = $derived(
 		rows.reduce((n, r) => n + 1 + (r.type === 'swarm' && expanded[r.key] ? r.members.length : 0), 0) +
 			watchRows.length
 	);
 	/** "2 agents · 1 shell task · 1 watch", or just the watches. */
 	const fullSummary = $derived(
-		[counts.running ? countSummary(counts) : '', watchSummary(watchRows)].filter(Boolean).join(' · ') || 'Nothing running'
+		[counts.running ? countSummary(counts) : '', watchSummary(watchRows)].filter(Boolean).join(' · ') ||
+			(watchesUnknown ? 'No tasks running · watches unavailable' : 'Nothing running')
 	);
 	const headLabel = $derived(counts.running ? plural(counts.running, 'running task') : watchCount(liveWatches));
 	const headSub = $derived(
@@ -530,9 +533,15 @@
 				: filter === 'agents'
 					? 'No agents running'
 					: filter === 'watches'
-						? 'No watches. Ask any chat to watch something for you.'
-						: 'Nothing running'
+						? watchesUnknown
+							? 'Your watches could not be loaded.'
+							: 'No watches. Ask any chat to watch something for you.'
+						: watchesUnknown
+							? 'No tasks running. Your watches could not be loaded.'
+							: 'Nothing running'
 	);
+	/** The all-clear tick only for a list confirmed empty. */
+	const confirmedEmpty = $derived(allRowCount === 0 && !watchesUnknown);
 </script>
 
 <!-- ── One row (task or swarm), shared by both variants ─────────────────── -->
@@ -844,12 +853,16 @@
 				{#if swarmError && sessionSwarms.length}
 					<p class="rt-warn" role="status">Swarm status could not be refreshed. <button type="button" class="link" onclick={() => sessionId && swarms.hydrate(sessionId)}>Retry</button></p>
 				{/if}
-				{#if $watches.error && watchRows.length}
-					<p class="rt-warn" role="status">Watches could not be refreshed. <button type="button" class="link" onclick={() => watches.refresh()}>Retry</button></p>
+				{#if $watches.error}
+					<!-- Shown even with no rows: a failed first load must not read as "no watches". -->
+					<p class="rt-warn" role="status" data-testid="watches-error">
+						{watchesUnknown ? 'Watches could not be loaded.' : 'Watches could not be refreshed.'}
+						<button type="button" class="link" onclick={() => watches.refresh()}>Retry</button>
+					</p>
 				{/if}
 				{#if shown.length === 0 && shownWatches.length === 0}
 					<div class="rt-empty">
-						{#if allRowCount === 0}<CircleCheck size={28} aria-hidden="true" />{/if}
+						{#if confirmedEmpty}<CircleCheck size={28} aria-hidden="true" />{/if}
 						<p>{emptyMessage}</p>
 					</div>
 				{:else}
