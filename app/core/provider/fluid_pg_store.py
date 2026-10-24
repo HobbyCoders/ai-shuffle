@@ -339,7 +339,16 @@ def _events_since_sync(session_id: str, seq: int) -> List[Event]:
 EVENT_PAGE_BYTES = 8 * 1024 * 1024
 
 
-def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> List[Event]:
+def _events_page_sync(
+    session_id: str, seq: int, through: int, limit: int,
+    classes: Optional[tuple[str, ...]] = None,
+) -> List[Event]:
+    if classes == ():
+        return []
+    class_filter = ""
+    if classes is not None:
+        class_filter = " AND event ->> '_cls' IN (" + ", ".join("%s" for _ in classes) + ")"
+    params = (session_id, seq, through, *(classes or ()))
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -348,18 +357,17 @@ def _events_page_sync(session_id: str, seq: int, through: int, limit: int) -> Li
             # The running sum still enforces the budget for mixed row sizes.
             "WITH first_size AS MATERIALIZED ("
             "SELECT octet_length(CAST(event AS TEXT)) AS bytes FROM fluid_session_events "
-            "WHERE session_id = %s AND seq > %s AND seq <= %s ORDER BY seq LIMIT 1"
+            f"WHERE session_id = %s AND seq > %s AND seq <= %s{class_filter} ORDER BY seq LIMIT 1"
             "), candidates AS MATERIALIZED ("
             "SELECT seq, event FROM fluid_session_events WHERE session_id = %s "
-            "AND seq > %s AND seq <= %s ORDER BY seq "
+            f"AND seq > %s AND seq <= %s{class_filter} ORDER BY seq "
             "LIMIT LEAST(%s, COALESCE((SELECT GREATEST(1, %s / bytes) FROM first_size), 1))"
             "), sized AS (SELECT seq, event, "
             "SUM(octet_length(CAST(event AS TEXT))) OVER (ORDER BY seq "
             "ROWS UNBOUNDED PRECEDING) AS page_bytes, "
             "ROW_NUMBER() OVER (ORDER BY seq) AS row_num FROM candidates) "
             "SELECT event FROM sized WHERE page_bytes <= %s OR row_num = 1 ORDER BY seq",
-            (session_id, seq, through, session_id, seq, through,
-             limit, EVENT_PAGE_BYTES, EVENT_PAGE_BYTES),
+            (*params, *params, limit, EVENT_PAGE_BYTES, EVENT_PAGE_BYTES),
         )
         rows = cur.fetchall()
     return [event_from_dict(_as_dict(r["event"])) for r in rows]
@@ -1831,8 +1839,22 @@ class PgFluidStore:
         async with self._event_lock:
             await self._write_pending(session_id, event)
 
+    async def iter_events_of_class(
+        self, session_id: str, seq: int, classes: tuple[type[Event], ...], *,
+        page_size: int = EVENT_CACHE_LIMIT,
+    ) -> AsyncIterator[Event]:
+        """Class-filtered replay with the same finite prefix and page budgets."""
+        if not classes:
+            return
+        async for event in self.iter_events(
+            session_id, seq, page_size=page_size,
+            classes=tuple(cls.__name__ for cls in classes),
+        ):
+            yield event
+
     async def iter_events(
         self, session_id: str, seq: int, *, page_size: int = EVENT_CACHE_LIMIT,
+        classes: Optional[tuple[str, ...]] = None,
     ) -> AsyncIterator[Event]:
         """Replay a finite committed prefix without retaining the whole history.
 
@@ -1846,7 +1868,10 @@ class PgFluidStore:
             await self._write_pending(session_id)
             through = await run_sync(_last_event_seq_sync, session_id)
         while seq < through:
-            page = await run_sync(_events_page_sync, session_id, seq, through, page_size)
+            if classes is None:
+                page = await run_sync(_events_page_sync, session_id, seq, through, page_size)
+            else:
+                page = await run_sync(_events_page_sync, session_id, seq, through, page_size, classes)
             if not page:
                 break
             for event in page:

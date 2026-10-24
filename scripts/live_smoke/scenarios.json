@@ -506,6 +506,14 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.23",
+          "check": "Native wake provenance across context pruning and rewind/resume",
+          "kind": "owner",
+          "how": "On a disposable candidate install, start a throwaway native-provider chat. Produce ordinary user turns, a background-task wake and a peer-delivered turn, including assistant tool calls/results. Record their first persisted TurnStarted sources and node IDs using a read-only diagnostic that emits only synthetic IDs, sources, replay cursors and decoded-row counts. Compact enough history to prune those nodes from the live context, then rewind to each recorded user/wake/peer node and resume it. Repeat an unchanged context scan and append a fresh user turn after an assistant/tool exchange. Archive only the throwaway chat and remove only diagnostics created for this check; never restart or mutate the installed worker or dump prompts, credentials or provider payloads.",
+          "pass_when": "Returning nodes retain their FIRST TurnStarted source despite later resume events: user turns stay user-authored and wake/peer turns keep their original exemptions and wake-aware counting. Only re-entering pruned context replays provenance from zero. Unchanged context and newly appended turns keep the saved cursor and decode only newer matching events, not the historical prefix or large tool results. Examined-node and provenance bookkeeping are pruned to the active context plus nodes appended since its last scan. Missing live evidence is recorded as not_run, not pass.",
+          "past_bug": "#354 / #264 / PR #504: unbounded wake bookkeeping required pruning, but comparing all active context nodes with only TurnStarted-named nodes restarted full provenance replay on ordinary mixed-role turns."
+        },
+        {
           "id": "harness-basics.20",
           "check": "Monitor viewer disconnect preserves its running shell",
           "kind": "owner",
