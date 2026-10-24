@@ -3,6 +3,7 @@ import errno
 import stat
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,7 @@ def _current_user_sid() -> str:
     return result.stdout.strip().rsplit(",", 1)[-1].strip('"')
 
 
-def _windows_dacl_sddl(path) -> str:
+def _windows_dacl_sddl(path: Path) -> str:
     """The DACL of ``path`` as SDDL, read straight from Win32 (metadata only).
 
     Not PowerShell's Get-Acl: starting PowerShell on a loaded hosted runner
