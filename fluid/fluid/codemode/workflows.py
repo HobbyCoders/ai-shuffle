@@ -68,7 +68,7 @@ def _content(body):
     return f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n\n{workflow.strip()}\n"
 
 
-def _evidence(entries, sessions, name, project, *, lost=0):
+def _evidence(entries, sessions, name, project, *, lost: int = 0):
     if not isinstance(sessions, list) or len(sessions) != 2 or any(not isinstance(s, str) or not s for s in sessions) or len(set(sessions)) != 2:
         raise ValueError("Cite exactly two distinct successful sessions")
     for entry in entries:
@@ -235,8 +235,10 @@ class WorkflowProposals:
             if _hash({k: row[k] for k in ("owner", "project", "content")}) != proposal_id:
                 raise ValueError("Workflow content changed since proposal")
             # Revalidate original producer evidence, including later corrections.
-            evidence = _evidence(self.store.journal_entries(), [e["session"] for e in row["evidence"]],
-                                 row["name"], row["project"], lost=load_loss(self.store.root))
+            evidence = _evidence(
+                self.store.journal_entries(), [e["session"] for e in row["evidence"]],
+                row["name"], row["project"], lost=load_loss(self.store.root),
+            )
             if evidence != row["evidence"]:
                 raise ValueError("Workflow evidence changed; do not promote stale proposals")
             fields, workflow = parse_frontmatter(row["content"])

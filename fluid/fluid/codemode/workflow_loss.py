@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from fluid.codemode.skills import atomic_write_text, journal_lock, JOURNAL_APPEND_LOCK_WAIT
@@ -66,6 +67,17 @@ def _with_lines(bits: int, lines: Iterable[str]) -> int:
 
 def _save(root: Path, bits: int) -> None:
     atomic_write_text(root / _FILE, json.dumps({"version": 1, "bits": f"{bits:0{_BITS // 4}x}"}))
+    # Persist the rename itself before allowing a journal trim. File fsync
+    # alone can leave the previous directory entry after a power loss.
+    # Windows cannot open/fsync directories this way; there we retain atomic
+    # replacement but cannot promise POSIX directory-fsync crash durability.
+    if os.name == "nt":
+        return
+    descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)  # failures propagate: the journal must stay intact
+    finally:
+        os.close(descriptor)
 
 
 def initialize_loss(root: Path, journal: Path) -> None:
@@ -85,8 +97,10 @@ def initialize_loss(root: Path, journal: Path) -> None:
 def record_loss(root: Path, lines: Iterable[str]) -> None:
     """Persist loss BEFORE discarding lines, under the caller's journal lock.
 
-    Failure prevents the trim. A crash after this write but before trimming
-    creates only safe false positives. Never reset/evict bits automatically.
+    POSIX file and directory sync failures prevent the trim. A crash after
+    successful sync but before trimming creates only safe false positives.
+    Windows skips unsupported directory fsync (atomic replacement only).
+    Never reset/evict bits automatically.
     """
     bits = load_loss(root)
     updated = _with_lines(bits, lines)

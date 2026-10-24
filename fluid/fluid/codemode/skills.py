@@ -1199,7 +1199,9 @@ class SkillStore:
                 from fluid.codemode.workflow_loss import record_loss
                 try:
                     with self._journal_path.open(encoding="utf-8") as stream:
-                        record_loss(self.root, (line for i, line in enumerate(stream) if i in removed))
+                        record_loss(
+                            self.root, (line for i, line in enumerate(stream) if i in removed),
+                        )
                 except OSError:
                     return 0  # never discard evidence without durable loss tracking
             if backlog:
