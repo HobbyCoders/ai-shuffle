@@ -25,14 +25,15 @@ Module layout (split for maintainability):
 """
 
 import logging
-from typing import Any, List, Optional
+from typing import Any
 
+from app.mcp.config_automations import _create_automation_tools
+from app.mcp.config_connectors import _create_connector_tools
+from app.mcp.config_generation import _create_generation_tools
 from app.mcp.config_helpers import _tool_result
 from app.mcp.config_hooks import _create_hook_tools
-from app.mcp.config_automations import _create_automation_tools
 from app.mcp.config_mcp_servers import _create_mcp_tools
 from app.mcp.config_profiles import _create_profile_tools
-from app.mcp.config_connectors import _create_connector_tools
 from app.mcp.config_subagents import _create_subagent_tools
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,9 @@ Hook commands run with the app's permissions: explain each one. Automations run 
 
 def _create_discovery_tools() -> list:
     """Create the getConfigCapabilities discovery tool."""
-    from app.mcp.inproc import tool
     from app.db import database
     from app.db.async_database import run_sync
+    from app.mcp.inproc import tool
 
     tools = []
 
@@ -142,6 +143,11 @@ def _create_discovery_tools() -> list:
                 "Read": "Matches the file Read tool",
                 ".*": "Matches any tool (use with caution)",
             },
+            "generation_preferences": {
+                "tool": "generationPreferences",
+                "kinds": ["image", "video", "audio", "3d"],
+                "job_choices": "Optional job_id pins an existing automation choice.",
+            },
             "current_stats": {
                 "hooks": len(all_hooks),
                 "automations": len(all_automations),
@@ -157,7 +163,7 @@ def _create_discovery_tools() -> list:
 # Server Factory
 # ============================================================================
 
-def get_app_config_tool_names() -> List[str]:
+def get_app_config_tool_names() -> list[str]:
     """
     Return the list of MCP tool names for allowed_tools registration.
 
@@ -167,6 +173,7 @@ def get_app_config_tool_names() -> List[str]:
     return [
         # Discovery
         "mcp__app-config__getConfigCapabilities",
+        "mcp__app-config__generationPreferences",
         # Hooks
         "mcp__app-config__listHooks",
         "mcp__app-config__getHook",
@@ -210,8 +217,9 @@ def get_app_config_tool_names() -> List[str]:
 
 def collect_app_config_tools(
     is_admin: bool = False,
-    project_id: Optional[str] = None,
-    project_dir: Optional[str] = None,
+    project_id: str | None = None,
+    project_dir: str | None = None,
+    *, generation_preferences_writable: bool = False,
 ) -> list:
     """The raw ``@tool`` objects of the app-config surface, no server around them.
 
@@ -234,14 +242,16 @@ def collect_app_config_tools(
     all_tools.extend(_create_profile_tools(is_admin))
     all_tools.extend(_create_connector_tools(is_admin))
     all_tools.extend(_create_subagent_tools(is_admin))
+    all_tools.extend(_create_generation_tools(is_admin, writable=generation_preferences_writable))
     return all_tools
 
 
 def create_app_config_server(
     is_admin: bool = False,
-    project_id: Optional[str] = None,
-    project_dir: Optional[str] = None,
-) -> Optional[Any]:
+    project_id: str | None = None,
+    project_dir: str | None = None,
+    *, generation_preferences_writable: bool = False,
+) -> Any | None:
     """
     Create the app-config SDK MCP server with all configuration tools.
 
@@ -263,7 +273,10 @@ def create_app_config_server(
         logger.debug("Fluid tool helpers not available — app-config tools disabled")
         return None
 
-    all_tools = collect_app_config_tools(is_admin, project_id, project_dir)
+    all_tools = collect_app_config_tools(
+        is_admin, project_id, project_dir,
+        generation_preferences_writable=generation_preferences_writable,
+    )
     if not all_tools:
         return None
 
