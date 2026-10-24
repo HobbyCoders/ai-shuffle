@@ -172,6 +172,9 @@ class WatchManager:
                     await run_maintenance(
                         owner_store.retention_sweep, assistant_service.assistant_id()
                     )
+                    from app.db.watch_journal import sweep
+
+                    await run_maintenance(sweep)
             except Exception:
                 logger.warning("Watch accounting retention failed", exc_info=True)
             await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
@@ -255,8 +258,12 @@ class WatchManager:
             if watch["creating_session_id"]
             else None
         )
-        if not watch["creator_notified"] and (
-            not creator or not creator.get("is_active") or creator.get("status") == "archived"
+        # Missing or foreign mirrors are not authoritative lifecycle evidence.
+        if (
+            not watch["creator_notified"]
+            and creator
+            and assistant_service._owned_here(creator)
+            and (not creator.get("is_active") or creator.get("status") == "archived")
         ):
             await run_sync(
                 notifications.create_notification,

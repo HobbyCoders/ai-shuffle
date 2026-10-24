@@ -120,6 +120,15 @@ async def test_telegram_ingress_commit_ack_crosses_isolated_package(
             for filename in ("fake_telegram.py", "telegram.py", "telegram_actions.py")
         }
     }
+    # Retention keeps unread content only for watches that opted in before ingress.
+    _, initial_cursor = store.connector_page("fake-telegram", "123", {})
+    store.create(
+        owner="admin", creating_session_id=None, worker_id="source", agent_id="agent",
+        description="isolated Telegram ingress", source={"kind": "connector",
+        "connector_id": "fake-telegram", "channel_id": "123"}, filter={}, action="alert",
+        permissions={"read_only": True, "tools": []}, daily_budget_usd=1,
+        cursor=initial_cursor,
+    )
     persist = store.record_connector_event
     attempts = 0
 
@@ -146,7 +155,7 @@ async def test_telegram_ingress_commit_ack_crosses_isolated_package(
         assert attempts == 3
         await asyncio.wait_for(dispatched.wait(), timeout=2)
         incoming.assert_awaited_once()
-        events, cursor = store.connector_page("fake-telegram", "123", {"seq": 0})
+        events, cursor = store.connector_page("fake-telegram", "123", initial_cursor)
         assert len(events) == 1
         assert events[0][1]["text"] == "important"
         assert store.connector_page("fake-telegram", "123", cursor) == ([], cursor)
