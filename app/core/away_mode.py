@@ -226,8 +226,12 @@ def _last_delivered_away(session_id: str) -> bool:
             if isinstance(payload, str):
                 payload = json.loads(payload)
             return payload.get("away") is True
+        from app.db.history_indexing import search_table
+        # This is context inheritance, not search: pending imported text must
+        # still preserve an unattended chat's owner policy.
+        native_source = search_table(cursor, "fluid_session_nodes", "n", include_pending=True)
         cursor.execute(
-            "SELECT 1 FROM fluid_session_nodes n JOIN sessions s "
+            f"SELECT 1 FROM {native_source} JOIN sessions s "
             "ON n.session_id=s.sdk_session_id WHERE s.id=%s "
             "AND n.message->>'role'='user' AND n.message::text LIKE %s LIMIT 1",
             (session_id, "%The owner is away. Do not ask questions%"),
