@@ -3,6 +3,7 @@ from fluid.events.model import (
     WAKE_AUTO,
     WAKE_NOT_APPLICABLE,
     WAKE_SUPPRESSED,
+    AssistantTextSanitized,
     BlockStart,
     BlockStop,
     ContextCompaction,
@@ -56,6 +57,7 @@ from fluid.events.ops import (
 
 __all__ = [
     "AgentMessage",
+    "AssistantTextSanitized",
     "BackgroundTaskFinished",
     "BlockStart",
     "BlockStop",

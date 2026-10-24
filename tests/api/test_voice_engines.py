@@ -1,12 +1,13 @@
 """Voice engines in Settings: ChatGPT voice list, GPT-Live-1.1 gate, fallbacks."""
+import json
 import logging
 
 import httpx
 import pytest
 
 from app.core import encryption, voice_availability
-from app.core.voice_models import CODEX_MODEL, CODEX_VOICES, LIVE_11_MODEL, LIVE_VOICES
-from tests.api.test_voice_api import RAW_KEY, VOICE_SETTINGS, _make_provider
+from app.core.voice_models import CODEX_MODEL, CODEX_VOICES, LIVE_11_MODEL, LIVE_MODEL, LIVE_VOICES
+from tests.api.test_voice_api import RAW_KEY, VOICE_ROOT, VOICE_SETTINGS, _enable_voice, _make_provider
 from tests.helpers import unlock_encryption
 
 REAL_FETCH_STATUS = voice_availability._fetch_status
@@ -104,7 +105,104 @@ class TestChatGPTVoices:
         assert session["audio"]["output"]["voice"] == "juniper"
 
 
+class TestProviderPinPersistence:
+    @pytest.mark.parametrize("change,expected", [
+        ({"voice_provider_id": None}, None),
+        ({"voice_model": "grok-voice-latest"}, None),
+        ({"voice_provider_id": "prov-openai"}, 400),
+    ])
+    def test_disabled_pin_can_be_cleared_but_not_explicitly_selected(
+        self, authenticated_client, mock_db, change, expected,
+    ):
+        from app.db import database
+        pid = _make_provider()
+        c = authenticated_client
+        assert c.put(VOICE_SETTINGS, json={"voice_provider_id": pid}).status_code == 200
+        database.update_model_provider(pid, enabled=False)
+        response = c.put(VOICE_SETTINGS, json=change)
+        if expected == 400:
+            assert response.status_code == 400, response.text
+            assert database.get_system_setting("voice_provider_id") == pid
+        else:
+            assert response.status_code == 200, response.text
+            assert response.json()["voice_provider_id"] is None
+            assert database.get_system_setting("voice_provider_id") is None
+
+    def test_unknown_pin_is_cleared_when_saving_voice(self, authenticated_client, mock_db):
+        from app.db import database
+        database.set_system_setting("voice_provider_id", "deleted-provider")
+        response = authenticated_client.put(VOICE_SETTINGS, json={"voice_voice": "cedar"})
+        assert response.status_code == 200, response.text
+        assert response.json()["voice_provider_id"] is None
+        assert database.get_system_setting("voice_provider_id") is None
+
+    @pytest.mark.parametrize("update", [
+        {"voice_voice": "cedar"},
+        {"voice_max_call_minutes": 30},
+        {"voice_options": {"opening": "Hello"}},
+        {"voice_model": LIVE_MODEL},
+    ])
+    @pytest.mark.parametrize("state", ["disabled", "needs_reauth"])
+    def test_unrelated_save_keeps_temporarily_ineligible_pin(
+        self, authenticated_client, mock_db, update, state,
+    ):
+        from app.db import database
+        c = authenticated_client
+        if state == "needs_reauth":
+            pid = _make_provider("subscription", auth_mode="chatgpt")
+            database.update_model_provider(pid, codex_access_token="test-access-token")
+            model = CODEX_MODEL
+            update = {**update, **({"voice_voice": "juniper"} if "voice_voice" in update else {})}
+            if "voice_model" in update:
+                update["voice_model"] = model
+        else:
+            pid = _make_provider()
+            model = LIVE_MODEL
+        response = c.put(VOICE_SETTINGS, json={"voice_model": model, "voice_provider_id": pid})
+        assert response.status_code == 200, response.text
+        database.update_model_provider(pid, **({"enabled": False} if state == "disabled" else {"needs_reauth": True}))
+
+        response = c.put(VOICE_SETTINGS, json=update)
+        assert response.status_code == 200, response.text
+        assert response.json()["voice_provider_id"] == pid
+        assert database.get_system_setting("voice_provider_id") == pid
+
+
 class TestLive11Gate:
+    @pytest.mark.parametrize("status,expected", [(404, LIVE_MODEL), (200, LIVE_11_MODEL)])
+    def test_new_session_checks_explicit_provider_availability(
+        self, authenticated_client, mock_db, monkeypatch, status, expected,
+    ):
+        from unittest.mock import AsyncMock
+        from app.api import voice
+        from app.db import database
+        pinned = _api_key_provider(mock_db)
+        other = _make_provider("other-key", auth_token=encryption.encrypt_value("other-test-key"))
+        _models_answer(monkeypatch, 200)
+        c = authenticated_client
+        saved = c.put(VOICE_SETTINGS, json={"voice_model": LIVE_11_MODEL, "voice_provider_id": pinned, "voice_voice": "cedar"})
+        assert saved.status_code == 200, saved.text
+        _enable_voice()
+        probes = []
+
+        async def fetch(api_key):
+            probes.append(api_key)
+            return 200 if api_key == RAW_KEY else status
+
+        monkeypatch.setattr(voice_availability, "_fetch_status", fetch)
+        mint = AsyncMock(side_effect=AssertionError("Live engines must not mint WebRTC secrets"))
+        monkeypatch.setattr(voice, "_mint_client_secret", mint)
+        response = c.post(f"{VOICE_ROOT}/sessions", json={"provider_id": other, "model": "sonnet"})
+        assert response.status_code == 200, response.text
+        assert response.json()["model"] == expected
+        row = database.get_session(response.json()["session_id"])
+        binding = json.loads(row["voice_config"])
+        assert (binding["model"], binding["provider_id"], binding["voice"]) == (expected, other, "cedar")
+        assert probes == ["other-test-key"]
+        assert database.get_system_setting("voice_model") == LIVE_11_MODEL
+        assert database.get_system_setting("voice_provider_id") == pinned
+        mint.assert_not_called()
+
     def test_hidden_on_404_and_listed_on_200(self, authenticated_client, mock_db, monkeypatch):
         _api_key_provider(mock_db)
         calls = _models_answer(monkeypatch, 404)
