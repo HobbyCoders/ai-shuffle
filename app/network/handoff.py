@@ -72,7 +72,7 @@ class _Timing:
         self.role, self.sid = role, sid
         self.start = self.last = monotonic()
         self.steps = []
-        self.current = ("admission", self.start)
+        self.current = ("admission", self.start, None)
         self.finished = False
         self.loop = loop or _progress_loop.get()
         self.progress_handle = None
@@ -89,7 +89,7 @@ class _Timing:
     def _log_progress(self):
         if self.finished:
             return
-        name, since = self.current
+        name, since, _ = self.current
         now = monotonic()
         logger.info("Hand-off %s for session %s waiting on %s for %.1fs (total %.1fs): %s",
                     self.role, self.sid, name, now - since, now - self.start,
@@ -97,20 +97,27 @@ class _Timing:
         self._arm_progress()
 
     def snapshot(self):
-        name, since = self.current
+        name, since, rows = self.current
         now = monotonic()
         return {"step": name, "elapsed_seconds": round(now - self.start, 1),
-                "step_elapsed_seconds": round(now - since, 1)}
+                "step_elapsed_seconds": round(now - since, 1),
+                **({"rows_completed": rows[0], "rows_total": rows[1]} if rows is not None else {})}
 
     def waiting(self, name):
-        self.current = (name, monotonic())
+        self.current = (name, monotonic(), None)
+
+    def rows(self, completed, total):
+        # One immutable snapshot crosses the import-thread/status-poll boundary.
+        # Counts describe this step only, and advance after a chunk commits.
+        name, since, _ = self.current
+        self.current = (name, since, (completed, total))
 
     def step(self, name, **facts):
         now = monotonic()
         detail = "".join(f" {key}={value}" for key, value in facts.items())
         self.steps.append(f"{name}={now - self.last:.1f}s{detail}")
         self.last = now
-        self.current = ("next step", now)
+        self.current = ("next step", now, None)
 
     def log(self, outcome, *, quiet=False):
         self.finished = True
@@ -1518,6 +1525,8 @@ def install_history(sid, data, cwd):
                 rows.append((destination_id, *values))
             metrics = {"rows": len(rows), "statements": 0, "execute_seconds": 0.0,
                        "max_statement_seconds": 0.0, "commit_seconds": 0.0, "connection_seconds": 0.0}
+            if timing:
+                timing.rows(0, len(rows))
             for start in range(0, len(rows), 200):
                 part = rows[start:start + 200]
                 # get_db commits each bounded chunk. Staging never changes the
@@ -1539,6 +1548,8 @@ def install_history(sid, data, cwd):
                                      _history_conflict(table, ("session_id", *columns)), batch=200)
                     written = monotonic()
                 metrics["commit_seconds"] += monotonic() - written
+                if timing:
+                    timing.rows(start + len(part), len(rows))
             metrics["seconds"] = monotonic() - started
             facts[table] = {key: round(value, 3) if key.endswith("seconds") else value
                             for key, value in metrics.items()}

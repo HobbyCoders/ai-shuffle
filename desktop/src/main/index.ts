@@ -29,7 +29,8 @@ import { installTray } from './tray';
 import { timedPhase } from './timed-phase';
 import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
-import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
+import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError } from './update-restore-point';
+import { IncrementalClusterCopy } from './incremental-restore-point';
 import { launcherImage, launchUpdateSplash } from './update-splash';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
@@ -379,7 +380,7 @@ async function main(): Promise<void> {
 		if (applications && state.phase === 'ready' && !state.external) {
 			// The initial timer may have fired while this revision was still booting.
 			void applications.healthy().then(async () => {
-				if (postgres) await applications.finishRollback(async () => postgres!.updateRestorePoint());
+				if (postgres) await applications.finishRollback(async () => new IncrementalClusterCopy(path.join(userData, 'postgres'), async () => { throw new Error('Healthy cleanup must not stop or restore the database'); }));
 				replaceLauncher(); return updater.check();
 			}).catch(error => console.error('Could not record healthy application', error));
 		}
@@ -475,7 +476,7 @@ async function main(): Promise<void> {
 	const launcherKeepsPoint = !!applications && !!postgres && !isolation && process.platform === 'win32' &&
 		(managed ? !!managed.host && !managed.profile && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcherVersion(process.env[LAUNCHER_VERSION_ENV])) : !!installation);
 	if (launcherKeepsPoint) {
-		const restorePoint = async () => new SinglePassClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
+		const restorePoint = async () => new IncrementalClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
 			await quiesceRecordedWorker(path.join(userData, 'worker'));
 			await postgres!.quiesce(snapshot);
 		});
