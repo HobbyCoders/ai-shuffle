@@ -806,7 +806,9 @@ panel, turn navigator, side panel, composer, usage rows) at desktop
 cover (360×882) screens, opens the panel or popover under test, and compares
 each with `frontend/tests/visual-baselines/`. Run it before and after chat UI
 work; accept intended changes with `node tests/visual-regression.mjs --update`
-and commit the new baselines. Pass a fixture name to run one
+and commit the new baselines in the same PR (they are test fixtures, not PR
+evidence, so the no-screenshots rule in docs/internal/CONTRIBUTING.md does not
+apply to them). Pass a fixture name to run one
 (`node tests/visual-regression.mjs usage-rows`). It uses the browser runtime's
 playwright-core and Chromium, freezes the page clock, and is deliberately not a
 CI job to keep runner minutes down.

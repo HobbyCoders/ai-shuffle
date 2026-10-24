@@ -198,6 +198,13 @@ public hosts. Describe the rendered check in text instead: what you opened,
 which states and widths you checked, and what you saw. Keep any captures in
 your own scratch space.
 
+This rule is about evidence for a review. Images the product, its docs or its
+tests use do belong in the repository, and a UI change should update them in
+the same PR: app and store icons, the README and docs images under
+`docs/images/`, and the visual-regression reference images in
+`frontend/tests/visual-baselines/` (see "Visual regression screenshots" in
+`docs/ci/pr-checks.md`).
+
 An explicit `check` or `full` run ends by listing what this machine could not
 cover (Windows when not on a Windows worker, Mac-only checks, the container
 image). See [docs/ci/pr-checks.md](../ci/pr-checks.md) for edge
