@@ -1150,6 +1150,22 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
     return result
 
 
+def validate_isolation_startup(puid: int, pgid: int) -> None:
+    """Refuse impossible required splits before home or mount-root writes."""
+    if isolation_setting() != "required":
+        return
+    prefix = "required agent isolation: startup refused; "
+    if os.geteuid() != 0:
+        raise RuntimeFailure(prefix + "start the container as root, without --user")
+    module = isolation()
+    if not all(hasattr(module, name) for name in ("identity", "bootstrap", "drop")):
+        raise RuntimeFailure(prefix + "image lacks isolation helpers")
+    try:
+        module.identity(puid, pgid)
+    except module.IsolationError as error:
+        raise RuntimeFailure(prefix + str(error)) from None
+
+
 def home_service_uid(mode):
     """Validate before home preparation, preserving each isolation mode's policy."""
     module = isolation()
@@ -1308,6 +1324,7 @@ def drop_privileges(settings, *, maintenance=False):
             raise RuntimeFailure("PUID/PGID must identify a non-root account")
         if account.pw_dir != "/home/appuser":
             raise RuntimeFailure("appuser home must be /home/appuser; recreate the container to repair its account")
+        validate_isolation_startup(account.pw_uid, account.pw_gid)
         paths = [("DATA_DIR", settings.effective_data_dir)]
         if not maintenance:
             paths.append(("WORKSPACE_DIR", settings.effective_workspace_dir))
@@ -1821,6 +1838,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("run")
+    validate = sub.add_parser("validate-isolation")
+    validate.add_argument("--new-uid", type=int, required=True)
+    validate.add_argument("--new-gid", type=int, required=True)
     remap = sub.add_parser("remap-home")
     for name in ("old-uid", "old-gid", "new-uid", "new-gid"):
         remap.add_argument("--" + name, type=int, required=True)
@@ -1831,7 +1851,10 @@ def main(argv=None):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: STOP.set())
     try:
-        if args.action == "remap-home":
+        if args.action in {"validate-isolation", "remap-home"}:
+            validate_isolation_startup(args.new_uid, args.new_gid)
+            if args.action == "validate-isolation":
+                return 0
             mode = isolation_setting()
             home_service_uid(mode)
             if os.geteuid() != 0 or min(args.old_uid, args.old_gid, args.new_uid, args.new_gid) <= 0:

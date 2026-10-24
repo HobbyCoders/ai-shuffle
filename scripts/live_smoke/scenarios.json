@@ -440,6 +440,14 @@
           "past_bug": "#436: older installs retained core.fsmonitor=true and accumulated detached per-worktree daemons after the app stopped enabling it."
         },
         {
+          "id": "harness-basics.34",
+          "check": "Required Docker isolation refuses before root writes",
+          "kind": "owner",
+          "how": "Run the disposable-image preflight matrix in agent-shell-isolation.md.",
+          "pass_when": "Bad starts leave sentinels unchanged; valid required starts isolated.",
+          "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
+        },
+        {
           "id": "harness-basics.26",
           "check": "Bounded home ownership repair progresses across persistent-volume restarts",
           "kind": "owner",
@@ -512,6 +520,14 @@
           "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
           "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
           "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
+        },
+        {
+          "id": "harness-basics.23",
+          "check": "Native wake provenance across context pruning and rewind/resume",
+          "kind": "owner",
+          "how": "On a disposable candidate install, start a throwaway native-provider chat. Produce ordinary user turns, a background-task wake and a peer-delivered turn, including assistant tool calls/results. Record their first persisted TurnStarted sources and node IDs using a read-only diagnostic that emits only synthetic IDs, sources, replay cursors and decoded-row counts. Compact enough history to prune those nodes from the live context, then rewind to each recorded user/wake/peer node and resume it. Repeat an unchanged context scan and append a fresh user turn after an assistant/tool exchange. Archive only the throwaway chat and remove only diagnostics created for this check; never restart or mutate the installed worker or dump prompts, credentials or provider payloads.",
+          "pass_when": "Returning nodes retain their FIRST TurnStarted source despite later resume events: user turns stay user-authored and wake/peer turns keep their original exemptions and wake-aware counting. Only re-entering pruned context replays provenance from zero. Unchanged context and newly appended turns keep the saved cursor and decode only newer matching events, not the historical prefix or large tool results. Examined-node and provenance bookkeeping are pruned to the active context plus nodes appended since its last scan. Missing live evidence is recorded as not_run, not pass.",
+          "past_bug": "#354 / #264 / PR #504: unbounded wake bookkeeping required pruning, but comparing all active context nodes with only TurnStarted-named nodes restarted full provenance replay on ordinary mixed-role turns."
         },
         {
           "id": "harness-basics.20",
