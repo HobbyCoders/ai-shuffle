@@ -17,6 +17,13 @@ async def poll(
     if allowed and channel_id not in {str(item) for item in allowed}:
         raise PermissionError("Watch channel is no longer allowed by the connector")
     if kind == "telegram":
+        spec = getattr(instance, "PACKAGE_SPEC", None)
+        if spec is not None:
+            from app.core.connector_packages import CATALOG
+
+            expected = CATALOG["packages"]["telegram"]["files"]["telegram.py"]
+            if spec.get("files", {}).get("telegram.py") != expected:
+                raise ValueError("Update the Telegram connector package to enable watch events")
         return await run_sync(store.connector_page, instance.connector_id, channel_id, cursor)
     try:
         events, checkpoint = await instance.poll_watch(source, cursor)

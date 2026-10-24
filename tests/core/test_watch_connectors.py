@@ -180,3 +180,12 @@ async def test_slack_page_boundary_preserves_high_watermark() -> None:
     assert cursor == {"after": "00205"}
     events, _ = await poll("slack", instance, {"channel_id": "123"}, cursor)
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_old_telegram_package_fails_explicitly() -> None:
+    from app.core.watch_connector_sources import poll
+
+    instance = SimpleNamespace(config={}, PACKAGE_SPEC={"files": {"telegram.py": "old"}})
+    with pytest.raises(ValueError, match="Update the Telegram connector package"):
+        await poll("telegram", instance, {"channel_id": "123"}, {})
