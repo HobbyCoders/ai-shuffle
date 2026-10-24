@@ -371,6 +371,24 @@
           "past_bug": "#436: a Git for Windows redirector timeout left its pipe-holding child alive and shared status waiters blocked; invalidation launched overlapping reads of the same checkout."
         },
         {
+          "id": "harness-basics.14",
+          "check": "Task bases respect hotfix callers and explicit pins",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On disposable paired candidate workers, register a temporary repository whose origin/main is ahead of a hotfix/1.2 branch with no unique commits and no default upstream. Dispatch coding Tasks locally and to the peer from a chat bound to hotfix/1.2; then repeat from main and from a branch tracking origin/main. Repeat with an explicit old base_commit and a deliberately slow origin (more than five but less than sixty seconds) for a new chat. Do not alter production repository refs.",
+          "pass_when": "Hotfix Tasks on both workers retain the caller SHA and cannot merge unreleased main commits into hotfix. Default/tracking callers use fresh origin/main only when it contains the caller. Explicit pins trigger no fetch. A new chat waits for the slow successful fetch and starts at the new origin tip; missing dispatch receipts leave remote branches untouched with an honest reason.",
+          "past_bug": "#407: ancestry alone refreshed non-default callers, chat fetches timed out after five seconds, explicit pins fetched unnecessarily, and missing receipts blamed branch movement."
+        },
+        {
+          "id": "harness-basics.15",
+          "check": "Peer terminal consent survives only retryable folder checks",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On disposable paired candidate workers, enable peer terminals in owner policy and approve one shell on the recipient using matching panel codes. Enter an invalid folder, correct it and open with the same approval. Repeat with a folder moved during spawn, and revoke the requester lease during a deliberately delayed recipient folder check. Finally open a shell and turn policy off on the source only without polling source authorization status. Inspect recipient PTY creation/closure and source leases; exercise input/output, resize, reload/reconnect and close through the panel.",
+          "pass_when": "Pre-spawn folder refusal retains approval and correction works. A spawn-time folder race forgets the source lease, drops recipient consent and asks for new approval instead of promising a folder retry. Revoke during folder validation creates no PTY. Source-only policy-off refuses the recipient callback and ends the live shell within its fifteen-second authorization recheck plus callback time, without waiting for a status GET or ten-minute expiry.",
+          "past_bug": "#378: a spawn-time folder race kept a dead lease, requester revoke during folder validation spawned a PTY, and source-only policy-off retained callback authority."
+        },
+        {
           "id": "harness-basics.11",
           "check": "Active-only worktree status and idle edits",
           "kind": "owner",
