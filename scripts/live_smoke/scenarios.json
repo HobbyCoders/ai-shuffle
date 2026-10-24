@@ -286,6 +286,15 @@
           "past_bug": "#295: importing a long chat spent minutes in install_history with no row-count progress, making the move look stuck."
         },
         {
+          "id": "two-worker-smoke.28",
+          "check": "Disposable coordinators retain the owner working record",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "In a throwaway no-project chat, ask the agent to record a distinctive decision and pending item using WorkingRecord, then start a short project chat on the peer. Settle the coordinator before the peer reports. Start a brand-new no-project chat on either worker and ask what is going on. Resolve the pending item and report, and ask again from another fresh chat. On disposable paired workers, hold sync, acknowledge a provisional report on one worker while the other receives its genuine report, then reconnect; repeat with the opposite first delivery. Separately, run a throwaway coordinator until its measured context crosses 80%, with no queued messages, approvals or background Tasks. Archive the throwaway chats and resolve their record items afterwards.",
+          "pass_when": "The new chat knows the decision, pending item, child report and live running/needs-owner state without opening the settled coordinator. Both workers see the same items and acknowledgements. Concurrent acknowledgement and genuine report delivery preserve the resolved state and genuine result in both delivery orders. At the threshold the old chat settles exactly once and a notification opens a fresh active chat with the same model/effort/access, the working record and no old transcript; completed work is not restarted. Stop, pending questions and active background Tasks prevent automatic hand-off.",
+          "past_bug": "#371 step 2: status and decisions existed only in a long coordinator transcript; a fresh chat lost the work and no automatic replacement existed."
+        },
+        {
           "id": "two-worker-smoke.29",
           "check": "Concurrent remote starts and workflow reads remain responsive",
           "kind": "owner",
@@ -294,6 +303,15 @@
           "how": "On disposable paired branch workers (including Windows), use an isolated in-process harness with task execution suppressed, not 31 real model agents. Submit 31 concurrent task-start requests with distinct child ids to one project; during admission poll that project's git/pr-state (including a branch beyond the first 100 open PRs, with gh mocked) and a session's swarms after 120 publications of 30 tasks interleaved with at least 12000 transcript events. Repeat the same child ids and inspect durable turns and report obligations. Time handler and fetch spans, then repeat with branch and default checkout modes; never use the installed app's data directory.",
           "pass_when": "Task-start receipts return within a few seconds, each child has exactly one queued turn and report obligation after retries, worktrees retain their validated base and branch, and pr-state and swarms stay under 1 second. A burst wakes the coalescing catalog scanner rather than awaiting 31 whole-catalog passes; distinct branch fetches overlap, while worktree mutations remain protected.",
           "past_bug": "#482: 31 simultaneous remote starts took about 90 seconds on Windows; full status and unfiltered PR scans delayed pr-state, while serial full-transcript replays delayed swarms."
+        },
+        {
+          "id": "two-worker-smoke.30",
+          "check": "Sidebar Check for updates finds a peer's update like Settings does",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking. Install nothing.",
+          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress (Settings may show that refusal on its own repeated click; see #519).",
+          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date."
         }
       ]
     },
@@ -488,6 +506,14 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.20",
+          "check": "Monitor viewer disconnect preserves its running shell",
+          "kind": "owner",
+          "how": "On a real candidate worker, start a throwaway chat and a long-running Monitor shell that prints a marker and waits for an explicit release file in its disposable folder. As the authenticated owner, open the read-only Monitor viewer, wait for the marker and repeatedly disconnect and reconnect it at least 50 times while the worker is busy. Include abrupt WebSocket closes overlapping an owner-auth recheck. Reattach and inspect the same task's status/output after each disconnect. With a second owner login available for cleanup, revoke the viewer's owner session while attached and confirm the connection closes. Inspect worker logs for every connection, then release only the throwaway shell and archive its chat; do not stop or restart the worker.",
+          "pass_when": "Every disconnect and reconnect leaves the original shell running with the same task id and readable backlog. Revocation closes the viewer with code 4001 without stopping that shell. Worker logs contain no teardown exception, CancelledError or leaked Monitor connection task for these connections. The explicit release ends the shell normally; a missing log inspection or fewer than 50 disconnects is not a pass.",
+          "past_bug": "#402: a disconnect followed by ASGI cancellation during Monitor child-task cleanup propagated a child CancelledError through WebSocket teardown."
+        },
+        {
           "id": "harness-basics.24",
           "check": "Learned prose workflow across separately synthesized sessions",
           "kind": "owner",
@@ -502,6 +528,23 @@
           "how": "On a disposable Linux/glibc candidate install only, grow a native session beyond 8 MiB of durable message JSON using streaming turns and tool results, then compact it. Repeatedly detach/reconnect that session and complete a turn, at least 60 seconds apart, with three clients attached. Sample fixed-process anonymous RSS, retained nodes, compaction residency, subscriber and task counts for 30 minutes after warm-up. Open old history and a fork ending before a checkpoint. Do not restart or instrument an installed worker.",
           "pass_when": "The resumed transcript and older fork remain readable with unchanged compacted output. Retained nodes stay near the checkpoint tail and superseded digest residency does not increase on each reconnect. Warm anonymous RSS does not ratchet after large cold loads; only the first terminal after an evicted cold load may attempt allocator reclamation, globally at most once per minute. Ordinary turns do not trim; non-glibc and non-Linux workers remain unaffected.",
           "past_bug": "#264: cold resume retained retired compaction entries after windowing and left large temporary transcript allocations in glibc arenas."
+        },
+        {
+          "id": "harness-basics.28",
+          "check": "ChatGPT Settings default and Included choice obey admission",
+          "kind": "owner",
+          "how": "On a disposable candidate install only with a verified ChatGPT subscription, select the legacy ChatGPT Settings image default and clear remembered and job-stored image choices. Capture legacy-handler entry, cap/reservation state and provider-submission activity. First request one image through generateImage without source/model in a fresh interactive owner chat, leaving the choice card unanswered; repeat in an unattended automation with no job choice. Inspect structured results and confirm zero submissions. Next deliberately remember a verified Included ChatGPT choice with its exact account/model/holding worker. Using disposable fixture storage, establish recorded daily spend above the enabled daily cap without making paid calls, and confirm the cap is exhausted. Repeat the interactive and unattended image requests and inspect their structured results, cap/reservation state and provider activity. Restore only the disposable settings, choices, cap and fixture storage and archive the throwaway sessions. Never change an installed owner's preferences or ledger; no generation submission is authorized by this row.",
+          "pass_when": "With no stored choice the interactive result is choose with a choice card and the unattended result is skipped with reason no_stored_choice; neither request enters the legacy handler, reserves a generation or submits to any provider. With the stored Included choice and exhausted cap, both requests are refused with reason daily_cap and the unattended run reports it. Both refusals retain Included pricing (known USD zero), append no successful reservation and submit nothing. Retain structured results and zero-submission evidence; prose-only promises to ask or refuse are not a pass.",
+          "past_bug": "#379: the non-chat ChatGPT Settings default returned the legacy handler before the resolver, bypassing deliberate choices, Included pricing and daily-cap admission."
+        },
+        {
+          "id": "harness-basics.33",
+          "check": "Scheduled automation binds its stored choice on the holding worker",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Use disposable candidate workers ServerWorker and DesktopWorker with one owner-approved, verified Included image account held only by DesktopWorker. On ServerWorker create a disabled throwaway automation and PUT its exact account/worker/model/options to /api/v1/generation/jobs/{automation_id}/choices/image; GET it back. Leave remembered image choices empty or deliberately different. With the disposable cap admitting the request, trigger one scheduled run on ServerWorker with a prompt that calls generateImage without naming source/model/worker. Inspect the scheduler-created session's automation_id, structured generation result, both workers' submission activity and the resulting session artifact. Restore the disposable choices and remove only the throwaway automation/session afterward. No API-key or fal generation is authorized by this check.",
+          "pass_when": "The real unattended run uses the saved job choice despite the absent or different remembered choice. Result source/account/model/options and holding worker match the read-back binding; exactly one Included submission occurs on DesktopWorker, none on ServerWorker or another source. Current cap and schema admission run before submission, and the generated artifact is readable from the run session. A fixture that only injects RunContext.job_choices is not a pass.",
+          "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
         }
       ]
     }
