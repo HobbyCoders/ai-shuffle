@@ -116,6 +116,87 @@ async def test_recipient_uses_local_cwd_validation_and_pinning(peers, monkeypatc
     await relay.handle({"op": "close", "lease": target.authorization_id}, "source")
 
 
+
+
+@pytest.mark.asyncio
+async def test_spawn_bad_folder_forgets_consumed_source_lease(peers, monkeypatch, tmp_path):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "workspace_dir", tmp_path)
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    target = await _approved()
+    original = api._validated_terminal_cwd
+
+    def validate(cwd):
+        result = original(cwd)
+        selected.rename(tmp_path / "moved")  # Real registry's subsequent pin must fail.
+        return result
+
+    monkeypatch.setattr(api, "_validated_terminal_cwd", validate)
+    create = AsyncMock(wraps=peers[0].create)
+    monkeypatch.setattr(peers[0], "create", create)
+    with pytest.raises(service.TerminalError) as failed:
+        await targets.create(service.TerminalRegistry(), api.CreateTerminal(target=target, cwd=str(selected)),
+                             "owner", SimpleNamespace(valid=True))
+    assert failed.value.code == "folder_changed"  # Existing picker requests new consent.
+    create.assert_awaited_once()
+    assert peers[0].count == 0
+    assert target.authorization_id not in relay._owners
+    assert ("source", target.authorization_id) not in relay._approvals
+
+
+@pytest.mark.asyncio
+async def test_requester_revoke_during_folder_validation_never_spawns(peers, monkeypatch, tmp_path):
+    target = await _approved()
+    create = AsyncMock(wraps=peers[0].create)
+    monkeypatch.setattr(peers[0], "create", create)
+
+    def validate(cwd):
+        relay.forget(target.authorization_id)
+        return str(tmp_path), str(tmp_path)
+
+    monkeypatch.setattr(api, "_validated_terminal_cwd", validate)
+    with pytest.raises(PermissionError, match="Source"):
+        await relay.handle({"op": "open", "lease": target.authorization_id}, "source")
+    create.assert_not_awaited()
+    assert ("source", target.authorization_id) not in relay._approvals
+
+
+@pytest.mark.asyncio
+async def test_source_policy_off_refuses_callback_without_status_poll(peers, monkeypatch):
+    target = await _approved()
+    # This is the callback used by the recipient's live-shell recheck. There
+    # has been no requester status GET to clear the lease first.
+    monkeypatch.setattr(relay, "peer_targets_enabled", lambda: False)
+    assert await relay.handle_owner({"lease": target.authorization_id}, "peer") == {"authorized": False}
+    assert target.authorization_id not in relay._owners
+
+
+
+
+@pytest.mark.asyncio
+async def test_source_policy_off_closes_live_recipient_without_status_poll(peers, monkeypatch):
+    target = await _approved()
+    monkeypatch.setattr(relay, "AUTH_RECHECK_SECONDS", .01)
+    await relay.handle({"op": "open", "lease": target.authorization_id}, "source")
+    expiry_task = relay._sessions[("source", target.authorization_id)][3]
+    original = control.call
+
+    async def source_policy_off(device, action, body, **kwargs):
+        if action == "terminal-owner":
+            # Only the source policy is off; recipient owner checks stay on.
+            with monkeypatch.context() as source:
+                source.setattr(relay, "peer_targets_enabled", lambda: False)
+                return await original(device, action, body, **kwargs)
+        return await original(device, action, body, **kwargs)
+
+    monkeypatch.setattr(control, "call", source_policy_off)
+    await asyncio.wait_for(expiry_task, 2)
+    assert target.authorization_id not in relay._owners
+    assert ("source", target.authorization_id) not in relay._sessions
+    assert peers[0].count == 0
+
+
 async def _approved():
     from tests.core.test_terminal_targets import approved_target
     return await approved_target(SimpleNamespace(valid=True))
@@ -138,9 +219,20 @@ async def test_recipient_cwd_refusal_does_not_spawn(peers, monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bad_folder_preserves_source_and_recipient_consent_for_retry(peers, monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy_recipient", [False, True])
+async def test_bad_folder_preserves_source_and_recipient_consent_for_retry(peers, monkeypatch, tmp_path, legacy_recipient):
     from app.core.config import settings
     monkeypatch.setattr(settings, "workspace_dir", tmp_path)
+    original = control.call
+
+    async def recipient(device, action, body, **kwargs):
+        result = await original(device, action, body, **kwargs)
+        if legacy_recipient and action == "terminal" and "error" in result:
+            # Previous recipients preserve unused consent but omit this flag.
+            result["error"].pop("retryable", None)
+        return result
+
+    monkeypatch.setattr(control, "call", recipient)
     source = service.TerminalRegistry()
     request = SimpleNamespace(valid=True)
     target = await _approved()
