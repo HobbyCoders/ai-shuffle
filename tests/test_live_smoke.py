@@ -547,7 +547,8 @@ def test_real_scenarios_validate_and_markdown_is_generated():
     ({"id": "t.bad-row", "check": "x", "kind": "script", "steps": [{"op": "jump"}]}, "unknown op"),
     ({"id": "t.bad-row", "check": "x", "kind": "script",
       "steps": [{"op": "message", "session": "a", "prompt": "p"}]}, "no earlier step"),
-    ({"id": "t.bad-row", "check": "x", "kind": "browser", "steps": [{"op": "workers"}]}, "only script"),
+    ({"id": "t.bad-row", "check": "x", "kind": "browser",
+      "steps": [{"op": "workers"}]}, "only script"),
     ({"id": "t.bad-row", "check": "x", "kind": "script",
       "steps": [{"op": "start", "prompt": "p", "typo": 1}]}, "does not take"),
 ])
@@ -590,11 +591,15 @@ def test_render_check_rejects_merged_duplicate_ids(
 
 
 def test_named_row_runs_and_is_recorded_without_renumbering(tmp_path: Path) -> None:
-    rid = "t.parallel-addition"
-    result, path = _run(FakeWorker(), _data(_script(rid)), tmp_path)
+    rid = "harness-basics.named-id-result-round-trip"
+    row = next(row for row in scenarios.rows(scenarios.load()) if row["id"] == rid)
+    worker = FakeWorker()
+    result, path = _run(worker, _data(row), tmp_path, only=[rid])
     assert result["rows"][0]["id"] == rid
     assert result["rows"][0]["status"] == "pass"
-    assert results.read(path)["rows"][0]["id"] == rid
+    assert results.read(path)["rows"] == result["rows"]
+    assert result["partial"] is True
+    assert worker.archived == ["s1"]
 
 
 # -- gate --------------------------------------------------------------------
