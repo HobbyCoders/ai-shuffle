@@ -169,6 +169,7 @@ async def serve_registry_socket(
     http_token: str | None = None,
     http_routes: dict[str, HttpRoute | JsonHttpRoute] | None = None,
     deferred: Callable[[str], bool] | None = None,
+    agent_id_for_tool: Callable[[str | None], str | None] | None = None,
 ) -> asyncio.AbstractServer:
     """Serve ``list``/``call`` requests against ``registry`` over a socket.
 
@@ -181,7 +182,9 @@ async def serve_registry_socket(
     sets one; ``None`` exists for in-process tests of the wire format.
     ``tool_filter``, ``permissions`` and ``hooks`` gate the registry the way
     the native loop's dispatch path does (see ``_answer``); ``on_stop`` is
-    told when a hook ends the turn.
+    told when a hook ends the turn. ``agent_id_for_tool`` resolves caller identity
+    from parent-owned CLI frames/hooks, never tool arguments or bridge requests.
+    Its per-call ctx overlay is isolated from concurrent calls and session state.
 
     ``deferred`` names the tools the CLI should keep behind its ToolSearch:
     each is still listed and callable, with ``_meta`` ``anthropic/alwaysLoad``
@@ -221,8 +224,14 @@ async def serve_registry_socket(
                     writer.write((json.dumps(_UNAUTHORIZED) + "\n").encode())
                     await writer.drain()
                     return
+                call_ctx = ctx
+                if req.get("op") == "call" and agent_id_for_tool is not None:
+                    tid = req.get("tool_use_id")
+                    agent_id = agent_id_for_tool(tid if isinstance(tid, str) else None)
+                    extra = _CallExtra(ctx.extra, {"agent_id": agent_id})
+                    call_ctx = replace(ctx, extra=extra)  # type: ignore[arg-type]
                 resp = await _answer(
-                    registry, ctx, req,
+                    registry, call_ctx, req,
                     tool_filter=tool_filter, permissions=permissions, hooks=hooks,
                     on_stop=on_stop, deferred=deferred,
                 )
@@ -445,11 +454,12 @@ async def _gate_call(
     from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
     from fluid.permissions.engine import non_interactive_denial
 
+    identity = {"agent_id": ctx.extra.get("agent_id")}
     hook_permission: str | None = None
     hook_reason: str | None = None
     if hooks is not None:
         decision = await hooks.emit(
-            PRE_TOOL_USE, {"name": name, "input": args, "tool_use_id": tool_use_id},
+            PRE_TOOL_USE, {"name": name, "input": args, "tool_use_id": tool_use_id, **identity},
         )
         if decision.action == "deny" or decision.stop:
             reason = decision.note or ("stopped by hook" if decision.stop else "denied")
@@ -487,13 +497,13 @@ async def _gate_call(
         # before it runs, as on the native loop.
         await hooks.tool_allowed({
             "session_id": ctx.session_id, "name": name, "input": args,
-            "tool_use_id": tool_use_id,
+            "tool_use_id": tool_use_id, **identity,
         })
     outcome = await registry.dispatch(name, args, _call_ctx(ctx, tool_use_id))
     if hooks is not None:
         decision = await hooks.emit(
             POST_TOOL_USE,
-            {"name": name, "tool_use_id": tool_use_id, "input": args,
+            {"name": name, "tool_use_id": tool_use_id, "input": args, **identity,
              "output": outcome.text, "is_error": outcome.is_error},
         )
         additions: list[str] = []

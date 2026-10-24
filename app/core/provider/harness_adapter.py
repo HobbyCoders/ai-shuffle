@@ -3068,7 +3068,8 @@ class HarnessAdapter(ProviderAdapter):
         return needs_owner(tool_name, tool_input, _assistant_scope(self._options), spec_risk=spec_risk,
                            permission_mode=mode)
 
-    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+    async def _ask_owner(self, tool_name: str, tool_input: Dict[str, Any], *,
+                         agent_id: Optional[str] = None) -> Optional[str]:
         """Put a high-risk assistant call to the owner; None when approved.
 
         The approver routes it to the assistant's conversation, where only
@@ -3084,7 +3085,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             result = await self._can_use_tool(
                 self._permission_tool_name(tool_name), tool_input,
-                SimpleNamespace(tool_use_id=None, agent_id=None, delegated=self._is_delegated,
+                SimpleNamespace(tool_use_id=None, agent_id=agent_id, delegated=self._is_delegated,
                                 assistant_owner=True, decision_reason=ASK_REASON),
             )
         except asyncio.CancelledError:
@@ -5143,12 +5144,15 @@ class HarnessAdapter(ProviderAdapter):
 
         dispatch = registry.dispatch
 
-        async def guarded_dispatch(name, input, ctx=None, **kwargs):
+        async def guarded_dispatch(
+            name: str, input: Dict[str, Any], ctx: Optional[ToolCtx] = None, **kwargs: Any,
+        ) -> ToolOutcome:
             from app.core.assistant_permissions import has_own_consent
 
             denial = None
             if not native and self._owner_needed(name, input):
-                denial = await self._ask_owner(name, input)
+                agent_id = ctx.extra.get("agent_id") if ctx is not None else None
+                denial = await self._ask_owner(name, input, agent_id=agent_id)
             elif has_own_consent(name) and self.permission_mode != "bypassPermissions":
                 # The tool's own card or grant is the owner's consent
                 # (assistant_permissions.OWN_CONSENT_TOOLS); a saved Deny still

@@ -804,6 +804,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # name, schema loaded on demand, every one still callable. None loads
         # them all, as before tiering.
         self.bridge_deferred = bridge_deferred
+        # Parent-owned identity, keyed by the CLI's tool id (never model arguments).
+        self._bridge_agents: dict[str, str | None] = {}
         # The main conversation is compacting: set by the CLI's
         # ``system/status`` frame (``compacting``, then null), which it sends
         # before the SessionStart(compact) callback for the main thread only.
@@ -1466,6 +1468,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 http_token=self._mod_token if routes else None,
                 http_routes=routes or None,
                 deferred=self.bridge_deferred,
+                agent_id_for_tool=self._bridge_agent_id,
             )
             self._usage_route = usage_route
             self._compaction_route = compaction_route
@@ -2899,6 +2902,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     posted = posted_questions.pop(block.get("tool_use_id"), None)
                     if posted is not None and flatten_tool_content(block.get("content")) == posted:
                         block["is_error"] = False
+            self._track_bridge_agents(frame)
             mapped = mapper.feed(frame)
             await self._stdin_lane_frame(frame, mapped)
             if mapped.hook_request is not None:
@@ -3553,6 +3557,32 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         for message in messages:
             await self._hook_event("warning", message, hook_event, tool_name)
 
+    def _remember_bridge_agent(self, tool_use_id: str, agent_id: str | None) -> None:
+        # Keep background calls across turns, but bound long-lived sessions. An
+        # evicted/unknown id is never treated as the main chat by the resolver.
+        if len(self._bridge_agents) >= 4096 and tool_use_id not in self._bridge_agents:
+            self._bridge_agents.pop(next(iter(self._bridge_agents)))
+        if agent_id or tool_use_id not in self._bridge_agents:
+            self._bridge_agents[tool_use_id] = agent_id
+
+    def _track_bridge_agents(self, frame: dict[str, Any]) -> None:
+        """Keep stream-json ancestry when a CLI version omits hook agent_id."""
+        if frame.get("type") != "assistant":
+            return
+        message = frame.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        parent = frame.get("parent_tool_use_id")
+        agent = f"delegated-parent:{parent}" if isinstance(parent, str) and parent else None
+        for block in blocks if isinstance(blocks, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tid = block.get("id")
+                if isinstance(tid, str) and tid and not self._bridge_agents.get(tid):
+                    self._remember_bridge_agent(tid, agent)
+
+    def _bridge_agent_id(self, tool_use_id: str | None) -> str | None:
+        """Unknown identity fails closed: only a known main call may spend a pass."""
+        return self._bridge_agents.get(tool_use_id or "", "delegated:unknown")
+
     def _bridge_serves(self, tool_name: str) -> bool:
         """True for a call the bundled bridge serves: the bridge runs that
         call's hooks and gates it, so the CLI's hooks leave it alone."""
@@ -3606,6 +3636,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         raw_input = data.get("tool_input")
         tool_input: dict[str, Any] = raw_input if isinstance(raw_input, dict) else {}
         if self._bridge_serves(name):
+            tid = data.get("tool_use_id") or tool_use_id
+            agent = data.get("agent_id")
+            if isinstance(tid, str) and tid:
+                self._remember_bridge_agent(
+                    tid, agent if isinstance(agent, str) and agent else None,
+                )
             return {}
         specific: dict[str, Any] = {"hookEventName": "PreToolUse"}
         if self.hooks is not None:

@@ -51,6 +51,8 @@ Single-worker checks of the turn loop.
 
 | # | Check | Kind | How | Pass when | Past bug |
 |---|---|---|---|---|---|
+| cli-subagent-owner-pass | CLI bundled calls cannot spend the main chat approval | owner | On disposable candidate + #535, park HandOffSession to an offline test worker. | Approve, then rerun via CLI subagent: asks with identity; main uses pass. | #559: the bundled MCP bridge dropped the subagent caller identity. |
+| native-owner-pass | Native owner approval retains its caller scope | owner | On disposable native candidate + #535, park and approve the same offline call. | Main rerun uses its pass once; another agent session needs its own yes. | #559: CLI identity plumbing must not change native approval scope. |
 | 1 | First message not lost | script | start "reply OK, no tools" | reply `OK` |  |
 | 2 | Long shell + wake | script | start "run `sleep 60 && echo done`, reply finished" | reply `finished`, no duplicate turn |  |
 | 3 | Swarm tool availability | script | GET /api/v1/tools/surface; inspect available groups, without starting a model or subagent | an available catalog group contains the exact Swarm tool name (bare or MCP-qualified); this checks availability, not Swarm workload execution |  |
