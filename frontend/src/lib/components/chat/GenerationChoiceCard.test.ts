@@ -123,7 +123,7 @@ describe('GenerationChoiceCard', () => {
 	it('names the worker holding an option that is not on this worker', async () => {
 		mocks.get.mockImplementation(async (url: string) =>
 			url === '/cluster/installs'
-				? { installs: [{ id: 'worker-b', device_id: 'worker-b', device_name: 'GamingPC', online: true }], self_instance_id: 'worker-a' }
+				? { installs: [{ id: 'worker-b', device_id: 'worker-b', device_name: 'DesktopWorker', online: true }], self_instance_id: 'worker-a' }
 				: { remembered: {}, last: {}, migrated: true, worker: 'worker-a' }
 		);
 		await refreshWorkerPresence();
@@ -132,8 +132,8 @@ describe('GenerationChoiceCard', () => {
 		card({ options: [FAL, sameOnPeer, GROK] });
 		const radios = screen.getAllByRole('radio');
 		expect(radios[0].querySelector('.gcc-where')).toBeNull();
-		await waitFor(() => expect(radios[1].querySelector('.gcc-where')?.textContent).toBe('on GamingPC'));
-		expect(radios[2].querySelector('.gcc-where')?.textContent).toBe('on GamingPC');
+		await waitFor(() => expect(radios[1].querySelector('.gcc-where')?.textContent).toBe('on DesktopWorker'));
+		expect(radios[2].querySelector('.gcc-where')?.textContent).toBe('on DesktopWorker');
 	});
 
 	it('moves the selection with the arrow keys, skipping unavailable options', async () => {

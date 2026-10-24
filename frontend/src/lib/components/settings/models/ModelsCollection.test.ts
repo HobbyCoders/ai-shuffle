@@ -69,8 +69,8 @@ const CATALOG = [
 		price: USD(null, 'unknown'), status: 'unpriced', available: true, reason: null, schema: null }
 ];
 const INSTALLS = [
-	{ id: 'worker-a', device_id: 'worker-a', device_name: 'Unraid', is_self: true, online: true, base_url: null, platform: null, version: null, capabilities: {}, last_seen: null },
-	{ id: 'worker-b', device_id: 'worker-b', device_name: 'GamingPC', is_self: false, online: false, base_url: null, platform: null, version: null, capabilities: {}, last_seen: null }
+	{ id: 'worker-a', device_id: 'worker-a', device_name: 'ServerWorker', is_self: true, online: true, base_url: null, platform: null, version: null, capabilities: {}, last_seen: null },
+	{ id: 'worker-b', device_id: 'worker-b', device_name: 'DesktopWorker', is_self: false, online: false, base_url: null, platform: null, version: null, capabilities: {}, last_seen: null }
 ];
 let catalogEntries: typeof CATALOG;
 let favourites: Record<string, unknown>;
@@ -379,7 +379,7 @@ describe('CatalogDetail, all accounts', () => {
 		expect(screen.getByRole('tab', { name: 'All accounts' }).getAttribute('aria-selected')).toBe('true');
 		expect(mocks.get).toHaveBeenCalledWith('/generation/catalog?kind=image&limit=15');
 		// This worker first, then the peer; names from the install registry.
-		await waitFor(() => expect(groupTitles()).toEqual(['Unraid', 'GamingPC']));
+		await waitFor(() => expect(groupTitles()).toEqual(['ServerWorker', 'DesktopWorker']));
 		const groups = [...document.querySelectorAll<HTMLElement>('.acat .st-grp')];
 		expect(groups[0].textContent).toContain('This worker');
 		expect(groups[1].textContent).toContain('Offline');
@@ -395,7 +395,7 @@ describe('CatalogDetail, all accounts', () => {
 		expect(fal.textContent).toContain('$0.025');
 		expect(fal.textContent).not.toContain('Verified');
 		const grok = rowFor('grok-imagine-image');
-		expect(grok.closest('.st-grp')!.textContent).toContain('GamingPC');
+		expect(grok.closest('.st-grp')!.textContent).toContain('DesktopWorker');
 		expect(grok.textContent).toContain('No price');
 		expect(grok.textContent).toContain('No known price, so it cannot run.');
 		expect(grok.textContent).toContain('Unknown');
@@ -424,7 +424,7 @@ describe('CatalogDetail, all accounts', () => {
 			source: 'supergrok', account: 'grok-9', worker: 'worker-b', model: 'grok-imagine-image', options: {}
 		}));
 		await waitFor(() => expect(card().textContent).toContain('SuperGrok · Grok Imagine Image'));
-		expect(card().textContent).toContain('on GamingPC');
+		expect(card().textContent).toContain('on DesktopWorker');
 		expect(card().textContent).toContain('No price');
 		// A favourite never changes the remembered choice.
 		expect(mocks.put).not.toHaveBeenCalledWith(expect.stringMatching(/^\/generation\/choices\//), expect.anything());
