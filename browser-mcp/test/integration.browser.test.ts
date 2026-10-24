@@ -6,7 +6,7 @@
  * so `npm test` stays green in browser-less CI.
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -14,6 +14,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Page } from "playwright-core";
 
 import { stopBrowser } from "./browser-process.js";
 import { BrowserManager } from "../src/browser.js";
@@ -206,6 +207,15 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// setContent/load and a style write do not wait for a rendering opportunity.
+// Geometry fixtures must reach a rendered frame before exercising the reader's
+// deliberately bounded IntersectionObserver path (not a sleep or an IO retry).
+async function renderFixture(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+}
+
 function findBrowser(): string | null {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
   if (process.platform === "win32") {
@@ -326,17 +336,22 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       throw new Error(`${String(error)}; browser=${browserPath}; exit=${proc.exitCode}; ${startupFailure}; ${startupStderr}`);
     }
     cdpEndpoint = `http://127.0.0.1:${port}`;
+  }, 30000);
+
+  // Keep Chromium/HTTP startup shared, never the page or Session. A failed
+  // assertion must not leave delayed reloads, busy frames, viewport overrides,
+  // patched browser APIs or passive observation history for the next test.
+  beforeEach(async () => {
     manager = new BrowserManager({ endpoint: cdpEndpoint });
     session = new Session(manager);
-  }, 30000);
+    await session.ensurePage();
+  });
+  afterEach(async () => {
+    await manager?.cleanup();
+  });
 
   afterAll(async () => {
     delete process.env.BROWSER_SSRF_ALLOW;
-    try {
-      await manager?.cleanup();
-    } catch {
-      /* ignore */
-    }
     if (httpServer) {
       // Drop any keep-alive connection the browser held, else close() hangs.
       httpServer.closeAllConnections?.();
@@ -356,6 +371,32 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     if (userDataDir) {
       rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
+  });
+
+  describe("page isolation regressions", () => {
+    let previous: Page | undefined;
+    it.each([1, 2])("starts with a fresh page and closes predecessor state (%i)", async () => {
+      const page = await session.ensurePage();
+      // Also works when either row is selected on its own. When run together,
+      // the second row proves teardown closed, not merely navigated, the page.
+      if (previous) expect(previous.isClosed()).toBe(true);
+      expect(page).not.toBe(previous);
+      expect(page.url()).toBe("about:blank");
+      expect(await page.evaluate(() => ({
+        leaked: document.body.dataset.leaked,
+        width: innerWidth, height: innerHeight,
+        observer: IntersectionObserver.prototype.observe.toString(),
+      }))).toMatchObject({ leaked: undefined, width: 1280, height: 800,
+        observer: expect.stringContaining("[native code]") });
+      previous = page;
+      await page.goto(httpUrl);
+      await page.setViewportSize({ width: 369, height: 714 });
+      await page.evaluate(() => {
+        document.body.dataset.leaked = "previous test";
+        window.IntersectionObserver = class extends IntersectionObserver { observe() {} };
+        setTimeout(() => { location.href = "/review/latereload"; }, 1000);
+      });
+    });
   });
 
   describe("action and settle regressions", () => {
@@ -385,6 +426,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }, { mode, absolute });
       const frame = page.mainFrame().childFrames()[0];
       await frame.getByText("HiddenSlottedMarker").waitFor({ state: "attached" });
+      await renderFixture(page);
       expect(await observationRootStatus({ frame, primary: false })).toBe("hidden");
       const result = await runReadText(session);
       expect(body(result)).toMatchObject({ frames_hidden: 1 });
@@ -392,6 +434,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.evaluate(() => {
         document.getElementById("host")!.style.setProperty("--clip-height", "200px");
       });
+      await renderFixture(page);
       expect(await observationRootStatus({ frame, primary: false })).toBe("included");
       expect((await runReadText(session)).content[1]).toMatchObject({ text: expect.stringContaining("HiddenSlottedMarker") });
     });
@@ -405,6 +448,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }, where);
       const frame = page.mainFrame().childFrames()[0];
       await frame.getByText("ScrollSlotMarker").waitFor({ state: "attached" });
+      await renderFixture(page);
       expect(await observationRootStatus({ frame, primary: false })).toBe(where === "visible" ? "included" : "hidden");
       const result = await runReadText(session);
       expect(body(result)).toMatchObject({ frames_hidden: where === "visible" ? 0 : 1 });
@@ -439,6 +483,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }, where);
       const frame = page.mainFrame().childFrames()[0];
       await frame.getByText("QueuedIntersectionMarker").waitFor({ state: "attached" });
+      await renderFixture(page);
       try {
         expect(await observationRootStatus({ frame, primary: false })).toBe(where === "visible" ? "included" : "hidden");
       } finally {
@@ -723,7 +768,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       const result = body(await runAct(session, { kind: "click", ref: await ref("Save label") }));
       expect(result).toMatchObject({ ok: true, dom_mutated: "minor", settle_capped: false, text_churn_ignored: true });
       expect(await page.locator("#status").innerText()).toBe("Saved");
-      expect(result.timings.settle_ms).toBeGreaterThanOrEqual(kind === "fetch" ? 650 : 450);
+      // Hosted Chromium delivered the 150 ms timer + 300 ms quiet window in
+      // 448 ms (issue #454). Timers and rounded cross-process timings are not
+      // exact clocks: allow 5 ms granularity, not another polling interval.
+      expect(result.timings.settle_ms).toBeGreaterThanOrEqual((kind === "fetch" ? 650 : 450) - 5);
       expect(result.timings.settle_ms).toBeLessThan(1200);
       await page.goto("about:blank");
     });
@@ -1523,6 +1571,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const page = await session.ensurePage(); await page.goto(httpUrl);
     const src = new URL("observation-text?text=HiddenInjection", httpUrl).href.replace("127.0.0.1", "localhost");
     await page.setContent(`<p>Main content</p><div style="${wrapper}"><iframe ${attributes} src="${src}"></iframe></div><iframe srcdoc="<p>Visible control frame</p>"></iframe>`);
+    await renderFixture(page);
     const read = await runReadText(session);
     const text = (read.content[1] as { text: string }).text;
     expect(text).toContain("Main content"); expect(text).toContain("Visible control frame");
@@ -1758,6 +1807,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
   });
 
   it("snapshot preserves all distinct list rows", async () => {
+    await runNavigate(session, { url: fixtureUrl });
     const res = await runSnapshot(session, { filter: "all" });
     const snapText = res.content[1] && res.content[1].type === "text" ? res.content[1].text : "";
     expect(snapText).not.toContain("more similar items");
@@ -1765,6 +1815,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
   });
 
   it("act(fill) then act(click) mutates the DOM and reflects the value", async () => {
+    await runNavigate(session, { url: fixtureUrl });
     // Find the textbox and button refs from a fresh snapshot.
     const snap = await runSnapshot(session, { filter: "interactive" });
     const snapText = snap.content[1] && snap.content[1].type === "text" ? snap.content[1].text : "";
