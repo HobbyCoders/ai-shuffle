@@ -388,7 +388,7 @@ def _task_stop(cursor, session_id: str, *, owner: bool = False) -> bool:
     cursor.execute(
         "SELECT * FROM turns WHERE session_id=%s "
         "AND payload ->> 'terminal_task_stop' IS NOT NULL "
-        "ORDER BY position DESC, insert_order DESC, id DESC LIMIT 1", (session_id,),
+        "ORDER BY position DESC, insert_order DESC, created_at DESC, id DESC LIMIT 1", (session_id,),
     )
     row = _row(cursor.fetchone())
     if not row or not row["payload"].get(TASK_STOP_KEY):
@@ -406,7 +406,8 @@ def _cwd_failure(cursor, session_id: str):
     cursor.execute(
         "SELECT * FROM turns WHERE session_id=%s "
         "AND payload ->> 'working_directory_failure' IS NOT NULL "
-        "ORDER BY ended_at DESC NULLS FIRST, position DESC, insert_order DESC, id DESC LIMIT 1",
+        "ORDER BY ended_at DESC NULLS FIRST, position DESC, insert_order DESC, "
+        "created_at DESC, id DESC LIMIT 1",
         (session_id,),
     )
     row = _row(cursor.fetchone())
@@ -480,6 +481,34 @@ def block_missing_cwd(session_id: str, turn_id: str, path: str, reason: str) -> 
         return blocked
 
 
+def _initialize_insert_order(cursor: Any, session_id: str) -> None:
+    """Assign an all-legacy session lazily; caller holds its admission lock.
+
+    Startup's metadata-only column leaves old rows at zero. Reads order that
+    legacy group by timestamp/position/id, below any assigned history. On the
+    first write, rank ONLY this session in the same stable order before appending.
+    No table-wide DDL lock or correlated history-wide MAX is involved.
+
+    If assigned history already exists, preserve its immutable ordinals. Any
+    zero rows imported later from frozen legacy queues remain in the older
+    legacy group; renumbering them above assigned history would change its order.
+    """
+    cursor.execute(
+        "SELECT MAX(insert_order) AS maximum FROM turns WHERE session_id=%s", (session_id,),
+    )
+    row = cursor.fetchone()
+    if row is None or row["maximum"] != 0:
+        return  # no history, or an already initialized session
+    cursor.execute("""
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, position, id) AS ordinal
+            FROM turns WHERE session_id=%s AND insert_order=0
+        )
+        UPDATE turns SET insert_order=ranked.ordinal
+        FROM ranked WHERE turns.id=ranked.id
+    """, (session_id,))
+
+
 def enqueue_turn(
     session_id: str,
     source: str,
@@ -531,6 +560,7 @@ def enqueue_turn(
         # Serialize admission with the pre-model filesystem breaker. Queued
         # automatic turns remain durable but cannot claim a live slot while held.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        _initialize_insert_order(cursor, session_id)
         # Retryable watch/compact/handoff commands are resolved under the
         # session admission lock, before inserting or clearing Stop. A receipt
         # committed before an overlapping watch retry cannot admit two turns.
@@ -701,6 +731,7 @@ def record_adhoc_turn(
         # Share enqueue's lock: ad-hoc records participate in the same history
         # even though they never claim a live slot or a run lease.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        _initialize_insert_order(cursor, session_id)
         cursor.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS pos, "
             "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns WHERE session_id = %s",
@@ -1460,7 +1491,7 @@ def get_turn_by_command(session_id: str, command_id: str, *, _conn=None) -> Opti
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s AND command_id=%s "
-            "ORDER BY insert_order ASC, id ASC LIMIT 1",
+            "ORDER BY insert_order ASC, created_at ASC, position ASC, id ASC LIMIT 1",
             (session_id, command_id),
         )
         row = cursor.fetchone()
@@ -1494,7 +1525,7 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
-            "ORDER BY insert_order DESC, id DESC LIMIT 1",
+            "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()
@@ -1516,7 +1547,7 @@ def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
             "AND NOT (state='completed' AND COALESCE(stop_reason, '')='steered') "
-            "ORDER BY insert_order DESC, id DESC LIMIT 1",
+            "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()

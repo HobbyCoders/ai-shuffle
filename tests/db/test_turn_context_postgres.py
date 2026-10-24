@@ -1,12 +1,15 @@
 """Context/history ordering under PostgreSQL NULLs, transaction clocks and locks."""
+from typing import Any
 from uuid import uuid4
+
+import pytest
 
 from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 
 pytestmark = requires_real_pg
 
 
-def test_terminal_context_prefers_ended_turn_over_legacy_null():
+def test_terminal_context_prefers_ended_turn_over_legacy_null() -> None:
     from app.core import turn_scheduler
     from app.db import base, turns
 
@@ -26,7 +29,9 @@ def test_terminal_context_prefers_ended_turn_over_legacy_null():
     assert context["profile_id"] == "recent-profile"
 
 
-def test_insert_order_survives_transaction_timestamp_tie_and_front_insert(monkeypatch):
+def test_insert_order_survives_transaction_timestamp_tie_and_front_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from types import SimpleNamespace
 
     from app.db import base, turns
@@ -51,7 +56,7 @@ def test_insert_order_survives_transaction_timestamp_tie_and_front_insert(monkey
     assert turns.pop_ready(sid)["id"] == front["id"]
 
 
-def test_insert_order_serializes_adhoc_and_queued_writers():
+def test_insert_order_serializes_adhoc_and_queued_writers() -> None:
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
@@ -61,9 +66,11 @@ def test_insert_order_serializes_adhoc_and_queued_writers():
     with base.get_db() as conn:
         conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
     first = turns.enqueue_turn(sid, "user")
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET insert_order=0 WHERE id=%s", (first["id"],))
     barrier = Barrier(2, timeout=5)
 
-    def insert(adhoc):
+    def insert(adhoc: bool) -> dict[str, Any]:
         barrier.wait()
         if adhoc:
             return turns.record_adhoc_turn(sid, "api")
@@ -74,3 +81,34 @@ def test_insert_order_serializes_adhoc_and_queued_writers():
     ordered = sorted([first, *others], key=lambda row: row["insert_order"])
     assert [row["insert_order"] for row in ordered] == [1, 2, 3]
     assert turns.get_latest_turn(sid)["id"] == ordered[-1]["id"]
+    assert turns.get_turn(first["id"])["insert_order"] == 1
+
+
+def test_lazy_backfill_does_not_block_another_sessions_write() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.db import base, turns
+
+    sid = "pg-lazy-order-" + uuid4().hex
+    other_sid = "pg-independent-order-" + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        for session_id in (sid, other_sid):
+            cur.execute("INSERT INTO sessions (id) VALUES (%s)", (session_id,))
+    first = turns.enqueue_turn(sid, "user")
+    other_first = turns.enqueue_turn(other_sid, "user")
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE turns SET insert_order=0 WHERE session_id IN (%s, %s)", (sid, other_sid),
+        )
+    # Keep the lazy allocation transaction open. A history-wide UPDATE would
+    # lock other_sid's legacy row too and block its writer until this commits.
+    # The pool is outside the transaction so a failed timeout still releases
+    # that transaction before joining the thread (no teardown deadlock).
+    with ThreadPoolExecutor(max_workers=1) as pool, base.get_db() as conn:
+        newer = turns.enqueue_turn(sid, "queue", _conn=conn)
+        assert newer["insert_order"] == 2
+        independent = pool.submit(turns.record_adhoc_turn, other_sid, "api")
+        assert independent.result(timeout=5)["insert_order"] == 2
+    assert turns.get_turn(first["id"])["insert_order"] == 1
+    assert turns.get_turn(other_first["id"])["insert_order"] == 1

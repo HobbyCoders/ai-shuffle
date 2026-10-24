@@ -2172,10 +2172,9 @@ def _run_column_migrations(cursor: Any) -> None:
     if not column_exists(cursor, "turns", "insert_order"):
         cursor.execute("ALTER TABLE turns ADD COLUMN insert_order BIGINT NOT NULL DEFAULT 0")
         migrations_applied.append("turns.insert_order")
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_turns_session_insert_order "
-        "ON turns(session_id, insert_order DESC)"
-    )
+    # Do not rewrite history or build an index under ADD COLUMN's table lock.
+    # Existing session-prefixed indexes cover these reads. Allocation of legacy
+    # history is lazy, scoped to one session's admission lock (turns.py).
 
     # Latest generated composer hint; retained even with no watching browser.
     cursor.execute("""
@@ -2215,25 +2214,6 @@ def _run_column_migrations(cursor: Any) -> None:
         """)
         if cursor.rowcount and cursor.rowcount > 0:
             migrations_applied.append(f"turns<-queued_messages({cursor.rowcount})")
-
-    # Include legacy queued_messages imports above. Historical same-time ties
-    # cannot be reconstructed: retain timestamp/position/id order ONCE, then
-    # give all new inserts an ordinal under the session-row admission lock.
-    # Only zero/unassigned rows change, so reruns preserve every assigned value.
-    cursor.execute("""
-        WITH ranked AS (
-            SELECT legacy.id,
-                   COALESCE((SELECT MAX(existing.insert_order) FROM turns existing
-                             WHERE existing.session_id=legacy.session_id), 0)
-                   + ROW_NUMBER() OVER (
-                       PARTITION BY legacy.session_id
-                       ORDER BY legacy.created_at, legacy.position, legacy.id
-                   ) AS ordinal
-            FROM turns legacy WHERE legacy.insert_order=0
-        )
-        UPDATE turns SET insert_order=ranked.ordinal
-        FROM ranked WHERE turns.id=ranked.id
-    """)
 
     # Per-session V2 streaming column (v57). Originally a per-session opt-in;
     # the v58 block below forces it TRUE on every session and flips the default.

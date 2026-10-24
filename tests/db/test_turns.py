@@ -1,6 +1,8 @@
 """Unit tests for app/db/turns.py — the durable turn queue + live-turn state
 machine (v2 core, Phase 2)."""
 
+from sqlite3 import Connection
+
 import pytest
 
 from app.db import turns
@@ -43,8 +45,8 @@ def test_enqueue_assigns_increasing_positions_and_reads_back(mock_db):
 
 @pytest.mark.parametrize("newer_writer", ["enqueue", "at_front", "adhoc"])
 def test_latest_turn_uses_insert_order_when_created_at_ties(
-    mock_db, monkeypatch, newer_writer,
-):
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch, newer_writer: str,
+) -> None:
     from types import SimpleNamespace
 
     # Reverse lexical UUID order so the old timestamp/id lookup MUST be wrong.
@@ -71,7 +73,9 @@ def test_latest_turn_uses_insert_order_when_created_at_ties(
         assert turns.pop_ready("timestamp-tie")["id"] == second["id"]
 
 
-def test_queue_position_ties_use_insert_order(mock_db, monkeypatch):
+def test_queue_position_ties_use_insert_order(
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from types import SimpleNamespace
 
     ids = iter(["z-first", "a-second"])
@@ -107,6 +111,33 @@ def test_queue_position_ties_use_insert_order(mock_db, monkeypatch):
             cur.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
         assert turns._task_stop(cur, "position-tie") is True
         assert turns._cwd_failure(cur, "position-tie")[0]["id"] == second["id"]
+
+
+def test_legacy_read_order_is_preserved_by_lazy_initialization(
+    mock_db: Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    ids = iter(["z-legacy-first", "a-legacy-newer", "m-assigned-newest"])
+    monkeypatch.setattr(turns, "uuid", SimpleNamespace(
+        uuid4=lambda: SimpleNamespace(hex=next(ids)),
+    ))
+    first = turns.enqueue_turn("lazy-legacy", "user", command_id="shared")
+    removed = turns.enqueue_turn("lazy-legacy", "user", command_id="shared")
+    turns.remove_queued_turn(removed["id"])
+    mock_db.execute(
+        "UPDATE turns SET insert_order=0, created_at=? WHERE session_id=?",
+        ("2026-01-01 00:00:00", "lazy-legacy"),
+    )
+    assert turns.get_latest_turn("lazy-legacy")["id"] == removed["id"]
+    assert turns.get_latest_run_turn("lazy-legacy")["id"] == removed["id"]
+    assert turns.get_turn_by_command("lazy-legacy", "shared")["id"] == first["id"]
+    newer = turns.enqueue_turn("lazy-legacy", "queue", at_front=True)
+    assert [turns.get_turn(row["id"])["insert_order"] for row in (first, removed, newer)] == [
+        1, 2, 3,
+    ]
+    assert turns.get_latest_turn("lazy-legacy")["id"] == newer["id"]
+    assert turns.get_turn_by_command("lazy-legacy", "shared")["id"] == first["id"]
 
 
 def test_enqueue_persists_optional_fields(mock_db):

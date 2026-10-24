@@ -2039,13 +2039,8 @@ def create_postgres_schema(cursor: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_turns_session_position ON turns(session_id, position DESC)"
     )
 
-    # Bootstrap precedes column migrations on upgrades; do not index a column
-    # that an older turns table does not have yet.
-    if column_exists(cursor, "turns", "insert_order"):
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_turns_session_insert_order "
-            "ON turns(session_id, insert_order DESC)"
-        )
+    # The existing session-prefixed indexes also cover insertion-order reads.
+    # No history rewrite or new writer-blocking index build belongs in bootstrap.
 
     # Latest generated composer hint; retained even with no watching browser.
     cursor.execute("""
