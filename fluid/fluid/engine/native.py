@@ -2175,6 +2175,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             log.debug("cache signal for the compactor failed", exc_info=True)
             return None
 
+    async def _append_node(self, sid: str, node: SessionNode) -> None:
+        """Persist a fresh node and distinguish it from re-entering old context."""
+        await self.store.append(sid, node)
+        examined = getattr(self, "_wake_scan_examined", None)
+        if examined is not None:
+            examined.add(node.node_id)
+
     async def _note_wake_turn_starts(self, sid: str, nodes: list[SessionNode]) -> None:
         """Tell the compactor which turn starts were wakes.
 
@@ -2182,10 +2189,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         the persisted TurnStarted events: the first event that names a node
         decides, so a resumed turn that re-reports an old node cannot relabel
         it. Retain provenance only for the current context window, not every
-        node the session has ever named. When an unknown node enters (including
-        a rewind to a pruned branch), replay from the beginning to recover its
-        FIRST source; otherwise read only past the newest seq seen. SQL class
-        filtering keeps unrelated large tool results out of both scans.
+        node the session has ever named. Examined context includes assistant
+        and tool nodes as well as fresh appends, independently of which nodes
+        TurnStarted named. Only re-entering pruned context needs a replay from
+        the beginning to recover its FIRST source; otherwise keep the cursor.
+        SQL class filtering keeps unrelated large tool results out of both scans.
         Unnamed turns retain the legacy real-user-turn count.
         """
         from fluid.context.compaction import WAKE_TURN_SOURCES
@@ -2195,7 +2203,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._compactor.wake_turn_starts.intersection_update(active)
         unparked: set[str] = getattr(self, "_unpark_turn_starts", set()) & active
         self._unpark_turn_starts = unparked
-        cursor = 0 if active - seen else getattr(self, "_wake_scan_seq", 0)
+        examined: set[str] = getattr(self, "_wake_scan_examined", set())
+        cursor = 0 if active - examined else getattr(self, "_wake_scan_seq", 0)
         try:
             async for event in iter_events_of_class(self.store, sid, cursor, (TurnStarted,)):
                 cursor = max(cursor, event.seq)
@@ -2213,6 +2222,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
         self._wake_scan_seq = cursor
         self._wake_scan_nodes = seen
+        self._wake_scan_examined = active
 
     async def _rehydrate_last_call_usage(
         self, sid: str, nodes: list[SessionNode]
@@ -2562,7 +2572,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         role="user", content=[Text(op.context_note)],
                     ).pin_context(op.context_note),
                 )
-                await self.store.append(sid, head)
+                await self._append_node(sid, head)
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name, source=op.source,
@@ -2629,7 +2639,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             parent_id=op.parent_node_id or meta.head_node_id,
             message=Message(role="user", content=content, context_pin=op.context_pin),
         )
-        await self.store.append(sid, user_node)
+        await self._append_node(sid, user_node)
         await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
         if self._codemode is not None:
@@ -4173,7 +4183,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                             },
                         ),
                     )
-                    await self.store.append(sid, node)
+                    await self._append_node(sid, node)
                     parent = node
                 # The tool blocks that closed before the failure were already
                 # published as ToolUse events. Answer each one, so a host
@@ -4199,7 +4209,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         node_id=new_id("node"), parent_id=parent.node_id,
                         message=Message(role="user", content=aborted),
                     )
-                    await self.store.append(sid, node)
+                    await self._append_node(sid, node)
                     parent = node
                 if (
                     drop_retries
@@ -4231,7 +4241,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
             )
-            await self.store.append(sid, node)
+            await self._append_node(sid, node)
             # One durable Usage event per logical model call. The call index and
             # provider-request attempt metadata in ``raw`` make retries and
             # interrupted turns auditable without inferring from tool events.
@@ -4316,7 +4326,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     node_id=new_id("node"), parent_id=parent.node_id,
                     message=Message(role="user", content=[Text(_CONTINUE_NUDGE)]),
                 )
-                await self.store.append(sid, nudge)
+                await self._append_node(sid, nudge)
                 parent = nudge
                 continue
             if not dispatchable:
@@ -4351,7 +4361,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                             hook_reminder("A Stop hook asked you to continue", reason)
                         )]),
                     )
-                    await self.store.append(sid, nudge)
+                    await self._append_node(sid, nudge)
                     parent = nudge
                     self._peer_delivery_sealed = False
                     continue
@@ -4400,7 +4410,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 node_id=new_id("node"), parent_id=parent.node_id,
                 message=Message(role="user", content=blocks),
             )
-            await self.store.append(sid, tr_node)
+            await self._append_node(sid, tr_node)
             await self._mark_questions_delivered(a.request_id for a in answers)
             parent = tr_node
             if call_cap_reached:
@@ -4503,7 +4513,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         else:
             node, peers = self._pending_peer_write
             delivered = [_steer_parts(op) for op in peers]
-        await self.store.append(sid, node)
+        await self._append_node(sid, node)
         self._pending_peer_write = None
         # Remove only the persisted batch, after its write succeeds. A peer
         # arriving during that await belongs to the next batch, even when its

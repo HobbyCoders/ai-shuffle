@@ -58,6 +58,7 @@ async def test_wake_bookkeeping_tracks_only_active_window_and_restores_first_sou
         await loop._note_wake_turn_starts("s", nodes)
         active = {n.node_id for n in nodes}
         assert loop._wake_scan_nodes == active
+        assert loop._wake_scan_examined == active
         wakes = {node_id for node_id in active if int(node_id) % 2 == 0}
         assert loop._compactor.wake_turn_starts == wakes
         assert loop._unpark_turn_starts == wakes
@@ -71,3 +72,104 @@ async def test_wake_bookkeeping_tracks_only_active_window_and_restores_first_sou
     assert loop._wake_scan_nodes == {"1"}
     assert loop._compactor.wake_turn_starts == set()
     assert loop._unpark_turn_starts == set()
+
+
+async def test_wake_replay_mixed_roles_is_incremental_until_pruned_nodes_reenter():
+    from types import SimpleNamespace
+    from fluid.engine.native import NativeLoop
+    from fluid.events import TurnStarted
+    from fluid.messages import Message, Text, ToolResultBlock
+    from fluid.store.base import MemoryStore, SessionNode
+
+    class CountingStore(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.cursors = []
+            self.decoded = 0
+
+        async def iter_events_of_class(self, sid, seq, classes):
+            self.cursors.append(seq)
+            for event in await self.events_since(sid, seq):
+                if isinstance(event, classes):
+                    self.decoded += 1
+                    yield event
+
+    store = CountingStore()
+    await store.create_session("s")
+    loop = object.__new__(NativeLoop)
+    loop.store = store
+    loop._compactor = SimpleNamespace(wake_turn_starts=set())
+    nodes = [
+        SessionNode(node_id="u0", parent_id=None, message=Message(role="user", content=[Text("start")])),
+        SessionNode(node_id="a0", parent_id="u0", message=Message(role="assistant", content=[Text("call")])),
+        SessionNode(node_id="r0", parent_id="a0", message=Message(role="user", content=[
+            ToolResultBlock(tool_use_id="t", content=[Text("output")])])),
+    ]
+    for node in nodes:
+        await store.append("s", node)
+    await store.append_event("s", TurnStarted(session_id="s", node_id="u0", seq=1,
+        source="unpark", model="synthetic", provider="synthetic"))
+    await loop._note_wake_turn_starts("s", nodes)
+    await loop._note_wake_turn_starts("s", nodes)
+    assert store.cursors == [0, 1]
+    assert store.decoded == 1
+
+    # The real append path records fresh IDs separately from TurnStarted provenance.
+    fresh = SessionNode(node_id="u1", parent_id="r0", message=Message(role="user", content=[Text("next")]))
+    await loop._append_node("s", fresh)
+    nodes.append(fresh)
+    await store.append_event("s", TurnStarted(session_id="s", node_id="u1", seq=3,
+        source="user", model="synthetic", provider="synthetic"))
+    await loop._note_wake_turn_starts("s", nodes)
+    assert store.cursors == [0, 1, 1]
+    assert store.decoded == 2
+    assert loop._compactor.wake_turn_starts == {"u0"}
+
+    # Pruning alone stays incremental; only returning old nodes needs the prefix.
+    await loop._note_wake_turn_starts("s", [fresh])
+    assert store.cursors[-1] == 3
+    assert loop._wake_scan_examined == {"u1"}
+    await store.append_event("s", TurnStarted(session_id="s", node_id="u0", seq=5,
+        source="user", model="synthetic", provider="synthetic"))
+    await loop._note_wake_turn_starts("s", nodes[:3])
+    assert store.cursors[-1] == 0
+    assert store.decoded == 5
+    assert loop._compactor.wake_turn_starts == {"u0"}
+
+
+async def test_native_turn_producer_keeps_wake_replay_incremental():
+    from fluid.engine.native import NativeLoop
+    from fluid.events import TurnStarted, UserTurn
+    from fluid.store.base import MemoryStore
+    from tests.unit.test_store_tree import ScriptedProvider
+
+    class CountingStore(MemoryStore):
+        cursors = None
+        decoded = 0
+
+        async def iter_events_of_class(self, sid, seq, classes):
+            if classes == (TurnStarted,):
+                self.cursors.append(seq)
+            for event in await self.events_since(sid, seq):
+                if isinstance(event, classes):
+                    if classes == (TurnStarted,):
+                        self.decoded += 1
+                    yield event
+
+    store = CountingStore()
+    store.cursors = []
+    loop = NativeLoop(provider=ScriptedProvider(), store=store, model="synthetic")
+    try:
+        await loop.submit(UserTurn(content="first"))
+        await loop.wait_turn()
+        first_cursor = loop._wake_scan_seq
+        assert first_cursor > 0
+        await loop.submit(UserTurn(content="next"))
+        await loop.wait_turn()
+        assert store.cursors == [0, first_cursor]
+        assert store.decoded == 2
+        path = await store.load_path(loop.session_id)
+        assert [n.message.role for n in path] == ["user", "assistant", "user", "assistant"]
+        assert loop._wake_scan_examined == {n.node_id for n in path}
+    finally:
+        await loop.aclose()
