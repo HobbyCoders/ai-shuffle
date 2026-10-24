@@ -1112,7 +1112,7 @@ def test_home_root_repair_cursor_is_readable_by_unprivileged_backup(tmp_path, ma
     assert (tmp_path / runtime.HOME_REPAIR_CURSOR).stat().st_mode & 0o004
 
 
-@pytest.mark.parametrize("cursor", ["malformed", "symlink", "escape", "nul", "huge-offset"])
+@pytest.mark.parametrize("cursor", ["malformed", "deep-json", "symlink", "escape", "nul", "huge-offset"])
 def test_home_root_repair_cursor_is_untrusted_advisory_state(tmp_path, home_ownership, cursor):
     home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
     for directory in (home, data, workspace):
@@ -1126,6 +1126,8 @@ def test_home_root_repair_cursor_is_untrusted_advisory_state(tmp_path, home_owne
         progress.symlink_to(outside)
     elif cursor == "malformed":
         progress.write_text("broken JSON")
+    elif cursor == "deep-json":
+        progress.write_text("[" * 20000 + "0" + "]" * 20000)
     else:
         frame = {"dev": home.stat().st_dev, "ino": home.stat().st_ino,
                  "offset": 2**64 - 1 if cursor == "huge-offset" else 0, "index": 0,

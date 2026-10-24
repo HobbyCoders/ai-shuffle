@@ -957,7 +957,7 @@ def repair_home_root_files(home, data_dir, workspace_dir, uid, gid, *, max_entri
     state = {"version": 1, "scan": 0, "frames": {}}
     try:
         state = home_repair_cursor(data_dir)
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RecursionError):
         pass  # Missing/stale state starts a fresh cycle; repair is best-effort.
 
     def skip(reason):
