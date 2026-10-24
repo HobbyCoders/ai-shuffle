@@ -16,6 +16,7 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 import { api } from '$lib/api/client';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { buildModelPickerCatalog } from '$lib/constants/model-picker';
+import { __resetWatches } from '$lib/stores/watches';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
@@ -28,6 +29,7 @@ afterEach(() => {
 	platform.set('desktop');
 	appMode.set('code');
 	activeSession.newChat();
+	__resetWatches();
 	document.querySelectorAll('.mcp-portal').forEach((n) => n.remove());
 });
 
@@ -307,10 +309,28 @@ describe('Chat controls panel', () => {
 		activeSession.setDraft('');
 		const onOpenChange = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange }) });
-		const row = within(panel()).getByRole('button', { name: '1 running tasks. Open the list' });
+		const row = within(panel()).getByRole('button', { name: '1 running: 1 agent. Open the list' });
 		expect(row.textContent).toContain('1 agent');
 		await fireEvent.click(row);
 		expect(onOpenChange).toHaveBeenLastCalledWith(false);
+	});
+
+	it('gives the owner\'s watches the same row, without the running badge (#371)', async () => {
+		const get = api.get.bind(api);
+		vi.spyOn(api, 'get').mockImplementation(((path: string, options?: unknown) =>
+			path === '/watches'
+				? Promise.resolve({ watches: [
+					{ id: 'w1', kind: 'watch', what: 'Inbox', status: 'active', last_fired_at: null, cost_usd: 0, can_pause: true, can_stop: true },
+					{ id: 'w2', kind: 'watch', what: 'CI', status: 'paused', last_fired_at: null, cost_usd: 0, can_pause: false, can_stop: true },
+					{ id: 'w3', kind: 'watch', what: 'Old', status: 'stopped', last_fired_at: null, cost_usd: 0, can_pause: false, can_stop: false }
+				] })
+				: get(path, options as never)) as typeof api.get);
+		activeSession.setDraft('');
+		render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		const row = await within(panel()).findByRole('button', { name: '2 watches: 1 paused. Open the list' });
+		expect(row.textContent).toContain('2 watches');
+		expect(row.textContent).toContain('1 paused');
+		expect(cell(/^All chat controls$/)).toBeTruthy();
 	});
 
 	it('carries Call, Browser and Export as actions, and no stash button', async () => {

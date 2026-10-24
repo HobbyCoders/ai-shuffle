@@ -456,6 +456,14 @@
           "past_bug": "#195: required preflight missed GID, collisions and unavailable helpers."
         },
         {
+          "id": "harness-basics.27",
+          "check": "Confirmed watches recover cursors and deliver without self-triggering",
+          "kind": "owner",
+          "how": "Use only a disposable candidate worker with its own persistent data directory and a configured real provider; never restart a production worker. In a throwaway live project chat request a 60-second schedule watch with a small daily cap. Confirm the host-owned source/filter, read-only scope, delivery action and budget sentence. Record its id, saved cursor, event ids and stable delivery command ids. After one real delivery, stop only the disposable worker for over 180 seconds, letting scheduled events accrue, then restart with the same data directory. Also interrupt once immediately after event admission but before dispatch using approved candidate diagnostics; retain the original command identity. Confirm all elapsed schedule events arrive once, then restart again and check no event or turn is repeated. Settle the creating chat, let a new schedule event arrive, and inspect the durable bell/push notification and cheap summary rather than a turn waking that chat. Create an investigation watch and verify a new short no-project chat plus notification. Finally create a finished-session watch scoped to its own creating chat; finish one ordinary owner turn, let the watch's real delivery finish, and wait through several polling intervals. Pause and stop every test watch, archive the throwaway chats, and remove only the disposable candidate after saving private receipts; do not publish screenshots.",
+          "pass_when": "No watch exists before the owner's confirmation. Live deliveries are real turns in the creating chat; a settled creator stays settled, alerts are durable notifications, and investigations use a new bounded no-project chat. Persisted cursors recover every elapsed schedule event exactly once across both restarts, including the expired undispatched admission, with unchanged dedupe and command ids. The finished-session watch reports the owner turn once and never re-fires on its own delivery, with no further provider call or cost during idle polling. Current permission revocation, pause/stop and daily budget still prevent dispatch after recovery. Record actual producing-path and provider evidence; mocked/seeded consumer state or an unexecuted restart is not a pass.",
+          "past_bug": "#371 review: expired admitted events were lost across restarts; finished-session watches observed their own delivery turns; only mocked local watch flows had been covered."
+        },
+        {
           "id": "harness-basics.26",
           "check": "Bounded home ownership repair progresses across persistent-volume restarts",
           "kind": "owner",
@@ -522,6 +530,14 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.31",
+          "check": "Phone attach sheet swipe and in-chat card style",
+          "kind": "owner",
+          "how": "On the Android app, open a no-project chat and tap the project pill to open 'Attach a project'. Pull the sheet down a little and let go; pull it fast, hold still for a second, then let go; flick it down. With more projects than fit, scroll the project list up and down, starting with a small downward wobble. Then, in a light and a dark theme, trigger one approval asked in words and one generation choice card.",
+          "pass_when": "Short and held pulls spring back, a flick or a long pull closes the sheet, and the list scrolls normally. The approval and choice cards use the same border, radius, badges and buttons as the question tray in both themes.",
+          "past_bug": "The phone attach sheet could not be swiped closed, and the approval and generation choice cards used their own rails, tints and uppercase badges."
+        },
+        {
           "id": "harness-basics.approval-self-gated-tools",
           "check": "Tools with their own consent card ask once in an owner chat",
           "kind": "owner",
@@ -577,6 +593,15 @@
           "how": "Use disposable candidate workers ServerWorker and DesktopWorker with one owner-approved, verified Included image account held only by DesktopWorker. On ServerWorker create a disabled throwaway automation and PUT its exact account/worker/model/options to /api/v1/generation/jobs/{automation_id}/choices/image; GET it back. Leave remembered image choices empty or deliberately different. With the disposable cap admitting the request, trigger one scheduled run on ServerWorker with a prompt that calls generateImage without naming source/model/worker. Inspect the scheduler-created session's automation_id, structured generation result, both workers' submission activity and the resulting session artifact. Restore the disposable choices and remove only the throwaway automation/session afterward. No API-key or fal generation is authorized by this check.",
           "pass_when": "The real unattended run uses the saved job choice despite the absent or different remembered choice. Result source/account/model/options and holding worker match the read-back binding; exactly one Included submission occurs on DesktopWorker, none on ServerWorker or another source. Current cap and schema admission run before submission, and the generated artifact is readable from the run session. A fixture that only injects RunContext.job_choices is not a pass.",
           "past_bug": "#379: resolver support for job_choice had no production writer or binding from scheduled automation sessions."
+        },
+        {
+          "id": "harness-basics.32",
+          "check": "Docker runtime overlay acceptance on both architectures",
+          "kind": "owner",
+          "optional": true,
+          "how": "Before pinning OVERLAYS in docker/update_contract.py: in a disposable container of the release image for each architecture (linux/amd64, and linux/arm64 natively or through QEMU), run scripts/release/overlay_acceptance.py as appuser with the candidate relocatable Python for that architecture (docs/ci/release-channels.md). Never on an installed worker or its data volume.",
+          "pass_when": "The JSON report passes on both architectures: apply (the release reaches /health/ready on the overlay interpreter and starts again after an offline cold restart), rollback (the database copy is put back and the previous release runs on its own overlay) and refuse (PostgreSQL major, other-architecture-only overlay, wrong-processor binary and a bootstrap without runtime-overlays-v1 are refused with the user's message while the running release keeps answering).",
+          "past_bug": "#194: the first real Python overlay could never activate. Running it rewrote the archive's .pyc files (unpack dropped their signed times) and launch-time verification refused the overlay as tampered."
         }
       ]
     }
