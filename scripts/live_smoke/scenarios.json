@@ -294,6 +294,15 @@
           "how": "On disposable paired branch workers (including Windows), use an isolated in-process harness with task execution suppressed, not 31 real model agents. Submit 31 concurrent task-start requests with distinct child ids to one project; during admission poll that project's git/pr-state (including a branch beyond the first 100 open PRs, with gh mocked) and a session's swarms after 120 publications of 30 tasks interleaved with at least 12000 transcript events. Repeat the same child ids and inspect durable turns and report obligations. Time handler and fetch spans, then repeat with branch and default checkout modes; never use the installed app's data directory.",
           "pass_when": "Task-start receipts return within a few seconds, each child has exactly one queued turn and report obligation after retries, worktrees retain their validated base and branch, and pr-state and swarms stay under 1 second. A burst wakes the coalescing catalog scanner rather than awaiting 31 whole-catalog passes; distinct branch fetches overlap, while worktree mutations remain protected.",
           "past_bug": "#482: 31 simultaneous remote starts took about 90 seconds on Windows; full status and unfiltered PR scans delayed pr-state, while serial full-transcript replays delayed swarms."
+        },
+        {
+          "id": "two-worker-smoke.30",
+          "check": "Sidebar Check for updates finds a peer's update like Settings does",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "With Update all workers on, use a pair where this worker already shows an update (the top Download update button) and the peer has not read its feed since the update was published (a container that last checked before the release). Open the sidebar More menu and choose Check for updates, then watch the top update button's tooltip rows and the bell. Run Settings > System > Updates > Check for updates once afterwards and compare. Then choose the sidebar check twice in a row so the second click lands while the peer is still checking. Install nothing.",
+          "pass_when": "The click sends a check to every worker even though this worker already offers an update; the bell says Update found or No updates found only after each worker has answered; the peer's row turns to its found update (never No update offered or Already up to date) and the single sidebar check agrees with the Settings check. After the double click, the bell waits for the peer and its row still turns to the found update, never Refused: An update is already in progress (Settings may show that refusal on its own repeated click; see #519).",
+          "past_bug": "#510: the sidebar check skipped the request whenever this worker already offered an update, called the check done 5 s after the click, and a check refused because one was already running marked that peer Refused, so peers' updates showed as up to date."
         }
       ]
     },
