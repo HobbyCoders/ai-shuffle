@@ -1064,6 +1064,120 @@ def test_home_root_repair_prioritizes_shallow_home_before_large_local(tmp_path, 
     assert result["limited"]
 
 
+@pytest.mark.parametrize("budget", [1, 20000])
+def test_home_root_repair_preserves_empty_data_volume_for_initial_ownership(tmp_path, home_ownership, budget):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace, home / ".fluid"):
+        directory.mkdir()
+    home_ownership()
+    runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=budget)
+    # drop_privileges may re-own only an EMPTY named volume, never retained data.
+    assert list(data.iterdir()) == []
+
+
+@pytest.mark.parametrize("count,budget", [(40, 1), (40, 5), (2500, 300)])
+def test_home_root_repair_resumes_across_restarts(tmp_path, home_ownership, count, budget):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace, home / ".fluid", home / ".local", home / "deep"):
+        directory.mkdir()
+    (data / "existing-install").write_text("initialized on an earlier boot")
+    targets = []
+    for index in range(count):
+        path = home / ".fluid" / str(index)
+        path.write_text("root write")
+        targets.append(path)
+    for directory in (home / ".local", home / "deep"):
+        path = directory / "late"
+        path.write_text("root write beyond the first scan")
+        targets.append(path)
+    changed = home_ownership({path: (0, 0) for path in targets})
+    for _ in range(count // budget + 30):
+        result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=budget)
+        assert result["visited"] <= budget
+        if not result["limited"]:
+            break
+    assert not result["limited"], "the bounded scan must eventually finish a cycle"
+    assert {entry[0] for entry in changed} == set(targets)
+
+
+@pytest.mark.parametrize("state", [None, {"version": 1, "scan": 0, "frames": {}}])
+def test_home_repair_cursor_refuses_image_data_before_any_io(tmp_path, monkeypatch, state):
+    image = tmp_path / "image"
+    image.mkdir()
+    marker = image / "retained"
+    marker.write_text("must remain unchanged")
+    monkeypatch.setattr(runtime.sys, "prefix", str(image))
+    monkeypatch.setattr(runtime, "mounted_directory", lambda _: False)
+    opened = Mock(wraps=runtime.open_directory)
+    monkeypatch.setattr(runtime, "open_directory", opened)
+    with pytest.raises(runtime.RuntimeFailure, match="DATA_DIR.*mount a volume.*outside the image trees"):
+        runtime.home_repair_cursor(image, state)
+    opened.assert_not_called()
+    assert list(image.iterdir()) == [marker]
+    assert marker.read_text() == "must remain unchanged"
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_home_root_repair_cursor_is_readable_by_unprivileged_backup(tmp_path, mask):
+    (tmp_path / "existing-install").write_text("initialized earlier")
+    previous = os.umask(mask)
+    try:
+        runtime.home_repair_cursor(tmp_path, {"version": 1, "scan": 0, "frames": {}})
+    finally:
+        os.umask(previous)
+    # Root creates this advisory metadata; the appuser tar backup must read it.
+    assert (tmp_path / runtime.HOME_REPAIR_CURSOR).stat().st_mode & 0o004
+
+
+@pytest.mark.parametrize("cursor", ["malformed", "deep-json", "symlink", "escape", "nul", "huge-offset"])
+def test_home_root_repair_cursor_is_untrusted_advisory_state(tmp_path, home_ownership, cursor):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace):
+        directory.mkdir()
+    target = home / "repair"
+    target.write_text("root write")
+    outside = tmp_path / "outside"
+    outside.write_text("must stay unchanged")
+    progress = data / runtime.HOME_REPAIR_CURSOR
+    if cursor == "symlink":
+        progress.symlink_to(outside)
+    elif cursor == "malformed":
+        progress.write_text("broken JSON")
+    elif cursor == "deep-json":
+        progress.write_text("[" * 20000 + "0" + "]" * 20000)
+    else:
+        frame = {"dev": home.stat().st_dev, "ino": home.stat().st_ino,
+                 "offset": 2**64 - 1 if cursor == "huge-offset" else 0, "index": 0,
+                 "pending": "../outside" if cursor == "escape" else "\0" if cursor == "nul" else ""}
+        progress.write_text(json.dumps({"version": 1, "scan": 2, "frames": {"0": frame}}))
+    changed = home_ownership({target: (0, 0), outside: (0, 0)})
+    result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert not result["limited"]
+    assert changed == [(target, 41002, 41002)]
+    assert outside.read_text() == "must stay unchanged"
+    assert not progress.is_symlink()
+    assert progress.stat().st_mode & 0o777 == 0o644
+
+
+def test_home_root_repair_resumed_directory_is_revalidated(tmp_path, home_ownership):
+    home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
+    for directory in (home, data, workspace, home / ".fluid"):
+        directory.mkdir()
+    (data / "existing-install").write_text("initialized on an earlier boot")
+    victim = home / ".fluid"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    protected = outside / "untouched"
+    protected.write_text("not under home")
+    changed = home_ownership({protected: (0, 0)})
+    first = runtime.repair_home_root_files(home, data, workspace, 41002, 41002, max_entries=1)
+    assert first["limited"]
+    victim.rename(home / "old-fluid")
+    victim.symlink_to(outside, target_is_directory=True)
+    runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
+    assert changed == []
+
+
 def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeypatch, home_ownership):
     home, data, workspace = (tmp_path / name for name in ("home", "data", "workspace"))
     for directory in (home, data, workspace):
@@ -1076,6 +1190,7 @@ def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeyp
     class SlowListing:
         def __init__(self, fd):
             self.iterator = original_scandir(fd)
+            self.is_home = os.fstat(fd).st_ino == home.stat().st_ino
         def __enter__(self):
             return self
         def __exit__(self, *args):
@@ -1083,8 +1198,9 @@ def test_home_root_repair_checks_time_inside_directory_listing(tmp_path, monkeyp
         def __iter__(self):
             return self
         def __next__(self):
-            reads.append(1)
-            clock[0] += 2
+            if self.is_home:
+                reads.append(1)
+                clock[0] += 2
             return next(self.iterator)
     monkeypatch.setattr(runtime.os, "scandir", SlowListing)
     monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
@@ -1205,6 +1321,22 @@ def test_home_root_repair_time_budget_does_not_block_startup(tmp_path, monkeypat
     monkeypatch.setattr(runtime.time, "monotonic", lambda: next(clock))
     result = runtime.repair_home_root_files(home, data, workspace, 41002, 41002)
     assert changed == [] and result["limited"] and result["visited"] == 0
+
+
+@pytest.mark.parametrize("mode,service_uid,message", [
+    ("typo", "abc", "AGENT_ISOLATION: startup refused; valid values: off, on, required"),
+    ("required", "abc", "AGENT_ISOLATION_SERVICE_UID must be a positive numeric id"),
+])
+def test_remap_home_rejects_invalid_isolation_before_ownership_changes(monkeypatch, capsys, mode, service_uid, message):
+    monkeypatch.setenv("AGENT_ISOLATION", mode)
+    monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", service_uid)
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime, "load_startup_settings", lambda: pytest.fail("validate before home preparation"))
+    monkeypatch.setattr(runtime, "remap_home", lambda *a: pytest.fail("no ownership changes"))
+    monkeypatch.setattr(runtime, "repair_home_root_files", lambda *a: pytest.fail("no ownership repair"))
+    assert runtime.main(["remap-home", "--old-uid", "41001", "--old-gid", "41001",
+                         "--new-uid", "41002", "--new-gid", "41002"]) == 1
+    assert message in capsys.readouterr().err
 
 
 def test_remap_home_startup_repairs_as_root_before_drop(monkeypatch):
@@ -1941,7 +2073,15 @@ def _wait_for_idle():
         if sample["cpu_busy_percent"] < 10 and all(disk["busy_percent"] < 10 for disk in sample["disks"].values()):
             print(json.dumps({"phase": "guest-idle-baseline", **sample}))
             return
-    pytest.fail(f"No guest-idle interval within 60 seconds: {sample}")
+    pytest.skip(f"checkpoint lab precondition: No guest-idle interval within 60 seconds: {sample}")
+
+
+def test_checkpoint_busy_lab_is_an_explicit_precondition_skip(monkeypatch):
+    monkeypatch.setattr(runtime.time, "sleep", lambda _: None)
+    monkeypatch.setattr(sys.modules[__name__], "_host_counters", lambda: (100, 0, {}))
+    monkeypatch.setattr(sys.modules[__name__], "_host_delta", lambda *a: {"cpu_busy_percent": 90, "disks": {}})
+    with pytest.raises(pytest.skip.Exception, match="lab precondition.*No guest-idle interval"):
+        _wait_for_idle()
 
 
 def test_checkpoint_host_delta_reports_cpu_and_disk_work():
@@ -1959,8 +2099,18 @@ def _measured_checkpoint(db, phase):
     offset = logpath.stat().st_size
     before = _host_counters()
     started = time.monotonic()
+    outcome = "failed"
     try:
-        db.query("CHECKPOINT", admin=True)
+        # This is a lab observation, not the product's generic 10s SQL budget
+        # and not PostgreSQL's 30s FAST shutdown deadline. #350 measured a
+        # completed checkpoint at ~12s; bound the observation independently.
+        db.admin_script("CHECKPOINT", timeout=60)
+        outcome = "completed"
+    except runtime.RuntimeFailure as error:
+        if str(error) == "database command interrupted or timed out" and not runtime.STOP.is_set():
+            raise runtime.RuntimeFailure("lab checkpoint observation deadline (60s) exceeded; "
+                                         "not a PostgreSQL FAST shutdown deadline failure") from None
+        raise
     finally:
         # Only checkpoint timing lines: never SQL, client output or credentials.
         with logpath.open("rb") as stream:
@@ -1970,11 +2120,27 @@ def _measured_checkpoint(db, phase):
                    if re.search(r"LOG:  checkpoint (starting|complete):", line)]
         seconds = time.monotonic() - started
         print(json.dumps({"phase": phase, "seconds": seconds,
+                          "budget_kind": "lab-checkpoint-observation", "deadline_seconds": 60,
+                          "outcome": outcome,
                           "host": _host_delta(before, _host_counters(), seconds),
                           "load_average": os.getloadavg(), "checkpoint_log": timings}))
 
 
-def test_checkpoint_measurement_keeps_timeout_and_excludes_other_logs(tmp_path, capsys):
+def _measured_fast_shutdown(db):
+    import time
+    before, started = _host_counters(), time.monotonic()
+    outcome = "failed"
+    try:
+        db.close()  # The real SIGINT/30s wait/forced-stop path; no test override.
+        outcome = "completed"
+    finally:
+        seconds = time.monotonic() - started
+        print(json.dumps({"phase": "postgresql-fast-shutdown", "seconds": seconds,
+                          "deadline_seconds": 30, "outcome": outcome,
+                          "host": _host_delta(before, _host_counters(), seconds)}))
+
+
+def test_checkpoint_measurement_labels_lab_deadline_and_excludes_other_logs(tmp_path, capsys):
     db = Mock(pg=tmp_path)
     log = tmp_path / "server.log"
     log.write_text("previous log entry\n")
@@ -1985,19 +2151,38 @@ def test_checkpoint_measurement_keeps_timeout_and_excludes_other_logs(tmp_path, 
             stream.write("ERROR: synthetic-private-value\n")
         raise runtime.RuntimeFailure("database command interrupted or timed out")
 
-    db.query.side_effect = timeout
-    with pytest.raises(runtime.RuntimeFailure, match="timed out"):
+    db.admin_script.side_effect = timeout
+    with pytest.raises(runtime.RuntimeFailure, match="lab checkpoint observation deadline.*not.*FAST shutdown"):
         _measured_checkpoint(db, "test-timeout")
-    db.query.assert_called_once_with("CHECKPOINT", admin=True)
+    db.admin_script.assert_called_once_with("CHECKPOINT", timeout=60)
+    db.query.assert_not_called()
     output = json.loads(capsys.readouterr().out)
     assert output["seconds"] >= 0
     assert output["checkpoint_log"] == ["checkpoint starting: immediate force wait"]
     assert "synthetic-private-value" not in json.dumps(output)
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_fast_shutdown_measurement_preserves_real_deadline_failure(tmp_path, capsys, failed):
+    db = Mock(pg=tmp_path)
+    if failed:
+        db.close.side_effect = runtime.RuntimeFailure("PostgreSQL fast shutdown deadline exceeded; operator inspection required")
+        with pytest.raises(runtime.RuntimeFailure, match="fast shutdown deadline exceeded"):
+            _measured_fast_shutdown(db)
+    else:
+        _measured_fast_shutdown(db)
+    db.close.assert_called_once_with()
+    output = json.loads(capsys.readouterr().out)
+    assert output["phase"] == "postgresql-fast-shutdown"
+    assert output["deadline_seconds"] == 30
+    assert output["outcome"] == ("failed" if failed else "completed")
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("measurement", ["checkpoint", "fast-shutdown"])
 @pytest.mark.parametrize("writers", [0, 2], ids=["no-added-load", "disk-pressure"])
-def test_real_pg_checkpoint_timings(settings_factory, tmp_path, pg_enabled, writers):
-    """Opt-in bounded same-filesystem fsync pressure; keep the real 10s budget."""
+def test_real_pg_checkpoint_timings(settings_factory, tmp_path, pg_enabled, writers, measurement):
+    """Independent lab checkpoint and real FAST shutdown measurements under load."""
     if os.environ.get("CONTAINER_RUNTIME_TEST_PRESSURE") != "1":
         pytest.skip("requires explicit disk-pressure measurement opt-in")
     import selectors
@@ -2012,7 +2197,7 @@ block = b'x' * (1024 * 1024)
 started = time.monotonic()
 written = 0
 with path.open('wb', buffering=0) as stream:
-    while time.monotonic() - started < 60:
+    while time.monotonic() - started < 240:
         for _ in range(32):
             stream.write(block)
             written += len(block)
@@ -2035,10 +2220,19 @@ print(written, flush=True)
                 ready.register(child.stdout, selectors.EVENT_READ)
                 assert ready.select(timeout=10), "disk-pressure writer did not complete its first fsync"
                 assert child.stdout.readline().strip() == "ready"
-        for sample in range(3):
+        if measurement == "fast-shutdown":
+            # Leave dirty buffers for shutdown itself. A preceding manual
+            # CHECKPOINT would both clean them and gate the real deadline test.
             db.query("UPDATE checkpoint_probe SET value = reverse(value)")
             assert all(child.poll() is None for child in children), "disk-pressure producer exited early"
-            _measured_checkpoint(db, f"writers={writers},sample={sample}")
+            _measured_fast_shutdown(db)
+            assert not (db.data / "postmaster.pid").exists()
+            assert all(child.poll() is None for child in children), "disk-pressure producer exited before shutdown completed"
+        else:
+            for sample in range(3):
+                db.query("UPDATE checkpoint_probe SET value = reverse(value)")
+                assert all(child.poll() is None for child in children), "disk-pressure producer exited early"
+                _measured_checkpoint(db, f"writers={writers},sample={sample}")
     finally:
         for child in children:
             child.terminate()
