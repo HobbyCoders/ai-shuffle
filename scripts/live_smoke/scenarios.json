@@ -497,6 +497,14 @@
           "past_bug": "#436: every unseen historical worktree received a cold status scan, and idle file edits had no debounced status invalidation."
         },
         {
+          "id": "harness-basics.20",
+          "check": "Monitor viewer disconnect preserves its running shell",
+          "kind": "owner",
+          "how": "On a real candidate worker, start a throwaway chat and a long-running Monitor shell that prints a marker and waits for an explicit release file in its disposable folder. As the authenticated owner, open the read-only Monitor viewer, wait for the marker and repeatedly disconnect and reconnect it at least 50 times while the worker is busy. Include abrupt WebSocket closes overlapping an owner-auth recheck. Reattach and inspect the same task's status/output after each disconnect. With a second owner login available for cleanup, revoke the viewer's owner session while attached and confirm the connection closes. Inspect worker logs for every connection, then release only the throwaway shell and archive its chat; do not stop or restart the worker.",
+          "pass_when": "Every disconnect and reconnect leaves the original shell running with the same task id and readable backlog. Revocation closes the viewer with code 4001 without stopping that shell. Worker logs contain no teardown exception, CancelledError or leaked Monitor connection task for these connections. The explicit release ends the shell normally; a missing log inspection or fewer than 50 disconnects is not a pass.",
+          "past_bug": "#402: a disconnect followed by ASGI cancellation during Monitor child-task cleanup propagated a child CancelledError through WebSocket teardown."
+        },
+        {
           "id": "harness-basics.25",
           "check": "Large native cold-resume memory retention",
           "kind": "owner",
