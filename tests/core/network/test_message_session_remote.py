@@ -202,6 +202,15 @@ async def test_offline_worker_is_named_in_the_listing(workers, monkeypatch, kick
     call.assert_awaited_once()
 
 
+def test_in_process_discovery_does_not_use_wall_clock_budgets(workers, monkeypatch):
+    # Eligibility tests exercise signed control + SQL even with stale presence;
+    # executor/portal scheduling is not peer liveness. Dedicated deadline tests
+    # below re-enable budgets and assert cancellation and receipt semantics.
+    network(workers, monkeypatch)
+    assert orch.PEERS_TIMEOUT is None
+    assert orch.OFFLINE_PEERS_TIMEOUT is None
+
+
 @pytest.mark.parametrize("stale_fields", [
     {"is_active": False}, {"status": "archived"}, {"hidden": True},
     {"is_worker": True},
