@@ -304,9 +304,12 @@ async def test_revoked_expired_ack_loss_cannot_pin_transfer(peers: dict[str, Any
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_instance", [False, True], ids=["instance", "device-owned"])
 async def test_remote_watch_booked_usage_counts_on_both_workers(
     peers: dict[str, Any],
     tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_instance: bool,
 ) -> None:
     from app.core import assistant_limits
     from app.core.query_persistence import usage_settlement_key
@@ -314,6 +317,20 @@ async def test_remote_watch_booked_usage_counts_on_both_workers(
     from app.db import assistant_limits as limits_db
 
     sid = peers["session"]["id"]
+    if legacy_instance:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            assistant_service,
+            "_network",
+            lambda: SimpleNamespace(device_id=runners.self_device_id()),
+        )
+        with base.get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id=%s,owner_device_id=%s WHERE id=%s",
+                ("LegacyWorker", "dev_desktop", sid),
+            )
+        assert watches.owner_session(sid)["instance_id"] == "LegacyWorker"
     project = database.create_project(uuid4().hex, "Ordinary project", None, str(tmp_path))
     database.set_session_project(sid, project["id"])
     limits_db.update("DesktopWorker", {"daily_spend_limit_usd": 2})
@@ -339,6 +356,21 @@ async def test_remote_watch_booked_usage_counts_on_both_workers(
         await asyncio.to_thread(
             watches.assert_allowed, turn["payload"]["_assistant_proactive"], sid
         )
+    if legacy_instance:
+        # Device ownership wins in both directions: a matching instance cannot
+        # charge a chat which has since moved to another device.
+        with base.get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id=%s,owner_device_id=%s WHERE id=%s",
+                ("DesktopWorker", "dev_server", sid),
+            )
+        assert not assistant_service._owned_here(database.get_session(sid))
+        assert assistant_limits.status()["spent_today_usd"] == 0
+        with base.get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id=%s,owner_device_id=%s WHERE id=%s",
+                ("LegacyWorker", "dev_desktop", sid),
+            )
     with peers["on"]("dev_server"):
         await watch_manager.WatchManager().run_once()
         await watch_manager.WatchManager().run_once()
@@ -375,6 +407,33 @@ async def test_outbox_bounds_backlog_and_backs_off_only_failed_target(
     assert calls == ["dev_absent", "dev_healthy", "dev_healthy"]
     assert len(delivery.pending()) == 40
     assert not delivery.batch(16, ["dev_absent"])
+
+
+@pytest.mark.asyncio
+async def test_outbox_rotates_more_than_one_batch_of_continuously_backlogged_peers(
+    peers: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [f"dev_peer_{i:02d}" for i in range(20)]
+    calls: list[str] = []
+
+    async def call(worker: str, operation: str, **body: Any) -> dict[str, Any]:
+        calls.append(worker)
+        return {"acknowledged": True}
+
+    monkeypatch.setattr(placement, "call", call)
+    for pass_number in range(3):
+        # Every target has new pending work before every pass; successful early
+        # peers cannot starve the tail by immediately becoming eligible again.
+        delivery.enqueue(f"report-{pass_number}", targets, {"title": "Watch", "message": "matched"})
+        await watch_delivery.flush()
+        # Simulate losing dispatcher memory: fairness must survive restarts.
+        monkeypatch.setattr(watch_delivery, "_retry_after", {})
+    assert len(calls) == 3 * watch_delivery.REPORTS_PER_PASS
+    assert calls[:16] == targets[:16]
+    assert calls[16:20] == targets[16:]
+    assert set(calls[:32]) == set(targets)
+    assert all(calls.count(target) >= 2 for target in targets)
 
 
 @pytest.mark.asyncio

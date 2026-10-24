@@ -211,12 +211,13 @@ def _watch_turns(cursor: Any) -> dict[str, set[str]]:
     # receipts identify only the host-admitted watch commands, not owner turns
     # elsewhere in the same (possibly project-bound) creating chat.
     cursor.execute(
-        "SELECT t.session_id,t.id AS turn_id FROM watch_receipts r "
-        "JOIN turns t ON t.command_id=r.event_id AND t.source='watch' "
-        "JOIN sessions s ON s.id=t.session_id WHERE s.instance_id=%s",
-        (assistant_id(),),
+        "SELECT t.session_id,t.id AS turn_id,s.instance_id,s.owner_device_id,s.api_user_id "
+        "FROM watch_receipts r JOIN turns t ON t.command_id=r.event_id AND t.source='watch' "
+        "JOIN sessions s ON s.id=t.session_id",
     )
-    rows.extend(cursor.fetchall())
+    # Reuse admission's device-first predicate, including its standalone fallback.
+    # A matching legacy instance must not override another device's ownership.
+    rows.extend(row for row in cursor.fetchall() if service._owned_here(row))
     tracked: dict[str, set[str]] = {}
     for row in rows:
         if row["turn_id"]:

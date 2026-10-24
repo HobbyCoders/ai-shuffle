@@ -20,6 +20,9 @@ def create_schema(cursor: Any) -> None:
         event_id TEXT NOT NULL, target TEXT NOT NULL, body JSONB NOT NULL,
         acknowledged BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(event_id,target)
     )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS watch_notification_dispatch (
+        target TEXT PRIMARY KEY, attempted_at TIMESTAMPTZ NOT NULL
+    )""")
 
 
 def origin(watch_id: str) -> str | None:
@@ -107,17 +110,29 @@ def batch(limit: int, excluded: list[str]) -> list[dict[str, Any]]:
         if excluded:
             exclusion = " AND target NOT IN (" + ",".join(["%s"] * len(excluded)) + ")"
         c.execute(
-            "SELECT event_id,target,body FROM (SELECT event_id,target,body,"
+            "SELECT pending.event_id,pending.target,pending.body FROM (SELECT event_id,target,body,"
             " ROW_NUMBER() OVER (PARTITION BY target ORDER BY event_id) AS ordinal"
             " FROM watch_notification_outbox WHERE acknowledged=FALSE"
             + exclusion
-            + ") pending WHERE ordinal=1 ORDER BY target LIMIT %s",
+            + ") pending LEFT JOIN watch_notification_dispatch d ON d.target=pending.target"
+            " WHERE ordinal=1 ORDER BY d.attempted_at NULLS FIRST,pending.target LIMIT %s",
             (*excluded, limit),
         )
         return [
             dict(row, body=json.loads(row["body"]) if isinstance(row["body"], str) else row["body"])
             for row in c.fetchall()
         ]
+
+
+def mark_attempt(target: str) -> None:
+    """Persist peer scheduling progress even if a reply is lost or the worker restarts."""
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO watch_notification_dispatch(target,attempted_at) "
+            "VALUES (%s,CURRENT_TIMESTAMP) ON CONFLICT(target) "
+            "DO UPDATE SET attempted_at=excluded.attempted_at",
+            (target,),
+        )
 
 
 def acknowledge(event_id: str, target: str) -> None:

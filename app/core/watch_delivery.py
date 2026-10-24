@@ -296,6 +296,7 @@ async def flush() -> None:
                 _retry_after[key] = time.monotonic() + RETRY_SECONDS
                 try:
                     async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
+                        await run_sync(delivery.mark_attempt, row["target"])
                         if placement.local(row["target"]):
                             await run_sync(save_report, row["event_id"], row["body"])
                         else:
