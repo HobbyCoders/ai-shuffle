@@ -237,6 +237,9 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
+    from app.preview_run import initialize_preview_access
+    from app.db.async_database import run_sync
+    await run_sync(initialize_preview_access)
     # OWNER_PASSWORD seeds the owner password on first boot only; it is taken
     # out of the environment either way so agents never inherit it.
     from app.core import owner_auth

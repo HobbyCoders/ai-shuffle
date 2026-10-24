@@ -2310,6 +2310,21 @@
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
     "base_settings": false
   },
+  "SHUFFLE_PREVIEW_ACCESS_HOST": {
+    "kind": "internal",
+    "reason": "Disposable Linux preview launcher access-link address; never inherited from the worker",
+    "base_settings": false
+  },
+  "SHUFFLE_PREVIEW_ACCESS_TTL": {
+    "kind": "internal",
+    "reason": "Disposable Linux preview launcher token lifetime bounded by its parent/TTL lease",
+    "base_settings": false
+  },
+  "SHUFFLE_PREVIEW_HOST": {
+    "kind": "infra",
+    "reason": "Bind address of the token-only preview listener, independent of owner listeners",
+    "base_settings": false
+  },
   "SHUFFLE_PREVIEW_PORT": {
     "kind": "infra",
     "reason": "Port for isolated branch preview (also used by desktop preview tooling)",

@@ -180,7 +180,8 @@ def run(app, settings) -> None:
         try:
             wanted = configured_preview_port(os.environ, settings.port, remote_port)
             if wanted is not None:
-                preview = stack.enter_context(bind_listener(settings.host, wanted))
+                preview_host = os.environ.get("SHUFFLE_PREVIEW_HOST", settings.host)
+                preview = stack.enter_context(bind_listener(preview_host, wanted))
                 preview_port = preview.getsockname()[1]
                 sockets.append(preview)
         except (OSError, ValueError) as exc:
@@ -188,7 +189,7 @@ def run(app, settings) -> None:
                 "Agent preview listener is off: %s. Agents cannot open this worker's UI in their browser.", exc)
         from app.core import preview_access
 
-        preview_access.set_listener_port(preview_port, settings.host)
+        preview_access.set_listener_port(preview_port, preview_host if preview_port else None)
         config = uvicorn.Config(
             IngressApplication(app, local.getsockname()[1], remote.getsockname()[1], preview_port),
             host=settings.host,

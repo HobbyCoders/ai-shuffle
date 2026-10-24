@@ -687,6 +687,14 @@
           "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
         },
         {
+          "id": "harness-basics.branch-preview-remote-access",
+          "check": "Disposable branch preview admits a remote browser only with its access link",
+          "kind": "owner",
+          "how": "In a fresh branch checkout build the frontend and run python -m app.preview stamp. Under Monitor run python -m app.preview run --port 18080 --host 0.0.0.0 --browser-host <worker-IP> --ttl-seconds 300, using the IP reachable by the agent browser. Check the named port without a cookie and with a forged token; then open the printed preview-access link in the agent browser and load the stamped app. Confirm owner/protected sockets remain loopback-only. Let the TTL expire and check that the app and disposable PostgreSQL stop. Never copy installed worker data, keys or credentials.",
+          "pass_when": "The remote browser reaches the stamped branch app through the printed link. Missing/forged tokens are refused; only the new disposable access session grants a cookie, normal preview mutation/transport limits remain enforced, and the named port is not an unauthenticated owner listener. TTL teardown closes the app and cluster; a missing build or unexecuted browser path is not a pass.",
+          "past_bug": "#582: the Linux preview bound loopback, disabled its token-only listener and offered no access link for a remote agent browser."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",
