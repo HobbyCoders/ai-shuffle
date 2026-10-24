@@ -219,9 +219,20 @@ async def test_recipient_cwd_refusal_does_not_spawn(peers, monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bad_folder_preserves_source_and_recipient_consent_for_retry(peers, monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy_recipient", [False, True])
+async def test_bad_folder_preserves_source_and_recipient_consent_for_retry(peers, monkeypatch, tmp_path, legacy_recipient):
     from app.core.config import settings
     monkeypatch.setattr(settings, "workspace_dir", tmp_path)
+    original = control.call
+
+    async def recipient(device, action, body, **kwargs):
+        result = await original(device, action, body, **kwargs)
+        if legacy_recipient and action == "terminal" and "error" in result:
+            # Previous recipients preserve unused consent but omit this flag.
+            result["error"].pop("retryable", None)
+        return result
+
+    monkeypatch.setattr(control, "call", recipient)
     source = service.TerminalRegistry()
     request = SimpleNamespace(valid=True)
     target = await _approved()
