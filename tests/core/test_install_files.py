@@ -41,7 +41,7 @@ def test_compose_runs_a_pinned_release_image_never_a_build_or_moving_tag():
 def test_compose_carries_the_runtime_settings_the_image_needs():
     ai_shuffle = service()
     assert ai_shuffle["shm_size"] == "1gb"
-    assert ai_shuffle["stop_grace_period"] == "90s"
+    assert ai_shuffle["stop_grace_period"] == "120s"
     assert ai_shuffle["restart"] == "unless-stopped"
     targets = {volume.rsplit(":", 1)[1] for volume in ai_shuffle["volumes"]}
     assert targets == PERSISTENT

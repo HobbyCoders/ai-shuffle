@@ -103,7 +103,7 @@ The container has too little shared memory. Keep `shm_size: 1gb` in the compose 
 
 ## Stopping and the database
 
-- **The container takes a while to stop:** AI Shuffle needs up to 90 seconds to shut down cleanly. Do not kill it. With `docker run`, use `--stop-timeout 90`.
+- **The container takes a while to stop:** AI Shuffle needs up to 120 seconds to shut down cleanly. Do not kill it. With `docker run`, use `--stop-timeout 120`.
 - **The database does not start after a crash or a full disk:** stop the container, copy the whole `data` volume somewhere safe before changing anything, and email support.
 
 ## Sending logs to support

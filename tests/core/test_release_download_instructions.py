@@ -65,7 +65,7 @@ def test_docker_commands_pin_release_and_preserve_runtime_data():
     run = shlex.split(commands[1])
     assert run[:3] == ["docker", "run", "-d"]
     assert run[-1] == image
-    assert run[run.index("--stop-timeout") + 1] == "90"
+    assert run[run.index("--stop-timeout") + 1] == "120"
     assert run[run.index("--shm-size") + 1] == "1g"
     assert run[run.index("-p") + 1] == "127.0.0.1:8000:8000"
     mounts = [run[i + 1].split(":", 1)[1] for i, arg in enumerate(run) if arg == "-v"]
