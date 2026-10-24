@@ -113,10 +113,16 @@ export function searchSource(): SearchItem[] {
 			target: { category: 'models', item: 'voicecall' }
 		},
 		{
+			title: 'Generation catalog',
+			where: 'Default models, Catalog',
+			keywords: 'catalog all accounts workers verified price status favourite favorite chatgpt supergrok openai xai fal',
+			target: { category: 'models', item: 'catalog', tab: 'accounts' }
+		},
+		{
 			title: 'All fal.ai models',
 			where: 'Default models, Catalog',
 			keywords: 'catalog browse fal models refresh pin image editing image to video image to 3d audio to audio speech to text',
-			target: { category: 'models', item: 'catalog' }
+			target: { category: 'models', item: 'catalog', tab: 'fal' }
 		}
 	];
 }
