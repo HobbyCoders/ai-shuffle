@@ -1,5 +1,6 @@
 """A prose workflow must remain a proposal until the local owner approves it."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -40,7 +41,7 @@ async def test_synthesizer_queues_grounded_prose_without_installing(tmp_path, mo
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
     systems = []
 
-    async def complete(prompt, system):
+    async def complete(prompt: str, system: str) -> tuple[str, dict[str, int]]:
         systems.append(system)
         assert "workflow accepted: fixture-summary" in prompt
         return output(), {}
@@ -73,9 +74,11 @@ async def test_workflow_prompt_only_after_repeated_user_acceptance(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_separate_session_synthesis_passes_leave_workflow_proposals_inert(tmp_path, monkeypatch):
-    # Known partial feature: each normal session drains its own slice, so the
-    # next pass has no retained accepted episode to ground repeated learning.
+async def test_separate_session_synthesis_passes_queue_one_grounded_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each session drains its own slice. Only bounded workflow evidence, not
+    # consumed memory inputs, may be reused on the next acceptance receipt.
     from fluid.codemode.workflows import WorkflowProposals
     cwd = tmp_path / "project"
     cwd.mkdir()
@@ -83,18 +86,33 @@ async def test_separate_session_synthesis_passes_leave_workflow_proposals_inert(
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
     systems = []
 
-    async def complete(prompt, system):
+    async def complete(prompt: str, system: str) -> tuple[str, dict[str, int]]:
         systems.append(system)
         return (output() if "<workflow>JSON</workflow>" in system else ""), {}
 
     monkeypatch.setattr(synth, "_complete", complete)
-    for session in ("first", "second"):
-        await journal_success(store, cwd, session)
-        assert await synth._run_locked() == []
+    await journal_success(store, cwd, "first")
+    assert await synth._run_locked() == []
+    cursor = store.synth_cursor()
+    # A new learner/store instance must work from persisted journal/cursor,
+    # not an in-memory cache populated by session one.
+    store = SkillStore(store.root)
+    synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
+    monkeypatch.setattr(synth, "_complete", complete)
+    await journal_success(store, cwd, "second")
+    changed = await synth._run_locked()
+    assert len(changed) == 1 and changed[0].startswith("workflow-proposal:")
     assert len(systems) == 2
-    assert all("<workflow>JSON</workflow>" not in system for system in systems)
-    assert WorkflowProposals(store).list() == []
+    assert "<workflow>JSON</workflow>" not in systems[0]
+    assert "<workflow>JSON</workflow>" in systems[1]
+    row, = WorkflowProposals(store).list()
+    assert row["status"] == "pending"
+    assert [e["session"] for e in row["evidence"]] == ["first", "second"]
+    assert all(e["sha256"] and len(e["entries"]) == 4 for e in row["evidence"])
+    assert store.synth_cursor() > cursor
     assert not (cwd / ".fluid" / "skills").exists()
+    assert await synth._run_locked() == []  # no extra model call, no replay
+    assert len(systems) == 2
 
 
 @pytest.mark.asyncio
@@ -125,10 +143,15 @@ async def propose(tmp_path):
     cwd = tmp_path / "project"
     cwd.mkdir()
     store = SkillStore(tmp_path / "store")
-    await journal_success(store, cwd, "first")
-    await journal_success(store, cwd, "second")
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
-    await synth._apply(output(), store.journal_entries())
+    async def complete(prompt: str, system: str) -> tuple[str, dict[str, int]]:
+        return (output() if "<workflow>JSON</workflow>" in system else ""), {}
+    synth._complete = complete
+    await journal_success(store, cwd, "first")
+    assert await synth._run_locked() == []
+    await journal_success(store, cwd, "second")
+    changed = await synth._run_locked()
+    assert len(changed) == 1 and changed[0].startswith("workflow-proposal:")
     queue = WorkflowProposals(store)
     row, = queue.list()
     return cwd, store, queue, row

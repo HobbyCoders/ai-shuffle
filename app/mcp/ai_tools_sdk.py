@@ -656,37 +656,17 @@ UNIFIED_TOOL_NAMES = {*UNIFIED_TOOL_KINDS, "searchModels", "runFalModel"}
 #   saved fal default is migrated into a remembered choice before the run,
 #   and an unreadable or unmigrated state must not fall back to an unguarded
 #   fal job with no known price, cap or confirmation.
-# - The only generation lane left is the ChatGPT-plan image tool (#1796): it
-#   runs on the subscription login and spends no per-item money.
+# - Subscription images also use the resolver: Included pricing still needs
+#   admission, a deliberate choice and the daily-cap check.
 # - runFalModel uses its fal lane only to pin the guarded request to this
 #   worker, never to call the raw handler. Unsupported inputs are refused
 #   (interactive) or skipped and reported (unattended), not run unpriced.
 
 
 def _settings_lanes(legacy_tools: dict, tool_env: Optional[Dict[str, str]], fal_usable: bool) -> dict:
-    """``{name: (lane, handler)}`` for main's configured routes.
-
-    ``"chatgpt"`` is the ChatGPT-plan image tool (#1796), which needs no fal
-    key. ``"fal"`` pins ``runFalModel`` to this worker while a key is usable;
-    its raw handler is never called. The four unified generation tools never
-    get a fal lane (see above).
-    """
-    from app.core.provider import subscription_images as sub
-
-    subscription_image = sub.is_subscription_model(_configured_image_models(tool_env)[0])
-    lanes = {}
-    for name, legacy in legacy_tools.items():
-        if name == "generateImage" and subscription_image:
-            lanes[name] = ("chatgpt", legacy.handler)
-        elif fal_usable and name not in UNIFIED_TOOL_KINDS and name != "searchModels":
-            lanes[name] = ("fal", legacy.handler)
-    return lanes
-
-
-def _lane_label(tool_env: Optional[Dict[str, str]]) -> str:
-    from app.core.provider import subscription_images as sub
-
-    return sub.model_label(_configured_image_models(tool_env)[0]) + " on the ChatGPT plan"
+    """Pin guarded runFalModel to this worker; never admit raw generation."""
+    return {name: ("fal", legacy.handler) for name, legacy in legacy_tools.items()
+            if fal_usable and name not in UNIFIED_TOOL_KINDS and name != "searchModels"}
 
 
 def _compact_generation_option(option):
@@ -759,39 +739,25 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
     def plan_image_refusal(request):
         if normalize_source(request.get("source")) == "fal":
             return sub.fal_image_refusal()
-        if request.get("model") and normalize_source(request.get("source")) in (None, "chatgpt"):
+        # The verified native ChatGPT route calls its provider-default image
+        # model "default". Accept the card's exact ID, then let the resolver
+        # check account, schema, Included pricing and admission.
+        if (request.get("model") not in (None, "", "default")
+                and normalize_source(request.get("source")) in (None, "chatgpt")):
             return sub.refusal(request["model"], configured_image)
         return None
 
     def lane_for(name):
-        # A trusted stored/job choice outranks the Settings default.
-        kind = UNIFIED_TOOL_KINDS.get(name)
-        remembered = context.remembered_for(kind) if kind else context.remembered_choice
-        lane = None if context.job_choice or remembered else lanes.get(name)
-        # Main's fal handlers are never a generation tool's lane (see above).
-        return None if kind and lane and lane[0] != "chatgpt" else lane
+        return None if name in UNIFIED_TOOL_KINDS else lanes.get(name)
 
     def generation_tool(name, kind):
         legacy = {"video": {"duration": {"type": "integer"}, "aspect_ratio": {"type": "string"}},
                   "audio": {"duration": {"type": "number"}},
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
-        lane = lane_for(name)
         description = (f"Generate {kind}. No source/model: the user's saved choice, else they pick; never pick for them. "
                        "IDs/schema: searchModels. Unknown prices never run (unattended skips, interactive asks); "
                        "above-threshold spend needs an approved retry.")
-        if lane:
-            description += f" Here, omitting source/model uses the Settings default ({_lane_label(tool_env)})."
-
-        def main_args(request):
-            """The call as main's ChatGPT-plan image tool took it, or None."""
-            if any(request.get(key) not in (None, {}, False) for key in ("worker", "options", "confirmed", "confirmation_token")):
-                return None
-            # The configured plan model (or its tail) is accepted, as on main.
-            if normalize_source(request.get("source")) not in (None, "chatgpt") or sub.refusal(request.get("model"), configured_image):
-                return None
-            return {key: request[key] for key in ("prompt", "model") if request.get(key)}
-
         @tool(name, description, {
             "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
         }, annotations=_LARGE_RESULT_ANNOTATIONS)
@@ -803,10 +769,6 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                 refused = plan_image_refusal(request)
                 if refused:
                     return _tool_result(result("refused", reason="image_provider_restricted", error=refused))
-            fallback = main_args(request) if lane else None
-            if fallback is not None:
-                # The ChatGPT-plan image setting: main's path, unchanged.
-                return await lane[1](fallback)
             options = request.get("options", {})
             if not isinstance(options, dict):
                 return _tool_result(result("refused", error="options must be an object."))

@@ -38,9 +38,10 @@ The default response is at most 32 KiB of ASCII-escaped JSON; omitted results se
 request complete schemas and defaults. Choice cards still receive complete schemas.
 Media-related boolean switches such as `generate_audio` stay boolean, not file inputs.
 
-Every call to the four generation tools or `runFalModel` that can spend money
-goes through the guard below: a known price, confirmation above the threshold
-and the daily cap. Nothing unpriced is submitted, including unattended calls.
+Every call to the four generation tools or `runFalModel`, including subscription
+images priced **Included**, goes through the guard below: a known price,
+confirmation above the threshold and the daily cap. Nothing unpriced is
+submitted, including unattended calls.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -70,8 +71,9 @@ and the daily cap. Nothing unpriced is submitted, including unattended calls.
   is refused before submission, so no worker-local path is ever returned.
 - **ChatGPT-plan images.** While Image generation is set to the ChatGPT plan,
   `generateImage` keeps main's rule (#1796): no fal source or fal model, on
-  this worker or a peer, and no fal options in a choice card. The configured
-  plan model ID (or its model tail) is accepted as before. A worker that holds
+  this worker or a peer, and no fal options in a choice card. The legacy Settings
+  handler is never used by unified generation: choose a verified account/model
+  from the card or Catalog and remember it to run unasked. A worker that holds
   a fal key applies its own setting too: if its Image generation is the
   ChatGPT plan, it lists no fal image models for peers and refuses to run one.
 - **`runFalModel`** runs fal endpoints with a declared text prompt, including
@@ -88,9 +90,52 @@ and the daily cap. Nothing unpriced is submitted, including unattended calls.
 - **Native plan tools.** `GenerateNativeImage` and `GenerateNativeVideo` stay
   registered for sessions running on a verified ChatGPT or SuperGrok account.
 - **Stored Native generation settings** decide eligibility per account. A
-  `null` group is never offered or run. Unreadable stored JSON keeps the
+  `null` group is shown as unavailable and never run. Unreadable stored JSON keeps the
   verified image default and disables video; an account with no stored row keeps
   the provider defaults, including SuperGrok video.
+
+## Catalog and job-choice APIs
+
+`GET /api/v1/generation/catalog` returns `entries`, `favourites`, `kinds` and
+`limit`. Optional filters are `kind` (`image`, `video`, `audio`, `3d`), `source`,
+`model`, `query` and `limit` (1–50, default 15, per kind/source/holding worker).
+With no kind it queries all four. Use search filters to browse large fal catalogs;
+this is a bounded on-demand view, not a complete offline model inventory.
+Each entry contains `source`, `account`, `worker` (the holding worker ID),
+`model`, `kind`, `verified`, `available`, `reason`, `options`, `schema`,
+`quick_settings`, `price` and `status` (`available`, `unpriced`, `unavailable`).
+Prices retain `currency`, `unit`, decimal-string `amount`/`total` and `status`;
+unknown amounts are null, never zero. Native account-disabled routes remain
+visible with their verified combination and price but `available: false`.
+Ordinary API users see only their own permitted sources, not owner accounts.
+Catalog lookup submits no generation; a quote/admission must still recheck cost.
+
+`PUT /api/v1/generation/favourites/{kind}` accepts a choice directly
+(`source` or `account`, `model`, optional `worker`, `options`).
+`DELETE` clears it. There is one optional favourite per account/kind, returned
+in the catalog's `favourites` map. It is a bookmark only: it never updates
+remembered/last choices or authorizes unattended generation.
+
+For scheduled automation jobs, owner-only
+`GET /api/v1/generation/jobs/{automation_id}/choices` returns `job_id` and a
+per-kind `choices` map. `PUT .../choices/{kind}` stores a choice directly;
+it must pin `account`, `worker` and `model` (and may include `source`, `options`).
+`DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
+protection as preferences. Job choices are account-scoped preferences, separate
+from favourites and remembered picks. A run session's stored `automation_id`
+binds these choices in the production RunContext; tool arguments cannot invent
+a job binding. Each kind uses its job choice first, then its remembered choice.
+Unreadable job choices fail closed; current options, price and cap are checked
+at execution time, not assumed from the save.
+
+OpenAI/xAI API-key images remain unavailable until a reviewed live-probe record
+is added to `app/core/native_image_verification.py`. The initially empty table
+pins one exact image combination and explicit output/text-input USD rates per
+provider; it drives native settings, catalog eligibility, admission pricing and
+the official `images/generations` adapter. No subscription, custom gateway,
+redirect, automatic retry or other-provider fallback is used for these API calls.
+A table record is not evidence of access on every account: provider rejection
+still fails without a second submission. No paid probe is part of this change.
 
 ## Selection contract
 

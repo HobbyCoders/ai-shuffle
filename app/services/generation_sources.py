@@ -129,21 +129,30 @@ class Sources:
             capability = native.capabilities(provider_kind).get(kind) or {}
             combination = capability.get("verified_combination")
             if combination and capability.get("available"):
-                # The owner's stored settings decide; a disabled group is skipped.
+                # Disabled groups remain visible for the all-account catalog,
+                # but cannot be selected or submitted.
                 stored = await stored_native_group(account, kind)
-                if stored is None:
-                    continue
-                combination = stored.model_dump()
+                combination = stored.model_dump() if stored else combination
                 if model and combination["model"] != model:
+                    continue
+                if (query and query.casefold()
+                        not in f"{name} {account} {combination['model']}".casefold()):
                     continue
                 # Plan images carry no per-item charge on the verified route.
                 price = dict(INCLUDED_PRICE) if kind == "image" and name in ("chatgpt", "supergrok") else dict(UNKNOWN_PRICE)
+                if kind == "image" and name in ("openai", "xai"):
+                    from app.core.native_image_verification import verified
+                    price = verified(name).price(prompt)
                 if name == "supergrok" and kind == "video":
                     from app.core.provider.native_video import estimate_price
                     price = estimate_price(native.NativeVideoSettings(**combination))
-                entries.append(Candidate(name, account, worker, combination["model"], kind, True,
-                                         options={k: v for k, v in combination.items() if k != "model"},
-                                         schema=capability, price=price))
+                entries.append(Candidate(
+                    name, account, worker, combination["model"], kind, True,
+                    options={k: v for k, v in combination.items() if k != "model"},
+                    schema=capability, price=price, available=stored is not None,
+                    reason=None if stored else
+                    "Disabled in this account's Native generation settings.",
+                ))
             elif not model or source:
                 # Unsupported accounts are visible in discovery, but must not
                 # invent a match for a model explicitly named on another source.
@@ -203,7 +212,7 @@ class Sources:
         if "model" in options:
             raise ValueError("Pass the model separately, not in options.")
         values = {**options, "model": candidate.model}
-        kind = "grok" if candidate.source == "supergrok" else "chatgpt"
+        kind = "grok" if candidate.source == "supergrok" else candidate.source
         if await stored_native_group(candidate.account, candidate.kind) is None:
             raise ValueError("This kind is disabled in the account's Native generation settings.")
         try:
@@ -217,6 +226,11 @@ class Sources:
                 raise ValueError("No verified subscription route for this kind.")
         except ValueError:
             raise ValueError("Unsupported or not yet verified subscription combination.") from None
+        if candidate.source in ("openai", "xai"):
+            from app.core.native_image_verification import verified
+            return replace(
+                candidate, options=options, price=verified(candidate.source).price(prompt),
+            )
         return replace(candidate, options=options)
 
     async def reserve(self, candidate, context):
@@ -310,6 +324,11 @@ class Sources:
             return {**output, "video_url": f"/api/v1/artifacts/{artifact['hash']}/video.mp4?" + urlencode({"session_id": context.session_id})}
         if candidate.source == "supergrok":
             items, warning = await supergrok_images.generate(candidate.account, prompt, NativeImageSettings(**options))
+        elif candidate.source in ("openai", "xai"):
+            from app.core.provider import api_images
+            items, warning = await api_images.generate(
+                candidate.account, candidate.source, prompt, NativeImageSettings(**options),
+            )
         else:
             from fluid.messages import Message, Text
             from fluid.providers.base import ProviderRequest
