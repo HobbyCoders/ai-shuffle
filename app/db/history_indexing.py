@@ -274,15 +274,13 @@ def run_pass(
     *, seconds: float = 5.0, pause: float = 0.05, can_work: Callable[[], bool] = lambda: True,
 ) -> bool:
     """Yield between batches when a foreground turn needs the worker's I/O."""
-    if not can_work():
-        return False
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM system_settings WHERE key=%s "
                     "AND value IN ('building','ready')", (KEY,))
         if not cur.fetchone():
             return True  # Experimental: no online DDL or deferral without opt-in.
-    if not migrate():
+    if not can_work() or not migrate():
         return False
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:

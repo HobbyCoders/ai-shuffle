@@ -150,7 +150,9 @@ def test_handoff_producer_searches_after_durable_catchup(
         with pytest.raises(RuntimeError, match="interrupted promotion"):
             hi.promote_batch(rows=1)
     hi.promote_batch(rows=1)
-    # A fresh migrator invocation represents the restart boundary.
+    # Drop every connection/cursor, then resume exclusively from persisted state.
+    base.close_pool()
+    base.init_pool(min_conn=1, max_conn=6)
     finish_migration()
     for _ in range(20):
         if not hi.promote_batch(rows=2):

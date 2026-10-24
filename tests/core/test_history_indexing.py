@@ -18,7 +18,13 @@ def test_online_migration_cannot_open_a_database_outside_the_pool(
         hi.migrate()
 
 
-def test_active_turn_gate_prevents_background_work(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_active_turn_gate_prevents_background_work(
+    mock_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with hi.get_db() as conn:
+        conn.cursor().execute("INSERT INTO system_settings(key,value) VALUES (%s,'building')",
+                              (hi.KEY,))
+
     def forbidden_migration() -> bool:
         pytest.fail("migration ran while the worker had an active turn")
 
