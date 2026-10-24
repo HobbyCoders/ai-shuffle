@@ -45,13 +45,13 @@
 	const approvals: { data: ApprovalCardData; active?: boolean }[] = [
 		{ data: { ...base, request_id: 'a1', action: 'run `git push origin fix/attach-sheet`', asker: 'Release helper', status: 'pending' }, active: true },
 		{ data: { ...base, request_id: 'a2', action: 'delete `scratch/old-screens`', asker: 'Cleanup agent', status: 'pending' } },
-		{ data: { ...base, request_id: 'a3', action: 'restart the Unraid worker', asker: 'Ops agent', status: 'approved' } },
+		{ data: { ...base, request_id: 'a3', action: 'restart the build worker', asker: 'Ops agent', status: 'approved' } },
 		{ data: { ...base, request_id: 'a4', action: 'run `rm -rf build/`', status: 'declined', attempt: 2 } },
 		{ data: { ...base, request_id: 'a5', action: '', question: 'Send the weekly summary to the team?', status: 'expired' } },
 		{ data: { ...base, request_id: 'a6', action: 'open a pull request', asker: 'Docs agent', status: 'cancelled' } }
 	];
 	const outcomes = [
-		{ decision: 'approved', action: 'restart the Unraid worker', asker: 'Ops agent', request_id: 'a3' },
+		{ decision: 'approved', action: 'restart the build worker', asker: 'Ops agent', request_id: 'a3' },
 		{ decision: 'declined', action: 'run `rm -rf build/`', request_id: 'a4' },
 		{ decision: 'asked_again', action: 'run `git push origin fix/attach-sheet`', asker: 'Release helper', request_id: 'a1' }
 	];

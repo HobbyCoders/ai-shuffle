@@ -8,17 +8,17 @@ import base from '../vite.config.js';
 // beside the established chat surfaces, and the Attach a project sheet, on
 // fixture data. Every /api request is answered here; nothing reaches a worker.
 const PROJECTS = [
-	{ id: 'proj-shuffle', name: 'ai-shuffle', path: 'D:/Development/ai-shuffle' },
-	{ id: 'proj-cloud', name: 'hobbycoders-cloud', path: 'D:/Development/hobbycoders-cloud' },
-	{ id: 'proj-evrima', name: 'evrima-server-toolkit', path: 'D:/Development/evrima-server-toolkit' },
-	{ id: 'proj-site', name: 'site', path: 'D:/Development/site' },
-	{ id: 'proj-notes', name: 'notes', path: 'D:/Development/notes' },
-	{ id: 'proj-mods', name: 'isle-mods', path: 'D:/Development/isle-mods' },
-	{ id: 'proj-lab', name: 'homelab-scripts', path: 'D:/Development/homelab-scripts' }
+	{ id: 'proj-shuffle', name: 'ai-shuffle', path: '/work/ai-shuffle' },
+	{ id: 'proj-store', name: 'web-store', path: '/work/web-store' },
+	{ id: 'proj-game', name: 'game-server-tools', path: '/work/game-server-tools' },
+	{ id: 'proj-site', name: 'site', path: '/work/site' },
+	{ id: 'proj-notes', name: 'notes', path: '/work/notes' },
+	{ id: 'proj-mods', name: 'mod-pack', path: '/work/mod-pack' },
+	{ id: 'proj-lab', name: 'home-scripts', path: '/work/home-scripts' }
 ];
 const CLUSTER = {
 	projects: [
-		{ project_v2_id: 'v2-remote', origin: 'git@example.com:me/unraid-stack.git', name: 'unraid-stack', local_project_id: null, eligible: [{ id: 'unraid', online: true }] }
+		{ project_v2_id: 'v2-remote', origin: 'git@example.com:me/nas-stack.git', name: 'nas-stack', local_project_id: null, eligible: [{ id: 'nas', online: true }] }
 	]
 };
 
