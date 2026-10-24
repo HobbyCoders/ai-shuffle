@@ -57,6 +57,34 @@ def _windows_dacl_sddl(path) -> str:
         kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
 
 
+def _full_sid(trustee: str) -> str:
+    """An SDDL trustee in S-1-... form. SDDL writes well-known accounts as
+    aliases: a hosted runner's built-in Administrator is "LA"."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    advapi.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    sid, text = ctypes.c_void_p(), wintypes.LPWSTR()
+    if not advapi.ConvertStringSidToSidW(trustee, ctypes.byref(sid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        kernel.LocalFree(sid)
+
+
 def assert_private(path, *, directory=False):
     if os.name != "nt":
         assert path.stat().st_mode & 0o777 == (0o700 if directory else 0o600)
@@ -64,7 +92,10 @@ def assert_private(path, *, directory=False):
     # Protected ("P": nothing inherited), and exactly one allow ACE granting
     # this user full access (FA), inheritable by a directory's children only.
     inheritance = "OICI" if directory else ""
-    assert _windows_dacl_sddl(path) == f"D:P(A;{inheritance};FA;;;{_current_user_sid()})"
+    sddl = _windows_dacl_sddl(path)
+    prefix = f"D:P(A;{inheritance};FA;;;"
+    assert sddl.startswith(prefix) and sddl.endswith(")") and sddl.count("(") == 1, sddl
+    assert _full_sid(sddl[len(prefix):-1]) == _current_user_sid()
 
 
 def test_private_permissions_and_repeated_protection(tmp_path):
