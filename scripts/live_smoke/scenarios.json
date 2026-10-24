@@ -561,6 +561,14 @@
           "how": "On a disposable candidate install only, start a throwaway turn with provider usage and delayed cancellation cleanup plus several long-running background tasks. Stop the turn, repeat Stop while it unwinds, and confirm usage is booked. In a second turn, hold cleanup beyond the update grace and request Stop then update. Inspect the turn row, settlement notification, task records and elapsed stop time. Separately shut down the disposable install while a stop handler is delayed. Never restart or update a live worker for this check.",
           "pass_when": "Repeated Stop does not cancel nonterminal cleanup or lose usage. A force-cancelled execution records aborted with stop_reason worker_update and notifies settlement exactly once; an already terminal row keeps its original reason. Background stops start concurrently and the force-stop phase stays within one grace budget regardless of task count. Shutdown returns within its single 25-second budget even with a delayed stop handler; the disposable update proceeds without a stale busy refusal.",
           "past_bug": "#465: repeated stop cancelled usage booking, forced execute cancellation skipped terminal persistence and settlement callbacks, shutdown waited unboundedly before its timeout, and task force-stops accumulated per-task delays."
+        },
+        {
+          "id": "harness-basics.approval-self-gated-tools",
+          "check": "Tools with their own consent card ask once in an owner chat",
+          "kind": "owner",
+          "how": "On a disposable candidate install, in an owner chat with no project in Ask mode, on a Claude CLI model and again on a native-provider model: ask the agent to request access to a disposable SSH machine and to a disposable folder, approve each card, then have it run three commands on the machine, list and read the folder, and finally request screen control of Notepad. Repeat the commands and the screen request with the chat in Bypass. Save a Deny rule for RequestChatAccess on the agent and ask once more. Never use a production machine or the owner's saved connections.",
+          "pass_when": "In Ask no typed yes/no card appears before the private access card, the folder list/read, or the screen-control card; each command shows only the one-shot approval; the screen request shows one card and grants on its first approval. In Bypass each command and the screen request ask once with a typed yes/no card, and folder reads ask nothing. The saved Deny refuses the request with no card.",
+          "past_bug": "#527: RequestChatAccess and every chat-access call raised a typed yes/no before their own card or inside an approved grant."
         }
       ]
     }
