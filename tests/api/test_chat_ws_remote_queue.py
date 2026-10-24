@@ -67,6 +67,18 @@ async def test_late_queue_response_cannot_overwrite_new_watch(next_session):
     assert frames[0]["data"]["queued_messages"] == []
 
 
+@pytest.mark.parametrize("reply", [{}, {"queue_status": "available"},
+                                  {"queue_status": "available", "queued_messages": None,
+                                   "pending_peer_messages": []}])
+async def test_incomplete_owner_reply_is_unavailable(reply):
+    with _HandlerHarness() as h, patch.object(control, "owner_of", return_value="owner"), patch.object(
+        control, "call", new=AsyncMock(return_value=reply)):
+        await h.make_handler().handle_watch_session(dict(WATCH))
+    assert _queue_frames(h.ws)[0]["data"] == {
+        "queue_status": "unavailable", "queue_owner_device_id": "owner"}
+    h.queue_view.assert_not_called()
+
+
 async def test_owner_change_during_read_is_unavailable():
     with _HandlerHarness() as h, patch.object(control, "owner_of", side_effect=["owner", "new-owner"]), patch.object(
         control, "call", new=AsyncMock(return_value={"queue_status": "available", "queued_messages": [], "pending_peer_messages": []})):
