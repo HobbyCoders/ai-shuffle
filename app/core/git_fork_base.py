@@ -14,6 +14,7 @@ from app.core.git_worktree_ops import repo_worktree_lock
 
 logger = logging.getLogger(__name__)
 FETCH_TIMEOUT = 5
+CHAT_FETCH_TIMEOUT = 60
 FETCH_COALESCE_SECONDS = 10
 # Access for a key is serialized by that repository's worktree lock.
 _recent_fetches: dict[tuple[str, str], float] = {}
@@ -31,7 +32,8 @@ def _log_legacy_fetch() -> None:
     logger.warning("Git older than 2.29: checkout fetch uses compatible flags and may update FETCH_HEAD")
 
 
-def fetch_base(path: str, branch: str | None = None) -> tuple[str, bool]:
+def fetch_base(path: str, branch: str | None = None, *,
+               timeout: float | None = None) -> tuple[str, bool]:
     """Fetch only the requested/default origin branch, with bounded tree cleanup.
 
     Successful fetches coalesce for ten seconds under the repository lock. The
@@ -58,7 +60,7 @@ def fetch_base(path: str, branch: str | None = None) -> tuple[str, bool]:
             result = checkout_transfer._run(
                 path, "fetch", *flags, "origin",
                 f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
-                timeout=FETCH_TIMEOUT,
+                timeout=FETCH_TIMEOUT if timeout is None else timeout,
             )
             if result.returncode == 0:
                 now = time.monotonic()
@@ -74,13 +76,31 @@ def fetch_base(path: str, branch: str | None = None) -> tuple[str, bool]:
     return branch, False
 
 
+def caller_uses_default(path: str, default: str | None = None) -> bool:
+    """Only the default branch or an explicit origin/default tracking branch."""
+    default = default or git_service.get_default_branch(path)
+    branch = git_service._run_git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"], timeout=5)
+    if branch.returncode:
+        return False  # Detached/unknown callers must keep their own committed tip.
+    if branch.stdout.strip() == default:
+        return True
+    upstream = git_service._run_git(
+        path, ["rev-parse", "--symbolic-full-name", "@{upstream}"], timeout=5,
+    )
+    return upstream.returncode == 0 and upstream.stdout.strip() == f"refs/remotes/origin/{default}"
+
+
 def choose_worker_base(path: str, caller: str = "HEAD", *,
-                       base_commit: str | None = None) -> tuple[str, str]:
-    """Caller must hold the per-project lock; an explicit local commit wins."""
-    branch, fetched = fetch_base(path)
+                       base_commit: str | None = None,
+                       default_branch_caller: bool | None = None) -> tuple[str, str]:
+    """Caller holds the project lock; peers supply eligibility checked at source."""
     if base_commit is not None:
-        return base_commit, ("Explicit base_commit." if fetched else
-                             "Explicit base_commit; fetch-failed fallback.")
+        return base_commit, "Explicit base_commit."
+    if default_branch_caller is None:
+        default_branch_caller = caller_uses_default(path)
+    if not default_branch_caller:
+        return caller, "Caller HEAD; non-default caller branch."
+    branch, fetched = fetch_base(path)
     if not fetched:
         return caller, "Caller HEAD; fetch-failed fallback."
     remote = f"origin/{branch}"
