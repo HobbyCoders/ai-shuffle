@@ -33,12 +33,27 @@ def _emulator_tools_listed(monkeypatch):
 # of the no-Swarm sizing line, and the app-tools note maps Swarm onto its
 # bridged name: +441 chars (14,094 -> 14,535 on a local run of the fixture).
 # Swarm's schema stays deferred: the always-loaded bridge tools are unchanged.
-# WorkingRecord adds one deferred schema (792 chars). Current full measurement
-# is 130,017; eager/loaded budgets stay unchanged (no new eager tool).
-MEASURED_FULL = 130_017
+# WorkingRecord adds one deferred schema (792 chars); source provenance adds
+# 105 chars only to deferred DeployStatus docs (#495). Re-measured after merge:
+# full 130,122; eager/loaded budgets and the 1% allowance stay unchanged.
+MEASURED_FULL = 130_122
 MEASURED_EAGER = 52_573
 MEASURED_DELEGATED_APPEND = 14_716
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_source_provenance_guidance_is_bounded_and_not_duplicated(native):
+    compiled, catalog, _ = compile_fixture(native=native)
+    system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
+              if native else compiled.text)
+    docs = next(text for text, name in catalog if name.endswith("__DeployStatus"))
+    # Measured fixture 824 chars, with 1% allowance, including its unchanged schema.
+    assert len(docs) <= 824 * 101 // 100
+    combined = system + "\n\n" + "\n\n".join(text for text, _ in catalog)
+    phrase = "Before diagnosis, compare checkout HEAD/dirty with runtime revision"
+    assert combined.count(phrase) == 1
+    assert phrase not in compiled.text  # remains deferred on both legs
 
 
 def test_prompt_catalog_budget():
