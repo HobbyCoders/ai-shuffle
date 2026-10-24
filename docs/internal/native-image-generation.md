@@ -1,5 +1,35 @@
 # Native generation: images and video
 
+## Guarded compatibility aliases (#545)
+
+The registered `GenerateNativeImage` and `GenerateNativeVideo` names now enter
+`Resolver.generate` with the same trusted current-turn context and `Sources`
+backend as `generateImage` and `generateVideo`. Existing native grants and
+capability-based discovery remain intact; raw native handlers are transport
+helpers, not registered tool entry points. These native grants do not authorize
+fal generation, so the resolver excludes that source from their choices. The bound chat provider no longer
+implicitly selects a generation account. A remembered/job choice or an explicit
+interactive choice identifies the account/model/worker and its validated options.
+
+With no saved choice, interactive calls return the unified `choose` envelope and
+unattended calls skip. Unreadable choices, unavailable options, unknown prices,
+above-threshold confirmation and daily-cap exhaustion use the unified admission
+rules. Subscription images carry explicit Included pricing and still reserve
+against the daily cap; the verified SuperGrok video estimate remains $0.02, not
+free or unlimited. Approved retries accept `source`, `model`, `worker`, `options`,
+`confirmed` and the one-use `confirmation_token`. Legacy image fields
+`image_model`, `size`, `quality` and `format` adapt to the unified request;
+conflicting legacy/unified fields refuse instead of silently overriding a pick.
+
+The adapter submits only after admission and preserves unified structured result
+fields. Frontend alias choice/confirmation-card recognition is tracked separately;
+JSON parity does not establish rendered-card support (#550). The sections below describe
+the raw native transports and earlier verification history, not a bypass around
+these registered-tool admission rules. Live no-paid-submission follow-up:
+`harness-basics.native-generation-admission` in the live-smoke catalog.
+
+## Native transports and earlier verification
+
 `GenerateNativeImage` is exposed only on the Responses transport with a bound
 account whose Image capability is available. OpenAI/xAI API-key and no-account
 (including environment-key fallback) sessions lose the tool until verified.
