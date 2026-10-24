@@ -29,11 +29,17 @@ class _CommitWatchdog:
     def arm(self, fd: int, seconds: float) -> socket.socket:
         # Duplicate the descriptor so completion/expiry can never close a socket
         # that the OS has since reused. shutdown affects the original transport.
-        source = socket.socket(fileno=fd)
+        # libpq keeps its transport nonblocking. socket.socket.dup() calls
+        # settimeout(None) under the default timeout, making the shared transport
+        # blocking. Duplicate the raw socket instead (also supports Winsock).
+        # Wrapping it does not clear O_NONBLOCK; a non-None default timeout can
+        # only enable nonblocking mode, which libpq already requires.
+        duplicate_fd = socket.dup(fd)
         try:
-            duplicate = source.dup()
-        finally:
-            source.detach()
+            duplicate = socket.socket(fileno=duplicate_fd)
+        except BaseException:
+            socket.close(duplicate_fd)
+            raise
         with self._condition:
             self._pending[duplicate] = time.monotonic() + seconds
             if not self._started:
