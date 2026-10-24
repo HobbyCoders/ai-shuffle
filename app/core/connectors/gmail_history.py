@@ -54,7 +54,10 @@ def poll(
         )
         args: dict[str, Any] = dict(
             userId="me", maxResults=100, labelIds=labels,
-            q=("after:" + str(cursor["legacy_after"])) if cursor.get("legacy_after") else "is:unread",
+            q=(
+                ("after:" + str(cursor["legacy_after"]))
+                if cursor.get("legacy_after") else "is:unread"
+            ),
         )
         if cursor.get("legacy_page_token"):
             args["pageToken"] = cursor["legacy_page_token"]
