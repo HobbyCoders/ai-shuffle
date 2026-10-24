@@ -14,6 +14,7 @@ Three failure modes that used to lose data silently:
 import json
 import logging
 import os
+from typing import Any
 
 import pytest
 
@@ -163,7 +164,7 @@ def test_reap_aborts_when_a_line_lands_between_read_and_replace(
     real_rewrite = skills_mod._rewrite_dropping_prefix
     rewriting_journal = False
 
-    def rewrite_journal(*args, **kwargs):
+    def rewrite_journal(*args: Any, **kwargs: Any) -> bool:
         nonlocal rewriting_journal
         rewriting_journal = True
         try:
@@ -173,7 +174,7 @@ def test_reap_aborts_when_a_line_lands_between_read_and_replace(
 
     monkeypatch.setattr(skills_mod, "_rewrite_dropping_prefix", rewrite_journal)
 
-    def append_during_rewrite(fd):
+    def append_during_rewrite(fd: int) -> None:
         # Runs after reap has copied the journal into the temp file and
         # before it re-checks the size: the window a lock-ignoring writer
         # can hit.

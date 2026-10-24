@@ -1,5 +1,6 @@
 """A prose workflow must remain a proposal until the local owner approves it."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -40,7 +41,7 @@ async def test_synthesizer_queues_grounded_prose_without_installing(tmp_path, mo
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
     systems = []
 
-    async def complete(prompt, system):
+    async def complete(prompt: str, system: str) -> tuple[str, dict[str, int]]:
         systems.append(system)
         assert "workflow accepted: fixture-summary" in prompt
         return output(), {}
@@ -73,7 +74,9 @@ async def test_workflow_prompt_only_after_repeated_user_acceptance(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_separate_session_synthesis_passes_queue_one_grounded_workflow(tmp_path, monkeypatch):
+async def test_separate_session_synthesis_passes_queue_one_grounded_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Each session drains its own slice. Only bounded workflow evidence, not
     # consumed memory inputs, may be reused on the next acceptance receipt.
     from fluid.codemode.workflows import WorkflowProposals
@@ -83,7 +86,7 @@ async def test_separate_session_synthesis_passes_queue_one_grounded_workflow(tmp
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
     systems = []
 
-    async def complete(prompt, system):
+    async def complete(prompt: str, system: str) -> tuple[str, dict[str, int]]:
         systems.append(system)
         return (output() if "<workflow>JSON</workflow>" in system else ""), {}
 
@@ -141,7 +144,7 @@ async def propose(tmp_path):
     cwd.mkdir()
     store = SkillStore(tmp_path / "store")
     synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd))
-    async def complete(prompt, system):
+    async def complete(prompt: str, system: str) -> tuple[str, dict[str, int]]:
         return (output() if "<workflow>JSON</workflow>" in system else ""), {}
     synth._complete = complete
     await journal_success(store, cwd, "first")

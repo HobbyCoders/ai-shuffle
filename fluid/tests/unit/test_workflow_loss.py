@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import stat
 
 import pytest
@@ -19,8 +20,8 @@ from .test_workflow_proposals import journal_success, output
 
 @pytest.mark.asyncio
 async def test_reaped_correction_before_later_request_blocks_learning_and_promotion(
-    tmp_path, monkeypatch,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fluid.codemode import skills
     cwd = tmp_path / "project"
     cwd.mkdir()
@@ -64,7 +65,9 @@ async def test_reaped_correction_before_later_request_blocks_learning_and_promot
 
 
 @pytest.mark.asyncio
-async def test_unrelated_reap_keeps_complete_new_sessions_eligible(tmp_path, monkeypatch):
+async def test_unrelated_reap_keeps_complete_new_sessions_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fluid.codemode import skills
     store = SkillStore(tmp_path / "store")
     store.journal_context(session_id="old", project="old-project")
@@ -83,7 +86,9 @@ async def test_unrelated_reap_keeps_complete_new_sessions_eligible(tmp_path, mon
     assert len(evidence) == 8
 
 
-def test_loss_metadata_failure_preserves_journal_before_trim(tmp_path, monkeypatch):
+def test_loss_metadata_failure_preserves_journal_before_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fluid.codemode import skills, workflow_loss
     store = SkillStore(tmp_path)
     store.journal_context(session_id="first", project="fixture")
@@ -91,7 +96,7 @@ def test_loss_metadata_failure_preserves_journal_before_trim(tmp_path, monkeypat
         ToolJournal(store).record_event("user", text)
     store.set_synth_cursor(1)
     monkeypatch.setattr(skills, "JOURNAL_KEEP_ENTRIES", 1)
-    def fail(*args):
+    def fail(*args: object) -> None:
         raise OSError("fixture persistence failure")
     monkeypatch.setattr(workflow_loss, "_save", fail)
     assert store.reap_journal() == 0
@@ -100,7 +105,9 @@ def test_loss_metadata_failure_preserves_journal_before_trim(tmp_path, monkeypat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not support directory fsync")
-def test_directory_sync_failure_prevents_trim(tmp_path, monkeypatch):
+def test_directory_sync_failure_prevents_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fluid.codemode import skills, workflow_loss
     store = SkillStore(tmp_path)
     store.journal_context(session_id="first", project="fixture")
@@ -111,7 +118,7 @@ def test_directory_sync_failure_prevents_trim(tmp_path, monkeypatch):
     real_fsync = os.fsync
     synced_directories = []
 
-    def fail_directory_sync(descriptor):
+    def fail_directory_sync(descriptor: int) -> None:
         if stat.S_ISDIR(os.fstat(descriptor).st_mode):
             synced_directories.append(descriptor)
             raise OSError("fixture directory sync failure")
@@ -126,7 +133,7 @@ def test_directory_sync_failure_prevents_trim(tmp_path, monkeypatch):
     assert store.reap_journal() == 1  # retry must sync even unchanged loss bits
 
 
-def test_legacy_tail_is_not_assumed_complete(tmp_path):
+def test_legacy_tail_is_not_assumed_complete(tmp_path: Path) -> None:
     tmp_path.joinpath("journal.jsonl").write_text(json.dumps({
         "kind": "user", "text": "A later request", "project": "fixture", "session": "legacy",
     }) + "\n", encoding="utf-8")
@@ -136,7 +143,9 @@ def test_legacy_tail_is_not_assumed_complete(tmp_path):
 
 
 @pytest.mark.parametrize("contents", [None, "{}", '{"version": 1, "bits": "bad"}', "x" * 17000])
-def test_missing_or_corrupt_loss_metadata_fails_closed(tmp_path, contents):
+def test_missing_or_corrupt_loss_metadata_fails_closed(
+    tmp_path: Path, contents: str | None,
+) -> None:
     store = SkillStore(tmp_path)
     path = store.root / ".workflow-loss.json"
     if contents is None:
@@ -146,7 +155,7 @@ def test_missing_or_corrupt_loss_metadata_fails_closed(tmp_path, contents):
     assert session_lost(load_loss(store.root), "fixture", "any-session")
 
 
-def test_loss_filter_is_fixed_size_monotone_and_content_free(tmp_path):
+def test_loss_filter_is_fixed_size_monotone_and_content_free(tmp_path: Path) -> None:
     from fluid.codemode.workflow_loss import record_loss
     store = SkillStore(tmp_path)
     lines = []
