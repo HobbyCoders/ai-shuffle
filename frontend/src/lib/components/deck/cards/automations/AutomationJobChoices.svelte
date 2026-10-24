@@ -265,7 +265,7 @@
 	</p>
 
 	{#if loadState === 'loading'}
-		<p class="ajc-status" role="status" aria-live="polite">
+		<p class="ajc-status" aria-live="polite">
 			<span class="ajc-spinner" aria-hidden="true"></span>Reading this job's choices…
 		</p>
 	{:else if loadState === 'error'}
