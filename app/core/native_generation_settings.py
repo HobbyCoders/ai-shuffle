@@ -57,7 +57,7 @@ def _options(verified, locked=()):
 def capabilities(kind):
     if kind not in ("chatgpt", "grok", "openai", "xai"):
         raise ValueError("Unknown Native generation provider.")
-    defaults = _IMAGE_DEFAULTS.get(kind)
+    defaults = image_default(kind)
     xai = kind in ("grok", "xai")
     image_candidates = dict(model=["grok-imagine-image", "grok-imagine-image-2.0"] if xai else ["default"],
                             size=["1k", "2k"] if xai else ["auto"],
@@ -66,7 +66,7 @@ def capabilities(kind):
              "fields": {k: _options([defaults[k]] if defaults and defaults[k] is not None else [], values)
                         for k, values in image_candidates.items()},
              "verified_combination": defaults, "aspect_ratios": ["1:1"] if xai else ["auto"],
-             "route": "images/generations" if xai else "responses"}
+             "route": "images/generations" if kind in ("grok", "xai", "openai") else "responses"}
     video_fields = dict(model=["grok-imagine-video-1.5-lite"], duration=list(range(1, 16)),
                         resolution=["480p", "720p", "1080p"],
                         aspect_ratio=["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9", "5:2"],
@@ -86,9 +86,16 @@ def capabilities(kind):
     return {"image": image, "video": video}
 
 
+def image_default(kind):
+    from app.core.native_image_verification import verified
+
+    record = verified(kind)
+    return record.settings() if record else _IMAGE_DEFAULTS.get(kind)
+
+
 def validate(kind, value):
     """Image settings: only the verified combination, never arbitrary options."""
-    if kind not in _IMAGE_DEFAULTS or value.model_dump() != _IMAGE_DEFAULTS[kind]:
+    if image_default(kind) is None or value.model_dump() != image_default(kind):
         raise ValueError("Unsupported or not yet verified Native generation image options.")
     return value
 
@@ -133,7 +140,7 @@ def _validated_stored_groups(kind, data, defaults):
 
 def _load_with_status(provider_id):
     _, kind = _account(provider_id)
-    defaults = NativeGenerationSettings(image=_IMAGE_DEFAULTS.get(kind), video=_VIDEO_DEFAULT if kind == "grok" else None)
+    defaults = NativeGenerationSettings(image=image_default(kind), video=_VIDEO_DEFAULT if kind == "grok" else None)
     raw = database.get_system_setting(f"native_generation:{provider_id}")
     if raw is not None:
         try:

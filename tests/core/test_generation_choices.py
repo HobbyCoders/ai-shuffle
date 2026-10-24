@@ -10,6 +10,33 @@ OWNER = ("account", "origin#owner")
 OTHER = ("api_user", "user-b")
 
 
+@pytest.mark.parametrize("kind", choices.KINDS)
+def test_job_choices_and_favourites_are_account_isolated_and_never_default(kind):
+    from uuid import uuid4
+    job_id = str(uuid4())
+    pick = {"source": "fal", "account": "fal-ai", "worker": "w", "model": "m", "options": {}}
+    choices.set_favourite(OWNER, kind, pick)
+    choices.save_job(OWNER, job_id, kind, pick)
+    assert choices.load_job(OWNER, job_id) == {kind: pick}
+    assert choices.load_job(OTHER, job_id) == {}
+    assert choices.favourites(OTHER) == {}
+    assert choices.load(OWNER)["remembered"] == choices.load(OWNER)["last"] == {}
+    assert choices.favourites(OWNER) == {kind: pick}
+
+
+def test_unreadable_job_choice_fails_closed_in_production_context(monkeypatch):
+    from uuid import uuid4
+    from app.core import model_effort, query_options
+    job_id = str(uuid4())
+    monkeypatch.setattr(model_effort, "_caller_preference_identity", lambda row: OWNER)
+    choices.save(OWNER, "image", {"source": "fal", "model": "remembered"}, remember=True)
+    database.set_user_preference(*OWNER, choices._job_key(job_id, "image"), {"broken": True})
+    context = query_options._generation_context({"image_generation": True}, {"id": "s", "automation_id": job_id},
+                                                None, session_id="s", unattended=True)
+    assert context.choices_unreadable and not context.job_choices and not context.remembered_choices
+
+
+
 @pytest.fixture(autouse=True)
 def _db(mock_db, monkeypatch):
     from app.network import runners

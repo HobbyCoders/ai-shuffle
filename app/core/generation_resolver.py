@@ -55,6 +55,7 @@ class RunContext:
     # fields above take precedence for callers that bind one kind.
     remembered_choices: dict | None = None
     last_choices: dict | None = None
+    job_choices: dict | None = None
     # The account's saved choices could not be read (database, account service
     # or identity failure). Nothing saved is known, so nothing runs unasked:
     # an unattended run skips, an interactive one asks with the choice card.
@@ -191,8 +192,9 @@ class Resolver:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
             return result("refused", error="A nonempty prompt of at most 32000 characters is required.")
         remembered = context.remembered_for(kind)
-        stored = context.job_choice or remembered
-        from_memory = bool(remembered) and not context.job_choice
+        job = context.job_choice or (context.job_choices or {}).get(kind)
+        stored = job or remembered
+        from_memory = bool(remembered) and not job
         if context.unattended and not stored and context.choices_unreadable:
             return result("skipped", reason="choices_unreadable", kind=kind, message=UNREADABLE_SKIP_MESSAGE)
         if context.unattended and not stored:
@@ -225,7 +227,7 @@ class Resolver:
                 # An unreachable or old peer cannot make a named choice ambiguous
                 # when a usable candidate matches; it never runs either way.
                 candidates = [c for c in candidates if c.available]
-            if not candidates:
+            if not candidates and (stored or explicit):
                 if unasked and not context.unattended:
                     return await reoffer("remembered_unavailable")
                 return result("refused", reason="no_match", error="No matching source/account and model is available. No other source was used.")
@@ -265,10 +267,10 @@ class Resolver:
                                   message=CHOOSE_MESSAGE + UNREADABLE_CHOOSE_MESSAGE)
                 return result("choose", kind=kind, options=views, message=CHOOSE_MESSAGE)
             candidate = candidates[0]
-            if not candidate.available or (candidate.source in ("chatgpt", "supergrok") and not candidate.verified):
+            if not candidate.available or (candidate.source in ("chatgpt", "supergrok", "openai", "xai") and not candidate.verified):
                 if unasked and not context.unattended:
                     return await reoffer("remembered_unavailable")
-                return result("refused", price=candidate.price, reason="unavailable", error=candidate.reason or "Subscription combination is not verified.")
+                return result("refused", price=candidate.price, reason="unavailable", error=candidate.reason or "Native combination is not verified.")
             supplied = args.get("options", {})
             if not isinstance(supplied, dict):
                 return result("refused", error="options must be an object.")

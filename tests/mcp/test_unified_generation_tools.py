@@ -162,15 +162,53 @@ async def test_chat_mode_has_no_settings_default(monkeypatch):
     assert "Settings default" not in tools["generateImage"].description
 
 
-@pytest.mark.parametrize("args", [{"prompt": "tree"}, {"prompt": "tree", "source": "ChatGPT"}])
-async def test_chatgpt_plan_image_default_keeps_working(monkeypatch, args):
+@pytest.mark.parametrize("unattended", [False, True])
+@pytest.mark.parametrize("unreadable", [False, True])
+@pytest.mark.parametrize("empty_catalog", [False, True])
+async def test_chatgpt_setting_never_bypasses_choice_or_admission(monkeypatch, unattended, unreadable, empty_catalog):
     env = {"IMAGE_MODEL": "chatgpt-subscription"}
-    tools, backend, legacy = lane_tools(monkeypatch, [candidate(source="chatgpt", account="plan-a")], INTERACTIVE,
+    entries = [] if empty_catalog else [candidate(source="chatgpt", account="plan-a")]
+    context = replace(INTERACTIVE, unattended=unattended, choices_unreadable=unreadable)
+    tools, backend, legacy = lane_tools(monkeypatch, entries, context,
                                         lane="chatgpt", tool_env=env, names=("generateImage",))
-    output = payload(await tools["generateImage"].handler(args))
-    assert output["lane"] == "settings"
-    legacy.assert_awaited_once_with({"prompt": "tree"})
-    assert "ChatGPT plan" in tools["generateImage"].description
+    backend.cap = False
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    assert output["status"] == ("skipped" if unattended else "choose")
+    if unattended:
+        assert output["reason"] == ("choices_unreadable" if unreadable else "no_stored_choice")
+    legacy.assert_not_awaited()
+    assert backend.calls == []
+    assert "Settings default" not in tools["generateImage"].description
+
+
+@pytest.mark.parametrize("cap", [False, True])
+@pytest.mark.parametrize("unattended", [False, True])
+async def test_chatgpt_included_choice_checks_cap_before_execution(monkeypatch, cap, unattended):
+    from app.core.generation_resolver import INCLUDED_PRICE
+    entry = replace(candidate(source="chatgpt", account="plan-a"), price=dict(INCLUDED_PRICE))
+    context = replace(INTERACTIVE, unattended=unattended, remembered_choice=entry.choice())
+    tools, backend, legacy = lane_tools(monkeypatch, [entry], context, lane="chatgpt",
+                                        tool_env={"IMAGE_MODEL": "chatgpt-subscription"})
+    backend.cap = cap
+    output = payload(await tools["generateImage"].handler({"prompt": "tree"}))
+    assert output["price"] == INCLUDED_PRICE
+    assert output["status"] == ("completed" if cap else "refused")
+    assert ("reserve", "plan-a") in backend.calls
+    assert (("execute", "plan-a") in backend.calls) is cap
+    legacy.assert_not_awaited()
+
+
+
+
+async def test_chatgpt_choice_card_model_id_can_be_submitted_through_guard(monkeypatch):
+    from app.core.generation_resolver import INCLUDED_PRICE
+    entry = replace(candidate(source="chatgpt", account="plan-a", model="default"), price=dict(INCLUDED_PRICE))
+    tools, backend, legacy = lane_tools(monkeypatch, [entry], INTERACTIVE, lane="chatgpt",
+                                        tool_env={"IMAGE_MODEL": "chatgpt-subscription"})
+    output = payload(await tools["generateImage"].handler({"prompt": "tree", **entry.choice()}))
+    assert output["status"] == "completed" and output["price"] == INCLUDED_PRICE
+    assert [call[0] for call in backend.calls] == ["prepare", "reserve", "execute"]
+    legacy.assert_not_awaited()
 
 
 async def test_server_wires_chatgpt_plan_lane_without_fal(monkeypatch):
@@ -185,8 +223,9 @@ async def test_server_wires_chatgpt_plan_lane_without_fal(monkeypatch):
     sdk.create_ai_tools_server({"image_generation": True}, "unused-tools-dir", tool_env={"IMAGE_MODEL": "chatgpt-subscription"},
                                generation_context=UNATTENDED)
     image = next(t for t in captured if t.name == "generateImage")
-    assert payload(await image.handler({"prompt": "tree"}))["source"] == "chatgpt_subscription"
-    assert run.await_args.args[:2] == ("tree", "chatgpt-subscription")
+    output = payload(await image.handler({"prompt": "tree"}))
+    assert output["status"] == "skipped" and output["reason"] == "no_stored_choice"
+    run.assert_not_awaited()
 
 
 async def test_run_fal_model_keeps_non_text_models(monkeypatch):
@@ -325,12 +364,13 @@ async def test_plan_image_default_choose_card_never_offers_fal(monkeypatch):
 @pytest.mark.parametrize("configured,model", [("chatgpt-subscription", "chatgpt-subscription"),
                                               ("chatgpt-subscription/gpt-image-1", "chatgpt-subscription/gpt-image-1"),
                                               ("chatgpt-subscription/gpt-image-1", "gpt-image-1")])
-async def test_configured_plan_model_argument_runs_as_on_main(monkeypatch, configured, model):
+async def test_unresolved_legacy_plan_model_is_not_a_handler_bypass(monkeypatch, configured, model):
     env = {"IMAGE_MODEL": configured}
     tools, backend, legacy = lane_tools(monkeypatch, [], INTERACTIVE, lane="chatgpt", tool_env=env, names=("generateImage",))
     output = payload(await tools["generateImage"].handler({"prompt": "tree", "model": model}))
-    assert output["lane"] == "settings"
-    legacy.assert_awaited_once_with({"prompt": "tree", "model": model})
+    assert output["status"] == "refused" and output["reason"] == "no_match"
+    legacy.assert_not_awaited()
+    assert backend.calls == []
 
 
 async def test_old_peer_does_not_make_a_named_request_ambiguous(monkeypatch):
@@ -479,7 +519,7 @@ def test_generation_tools_never_get_a_fal_lane():
     assert set(sdk._settings_lanes(legacy, {"IMAGE_MODEL": "fal-ai/flux/dev"}, False)) == set()
     # The ChatGPT-plan image setting is a provider rule (#1796), never migrated away.
     plan = sdk._settings_lanes(legacy, {"IMAGE_MODEL": "chatgpt-subscription"}, False)
-    assert plan == {"generateImage": ("chatgpt", legacy["generateImage"].handler)}
+    assert plan == {}  # Included images must also pass through admission.
 
 
 async def test_unspecified_interactive_request_without_a_saved_setting_shows_the_card(monkeypatch):
