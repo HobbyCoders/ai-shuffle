@@ -762,6 +762,14 @@
           "past_bug": "#583: new starts increased load during sustained database pressure instead of waiting for recovery."
         },
         {
+          "id": "harness-basics.db-recall-after-commit",
+          "check": "Large history recall stays responsive after pooled commits",
+          "kind": "owner",
+          "how": "On a disposable candidate with synthetic history only, create a throwaway chat containing multi-megabyte tool output and a unique recall marker. Complete another turn to exercise pooled commits, then recall and view the marker from a second throwaway chat. Repeat after a bounded deferred-commit timeout on the disposable database. Record recall completion, pool recovery and PostgreSQL wait state if anything stalls; archive only the throwaway chats.",
+          "pass_when": "Recall and transcript reads complete without idle-in-transaction/ClientRead stalls. Normal pooled commits preserve libpq's nonblocking transport; an expired commit still disconnects without retry, and subsequent reads use a healthy connection. Without running the candidate chats this row remains unverified, not a pass.",
+          "past_bug": "#630: socket.socket.dup() made libpq's shared transport blocking after bounded commits, stalling large history queries."
+        },
+        {
           "id": "harness-basics.db-stall-deadlines",
           "check": "DB stalls are bounded without a worker restart",
           "kind": "owner",
