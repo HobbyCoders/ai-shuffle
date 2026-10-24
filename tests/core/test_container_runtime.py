@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Callable
 from unittest.mock import Mock
 
 import pytest
@@ -851,7 +852,11 @@ def test_supervisor_hardening_really_clears_dumpable(allow, expected):
 
 
 @pytest.mark.parametrize("deadline_exceeded", [False, True])
-def test_fast_shutdown_budget_and_failure_fence(settings_factory, monkeypatch, deadline_exceeded):
+def test_fast_shutdown_budget_and_failure_fence(
+    settings_factory: Callable[..., Settings],
+    monkeypatch: pytest.MonkeyPatch,
+    deadline_exceeded: bool,
+) -> None:
     import signal
     import subprocess
     db = runtime.Database(settings_factory())
@@ -877,7 +882,9 @@ def test_fast_shutdown_budget_and_failure_fence(settings_factory, monkeypatch, d
     finally:
         runtime.STOP.clear()
     db.process.send_signal.assert_called_once_with(signal.SIGINT)
-    assert [call.kwargs for call in db.process.wait.call_args_list] == [{"timeout": 60}, {"timeout": 5}]
+    assert [call.kwargs for call in db.process.wait.call_args_list] == [
+        {"timeout": 60}, {"timeout": 5},
+    ]
     assert signals == [(db.process, signal.SIGKILL)]
     assert all(endpoint.exists() == deadline_exceeded for endpoint in endpoints)
     db.pg_log.close.assert_called_once_with()
@@ -2212,7 +2219,7 @@ def test_fast_shutdown_measurement_preserves_real_deadline_failure(tmp_path, cap
     log = tmp_path / "server.log"
     log.write_text("previous log entry\n")
 
-    def close():
+    def close() -> None:
         with log.open("a") as stream:
             stream.write("LOG:  checkpoint starting: shutdown immediate\n")
             stream.write("ERROR: synthetic-private-value\n")
@@ -2229,7 +2236,9 @@ def test_fast_shutdown_measurement_preserves_real_deadline_failure(tmp_path, cap
     assert output["phase"] == "postgresql-fast-shutdown"
     assert output["deadline_seconds"] == 60
     assert output["outcome"] == ("failed" if failed else "completed")
-    assert output["checkpoint_log"] == ([] if failed else ["checkpoint starting: shutdown immediate"])
+    assert output["checkpoint_log"] == (
+        [] if failed else ["checkpoint starting: shutdown immediate"]
+    )
     assert "synthetic-private-value" not in json.dumps(output)
 
 
