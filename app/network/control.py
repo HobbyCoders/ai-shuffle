@@ -926,7 +926,22 @@ async def _hydrate(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     return {"published": published}
 
 
+async def _queue_view(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """Read-only queue projection; never materialize peer turns on a mirror."""
+    from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view
+
+    session_id = str(body.get("session_id") or "")
+    await run_sync(_require_owned, session_id)
+    queue = await run_sync(_v2_queue_view, session_id)
+    peers = await run_sync(_v2_peer_queue_view, session_id)
+    # A move during the read invalidates this worker's authority.
+    await run_sync(_require_owned, session_id)
+    return {"queue_status": "available", "queued_messages": queue,
+            "pending_peer_messages": peers}
+
+
 _HANDLERS = {
+    "queue-view": _queue_view,
     "turns": _turns,
     "compact-first": _turns,
     "sessions": _sessions,

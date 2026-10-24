@@ -302,7 +302,8 @@ async def test_watch_session_restores_nonempty_queue():
         "type": "sync",
         "event_type": "queue_updated",
         "session_id": "sess-1",
-        "data": {"queued_messages": [{"id": "q1", "content": "later"}], "pending_peer_messages": []},
+        "data": {"queued_messages": [{"id": "q1", "content": "later"}], "pending_peer_messages": [],
+                 "queue_status": "available", "queue_owner_device_id": None},
     }]
     assert h.ws.sent[0]["_seq"] == 1
 
@@ -322,7 +323,8 @@ async def test_watch_session_queue_hydrates_from_v2_turns_view():
         "type": "sync",
         "event_type": "queue_updated",
         "session_id": "sess-1",
-        "data": {"queued_messages": [{"id": "t-1", "content": "later"}], "pending_peer_messages": []},
+        "data": {"queued_messages": [{"id": "t-1", "content": "later"}], "pending_peer_messages": [],
+                 "queue_status": "available", "queue_owner_device_id": None},
     }]
 
 
@@ -332,14 +334,14 @@ async def test_watch_session_empty_queue_sends_complete_empty_snapshot():
 
     assert _queue_frames(h.ws) == [{
         "type": "sync", "event_type": "queue_updated", "session_id": "sess-1",
-        "data": {"queued_messages": [], "pending_peer_messages": []},
+        "data": {"queued_messages": [], "pending_peer_messages": [],
+                 "queue_status": "available", "queue_owner_device_id": None},
     }]
 
 
 @pytest.mark.parametrize("failed_view", ["queue_view", "peer_queue_view"])
-async def test_watch_session_queue_load_failure_still_registers_silently(failed_view):
-    """Closure parity: a DB failure loading the queue is swallowed — the watch
-    registration stands, and neither a queue frame nor an error frame is sent."""
+async def test_watch_session_queue_load_failure_reports_unavailable(failed_view):
+    """Registration stands, but unknown queue state is explicitly not empty."""
     with _HandlerHarness() as h:
         getattr(h, failed_view).side_effect = RuntimeError("db down")
         handler = h.make_handler()
@@ -347,7 +349,9 @@ async def test_watch_session_queue_load_failure_still_registers_silently(failed_
 
     h.sync.register_device.assert_awaited_once()
     assert handler.current_session_id == "sess-1"
-    assert _queue_frames(h.ws) == []
+    assert _queue_frames(h.ws)[0]["data"] == {
+        "queue_status": "unavailable", "queue_owner_device_id": None,
+    }
     assert _errors(h.ws) == []
 
 

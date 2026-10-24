@@ -150,7 +150,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
             created = created.isoformat()
         rows.append({
             "id": turn["id"],
-            **({"client_message_id": turn["command_id"]} if _valid_client_message_id(turn.get("command_id")) else {}),
+            **({"command_id": turn["command_id"], "client_message_id": turn["command_id"]}
+               if _valid_client_message_id(turn.get("command_id")) else {}),
             "session_id": session_id,
             "content": turn.get("prompt") or "",
             "profile_id": turn.get("profile_id"),
@@ -170,7 +171,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
         held_at = held.get("held_at")
         rows.append({
             "id": held.get("id"),
-            **({"client_message_id": held["command_id"]} if _valid_client_message_id(held.get("command_id")) else {}),
+            **({"command_id": held["command_id"], "client_message_id": held["command_id"]}
+               if _valid_client_message_id(held.get("command_id")) else {}),
             "session_id": session_id,
             "content": held.get("prompt") or "",
             "profile_id": held.get("profile_id"),
@@ -2227,22 +2229,51 @@ class ChatWebSocketHandler:
         # they remain in the DB and still fire when the turn
         # ends. Mirror the queue_updated event emitted by the
         # queue_message / remove / clear handlers.
+        from app.network import control
+
+        # A mirror has no executable turns. Read through the same authenticated
+        # owner relay as remote sends, never mistake our empty table for its queue.
+        generation = getattr(self, "_queue_watch_generation", 0) + 1
+        self._queue_watch_generation = generation
+        owner = None
         try:
-            watch_queue = await run_sync(_v2_queue_view, session_id)
-            peer_queue = await run_sync(_v2_peer_queue_view, session_id)
+            row = await run_sync(database.get_session, session_id)
+            if row is None:
+                raise LookupError("Unknown session")
+            owner = control.owner_of(row)
+            if owner:
+                snapshot = await control.call(owner, "queue-view", {"session_id": session_id})
+                if (snapshot.get("queue_status") != "available"
+                        or not isinstance(snapshot.get("queued_messages"), list)
+                        or not isinstance(snapshot.get("pending_peer_messages"), list)):
+                    raise ValueError("Owner did not return a queue snapshot")
+            else:
+                snapshot = {
+                    "queued_messages": await run_sync(_v2_queue_view, session_id),
+                    "pending_peer_messages": await run_sync(_v2_peer_queue_view, session_id),
+                    "queue_status": "available",
+                }
+            current = await run_sync(database.get_session, session_id)
+            if current is None or control.owner_of(current) != owner:
+                raise ValueError("Queue owner changed during watch")
         except Exception as exc:
             logger.warning(
                 f"[Queue] Failed to load queued messages for "
                 f"{session_id} on watch: {exc}"
             )
-            # Unknown state is not an empty queue; keep existing pending rows
-            # until hydration succeeds or a real delivery event reconciles them.
+            # Deliberately OMIT both arrays: unavailable is not an authoritative
+            # empty snapshot. Clients retain cached chips and can re-watch to retry.
+            snapshot = {"queue_status": "unavailable"}
+        snapshot["queue_owner_device_id"] = owner
+        # A slow peer response must not overwrite a later switch or reconnect.
+        if (self.current_session_id != session_id
+                or self._queue_watch_generation != generation):
             return
         await self.send_json({
             "type": "sync",
             "event_type": "queue_updated",
             "session_id": session_id,
-            "data": {"queued_messages": watch_queue, "pending_peer_messages": peer_queue},
+            "data": snapshot,
         })
 
     # ------------------------------------------------------------------
