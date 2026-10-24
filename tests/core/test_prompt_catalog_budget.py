@@ -192,8 +192,12 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    assert len(specs) == 110  # WorkingRecord and the four deferred owner-watch tools.
-    for leaf in ("CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord"):
+    # generationPreferences adds one deferred schema to main's 110; budgets stay unchanged.
+    assert len(specs) == 111
+    for leaf in (
+        "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
+        "generationPreferences",
+    ):
         spec = next(s for s in specs if s.name.rsplit("__", 1)[-1] == leaf)
         assert spec.description not in compiled.text
     assert first["totals"]["compiled_eager"] < first["totals"]["combined_full"]
@@ -201,6 +205,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     # Discovery remains available; full schemas remain measurable on demand.
     assert any(s.name == "ToolSearch" for s in specs)
     assert any(name == "mcp__app-config__createAutomation" for _, name in catalog)
+    assert any(name == "mcp__app-config__generationPreferences" for _, name in catalog)
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
