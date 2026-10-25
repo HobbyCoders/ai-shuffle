@@ -238,6 +238,16 @@ def question_carry(target):
     return int(capabilities.get("move_questions") or 0) >= 1
 
 
+def plain_folder_carry(target: str) -> bool | None:
+    """Whether ``target`` moves a project folder without Git (#639); None until known."""
+    from app.network import runners
+
+    capabilities = (runners.find(target) or {}).get("capabilities") or {}
+    if not capabilities:
+        return None
+    return int(capabilities.get("handoff_plain_folder") or 0) >= 1
+
+
 def carries_wakes(target):
     return wake_carry(target) is True
 
@@ -555,6 +565,40 @@ BUSY_CHECKOUT = ("Another session is working in this checkout or on this branch.
                  "Wait for it to finish before moving this session.")
 UNVERIFIED_CHECKOUT = ("Cannot verify which sessions use this checkout or branch. "
                        "The session was not moved.")
+# A project folder without Git moves its history only (#639). Both workers must
+# see a plain folder; one Git checkout and one plain folder cannot be reconciled.
+PLAIN_MISMATCH = ("This project's folder is a Git repository on one worker but not on the "
+                  "other. Use the same kind of folder on both workers, then move again; "
+                  "ownership has not moved.")
+PLAIN_OWNER_UPDATE = ("Update the owning worker to move a session whose project folder is "
+                      "not a Git repository; ownership has not moved.")
+PLAIN_UNKNOWN = ("Cannot tell whether this project's folder is a Git repository; "
+                 "ownership has not moved.")
+
+
+def _plain_folder(path: str) -> bool:
+    """True only when ``path`` is positively not in a Git repository (#639).
+
+    Uses the Git toolbar's classifier: a failed probe (dubious ownership,
+    unreadable or corrupt metadata, Git missing or timing out) never reads as
+    plain, so it cannot authorize a history-only move. Raises ``ValueError``.
+    """
+    import subprocess
+
+    from app.api.git_owner import _is_plain_project_folder
+
+    try:
+        return bool(_is_plain_project_folder(path))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(PLAIN_UNKNOWN) from exc
+
+
+def _known_plain(path: str) -> bool:
+    """Like :func:`_plain_folder`, but a doubtful folder is simply not plain."""
+    try:
+        return _plain_folder(path)
+    except ValueError:
+        return False
 
 
 def _bound_branch(row):
@@ -732,11 +776,16 @@ def _lease(cur, sid, target, token):
     return dict(row)
 
 
-def begin(sid, target, remote=None, note=None, wake_barrier=False):
-    """Owner: export the chat for ``target``. ``note`` travels with its history."""
+def begin(sid, target, remote=None, note=None, wake_barrier=False, plain: bool = False):
+    """Owner: export the chat for ``target``. ``note`` travels with its history.
+
+    ``plain`` is the receiver's request to move a project whose folder is not a
+    Git repository: history only, after this worker confirms its own folder is
+    not one either (#639).
+    """
     timing = _Timing("export", sid)
     try:
-        reply = _begin(sid, target, remote, note, wake_barrier, timing)
+        reply = _begin(sid, target, remote, note, wake_barrier, timing, plain)
     except BaseException:
         # Admission refusals are already logged by the control boundary. Still
         # cancel the progress timer, but don't add a second "failed: no steps".
@@ -746,21 +795,38 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
     return reply
 
 
-def _begin(sid, target, remote, note, wake_barrier, timing):
+def _begin(sid, target, remote, note, wake_barrier, timing, plain: bool = False):
     control._require_owned(sid)
     session = database.get_session(sid)
     project = project_resolver.resolve_project_v2(session)
     branch = project_resolver._effective_branch(session)
-    # Project-less (plain chat) sessions move their history only.
+    # Project-less (plain chat) sessions and project folders without Git move
+    # their history only.
     cwd = None
-    if project:
+    plain = bool(project and plain)
+    if plain:
+        cwd = project_resolver.resolve_existing_cwd(session)
+        if not cwd:
+            raise ValueError("The owning worker no longer has this project's folder; "
+                             "ownership has not moved.")
+        if not _plain_folder(cwd):
+            raise ValueError(PLAIN_MISMATCH)
+        branch = None
+    elif project:
         if not remote:
             raise ValueError("Update both workers to use Git-based resume.")
         cwd = project_resolver.resolve_existing_cwd(session)
         if not cwd:
             raise ValueError("The owning worker has no existing branch checkout to transfer.")
         if not branch:
-            branch = checkout_transfer.git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip()
+            try:
+                head = checkout_transfer.git(cwd, "symbolic-ref", "--short", "HEAD")
+                branch = head.decode().strip()
+            except ValueError:
+                # The receiver has a Git checkout of a folder that has none here.
+                if _known_plain(cwd):
+                    raise ValueError(PLAIN_MISMATCH) from None
+                raise
     with get_db() as conn:
         _idle(conn.cursor(), sid)
     from app.db import interactions
@@ -776,15 +842,16 @@ def _begin(sid, target, remote, note, wake_barrier, timing):
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
     held = {}
     try:
-        if project:
+        if project and not plain:
             timing.waiting("checkout_guard")
             # Publication commits and pushes the shared checkout. Exclude other
             # sessions working there; they keep their files and work.
             _hold_checkout(session, project, cwd, branch, HOLD + run["id"], held)
             timing.step("checkout_guard", holds=len(held))
         timing.waiting("git_publish")
-        state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
-        if project:
+        git_backed = project and not plain
+        state = checkout_transfer.export_checkout(cwd, branch, remote) if git_backed else None
+        if git_backed:
             timing.step("git_publish")
         if note is not None:
             timing.waiting("wake_note")
@@ -805,7 +872,8 @@ def _begin(sid, target, remote, note, wake_barrier, timing):
         data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
                     project_id=project["id"] if project else None, token=run["id"],
                     wakes=wakes, wake_barrier=barrier, handoff_receipt=1,
-                    resume_wake_id=resume_wake["id"] if resume_wake else None)
+                    resume_wake_id=resume_wake["id"] if resume_wake else None,
+                    **({"plain_folder": True} if plain else {}))
         raw = json.dumps(data, default=str).encode()
         timing.step("history", rows=sum(len(rows) for rows in data["history"].values()),
                     mb=f"{len(raw) / 1e6:.1f}")
@@ -880,7 +948,14 @@ def _commit(sid, target, payload, token):
                 return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
-    if project:
+    if project and payload.get("plain_folder") is True:
+        # History-only move of a project folder without Git (#639).
+        cwd = project_resolver.resolve_existing_cwd(session)
+        if (not cwd or not _plain_folder(cwd)
+                or payload.get("fingerprint") is not None or payload.get("branch") is not None):
+            raise ValueError("The owning worker's project folder changed during the move; "
+                             "ownership was not moved.")
+    elif project:
         cwd = project_resolver.resolve_existing_cwd(session)
         branch = project_resolver._effective_branch(session)
         if not cwd:
@@ -1107,7 +1182,8 @@ async def _handle_phase(payload, peer_device_id):
                 logger.warning("Could not note the wakes of %s before a move", sid, exc_info=True)
         try:
             return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note,
-                                  payload.get("wake_barrier") is True)
+                                  payload.get("wake_barrier") is True,
+                                  payload.get("plain_folder") is True)
         except BaseException:
             _wake_queued()
             raise
@@ -1715,7 +1791,8 @@ async def move(session, target):
 async def receive(session):
     """Publish the owner branch, fetch locally, then sync context and ownership.
 
-    Project-less sessions skip the Git steps and transfer history only.
+    Project-less sessions, and projects whose folder is not a Git repository
+    on either worker (#639), skip the Git steps and transfer history only.
     """
     timing = _Timing("import", session["id"], loop=asyncio.get_running_loop())
     context_token = _import_timing.set(timing)
@@ -1742,16 +1819,27 @@ async def _receive(session, timing):
     timing.waiting("resolve_checkout")
     project = await run_sync(project_resolver.resolve_project_v2, session)
     base = remote = None
+    plain = False
     if project:
         if not await run_sync(project_resolver.has_local_base_checkout, session):
             raise ValueError("Clone this project on this worker before resuming here.")
         base_row = await run_sync(project_resolver._local_checkout, project["id"], settings.effective_instance_id)
         base = checkout_manager._resolve_checkout_path(base_row["path"])
-        remote = await run_sync(checkout_transfer.remote_identity, base)
+        try:
+            remote = await run_sync(checkout_transfer.remote_identity, base)
+        except ValueError:
+            # Only a folder proven not to be a repository asks for history
+            # only; a failed probe keeps the original Git error.
+            if not await run_sync(_known_plain, str(base)):
+                raise
+            # A folder without Git here: ask the owner for its history only.
+            if await run_sync(plain_folder_carry, owner) is False:
+                raise ValueError(PLAIN_OWNER_UPDATE) from None
+            plain = True
     held = {}
     try:
         return await _pull_steps(session, owner, ctx, project, base, remote, held,
-                                 HOLD + str(uuid.uuid4()), timing)
+                                 HOLD + str(uuid.uuid4()), timing, plain)
     finally:
         if held:
             timing.waiting("release_checkout_holds")
@@ -1845,9 +1933,10 @@ async def _owner_commit(owner, payload):
     return result
 
 
-async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, timing):
+async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, timing,
+                      plain: bool = False):
     sid = session["id"]
-    expected_branch = project_resolver._effective_branch(session) if project else None
+    expected_branch = project_resolver._effective_branch(session) if project and not plain else None
     if expected_branch:
         timing.waiting("early_checkout_guard")
         # Refuse a busy receiving checkout before the owner commits or pushes.
@@ -1855,7 +1944,10 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         await run_sync(_hold_checkout, session, project, str(path), expected_branch, holder, held)
         timing.step("early_checkout_guard", holds=len(held))
     timing.waiting("owner_export")
-    reply = await _call(owner, {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}, timeout=600)
+    begin_body = {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}
+    if plain:
+        begin_body["plain_folder"] = True
+    reply = await _call(owner, begin_body, timeout=600)
     timing.step("owner_export")
     # A long chat's export is tens of megabytes; never decode it on the event loop.
     timing.waiting("decode")
@@ -1875,11 +1967,16 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         # Keep run admission closed through atomic context publication, including
         # plain chats and recovery after a lost commit response.
         await run_sync(_reserve_mirror, sid, HOLD + token, held)
-        if not project:
-            # Plain chat: no checkout to move, only the conversation history.
+        if not project or plain:
+            # Plain chat, or a project folder without Git on both workers: no
+            # checkout to move, only the conversation history. A chat runs in
+            # this worker's workspace folder; a project in its folder here.
             if state is not None:
-                raise ValueError("Unexpected checkout for a project-less session.")
-            cwd = str(settings.effective_workspace_dir)
+                raise ValueError("Unexpected checkout for a project-less session." if not project
+                                 else PLAIN_MISMATCH)
+            if plain and data.get("plain_folder") is not True:
+                raise ValueError(PLAIN_OWNER_UPDATE)
+            cwd = str(base) if plain else str(settings.effective_workspace_dir)
             timing.waiting("install_history")
             await run_sync(install_history, sid, data, cwd)
             if data.get("wake_barrier"):
@@ -1890,6 +1987,7 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
             result = await _owner_commit(owner, {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
+                **({"plain_folder": True} if plain else {}),
                 **_moving_wakes(data),
             })
             timing.step("owner_commit")

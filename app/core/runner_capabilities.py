@@ -31,6 +31,7 @@ Shape::
         "handoff_poll": int,  # short HTTP requests for long Git/history transfers
         "handoff_target_resume": int,  # receiver arms the agent continuation at commit
         "handoff_receipt": int,  # source syncs the commit token with ownership
+        "handoff_plain_folder": int,  # moves history only for a project folder without Git
         "terminal": int,
     }
 
@@ -262,6 +263,7 @@ def detect_capabilities() -> Dict[str, Any]:
         "handoff_receipt": 1,
         "move_questions": 1,
         "handoff_poll": 1,
+        "handoff_plain_folder": 1,
         "terminal": _detect_terminal(),
         "generation": GENERATION_VERSION,
     }

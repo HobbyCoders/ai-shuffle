@@ -121,6 +121,7 @@ async def test_idle_sessions_untouched_and_nothing_reconciled(mock_db, test_db):
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
         "engine_pending_repaired": 0,
+        "swarms_settled": 0,
         "orphan_processes_reaped": 0,
     }
     assert _session_row(test_db, session_id)["status"] == "active"
@@ -211,6 +212,7 @@ async def test_reconcile_db_failure_does_not_raise(mock_db, monkeypatch):
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
         "engine_pending_repaired": 0,
+        "swarms_settled": 0,
         "orphan_processes_reaped": 0,
     }
 
@@ -605,6 +607,7 @@ _GATED_BRANCHES = {
     "_clear_stale_parked_markers": "parked_markers_cleared",
     "_mark_stale_background_task_rows": "background_task_rows_killed",
     "_repair_orphaned_engine_pending": "engine_pending_repaired",
+    "_settle_orphaned_swarms": "swarms_settled",
     "_reset_orphaned_session_statuses": "statuses_reset",
     "_sweep_stray_cli_processes": "stray_cli_reaped",
 }

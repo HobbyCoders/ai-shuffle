@@ -667,9 +667,11 @@ A swarm is a set of tasks an agent hands to other agents, some waiting on others
 
 `status` (swarm and task) is `queued`, `running`, `completed`, `failed`, `cancelled` or `interrupted`.
 
+A swarm left running when the app stopped is settled when the app starts again, or on its chat's next turn: each task takes its worker's real result, and the swarm becomes `completed` when every task completed, otherwise `interrupted`. A swarm with a worker that is still running waits until that worker ends. A task interrupted this way whose worker is continued later (for example with SendMessage) and completes takes that result, and the swarm becomes `completed` once every task has.
+
 ### POST /api/sessions/{session_id}/swarms/{swarm_id}/cancel
 
-Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when this worker cannot control it.
+Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when another worker may still be running it. A swarm left running when the app stopped is cancelled here: its workers that are still running are stopped, and it is saved as `cancelled`.
 
 ## Private Access
 
@@ -765,7 +767,7 @@ When several devices share one account, each session runs on one device at a tim
 
 Run the session on this device from now on (**Continue here** in the device menu). The body is optional.
 
-Plain chat sessions with no project move by conversation history alone. For a session in a project, cross-worker resume requires a Git project with a single `origin` remote pointing to the same repository on both workers. GitHub and other Git hosts are supported. Both workers must be online, and the receiving worker must already have a clone of the project.
+Plain chat sessions with no project move by conversation history alone, with their question cards and scheduled wake-ups; the device menu offers the move in a saved chat too. On the receiving worker the chat runs in that worker's own workspace folder. Files in the old worker's workspace folder, including chat attachments, are not copied. A project whose folder is not a Git repository on either worker also moves by history alone: the receiving worker must already have that project's folder registered, the session then runs in that folder, and no files are copied. A folder that is a Git repository on one worker but not on the other is refused ("Use the same kind of folder on both workers"), and an owning worker on an older release is refused with a request to update it. For a session in a Git project, cross-worker resume requires a Git project with a single `origin` remote pointing to the same repository on both workers. GitHub and other Git hosts are supported. Both workers must be online, and the receiving worker must already have a clone of the project.
 
 After confirmation, the owning worker commits all non-ignored changes (including new files and deletions) and pushes the session branch without force. The receiving worker fetches that branch, creates a worktree or fast-forwards an existing clean branch checkout, then copies the conversation and native session context. Only after these steps succeed does ownership move. Ignored files, dependencies and local credentials are not copied.
 
