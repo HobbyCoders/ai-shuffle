@@ -24,12 +24,12 @@ beforeEach(() => {
 
 describe('executeRewind payload shape', () => {
 	it('restores an unsent row by durable id, never by transcript content', async () => {
-		await executeRewind('s1', '', false, 'user', false, null, null, 'unsent-id');
+		await executeRewind('s1', '', false, 'user', null, null, 'unsent-id');
 		expect(apiPostMock.mock.calls[0][1]).toEqual({target_uuid:'', restore_chat:false, restore_files:false,
 			include_response:false, target_role:'user', target_not_sent_id:'unsent-id'});
 	});
 	it('uuid present → uuid payload, no content fields (existing callers unchanged)', async () => {
-		await executeRewind('sess-1', 'uuid-abc', true, 'assistant', false);
+		await executeRewind('sess-1', 'uuid-abc', true, 'assistant');
 
 		expect(apiPostMock).toHaveBeenCalledTimes(1);
 		const [path, body] = apiPostMock.mock.calls[0] as unknown as [string, Record<string, unknown>];
@@ -46,7 +46,7 @@ describe('executeRewind payload shape', () => {
 	});
 
 	it('no uuid + occurrence → occurrence+content payload with target_uuid ""', async () => {
-		await executeRewind('sess-1', '', false, 'user', false, 2, 'the repeated prompt');
+		await executeRewind('sess-1', '', false, 'user', 2, 'the repeated prompt');
 
 		const [path, body] = apiPostMock.mock.calls[0] as unknown as [string, Record<string, unknown>];
 		expect(path).toBe('/commands/rewind/execute/sess-1');
@@ -62,7 +62,7 @@ describe('executeRewind payload shape', () => {
 	});
 
 	it('occurrence 0 is a valid target (falsy-number guard)', async () => {
-		await executeRewind('sess-1', '', false, 'user', false, 0, 'first prompt');
+		await executeRewind('sess-1', '', false, 'user', 0, 'first prompt');
 
 		const [, body] = apiPostMock.mock.calls[0] as unknown as [string, Record<string, unknown>];
 		expect(body.target_occurrence).toBe(0);
@@ -70,7 +70,7 @@ describe('executeRewind payload shape', () => {
 	});
 
 	it('uuid present wins over a supplied occurrence — content fields are NOT sent', async () => {
-		await executeRewind('sess-1', 'uuid-abc', false, 'user', false, 4, 'some prompt');
+		await executeRewind('sess-1', 'uuid-abc', false, 'user', 4, 'some prompt');
 
 		const [, body] = apiPostMock.mock.calls[0] as unknown as [string, Record<string, unknown>];
 		expect(body.target_uuid).toBe('uuid-abc');
@@ -82,7 +82,7 @@ describe('executeRewind payload shape', () => {
 		// The component refuses before calling in this state (assistant messages
 		// without a uuid keep the graceful refusal); if it IS called, the API must
 		// not fabricate a content anchor.
-		await executeRewind('sess-1', '', true, 'assistant', false);
+		await executeRewind('sess-1', '', true, 'assistant');
 
 		const [, body] = apiPostMock.mock.calls[0] as unknown as [string, Record<string, unknown>];
 		expect(body.target_uuid).toBe('');

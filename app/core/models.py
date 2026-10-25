@@ -150,8 +150,9 @@ class ProfileConfig(BaseModel):
     # Paths can be relative (resolved from workspace) or absolute
     enabled_plugins: Optional[List[str]] = None
 
-    # SDK-shaped flag; the harness adapter ignores it.
-    enable_file_checkpointing: bool = False
+    # ``enable_file_checkpointing`` is retired and not a field: file restore
+    # isn't supported, so a request that still sends it is accepted and the
+    # key ignored (app.db.profiles also drops it from stored rows).
 
     # App configuration tools - allows the agent to manage hooks, automations,
     # MCP servers, and profiles through conversation. Only effective for admin
