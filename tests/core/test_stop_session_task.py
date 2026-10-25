@@ -663,7 +663,9 @@ class TestStopReachesAQueuedWorkerStart:
     """#583: a worker still Queued behind start admission has no runtime for the
     interrupt to reach, so a per-task Stop must also abort its queued start."""
 
-    async def test_kill_aborts_the_workers_queued_start(self, monkeypatch):
+    async def test_kill_aborts_the_workers_queued_start(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from app.core import provider_agent_supervisor as sup
         from app.core import session_pool, turn_manager
         from app.db import turns as turns_db

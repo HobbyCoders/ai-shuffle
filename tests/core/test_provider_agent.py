@@ -15,6 +15,7 @@ so it is asserted against the real predicate rather than a mock.
 
 from tests.conftest import async_twin
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -1398,8 +1399,11 @@ class TestDispatchWorkerFailsClosed:
 
     @pytest.mark.parametrize("stopped_by", ["queue_chip", "stop_latch"])
     def test_a_start_cancelled_while_queued_is_a_stop_not_a_retryable_failure(
-        self, dispatch_env, monkeypatch, stopped_by
-    ):
+        self,
+        dispatch_env: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        stopped_by: str,
+    ) -> None:
         """#583: Stop, or removing the queue chip, on a worker still Queued under
         database pressure is the user's decision. Reporting it as "no terminal
         event" made task dispatch re-dispatch the same brief as a new worker."""
