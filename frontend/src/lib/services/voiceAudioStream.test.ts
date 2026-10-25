@@ -7,7 +7,7 @@ vi.mock('$lib/api/runtime', () => ({
   return 'ws://localhost' + path + (query ? '?' + query : '');
  },
 }));
-import { CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, HEARING_HANGOVER_MS, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micLevel, micProblem, openVoiceAudioStream } from './voiceAudioStream';
+import { CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micLevel, micProblem, openVoiceAudioStream } from './voiceAudioStream';
 
 const nodes: any[] = [];
 const contexts: any[] = [];
@@ -499,41 +499,67 @@ describe('microphone watchdog', () => {
 });
 
 // Phone report: the call transcribed the caller while its waveform stayed flat.
-// A streamed call's meter must come from the PCM it actually sends.
+// A streamed call's meter must come from the PCM it actually sends, and
+// "hearing" must be the gate's own decision about what reaches the provider.
 describe('caller meter', () => {
- const frame = (value: number) => ({ data: { pcm: new Int16Array(1920).fill(value).buffer, generation: 0 } });
- afterEach(() => { vi.useRealTimers(); });
+ const frameOf = (pcm: Int16Array) => ({ data: { pcm: pcm.buffer, generation: 0 } });
+ const frame = (value: number) => frameOf(new Int16Array(1920).fill(value));
+ /** Silence with one 10 ms gate block just above the -42 dBFS gate (about -38 dBFS). */
+ const shortBlock = () => { const pcm = new Int16Array(1920); pcm.fill(400, 960, 1200); return pcm; };
+ const meterHandlers = () => ({ ...handlers(), level: vi.fn<(level: number, hearing: boolean) => void>() });
+ const open = async (callbacks: ReturnType<typeof meterHandlers>) =>
+  openVoiceAudioStream('s', { getAudioTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream, callbacks, new AbortController().signal, DEFAULT_MIC_THRESHOLD_DB);
 
- it('reads a frame on a -60..-12 dBFS scale and marks speech that passes the gate', () => {
-  expect(micLevel(new Int16Array(1920))).toEqual({ level: 0, voiced: false });
-  const speech = micLevel(new Int16Array(1920).fill(3000)); // about -20.8 dBFS
-  expect(speech.level).toBeCloseTo(0.817, 2);
-  expect(speech.voiced).toBe(true);
-  const room = micLevel(new Int16Array(1920).fill(100)); // about -50.3 dBFS
-  expect(room.level).toBeCloseTo(0.202, 2);
-  expect(room.voiced).toBe(false);
-  // The owner's own gate decides what counts as heard.
-  expect(micLevel(new Int16Array(1920).fill(100), -55).voiced).toBe(true);
-  expect(micLevel(new Int16Array(1920).fill(32767)).level).toBe(1);
+ it('reads a frame on a -60..-12 dBFS scale from its whole-frame RMS', () => {
+  expect(micLevel(new Int16Array(1920))).toBe(0);
+  expect(micLevel(new Int16Array(1920).fill(3000))).toBeCloseTo(0.817, 2); // about -20.8 dBFS
+  expect(micLevel(new Int16Array(1920).fill(100))).toBeCloseTo(0.202, 2); // about -50.3 dBFS
+  expect(micLevel(new Int16Array(1920).fill(32767))).toBe(1);
  });
 
- it('reports every captured frame, holds "hearing" briefly after speech, and drops to zero on mute', async () => {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] });
-  const callbacks = { ...handlers(), level: vi.fn() };
-  const stream = await openVoiceAudioStream('s', { getAudioTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream, callbacks, new AbortController().signal, DEFAULT_MIC_THRESHOLD_DB);
-  capture().port.onmessage(frame(3000));
-  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.817, 2), true);
-  vi.advanceTimersByTime(80);
-  capture().port.onmessage(frame(100));
-  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.202, 2), true); // word ending
-  vi.advanceTimersByTime(HEARING_HANGOVER_MS);
-  capture().port.onmessage(frame(100));
-  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.202, 2), false);
+ it('reports the gate letting a short loud block through as heard, even when the frame average is below the gate', () => {
+  const gate = createInputGate(DEFAULT_MIC_THRESHOLD_DB);
+  const sent = gate(shortBlock());
+  expect(sent.some(sample => sample !== 0)).toBe(true); // the provider receives it
+  expect(gate.passed).toBe(true);
+  // The whole frame averages about -47 dBFS, under the -42 dBFS gate.
+  expect(micLevel(shortBlock())).toBeLessThan((DEFAULT_MIC_THRESHOLD_DB - -60) / 48);
+  expect(createInputGate(DEFAULT_MIC_THRESHOLD_DB)(new Int16Array(1920).fill(100)).every(s => s === 0)).toBe(true);
+ });
+
+ it('says "hearing" exactly while the gate sends audio, including its hangover', async () => {
+  const callbacks = meterHandlers();
+  const stream = await open(callbacks);
+  capture().port.onmessage(frameOf(shortBlock()));
+  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.265, 2), true); // about -47.3 dBFS over the frame
+  const sent = new Int16Array(sockets[0].send.mock.calls.at(-1)[0]);
+  expect(sent.some(sample => sample !== 0)).toBe(true);
+  // Room noise after it stays open for the gate's 600 ms hangover, then closes.
+  let frames = 0;
+  for (; frames < 20; frames++) {
+   capture().port.onmessage(frame(100));
+   const heard = callbacks.level.mock.lastCall![1];
+   const passed = new Int16Array(sockets[0].send.mock.calls.at(-1)[0]).some(sample => sample !== 0);
+   expect(heard).toBe(passed);
+   if (!heard) break;
+  }
+  // 600 ms from the loud block (mid-frame): its frame tail plus 8 more frames.
+  expect(frames).toBe(8);
   stream.muteInput(true);
   expect(callbacks.level).toHaveBeenLastCalledWith(0, false);
   const calls = callbacks.level.mock.calls.length;
   capture().port.onmessage(frame(3000)); // a queued pre-mute frame
   expect(callbacks.level).toHaveBeenCalledTimes(calls);
+  await stream.close();
+ });
+
+ it('does not count audio dropped behind a stalled upload as heard', async () => {
+  vi.spyOn(console, 'info').mockImplementation(() => {});
+  const callbacks = meterHandlers();
+  const stream = await open(callbacks);
+  sockets[0].bufferedAmount = MAX_UPLOAD_BUFFER + 1;
+  capture().port.onmessage(frame(3000));
+  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.817, 2), false);
   await stream.close();
  });
 

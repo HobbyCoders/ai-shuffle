@@ -60,21 +60,19 @@ import playbackWorkletUrl from './voicePlayback.worklet.js?url&no-inline';
 /** Meter range: a frame at or below the floor reads 0, at or above the ceiling 1. */
 export const LEVEL_FLOOR_DB = -60;
 export const LEVEL_CEIL_DB = -12;
-/** How long the meter keeps "hearing you" after the last frame above the gate. */
-export const HEARING_HANGOVER_MS = 600;
 
 /**
- * One captured frame's meter reading. Pure, so the scale can be tested
- * without a browser. `voiced` uses the same dBFS threshold as the gate.
+ * One captured frame's meter height (0–1), from its whole-frame RMS. Pure, so
+ * the scale can be tested without a browser. Whether the caller is heard is
+ * the gate's decision (`InputGate.passed`), never this number.
  */
-export function micLevel(pcm: Int16Array, thresholdDb = DEFAULT_MIC_THRESHOLD_DB): { level: number; voiced: boolean } {
+export function micLevel(pcm: Int16Array): number {
  let sum = 0;
  for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
  const rms = pcm.length ? Math.sqrt(sum / pcm.length) : 0;
- if (rms <= 0) return { level: 0, voiced: false };
+ if (rms <= 0) return 0;
  const db = 20 * Math.log10(rms / 32768);
- const level = Math.max(0, Math.min(1, (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)));
- return { level, voiced: db >= thresholdDb };
+ return Math.max(0, Math.min(1, (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)));
 }
 
 /** Why the microphone is not reaching the call, or null when it is. */
@@ -101,10 +99,21 @@ export function micProblem(s: {
  * receives continuous audio, and nothing is delayed. Returns the same array
  * when nothing was gated.
  */
-export function createInputGate(thresholdDb = DEFAULT_MIC_THRESHOLD_DB): (pcm: Int16Array) => Int16Array {
+export interface InputGate {
+ (pcm: Int16Array): Int16Array;
+ /**
+  * Whether the last frame let any block through: a loud block, its pre-roll,
+  * or the hangover after one. The call's "Hearing you…" reads this, so it is
+  * on exactly when the provider receives the caller's audio.
+  */
+ readonly passed: boolean;
+}
+
+export function createInputGate(thresholdDb = DEFAULT_MIC_THRESHOLD_DB): InputGate {
  const threshold = 32768 * 10 ** (thresholdDb / 20);
  let hold = 0; // samples still open after earlier loud audio
- return pcm => {
+ let passed = false;
+ const gate = (pcm: Int16Array): Int16Array => {
   const blocks = Math.ceil(pcm.length / GATE_BLOCK);
   const open = new Array<boolean>(blocks).fill(false);
   for (let b = 0; b < blocks; b++) {
@@ -119,11 +128,13 @@ export function createInputGate(thresholdDb = DEFAULT_MIC_THRESHOLD_DB): (pcm: I
     hold = Math.max(0, hold - (end - start));
    }
   }
+  passed = open.some(Boolean);
   if (open.every(Boolean)) return pcm;
   const gated = new Int16Array(pcm.length);
   open.forEach((on, b) => { if (on) gated.set(pcm.subarray(b * GATE_BLOCK, (b + 1) * GATE_BLOCK), b * GATE_BLOCK); });
   return gated;
  };
+ return Object.defineProperty(gate, 'passed', { get: () => passed }) as InputGate;
 }
 
 /**
@@ -273,9 +284,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   const silent = context.createGain(); silent.gain.value = 0;
   source.connect(capture); capture.connect(silent); silent.connect(context.destination);
   let gate = createInputGate(micThresholdDb);
-  let lastVoicedAt = -Infinity;
-  const reportLevel = (level: number, hearing: boolean) => {
-   try { handlers.level?.(level, hearing); } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }
+  const reportLevel = (level: number, heard: boolean) => {
+   try { handlers.level?.(level, heard); } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }
   };
   capture.port.onmessage = event => {
    // Dropping frames here is independent of MediaStreamTrack.enabled. Epochs
@@ -285,18 +295,21 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    const input = new Int16Array(event.data.pcm);
    // The meter reads this call's own capture graph: the one that is
    // demonstrably running whenever the provider transcribes the caller.
-   const reading = micLevel(input, micThresholdDb);
-   if (reading.voiced) lastVoicedAt = lastCaptureAt;
-   reportLevel(reading.level, lastCaptureAt - lastVoicedAt < HEARING_HANGOVER_MS);
+   // Bar height is the whole frame's level; "hearing" is the gate's own
+   // per-block decision (with its hangover) for the audio actually sent.
+   const level = micLevel(input);
    // A stalled connection is caught by its close; a burst after a stall only
    // loses the microphone audio that could not be sent in time.
    if (socket.bufferedAmount > MAX_UPLOAD_BUFFER) {
     stats.upload_dropped++;
     if (!droppedUpload++) console.info('[voice] upload fell behind; dropping microphone audio to catch up');
+    // Dropped audio never reaches the provider, so it is not "heard" either.
+    reportLevel(level, false);
     return;
    }
    droppedUpload = 0;
    const gated = gate(input);
+   reportLevel(level, gate.passed);
    socket.send(gated === input ? event.data.pcm : gated.buffer);
    stats.sent++;
   };
@@ -389,7 +402,6 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
     micMuted = muted; micGeneration++; gate = createInputGate(micThresholdDb);
     capture.port.postMessage({ type: 'mute', muted, generation: micGeneration });
     // No frames arrive while muted, so the meter would freeze on its last reading.
-    lastVoicedAt = -Infinity;
     reportLevel(0, false);
     // Unmuted audio needs a moment to flow again before the watchdog judges it.
     lastCaptureAt = performance.now(); graceUntil = lastCaptureAt + MIC_SILENT_MS;
