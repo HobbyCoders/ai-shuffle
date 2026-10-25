@@ -33,9 +33,11 @@
 		panelActions?: Snippet;
 		/** Sends a diff line comment to the current chat (review mode). */
 		onAskAgent?: (prompt: string) => Promise<boolean>;
+		/** Why line comments are off (no chat, or another chat is live). */
+		askAgentUnavailable?: string;
 	}
 
-	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false, panelActions, onAskAgent }: Props = $props();
+	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false, panelActions, onAskAgent, askAgentUnavailable }: Props = $props();
 
 	// ── Grouped file lists ──────────────────────────────────────────────
 	const conflicts = $derived(($changedFiles ?? []).filter(f => f.category === 'conflict'));
@@ -685,7 +687,7 @@
 			<ReviewDiffPanel
 				{projectId} files={flatFiles} loading={$changedFilesLoading}
 				selected={reviewSelectedFile} onSelect={(file) => { reviewSelectedFile = file; }}
-				{onClose} {embedded} {panelActions} {onAskAgent}
+				{onClose} {embedded} {panelActions} {onAskAgent} {askAgentUnavailable}
 				onScopeChange={(next) => { reviewScope = next; }}
 			/>
 

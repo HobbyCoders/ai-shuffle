@@ -14,6 +14,8 @@
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { pendingDeepLink } from '$lib/stores/pending-deep-link';
 	import { activeSession } from '$lib/stores/active-session';
+	import { get } from 'svelte/store';
+	import { askAgentUnavailableReason } from '$lib/review/scope';
 	import {
 		git,
 		gitStatus,
@@ -320,6 +322,13 @@
 		? activeTab.project || activeTab.projectV2Id || null
 		: activeTab?.projectV2Id || activeTab?.project || null);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
+	// Review line comments go only to the chat that owns the Changes panel.
+	const askAgentReason = $derived(askAgentUnavailableReason(activeSessionId, $activeSession.sessionId));
+	function sendReviewComment(prompt: string): Promise<boolean> {
+		// Re-check at send time: the tab or live session may have changed since render.
+		if (askAgentUnavailableReason(activeSessionId, get(activeSession).sessionId)) return Promise.resolve(false);
+		return activeSession.sendMessage(prompt);
+	}
 	const activeSessionRow = $derived($sessions.find((s) => s.id === activeSessionId));
 	// A subagent's own chat (Task/Swarm child) is read and message only: no Git
 	// controls and no private access UI (its requests show in its main chat).
@@ -1108,7 +1117,8 @@
 						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" fallbackActions={panelActions}
 							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,
 								onClose: closeSidePanel, onViewDiff: () => {}, panelActions,
-								onAskAgent: (prompt: string) => activeSession.sendMessage(prompt) }} />
+								onAskAgent: askAgentReason ? undefined : sendReviewComment,
+								askAgentUnavailable: askAgentReason ?? undefined }} />
 					{/if}
 				{/key}
 				{/snippet}

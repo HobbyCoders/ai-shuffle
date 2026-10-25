@@ -271,6 +271,17 @@ describe('diff line feedback', () => {
 		expect(screen.queryByRole('group', { name: 'Diff lines of src/a.ts' })).toBeNull();
 	});
 
+	it('explains why line comments are off when there is no chat to send to', async () => {
+		const { container } = render(ReviewDiffPanel, { projectId: 'project', files, loading: false, selected: files[0], onSelect: vi.fn(), onClose: vi.fn(), embedded: true, askAgentUnavailable: 'Line comments need an open chat' });
+		expect(screen.getByRole('note').textContent).toBe('Line comments need an open chat');
+		await screen.findAllByText('new value');
+		await fireEvent.pointerDown(gutter(container, 3), { button: 0, pointerType: 'mouse' });
+		await fireEvent.pointerUp(window);
+		expect(container.querySelector('.row-selected')).toBeNull();
+		expect(container.querySelector('.ask-card')).toBeNull();
+		expect(screen.queryByRole('group', { name: /^Diff lines of/ })).toBeNull();
+	});
+
 	it('stays read-only without an ask handler', async () => {
 		const { container } = viewer({ onAskAgent: undefined });
 		await screen.findByText('new value');

@@ -2,7 +2,7 @@
 	// Layout adapted from pingdotgg/t3code's MIT-licensed DiffPanel.
 	// See t3code.LICENSE for the upstream notice.
 	import { tick, untrack, type Snippet } from 'svelte';
-	import { X, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Rows3, Columns2, WrapText, FolderTree, Folder, FileText, Copy, RefreshCw, GitBranch, AlertTriangle } from 'lucide-svelte';
+	import { X, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Rows3, Columns2, WrapText, FolderTree, Folder, FileText, Copy, RefreshCw, GitBranch, AlertTriangle, MessageSquareOff } from 'lucide-svelte';
 	import * as gitApi from '$lib/api/git';
 	import type { FileChangeInfo } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
@@ -26,8 +26,10 @@
 		onScopeChange?: (scope: ReviewScope) => void;
 		/** Sends a line comment to the current chat; enables diff line selection. */
 		onAskAgent?: (prompt: string) => Promise<boolean>;
+		/** Shown instead of line comments when there is no chat to send to. */
+		askAgentUnavailable?: string;
 	}
-	let { projectId, files, loading, selected, onSelect, onClose, embedded, panelActions, onScopeChange, onAskAgent }: Props = $props();
+	let { projectId, files, loading, selected, onSelect, onClose, embedded, panelActions, onScopeChange, onAskAgent, askAgentUnavailable }: Props = $props();
 	let mode = $state<'unified' | 'side-by-side'>('unified');
 	let wrap = $state(false);
 	let treeOpen = $state(false);
@@ -191,6 +193,9 @@
 			{#if baseLoading}<RefreshCw size={11} class="animate-spin muted" aria-label="Updating" />{/if}
 		</div>
 	{/if}
+	{#if askAgentUnavailable && !onAskAgent && shown.length}
+		<p class="ask-note" role="note"><MessageSquareOff size={12} aria-hidden="true" />{askAgentUnavailable}</p>
+	{/if}
 	<div class="body">
 		<div class="diff-files" aria-label="File diffs" aria-busy={listLoading}>
 			{#if reviewScope === 'base' && baseError}
@@ -256,6 +261,8 @@
 	.scope-switch button[aria-pressed=true] { background: var(--background); color: var(--foreground); box-shadow: var(--shadow-s); }
 	.scope-switch button:hover:not(:disabled):not([aria-pressed=true]) { background: transparent; color: var(--foreground); }
 	.base-strip { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 12px; flex-shrink: 0; overflow: hidden; white-space: nowrap; font-size: 11px; color: var(--muted-foreground); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); background: linear-gradient(90deg, color-mix(in oklch, var(--primary) 9%, transparent), transparent 70%); }
+	.ask-note { display: flex; align-items: center; gap: 6px; margin: 0; padding: 4px 12px; flex-shrink: 0; font-size: 11px; color: var(--muted-foreground); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+	.ask-note :global(svg) { flex-shrink: 0; }
 	.base-strip :global(svg) { flex-shrink: 0; color: var(--primary); }
 	.base-strip strong { color: var(--foreground); font-weight: 500; font-family: var(--font-mono); }
 	.base-strip .sep { opacity: .5; }

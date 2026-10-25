@@ -21,6 +21,20 @@ export function baseScopeUnavailableReason(sessionId: string | null | undefined)
 	return sessionId ? null : 'Available in a chat with its own checkout';
 }
 
+/**
+ * Line comments go to the chat that owns the panel. With no session, a send
+ * would start a new chat (and clear the composer draft); with a different live
+ * session it would land in the wrong chat. Returns why it is off, or null.
+ */
+export function askAgentUnavailableReason(
+	panelSessionId: string | null | undefined,
+	liveSessionId: string | null | undefined,
+): string | null {
+	if (!panelSessionId) return 'Line comments need an open chat';
+	if (liveSessionId !== panelSessionId) return 'Line comments need this chat to be active';
+	return null;
+}
+
 /** Badge text for a base-scope row's origin. */
 export function originLabel(origin: FileChangeInfo['change_origin']): string {
 	switch (origin) {
