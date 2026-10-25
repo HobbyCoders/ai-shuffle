@@ -24,7 +24,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = System.getenv("ANDROID_VERSION_CODE")?.toInt() ?: 13
-        versionName = System.getenv("ANDROID_VERSION_NAME") ?: "1.0.2"
+        versionName = System.getenv("ANDROID_VERSION_NAME") ?: "1.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appAuthRedirectScheme"] = "com.hobbycoders.aishuffle"

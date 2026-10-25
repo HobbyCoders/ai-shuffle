@@ -8,6 +8,70 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.0.3
+
+Choose how long an approval lasts, review changes against the base branch, resume a chat when a usage limit resets, terminals on your other workers, owner watches, one generation tool, and many reliability fixes.
+
+### Approvals
+
+- The permission prompt asks how long your answer lasts: just this once (the default), this chat until it goes idle, or always for this agent.
+- A new Approvals tab on each agent lists its saved rules, with Remove and Remove all.
+- Agents started from a chat inherit its permission mode. Each approval in a conversation shows once and in order, and your other messages still go through while one waits.
+- Tools that show their own consent card ask you once, not twice.
+
+### Chats
+
+- The new session screen starts from the agent, and a project is optional. Chats without a project can run work in your projects.
+- Your chats without a project are normal sessions: shell, file edits, the Python kernel and code subagents, governed by the chat's permission mode (Accept Edits included). They run in the workspace's new `no-project` folder, attachments stay readable without a prompt, and subagents no longer need a project. API-key, non-owner, agent-preview and unattended chats keep the read-only surface.
+- When a usage limit stops a chat, "Resume at reset" resumes that chat once when the limit resets.
+- HTML pages render inline in the reply, and long pages grow to their full height instead of a small scroll box.
+- Tables in chat have a Copy menu (Markdown or CSV). Spotlight (Ctrl+K) finds Settings too.
+- Queued subagents show as Queued. A long Task moves to the background at its time cap.
+- Claude compaction is a Settings toggle, on by default.
+- Stashing a prompt clears the composer only once the stash is saved. Rewind no longer offers file restore, which was never supported.
+
+### Code review and Git
+
+- The Changes panel can show everything since the base branch, not just uncommitted work. Select lines in a diff to send the agent a comment about them.
+- Git Pull picks the right upstream, timed-out Git processes are cleaned up, and Git status refreshes from file changes.
+- AI Shuffle sets the commit and pull request attribution for agent work.
+- Windows and macOS installs clean up the Git file-monitor setting and background daemons left by older versions once at startup. Later deliberate re-enabling is respected.
+
+### Workers
+
+- Peer terminals: ask to open a terminal on another worker, approve it on that worker, and revoke it at any time.
+- Chats without a project and non-Git project folders can move between workers.
+- Owner watches replace the email research loop, and your Gmail sources move over on their own. The watch panel shows where each watch runs and can move it.
+
+### Voice, models and generation
+
+- 25 ChatGPT voices, Grok Voice with a SuperGrok subscription sign-in, and an opt-in unofficial ChatGPT subscription voice.
+- One generation tool shows the price and asks before it spends, remembers your picks, and lets automations pin a choice per kind. A fal job without a price never runs past the spending guard.
+- A Model tuning page sets effort, Fast, context and local tuning per model.
+- The agent avatars are redrawn as the AI Shuffle deck.
+
+### Browser and phone
+
+- The Browser panel has pickers for dropdowns and date and time fields, and steadier typing and clicking.
+- The Phone panel opens when the agent uses the emulator. Android emulators work on Windows.
+
+### Removed
+
+- The personal assistant is gone, and its conversation is deleted. What it did now works in every chat.
+
+### Updates and installs
+
+- The update screens show staging, what a restart is waiting for, and how the install went. The sidebar's Check for updates asks every worker, like Settings does.
+- The Windows installer asks whether you want Stable or Nightly.
+- Docker installs can set `AGENT_ISOLATION=required` so the app refuses to start without agent isolation.
+
+### Reliability and security
+
+- New turns queue under heavy database load instead of failing, and managed PostgreSQL gets higher WAL and checkpoint limits.
+- Many fixes for hand-offs, sync, memory, Swarm workflows and container startup.
+- Webhook intake authentication works on the real route. Plugin MCP servers connect in native chats.
+- Patched advisories in DOMPurify and zod.
+
 ## 1.0.2
 
 Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fixes for hand-offs, git, sync and the composer.
@@ -31,7 +95,6 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 
 ### Sessions and agents
 
-- Your chats without a project are normal sessions: shell, file edits, the Python kernel and code subagents, governed by the chat's permission mode (Accept Edits included). They run in the workspace's new `no-project` folder, attachments stay readable without a prompt, and subagents no longer need a project. API-key, non-owner, agent-preview and unattended chats keep the read-only surface.
 - "Compact first" sends your draft after compaction and reactivates a settled chat. "Restore unsent draft" puts attachments back once, in place.
 - A question written in an agent's reply no longer marks a chat as waiting for you while it is still working.
 - Hand-offs keep a pending question answerable across the move, and a queued hand-off starts once the current work finishes.
@@ -41,7 +104,6 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 
 ### Git
 
-- Windows and macOS installs clean up the Git file-monitor setting and background daemons left by older versions once at startup. Later deliberate re-enabling is respected.
 - Plain-folder projects hide the Git controls. Creating a repository works without a configured Git identity and can be retried if it fails.
 
 ### Updates
