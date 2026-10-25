@@ -1,14 +1,23 @@
 """AI Shuffle host for Fluid's Swarm coordinator and scoped native messaging."""
 from __future__ import annotations
 import asyncio
+import copy
 import json
-from fluid.swarm import SwarmCoordinator, current_launch, recover, validate
+import logging
+from fluid.swarm import (
+    RESULT_LIMIT, TERMINAL, SwarmCoordinator, current_launch, now, recover, validate,
+)
 from fluid.tools.registry import ToolOutcome
 
+logger = logging.getLogger(__name__)
 coordinators = {}
 workers = {}  # app worker session id -> trusted Launch
 worker_jobs = {}  # initial receipt id -> dispatch/retry task
-_locks = {}
+_locks = {}  # session id -> lock serialising orphan settlement and cancel
+# Sessions this process found with no orphaned workflow left to settle. A
+# workflow is orphaned only when its coordinator died with an earlier process,
+# so one clean look per session per process is enough.
+_orphan_free = set()
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 
@@ -160,13 +169,206 @@ def _owns_recovery_lease(session_id, run_id, fence_token):
         return cursor.fetchone() is not None
 
 
+def _locally_owned(session_id: str, key: str) -> bool:
+    """A coordinator in THIS process still runs (or is starting) the workflow."""
+    live = coordinators.get(session_id)
+    if live is None:
+        return False
+    job = getattr(live, "jobs", {}).get(key)
+    if job is not None:
+        return not job.done()
+    return key in getattr(live, "swarms", {})
+
+
+def _ownership_refused(
+    session_id: str, run_id: str | None, fence_token: int | None,
+) -> bool:
+    """True when another runner may be executing this session's workflows.
+
+    With a lease (turn start) the proof is that lease. Without one (boot,
+    cancel) a live run claimed by a different runner, as after a remote
+    hand-off, means its coordinator may live there: leave it alone.
+    """
+    if run_id is not None:
+        return not _owns_recovery_lease(session_id, run_id, fence_token)
+    from app.core.config import settings
+    from app.db.runs import get_active_run
+
+    run = get_active_run(session_id)
+    return run is not None and run.get("runner_id") != settings.effective_instance_id
+
+
+def _worker_outcome(session_id: str, task: dict) -> tuple[str, str]:
+    """``(running|completed|interrupted, result)`` from an item's worker task."""
+    from app.core.task_registry import task_registry
+
+    task_id = task.get("task_id") or task.get("worker_session_id")
+    if not task_id:
+        return "interrupted", ""
+    record = task_registry.get_task(session_id, str(task_id), durable=True) or {}
+    if record.get("status") == "running":
+        return "running", ""
+    if record.get("status") != "completed":
+        return "interrupted", ""
+    path = record.get("reportPath") or record.get("report_path")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as report:
+                return "completed", report.read(RESULT_LIMIT)
+        except OSError:
+            pass
+    return "completed", str(record.get("summary") or "")[:RESULT_LIMIT]
+
+
+def _reconcile_items(session_id: str, snapshot: dict) -> tuple[dict, list[dict]]:
+    """A copy of an orphaned workflow carrying each worker's real outcome.
+
+    Completed workers become completed items with their report. Returns the
+    copy and the items whose worker is still running; the rest stay open for
+    the caller to settle.
+    """
+    snapshot = copy.deepcopy(snapshot)
+    running = []
+    for task in snapshot["tasks"]:
+        if task["status"] in TERMINAL or not (
+            task.get("task_id") or task.get("worker_session_id")
+        ):
+            continue
+        state, result = _worker_outcome(session_id, task)
+        if state == "running":
+            running.append(task)
+        elif state == "completed":
+            task.update(status="completed", result=result, error=None,
+                        finished_at=task.get("finished_at") or now())
+    return snapshot, running
+
+
+async def _proven_ended(session_id: str, keys: list[str]) -> set[str]:
+    """Workflow keys whose own task this install recorded as ended."""
+    from app.core.pending_reconcile import terminal_frames_for
+
+    frames = await asyncio.to_thread(terminal_frames_for, session_id, keys)
+    return {frame["task_id"] for frame in frames}
+
+
+async def _open_orphan_candidates(session_id: str) -> list[dict]:
+    """Non-terminal snapshots no local coordinator owns, behind a cheap gate."""
+    from app.db.background_tasks import list_sessions_with_killed_swarms
+
+    if not await asyncio.to_thread(list_sessions_with_killed_swarms, session_id):
+        return []
+    return [
+        snapshot for snapshot in await snapshots(session_id)
+        if snapshot.get("status") not in TERMINAL_STATUSES
+        and not _locally_owned(session_id, snapshot["id"])
+    ]
+
+
+async def settle_orphans(
+    session_id: str, *, run_id: str | None = None,
+    fence_token: int | None = None,
+) -> list[dict]:
+    """Settle workflows whose coordinator died with an earlier process.
+
+    Orphaned means: the latest snapshot is non-terminal, no coordinator here
+    owns it, and this install recorded the workflow's own task as ended (a
+    restart reap). Each item takes its worker's real outcome; a workflow with a
+    worker still running is left for a later pass. The aggregate is completed
+    only when every item completed, otherwise interrupted. Returns the
+    published snapshots. Reads (``snapshots``) never do this themselves.
+    """
+    if not session_id or session_id in _orphan_free:
+        return []
+    async with _locks.setdefault(session_id, asyncio.Lock()):
+        candidates = await _open_orphan_candidates(session_id)
+        if not candidates:
+            _orphan_free.add(session_id)
+            return []
+        if await asyncio.to_thread(_ownership_refused, session_id, run_id, fence_token):
+            return []
+        ended = await _proven_ended(session_id, [s["id"] for s in candidates])
+        deferred = len(ended) < len(candidates)
+        settled = []
+        for snapshot in candidates:
+            if snapshot["id"] not in ended:
+                continue
+            snapshot, running = await asyncio.to_thread(_reconcile_items, session_id, snapshot)
+            if running:
+                deferred = True
+                continue
+            if all(task["status"] == "completed" for task in snapshot["tasks"]):
+                snapshot.update(status="completed", updated_at=now())
+            else:
+                snapshot = recover(snapshot)
+            settled.append(snapshot)
+        # Recheck after the evidence reads, before any durable write.
+        if settled and await asyncio.to_thread(
+            _ownership_refused, session_id, run_id, fence_token,
+        ):
+            return []
+        settled = [s for s in settled if not _locally_owned(session_id, s["id"])]
+        for snapshot in settled:
+            await persist(snapshot, run_id=run_id, fence_token=fence_token)
+        if not deferred:
+            _orphan_free.add(session_id)
+        return settled
+
+
+async def settle_orphans_at_boot(limit: int = 200) -> int:
+    """Boot arm of :func:`settle_orphans` for every session a restart hit."""
+    from app.db.background_tasks import list_sessions_with_killed_swarms
+
+    count = 0
+    for session_id in await asyncio.to_thread(list_sessions_with_killed_swarms, None, limit):
+        try:
+            count += len(await settle_orphans(session_id))
+        except Exception:
+            logger.warning("Swarm: orphan settlement failed for %s", session_id, exc_info=True)
+    return count
+
+
+async def _cancel_orphan(session_id: str, key: str) -> dict | None:
+    """Cancel an orphaned workflow here; None when it may run elsewhere."""
+    async with _locks.setdefault(session_id, asyncio.Lock()):
+        snapshot = next((s for s in await snapshots(session_id) if s["id"] == key), None)
+        if snapshot is None:
+            raise ValueError("Unknown swarm")
+        if snapshot["status"] in TERMINAL_STATUSES:
+            return snapshot
+        if _locally_owned(session_id, key) or await asyncio.to_thread(
+            _ownership_refused, session_id, None, None,
+        ) or key not in await _proven_ended(session_id, [key]):
+            return None
+        snapshot, running = await asyncio.to_thread(_reconcile_items, session_id, snapshot)
+        await asyncio.gather(*(
+            cancel_worker(str(task.get("task_id") or task["worker_session_id"]))
+            for task in running))
+        stamp = now()
+        for task in snapshot["tasks"]:
+            if task["status"] not in TERMINAL:
+                task.update(status="cancelled", error="Swarm cancelled", finished_at=stamp)
+        snapshot.update(status="cancelled", updated_at=stamp)
+        await persist(snapshot)
+        return snapshot
+
+
 async def reconcile_owned_pending(session_id, run_id, fence_token):
     """Repair pooled Swarm receipts only at the runtime's leased reader boundary.
 
     Connect and turn-end reconciliation still own general Task hygiene. Here we
-    also publish the interrupted workflow that receipt-only repair cannot fix.
-    No pool/Swarm receipt means no lease query or session-history scan.
+    also publish the interrupted workflow that receipt-only repair cannot fix,
+    and settle workflows orphaned by an earlier process (``settle_orphans``).
+    No pool/Swarm receipt and no killed workflow row means no lease query or
+    session-history scan.
     """
+    try:
+        await settle_orphans(session_id, run_id=run_id, fence_token=fence_token)
+    except Exception:
+        logger.warning("Swarm: orphan settlement failed for %s", session_id, exc_info=True)
+    return await _reconcile_pending_receipts(session_id, run_id, fence_token)
+
+
+async def _reconcile_pending_receipts(session_id, run_id, fence_token):
     from app.core.pending_reconcile import (
         _pooled_adapter, engine_pending_task_ids, terminal_frames_for,
     )
@@ -303,9 +505,14 @@ async def cancel(session_id, key):
     if snapshot is None:
         raise ValueError("Unknown swarm")
     if snapshot["status"] not in TERMINAL_STATUSES:
-        # The durable interrupt command targets an entire session/turn, not a
-        # single workflow. Do not silently cancel unrelated work as a fallback.
-        raise SwarmUnavailableError("Swarm cancellation is unavailable on this runner; contact the execution owner")
+        # A workflow whose coordinator died here is cancelled here, worker by
+        # worker. Otherwise it may run elsewhere: the durable interrupt command
+        # targets an entire session/turn, so never cancel unrelated work.
+        orphan = await _cancel_orphan(session_id, key)
+        if orphan is None:
+            raise SwarmUnavailableError(
+                "Swarm cancellation is unavailable on this runner; contact the execution owner")
+        return orphan
     return snapshot
 
 def peer_rows(session_id):

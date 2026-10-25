@@ -851,6 +851,25 @@ async def _repair_orphaned_engine_pending() -> int:
     return repaired
 
 
+async def _settle_orphaned_swarms() -> int:
+    """Settle Swarm workflows the previous process left ``running``.
+
+    Their own task rows were just reaped, so the engine no longer lists them
+    and nothing else would ever publish their end. Each item takes its
+    worker's real outcome (``app.core.swarm.settle_orphans``). Returns the
+    number of workflows settled; never raises past the caller's guard.
+    """
+    from app.core import swarm
+
+    settled = await swarm.settle_orphans_at_boot()
+    if settled:
+        logger.warning(
+            "Boot reconcile: settled %d Swarm workflow(s) orphaned by the "
+            "previous process", settled,
+        )
+    return settled
+
+
 def _reset_orphaned_session_statuses(*, stop=None) -> int:
     """Reset own-instance sessions stuck in a live-looking ``status``.
 
@@ -1014,6 +1033,7 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
         "engine_pending_repaired": 0,
+        "swarms_settled": 0,
         "orphan_processes_reaped": 0,
     }
 
@@ -1071,6 +1091,20 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
             f"Boot reconcile failed while repairing engine pending sets: {exc}",
             detail=traceback.format_exc(),
             context={"reconcile": "engine_pending"},
+        )
+
+    # Swarm workflows whose coordinator died with the previous process. Runs
+    # AFTER the stale-row sweep, whose reap is the proof that each one ended.
+    try:
+        counts["swarms_settled"] = await _settle_orphaned_swarms()
+    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+        logger.exception("Boot reconcile: orphaned Swarm settlement failed")
+        await run_sync(
+            record_error,
+            "backend",
+            f"Boot reconcile failed while settling orphaned Swarm workflows: {exc}",
+            detail=traceback.format_exc(),
+            context={"reconcile": "swarms"},
         )
 
     try:
