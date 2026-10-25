@@ -21,9 +21,10 @@ xcodebuild test -project AIShuffle.xcodeproj -scheme AIShuffle \
 ```
 
 The tests need no worker: the WebKit tests load a fixture page at
-`https://worker.invalid/mobile/`. CI runs the same steps in
-`.github/workflows/ios.yml` on PRs that touch `ios/`. A change under `mobile/`
-needs no app build at all.
+`https://worker.invalid/mobile/`. `.github/workflows/ios.yml` runs the same
+steps, but not on PRs: it is started by hand before an iOS release, so CI has
+not built or tested a PR that touches `ios/`. A change under `mobile/` needs no
+app build at all.
 
 ## How it maps to Android
 
