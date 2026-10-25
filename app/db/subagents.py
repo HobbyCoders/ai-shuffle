@@ -383,20 +383,37 @@ def get_permission_rules(
         return rows_to_list(cursor.fetchall())
 
 
-def delete_permission_rule(rule_id: str) -> bool:
-    """Delete a permission rule"""
+def _delete_permission_rules(where: str, params: tuple[str, ...]) -> int:
+    """Commit revocations and their sync tombstones in the same transaction.
+
+    Waiting for the periodic scan leaves a window in which a peer can restore
+    a deleted row before its deletion has been versioned locally.
+    """
+    from app.network import engine
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM permission_rules WHERE id = %s", (rule_id,))
-        return cursor.rowcount > 0
+        cursor.execute(f"DELETE FROM permission_rules WHERE {where} RETURNING id", params)
+        deleted = cursor.fetchall()
+        for row in deleted:
+            engine.record(cursor, "permission_rules", row["id"], None)
+    if deleted:
+        engine.kick()
+    return len(deleted)
+
+
+def delete_permission_rule(rule_id: str, profile_id: str | None = None) -> bool:
+    """Delete a permission rule, optionally constrained to its owning profile."""
+    where, params = "id = %s", (rule_id,)
+    if profile_id is not None:
+        where += " AND profile_id = %s"
+        params += (profile_id,)
+    return _delete_permission_rules(where, params) > 0
 
 
 def delete_profile_permission_rules(profile_id: str) -> int:
-    """Delete all permission rules for a profile"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM permission_rules WHERE profile_id = %s", (profile_id,))
-        return cursor.rowcount
+    """Delete all permission rules for a profile."""
+    return _delete_permission_rules("profile_id = %s", (profile_id,))
 
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync

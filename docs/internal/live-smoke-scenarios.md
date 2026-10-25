@@ -8,6 +8,14 @@ runner; `browser` rows need the browser tools and `owner` rows need the
 owner; record those with `python -m scripts.live_smoke record`.
 Default token cap per run: 600000 tokens.
 
+## approval-scopes
+
+Use two disposable candidate workers and throwaway agents and chats.
+
+| # | Check | Kind | How | Pass when | Past bug |
+|---|---|---|---|---|---|
+| remember-and-revoke | One-shot, runner-memory and permanent approvals have distinct lifetimes | owner, two workers | On candidate A, trigger a real Bash permission request in a throwaway agent. Answer once and confirm the next different Bash call asks again. Repeat with session remembrance and confirm a later call on the same pooled chat follows the decision, but another chat does not. Evict the disposable chat or restart candidate A; it must ask again. Repeat through /query and confirm its next background turn asks again. Save a permanent allow and deny in turn, confirm both sync to candidate B, list them as owner, then remove one and remove all from B. Reconnect a stale A and confirm removed rules stay absent and later calls ask. Check anonymous, API-key and ordinary paired clients cannot list or delete rules. On another install sharing A's test database and on a remote Task proxy, confirm only one-shot is offered; ModelSwitch also remains one-shot. Never restart production workers. | No remembrance is the default. Session rules end on runner teardown, eviction or restart, and at each background turn's end. Permanent rules cover every chat using that agent and disappear on both workers after revocation sync, without stale-peer resurrection. Only owners manage permanent rules. Prompts whose answers cannot reach runner memory offer only one-shot. Real-worker receipts are required; unit tests alone do not pass this row. | Tool-wide permanent permission rules had no list or revoke API; unpatterned session answers could fail to reach the runner. |
+
 ## durable-watches
 
 Disposable candidate workers and throwaway channels only; never publish credentials or private receipts.

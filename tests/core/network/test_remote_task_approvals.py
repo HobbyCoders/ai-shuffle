@@ -235,9 +235,9 @@ def test_always_allow_on_the_card_travels_as_allow_once(workers, monkeypatch, pr
         assert result.get("resolved") is True, result
     _, result = round_trip(a, b, proxies, held, ask_kwargs(child), always)
     assert isinstance(result, PermissionResultAllow)
-    assert [r["tool_pattern"] for r in permission_handler.get_session_rules("caller")] == ["df *"]
+    assert permission_handler.get_session_rules("caller") == []
 
-    # The next call asks again: the rule stayed on the parent.
+    # A legacy client's remember flag is ignored; the next remote call asks again.
     _, second = round_trip(a, b, proxies, held, ask_kwargs(child), responder("deny"))
     assert isinstance(second, PermissionResultDeny)
 

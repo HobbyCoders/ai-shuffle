@@ -2,7 +2,7 @@
 Profile management API routes
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime, timezone
 import re
 import logging
@@ -58,6 +58,20 @@ class SubagentResponse(BaseModel):
     is_builtin: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+class PermissionRuleResponse(BaseModel):
+    """A durable, network-synced rule for every chat using this agent."""
+    id: str
+    profile_id: str
+    tool_name: str
+    tool_pattern: str | None
+    decision: Literal["allow", "deny"]
+    created_at: datetime
+
+
+class DeletedPermissionRulesResponse(BaseModel):
+    deleted_count: int
 
 
 # Request model for updating enabled agents
@@ -212,6 +226,48 @@ async def get_profile(request: Request, profile_id: str, token: str = Depends(re
         return profile
 
     return await run_sync(_load)
+
+
+def _require_rule_profile(profile_id: str) -> None:
+    if database.get_profile(profile_id) is None:
+        raise HTTPException(status_code=404, detail=f"Profile not found: {profile_id}")
+
+
+@router.get("/{profile_id}/permission-rules", response_model=list[PermissionRuleResponse])
+async def list_permission_rules(
+    profile_id: str, token: str = Depends(require_admin),
+) -> list[dict]:
+    """List permanent saved decisions. A null pattern matches every tool call."""
+    def _load() -> list[dict]:
+        _require_rule_profile(profile_id)
+        return database.get_permission_rules(profile_id=profile_id)
+
+    return await run_sync(_load)
+
+
+@router.delete("/{profile_id}/permission-rules", response_model=DeletedPermissionRulesResponse)
+async def delete_all_permission_rules(
+    profile_id: str, token: str = Depends(require_admin),
+) -> dict:
+    """Revoke this agent's permanent rules, including on peer workers after sync."""
+    def _delete() -> dict:
+        _require_rule_profile(profile_id)
+        return {"deleted_count": database.delete_profile_permission_rules(profile_id)}
+
+    return await run_sync(_delete)
+
+
+@router.delete("/{profile_id}/permission-rules/{rule_id}", status_code=204)
+async def delete_saved_permission_rule(
+    profile_id: str, rule_id: str, token: str = Depends(require_admin),
+) -> None:
+    """Revoke one rule without allowing cross-agent rule IDs."""
+    def _delete() -> None:
+        _require_rule_profile(profile_id)
+        if not database.delete_permission_rule(rule_id, profile_id=profile_id):
+            raise HTTPException(status_code=404, detail="Permission rule not found")
+
+    await run_sync(_delete)
 
 
 @router.get("/{profile_id}/agents", response_model=List[SubagentResponse])
