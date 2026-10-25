@@ -6,6 +6,11 @@ Security tests for WebhookConnector.verify_inbound_request (Phase 1.4).
   False) rather than accept any unauthenticated request
 """
 
+import base64
+import hashlib
+import hmac
+
+import pytest
 from unittest.mock import MagicMock
 
 from app.core.connectors.webhook_connector import WebhookConnector
@@ -64,6 +69,35 @@ class TestVerifyInboundHmac:
         assert c.verify_inbound_request(body, signature=sig) is True
         # With the "sha256=" prefix too.
         assert c.verify_inbound_request(body, signature=f"sha256={sig}") is True
+
+    @pytest.mark.parametrize("encoding", ["hex", "base64"])
+    @pytest.mark.parametrize("prefix", ["", "sha256=", "hmac="])
+    def test_configured_encoding_and_prefix(self, encoding, prefix):
+        body = b'{"message":"exact bytes \xc3\xa9"}'
+        digest = hmac.new(b"secret", body, hashlib.sha256).digest()
+        signature = digest.hex() if encoding == "hex" else base64.b64encode(digest).decode()
+        c = _make_connector({"secret": "secret", "signature_encoding": encoding,
+                             "signature_prefix": prefix})
+        assert c.verify_inbound_request(body, signature=prefix + signature)
+        assert not c.verify_inbound_request(body + b" ", signature=prefix + signature)
+        assert not c.verify_inbound_request(body, signature=prefix + "not-a-signature")
+        if prefix:
+            assert not c.verify_inbound_request(body, signature=signature)
+            assert not c.verify_inbound_request(body, signature="wrong=" + signature)
+
+    @pytest.mark.parametrize("signature", ["", "not hex", "é", "sha256=é"])
+    def test_malformed_signature_is_rejected(self, signature):
+        assert not _make_connector({"secret": "secret"}).verify_inbound_request(b"body", signature=signature)
+
+    def test_empty_optional_settings_use_legacy_defaults(self):
+        c = _make_connector({"secret": "secret", "signature_encoding": "", "signature_prefix": ""})
+        signature = hmac.new(b"secret", b"body", hashlib.sha256).hexdigest()
+        assert c.verify_inbound_request(b"body", signature=signature)
+        assert c.verify_inbound_request(b"body", signature="sha256=" + signature)
+
+    def test_unknown_encoding_fails_closed(self):
+        c = _make_connector({"secret": "secret", "signature_encoding": "unsupported"})
+        assert not c.verify_inbound_request(b"body", signature="anything")
 
     def test_invalid_signature_returns_false(self):
         c = _make_connector({"secret": "topsecret"})

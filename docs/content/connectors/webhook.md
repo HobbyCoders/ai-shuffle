@@ -32,6 +32,9 @@ Inbound needs AI Shuffle reachable from the service that sends. For services out
 | `inbound_path` | For inbound | A short name for your address, such as `monitoring` |
 | `inbound_token` | For inbound, this or `secret` | A password senders include |
 | `secret` | For inbound, this or `inbound_token` | A key senders sign requests with. Outbound requests are signed with it too |
+| `signature_header` | No | Incoming signature header; default `X-Webhook-Signature` |
+| `signature_encoding` | No | Incoming HMAC-SHA256 digest encoding: `hex` (default) or `base64` |
+| `signature_prefix` | No | Prefix required before the digest, such as `sha256=`. If unset, hex accepts both bare hex and `sha256=<hex>` for compatibility |
 | `url` | For outbound | Where to send requests |
 | `headers` | No | Extra headers for outbound requests, such as your service's API key |
 | `prompt_template` | No | Instructions for the agent after the request. Default "Process the above webhook payload." |
@@ -64,6 +67,24 @@ curl -X POST http://localhost:8000/api/v1/connectors/hooks/custom \
   -H "X-Webhook-Signature: sha256=$SIGNATURE" \
   -d "$PAYLOAD"
 ```
+
+The signature settings affect inbound verification only; outbound signing is unchanged. Verification uses the exact request bytes, not re-serialized JSON. A wrong signature, encoding or required prefix is rejected.
+
+### GitHub example
+
+Create an inbound connector with `inbound_path` set to `github`, your GitHub webhook secret in `secret`, and no `inbound_token`. Set:
+
+- **Signature Header:** `X-Hub-Signature-256`
+- **Signature Encoding:** `hex`
+- **Signature Prefix:** `sha256=`
+
+In your GitHub repository's **Settings → Webhooks**, add your reachable AI Shuffle URL ending in `/api/v1/connectors/hooks/github`. Choose `application/json`, enter the same secret, and select the events to deliver. A GitHub push delivery then passes its `X-Hub-Signature-256: sha256=<hex>` signature to this connector.
+
+### Automation trigger data
+
+The `webhook_received` trigger contains `method` from the HTTP request, `body` with the complete JSON payload, and `path` with the connector's inbound slug. Its `headers` uses lowercase names and includes only `content-type`, `user-agent`, `x-request-id`, `x-github-event`, `x-github-delivery`, `x-gitlab-event`, `x-webhook-event` and `x-webhook-delivery-id`, when present. Authorization, cookies, token headers and the configured signature header are never included. A `headers` or `method` key inside the JSON stays inside `body`; it cannot replace transport metadata.
+
+If an automation is already running on this worker, another webhook, manual or connector trigger records a `skipped_running` entry in run history with its trigger data. It does not queue another run. `skipped_running` and `budget_exceeded` entries do not consume the daily run allowance, count as executed runs in statistics, or displace executed runs from output deduplication checks. A successful webhook response acknowledges receipt, not completion of an automation.
 
 ## Requests AI Shuffle sends
 

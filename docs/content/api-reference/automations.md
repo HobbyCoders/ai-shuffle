@@ -211,7 +211,7 @@ Run the automation now, or deliver a webhook payload. Owner access is required e
 - **Without `X-Webhook-Signature`** this is a manual run. It returns `409` if the automation is disabled. Any body is ignored.
 - **With `X-Webhook-Signature`** (automations with a webhook trigger), the JSON body is the payload. Sign it with the trigger's `secret`: compute HMAC-SHA256 over the body re-serialized with sorted keys and no spaces (`json.dumps(body, separators=(",", ":"), sort_keys=True)`), and send `sha256=<hex digest>`. A wrong signature returns `403`, and so does a signed call to a disabled automation.
 
-Either way the response is `{"automation_id": "...", "status": "triggered"}`, returned before the run starts; `404` if the automation does not exist. A worker runs only one run of an automation at a time: if one is already in progress there, the new one is skipped and no run record is created. A budget limit that is already reached records a `budget_exceeded` run instead.
+Either way the response is `{"automation_id": "...", "status": "triggered"}`, returned before the run starts; `404` if the automation does not exist. A worker runs only one run of an automation at a time: if one is already in progress there, the new one is not queued; a `skipped_running` run record preserves its trigger data in run history. This also applies to connector triggers. A budget limit that is already reached records a `budget_exceeded` run instead.
 
 ```bash
 # Manual run

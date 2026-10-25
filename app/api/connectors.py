@@ -251,11 +251,10 @@ async def inbound_webhook(webhook_slug: str, request: Request):
         else:
             token = request.headers.get("x-webhook-token")
 
-        signature = request.headers.get("x-webhook-signature")
+        signature_header = config.get("signature_header") or "X-Webhook-Signature"
+        signature = request.headers.get(signature_header)
 
-        if not connector.verify_inbound_request(
-            body.decode("utf-8", errors="replace"), token=token, signature=signature
-        ):
+        if not connector.verify_inbound_request(body, token=token, signature=signature):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid authentication",
@@ -263,7 +262,20 @@ async def inbound_webhook(webhook_slug: str, request: Request):
 
         # Dispatch to AI
         async with api_error_handler("process inbound webhook"):
-            await connector.handle_webhook_payload(payload)
+            # Only useful transport metadata is exposed, never credentials.
+            allowed_headers = {
+                "content-type", "user-agent", "x-request-id",
+                "x-github-event", "x-github-delivery", "x-gitlab-event",
+                "x-webhook-event", "x-webhook-delivery-id",
+            }
+            allowed_headers.discard(signature_header.lower())
+            headers = {
+                name: value for name, value in request.headers.items()
+                if name in allowed_headers
+            }
+            await connector.handle_webhook_payload(
+                payload, request_method=request.method, headers=headers,
+            )
 
         matched = True
         break

@@ -220,9 +220,51 @@ class TestExecuteConcurrency:
 
         await manager._execute("auto-conc", {"trigger": "manual"})
 
-        # Should not have created any run (blocked by concurrency check)
         runs = database.get_automation_runs("auto-conc")
-        assert len(runs) == 0
+        assert len(runs) == 1
+        assert runs[0]["status"] == "skipped_running"
+        assert runs[0]["trigger_data"] == {"trigger": "manual"}
+        assert "auto-conc" in manager._running  # The active run retains its latch.
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("trigger", ["webhook", "manual", "connector_trigger"])
+    async def test_overlapping_fires_are_recorded(self, manager, mock_db, runner, trigger):
+        tasks = _capture_tasks(manager)
+        _make_automation("auto-overlap", triggers=[
+            {"type": "webhook", "config": {}},
+            {"type": "connector_trigger", "config": {"connector_id": "c-1", "trigger_id": "webhook_received"}},
+        ])
+        release = asyncio.Event()
+        runner.gates = [release]
+
+        async def fire(delivery):
+            if trigger == "webhook":
+                result = await manager.trigger_webhook("auto-overlap", {"delivery": delivery})
+                assert result["status"] == "triggered"
+            elif trigger == "manual":
+                result = await manager.trigger_manual("auto-overlap")
+                assert result["status"] == "triggered"
+            else:
+                await manager.handle_connector_trigger("c-1", "webhook_received", {"delivery": delivery})
+
+        try:
+            await fire(1)
+            await _until(lambda: len(runner.calls) == 1)
+            await fire(2)
+            await tasks[1]
+            runs = _runs("auto-overlap")
+            assert len(runs) == 2
+            skipped = next(run for run in runs if run["status"] == "skipped_running")
+            assert skipped["trigger_data"]["trigger"] == trigger
+            if trigger == "webhook":
+                assert skipped["trigger_data"]["payload"] == {"delivery": 2}
+            elif trigger == "connector_trigger":
+                assert skipped["trigger_data"]["data"] == {"delivery": 2}
+            assert len(runner.calls) == 1
+            assert manager._running["auto-overlap"] is tasks[0]
+        finally:
+            release.set()
+            await _drain(tasks)
 
 
 # =============================================================================
@@ -2175,6 +2217,40 @@ class TestConnectorEventFiltering:
 
 
 class TestBudgetAndApproval:
+    async def test_skipped_fires_do_not_consume_daily_budget(self, manager, mock_db, runner):
+        from app.db import database
+
+        tasks = _capture_tasks(manager)
+        cap = 2
+        _make_automation("auto-skips-cap", triggers=_WEBHOOK_NO_SECRET, max_runs_per_day=cap)
+        release = asyncio.Event()
+        runner.gates = [release]
+        try:
+            await manager.trigger_webhook("auto-skips-cap", {"delivery": 1})
+            await _until(lambda: len(runner.calls) == 1)
+            for _ in range(cap):
+                await manager.trigger_manual("auto-skips-cap")
+                await tasks[-1]
+            assert sum(r["status"] == "skipped_running" for r in _runs("auto-skips-cap")) == cap
+            assert database.get_automation_daily_stats("auto-skips-cap")["run_count"] == 1
+        finally:
+            release.set()
+            await _drain(tasks)
+
+        await manager.trigger_webhook("auto-skips-cap", {"delivery": 2})
+        await _drain(tasks)
+        assert len(runner.calls) == cap
+        assert _auto("auto-skips-cap")["failure_count"] == 0
+        assert database.get_automation_aggregate_stats("auto-skips-cap")["total_runs"] == cap
+
+        # Real admitted runs still enforce the cap. Rejections are history only.
+        await manager.trigger_manual("auto-skips-cap")
+        await _drain(tasks)
+        assert len(runner.calls) == cap
+        assert any(r["status"] == "budget_exceeded" for r in _runs("auto-skips-cap"))
+        assert database.get_automation_daily_stats("auto-skips-cap")["run_count"] == cap
+        assert database.get_automation_aggregate_stats("auto-skips-cap")["total_runs"] == cap
+
     async def test_daily_run_limit_blocks_with_budget_exceeded_row(self, manager, mock_db, runner):
         from app.db import database
 
@@ -2499,7 +2575,11 @@ class TestRunConcurrency:
 
         await manager._execute("auto-busy", {"trigger": "schedule"})  # next fire arrives
         assert len(runner.calls) == 1
-        assert len(_runs("auto-busy")) == 1
+        runs = _runs("auto-busy")
+        assert sorted(r["status"] for r in runs) == ["running", "skipped_running"]
+        skipped = next(r for r in runs if r["status"] == "skipped_running")
+        assert skipped["trigger_data"] == {"trigger": "schedule"}
+        assert manager._running["auto-busy"] is first
 
         gate.set()
         await first
@@ -2507,7 +2587,9 @@ class TestRunConcurrency:
 
         await manager._execute("auto-busy", {"trigger": "schedule"})
         assert len(runner.calls) == 2
-        assert sorted(r["status"] for r in _runs("auto-busy")) == ["completed", "completed"]
+        assert sorted(r["status"] for r in _runs("auto-busy")) == [
+            "completed", "completed", "skipped_running",
+        ]
 
     async def test_latch_released_after_a_failed_run(self, manager, mock_db, runner):
         runner.exc = RuntimeError("boom")
@@ -3036,8 +3118,9 @@ class TestOutputRouting:
         pytest.param("same answer", id="short"),
         pytest.param("x" * 3000, id="longer-than-stored-tail"),
     ])
+    @pytest.mark.parametrize("non_run_status", ["skipped_running", "budget_exceeded"])
     async def test_identical_response_within_window_is_deduplicated(
-        self, manager, mock_db, runner, connectors, response
+        self, manager, mock_db, runner, connectors, response, non_run_status
     ):
         """Regression: the dedup window never fired. The stored completion time
         was parsed as a naive datetime and subtracted from an aware ``now``
@@ -3049,11 +3132,19 @@ class TestOutputRouting:
             "type": "connector", "connector_id": "c-1", "platform_chat_id": "chat-1",
             "deduplicate_window_seconds": 3600,
         })
+        from app.db import database
         await manager._execute("auto-dd", {"trigger": "manual"})
+        # More audit rows than the five-row lookback must not hide delivery.
+        for i in range(6):
+            database.create_automation_run(
+                run_id=f"run-non-run-{i}", automation_id="auto-dd", status=non_run_status,
+            )
         await manager._execute("auto-dd", {"trigger": "manual"})
 
         assert len(connectors["c-1"].messages) == 1
-        statuses = [r["output_status"] for r in sorted(_runs("auto-dd"), key=lambda r: r["created_at"])]
+        assert len(_runs("auto-dd")) == 8  # Audit rows remain visible in history.
+        executed = database.get_automation_runs("auto-dd", include_non_runs=False)
+        statuses = [r["output_status"] for r in sorted(executed, key=lambda r: r["created_at"])]
         assert statuses == ["delivered", "deduplicated"]
 
     async def test_dedup_ignores_old_or_different_responses(self, manager, mock_db):

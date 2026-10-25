@@ -118,15 +118,66 @@ def test_websocket_upgrade_header_skips_origin_check(client):
     assert client.post("/api/v1/things", headers=headers).status_code == 200
 
 
-def test_connector_webhook_prefix_is_exempt(monkeypatch):
-    client = _client(monkeypatch)
-    api = client.app
+@pytest.mark.parametrize("auth_mode", ["signature", "token", "github", "base64", "allowlisted"])
+def test_connector_webhook_prefix_is_exempt(monkeypatch, auth_mode):
+    import base64
+    import hashlib
+    import hmac
+    from unittest.mock import AsyncMock
+    from app.api.connectors import router
+    from app.core.connectors.manager import connector_manager
+    from app.core.connectors.webhook_connector import WebhookConnector
 
-    @api.post("/api/v1/connectors/webhook/abc")
-    async def hook():
-        return {"ok": True}
+    client = _client(monkeypatch)  # Non-loopback, CSRF enabled, no Origin.
+    client.app.include_router(router)
+    config = {"mode": "inbound", "inbound_path": "abc"}
+    if auth_mode == "token":
+        config["inbound_token"] = "test-token"
+    else:
+        config["secret"] = "test-secret"
+    if auth_mode == "allowlisted":
+        config["signature_header"] = "X-Request-Id"
+    if auth_mode == "github":
+        config.update(signature_header="X-Hub-Signature-256", signature_prefix="sha256=")
+    if auth_mode == "base64":
+        config.update(signature_header="X-Sender-Signature", signature_encoding="base64",
+                      signature_prefix="hmac=")
+    connector = WebhookConnector(
+        connector_id="hook-test", connector_type="webhook", config=config,
+        on_incoming_message=AsyncMock(), on_permission_response=AsyncMock(),
+    )
+    connector.emit_trigger = AsyncMock()
+    monkeypatch.setattr(connector_manager, "get_running_connectors", lambda kind: [("hook-test", connector)])
+    body = b'{"headers":{"x-github-event":"fake"},"method":"DELETE","message":"hello"}'
+    digest = hmac.new(b"test-secret", body, hashlib.sha256).digest()
+    signature = base64.b64encode(digest).decode() if auth_mode == "base64" else digest.hex()
+    signature = config.get("signature_prefix", "") + signature
+    auth_headers = {"X-Webhook-Token": "test-token"} if auth_mode == "token" else {
+        config.get("signature_header", "X-Webhook-Signature"): signature,
+    }
+    headers = {
+        **auth_headers, "Content-Type": "application/json", "X-GitHub-Event": "push",
+        "Cookie": "private=value", "X-Private": "do-not-forward", "Authorization": "Basic private",
+    }
+    response = client.post("/api/v1/connectors/hooks/abc", content=body, headers=headers)
+    assert response.status_code == 200, response.text
+    connector.emit_trigger.assert_awaited_once()
+    trigger, data = connector.emit_trigger.await_args.args
+    assert trigger == "webhook_received"
+    assert data["method"] == "POST"
+    assert data["headers"] == {
+        "content-type": "application/json", "user-agent": "testclient", "x-github-event": "push",
+    }
+    assert data["body"]["headers"]["x-github-event"] == "fake"
+    assert data["body"]["method"] == "DELETE"
+    assert connector._on_incoming_message.await_args.args[0].metadata["raw_payload"] == data["body"]
 
-    assert client.post("/api/v1/connectors/webhook/abc").status_code == 200
+    # Exemption never bypasses the route's own authentication.
+    bad_headers = {key: "invalid" for key in auth_headers}
+    response = client.post("/api/v1/connectors/hooks/abc", content=body, headers=bad_headers)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Invalid authentication"
+    assert connector.emit_trigger.await_count == 1
 
 
 def test_no_configured_origins_still_enforces_same_origin(monkeypatch):
