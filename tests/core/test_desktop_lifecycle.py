@@ -1,6 +1,7 @@
 """Desktop close and orphan recovery use real runtime and database transitions."""
 import asyncio
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -210,7 +211,10 @@ async def test_shutdown_execution_wait_uses_budget_left_after_stop(monkeypatch):
             await asyncio.gather(execution, return_exceptions=True)
 
 
-async def test_force_stop_runs_all_tasks_and_turns_under_one_deadline(mock_db, monkeypatch):
+@pytest.mark.parametrize("preparation_seconds", [0.02, 0.08], ids=["budget-left", "expired"])
+async def test_force_stop_runs_all_tasks_and_turns_under_one_deadline(
+    mock_db: object, monkeypatch: pytest.MonkeyPatch, preparation_seconds: float,
+) -> None:
     from app.core.task_registry import TaskRegistry
 
     registry = TaskRegistry()
@@ -219,23 +223,53 @@ async def test_force_stop_runs_all_tasks_and_turns_under_one_deadline(mock_db, m
     for i in range(12):
         registry.start_task(f"s{i % 2}", f"task{i}", "shell", "work")
     release = asyncio.Event()
-    calls, started = [], []
+    all_started = asyncio.Event()
+    calls: list[asyncio.Task[object]] = []
 
-    async def block(*args, **kwargs):
-        calls.append(asyncio.current_task())
-        started.append(args)
+    async def block(*args: object, **kwargs: object) -> list[object]:
+        task = asyncio.current_task()
+        assert task is not None
+        calls.append(task)
+        if len(calls) == 13:
+            all_started.set()
         await release.wait()
         return []
 
-    with patch.object(session_runtime, "force_end_executions", new=block), \
-         patch("app.core.query_session_lifecycle.stop_session_task", new=block):
+    async def wait_at_deadline(
+        stops: list[asyncio.Task[object]], *, timeout: float,
+    ) -> tuple[set[asyncio.Task[object]], set[asyncio.Task[object]]]:
+        # A single wait must include every stop, with only the original budget left.
+        assert len(stops) == 13
+        assert timeout == pytest.approx(max(0, 0.05 - preparation_seconds))
+        await all_started.wait()
+        assert set(stops) == set(calls)
+        return set(), set(stops)  # Model deadline expiry while all handlers are blocked.
+
+    # Advance only the product's clock, not the real event loop's scheduling clock.
+    # The old outer 0.5s wait_for raced descheduling even when the budget was already 0.
+    clock = Mock(side_effect=[100.0, 100.0 + preparation_seconds])
+    wait = AsyncMock(side_effect=wait_at_deadline)
+    monkeypatch.setattr(desktop_lifecycle, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=clock),
+        create_task=asyncio.create_task,
+        wait=wait,
+    ))
+    with (
+        patch.object(session_runtime, "force_end_executions", side_effect=block) as end,
+        patch("app.core.query_session_lifecycle.stop_session_task", side_effect=block) as stop,
+    ):
         try:
-            assert await asyncio.wait_for(desktop_lifecycle.force_stop_sessions(
-                {"s0", "s1"}, source="worker_update", grace=0.05), 0.5) == ["s0", "s1"]
-            assert len(started) == 13  # turn force-end and every task start concurrently
-            assert all(call.cancelling() == 0 for call in calls)
+            assert await desktop_lifecycle.force_stop_sessions(
+                {"s0", "s1"}, source="worker_update", grace=0.05,
+            ) == ["s0", "s1"]
+            wait.assert_awaited_once()
+            end.assert_awaited_once_with({"s0", "s1"}, grace=0.025)
+            assert stop.await_count == 12
+            assert len(calls) == 13  # turn force-end and every task start concurrently
+            assert all(not call.done() and call.cancelling() == 0 for call in calls)
             assert not registry.active_session_ids()
             for i in range(12):
+                stop.assert_any_await(f"s{i % 2}", f"task{i}", source="worker_update")
                 task = registry.get_task(f"s{i % 2}", f"task{i}")
                 assert (task["status"], task["reason"]) == ("killed", "worker_update")
         finally:
