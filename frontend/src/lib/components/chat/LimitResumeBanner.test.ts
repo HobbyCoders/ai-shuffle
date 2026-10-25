@@ -99,6 +99,46 @@ describe('LimitResumeBanner', () => {
 		expect(await screen.findByText(/Resumes at/)).toBeTruthy();
 	});
 
+	it('keeps the arm answer over an older read that lands after it', async () => {
+		mocks.get.mockResolvedValueOnce(STOPPED);
+		const view = render(LimitResumeBanner, { sessionId: 's1', messages: [] });
+		await screen.findByRole('button', { name: 'Resume at reset' });
+		let finishStale!: (v: SessionLimitResume) => void;
+		mocks.get.mockReturnValueOnce(new Promise((r) => (finishStale = r)));
+		const row = { id: 'r9', role: 'system' as const, type: 'system' as const, content: '',
+			systemSubtype: 'limit_resume', systemData: { status: 'available', reset_at: RESET } };
+		await view.rerender({ sessionId: 's1', messages: [row] });
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		mocks.arm.mockResolvedValue(ARMED);
+		await fireEvent.click(screen.getByRole('button', { name: 'Resume at reset' }));
+		expect(await screen.findByText(/Resumes at/)).toBeTruthy();
+		finishStale(STOPPED);
+		await new Promise((r) => setTimeout(r, 20));
+		expect(screen.getByText(/Resumes at/)).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Resume at reset' })).toBeNull();
+	});
+
+	it('keeps the cancel over an older armed read that lands after it', async () => {
+		mocks.get.mockResolvedValueOnce(ARMED);
+		const view = render(LimitResumeBanner, { sessionId: 's1', messages: [] });
+		await screen.findByRole('button', { name: 'Cancel' });
+		let finishStale!: (v: SessionLimitResume) => void;
+		mocks.get.mockReturnValueOnce(new Promise((r) => (finishStale = r)));
+		const row = { id: 'r10', role: 'system' as const, type: 'system' as const, content: '',
+			systemSubtype: 'limit_resume', systemData: { status: 'scheduled', resume_at: RESET + 30 } };
+		await view.rerender({ sessionId: 's1', messages: [row] });
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+		mocks.get.mockResolvedValue({
+			...STOPPED, limit_stopped: { ...STOPPED.limit_stopped!, can_arm: false, reason: 'already_handled' }
+		});
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		expect(await screen.findByText(/Resets at/)).toBeTruthy();
+		finishStale({ ...ARMED, resume_at: RESET + 90, pending: { fire_at: RESET + 90 } });
+		await new Promise((r) => setTimeout(r, 20));
+		expect(screen.getByText(/Resets at/)).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+	});
+
 	it('does not ask again while nothing that matters changed', async () => {
 		mocks.get.mockResolvedValue(STOPPED);
 		const view = render(LimitResumeBanner, { sessionId: 's1', messages: [] });

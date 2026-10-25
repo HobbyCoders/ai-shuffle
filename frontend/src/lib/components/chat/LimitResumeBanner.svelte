@@ -106,6 +106,8 @@
 		busy = true;
 		try {
 			const next = await armLimitResume(sid, banner.turnId);
+			// The arm answer is newer than any read still in flight: drop those.
+			request++;
 			if (sid === sessionId) limitState = next;
 		} catch (e) {
 			notify(getErrorMessage(e, 'Could not schedule the resume.'), { severity: 'error' });
@@ -123,6 +125,7 @@
 		try {
 			await cancelLimitResume(sid);
 			hiddenArm = key;
+			// load() drops every read that started before the cancel landed.
 			void load(sid);
 		} catch (e) {
 			notify(getErrorMessage(e, 'Could not cancel the resume.'), { severity: 'error' });
