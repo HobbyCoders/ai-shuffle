@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
+
 import asyncssh
 
 from app.core import terminals as service
@@ -10,6 +12,7 @@ from app.core.terminals import TerminalError
 from app.db.async_database import run_sync
 from app.network import control, runners, terminal_relay, transport
 
+logger = logging.getLogger(__name__)
 PROBE_TIMEOUT_SECONDS = 3
 PROBE_CONNECT_SECONDS = 1
 
@@ -149,9 +152,14 @@ class PeerTerminal(StreamTerminal):
             # A spawn-time folder race consumes it and must drop this lease.
             if not isinstance(exc, TerminalError) or exc.code != "bad_folder" or not exc.retryable:
                 terminal_relay.forget(self.lease)
+            logger.info("peer terminal open refused worker=%s code=%s by=%s", target.worker_id,
+                        getattr(exc, "code", type(exc).__name__), self.created_by)
             raise
         self.shell, self.cwd = info["shell"], info["cwd"]
         self.state = info["state"]
+        # The recipient logs its side; this is the source worker's record.
+        logger.info("peer terminal opened worker=%s terminal=%s shell=%s by=%s",
+                    target.worker_id, self.id, self.shell, self.created_by)
         self.task = asyncio.create_task(self.pump())
         self.task.add_done_callback(lambda _: terminal_relay.forget(self.lease))
 
@@ -194,6 +202,7 @@ class PeerTerminal(StreamTerminal):
         if self._peer_closed:
             return
         self._peer_closed = True
+        logger.info("peer terminal closed worker=%s terminal=%s", self.target["worker_id"], self.id)
         try:
             # Revocation only reduces access, so it remains valid if the owner
             # credential expired or the reader was cancelled before starting.

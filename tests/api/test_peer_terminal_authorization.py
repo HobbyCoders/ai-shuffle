@@ -33,7 +33,8 @@ def test_source_http_contract_opens_real_peer_pty_and_existing_websocket(peer, m
     from app.core import terminals as service
     from app.network import runners
 
-    caplog.set_level("INFO", logger="app.network.terminal_relay")
+    for name in ("app.network.terminal_relay", "app.core.terminal_targets", "app.api.terminals"):
+        caplog.set_level("INFO", logger=name)
     source = service.TerminalRegistry()
     monkeypatch.setattr(api, "registry", source)
     monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda device:
@@ -89,13 +90,35 @@ def test_source_http_contract_opens_real_peer_pty_and_existing_websocket(peer, m
         read_until(ws, b"PEER_OK")
         ws.send_json({"type": "resize", "cols": 100, "rows": 40})
         assert until(lambda: peer.reg.list()[0].cols == 100)
+    # Reconnect like a reload: the source keeps the peer shell, replays its
+    # recent output and carries new input, exactly as for a local terminal.
+    assert source.get(terminal["id"]).state != service.STATE_EXITED
+    with wsc(tc, ws_url(terminal["id"])) as ws:
+        _, replay = attach(ws)
+        assert b"PEER_OK" in replay
+        again = ("Write-Output ('AGAIN_' + 'OK')\r" if terminal["shell"] in {"pwsh", "powershell"}
+                 else "printf 'AGAIN_%s' OK\n")
+        ws.send_json({"type": "input", "data": again})
+        read_until(ws, b"AGAIN_OK")
     assert tc.delete(f"/api/v1/terminals/{terminal['id']}").status_code == 200
     assert source.count == peer.reg.count == 0
     assert not relay._owners
-    audit = "\n".join(r.getMessage() for r in caplog.records if r.name == "app.network.terminal_relay")
+
+    def log(name):
+        return "\n".join(r.getMessage() for r in caplog.records if r.name == name)
+
+    recipient = log("app.network.terminal_relay")
     for event in ("requested", "approved", "opened", "closed"):
-        assert "peer terminal " + event in audit
-    assert authorization_id not in audit and peer.owner not in audit and "PEER_OK" not in audit
+        assert "peer terminal " + event in recipient
+    # Each open is also on record on the worker that asked for it.
+    requester = log("app.api.terminals") + "\n" + log("app.core.terminal_targets")
+    for event in ("requested worker=destination", "open refused worker=destination code=bad_folder",
+                  f"opened worker=destination terminal={terminal['id']}",
+                  f"closed worker=destination terminal={terminal['id']}"):
+        assert "peer terminal " + event in requester
+    for audit in (recipient, requester):
+        assert authorization_id not in audit and peer.owner not in audit
+        assert "PEER_OK" not in audit and "AGAIN_OK" not in audit
 
 
 @pytest.mark.asyncio
