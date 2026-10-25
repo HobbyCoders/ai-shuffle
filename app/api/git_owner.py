@@ -106,6 +106,10 @@ async def _guard_mutation(action_name, values, endpoint=None):
     body = values.get('body')
     sid = values.get('session_id') or getattr(body, 'session_id', None)
     wid = values.get('worktree_id') or getattr(body, 'worktree_id', None)
+    base_review = values.get('scope') == 'base' or getattr(body, 'scope', None) == 'base'
+    if base_review:
+        from app.api.git_helpers import get_session_review_working_dir_async
+        resolve = get_session_review_working_dir_async
     if action_name == 'checkout_branch' and wid:
         raise HTTPException(400, 'Cannot checkout branches in a worktree. Worktrees are bound to their branch.')
     try:
@@ -115,6 +119,8 @@ async def _guard_mutation(action_name, values, endpoint=None):
     except HTTPException as exc:
         # GitHub-only projects need not have a local clone. Branch activity is
         # still checked against the authenticated project's canonical aliases.
+        if base_review:
+            raise
         if action_name in _MUTATING_ACTIONS and (action_name != 'create_pull_request' or exc.status_code not in {404, 409}):
             raise
         cwd = None

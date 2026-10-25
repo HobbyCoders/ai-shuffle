@@ -20,13 +20,14 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.config import settings
 from app.core.detached_tasks import spawn_detached
 from app.core.git_service import classify_clone_url, git_service
+from app.core.git_base_diff import BaseReviewUnavailable
 from app.core.scrub import redact_url_credentials, strip_url_userinfo
 from app.db import database
 from app.db.async_database import run_sync
@@ -40,6 +41,7 @@ from app.api.git_helpers import (
     _coalescer,
     get_project_path,
     get_working_dir_async,
+    get_session_review_working_dir_async,
     stage_and_commit,
     ensure_git_repository_record,
     peek_repo_record_cache,
@@ -928,13 +930,14 @@ async def get_diff_stats(
 # Changed Files & File-Level Operations
 # =============================================================================
 
-@router.get("/changed-files", response_model=ChangedFilesResponse)
+@router.get("/changed-files", response_model=ChangedFilesResponse, response_model_exclude_none=True)
 @session_git_action
 async def get_changed_files(
     request: Request,
     project_id: str,
     worktree_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    scope: Literal["working", "base"] = "working",
     token: str = Depends(require_auth),
 ):
     """
@@ -942,8 +945,19 @@ async def get_changed_files(
 
     Returns files grouped by category (staged, modified, untracked, conflict)
     with per-file addition/deletion counts for display in the changed files panel.
+    Scope base includes committed task work and requires a session checkout.
     """
     check_project_access(request, project_id)
+    if scope == "base":
+        working_dir = await get_session_review_working_dir_async(
+            project_id, worktree_id, session_id,
+        )
+        try:
+            return ChangedFilesResponse(**await run_git(
+                git_service.get_base_changed_files, working_dir,
+            ))
+        except BaseReviewUnavailable as exc:
+            raise HTTPException(409, str(exc)) from exc
     working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
 
     # Fetch status and per-file stats in parallel via the thread pool
@@ -1042,7 +1056,7 @@ async def get_changed_files(
     )
 
 
-@router.post("/file-diff", response_model=FileDiffResponse)
+@router.post("/file-diff", response_model=FileDiffResponse, response_model_exclude_none=True)
 @session_git_action
 async def get_file_diff(
     request: Request,
@@ -1059,6 +1073,16 @@ async def get_file_diff(
     Fetches lazily (on user click), not pre-loaded.
     """
     check_project_access(request, project_id)
+    if body.scope == "base":
+        working_dir = await get_session_review_working_dir_async(
+            project_id, worktree_id, session_id,
+        )
+        try:
+            return FileDiffResponse(**await run_git(
+                git_service.get_base_file_diff, working_dir, body.file_path,
+            ))
+        except BaseReviewUnavailable as exc:
+            raise HTTPException(409, str(exc)) from exc
     working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
 
     result = await run_git(
