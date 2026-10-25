@@ -5369,10 +5369,13 @@ def _native_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
     from fluid.context.plugins import discover_plugins, plugin_mcp_servers
 
     sources = _fluid_setting_sources(options)
-    plugins = discover_plugins(
-        options.cwd or ".",
-        sources=sources if sources is not None else ("user", "project", "local"),
-    )
+    plugins = []
+    # Plugin packages are user-scoped, even when project/local settings enable them.
+    if sources is None or "user" in sources:
+        plugins = discover_plugins(
+            options.cwd or ".",
+            sources=sources if sources is not None else ("user", "project", "local"),
+        )
     merged = plugin_mcp_servers(plugins)
     # Reserve all host names, including in-process servers filtered below.
     merged.update(options.mcp_servers or {})

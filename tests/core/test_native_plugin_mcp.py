@@ -118,6 +118,23 @@ def test_scope_filter_and_sorted_server_map(
     assert "demo" not in ha._native_external_mcp_servers(options)
 
 
+@pytest.mark.parametrize("sources", [[], ["project"], ["local"], ["project", "local"]])
+def test_plugin_mcp_requires_user_scope(
+    plugin_home: tuple[Path, PluginService], tmp_path: Path, sources: list[str],
+) -> None:
+    project_settings = tmp_path / ".fluid"
+    project_settings.mkdir()
+    enabled = json.dumps({"enabledPlugins": {"demo@testmp": True}})
+    # Without the user gate, either project scope can enable the cached package.
+    for filename in ("settings.json", "settings.local.json"):
+        (project_settings / filename).write_text(enabled, encoding="utf-8")
+    host = {"host": _config("host_ping")}
+    options = SessionOptions(
+        model="gpt-4o", cwd=str(tmp_path), mcp_servers=host, setting_sources=sources,
+    )
+    assert ha._native_external_mcp_servers(options) == host
+
+
 @pytest.mark.asyncio
 async def test_delegated_path_does_not_copy_plugin_servers(
     plugin_home: tuple[Path, PluginService], tmp_path: Path,
