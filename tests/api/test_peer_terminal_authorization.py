@@ -104,7 +104,7 @@ def test_source_http_contract_opens_real_peer_pty_and_existing_websocket(peer, m
     assert source.count == peer.reg.count == 0
     assert not relay._owners
 
-    def log(name):
+    def log(name: str) -> str:
         return "\n".join(r.getMessage() for r in caplog.records if r.name == name)
 
     recipient = log("app.network.terminal_relay")

@@ -10,6 +10,8 @@ meets on the worker that would run the shell.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import httpx
 import pytest
@@ -22,7 +24,7 @@ from app.db import network as store
 from app.network import control, engine, transport
 from app.network import terminal_relay as relay
 from tests.core.network import harness
-from tests.core.network.harness import converge, join
+from tests.core.network.harness import Worker, converge, join
 from tests.core.network.test_transport import ServedBy, _app
 
 pytestmark = [
@@ -39,14 +41,20 @@ FORGED_LEASE = "forged-lease-the-source-owner-never-issued"
 class Served(ServedBy):
     """``ServedBy`` on the scheme of its base URL, so HTTPS reaches the route as HTTPS."""
 
-    def __init__(self, server, base_url: str) -> None:
+    def __init__(self, server: Worker, base_url: str) -> None:
         super().__init__(server, base_url)
         scheme = base_url.split("://", 1)[0]
         self.client = TestClient(_app(), base_url=f"{scheme}://testserver")
 
 
+# (source, recipient, endpoint URLs per device, served transport per base URL)
+Pair = tuple[Worker, Worker, dict[str, list[str]], dict[str, Served]]
+
+
 @pytest.fixture
-def pair(workers, monkeypatch):
+def pair(
+    workers: Callable[[str], Worker], monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Pair]:
     """Source and recipient workers in one network, each serving its own control route."""
     monkeypatch.setattr(type(settings), "network_peer_terminals", property(lambda self: True))
     source, recipient = workers("source"), workers("recipient")
@@ -61,7 +69,7 @@ def pair(workers, monkeypatch):
 
     real_async = httpx.AsyncClient
 
-    def async_client(*args, **kwargs):
+    def async_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_async(**kwargs)
 
@@ -87,17 +95,17 @@ def pair(workers, monkeypatch):
     relay._sessions.clear()
 
 
-async def _terminal(source, recipient, body):
+async def _terminal(source: Worker, recipient: Worker, body: dict[str, Any]) -> dict[str, Any]:
     with source.active():
         return await control.call(recipient.device_id, "terminal", body, timeout=10, secure=True)
 
 
-def _row(recipient, terminal_capability):
+def _row(recipient: Worker, terminal_capability: int) -> dict[str, Any]:
     return {"id": recipient.device_id, "device_name": "Recipient", "is_self": False, "online": True,
             "capabilities": {"terminal": terminal_capability}, "endpoints": [RECIPIENT_URL]}
 
 
-async def test_compatible_peer_is_offered_only_for_recipient_approval(pair):
+async def test_compatible_peer_is_offered_only_for_recipient_approval(pair: Pair) -> None:
     source, recipient, _, served = pair
     with source.active():
         state = await terminal_targets.peer_availability(_row(recipient, 2))
@@ -106,7 +114,7 @@ async def test_compatible_peer_is_offered_only_for_recipient_approval(pair):
     assert ("POST", "/api/v1/network/peer/control/terminal") in served[RECIPIENT_URL].requests
 
 
-async def test_old_peer_is_refused_without_a_peer_call(pair):
+async def test_old_peer_is_refused_without_a_peer_call(pair: Pair) -> None:
     source, recipient, _, served = pair
     with source.active():
         state = await terminal_targets.peer_availability(_row(recipient, 1))
@@ -114,7 +122,9 @@ async def test_old_peer_is_refused_without_a_peer_call(pair):
     assert served[RECIPIENT_URL].requests == []
 
 
-async def test_peer_with_terminals_turned_off_answers_for_itself(pair, monkeypatch):
+async def test_peer_with_terminals_turned_off_answers_for_itself(
+    pair: Pair, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source, recipient, _, _ = pair
     # Policy on for the source, off on the recipient: only the recipient's own
     # answer can report it (its advertisement may lag behind the change).
@@ -133,7 +143,7 @@ async def test_peer_with_terminals_turned_off_answers_for_itself(pair, monkeypat
         assert relay.recipient_requests() == []
 
 
-async def test_forged_request_is_refused_after_asking_the_source_owner(pair):
+async def test_forged_request_is_refused_after_asking_the_source_owner(pair: Pair) -> None:
     source, recipient, _, served = pair
     with pytest.raises(control.ControlRefused, match="owner authorization"):
         await _terminal(source, recipient, {"op": "request", "lease": FORGED_LEASE})
@@ -145,7 +155,7 @@ async def test_forged_request_is_refused_after_asking_the_source_owner(pair):
 
 
 @pytest.mark.parametrize("op", ["open", "read", "write", "resize"])
-async def test_unapproved_lease_cannot_drive_a_shell(pair, op):
+async def test_unapproved_lease_cannot_drive_a_shell(pair: Pair, op: str) -> None:
     source, recipient, _, _ = pair
     before = service.registry.count
     with pytest.raises(control.ControlRefused):
@@ -154,7 +164,7 @@ async def test_unapproved_lease_cannot_drive_a_shell(pair, op):
     assert service.registry.count == before
 
 
-async def test_plaintext_control_route_is_refused_by_the_recipient(pair):
+async def test_plaintext_control_route_is_refused_by_the_recipient(pair: Pair) -> None:
     source, recipient, urls, served = pair
     urls[recipient.device_id][:] = [PLAIN_URL]
     transport._links.pop(recipient.device_id, None)
@@ -168,7 +178,7 @@ async def test_plaintext_control_route_is_refused_by_the_recipient(pair):
     assert served[PLAIN_URL].requests
 
 
-def test_unauthenticated_caller_is_refused_before_the_relay(pair):
+def test_unauthenticated_caller_is_refused_before_the_relay(pair: Pair) -> None:
     _, recipient, _, served = pair
     with recipient.active():
         response = served[RECIPIENT_URL].client.post("/api/v1/network/peer/control/terminal",
