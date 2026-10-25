@@ -2106,7 +2106,7 @@ async def cancel_session_limit_resume(
     request: Request,
     session_id: str,
     task_id: Optional[str] = Query(None, description="A paused Task worker of this chat"),
-    token: str = Depends(require_admin),
+    token: str = Depends(require_auth),
 ):
     """Cancel the resume this chat (or one of its paused Task workers) has
     scheduled. A cancelled worker settles as stopped. ``cancelled`` is false
@@ -2119,7 +2119,10 @@ async def cancel_session_limit_resume(
         if task_id not in await run_sync(limit_resume.paused_workers_of, session_id):
             raise HTTPException(status_code=404, detail="No paused worker with that id")
         target = task_id
-    cancelled = await limit_resume.cancel(target)
+    if task_id:
+        cancelled = await limit_resume.cancel(target)
+    else:
+        cancelled = await limit_resume.cancel(target, authorize_once=lambda: require_admin(request))
     return {"session_id": session_id, "task_id": task_id, "cancelled": cancelled}
 
 

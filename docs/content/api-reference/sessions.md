@@ -547,7 +547,7 @@ The event log emits `system` frames with subtype `limit_resume` (`system.note` i
 
 ### POST /api/v1/sessions/{session_id}/limit-resume/cancel
 
-**Auth:** Owner only.
+**Auth:** Required, with normal session access. Cancelling a per-chat one-shot arm additionally requires the owner. Stopping a paused worker with `task_id`, or cancelling a globally scheduled automatic resume, keeps normal authenticated access.
 
 Cancel the chat's scheduled resume. With `?task_id=<worker id>` it cancels the resume of that paused worker instead; the worker is then stopped. Returns `{"session_id": "...", "task_id": null, "cancelled": true}`, with `cancelled` `false` when nothing was scheduled. Returns `404` for a `task_id` that is not a paused worker of this chat.
 

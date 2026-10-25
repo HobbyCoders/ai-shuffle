@@ -258,6 +258,22 @@ async def test_never_scheduled_when_it_must_not_resume(monkeypatch, case):
     assert [s for _, s, _ in env.recorded] == (["available"] if case == "off" else [])
 
 
+@pytest.mark.parametrize("has_reset", [True, False])
+@pytest.mark.parametrize("has_parent", [True, False])
+async def test_worker_with_global_resume_off_records_no_arm_offer(monkeypatch, has_reset, has_parent):
+    from app.db import wakeups as wdb
+
+    session = {"id": "s1", "profile_id": "pr", "instance_id": settings.effective_instance_id}
+    if has_parent:
+        session["parent_session_id"] = "parent"
+    env = _Env(monkeypatch, session=session, switches={"resume_on_reset": False})
+    _no_structured(monkeypatch)
+    terminal = TERMINAL if has_reset else {"api_error_status": 429, "errors": ["usage limit reached"]}
+    assert await lr.on_limit_stop("s1", TURN, terminal, worker_owner="parent") is None
+    assert env.recorded == []
+    assert wdb.get_session_wakeups("s1", lr.LIMIT_RESUME_SOURCE) == []
+
+
 async def test_no_reset_time_says_so_and_schedules_nothing(monkeypatch):
     env = _Env(monkeypatch)
     _no_structured(monkeypatch)

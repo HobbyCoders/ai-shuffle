@@ -158,6 +158,24 @@ async def test_cancel_after_claim_prevents_the_continuation(stopped_chat, monkey
     submit.assert_not_awaited()
 
 
+@pytest.mark.parametrize("claimed", [True, False])
+async def test_once_cancel_authorizes_before_any_mutation(stopped_chat, claimed):
+    turn, _, _ = stopped_chat
+    await lr.arm("once-chat", turn["id"])
+    [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
+    if claimed:
+        assert wakeups.claim_wakeup(row["id"]) is True
+
+    def denied():
+        raise PermissionError("Owner access required")
+
+    with pytest.raises(PermissionError, match="Owner access required"):
+        await lr.cancel("once-chat", authorize_once=denied)
+    assert lr._last_decision("once-chat")["status"] == "scheduled"
+    assert bool(lr.pending("once-chat")) is not claimed
+    assert await lr.cancel("once-chat", authorize_once=lambda: None) is True
+
+
 async def test_stale_turn_id_cannot_arm_latest_stop(stopped_chat):
     with pytest.raises(ValueError, match="no longer the last"):
         await lr.arm("once-chat", "older-turn")
