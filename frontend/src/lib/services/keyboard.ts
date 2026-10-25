@@ -32,8 +32,11 @@ export interface KeyboardShortcut {
 	action: () => unknown;
 	/** Whether to prevent default browser behavior */
 	preventDefault?: boolean;
-	/** Whether shortcut should work when in input fields */
-	allowInInput?: boolean;
+	/**
+	 * Whether shortcut should work when in input fields. A function is asked
+	 * at key time, for a shortcut whose answer depends on what is on screen.
+	 */
+	allowInInput?: boolean | (() => boolean);
 }
 
 export interface ShortcutRegistration {
@@ -122,7 +125,9 @@ function handleKeyDown(e: KeyboardEvent): void {
 	const shortcut = shortcuts.get(eventKey)?.at(-1);
 	if (shortcut) {
 		// Check if we should ignore when in input fields
-		if (!shortcut.allowInInput && isInputElement(e.target)) {
+		const allowInInput =
+			typeof shortcut.allowInInput === 'function' ? shortcut.allowInInput() : shortcut.allowInInput;
+		if (!allowInInput && isInputElement(e.target)) {
 			// Exception: Allow Escape to always work
 			if (shortcut.key.toLowerCase() !== 'escape') {
 				return;

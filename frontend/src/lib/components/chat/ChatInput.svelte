@@ -31,6 +31,7 @@
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { restoreMessageDocument } from './tiptap/serialization';
+	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
@@ -409,6 +410,22 @@
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
+	});
+
+	// Text handed over from another surface (the terminal's "Send selection to
+	// chat") goes at the end of this chat's draft. Never sent: the user adds a
+	// question and sends it. On a phone the terminal covers the chat, so focus
+	// stays where it is instead of raising the keyboard behind it.
+	$effect(() => {
+		const insert = $composerInsert;
+		// Wait for the editor: a request taken before it exists would be lost.
+		if (!insert || !editorRef || !ownsComposer() || insert.sessionId !== $activeSession.sessionId) return;
+		const block = JSON.stringify(restoreMessageDocument(insert.text));
+		const current = getDraftJSON();
+		setComposerDraft(hasComposerDraft(current) ? joinDrafts(current, block) : block);
+		recall.reset();
+		completeComposerInsert(insert);
+		if (!isMobileComposerViewport()) tick().then(() => editorRef?.focus());
 	});
 
 	/** Replace the composer's content and persist it at once. */

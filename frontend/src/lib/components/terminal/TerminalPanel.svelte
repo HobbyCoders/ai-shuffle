@@ -10,7 +10,7 @@
 	 * the worker's terminals that belong to no chat.
 	 */
 	import { onMount, onDestroy, tick, untrack, type Snippet } from 'svelte';
-	import { Plus, X, Search, Copy, Check, Eraser, Square, ChevronUp, ChevronDown, LoaderCircle } from 'lucide-svelte';
+	import { Plus, X, Search, Copy, Check, Eraser, Square, ChevronUp, ChevronDown, LoaderCircle, MessageSquarePlus } from 'lucide-svelte';
 	import TerminalView from './TerminalView.svelte';
 	import MonitorWatch from './MonitorWatch.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
@@ -24,6 +24,8 @@
 	import type { CreateTerminal, TerminalInfo } from '$lib/api/terminals';
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import { resourceSync } from '$lib/services/resource-sync';
+	import { terminalSnippet } from '$lib/terminal/to-chat';
+	import { requestComposerInsert } from '$lib/stores/composer-insert';
 
 	let { sessionId, panelActions, mobile = false }: { sessionId: string; panelActions?: Snippet; mobile?: boolean } = $props();
 
@@ -41,6 +43,10 @@
 	let query = $state('');
 	let searchMiss = $state(false);
 	let copied = $state(false);
+	/** Tabs with text selected now (for "Send selection to chat"). */
+	let selected = $state<Record<string, boolean>>({});
+	let sentToChat = $state(false);
+	let sentTimer: ReturnType<typeof setTimeout> | undefined;
 	let ctrl = $state(false);
 	let confirm = $state<{ kind: 'paste'; id: string; text: string } | { kind: 'close'; id: string } | null>(null);
 	let searchInput = $state<HTMLInputElement>();
@@ -284,6 +290,21 @@
 		}
 	}
 
+	// ── Send selection to chat ─────────────────────────────────────────────
+	// The selected text goes to the end of this chat's draft as a fenced
+	// block. It is not sent: the owner adds a question and sends it.
+	const canSendSelection = $derived(!chatless && !!activeId && !!selected[activeId]);
+	function sendSelectionToChat() {
+		if (!activeId || chatless) return;
+		const snippet = terminalSnippet(views[activeId]?.selectionText() ?? '');
+		if (!snippet) return;
+		requestComposerInsert(sessionId, snippet);
+		sentToChat = true;
+		clearTimeout(sentTimer);
+		sentTimer = setTimeout(() => (sentToChat = false), 1600);
+	}
+	onDestroy(() => clearTimeout(sentTimer));
+
 	const statusLabel = $derived.by(() => {
 		if (!activeInfo || !activeLink) return null;
 		if (activeInfo.state === 'exited') return { tone: 'bad', text: activeInfo.exit_code === null ? 'Exited' : `Exited · code ${activeInfo.exit_code}` };
@@ -351,6 +372,13 @@
 				<button class="tool" aria-label="Copy output" title="Copy output (the selection, or everything)" onclick={copyOutput}>
 					{#if copied}<Check size={15} />{:else}<Copy size={15} />{/if}
 				</button>
+				{#if !chatless}
+					<button class="tool to-chat" class:sent={sentToChat} aria-label="Send selection to chat" disabled={!canSendSelection && !sentToChat}
+						title={sentToChat ? 'Added to your message. Nothing was sent.' : canSendSelection ? 'Add the selected text to your message as a code block. Nothing is sent.' : 'Select text in the terminal to add it to your message'}
+						onclick={sendSelectionToChat}>
+						{#if sentToChat}<Check size={15} />{:else}<MessageSquarePlus size={15} />{/if}
+					</button>
+				{/if}
 				<button class="tool" aria-label="Clear" title="Clear the screen here. The shell keeps running." onclick={() => activeId && views[activeId]?.clearScreen()}><Eraser size={15} /></button>
 				<button class="tool stop" aria-label="Stop" title="Stop the running command (Ctrl+C)" disabled={!activeInfo?.busy || !canType}
 					onclick={() => activeId && views[activeId]?.type('\x03')}><Square size={13} /></button>
@@ -403,7 +431,8 @@
 			{#each tabState.ids as id (id)}
 				<TerminalView bind:this={views[id]} {id} {sessionId} active={id === activeId && !watching}
 					ctrlArmed={ctrl} onCtrlUsed={() => (ctrl = false)}
-					onPasteRequest={(text) => void queuePaste(id, text)} mayFocus={focusAllowed} />
+					onPasteRequest={(text) => void queuePaste(id, text)} mayFocus={focusAllowed}
+					onSelectionChange={(has) => (selected[id] = has)} />
 			{/each}
 		{/if}
 	</div>
@@ -427,6 +456,8 @@
 			</div>
 		</div>
 	{/if}
+
+	<span class="sr-status" role="status" aria-live="polite">{sentToChat ? 'Selection added to your message. Nothing was sent.' : ''}</span>
 
 	{#if notice}
 		<div class="notice" role="alert"><span>{notice}</span>
@@ -502,6 +533,8 @@
 	.tool:disabled { opacity: 0.35; cursor: not-allowed; }
 	.tool[aria-pressed='true'], .tool[aria-expanded='true'] { background: color-mix(in oklch, var(--primary) 14%, transparent); color: var(--primary); }
 	.stop:not(:disabled) { color: var(--destructive); }
+	.to-chat.sent { color: var(--success); }
+	.sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 	/* ── Search ── */
 	.search { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 12px; border-bottom: 1px solid var(--border); background: var(--background); color: var(--muted-foreground); animation: slide 0.18s ease-out; }

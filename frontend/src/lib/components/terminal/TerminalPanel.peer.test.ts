@@ -20,7 +20,7 @@ vi.mock('@xterm/xterm', () => ({
 	Terminal: class {
 		cols = 80; rows = 24; buffer = { active: { length: 0, getLine: () => null } };
 		loadAddon() {} open(host: HTMLElement) { host.appendChild(document.createElement('textarea')); }
-		onData() {} attachCustomKeyEventHandler() {} focus() {} write() {} reset() {} clear() {} dispose() {}
+		onData() {} onSelectionChange() {} attachCustomKeyEventHandler() {} focus() {} write() {} reset() {} clear() {} dispose() {}
 		hasSelection() { return false; } getSelection() { return ''; } clearSelection() {}
 	},
 }));

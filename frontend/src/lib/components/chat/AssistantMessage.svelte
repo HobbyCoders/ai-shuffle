@@ -3,7 +3,8 @@
 	/**
 	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
-	import { onDestroy, untrack } from 'svelte';
+	import { mount, onDestroy, unmount, untrack } from 'svelte';
+	import TableCopyMenu from './TableCopyMenu.svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
@@ -278,6 +279,26 @@
 			head.insertBefore(runButton('open', reason, target), copy);
 			head.insertBefore(runButton('paste', reason, target), copy);
 		}
+	});
+
+	// Tables in a settled reply get a small Copy menu (Markdown or CSV). The
+	// wrapper comes from chat-markdown.ts; the menu is mounted here, after
+	// sanitising, so the sanitiser never has to admit a button for it. A
+	// re-render replaces the wrappers, so the menus go with them.
+	$effect(() => {
+		void rendered;
+		const root = proseEl;
+		if (!root || streaming) return;
+		const menus = Array.from(root.querySelectorAll<HTMLElement>('.md-table'))
+			.filter((wrapper) => wrapper.querySelector(':scope > table'))
+			.map((wrapper) => {
+				wrapper.querySelectorAll(':scope > .md-table-bar').forEach((el) => el.remove());
+				const bar = document.createElement('div');
+				bar.className = 'md-table-bar';
+				wrapper.prepend(bar);
+				return mount(TableCopyMenu, { target: bar, props: { wrapper } });
+			});
+		return () => menus.forEach((menu) => void unmount(menu));
 	});
 
 	function span(className: string, text: string): HTMLSpanElement {
@@ -894,6 +915,21 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.assistant-actions { transition: none; }
+	}
+
+	/* ── Tables: a quiet Copy menu above the right edge (TableCopyMenu) ── */
+	.abody :global(.md-table) {
+		margin: 0.5rem 0 1rem;
+		min-width: 0;
+	}
+	.abody :global(.md-table > table) {
+		margin-top: 0;
+		margin-bottom: 0;
+	}
+	.abody :global(.md-table-bar) {
+		display: flex;
+		justify-content: flex-end;
+		margin-bottom: 4px;
 	}
 
 	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */

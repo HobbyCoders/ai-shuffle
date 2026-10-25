@@ -8,6 +8,7 @@ import { auth } from '$lib/stores/auth.svelte';
 import { composerSuggestion } from '$lib/stores/session/composer-suggestion';
 import { promptStash } from '$lib/stores/session/prompt-stash';
 import { LARGE_PASTE_BYTES } from './tiptap/large-paste';
+import { composerInsert, requestComposerInsert } from '$lib/stores/composer-insert';
 import '$lib/test-stubs/composer-dom';
 
 // The composer's keyboard tools: ArrowUp recall, the Ctrl/Cmd+S prompt stash,
@@ -159,6 +160,29 @@ describe('unsent prompts return to the composer', () => {
 		const text = editor.textContent ?? '';
 		expect(text.indexOf('unsent first')).toBeLessThan(text.indexOf('typed after'));
 		expect(activeSession.current.pendingRestorePrompt).toBeNull();
+	});
+});
+
+describe('terminal selection sent to chat', () => {
+	afterEach(() => composerInsert.set(null));
+
+	it('goes after what the user typed, as a fenced block, and is not sent', async () => {
+		activeSession.setDraft('why does this fail?');
+		const { editor } = renderComposer();
+		requestComposerInsert('tools', '```text\nnpm ERR! missing script: dev\n```');
+		await waitFor(() => expect(editor.textContent).toContain('npm ERR! missing script: dev'));
+		const paragraphs = Array.from(editor.querySelectorAll('p'), (p) => p.textContent);
+		expect(paragraphs).toEqual(['why does this fail?', '```text', 'npm ERR! missing script: dev', '```']);
+		expect(get(composerInsert)).toBeNull();
+		expect(activeSession.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it("waits for that chat's composer", async () => {
+		const { editor } = renderComposer();
+		requestComposerInsert('another-chat', '```text\nx\n```');
+		await tick();
+		expect(editor.textContent).toBe('');
+		expect(get(composerInsert)).toMatchObject({ sessionId: 'another-chat' });
 	});
 });
 
