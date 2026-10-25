@@ -371,6 +371,13 @@ export const HTML_PREVIEW_MIN_HEIGHT = 64;
  * scrolling fallback.
  */
 export const HTML_PREVIEW_MAX_HEIGHT = 1_000_000;
+/**
+ * A page that reports more than this, taller than its frame, is probed before
+ * the frame grows to it. A page made of viewport-height sections (a slide
+ * deck, a 100vh hero) grows with every fit; without this it would balloon
+ * the frame (and its own 100vh) toward the ceiling before being pinned.
+ */
+export const HTML_PREVIEW_TALL_HEIGHT = 12_000;
 /** Reserved while the page loads and measures, so the transcript does not jump. */
 export const HTML_PREVIEW_INITIAL_HEIGHT = 320;
 /** A page whose height follows its frame gets this, and scrolls inside. */
@@ -463,7 +470,7 @@ export class HtmlPreviewSizer {
 			return this.fit(height);
 		}
 		if (this.mode === 'measuring') {
-			if (Math.abs(height - measured) <= 1 || (this.suspect && height !== measured)) return this.probe(height, measured);
+			if (Math.abs(height - measured) <= 1 || (this.suspect && height !== measured) || this.tallerThan(height, measured)) return this.probe(height, measured);
 			this.mode = 'fit';
 			return this.fit(height);
 		}
@@ -478,7 +485,7 @@ export class HtmlPreviewSizer {
 			&& Math.abs(height - previous.height - frameMoved) <= STALE_TOLERANCE;
 		this.streak = height > measured + 1 || tracks ? this.streak + 1 : 0;
 		if (Math.abs(height - this.height) <= 1) return 'none';
-		if (this.streak >= this.threshold) return this.probe(height, measured);
+		if (this.streak >= this.threshold || this.tallerThan(height, measured)) return this.probe(height, measured);
 		return this.fit(height);
 	}
 
@@ -496,6 +503,11 @@ export class HtmlPreviewSizer {
 		if (this.settled) return 'none';
 		if (this.mode === 'probing') return this.probeExpired();
 		return this.pin();
+	}
+
+	/** Tall and overflowing the frame it was measured in: check it does not follow the frame. */
+	private tallerThan(height: number, measured: number): boolean {
+		return height > HTML_PREVIEW_TALL_HEIGHT && height > measured + 1;
 	}
 
 	private fit(height: number): HtmlPreviewSizerAction {

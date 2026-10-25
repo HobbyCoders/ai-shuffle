@@ -544,10 +544,52 @@ describe('HTML preview fit to content', () => {
 		// A real nightly report: 41k px on desktop, 82k px on a phone.
 		for (const tall of [41_012, 81_686]) {
 			const s = sizer();
+			expect(s.report(tall, s.height)).toBe('probe');
 			expect(s.report(tall, s.height)).toBe('resize');
 			expect(s.report(tall, s.height)).toBe('none');
 			expect([s.mode, s.height]).toEqual(['fit', tall]);
 		}
+	});
+
+	// Drive the sizer the way the frame does: every resize gets a fresh report
+	// from a page whose height is `page(viewport)`. Returns the tallest frame.
+	function drive(s: HtmlPreviewSizer, page: (viewport: number) => number) {
+		let peak = s.height;
+		for (let i = 0; i < 20 && s.mode !== 'fixed'; i++) {
+			const viewport = s.height;
+			const action = s.report(page(viewport), viewport);
+			peak = Math.max(peak, s.height);
+			if (action === 'none') break;
+		}
+		return peak;
+	}
+
+	it('pins pages built from viewport-height sections without ballooning the frame', () => {
+		for (const page of [(v: number) => 10 * v, (v: number) => 5 * v, (v: number) => v + 40_000]) {
+			const s = sizer();
+			const peak = drive(s, page);
+			expect(s.mode).toBe('fixed');
+			expect(peak).toBeLessThan(45_000);
+		}
+	});
+
+	it('probes a long report once and settles at its height', () => {
+		const s = sizer();
+		expect(s.report(41_012, s.height)).toBe('probe');
+		expect(s.height).toBe(41_012 + HTML_PREVIEW_PROBE_STEP);
+		expect(drive(s, () => 41_012)).toBe(41_012 + HTML_PREVIEW_PROBE_STEP);
+		expect([s.mode, s.height]).toEqual(['fit', 41_012]);
+	});
+
+	it('pins rather than clips when an unanswered probe was past the ceiling', () => {
+		const s = sizer();
+		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500, s.height)).toBe('probe');
+		expect(s.height).toBe(HTML_PREVIEW_MAX_HEIGHT);
+		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500, s.height)).toBe('fixed');
+		const probing = sizer({ height: 400 });
+		expect(probing.report(HTML_PREVIEW_MAX_HEIGHT + 500, 400)).toBe('probe');
+		expect(probing.probeExpired()).toBe('fixed');
+		expect(probing.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
 	});
 
 	it('re-measures a page pinned by an older build at its full height, not clipped', () => {
@@ -561,11 +603,9 @@ describe('HTML preview fit to content', () => {
 	it('falls back when a page reports more than the maximum height', () => {
 		const s = sizer();
 		s.report(400);
+		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500)).toBe('probe');
 		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500)).toBe('fixed');
 		expect(s.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
-		// From the first report too: never a frame cut off at the ceiling.
-		const first = sizer();
-		expect(first.report(HTML_PREVIEW_MAX_HEIGHT + 500, first.height)).toBe('fixed');
 	});
 
 	it('starts from a remembered size and gives up on a page that never reports', () => {
