@@ -1969,8 +1969,18 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
     incarnation = task_registry.task_incarnation(session_id, frame.get("task_id"))
     if incarnation:
         frame.setdefault("task_incarnation", incarnation)
+    await _record_swarm_worker_completion(session_id, frame)
     async with _terminal_delivery_lock(session_id):
         return await _on_task_terminal_locked(session_id, frame)
+
+
+async def _record_swarm_worker_completion(session_id: str, frame: Dict[str, Any]) -> None:
+    """A completed worker of a Swarm whose coordinator died reports into it (#635)."""
+    if frame.get("status") != "completed" or not frame.get("task_id"):
+        return
+    from app.core.swarm import record_worker_completion
+
+    await record_worker_completion(session_id, str(frame["task_id"]))
 
 
 async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) -> None:
@@ -1999,6 +2009,7 @@ async def on_remote_task_terminal(session_id: str, frame: Dict[str, Any]) -> Non
     completions use. ``app.core.remote_task.handle_task_report`` deduplicates
     retried deliveries durably before calling this.
     """
+    await _record_swarm_worker_completion(session_id, frame)
     async with _terminal_delivery_lock(session_id):
         return await _on_task_terminal_locked(session_id, frame, started_session=True)
 

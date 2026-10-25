@@ -954,6 +954,15 @@
           "past_bug": "#557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
         },
         {
+          "id": "harness-basics.swarm-restart-settle",
+          "check": "A swarm cut off by an app restart settles and can be cancelled",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On disposable paired candidates, start a two-task Swarm with one quick task and one task of several minutes on this worker, and a second Swarm with one long task here and one long task on the other worker. After the quick task finishes, stop this worker's app uncleanly and start it again, then open the chat's Running tasks panel. Press the second swarm's stop button. Continue the first swarm's interrupted task with SendMessage and let it finish.",
+          "pass_when": "The first swarm leaves the panel as interrupted, keeping the quick task's completed report, and becomes completed once the continued task finishes. The second stays listed while its remote task runs; stopping it returns no error, stops the remote task and shows the swarm cancelled.",
+          "past_bug": "#635: swarms cut off by a restart stayed running for hours, and stopping them failed with a conflict."
+        },
+        {
           "id": "harness-basics.turn-insert-order-upgrade",
           "check": "Persistent-database upgrade preserves insertion order without blocking unrelated sessions",
           "kind": "owner",

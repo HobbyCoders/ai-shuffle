@@ -667,9 +667,11 @@ A swarm is a set of tasks an agent hands to other agents, some waiting on others
 
 `status` (swarm and task) is `queued`, `running`, `completed`, `failed`, `cancelled` or `interrupted`.
 
+A swarm left running when the app stopped is settled when the app starts again, or on its chat's next turn: each task takes its worker's real result, and the swarm becomes `completed` when every task completed, otherwise `interrupted`. A swarm with a worker that is still running waits until that worker ends. A task interrupted this way whose worker is continued later (for example with SendMessage) and completes takes that result, and the swarm becomes `completed` once every task has.
+
 ### POST /api/sessions/{session_id}/swarms/{swarm_id}/cancel
 
-Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when this worker cannot control it.
+Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when another worker may still be running it. A swarm left running when the app stopped is cancelled here: its workers that are still running are stopped, and it is saved as `cancelled`.
 
 ## Private Access
 

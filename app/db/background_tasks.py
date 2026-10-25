@@ -256,6 +256,39 @@ def list_stale_nonterminal_background_tasks(
         return rows_to_list(cursor.fetchall())
 
 
+def list_sessions_with_killed_swarms(
+    session_id: Optional[str] = None, limit: int = 200,
+) -> List[str]:
+    """Sessions holding a killed Swarm workflow row of THIS install, newest first.
+
+    Feed for orphaned-Swarm settlement (``app.core.swarm.settle_orphans``). A
+    coordinator that finishes publishes its terminal snapshot BEFORE it settles
+    its own task row (id ``swarm_…``), so a snapshot can only be left
+    ``running`` when something else ended that row: a restart reap, the stale
+    sweep or a stop, all of which write ``killed``. Instance-scoped: another
+    install's workflow is that install's to settle. Pass ``session_id`` to ask
+    about one session. Read-only and bounded.
+    """
+    _ph = ph()
+    scope = f" AND session_id = {_ph}" if session_id else ""
+    params: tuple = (settings.effective_instance_id, "swarm_%")
+    if session_id:
+        params += (session_id,)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT session_id FROM background_tasks
+                 WHERE instance_id = {_ph} AND task_id LIKE {_ph}
+                   AND status = 'killed'{scope}
+                 GROUP BY session_id
+                 ORDER BY MAX(updated_at) DESC
+                 LIMIT {_ph}""",
+            (*params, int(limit)),
+        )
+        rows = rows_to_list(cursor.fetchall())
+    return [str(row["session_id"]) for row in rows if row.get("session_id")]
+
+
 def list_session_nonterminal_background_tasks(
     session_id: str,
 ) -> List[Dict[str, Any]]:
