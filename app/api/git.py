@@ -949,9 +949,13 @@ async def get_changed_files(
     """
     check_project_access(request, project_id)
     if scope == "base":
-        working_dir = await get_session_review_working_dir_async(project_id, worktree_id, session_id)
+        working_dir = await get_session_review_working_dir_async(
+            project_id, worktree_id, session_id,
+        )
         try:
-            return ChangedFilesResponse(**await run_git(git_service.get_base_changed_files, working_dir))
+            return ChangedFilesResponse(**await run_git(
+                git_service.get_base_changed_files, working_dir,
+            ))
         except BaseReviewUnavailable as exc:
             raise HTTPException(409, str(exc)) from exc
     working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
@@ -1070,7 +1074,9 @@ async def get_file_diff(
     """
     check_project_access(request, project_id)
     if body.scope == "base":
-        working_dir = await get_session_review_working_dir_async(project_id, worktree_id, session_id)
+        working_dir = await get_session_review_working_dir_async(
+            project_id, worktree_id, session_id,
+        )
         try:
             return FileDiffResponse(**await run_git(
                 git_service.get_base_file_diff, working_dir, body.file_path,

@@ -23,14 +23,19 @@ def review(mock_db, tmp_path, monkeypatch):
     hermetic_git_env(monkeypatch, tmp_path)
     git_cache._git_cache.invalidate_prefix("")
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
-    repo = init_repo(tmp_path / "repo", {"a.txt": "first\n", "delete.txt": "delete\n", "rename.txt": "rename\n"})
+    repo = init_repo(
+        tmp_path / "repo",
+        {"a.txt": "first\n", "delete.txt": "delete\n", "rename.txt": "rename\n"},
+    )
     make_origin(tmp_path, repo)
     database.create_project("p1", "Repo", None, str(repo))
     project = projects_v2.upsert_project("local:p1", name="Repo")
     checkouts.upsert_checkout(project["id"], config.settings.effective_instance_id, str(repo))
     database.create_session(session_id="s1", profile_id="default", project_id="p1")
     database.set_session_branch("s1", "feature/review", project["id"])
-    branch = Path(checkout_manager.ensure_checkout(project, branch="feature/review", create_new_branch=True))
+    branch = Path(checkout_manager.ensure_checkout(
+        project, branch="feature/review", create_new_branch=True,
+    ))
     git_helpers.invalidate_working_dir_cache()
     app = FastAPI()
     app.include_router(git_api.router)
@@ -48,7 +53,9 @@ def changed(client):
 
 
 def diff(client, path):
-    response = client.post(BASE + "/file-diff?session_id=s1", json={"file_path": path, "scope": "base"})
+    response = client.post(
+        BASE + "/file-diff?session_id=s1", json={"file_path": path, "scope": "base"},
+    )
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -136,7 +143,12 @@ def test_moving_base_is_resolved_without_stale_status_cache(review):
     assert data["merge_base"] == tip != first_base["merge_base"]
 
 
-@pytest.mark.parametrize("case,detail", [("detached", "detached"), ("no_remote", "requires a remote"), ("unrelated", "unrelated history"), ("no_base", "no default branch")])
+@pytest.mark.parametrize("case,detail", [
+    ("detached", "detached"),
+    ("no_remote", "requires a remote"),
+    ("unrelated", "unrelated history"),
+    ("no_base", "no default branch"),
+])
 def test_unavailable_base_returns_clear_error(review, case, detail):
     client, _, branch = review
     if case == "detached":
@@ -159,7 +171,9 @@ def test_unavailable_base_returns_clear_error(review, case, detail):
     response = client.get(BASE + "/changed-files" + QUERY)
     assert response.status_code == 409, response.text
     assert detail in response.json()["detail"]
-    response = client.post(BASE + "/file-diff?session_id=s1", json={"file_path": "a.txt", "scope": "base"})
+    response = client.post(
+        BASE + "/file-diff?session_id=s1", json={"file_path": "a.txt", "scope": "base"},
+    )
     assert response.status_code == 409
 
 
@@ -172,7 +186,9 @@ def test_missing_session_checkout_and_legacy_worktree_never_fall_back(review, mo
         assert response.status_code == 409, response.text
         assert "checkout is not available" in response.json()["detail"]
     assert client.get(BASE + "/changed-files?scope=base").status_code == 400
-    assert client.post(BASE + "/file-diff", json={"file_path": "a.txt", "scope": "base"}).status_code == 400
+    assert client.post(
+        BASE + "/file-diff", json={"file_path": "a.txt", "scope": "base"},
+    ).status_code == 400
 
 
 def test_untracked_literal_path_binary_and_recreated_deletion(review):
@@ -210,7 +226,9 @@ def test_binary_and_truncation_and_literal_paths(review):
     assert result["truncated"] is True
     assert len(result["diff"]) < 50100
     assert "diff truncated" in result["diff"]
-    response = client.post(BASE + "/file-diff?session_id=s1", json={"file_path": "../outside.txt", "scope": "base"})
+    response = client.post(
+        BASE + "/file-diff?session_id=s1", json={"file_path": "../outside.txt", "scope": "base"},
+    )
     assert response.status_code == 409
 
 
@@ -218,12 +236,17 @@ def test_binary_and_truncation_and_literal_paths(review):
     ("GET", "/changed-files?session_id=s1&scope=base", None, "get_changed_files"),
     ("POST", "/file-diff?session_id=s1", {"file_path": "a.txt", "scope": "base"}, "get_file_diff"),
 ])
-def test_remote_owner_receives_scope_and_offline_never_reads_local(review, monkeypatch, method, path, body, action):
+def test_remote_owner_receives_scope_and_offline_never_reads_local(
+    review, monkeypatch, method, path, body, action,
+):
     client, _, _ = review
     monkeypatch.setattr(control, "owner_of", lambda _: "remote-worker")
     call = AsyncMock(return_value={"status": 409, "detail": "Owner base unavailable"})
     monkeypatch.setattr(control, "call", call)
-    monkeypatch.setattr(git_api, "get_session_review_working_dir_async", AsyncMock(side_effect=AssertionError("local checkout touched")))
+    monkeypatch.setattr(
+        git_api, "get_session_review_working_dir_async",
+        AsyncMock(side_effect=AssertionError("local checkout touched")),
+    )
     response = client.request(method, BASE + path, json=body)
     assert response.status_code == 409 and response.json()["detail"] == "Owner base unavailable"
     target, kind, envelope = call.call_args.args

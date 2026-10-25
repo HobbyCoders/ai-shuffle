@@ -266,7 +266,9 @@ async def get_session_review_working_dir_async(
             mismatch = describe_checkout_mismatch(session)
             if mismatch:
                 raise SessionCheckoutUnavailable(409, "Base review is unavailable: " + mismatch)
-            raise SessionCheckoutUnavailable(409, "This session's checkout is not available on this worker.")
+            raise SessionCheckoutUnavailable(
+                409, "This session's checkout is not available on this worker.",
+            )
         return cwd
 
     return await asyncio.to_thread(resolve)
