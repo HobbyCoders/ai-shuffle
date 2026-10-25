@@ -540,11 +540,32 @@ describe('HTML preview fit to content', () => {
 		expect(s.height).toBe(450);
 	});
 
+	it('grows to the full height of a long report instead of scrolling inside', () => {
+		// A real nightly report: 41k px on desktop, 82k px on a phone.
+		for (const tall of [41_012, 81_686]) {
+			const s = sizer();
+			expect(s.report(tall, s.height)).toBe('resize');
+			expect(s.report(tall, s.height)).toBe('none');
+			expect([s.mode, s.height]).toEqual(['fit', tall]);
+		}
+	});
+
+	it('re-measures a page pinned by an older build at its full height, not clipped', () => {
+		const s = sizer({ height: HTML_PREVIEW_FALLBACK_HEIGHT, fixed: true });
+		expect(s.report(41_012, HTML_PREVIEW_FALLBACK_HEIGHT)).toBe('probe');
+		expect(s.report(41_012, s.height)).toBe('resize');
+		expect(s.report(41_012, s.height)).toBe('none');
+		expect([s.mode, s.height]).toEqual(['fit', 41_012]);
+	});
+
 	it('falls back when a page reports more than the maximum height', () => {
 		const s = sizer();
 		s.report(400);
 		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500)).toBe('fixed');
 		expect(s.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
+		// From the first report too: never a frame cut off at the ceiling.
+		const first = sizer();
+		expect(first.report(HTML_PREVIEW_MAX_HEIGHT + 500, first.height)).toBe('fixed');
 	});
 
 	it('starts from a remembered size and gives up on a page that never reports', () => {

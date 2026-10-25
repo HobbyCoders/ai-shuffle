@@ -363,7 +363,14 @@ export function hostContextMessage(theme: HtmlPreviewTheme, scrollable?: boolean
 // ── Fit to content ─────────────────────────────────────────────────────────
 
 export const HTML_PREVIEW_MIN_HEIGHT = 64;
-export const HTML_PREVIEW_MAX_HEIGHT = 12_000;
+/**
+ * A safety ceiling, not a design limit: an inline page grows to its full
+ * height so the reader never scrolls inside the transcript's scroll. Long
+ * reports run to tens of thousands of pixels (80k on a phone); browsers lay
+ * out elements up to roughly 17M px. Only past this does a page get the
+ * scrolling fallback.
+ */
+export const HTML_PREVIEW_MAX_HEIGHT = 1_000_000;
 /** Reserved while the page loads and measures, so the transcript does not jump. */
 export const HTML_PREVIEW_INITIAL_HEIGHT = 320;
 /** A page whose height follows its frame gets this, and scrolls inside. */
@@ -472,7 +479,6 @@ export class HtmlPreviewSizer {
 		this.streak = height > measured + 1 || tracks ? this.streak + 1 : 0;
 		if (Math.abs(height - this.height) <= 1) return 'none';
 		if (this.streak >= this.threshold) return this.probe(height, measured);
-		if (height > HTML_PREVIEW_MAX_HEIGHT) return this.pin();
 		return this.fit(height);
 	}
 
@@ -493,6 +499,9 @@ export class HtmlPreviewSizer {
 	}
 
 	private fit(height: number): HtmlPreviewSizerAction {
+		// Past the ceiling a fitted frame would cut the page off with no way
+		// to reach the rest: scroll it inside instead.
+		if (height > HTML_PREVIEW_MAX_HEIGHT) return this.pin();
 		const next = clampHeight(height);
 		if (next === this.height) return 'none';
 		this.height = next;
