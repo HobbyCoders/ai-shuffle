@@ -2879,6 +2879,7 @@ async def dispatch_worker(
     #: The registry ``summary`` for a CLEAN completion — the report's first
     #: line, so a listing says what came back rather than which model ran.
     completion_summary: Optional[str] = None
+    stop_summary: Optional[str] = None  # a start cancelled while Queued (#583)
     #: Background work the worker left running; a checkout still in use by it
     #: is never reclaimed from under it.
     outstanding: List[Dict[str, Any]] = []
@@ -3190,6 +3191,9 @@ async def dispatch_worker(
             )
             preview = error
             status = "killed"
+            from app.core.task_registry import USER_STOP_SUMMARY
+
+            stop_summary = USER_STOP_SUMMARY
             return WorkerOutcome(
                 ok=False, session_id=worker_session_id, error=error,
                 usage=outcome["usage"], frames_forwarded=feed.frames_forwarded,
@@ -3423,10 +3427,10 @@ async def dispatch_worker(
             await emit_shielded(feed.completed(
                 status,
                 result_preview=preview,
-                summary=f"{provider_tag} · {model_tag}",
+                summary=stop_summary or f"{provider_tag} · {model_tag}",
                 usage=usage_seen,
             ))
-            terminal_summary = _failure_summary(
+            terminal_summary = stop_summary or _failure_summary(
                 status, preview, feed.frames_forwarded
             ) or completion_summary
             # A caller that is about to RE-DISPATCH this brief takes the chip

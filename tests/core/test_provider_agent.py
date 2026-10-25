@@ -1427,6 +1427,9 @@ class TestDispatchWorkerFailsClosed:
         assert not outcome.ok
         assert outcome.killed
         assert "stopped before it started" in outcome.error
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["status"] == "killed"
+        assert record["summary"] == "Stopped by user"
         used = {"start": 0, "rate": 0}
         assert task_dispatch._retry_kind(
             "killed", outcome.error, outcome.frames_forwarded, used, start_max=3, rate_max=3,

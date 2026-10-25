@@ -771,20 +771,20 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
-          "id": "harness-basics.db-pressure-start-admission",
-          "check": "Database pressure queues new starts without dropping running turns",
-          "kind": "owner",
-          "how": "On a disposable candidate worker with real providers only, keep native and delegated turns running, then hold ordinary pool borrowers or stall event commits beyond the admission sustain threshold. Launch Task, Swarm and StartSession work locally and to a disposable remote executor. Inspect queued turns and parent task summaries. Cancel one queued start, fill the 128-waiter working set and exceed its wait deadline. Release pressure and observe start timestamps. Do not modify an installed worker or its database.",
-          "pass_when": "Existing turns and reserved lease renewals remain responsive. New starts visibly stay Queued, duplicate kicks do not consume extra slots, cancellation removes waiting work, overflow/deadline retain durable queued turns, and recovery admits FIFO waiters at the configured spacing without a restart or burst. Remote admission uses executor pressure. Provider first-frame timing excludes queued time, but hard job deadlines and unavailable-read watchdogs still apply. Record actual provider, UI, lease and timing evidence; an unrun path is not a pass.",
-          "past_bug": "#583: new starts increased load during sustained database pressure instead of waiting for recovery."
-        },
-        {
           "id": "harness-basics.db-pressure-queued-task-stop",
           "check": "A subagent Queued by database pressure shows Queued and stays stopped when stopped",
           "kind": "owner",
           "how": "On a disposable candidate only, hold database pressure past the admission sustain threshold, then have a chat dispatch two background subagents. Check the subagent cards and the running tasks list at desktop and phone widths. Stop one subagent from the running tasks list and open the other's transcript and press Stop. Release pressure.",
           "pass_when": "Both cards and both list rows read Queued while waiting. Each stopped subagent reads Stopped, is not re-dispatched as a retry, and never reaches its provider after pressure clears; its queued turn is aborted (removed_from_queue).",
           "past_bug": "#583 live run: the Queued summary was stored but never rendered, Stop on a queued worker session re-dispatched the brief, and Stop from the running tasks list left the queued turn to run after recovery."
+        },
+        {
+          "id": "harness-basics.db-pressure-start-admission",
+          "check": "Database pressure queues new starts without dropping running turns",
+          "kind": "owner",
+          "how": "On a disposable candidate worker with real providers only, keep native and delegated turns running, then hold ordinary pool borrowers or stall event commits beyond the admission sustain threshold. Launch Task, Swarm and StartSession work locally and to a disposable remote executor. Inspect queued turns and parent task summaries. Cancel one queued start, fill the 128-waiter working set and exceed its wait deadline. Release pressure and observe start timestamps. Do not modify an installed worker or its database.",
+          "pass_when": "Existing turns and reserved lease renewals remain responsive. New starts visibly stay Queued, duplicate kicks do not consume extra slots, cancellation removes waiting work, overflow/deadline retain durable queued turns, and recovery admits FIFO waiters at the configured spacing without a restart or burst. Remote admission uses executor pressure. Provider first-frame timing excludes queued time, but hard job deadlines and unavailable-read watchdogs still apply. Record actual provider, UI, lease and timing evidence; an unrun path is not a pass.",
+          "past_bug": "#583: new starts increased load during sustained database pressure instead of waiting for recovery."
         },
         {
           "id": "harness-basics.db-recall-after-commit",
