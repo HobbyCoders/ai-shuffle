@@ -7,6 +7,7 @@ import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerSuggestion } from '$lib/stores/session/composer-suggestion';
 import { promptStash } from '$lib/stores/session/prompt-stash';
+import { liveBanners, notify } from '$lib/stores/notifications';
 import { LARGE_PASTE_BYTES } from './tiptap/large-paste';
 import '$lib/test-stubs/composer-dom';
 
@@ -63,7 +64,19 @@ beforeEach(async () => {
 afterEach(() => {
 	cleanup();
 	vi.restoreAllMocks();
+	for (const banner of get(liveBanners)) notify.dismissLive(banner.id);
 });
+
+/** Make the browser refuse localStorage writes (quota or disabled storage). */
+function refuseLocalStorage() {
+	const setItem = Storage.prototype.setItem;
+	vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+		if (this === localStorage) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+		setItem.call(this, key, value);
+	});
+}
+
+const bannerMessages = () => get(liveBanners).map(b => b.message);
 
 function renderComposer() {
 	const view = render(ChatInput);
@@ -139,6 +152,43 @@ describe('prompt stash', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Restore stashed prompt: older idea' }));
 		await waitFor(() => expect(editor.textContent).toBe('older idea'));
 		expect(get(promptStash).map(e => e.preview)).toEqual(['current idea']);
+	});
+
+	it('keeps the draft and says so when the browser refuses the stash', async () => {
+		activeSession.setDraft('do not lose me');
+		const { editor } = renderComposer();
+		await waitFor(() => expect(editor.textContent).toBe('do not lose me'));
+		refuseLocalStorage();
+		await fireEvent.keyDown(editor, { key: 's', ctrlKey: true });
+		await tick();
+		expect(editor.textContent).toBe('do not lose me');
+		expect(get(promptStash)).toEqual([]);
+		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
+		expect(bannerMessages()).not.toContain('Prompt stashed');
+	});
+
+	it('keeps the draft when no account is signed in to stash under', async () => {
+		promptStash.setOwner(null);
+		activeSession.setDraft('signed out draft');
+		const { editor } = renderComposer();
+		await waitFor(() => expect(editor.textContent).toBe('signed out draft'));
+		await fireEvent.keyDown(editor, { key: 's', ctrlKey: true });
+		await tick();
+		expect(editor.textContent).toBe('signed out draft');
+		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
+	});
+
+	it('leaves both drafts in place when restoring cannot stash the current one', async () => {
+		promptStash.push('older idea');
+		activeSession.setDraft('current idea');
+		const { editor } = renderComposer();
+		await fireEvent.click(await screen.findByRole('button', { name: 'Stashed prompts (1)' }));
+		refuseLocalStorage();
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore stashed prompt: older idea' }));
+		await tick();
+		expect(editor.textContent).toBe('current idea');
+		expect(get(promptStash).map(e => e.preview)).toEqual(['older idea']);
+		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
 	});
 
 	it('leaves the browser Save shortcut alone outside the composer', async () => {

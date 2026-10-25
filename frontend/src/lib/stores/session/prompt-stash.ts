@@ -62,22 +62,34 @@ function read(owner: string | null): StashedPrompt[] {
 	}
 }
 
-function write(owner: string | null, entries: StashedPrompt[]): void {
-	if (!owner) return;
+/** Save the list; false when nothing was saved (signed out, quota, disabled storage). */
+function write(owner: string | null, entries: StashedPrompt[]): boolean {
+	if (!owner) return false;
 	try {
 		if (entries.length) localStorage.setItem(stashStorageKey(owner), JSON.stringify(entries));
 		else localStorage.removeItem(stashStorageKey(owner));
-	} catch { /* quota or disabled storage: the in-memory list still works this page */ }
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** A pushed entry, and whether it reached storage. Not durable means the list didn't change. */
+export interface StashPush {
+	entry: StashedPrompt;
+	durable: boolean;
 }
 
 export function createPromptStash(now: () => number = () => Date.now()) {
 	let owner: string | null = null;
 	const entries = writable<StashedPrompt[]>([]);
 	let current: StashedPrompt[] = [];
-	const set = (next: StashedPrompt[]) => {
+	/** Commit a new list only once storage took it, so the list never claims more than a reload keeps. */
+	const set = (next: StashedPrompt[]): boolean => {
+		if (!write(owner, next)) return false;
 		current = next;
 		entries.set(next);
-		write(owner, next);
+		return true;
 	};
 	return {
 		subscribe: entries.subscribe,
@@ -88,8 +100,12 @@ export function createPromptStash(now: () => number = () => Date.now()) {
 			current = read(owner);
 			entries.set(current);
 		},
-		/** Stash a draft, newest first. Returns the entry, or null for an empty draft. */
-		push(draft: string): StashedPrompt | null {
+		/**
+		 * Stash a draft, newest first. Null for an empty draft. When the save
+		 * fails (or no one is signed in) `durable` is false and nothing was
+		 * stashed: the caller must keep the draft where it is.
+		 */
+		push(draft: string): StashPush | null {
 			if (!hasComposerDraft(draft)) return null;
 			const savedAt = now();
 			const entry: StashedPrompt = {
@@ -98,19 +114,24 @@ export function createPromptStash(now: () => number = () => Date.now()) {
 				preview: draftPreview(draft),
 				savedAt
 			};
-			set([entry, ...current].slice(0, MAX_STASHED_PROMPTS));
-			return entry;
+			return { entry, durable: set([entry, ...current].slice(0, MAX_STASHED_PROMPTS)) };
 		},
-		/** Remove and return an entry (restore), or just remove it (delete). */
-		take(id: string): StashedPrompt | null {
-			const entry = current.find(e => e.id === id) ?? null;
-			if (entry) set(current.filter(e => e.id !== id));
-			return entry;
+		/** Look up an entry without removing it. */
+		find(id: string): StashedPrompt | null {
+			return current.find(e => e.id === id) ?? null;
 		},
-		/** Put a taken entry back where it was (Undo). */
-		putBack(entry: StashedPrompt) {
-			if (current.some(e => e.id === entry.id)) return;
-			set([...current, entry].sort((a, b) => b.savedAt - a.savedAt).slice(0, MAX_STASHED_PROMPTS));
+		/**
+		 * Remove an entry. True when the removal was saved; false when it isn't
+		 * there or storage refused, in which case the entry stays listed.
+		 */
+		take(id: string): boolean {
+			if (!current.some(e => e.id === id)) return false;
+			return set(current.filter(e => e.id !== id));
+		},
+		/** Put a taken entry back where it was (Undo). True once it is saved. */
+		putBack(entry: StashedPrompt): boolean {
+			if (current.some(e => e.id === entry.id)) return true;
+			return set([...current, entry].sort((a, b) => b.savedAt - a.savedAt).slice(0, MAX_STASHED_PROMPTS));
 		}
 	};
 }
