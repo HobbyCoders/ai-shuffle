@@ -964,9 +964,9 @@ describe('session run binding on switch', () => {
 		await switcher.switchSession('legacy');
 		expect(getState().permissionModeOverride).toBeNull();
 		switcher.newChat();
-		// A new session starts without a project (#371 step 4), where Accept
-		// Edits is not offered: it starts on Ask instead.
-		expect(getState().permissionModeOverride).toBe(mode === 'acceptEdits' ? 'default' : mode);
+		// A new session starts without a project (#371 step 4), which offers
+		// every mode, Accept Edits included (#641).
+		expect(getState().permissionModeOverride).toBe(mode);
 		switcher.destroy();
 	});
 
@@ -1427,10 +1427,10 @@ describe('session mode lanes', () => {
 	});
 
 	it.each([
-		['plan', 'default'], ['acceptEdits', 'default'], ['bypassPermissions', 'bypassPermissions'], ['auto', 'auto'],
+		['plan', 'default'], ['acceptEdits', 'acceptEdits'], ['bypassPermissions', 'bypassPermissions'], ['auto', 'auto'],
 	])('a new session without a project keeps %s as %s', (last, expected) => {
-		// No project: Ask, Auto and Bypass carry over; Accept Edits has nothing
-		// to approve and the retired plan mode runs as Ask.
+		// No project: Ask, Auto, Accept Edits (#641) and Bypass carry over; the
+		// retired plan mode runs as Ask.
 		localStorage.setItem('aihub_lastPermissionMode', last);
 		const { switcher, getState } = makeSwitcher(fullState());
 

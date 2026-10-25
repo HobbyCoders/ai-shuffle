@@ -162,7 +162,8 @@ describe('live permission selection', () => {
 		expect(activeSession.current.mode).toBe('code');
 		expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
 		activeSession.clearProject();
-		expect(activeSession.current.permissionModeOverride).toBe('default');
+		// #641: a session without a project keeps Accept Edits.
+		expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
 	});
 
 	it('retires an acknowledgement from a previous account', async () => {
@@ -194,14 +195,14 @@ describe('live permission selection', () => {
 		appMode.set('code', false);
 	});
 
-	it('starts a fresh composer on Ask after Accept Edits, and gives it back once a project is added', async () => {
+	it('keeps Accept Edits on a fresh composer without a project (#641)', async () => {
 		activeSession.current.sessionId = null;
 		await activeSession.setPermissionModeOverride('acceptEdits');
 		Object.assign(activeSession.current, { draft: '', worktreeBranch: '', worktreeId: null });
 		activeSession.newChat();
-		// No project: nothing for Accept Edits to approve.
+		// A session without a project is a normal session: Accept Edits carries over.
 		expect(activeSession.current.mode).toBe('chat');
-		expect(activeSession.current.permissionModeOverride).toBe('default');
+		expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
 		expect(composerPreferences.current.permissionMode).toBe('acceptEdits');
 	});
 
