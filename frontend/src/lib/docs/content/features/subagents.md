@@ -25,10 +25,12 @@ A subagent working on code gets its own copy of the project on its own branch, s
 ## When a worker is busy
 
 When database pressure persists, new turns (including Task, Swarm and StartSession
-work) stay **Queued** instead of claiming a run lease. The parent's task summary
-also says **Queued**. Already-running turns and lease renewals are independent.
-Starts resume automatically, one at a time, when pressure clears. Stop or removing
-a queued message cancels it; accepted work is not discarded on queue overflow.
+work) stay **Queued** instead of claiming a run lease. The subagent's card and its
+row in the running tasks list also say **Queued**. Already-running turns and lease
+renewals are independent. Starts resume automatically, one at a time, when pressure
+clears. Stop or removing a queued message cancels it; a stopped queued subagent
+reads **Stopped** and is not started again. Accepted work is not discarded on queue
+overflow.
 Remote work is admitted on the worker that executes it, not the sending worker.
 
 The defaults hold starts after 2 seconds of pressure: 85% ordinary-pool usage,

@@ -19,6 +19,7 @@ import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '..
 import { apiBase } from '$lib/api/runtime';
 import type { SessionEvent } from '$lib/contract/events';
 import { isSwarmTool } from '$lib/utils/swarm';
+import { isQueuedSummary } from '$lib/utils/subagent-status';
 import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
 import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
 import {
@@ -2262,15 +2263,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			let messages = state.messages;
 			let speculativelySettledCardIds = state.speculativelySettledCardIds;
 			let speculativelySettledTaskIds = state.speculativelySettledTaskIds;
-			// The joined subagent card shows the model too (#1827).
-			if (summary.model) {
+			// The joined subagent card shows the model too (#1827), and whether its
+			// start is still Queued behind database pressure (#583).
+			const queued = status === 'running' && isQueuedSummary(summary.summary);
+			if (summary.model || queued || isQueuedSummary(existing?.summary)) {
 				const card =
 					(summary.toolUseId
 						? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq)
 						: undefined) ?? findSubagentByTask(messages, taskId, state.messageOriginSeq);
-				if (card && card.agentModel !== summary.model) {
-					messages = replaceById(messages, card.id, { agentModel: summary.model });
-				}
+				const patch: Partial<ChatMessage> = {};
+				if (card && summary.model && card.agentModel !== summary.model) patch.agentModel = summary.model;
+				if (card && !!card.agentQueued !== queued) patch.agentQueued = queued;
+				if (card && Object.keys(patch).length) messages = replaceById(messages, card.id, patch);
 			}
 			// A background subagent finishing BETWEEN turns reports only via this
 			// chip (the drain pump dispatches no subagent.completed), so a

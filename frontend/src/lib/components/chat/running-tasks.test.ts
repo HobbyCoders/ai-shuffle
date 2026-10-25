@@ -74,6 +74,12 @@ describe('buildRows', () => {
 		expect(visibleRows(rows, 'all', 'sonnet').map((r) => r.id)).toEqual(['a']);
 	});
 
+	it('marks an agent row Queued while its start waits for database pressure (#583)', () => {
+		const rows = buildRows({ ...base, tasks: [task('q', { summary: 'Queued' }), task('r', { summary: 'Working' })] });
+		expect(rows.find((r) => r.id === 'q')).toMatchObject({ type: 'task', queued: true, name: 'Task q' });
+		expect(rows.find((r) => r.id === 'r')).toMatchObject({ type: 'task', queued: false });
+	});
+
 	it('ignores tasks that are no longer running', () => {
 		const rows = buildRows({ ...base, tasks: [task('a'), task('b', { status: 'completed' })] });
 		expect(rows.map((r) => r.id)).toEqual(['a']);

@@ -18,7 +18,8 @@
 		// Deliberately stopped (#1806): not a failure, and the card stays put.
 		isStopped: message.agentStatus === 'stopped'
 	});
-	const statusLabel = $derived(statusInfo.isRunning ? 'Running' : statusInfo.isError ? 'Failed' : statusInfo.isStopped ? 'Stopped' : message.agentStatus === 'pending' ? 'Pending' : 'Completed');
+	// A running worker whose start still waits for database pressure (#583).
+	const statusLabel = $derived(statusInfo.isRunning ? (message.agentQueued ? 'Queued' : 'Running') : statusInfo.isError ? 'Failed' : statusInfo.isStopped ? 'Stopped' : message.agentStatus === 'pending' ? 'Pending' : 'Completed');
 	// Who stopped it, as the task registry recorded it ("Stopped by user").
 	// The model the worker runs on, named as the model pickers name it (#1827).
 	const model = $derived(taskModel(message.agentModel));

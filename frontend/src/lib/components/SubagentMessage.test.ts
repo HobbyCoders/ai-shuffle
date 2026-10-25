@@ -56,6 +56,10 @@ describe('Subagent transcript card', () => {
   expect(switchSession).toHaveBeenCalledExactlyOnceWith(childId, undefined, null, null, null);
   expect(get(subagentChats).has(childId)).toBe(true);
  });
+ it('reads Queued while a running worker waits for database pressure to clear (#583)', () => {
+  render(SubagentMessage, { message: { ...message, agentQueued: true } });
+  expect(screen.getByRole('status').textContent).toBe('Queued');
+ });
  it('shows the model the worker runs on, as the model pickers name it (#1827)', async () => {
   const { rerender } = render(SubagentMessage, { message });
   expect(screen.getByText('gpt-test')).toBeTruthy();

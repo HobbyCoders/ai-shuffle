@@ -1,6 +1,17 @@
 import type { SubagentChildMessage } from '$lib/stores/types';
 
 /**
+ * The registry summary a worker carries while its start waits for database
+ * pressure to clear (#583, WorkerFeed.queued). The task is still "running" in
+ * the registry, so the summary is the only signal that it has not started.
+ */
+export const QUEUED_TASK_SUMMARY = 'Queued';
+
+export function isQueuedSummary(summary: string | null | undefined): boolean {
+	return summary === QUEUED_TASK_SUMMARY;
+}
+
+/**
  * Subagent running-status resolution.
  *
  * A subagent (Task tool) card renders a green checkmark once its `agentStatus`
