@@ -496,6 +496,31 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await waitFor(() => expect(adoptSession).toHaveBeenCalledExactlyOnceWith('remote'));
 	});
 
+	it('moves a saved no-project chat to another worker without Git controls (#639)', async () => {
+		session.store.set({ ...base, sessionId: 'chat', project: null, projectV2Id: null, mode: 'chat' });
+		appSessions.store.set([{ id: 'chat', instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
+		] });
+		vi.mocked(moveSession).mockResolvedValue({ moved: true } as any);
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.container.querySelector('.branch-wt-row')).toBeNull();
+		expect(execution).not.toHaveBeenCalled();
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Other worker' }));
+		expect(view.queryByRole('dialog')).toBeNull();
+		await waitFor(() => expect(moveSession).toHaveBeenCalledExactlyOnceWith('chat', 'peer'));
+	});
+
+	it('keeps a new no-project chat free of runner and repository chips', () => {
+		session.store.set({ ...base, sessionId: null, project: null, projectV2Id: null, mode: 'chat', messages: [] });
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
+		expect(view.container.querySelector('.ctx-sep')).toBeNull();
+		expect(execution).not.toHaveBeenCalled();
+	});
+
 	it('stays checked from auto naming through completed setup', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });
 		const { container } = render(ContextPillBar, { sheetMode });

@@ -501,7 +501,9 @@
 	{#if !strip}
 	<ProfileSelector {sheetMode} />
 	{/if}
-	{#if $activeSession.mode !== 'chat'}
+	<!-- A no-project chat has no repository or execution controls, but a saved
+	     one still shows its runner so it can move to another worker (#639). -->
+	{#if $activeSession.mode !== 'chat' || (!isEmptyState && !strip)}
 	{#if !strip}
 	<span class="ctx-sep" aria-hidden="true"></span>
 	{/if}
@@ -664,6 +666,7 @@
 			</span>
 		{/if}
 
+		{#if $activeSession.mode !== 'chat'}
 		{@render repoChip()}
 
 		{#if isGitRepo}
@@ -693,6 +696,7 @@
 			</span>
 		{/if}
 		</div>
+		{/if}
 		{/if}
 	{/if}
 	{/if}

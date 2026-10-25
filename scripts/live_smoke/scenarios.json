@@ -439,6 +439,15 @@
             {"op": "peer_delivery", "sender": "b", "session": "a", "within_s": 240,
              "message": "Live smoke {run}: delivery probe; no reply required.", "request_id": "{run}-9"}
           ]
+        },
+        {
+          "id": "two-worker-smoke.no-project-chat-move",
+          "check": "A no-project chat moves to the other worker and back",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Start a throwaway no-project chat on the first worker and send one message. At desktop width open its runner chip and pick the other worker, then move it back the same way. Repeat with a second throwaway no-project chat whose agent calls HandOffSession naming the other worker. Archive both chats afterwards.",
+          "pass_when": "The saved chat shows its runner chip with the other worker listed, and no commit-and-push dialog appears. Each move succeeds: the target owns the chat, the full transcript is there, and the next message runs on the target in its own workspace folder. The HandOffSession outcome row does not mention a branch. Moving back restores ownership on the first worker.",
+          "past_bug": "#639: no-project chats hid the runner chip, so none could be moved to another worker."
         }
       ]
     },
