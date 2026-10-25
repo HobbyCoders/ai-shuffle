@@ -275,9 +275,9 @@ def _build_mcp_servers_dict(
     """
     Build the mcp_servers dict for ``AgentOptions`` from registered MCP servers.
 
-    Reads MCP servers from two sources:
-    1. Scope-based .mcp.json files (user, local, project) via McpService
-    2. Installed+enabled plugin directories (each plugin can have its own .mcp.json)
+    Reads scope-based .mcp.json files (user, local, project) via McpService.
+    HarnessAdapter merges enabled Fluid plugins' servers into the native
+    registry separately; the delegated CLI discovers its own Claude plugins.
 
     Args:
         project_dir: Optional project directory for project-scoped servers.
@@ -340,10 +340,10 @@ def _build_mcp_servers_dict(
                     config["headers"] = server.headers
                 mcp_servers[server.name] = config
 
-    # NOTE: Plugin MCP servers (e.g. Context7) are NOT added here.
-    # Native legs load enabled plugins from ~/.fluid/plugins. Manually adding
-    # them here would create duplicates
-    # (e.g. mcp__context7__* AND mcp__plugin_context7_context7__*).
+    # Keep this shared map free of plugin servers. HarnessAdapter adds enabled
+    # Fluid plugins to the native registry only (NativeLoop does not discover
+    # them). The delegated CLI loads its own Claude plugins; adding their
+    # servers here would duplicate the CLI's plugin-prefixed tool names.
 
     if mcp_servers:
         logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")

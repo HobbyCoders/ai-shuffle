@@ -63,8 +63,10 @@ Delegated leg:
 Ignored: ``tools``, ``task_budget``, ``session_store*``,
 ``enable_file_checkpointing``, ``stderr``, ``user``, and every ``extra_args`` key
 except ``thinking-display``. Native discovery reads only fluid's
-``.fluid``/``.agents`` trees, never ``~/.claude``; fluid's settings.json stack and
-plugin MCP servers are not wired into NativeLoop.
+``.fluid``/``.agents`` trees, never ``~/.claude``. The app connects enabled,
+reviewed plugins' MCP servers through the native registry, with app-configured
+servers taking precedence; NativeLoop does not discover plugin servers itself.
+The rest of fluid's settings.json stack is not wired into NativeLoop.
 """
 
 from __future__ import annotations
@@ -4938,7 +4940,10 @@ class HarnessAdapter(ProviderAdapter):
             return prebuilt
 
         inproc_servers = _extra_opt(options, "inproc_servers") or []
-        external_mcp = _external_mcp_servers(options.mcp_servers)
+        external_mcp = (
+            await asyncio.to_thread(_native_external_mcp_servers, options)
+            if native else _external_mcp_servers(options.mcp_servers)
+        )
 
         registry = ToolRegistry(**_registry_bound_kwargs())
         # Constraint: native legs (anthropic / openai_responses / openrouter)
@@ -5351,6 +5356,28 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
             continue
         out[name] = cfg
     return out
+
+
+def _native_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
+    """Merge approved, enabled Fluid plugin servers into the native surface only.
+
+    Discovery reads the same enablement files as the app's plugin service and
+    checks authored-plugin content approvals. Respect the session's scope filter.
+    The delegated CLI discovers its own Claude plugins; copying their servers
+    into its --mcp-config would expose the same tools under two names.
+    """
+    from fluid.context.plugins import discover_plugins, plugin_mcp_servers
+
+    sources = _fluid_setting_sources(options)
+    plugins = discover_plugins(
+        options.cwd or ".",
+        sources=sources if sources is not None else ("user", "project", "local"),
+    )
+    merged = plugin_mcp_servers(plugins)
+    # Reserve all host names, including in-process servers filtered below.
+    merged.update(options.mcp_servers or {})
+    external = _external_mcp_servers(merged)
+    return {name: external[name] for name in sorted(external)}
 
 
 def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str, Any]]:
