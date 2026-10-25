@@ -56,9 +56,8 @@ export function effectiveAccessMode(
  */
 export function noProjectPermission(mode: string | null | undefined): string | null {
 	if (mode == null) return null;
-	return mode === 'default' || mode === 'auto' || mode === 'acceptEdits' || mode === 'bypassPermissions'
-		? mode
-		: 'default';
+	const offered = ['default', 'auto', 'acceptEdits', 'bypassPermissions'];
+	return offered.includes(mode) ? mode : 'default';
 }
 
 /**
@@ -132,12 +131,15 @@ export function attachWarning(agentName: string | null | undefined, projectName:
 	const project = projectName?.trim();
 	return {
 		title: 'One-way. Projects can’t be detached.',
-		body: project
-			? `${agent} keeps this conversation and moves into ${project}’s checkout, with its git panel. To work without a project again, start a new session.`
-			: `${agent} keeps this conversation and moves into the project’s checkout, with its git panel. To work without a project again, start a new session.`,
+		body:
+			`${agent} keeps this conversation and moves into ` +
+			`${project ? `${project}’s` : 'the project’s'} checkout, with its git panel. ` +
+			'To work without a project again, start a new session.',
 		access: ATTACH_ACCESS_NOTE
 	};
 }
 
 /** What appears once a project is attached, for the sheet's preview list. */
-export const ATTACH_GAINS: readonly string[] = ['Git panel', 'Branch', 'Checkout', 'Terminal in the checkout'];
+export const ATTACH_GAINS: readonly string[] = [
+	'Git panel', 'Branch', 'Checkout', 'Terminal in the checkout'
+];

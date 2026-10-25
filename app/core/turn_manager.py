@@ -169,19 +169,18 @@ def _stamp_caller(source: str, overrides: Optional[Dict[str, Any]],
                   caller: Optional[str]) -> Optional[Dict[str, Any]]:
     """``overrides`` with the turn's caller stamped, for a human source.
 
-    ``caller`` given: it wins over anything the overrides carried. Not given:
-    an existing valid stamp is kept (a held message re-sent after a move), and
-    anything else is :data:`session_modes.CALLER_UNKNOWN`, which keeps the
-    no-project ceiling. Other sources are returned unchanged.
+    The stamp is only ever the ``caller`` the intake states: the chat socket,
+    the authenticated peer channel, or a held message re-sent with its own
+    stored stamp (``session_handoff``). A stamp riding in on ``overrides`` is
+    replaced, so no message body sets it. Without a known caller the turn is
+    :data:`session_modes.CALLER_UNKNOWN`, which keeps the no-project ceiling.
+    Other sources are returned unchanged.
     """
     if source not in _CALLER_STAMPED_SOURCES:
         return overrides
     from app.core.session_modes import CALLER_KEY, CALLER_UNKNOWN, CALLERS
 
-    current = (overrides or {}).get(CALLER_KEY)
-    stamp = caller if caller is not None else current
-    if stamp not in CALLERS:
-        stamp = CALLER_UNKNOWN
+    stamp = caller if caller in CALLERS else CALLER_UNKNOWN
     return {**(overrides or {}), CALLER_KEY: stamp}
 
 # Override key a composer sends beside ``context_window``: the chat's saved pin

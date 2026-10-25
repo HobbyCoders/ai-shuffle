@@ -1427,7 +1427,8 @@ describe('session mode lanes', () => {
 	});
 
 	it.each([
-		['plan', 'default'], ['acceptEdits', 'acceptEdits'], ['bypassPermissions', 'bypassPermissions'], ['auto', 'auto'],
+		['plan', 'default'], ['acceptEdits', 'acceptEdits'],
+		['bypassPermissions', 'bypassPermissions'], ['auto', 'auto'],
 	])('a new session without a project keeps %s as %s', (last, expected) => {
 		// No project: Ask, Auto, Accept Edits (#641) and Bypass carry over; the
 		// retired plan mode runs as Ask.

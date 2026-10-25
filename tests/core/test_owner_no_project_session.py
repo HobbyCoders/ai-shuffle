@@ -227,7 +227,9 @@ async def _session_options(session_id: str) -> Tuple[Any, Any]:
 
 
 @pytest.mark.parametrize("permission", ["default", "acceptEdits"])
-async def test_uploads_are_readable_under_ask_on_both_legs(workspace: Path, permission: str) -> None:
+async def test_uploads_are_readable_under_ask_on_both_legs(
+    workspace: Path, permission: str,
+) -> None:
     from fluid.tools.builtins import read as read_tool
 
     row, _ = chat("owner-uploads", mode="chat")

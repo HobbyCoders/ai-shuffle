@@ -6,8 +6,8 @@ the stored row with the real option builder, as the runtime does.
 """
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, Optional
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, Awaitable, Callable, Dict, Iterator, Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -33,7 +33,8 @@ CODE_TOOLS = ("Bash", "Edit", "Write", "run_python")
 
 
 def _owner() -> Dict[str, Any]:
-    return identity.principal("admin", "install", "local-transport:" + settings.effective_instance_id)
+    transport = "local-transport:" + settings.effective_instance_id
+    return identity.principal("admin", "install", transport)
 
 
 @pytest.fixture
@@ -182,13 +183,92 @@ async def test_preview_send_to_another_worker_is_refused(workspace: Path) -> Non
     assert await _handler(_owner())._may_send_elsewhere("sess-x") is True
 
 
-def test_a_forwarded_send_carries_only_a_stated_owner_caller() -> None:
+def test_a_forwarded_turn_carries_only_a_stated_caller() -> None:
     from app.network import control
 
-    assert control._forwarded_caller({"owner_send": True, "caller": CALLER_PREVIEW}) == CALLER_PREVIEW
+    assert control._forwarded_caller({"caller": CALLER_PREVIEW}) == CALLER_PREVIEW
+    # Apart from owner_send: a held message the owner sent without a mode pick.
+    assert control._forwarded_caller({"caller": CALLER_AUTHENTICATED}) == CALLER_AUTHENTICATED
     assert control._forwarded_caller({"owner_send": True}) is None
-    assert control._forwarded_caller({"caller": CALLER_AUTHENTICATED}) is None
     assert control._forwarded_caller({"owner_send": True, "caller": "owner!"}) is None
+    # Only the top-level field: a stamp inside the overrides never counts.
+    body = {"owner_send": True, "overrides": {CALLER_KEY: CALLER_AUTHENTICATED}}
+    assert control._forwarded_caller(body) is None
+    assert control._turn_overrides(body["overrides"]) is None
+
+
+async def _held_then_moved(sid: str, send: Callable[[], Awaitable[Any]]) -> Dict[str, Any]:
+    """Hold a message while a move to another worker waits, deliver it there
+    through the real forwarding code, and take it in as the new worker does.
+
+    Both workers share this process: the source's ``control.call`` hands the
+    body it would send over the peer channel to the receiver's handler.
+    """
+    import time
+
+    from app.core import session_handoff as sh
+    from app.db import session_moves
+    from app.network import control
+
+    session_moves.save(sid, target_id="dev-dest", label="Dest", note="", requested_by="owner",
+                       requested_at=time.time(), expires_at=time.time() + 600)
+    with patch.object(sh, "holds", return_value=True):
+        await send()
+    (held,) = session_moves.get(sid)["held"]
+    assert turns_db.get_latest_turn(sid) is None  # held, not queued here
+
+    sent: list = []
+
+    async def call(device_id: str, action: str, body: Dict[str, Any], **kw: Any) -> Dict[str, Any]:
+        sent.append((device_id, action, body))
+        return {"turn_id": "t-dest", "session_id": sid}
+
+    with patch.object(control, "call", side_effect=call), \
+            patch.object(sh, "_finalize_moved_wakes", AsyncMock()), \
+            patch.object(sh, "_resend_safe", return_value=True), \
+            patch.object(sh, "FORWARD_RETRY_S", 0):
+        await sh.deliver_held(sid, "dev-dest", "Dest")
+    ((device_id, action, body),) = sent
+    assert (device_id, action, body["prompt"]) == ("dev-dest", "turns", held["prompt"])
+    # The receiver: the authenticated peer channel's turns handler.
+    with patch("app.core.sync_engine.sync_engine.broadcast_session_updated", AsyncMock()):
+        await control._turns(body, "dev-source")
+    return _latest(sid)
+
+
+async def test_an_owner_message_held_through_a_move_keeps_full_tools_there(
+    workspace: Path,
+) -> None:
+    sid = await _rest_create("local-owner")
+    turn = await _held_then_moved(sid, lambda: _handler(_owner()).handle_query({
+        "prompt": "check the disk", "session_id": sid, "profile": "default", "project": None,
+    }))
+    assert turn["prompt"] == "check the disk"
+    assert turn["overrides"][CALLER_KEY] == CALLER_AUTHENTICATED
+    _assert_full(_options(sid, turn["overrides"]))
+
+
+async def test_a_preview_message_held_through_a_move_stays_restricted_there(
+    workspace: Path,
+) -> None:
+    sid = await _rest_create("local-owner")
+    turn = await _held_then_moved(sid, lambda: _handler(identity.preview_principal()).handle_query({
+        "prompt": "run a shell", "session_id": sid, "profile": "default", "project": None,
+    }))
+    assert turn["overrides"][CALLER_KEY] == CALLER_PREVIEW
+    _assert_restricted(_options(sid, turn["overrides"]))
+
+
+async def test_an_unknown_callers_message_held_through_a_move_stays_restricted_there(
+    workspace: Path,
+) -> None:
+    sid = await _rest_create("local-owner")
+    turn = await _held_then_moved(sid, lambda: turn_manager.submit_async(
+        sid, "user", prompt="from somewhere", no_kick=True,
+        # A body claiming the owner's stamp changes nothing.
+        overrides={CALLER_KEY: CALLER_AUTHENTICATED}))
+    assert turn["overrides"][CALLER_KEY] == CALLER_UNKNOWN
+    _assert_restricted(_options(sid, turn["overrides"]))
 
 
 @pytest.mark.parametrize(("row_caller", "live_caller", "gated", "refused"), [
@@ -213,7 +293,8 @@ def test_a_preview_message_never_steers_into_another_callers_turn(
     runtime.turn = {"profile_id": "default", "payload": {}, "overrides": overrides(live_caller)}
     runtime.caller_gated_lane = gated
     reason = runtime._steer_refusal(
-        {"profile_id": "default", "payload": {}, "prompt": "hi", "overrides": overrides(row_caller)},
+        {"profile_id": "default", "payload": {}, "prompt": "hi",
+         "overrides": overrides(row_caller)},
         stored_workspace_ids=None,
     )
     assert (reason == "caller differs") is refused

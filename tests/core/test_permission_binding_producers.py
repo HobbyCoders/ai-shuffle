@@ -16,6 +16,7 @@ and only a missing session or profile fails closed to Ask.
 """
 
 from contextlib import ExitStack
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -356,8 +357,8 @@ def tightened_sender(mock_db, monkeypatch):
     sessions.create_session("caller", "agent", title="caller", is_active=True, permission_mode="default")
     # The owner's own send, stamped as the chat socket stamps it (#641).
     tid = turn_manager._submit_blocking("caller", "user", prompt="work", profile_id="agent",
-                                        overrides={"permission_mode": BYPASS}, explicit_permission=True,
-                                        caller=CALLER_AUTHENTICATED)
+                                        overrides={"permission_mode": BYPASS},
+                                        explicit_permission=True, caller=CALLER_AUTHENTICATED)
     turns.start_turn(tid)
     turns.park_turn(tid, ["job"])
     database.set_session_run_binding("caller", permission_mode="default")
@@ -391,7 +392,9 @@ async def test_remote_start_session_body_carries_the_senders_current_binding(tig
     assert planned["body"]["permission_mode"] == "default"
 
 
-def test_remote_start_session_from_an_unknown_callers_turn_is_refused(tightened_sender):
+def test_remote_start_session_from_an_unknown_callers_turn_is_refused(
+    tightened_sender: Any,
+) -> None:
     """#641: a send nobody vouched for keeps the chat on its ceiling, so it
     can't start a project-less code session on another worker."""
     from app.core import session_orchestration as orch, turn_manager

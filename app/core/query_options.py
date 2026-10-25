@@ -1009,7 +1009,8 @@ def build_options_from_profile(
     owner_coordinator = session_mode == "chat" and is_owner_session(_binding_row)
     # The owner's own no-project chat: a normal (code-lane) session (#641)
     # that still carries its working record, as a coordinator does.
-    owner_chat = session_mode == "code" and owner_workspace_chat(_binding_row, caller=turn_caller_value)
+    owner_chat = session_mode == "code" and owner_workspace_chat(
+        _binding_row, caller=turn_caller_value)
 
     # Where and how this session runs (execution mode, a worktree's base
     # branch, the runtime placement). The adapter renders it into every

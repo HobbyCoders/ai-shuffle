@@ -138,7 +138,9 @@ def record_creator(session_id: str, request: Any, *, conn: Any = None) -> Option
     socket records it, so the chat it made keeps the no-project ceiling on
     every turn (#641). Nothing for the owner login or an API key. Blocking.
     """
-    value = request_principal(request) or (preview_principal() if request_is_preview(request) else None)
+    value = request_principal(request)
+    if not value and request_is_preview(request):
+        value = preview_principal()
     if value:
         _bind_current(session_id, value, new=True, conn=conn)
     return value

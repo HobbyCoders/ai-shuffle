@@ -21,8 +21,12 @@ const values = (opts: { hasProject: boolean; autoSupported: boolean }) => access
 
 describe('Access without a project', () => {
 	it('offers the same modes without a project, Accept Edits included (#641)', () => {
-		expect(values({ hasProject: false, autoSupported: true })).toEqual(['default', 'auto', 'acceptEdits', 'bypassPermissions']);
-		expect(values({ hasProject: false, autoSupported: false })).toEqual(['default', 'acceptEdits', 'bypassPermissions']);
+		expect(values({ hasProject: false, autoSupported: true })).toEqual([
+			'default', 'auto', 'acceptEdits', 'bypassPermissions'
+		]);
+		expect(values({ hasProject: false, autoSupported: false })).toEqual([
+			'default', 'acceptEdits', 'bypassPermissions'
+		]);
 	});
 
 	it('keeps every option, Accept Edits included, for a project session', () => {

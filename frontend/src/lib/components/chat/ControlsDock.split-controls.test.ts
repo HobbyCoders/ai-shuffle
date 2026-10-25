@@ -537,6 +537,7 @@ describe('ControlsDock split controls', () => {
 		activeSession.clearProject();
 		await tick();
 		expect(get(activeSession).permissionModeOverride).toBe('acceptEdits');
-		expect(screen.getByRole('button', { name: /^permission mode:/i }).getAttribute('aria-label')).toMatch(/accept/i);
+		const picker = screen.getByRole('button', { name: /^permission mode:/i });
+		expect(picker.getAttribute('aria-label')).toMatch(/accept/i);
 	});
 });

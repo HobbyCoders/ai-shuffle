@@ -184,7 +184,8 @@ def test_no_project_session_cwd_follows_its_lane(
 
     ws = tmp_path / "ws"
     monkeypatch.setattr(qo.settings, "workspace_dir", ws)
-    principal = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"} if preview else None
+    preview_row = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"}
+    principal = preview_row if preview else None
     monkeypatch.setattr(orch, "_principal", lambda sid: principal)
     session = {"id": "ses-1", "mode": "chat", "project_v2_id": None, "branch": None}
 
