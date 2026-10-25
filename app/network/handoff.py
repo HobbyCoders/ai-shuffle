@@ -572,6 +572,33 @@ PLAIN_MISMATCH = ("This project's folder is a Git repository on one worker but n
                   "ownership has not moved.")
 PLAIN_OWNER_UPDATE = ("Update the owning worker to move a session whose project folder is "
                       "not a Git repository; ownership has not moved.")
+PLAIN_UNKNOWN = ("Cannot tell whether this project's folder is a Git repository; "
+                 "ownership has not moved.")
+
+
+def _plain_folder(path: str) -> bool:
+    """True only when ``path`` is positively not in a Git repository (#639).
+
+    Uses the Git toolbar's classifier: a failed probe (dubious ownership,
+    unreadable or corrupt metadata, Git missing or timing out) never reads as
+    plain, so it cannot authorize a history-only move. Raises ``ValueError``.
+    """
+    import subprocess
+
+    from app.api.git_owner import _is_plain_project_folder
+
+    try:
+        return bool(_is_plain_project_folder(path))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(PLAIN_UNKNOWN) from exc
+
+
+def _known_plain(path: str) -> bool:
+    """Like :func:`_plain_folder`, but a doubtful folder is simply not plain."""
+    try:
+        return _plain_folder(path)
+    except ValueError:
+        return False
 
 
 def _bound_branch(row):
@@ -749,7 +776,7 @@ def _lease(cur, sid, target, token):
     return dict(row)
 
 
-def begin(sid, target, remote=None, note=None, wake_barrier=False, plain=False):
+def begin(sid, target, remote=None, note=None, wake_barrier=False, plain: bool = False):
     """Owner: export the chat for ``target``. ``note`` travels with its history.
 
     ``plain`` is the receiver's request to move a project whose folder is not a
@@ -768,7 +795,7 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False, plain=False):
     return reply
 
 
-def _begin(sid, target, remote, note, wake_barrier, timing, plain=False):
+def _begin(sid, target, remote, note, wake_barrier, timing, plain: bool = False):
     control._require_owned(sid)
     session = database.get_session(sid)
     project = project_resolver.resolve_project_v2(session)
@@ -782,7 +809,7 @@ def _begin(sid, target, remote, note, wake_barrier, timing, plain=False):
         if not cwd:
             raise ValueError("The owning worker no longer has this project's folder; "
                              "ownership has not moved.")
-        if checkout_transfer.is_git_checkout(cwd):
+        if not _plain_folder(cwd):
             raise ValueError(PLAIN_MISMATCH)
         branch = None
     elif project:
@@ -797,7 +824,7 @@ def _begin(sid, target, remote, note, wake_barrier, timing, plain=False):
                 branch = head.decode().strip()
             except ValueError:
                 # The receiver has a Git checkout of a folder that has none here.
-                if not checkout_transfer.is_git_checkout(cwd):
+                if _known_plain(cwd):
                     raise ValueError(PLAIN_MISMATCH) from None
                 raise
     with get_db() as conn:
@@ -924,7 +951,7 @@ def _commit(sid, target, payload, token):
     if project and payload.get("plain_folder") is True:
         # History-only move of a project folder without Git (#639).
         cwd = project_resolver.resolve_existing_cwd(session)
-        if (not cwd or checkout_transfer.is_git_checkout(cwd)
+        if (not cwd or not _plain_folder(cwd)
                 or payload.get("fingerprint") is not None or payload.get("branch") is not None):
             raise ValueError("The owning worker's project folder changed during the move; "
                              "ownership was not moved.")
@@ -1801,7 +1828,9 @@ async def _receive(session, timing):
         try:
             remote = await run_sync(checkout_transfer.remote_identity, base)
         except ValueError:
-            if await run_sync(checkout_transfer.is_git_checkout, base):
+            # Only a folder proven not to be a repository asks for history
+            # only; a failed probe keeps the original Git error.
+            if not await run_sync(_known_plain, str(base)):
                 raise
             # A folder without Git here: ask the owner for its history only.
             if await run_sync(plain_folder_carry, owner) is False:
@@ -1905,7 +1934,7 @@ async def _owner_commit(owner, payload):
 
 
 async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, timing,
-                      plain=False):
+                      plain: bool = False):
     sid = session["id"]
     expected_branch = project_resolver._effective_branch(session) if project and not plain else None
     if expected_branch:

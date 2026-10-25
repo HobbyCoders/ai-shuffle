@@ -3,10 +3,16 @@
 A no-project chat and a project whose folder is not a Git repository move
 their history, question cards and wakes only. Each runs in the receiving
 worker's own folder afterwards: the workspace folder for a chat, the project's
-registered folder for a project. Folder contents never travel.
+registered folder for a project. Folder contents never travel. Only a folder
+proven not to be a repository counts as plain: a failed Git probe never
+authorizes a history-only move.
 """
 import json
+import subprocess
 import time
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,18 +22,24 @@ from app.core.config import settings
 from app.db import checkouts, database, projects_v2
 from app.db.base import get_db
 from app.network import control, crypto, engine, handoff, runners
-from tests.core.network.harness import converge
+from tests.core.network.harness import Worker, converge
 from tests.core.network.test_handoff import pair  # noqa: F401 - fixture
 from tests.core.test_checkout_transfer import repositories  # noqa: F401 - fixture
 
+Pair = tuple[Worker, Worker, Path, Path]
+Call = Callable[..., Awaitable[dict[str, Any]]]
+
 SID = "folder-move"
-OUTCOMES = []  # Hand-off outcomes the tool path reported, newest last.
-QUESTIONS = [{"question": "Which option?", "options": [{"label": "Keep", "description": "Keep it"}],
+ORIGIN = "local:plain-project"
+OUTCOMES: list[str] = []  # Hand-off outcomes the tool path reported, newest last.
+QUESTIONS = [{"question": "Which option?",
+              "options": [{"label": "Keep", "description": "Keep it"}],
               "multiSelect": False, "header": "Choice"}]
 
 
-def _route(a, b, phases=None):
-    async def call(device, action, body, **kwargs):
+def _route(a: Worker, b: Worker, phases: list[str] | None = None) -> Call:
+    async def call(device: str, action: str, body: dict[str, Any],
+                   **kwargs: Any) -> dict[str, Any]:
         caller = engine.require_context().device_id
         if phases is not None and action == "handoff":
             phases.append(body.get("phase"))
@@ -36,7 +48,7 @@ def _route(a, b, phases=None):
     return call
 
 
-def _chat(a, b):
+def _chat(a: Worker, b: Worker) -> None:
     with a.active():
         database.create_session(SID, "default", title="Chat", mode="chat")
         database.add_session_message(SID, "user", "Keep this chat")
@@ -44,7 +56,8 @@ def _chat(a, b):
     converge([a, b])
 
 
-def _plain_project(a, b, tmp_path, *, on_target=True):
+def _plain_project(a: Worker, b: Worker, tmp_path: Path, *,
+                   on_target: bool = True) -> dict[str, Path]:
     """A ``local:`` project registered in a plain folder on each worker."""
     folders = {}
     for worker in (a, b) if on_target else (a,):
@@ -52,11 +65,11 @@ def _plain_project(a, b, tmp_path, *, on_target=True):
         folder.mkdir()
         (folder / "notes.txt").write_text(f"only on {worker.name}")
         with worker.active():
-            project = projects_v2.upsert_project("local:plain-project", name="Plain")
+            project = projects_v2.upsert_project(ORIGIN, name="Plain")
             checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(folder))
         folders[worker.name] = folder
     with a.active():
-        project = projects_v2.get_project_v2_by_origin("local:plain-project")
+        project = projects_v2.get_project_v2_by_origin(ORIGIN)
         database.create_session(SID, "default", title="Plain", project_v2_id=project["id"])
         database.add_session_message(SID, "user", "Keep this project chat")
         engine.scan_all()
@@ -64,7 +77,18 @@ def _plain_project(a, b, tmp_path, *, on_target=True):
     return folders
 
 
-async def _move(path, src, dst, monkeypatch, tmp_path, phases=None):
+def _register(worker: Worker, folder: Path) -> None:
+    """Point ``worker``'s registration of the project at ``folder`` instead."""
+    with worker.active():
+        project = projects_v2.get_project_v2_by_origin(ORIGIN)
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE checkouts SET path=%s WHERE project_id=%s AND runner_id=%s",
+                (str(folder), project["id"], settings.effective_instance_id))
+
+
+async def _move(path: str, src: Worker, dst: Worker, monkeypatch: pytest.MonkeyPatch,
+                tmp_path: Path, phases: list[str] | None = None) -> str | None:
     """Run a producing path on ``src``: the Move endpoint or a HandOffSession hand-off.
 
     Returns the refusal text, or None when the move reported success.
@@ -85,10 +109,11 @@ async def _move(path, src, dst, monkeypatch, tmp_path, phases=None):
                 return exc.detail
             assert result.moved is True
             return None
-        listing = {"runners": [{"device_id": dst.device_id, "device_name": "Target", "online": True,
-                                "is_self": False}]}
+        listing = {"runners": [{"device_id": dst.device_id, "device_name": "Target",
+                                "online": True, "is_self": False}]}
+        store = tmp_path / f"pending-{src.name}.json"
         with patch.object(session_handoff, "_workers", return_value=listing), \
-                patch.object(session_handoff, "_store_path", lambda: tmp_path / f"pending-{src.name}.json"), \
+                patch.object(session_handoff, "_store_path", lambda: store), \
                 patch.object(session_handoff, "_queue_changed", AsyncMock()), \
                 patch.object(session_handoff, "schedule", lambda *args: None):
             session_handoff.request(SID, dst.device_id, "continue there")
@@ -97,40 +122,49 @@ async def _move(path, src, dst, monkeypatch, tmp_path, phases=None):
         return None if outcome.startswith("Handed off to Target.") else outcome
 
 
-def _owned_by(worker, owner):
+def _owned_by(worker: Worker, owner: Worker) -> bool:
     with worker.active():
         return database.get_session(SID)["owner_device_id"] == owner.device_id
 
 
-def _refuse_git_transfer(monkeypatch):
+def _refuse_git_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("no Git transfer without a checkout")
+
     for name in ("export_checkout", "import_checkout"):
-        monkeypatch.setattr(checkout_transfer, name,
-                            lambda *args, **kwargs: pytest.fail("no Git transfer without a checkout"))
+        monkeypatch.setattr(checkout_transfer, name, refuse)
 
 
-def _record_exports(monkeypatch):
-    exported = []
+def _record_exports(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    exported: list[dict[str, Any]] = []
     real_begin = handoff._begin
 
-    def begin(sid, target, *args, **kwargs):
+    def begin(sid: str, target: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         reply = real_begin(sid, target, *args, **kwargs)
         ctx = engine.require_context()
-        exported.append(json.loads(crypto.decrypt_payload(ctx.network_key, reply["payload"],
-                                                          handoff._aad(sid, target))))
+        raw = crypto.decrypt_payload(ctx.network_key, reply["payload"], handoff._aad(sid, target))
+        exported.append(json.loads(raw))
         return reply
 
     monkeypatch.setattr(handoff, "_begin", begin)
     return exported
 
 
+def _corrupt_checkout(repo: Path) -> None:
+    """A real checkout whose Git metadata no longer reads: every probe fails."""
+    (repo / ".git" / "HEAD").write_text("not a ref\n")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["api", "tool"])
-async def test_no_project_chat_moves_and_moves_back(pair, monkeypatch, tmp_path, path):  # noqa: F811
+async def test_no_project_chat_moves_and_moves_back(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,  # noqa: F811
+        path: str) -> None:
     a, b, _, _ = pair
     _chat(a, b)
     _refuse_git_transfer(monkeypatch)
     exported = _record_exports(monkeypatch)
-    phases = []
+    phases: list[str] = []
     assert await _move(path, a, b, monkeypatch, tmp_path, phases) is None
     assert phases[:3] == ["receive", "begin", "commit"]
     assert exported[-1]["checkout"] is None and "plain_folder" not in exported[-1]
@@ -149,7 +183,8 @@ async def test_no_project_chat_moves_and_moves_back(pair, monkeypatch, tmp_path,
         assert database.get_session_messages(SID)[0]["content"] == "Keep this chat"
 
 
-def test_chat_hand_off_request_does_not_promise_a_git_push(pair, tmp_path):  # noqa: F811
+def test_chat_hand_off_request_does_not_promise_a_git_push(pair: Pair,  # noqa: F811
+                                                           tmp_path: Path) -> None:
     from app.core import session_handoff
 
     a, b, _, _ = pair
@@ -169,7 +204,9 @@ def test_chat_hand_off_request_does_not_promise_a_git_push(pair, tmp_path):  # n
 
 
 @pytest.mark.asyncio
-async def test_no_project_chat_carries_questions_and_wakes(pair, monkeypatch, tmp_path):  # noqa: F811
+async def test_no_project_chat_carries_questions_and_wakes(pair: Pair,  # noqa: F811
+                                                           monkeypatch: pytest.MonkeyPatch,
+                                                           tmp_path: Path) -> None:
     from app.core import wakeup_service
     from app.core.user_question_handler import user_question_handler
     from app.db import wakeups
@@ -179,12 +216,13 @@ async def test_no_project_chat_carries_questions_and_wakes(pair, monkeypatch, tm
     real_find = runners.find
     monkeypatch.setattr(runners, "find", lambda target: {
         **(real_find(target) or {}), "capabilities": {"move_questions": 1, "move_wakes": 3}})
-    armed = []
+    armed: list[str] = []
     monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: armed.append(row["id"]))
     fire_at = time.time() + 3600
     with a.active():
-        wakeups.create_wakeup(id="chat-wake", session_id=SID, prompt="check back", fire_at=fire_at,
-                              reason="later", instance_id=settings.effective_instance_id)
+        wakeups.create_wakeup(id="chat-wake", session_id=SID, prompt="check back",
+                              fire_at=fire_at, reason="later",
+                              instance_id=settings.effective_instance_id)
         await user_question_handler.post_question(
             request_id="chat-question", tool_use_id="ask", session_id=SID,
             questions=QUESTIONS, broadcast_func=AsyncMock())
@@ -200,7 +238,9 @@ async def test_no_project_chat_carries_questions_and_wakes(pair, monkeypatch, tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["api", "tool"])
-async def test_plain_project_folder_moves_history_only_and_back(pair, monkeypatch, tmp_path, path):  # noqa: F811
+async def test_plain_project_folder_moves_history_only_and_back(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,  # noqa: F811
+        path: str) -> None:
     from app.core import project_resolver
 
     a, b, _, _ = pair
@@ -226,7 +266,9 @@ async def test_plain_project_folder_moves_history_only_and_back(pair, monkeypatc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["api", "tool"])
-async def test_plain_project_missing_on_target_is_refused(pair, monkeypatch, tmp_path, path):  # noqa: F811
+async def test_plain_project_missing_on_target_is_refused(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,  # noqa: F811
+        path: str) -> None:
     a, b, _, _ = pair
     _plain_project(a, b, tmp_path, on_target=False)
     refusal = await _move(path, a, b, monkeypatch, tmp_path)
@@ -236,24 +278,80 @@ async def test_plain_project_missing_on_target_is_refused(pair, monkeypatch, tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("git_on", ["source", "target"])
-async def test_git_on_only_one_worker_is_refused_clearly(pair, monkeypatch, tmp_path, git_on):  # noqa: F811
+async def test_git_on_only_one_worker_is_refused_clearly(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,  # noqa: F811
+        git_on: str) -> None:
     a, b, source, target = pair
     _plain_project(a, b, tmp_path)
     worker, repo = (a, source) if git_on == "source" else (b, target)
     before = checkout_transfer.fingerprint(repo)
-    with worker.active():
-        # This worker registered the project in a Git checkout instead.
-        project = projects_v2.get_project_v2_by_origin("local:plain-project")
-        with get_db() as conn:
-            conn.cursor().execute("UPDATE checkouts SET path=%s WHERE project_id=%s AND runner_id=%s",
-                                  (str(repo), project["id"], settings.effective_instance_id))
+    _register(worker, repo)  # This worker registered the project in a Git checkout.
     assert await _move("api", a, b, monkeypatch, tmp_path) == handoff.PLAIN_MISMATCH
     assert _owned_by(a, a) and _owned_by(b, a)
     assert checkout_transfer.fingerprint(repo) == before
 
 
 @pytest.mark.asyncio
-async def test_old_owner_gets_a_clear_update_refusal(pair, monkeypatch, tmp_path):  # noqa: F811
+@pytest.mark.parametrize("broken_on", ["source", "target"])
+async def test_a_checkout_whose_git_probe_fails_never_moves_history_only(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,  # noqa: F811
+        broken_on: str) -> None:
+    """Unreadable Git metadata is not a plain folder, on either worker."""
+    a, b, source, target = pair
+    _plain_project(a, b, tmp_path)
+    worker, repo = (a, source) if broken_on == "source" else (b, target)
+    _register(worker, repo)
+    _corrupt_checkout(repo)
+    _refuse_git_transfer(monkeypatch)
+    exported = _record_exports(monkeypatch)
+    refusal = await _move("api", a, b, monkeypatch, tmp_path)
+    assert refusal and "plain_folder" not in json.dumps(exported)
+    if broken_on == "source":
+        # The receiver asked for history only; the owner refuses to grant it.
+        assert refusal == handoff.PLAIN_MISMATCH
+    else:
+        # The receiver keeps the Git error instead of asking for history only.
+        assert "Git rev-parse failed" in refusal and not exported
+    assert _owned_by(a, a) and _owned_by(b, a)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_on", ["source", "target"])
+async def test_a_failed_plain_folder_probe_keeps_ownership(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,  # noqa: F811
+        failing_on: str) -> None:
+    """Dubious ownership (or Git missing) on the classifier probe fails closed."""
+    from app.core.git_service import git_service
+
+    a, b, _, _ = pair
+    _plain_project(a, b, tmp_path)
+    exported = _record_exports(monkeypatch)
+    failing = a if failing_on == "source" else b
+    real_run = git_service._run_git
+
+    def run_git(path: str, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        if engine.require_context().device_id == failing.device_id:
+            return subprocess.CompletedProcess(
+                ["git", *args], 128, "",
+                "fatal: detected dubious ownership in repository at '" + path + "'\n")
+        return real_run(path, args, **kwargs)
+
+    monkeypatch.setattr(git_service, "_run_git", run_git)
+    refusal = await _move("api", a, b, monkeypatch, tmp_path)
+    if failing_on == "source":
+        # The owner cannot prove its folder is plain, so it grants nothing.
+        assert refusal == handoff.PLAIN_UNKNOWN
+    else:
+        # The receiver keeps the Git error instead of asking for history only.
+        assert "Git rev-parse failed" in refusal
+    assert not exported
+    assert _owned_by(a, a) and _owned_by(b, a)
+
+
+@pytest.mark.asyncio
+async def test_old_owner_gets_a_clear_update_refusal(pair: Pair,  # noqa: F811
+                                                     monkeypatch: pytest.MonkeyPatch,
+                                                     tmp_path: Path) -> None:
     a, b, _, _ = pair
     _plain_project(a, b, tmp_path)
     real_find = runners.find
@@ -265,33 +363,40 @@ async def test_old_owner_gets_a_clear_update_refusal(pair, monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_old_owner_without_capability_report_still_refuses_cleanly(pair, monkeypatch, tmp_path):  # noqa: F811
+async def test_old_owner_without_capability_report_still_refuses_cleanly(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # noqa: F811
     """An older owner ignores ``plain_folder`` and refuses a begin without a remote."""
     a, b, _, _ = pair
     _plain_project(a, b, tmp_path)
     real_begin = handoff.begin
 
-    def old_begin(sid, target, remote=None, note=None, wake_barrier=False, plain=False):
+    def old_begin(sid: str, target: str, remote: str | None = None, note: Any = None,
+                  wake_barrier: bool = False, plain: bool = False) -> dict[str, Any]:
         return real_begin(sid, target, remote, note, wake_barrier)
 
     monkeypatch.setattr(handoff, "begin", old_begin)
-    assert await _move("api", a, b, monkeypatch, tmp_path) == "Update both workers to use Git-based resume."
+    refusal = await _move("api", a, b, monkeypatch, tmp_path)
+    assert refusal == "Update both workers to use Git-based resume."
     assert _owned_by(a, a) and _owned_by(b, a)
 
 
 @pytest.mark.asyncio
-async def test_old_receiver_answer_without_plain_flag_is_refused(pair, monkeypatch, tmp_path):  # noqa: F811
+async def test_old_receiver_answer_without_plain_flag_is_refused(
+        pair: Pair, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # noqa: F811
     """A receiver must not install history when the owner did not confirm a plain folder."""
     a, b, _, _ = pair
     _plain_project(a, b, tmp_path)
     real_begin = handoff._begin
 
-    def begin_without_flag(sid, target, remote, note, wake_barrier, timing, plain=False):
+    def begin_without_flag(sid: str, target: str, remote: str | None, note: Any,
+                           wake_barrier: bool, timing: Any,
+                           plain: bool = False) -> dict[str, Any]:
         reply = real_begin(sid, target, remote, note, wake_barrier, timing, plain)
         ctx = engine.require_context()
-        data = json.loads(crypto.decrypt_payload(ctx.network_key, reply["payload"], handoff._aad(sid, target)))
+        aad = handoff._aad(sid, target)
+        data = json.loads(crypto.decrypt_payload(ctx.network_key, reply["payload"], aad))
         data.pop("plain_folder")
-        payload = crypto.encrypt_payload(ctx.network_key, json.dumps(data).encode(), handoff._aad(sid, target))
+        payload = crypto.encrypt_payload(ctx.network_key, json.dumps(data).encode(), aad)
         return {**reply, "payload": payload}
 
     monkeypatch.setattr(handoff, "_begin", begin_without_flag)
@@ -300,7 +405,8 @@ async def test_old_receiver_answer_without_plain_flag_is_refused(pair, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_receiver_cannot_skip_git_publication_for_a_git_project(pair):  # noqa: F811
+async def test_receiver_cannot_skip_git_publication_for_a_git_project(
+        pair: Pair) -> None:  # noqa: F811
     """A forged ``plain_folder`` begin for a Git checkout is refused by the owner."""
     a, b, source, _ = pair
     before = checkout_transfer.fingerprint(source)
@@ -314,13 +420,15 @@ async def test_receiver_cannot_skip_git_publication_for_a_git_project(pair):  # 
 
 
 @pytest.mark.asyncio
-async def test_git_project_protocol_is_unchanged(pair, monkeypatch):  # noqa: F811
+async def test_git_project_protocol_is_unchanged(pair: Pair,  # noqa: F811
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
     """Git projects keep the Git path: same phases and fields, no ``plain_folder``."""
     a, b, _, _ = pair
-    bodies = []
+    bodies: list[dict[str, Any]] = []
     route = _route(a, b)
 
-    async def call(device, action, body, **kwargs):
+    async def call(device: str, action: str, body: dict[str, Any],
+                   **kwargs: Any) -> dict[str, Any]:
         bodies.append(dict(body))
         return await route(device, action, body, **kwargs)
 
@@ -334,4 +442,5 @@ async def test_git_project_protocol_is_unchanged(pair, monkeypatch):  # noqa: F8
     assert set(bodies[1]) == {"session_id", "phase", "token", "fingerprint", "branch",
                               "session_branch", "wake_ids"}
     assert bodies[1]["fingerprint"] and bodies[1]["branch"] == "feature/only-on-worker"
-    assert "plain_folder" not in exported[0] and exported[0]["checkout"]["branch"] == "feature/only-on-worker"
+    assert "plain_folder" not in exported[0]
+    assert exported[0]["checkout"]["branch"] == "feature/only-on-worker"
