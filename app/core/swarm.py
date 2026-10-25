@@ -1,9 +1,11 @@
 """AI Shuffle host for Fluid's Swarm coordinator and scoped native messaging."""
 from __future__ import annotations
 import asyncio
+import contextlib
 import copy
 import json
 import logging
+from collections.abc import AsyncIterator
 from fluid.swarm import (
     RESULT_LIMIT, TERMINAL, SwarmCoordinator, current_launch, now, recover, validate,
 )
@@ -18,6 +20,13 @@ _locks = {}  # session id -> lock serialising orphan settlement and cancel
 # workflow is orphaned only when its coordinator died with an earlier process,
 # so one clean look per session per process is enough.
 _orphan_free = set()
+# Session id -> whether this install holds a killed Swarm workflow row for it.
+# Only a restart reap (before this process ran anything for the session), the
+# stale sweep or a stop write one, and none of those creates an orphan while
+# this process lives, so one answer per session per process holds.
+_killed_swarms = {}
+# Lease a repair holds while it mutates a session that no run owns.
+_REPAIR_LEASE_SECONDS = 120
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 
@@ -204,6 +213,43 @@ def _append_authority(
     return False, run["id"], run["fence_token"]
 
 
+@contextlib.asynccontextmanager
+async def _append_lease(
+    session_id: str, run_id: str | None, fence_token: int | None,
+) -> AsyncIterator[tuple[str, int] | None]:
+    """The fence for a repair's writes, held across them; None when refused.
+
+    A turn's lease (turn start) or a live run of this runner fences the writes
+    as is. With no live run this runner claims one for the repair and releases
+    it afterwards: until then no other runner can claim the session, and a
+    takeover after it lapsed makes the fenced append fail instead of landing.
+    """
+    from app.core.config import settings
+    from app.db import runs
+
+    def acquire() -> tuple[tuple[str, int] | None, dict | None]:
+        if run_id is not None:
+            owned = _owns_recovery_lease(session_id, run_id, fence_token)
+            return ((run_id, fence_token) if owned else None), None
+        active = runs.get_active_run(session_id)
+        if active is not None:
+            if active.get("runner_id") != settings.effective_instance_id:
+                return None, None
+            return (active["id"], active["fence_token"]), None
+        claimed = runs.claim_run(
+            session_id, settings.effective_instance_id, _REPAIR_LEASE_SECONDS)
+        if claimed is None:
+            return None, None
+        return (claimed["id"], claimed["fence_token"]), claimed
+
+    fence, held = await asyncio.to_thread(acquire)
+    try:
+        yield fence
+    finally:
+        if held is not None:
+            await asyncio.to_thread(runs.release_run, held["id"], held["fence_token"])
+
+
 def _worker_id(task: dict) -> str | None:
     """The item's CURRENT worker: a retry rebinds it, ``task_id`` is the first spawn."""
     worker_id = task.get("worker_session_id") or task.get("task_id")
@@ -283,11 +329,19 @@ async def _proven_ended(session_id: str, keys: list[str]) -> set[str]:
     return {frame["task_id"] for frame in frames}
 
 
-async def _killed_snapshots(session_id: str) -> list[dict]:
-    """Snapshots no local coordinator owns, behind a cheap killed-row gate."""
+async def _has_killed_swarms(session_id: str) -> bool:
+    """The cheap gate: this install holds a killed workflow row for the session."""
     from app.db.background_tasks import list_sessions_with_killed_swarms
 
-    if not await asyncio.to_thread(list_sessions_with_killed_swarms, session_id):
+    if session_id not in _killed_swarms:
+        _killed_swarms[session_id] = bool(
+            await asyncio.to_thread(list_sessions_with_killed_swarms, session_id))
+    return _killed_swarms[session_id]
+
+
+async def _killed_snapshots(session_id: str) -> list[dict]:
+    """Snapshots no local coordinator owns, behind a cheap killed-row gate."""
+    if not await _has_killed_swarms(session_id):
         return []
     return [
         snapshot for snapshot in await snapshots(session_id)
@@ -298,16 +352,23 @@ async def _killed_snapshots(session_id: str) -> list[dict]:
 async def _publish_owned(
     session_id: str, rows: list[dict], run_id: str | None, fence_token: int | None,
 ) -> list[dict]:
-    """Append ``rows`` unless ownership moved during the reads before it."""
-    refused, run_id, fence_token = await asyncio.to_thread(
-        _append_authority, session_id, run_id, fence_token,
-    )
-    if refused:
-        return []
-    rows = [s for s in rows if not _locally_owned(session_id, s["id"])]
-    for snapshot in rows:
-        await persist(snapshot, run_id=run_id, fence_token=fence_token)
-    return rows
+    """Append ``rows`` under a held fence unless ownership moved meanwhile."""
+    from app.db.session_events import FenceViolation
+
+    published = []
+    async with _append_lease(session_id, run_id, fence_token) as fence:
+        if fence is None:
+            return []
+        for snapshot in rows:
+            if _locally_owned(session_id, snapshot["id"]):
+                continue
+            try:
+                await persist(snapshot, run_id=fence[0], fence_token=fence[1])
+            except FenceViolation:
+                logger.info("Swarm: %s changed owner before its repair landed", session_id)
+                break
+            published.append(snapshot)
+    return published
 
 
 async def settle_orphans(
@@ -393,6 +454,8 @@ async def record_worker_completion(session_id: str, worker_id: str) -> list[dict
     if not session_id or not worker_id or worker_id.startswith("swarm_") or worker_id in workers:
         return []
     try:
+        if not await _has_killed_swarms(session_id):
+            return []  # never cut off by a restart: nothing to write back
         # A completion can be what a deferred settlement was waiting for.
         _orphan_free.discard(session_id)
         published = await settle_orphans(session_id)
@@ -457,21 +520,24 @@ async def _cancel_orphan(session_id: str, key: str) -> dict | str | None:
         )
         if unknown:
             return _UNREADABLE
-        # Recheck after the evidence and outcome reads, before stopping anyone;
-        # the final append is fenced to the run that authority came from.
-        refused, run_id, fence_token = await asyncio.to_thread(
-            _append_authority, session_id, None, None,
-        )
-        if refused or _locally_owned(session_id, key):
-            return None
-        await asyncio.gather(*(cancel_worker(_worker_id(task)) for task in running))
-        stamp = now()
-        for task in snapshot["tasks"]:
-            if task["status"] not in TERMINAL:
-                task.update(status="cancelled", error="Swarm cancelled", finished_at=stamp)
-        snapshot.update(status="cancelled", updated_at=stamp)
-        await persist(snapshot, run_id=run_id, fence_token=fence_token)
-        return snapshot
+        # Recheck after the evidence and outcome reads, before stopping anyone,
+        # and hold that fence until the cancelled snapshot is appended under it.
+        from app.db.session_events import FenceViolation
+
+        async with _append_lease(session_id, None, None) as fence:
+            if fence is None or _locally_owned(session_id, key):
+                return None
+            await asyncio.gather(*(cancel_worker(_worker_id(task)) for task in running))
+            stamp = now()
+            for task in snapshot["tasks"]:
+                if task["status"] not in TERMINAL:
+                    task.update(status="cancelled", error="Swarm cancelled", finished_at=stamp)
+            snapshot.update(status="cancelled", updated_at=stamp)
+            try:
+                await persist(snapshot, run_id=fence[0], fence_token=fence[1])
+            except FenceViolation:
+                return None  # another runner took the session over meanwhile
+            return snapshot
 
 
 async def reconcile_owned_pending(

@@ -18,12 +18,14 @@ def clean_runtime():
     swarm.worker_jobs.clear()
     swarm._locks.clear()
     swarm._orphan_free.clear()
+    swarm._killed_swarms.clear()
     yield
     swarm.coordinators.clear()
     swarm.workers.clear()
     swarm.worker_jobs.clear()
     swarm._locks.clear()
     swarm._orphan_free.clear()
+    swarm._killed_swarms.clear()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
@@ -750,3 +752,101 @@ async def test_orphan_owned_by_another_runner_is_left_alone(
     with pytest.raises(swarm.SwarmUnavailableError):
         await swarm.cancel(sid, key)
     assert (await swarm.snapshots(sid))[0]["status"] == "running"
+
+
+async def _cancel_with_claim_during_stop(
+        agents: Any, monkeypatch: pytest.MonkeyPatch, sid: str, *, takeover: bool,
+) -> tuple[str, list[Any], int]:
+    """Cancel an orphan while another runner tries to claim the session as its
+    live worker is being stopped, after cancel's last authority read."""
+    from app.core.task_registry import task_registry
+    from app.db import runs
+    from app.db.base import get_db
+    from app.db.session_events import get_events
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid)
+    task_registry.resume_task(sid, wids["a"])
+    claims = []
+    async def stop(worker_id: str, reason: str) -> None:
+        if takeover:  # the repair's lease lapsed meanwhile: a takeover reaps it
+            with get_db() as conn:
+                conn.cursor().execute(
+                    "UPDATE runs SET lease_expires_at = NOW() + (%s * INTERVAL '1 second') "
+                    "WHERE session_id = %s AND state = 'active'", (-60, sid))
+        claims.append(runs.claim_run(sid, "other-runner", 60))
+    monkeypatch.setattr(swarm, "_stop_item", stop)
+    return key, claims, len(get_events(sid, 0, 500))
+
+
+@pytest.mark.asyncio
+async def test_orphan_cancel_holds_its_lease_while_stopping_workers(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db import runs
+    sid = "orphan-held"
+    key, claims, _ = await _cancel_with_claim_during_stop(
+        agents, monkeypatch, sid, takeover=False)
+    snapshot = await swarm.cancel(sid, key)
+    assert claims == [None]  # nobody can claim the session mid-cancel
+    assert snapshot["status"] == "cancelled"
+    assert (await swarm.snapshots(sid))[0]["status"] == "cancelled"
+    assert runs.get_active_run(sid) is None  # the repair lease was released
+
+
+@pytest.mark.asyncio
+async def test_orphan_cancel_lands_nothing_after_a_takeover(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db import runs
+    from app.db.session_events import get_events
+    sid = "orphan-taken"
+    key, claims, events = await _cancel_with_claim_during_stop(
+        agents, monkeypatch, sid, takeover=True)
+    with pytest.raises(swarm.SwarmUnavailableError):
+        await swarm.cancel(sid, key)
+    assert claims[0] is not None and claims[0]["runner_id"] == "other-runner"
+    assert len(get_events(sid, 0, 500)) == events
+    assert (await swarm.snapshots(sid))[0]["status"] == "running"
+    assert runs.get_active_run(sid)["runner_id"] == "other-runner"
+
+
+@pytest.mark.asyncio
+async def test_settlement_lands_nothing_after_a_takeover(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db import runs
+    from app.db.base import get_db
+    from app.db.session_events import get_events
+    sid = "orphan-settle-taken"
+    _, _ = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid)
+    original = swarm.persist
+    async def taken_over(snapshot: dict, *, run_id: str | None = None,
+                         fence_token: int | None = None) -> None:
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE runs SET lease_expires_at = NOW() + (%s * INTERVAL '1 second') "
+                "WHERE session_id = %s AND state = 'active'", (-60, sid))
+        assert runs.claim_run(sid, "other-runner", 60) is not None
+        await original(snapshot, run_id=run_id, fence_token=fence_token)
+    monkeypatch.setattr(swarm, "persist", taken_over)
+    events = len(get_events(sid, 0, 500))
+    assert await swarm.settle_orphans(sid) == []
+    assert sid not in swarm._orphan_free
+    assert len(get_events(sid, 0, 500)) == events
+
+
+@pytest.mark.asyncio
+async def test_completion_of_ordinary_work_skips_swarm_reads(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db import background_tasks
+    _mk_session(agents, "plain-parent", "root-agent")
+    calls = []
+    original = background_tasks.list_sessions_with_killed_swarms
+    def counted(*args: Any, **kwargs: Any) -> list[str]:
+        calls.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(background_tasks, "list_sessions_with_killed_swarms", counted)
+    snapshots = AsyncMock()
+    monkeypatch.setattr(swarm, "snapshots", snapshots)
+    for worker in ("w1", "w2", "w3"):
+        assert await swarm.record_worker_completion("plain-parent", worker) == []
+    assert len(calls) == 1  # one gate read per session per process
+    snapshots.assert_not_awaited()
