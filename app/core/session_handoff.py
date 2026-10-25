@@ -173,6 +173,22 @@ def resolve_worker(worker: str) -> Dict[str, Any]:
     return row
 
 
+def _without_checkout(session_id: str) -> bool:
+    """True for a no-project chat: it moves its history only, with no branch (#639).
+
+    An unreadable or missing row keeps the Git wording rather than guessing.
+    """
+    from app.core.session_modes import session_mode_of
+    from app.db import database
+
+    try:
+        row = database.get_session(session_id)
+    except Exception:  # noqa: BLE001 — wording only
+        return False
+    return (bool(row) and session_mode_of(row) == "chat"
+            and not any(row.get(key) for key in ("project_id", "project_v2_id", "branch")))
+
+
 def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
     """Queue a hand-off of ``session_id`` to ``worker`` for when the turn ends."""
     from app.core import archive_guard
@@ -183,14 +199,15 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
 
     check_unfinished_wakes(session_id)
     row = resolve_worker(worker)
+    how = ("moves this session and its history there" if _without_checkout(session_id)
+           else "commits and pushes the branch and moves this session there")
     with _state_lock:
         _check_cancelling(session_id)
         current = _active(session_id)
         if current is not None and current.target_id != row["device_id"]:
             raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
         message = ("Finish this turn now with a short summary of where the work stands; once the turn "
-                   "and any background work end, the app commits and pushes the branch and moves this "
-                   "session there.")
+                   f"and any background work end, the app {how}.")
         if current is not None:
             # The same move again: the queued one stands (with its time limit).
             return {"queued": True, "worker": current.label, "handoff_id": current.handoff_id,
@@ -1191,9 +1208,10 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     plan = await asyncio.to_thread(resume_plan, session_id, pending, owner)
     if exported and plan in ("unknown", "unsupported"):
         plan = "send"  # begin, not a later capability report, chose the protocol.
-    outcome = f"Handed off to {label}. Open this chat there to continue on the same branch."
+    branch = "" if await asyncio.to_thread(_without_checkout, session_id) else " on the same branch"
+    outcome = f"Handed off to {label}. Open this chat there to continue{branch}."
     if plan == "send":
-        outcome = f"Handed off to {label}. This chat continues there on the same branch."
+        outcome = f"Handed off to {label}. This chat continues there{branch}."
     elif plan == "question":
         from app.db import interactions
 
