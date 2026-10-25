@@ -165,22 +165,34 @@ class PermissionHandler:
         # Only this handler's live callbacks can install runner-local rules.
         self._active_requests: set[tuple[str, str]] = set()
 
-    def remember_scopes(self, session_id: str | None, payload: dict[str, Any]) -> list[str]:
-        """Scopes usable here, not merely advertised by another worker.
-
-        Session rules survive only while the runner keeps the chat in memory:
-        teardown/eviction, restart and each /query background turn clear them.
-        Remote worker proxy approvals and model switches remain one-shot.
-        """
+    @staticmethod
+    def _one_shot_only(payload: dict[str, Any]) -> bool:
+        """Prompts requiring an individual decision, regardless of client version."""
         from app.core.model_override import PROMPT_TOOL
 
+        return bool(
+            payload.get("tool_name") == PROMPT_TOOL
+            or (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
+            or payload.get("safety_check")
+            or (payload.get("skip_saved_rules") and payload.get("assistant_confirm") is None)
+        )
+
+    def remember_scopes(self, session_id: str | None, payload: dict[str, Any]) -> list[str]:
+        """Conservative UI advice, not authority to reject remembered answers.
+
+        A peer or a released owner-confirm card may still stamp a session hint
+        for the executing runner. Session memory ends on teardown/eviction,
+        restart and each /query background turn's completion.
+        """
         if (
-            (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
-            or payload.get("tool_name") == PROMPT_TOOL
+            self._one_shot_only(payload)
             or (session_id, payload.get("request_id")) not in self._active_requests
         ):
             return ["none"]
-        return ["none", "session", "profile"]
+        scopes = ["none", "session"]
+        if payload.get("profile_id"):
+            scopes.append("profile")
+        return scopes
 
     async def request_permission(
         self,
@@ -310,9 +322,6 @@ class PermissionHandler:
             "profile_id": profile_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
-            # Durable replay can land on another install or outlive the waiter.
-            # Live/pending projections recompute capabilities on the answering worker.
-            "remember_scopes": ["none"],
         }
         for key, value in (
             ("tool_use_id", tool_use_id),
@@ -419,7 +428,7 @@ class PermissionHandler:
 
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
-        rule = None if skip_saved_rules else self._check_rules(
+        rule = None if skip_saved_rules or safety_check else self._check_rules(
             session_id, profile_id, tool_name, tool_input
         )
         if rule:
@@ -461,6 +470,10 @@ class PermissionHandler:
             payload["mode_managed"] = True
         if safety_check:
             payload["safety_check"] = True
+        if skip_saved_rules and assistant_confirm is None:
+            # Owner-confirm calls bypass prior rules but keep the remembered-
+            # answer contract, including cards released while another turn runs.
+            payload["skip_saved_rules"] = True
         ttl_seconds = PERMISSION_TTL_SECONDS
         if assistant_confirm is not None:
             from app.core.owner_confirm import TTL_SECONDS as ttl_seconds
@@ -590,8 +603,8 @@ class PermissionHandler:
         answer = result_row.get("answer") or {}
         # Replay both patterned and tool-wide session rules on the executing
         # runner before the next call. Profile rules are already DB-backed.
-        if answer.get("remember") == "session":
-            payload_row = result_row.get("payload") or {}
+        payload_row = result_row.get("payload") or {}
+        if answer.get("remember") == "session" and not self._one_shot_only(payload_row):
             self._add_session_rule_idempotent(
                 session_id,
                 payload_row.get("tool_name", ""),
@@ -637,22 +650,19 @@ class PermissionHandler:
         payload = row.get("payload") or {}
         if decision not in ("allow", "deny", "defer"):
             return {"error": "Invalid permission decision"}
-        from app.core.model_override import PROMPT_TOOL
-        if (
-            payload.get("tool_name") == PROMPT_TOOL
-            or (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
-        ):
+        if self._one_shot_only(payload):
             # These prompts always need their own explicit decision. An older
             # client's "Always" must neither save a rule nor answer other prompts.
             remember, pattern = None, None
         if decision != "defer" and remember not in (None, "none", "session", "profile"):
             return {"error": "Invalid remember scope"}
-        if (
-            decision != "defer"
-            and remember not in (None, "none")
-            and remember not in self.remember_scopes(session_id, payload)
-        ):
-            return {"error": "Remember scope unavailable", "remember_scopes": ["none"]}
+        if decision != "defer" and remember == "profile" and not payload.get("profile_id"):
+            # Refuse before consuming the interaction: a null/empty agent would
+            # otherwise fail the permission_rules FK after the answer committed.
+            return {
+                "error": "Remember scope unavailable",
+                "remember_scopes": self.remember_scopes(session_id, payload),
+            }
         if decision == "defer" and not is_deferrable(payload.get("tool_name")):
             # Nobody would wait for the re-shown prompt's answer. Leave the
             # row pending so the owner can still approve or deny it.
@@ -811,19 +821,15 @@ class PermissionHandler:
         guarded UPDATE won — the async caller emits the durable
         ``interaction.answered`` events, one per winning transition.
         """
-        from app.core.model_override import PROMPT_TOOL
         from app.db import interactions
 
         resolved: List[str] = []
         emits: List[tuple] = []
         for r in self._v2_pending_permissions(session_id):
             payload = r.get("payload") or {}
-            # A remembered local answer must never batch-answer a remote proxy
-            # or a model switch that requires its own explicit decision.
-            if (
-                payload.get("tool_name") == PROMPT_TOOL
-                or (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
-            ):
+            # Safety checks, remote proxies and model switches require their
+            # own explicit answer even when an ordinary sibling is remembered.
+            if self._one_shot_only(payload):
                 continue
             if not rule.matches(payload.get("tool_name", ""), payload.get("tool_input") or {}):
                 continue
@@ -975,11 +981,6 @@ class PermissionHandler:
             "tool_input": request.tool_input,
             "queue_position": queue_position,
             "queue_total": queue_position,
-            "remember_scopes": self.remember_scopes(request.session_id, {
-                "request_id": request.request_id,
-                "tool_name": request.tool_name,
-                "provider_agent": request.provider_agent,
-            }),
         }
         # Include permission-context fields when available
         if request.tool_use_id:
