@@ -110,12 +110,44 @@ describe('permission queue frames', () => {
 		expect(h.state().pendingPermissions[1]).not.toHaveProperty('deferrable');
 	});
 
-	it('keeps remember_scopes on a live request and adds nothing when the frame has none', () => {
+	it('a live card starts one-shot and asks the pending projection how long an answer may be kept', async () => {
 		const h = harness();
-		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'scoped', tool_name: 'Bash', tool_input: { command: 'ls' }, remember_scopes: ['none', 'session', 'profile'] });
-		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'plain', tool_name: 'Bash', tool_input: { command: 'pwd' } });
-		expect(h.state().pendingPermissions[0].remember_scopes).toEqual(['none', 'session', 'profile']);
-		expect(h.state().pendingPermissions[1]).not.toHaveProperty('remember_scopes');
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'a', tool_name: 'Bash', tool_input: { command: 'ls' } });
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'b', tool_name: 'Edit', tool_input: { file_path: '/x' } });
+		// The frame itself never offers a kept answer.
+		expect(h.state().pendingPermissions.every((p) => !('remember_scopes' in p))).toBe(true);
+		await Promise.resolve();
+		// One refresh for the burst.
+		const sends = (h.deps.wsSend as ReturnType<typeof vi.fn>).mock.calls.map(([f]) => (f as { type: string }).type);
+		expect(sends.filter((t) => t === 'get_pending_permissions')).toHaveLength(1);
+
+		h.handleMessage({
+			type: 'pending_permissions',
+			session_id: 'current',
+			pending: [
+				{ ...perm('a'), remember_scopes: ['none', 'session', 'profile'] },
+				{ ...perm('b'), tool_name: 'Edit', remember_scopes: ['none'] },
+			],
+			deferred: [],
+		});
+		expect(h.state().pendingPermissions.map((p) => [p.request_id, p.remember_scopes])).toEqual([
+			['a', ['none', 'session', 'profile']],
+			['b', ['none']],
+		]);
+	});
+
+	it('ignores remember_scopes on a live frame (only the pending projection carries it)', () => {
+		const h = harness();
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'x', tool_name: 'Bash', tool_input: { command: 'ls' }, remember_scopes: ['none', 'session', 'profile'] });
+		expect(h.state().pendingPermissions[0]).not.toHaveProperty('remember_scopes');
+	});
+
+	it('an echoed or background-session card asks for nothing', async () => {
+		const h = harness({ pendingPermissions: [perm('a')] });
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'a', tool_name: 'Bash', tool_input: { command: 'ls' } });
+		h.handleMessage({ type: 'permission_request', session_id: 'other', request_id: 'z', tool_name: 'Bash', tool_input: { command: 'ls' } });
+		await Promise.resolve();
+		expect(h.deps.wsSend).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'get_pending_permissions' }));
 	});
 
 	it('accepts the requeue reply, which names requeued_ids and no resolved_ids (backend requeue_deferred_permissions)', () => {

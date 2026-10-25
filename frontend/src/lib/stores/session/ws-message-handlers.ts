@@ -287,6 +287,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (!patched || needsReload) scheduleSessionsReload();
 	}
 
+	/** One get_pending_permissions per burst of new permission cards. */
+	let rememberScopesQueued = false;
+	function requestRememberScopes(): void {
+		if (rememberScopesQueued) return;
+		rememberScopesQueued = true;
+		queueMicrotask(() => {
+			rememberScopesQueued = false;
+			wsSend({ type: 'get_pending_permissions' });
+		});
+	}
+
 	function mapPermissionRequests(
 		requests: PermissionRequestType[],
 		sessionId?: string
@@ -1246,10 +1257,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						: {}),
 					// A prompt the server will not let anyone defer (Switch model).
 					...(data.deferrable === false ? { deferrable: false } : {}),
-					// How long an answer may be kept. Absent: this request only.
-					...(Array.isArray(data.remember_scopes)
-						? { remember_scopes: (data.remember_scopes as unknown[]).filter((x): x is string => typeof x === 'string') }
-						: {}),
 				} as PermissionRequestType;
 
 				// The same prompt now arrives twice by design: once on the origin
@@ -1263,6 +1270,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 				setNeedsAttention(request.session_id, 0);
 				onNotifyWaitingForResponse('permission', { toolName: request.tool_name });
+				// The live frame never says how long an answer may be kept; only
+				// the pending_permissions projection does (`remember_scopes`).
+				// Ask for it now. Until it arrives the card offers one-shot only.
+				requestRememberScopes();
 				update(s => ({
 					...s,
 					pendingPermissions: [...s.pendingPermissions, request],

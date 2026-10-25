@@ -89,7 +89,7 @@ Subagents, Swarm tasks and chats an agent starts begin in the starting chat's cu
   - **Just this once** (the default): the agent asks again next time.
   - **This chat until it goes idle**: later calls of the tool in this chat get the same answer until the chat goes idle or the worker restarts.
   - **Always for this agent**: a permanent rule for that agent in every chat, on every worker. The buttons change to **Always allow** and **Always deny** so you can see what you are saving. Only do this for tools you always want handled the same way.
-- Some prompts can only be answered once and show no choice: a prompt relayed from a subagent on another worker, a model switch, and a prompt answered from an install that is not running the chat.
+- Some prompts can only be answered once and show no choice: a prompt relayed from a subagent on another worker, a model switch, and safety checks. A prompt from a chat with no agent offers **Just this once** and **This chat** only. The choice appears a moment after the prompt, once the app has checked which ones the request allows.
 
 **Saved approvals.** An agent's **Approvals** tab lists every rule saved with **Always for this agent**: the tool, what it covers (every call, or a pattern), Allow or Deny, and the day it was saved. **Remove** deletes one rule and **Remove all** deletes every rule for that agent. Both ask first and cannot be undone. A removed rule stops applying on your other workers once they sync, and the agent asks again. Only the owner sees this tab.
 

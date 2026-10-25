@@ -52,7 +52,7 @@ ws.send(JSON.stringify({
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |
 | `tool_result` | A tool call finished | `session_id`, `tool_use_id`, `name`, `output`, `is_error` |
-| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt); it is absent otherwise. `remember_scopes` lists the `remember` values this install accepts for the request | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total`, `remember_scopes` |
+| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt); it is absent otherwise. It does not say which `remember` values the request takes; read `remember_scopes` from `get_pending_permissions` | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
 | `user_question` | The agent asks the user a question | `session_id`, `request_id`, `tool_use_id`, `questions` |
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
@@ -116,7 +116,8 @@ When the agent wants to use a tool that requires approval:
 
 // Client approves or denies via a "decision" of "allow" or "deny".
 // "remember" optionally keeps the choice: "none", "session", or "profile" (the agent).
-// Send only a value listed in the request's remember_scopes.
+// Offer only the values listed in the request's remember_scopes
+// (from get_pending_permissions).
 // On an API key's connection "profile" is kept to the session, like "session".
 // "pattern" optionally narrows a remembered rule.
 ws.send(JSON.stringify({
@@ -130,7 +131,7 @@ ws.send(JSON.stringify({
 
 `remember` sets how long the answer lasts. `"none"` (or leaving it out) answers this request only. `"session"` gives later calls of the tool in this session the same answer while the worker running the session holds it in memory: it ends when the session goes idle (the end of each `/query` background turn, or the session being unloaded) or the worker restarts. `"profile"` saves a permanent rule on the agent that applies in every session and syncs to every worker; the owner lists and removes these with the [saved approvals API](/docs/api-reference/agents#saved-approvals). Without a `pattern`, a remembered answer covers every call of the tool.
 
-Each `permission_request`, and each entry in `pending_permissions.pending` and `.deferred`, carries `remember_scopes`: `["none", "session", "profile"]` for a request running on this install, or `["none"]` when it can only be answered once (a request owned by another install that shares the database, a Switch model prompt, a prompt relayed from a subagent on another worker, or a request replayed from history). Treat a missing `remember_scopes` as `["none"]`.
+Each entry in `pending_permissions.pending` and `.deferred` carries `remember_scopes`, the `remember` values worth offering for that request: `["none", "session", "profile"]` for an ordinary request, `["none", "session"]` for a request whose session has no agent, and `["none"]` for one that can only be answered once (a safety check, a Switch model prompt, or a prompt relayed from a subagent on another worker). The live `permission_request` frame does not carry it, so a client that shows a new prompt should send `get_pending_permissions` and offer only a one-shot answer until the reply arrives. Treat a missing `remember_scopes` as `["none"]`.
 
 An agent-wide (`"profile"`) rule applies to every session on that agent, so only the owner can create one. An API key that sends `remember: "profile"` gets a rule for its own session only, the same as `"session"`. A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. A request marked `deferrable: false` cannot be deferred: the reply carries an `error` and the request stays open for an approve or deny. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
 
