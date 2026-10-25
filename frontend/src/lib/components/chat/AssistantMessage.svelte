@@ -918,17 +918,58 @@
 	}
 
 	/* ── Tables: a quiet Copy menu above the right edge (TableCopyMenu) ── */
+	/* The wrapper scrolls sideways instead of the table, so the table keeps
+	   real table layout: the global prose rule splits thead and tbody into
+	   two separate tables whose columns do not line up. */
 	.abody :global(.md-table) {
 		margin: 0.5rem 0 1rem;
 		min-width: 0;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
 	}
 	.abody :global(.md-table > table) {
+		display: table;
+		width: 100%;
 		margin-top: 0;
 		margin-bottom: 0;
+		overflow: visible;
 	}
+	.abody :global(.md-table > table > thead) {
+		display: table-header-group;
+	}
+	.abody :global(.md-table > table > tbody) {
+		display: table-row-group;
+	}
+	/* Break between words only: the prose's break-word let a cell shrink to
+	   one letter per line. */
+	.abody :global(.md-table :is(th, td)) {
+		overflow-wrap: normal;
+		word-break: normal;
+	}
+	.abody :global(.md-table) {
+		container-type: inline-size;
+	}
+	/* Narrow column (phone, split pane): columns take their natural width up
+	   to 20rem and the table scrolls sideways, instead of squeezing every
+	   column to its longest word. */
+	@container (max-width: 600px) {
+		.abody :global(.md-table > table) {
+			width: max-content;
+			min-width: 100%;
+		}
+		.abody :global(.md-table :is(th, td)) {
+			max-width: 20rem;
+		}
+	}
+	/* Stays put while a wide table scrolls under it. */
 	.abody :global(.md-table-bar) {
+		position: sticky;
+		left: 0;
 		display: flex;
 		justify-content: flex-end;
+		/* Room for the button's larger touch area, so it never makes the
+		   wrapper scroll. */
+		padding-right: 6px;
 		margin-bottom: 4px;
 	}
 

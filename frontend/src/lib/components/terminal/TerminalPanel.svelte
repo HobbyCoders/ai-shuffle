@@ -292,10 +292,13 @@
 
 	// ── Send selection to chat ─────────────────────────────────────────────
 	// The selected text goes to the end of this chat's draft as a fenced
-	// block. It is not sent: the owner adds a question and sends it.
-	const canSendSelection = $derived(!chatless && !!activeId && !!selected[activeId]);
+	// block. It is not sent: the owner adds a question and sends it. Not in
+	// the phone layout: xterm has no touch selection, and the header has no
+	// room for a button that could never be used there.
+	const offerSendToChat = $derived(!chatless && !mobile);
+	const canSendSelection = $derived(offerSendToChat && !!activeId && !!selected[activeId]);
 	function sendSelectionToChat() {
-		if (!activeId || chatless) return;
+		if (!activeId || !offerSendToChat) return;
 		const snippet = terminalSnippet(views[activeId]?.selectionText() ?? '');
 		if (!snippet) return;
 		requestComposerInsert(sessionId, snippet);
@@ -372,7 +375,7 @@
 				<button class="tool" aria-label="Copy output" title="Copy output (the selection, or everything)" onclick={copyOutput}>
 					{#if copied}<Check size={15} />{:else}<Copy size={15} />{/if}
 				</button>
-				{#if !chatless}
+				{#if offerSendToChat}
 					<button class="tool to-chat" class:sent={sentToChat} aria-label="Send selection to chat" disabled={!canSendSelection && !sentToChat}
 						title={sentToChat ? 'Added to your message. Nothing was sent.' : canSendSelection ? 'Add the selected text to your message as a code block. Nothing is sent.' : 'Select text in the terminal to add it to your message'}
 						onclick={sendSelectionToChat}>

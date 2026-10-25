@@ -462,6 +462,13 @@ describe('send selection to chat', () => {
 		expect(view.getByText('Selection added to your message. Nothing was sent.')).toBeTruthy();
 	});
 
+	it('is not offered in the phone layout, which has no touch selection', async () => {
+		api.list.mockResolvedValue({ terminals: [info('t9')], open: 1, running: 0, limit: 8, worker: targets.worker });
+		const view = render(TerminalPanel, { sessionId: 's1', mobile: true });
+		await waitFor(() => expect(view.getByRole('button', { name: 'Copy output' })).toBeTruthy());
+		expect(view.queryByRole('button', { name: 'Send selection to chat' })).toBeNull();
+	});
+
 	it('is not offered on the Terminal page, which has no chat', async () => {
 		api.targets.mockResolvedValue(targets);
 		api.list.mockResolvedValue({ terminals: [info('own', { session_id: null })], open: 1, running: 0, limit: 8, worker: targets.worker });
