@@ -372,10 +372,11 @@ export const HTML_PREVIEW_MIN_HEIGHT = 64;
  */
 export const HTML_PREVIEW_MAX_HEIGHT = 1_000_000;
 /**
- * A page that reports more than this, taller than its frame, is probed before
- * the frame grows to it. A page made of viewport-height sections (a slide
- * deck, a 100vh hero) grows with every fit; without this it would balloon
- * the frame (and its own 100vh) toward the ceiling before being pinned.
+ * Past this, a page taller than its frame is checked before the frame grows
+ * to it. A page made of viewport-height sections (a slide deck, a 100vh
+ * hero) grows with every fit; unchecked it would balloon the frame (and its
+ * own 100vh) toward the ceiling before being pinned. Also the first step
+ * when a tall probe gets no answer (see probeExpired).
  */
 export const HTML_PREVIEW_TALL_HEIGHT = 12_000;
 /** Reserved while the page loads and measures, so the transcript does not jump. */
@@ -419,6 +420,12 @@ export class HtmlPreviewSizer {
 	private threshold = SUSPICION_STREAK;
 	/** Started from a remembered pin: the first mismatch is probed at once. */
 	private suspect = false;
+	/**
+	 * An unanswered tall probe grew the frame only part of the way, from the
+	 * frame and height it was measured at: the next report shows whether the
+	 * page followed that step.
+	 */
+	private stepped: { height: number; viewport: number } | null = null;
 
 	/**
 	 * `height` reserves a remembered size and starts fitting from it. A
@@ -474,6 +481,12 @@ export class HtmlPreviewSizer {
 			this.mode = 'fit';
 			return this.fit(height);
 		}
+		// The frame stepped up after an unanswered probe. A page that grew by
+		// about as much as the frame did follows it: the step was the probe.
+		const stepped = this.stepped;
+		this.stepped = null;
+		if (stepped && measured > stepped.viewport && height > measured + 1
+			&& height - stepped.height >= (measured - stepped.viewport) * 0.9) return this.pin();
 		// Two signatures of a page that follows its frame (or of content still
 		// growing): it is taller than the frame it was measured in, or it moved
 		// by as much as the frame did since the last report (a page sized
@@ -485,17 +498,35 @@ export class HtmlPreviewSizer {
 			&& Math.abs(height - previous.height - frameMoved) <= STALE_TOLERANCE;
 		this.streak = height > measured + 1 || tracks ? this.streak + 1 : 0;
 		if (Math.abs(height - this.height) <= 1) return 'none';
-		if (this.streak >= this.threshold || this.tallerThan(height, measured)) return this.probe(height, measured);
+		// A tall page jumping far past its frame is what a viewport follower
+		// does on every fit; content that loads late or a section opening on
+		// a long report grows by much less and is simply fitted.
+		if (this.streak >= this.threshold || (this.tallerThan(height, measured) && height > measured * 1.5)) {
+			return this.probe(height, measured);
+		}
 		return this.fit(height);
 	}
 
-	/** The probe got no answer: the page's height does not depend on its frame. */
+	/**
+	 * The probe got no answer (a throttled offscreen frame answers late, and
+	 * a late answer is stale): take it that the page's height does not depend
+	 * on its frame. A tall page is not taken on trust: the frame steps up at
+	 * most to twice its size (or TALL_HEIGHT), and the next report shows
+	 * whether the page followed the step. A long report reaches its height
+	 * in a few steps; a viewport follower is pinned on the first.
+	 */
 	probeExpired(): HtmlPreviewSizerAction {
 		if (this.mode !== 'probing') return 'none';
 		this.mode = 'fit';
 		this.threshold *= 2;
 		this.streak = 0;
-		return this.fit(this.probeBase.height);
+		const { height, viewport } = this.probeBase;
+		const step = Math.max(HTML_PREVIEW_TALL_HEIGHT, viewport * 2);
+		if (this.tallerThan(height, viewport) && height > step) {
+			this.stepped = { height, viewport };
+			return this.fit(step);
+		}
+		return this.fit(height);
 	}
 
 	/** The page never reported a size (its bootstrap could not run): show it scrollable. */

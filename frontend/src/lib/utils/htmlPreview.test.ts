@@ -552,25 +552,55 @@ describe('HTML preview fit to content', () => {
 	});
 
 	// Drive the sizer the way the frame does: every resize gets a fresh report
-	// from a page whose height is `page(viewport)`. Returns the tallest frame.
-	function drive(s: HtmlPreviewSizer, page: (viewport: number) => number) {
+	// from a page whose height is `page(viewport)`. With `expire`, every probe
+	// goes unanswered (a throttled offscreen frame). Returns the tallest frame.
+	function drive(s: HtmlPreviewSizer, page: (viewport: number) => number, expire = false) {
 		let peak = s.height;
-		for (let i = 0; i < 20 && s.mode !== 'fixed'; i++) {
+		for (let i = 0; i < 40 && s.mode !== 'fixed'; i++) {
 			const viewport = s.height;
-			const action = s.report(page(viewport), viewport);
+			let action = s.report(page(viewport), viewport);
 			peak = Math.max(peak, s.height);
+			if (action === 'probe' && expire) {
+				action = s.probeExpired();
+				peak = Math.max(peak, s.height);
+			}
 			if (action === 'none') break;
 		}
 		return peak;
 	}
 
+	const followers = [(v: number) => 10 * v, (v: number) => 5 * v, (v: number) => v + 40_000];
+
 	it('pins pages built from viewport-height sections without ballooning the frame', () => {
-		for (const page of [(v: number) => 10 * v, (v: number) => 5 * v, (v: number) => v + 40_000]) {
-			const s = sizer();
-			const peak = drive(s, page);
-			expect(s.mode).toBe('fixed');
-			expect(peak).toBeLessThan(45_000);
+		for (const expire of [false, true]) {
+			for (const page of followers) {
+				const s = sizer();
+				const peak = drive(s, page, expire);
+				expect(s.mode).toBe('fixed');
+				expect(peak).toBeLessThan(45_000);
+			}
 		}
+	});
+
+	it('reaches the full height of a long report even when no probe is answered', () => {
+		for (const tall of [41_012, 97_144]) {
+			const s = sizer();
+			drive(s, () => tall, true);
+			expect([s.mode, s.height]).toEqual(['fit', tall]);
+		}
+	});
+
+	it('fits a long report that grows after it is shown, without probing or pinning', () => {
+		const s = sizer({ height: 41_012 });
+		// A section opening, then late images arriving in one report.
+		for (const next of [41_812, 42_412, 43_612, 44_412]) {
+			expect(s.report(next, s.height)).toBe('resize');
+			expect(s.report(next, s.height)).toBe('none');
+			expect([s.mode, s.height]).toEqual(['fit', next]);
+		}
+		// Growing past a stale frame several times (offscreen): never pinned.
+		for (const next of [45_000, 46_000, 47_000]) s.report(next, s.height);
+		expect(s.mode).not.toBe('fixed');
 	});
 
 	it('probes a long report once and settles at its height', () => {
@@ -586,10 +616,17 @@ describe('HTML preview fit to content', () => {
 		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500, s.height)).toBe('probe');
 		expect(s.height).toBe(HTML_PREVIEW_MAX_HEIGHT);
 		expect(s.report(HTML_PREVIEW_MAX_HEIGHT + 500, s.height)).toBe('fixed');
+		// Unanswered probes step the frame up, then pin at the ceiling: the
+		// frame is never left fitted at the ceiling with the page cut off.
 		const probing = sizer({ height: 400 });
-		expect(probing.report(HTML_PREVIEW_MAX_HEIGHT + 500, 400)).toBe('probe');
-		expect(probing.probeExpired()).toBe('fixed');
+		const heights: number[] = [];
+		for (let i = 0; i < 20 && probing.mode !== 'fixed'; i++) {
+			if (probing.report(HTML_PREVIEW_MAX_HEIGHT + 500, probing.height) === 'probe') probing.probeExpired();
+			if (probing.mode === 'fit') heights.push(probing.height);
+		}
+		expect(probing.mode).toBe('fixed');
 		expect(probing.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
+		expect(heights.every((h) => h < HTML_PREVIEW_MAX_HEIGHT)).toBe(true);
 	});
 
 	it('re-measures a page pinned by an older build at its full height, not clipped', () => {
