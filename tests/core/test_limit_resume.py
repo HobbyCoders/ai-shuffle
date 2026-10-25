@@ -190,7 +190,7 @@ class _Env:
 
         async def record(sid, status, data):
             self.recorded.append((sid, status, dict(data)))
-            if data.get("limit_key"):
+            if data.get("limit_key") and status in lr._HANDLED:
                 self.handled.add(data["limit_key"])
 
         monkeypatch.setattr(lr, "_record", record)
@@ -255,7 +255,7 @@ async def test_never_scheduled_when_it_must_not_resume(monkeypatch, case):
     finally:
         task_registry.clear_user_stop("s1")
     assert wdb.get_session_wakeups("s1", lr.LIMIT_RESUME_SOURCE) == []
-    assert env.recorded == []
+    assert [s for _, s, _ in env.recorded] == (["available"] if case == "off" else [])
 
 
 async def test_no_reset_time_says_so_and_schedules_nothing(monkeypatch):
