@@ -272,14 +272,19 @@ promote them to state 2, while ordinary writes use state 0. Search prefilters us
 UNION ALL over states 0 and 2 so each arm can use its partial GIN index. Imported
 text may be absent from search until catch-up, but transcript viewing is unchanged.
 The queue survives restarts. History GIN indexes have separate pending lists,
-limited to 1 MiB per index. Live inserts and edits always enter state 0, so they
-cannot inherit a history pending-list flush. Live GIN settings are unchanged.
-Batches select at most eight
-rows and 128 KB per table (one oversize row may progress), with pauses and short
-transactions. Startup checks for active foreground runs before migration and
-between catch-up batches, yielding while turns are running. An index build
-already in progress still finishes concurrently. No global GIN pending-list
-limit is increased.
+limited to 4 MiB per history index. Disposable WAL decoding showed that the
+former 1 MiB history lists amplified GIN insert records; this history-only budget
+reduces that churn, but is not proof of live-latency acceptance. Live inserts and
+edits always enter state 0, so they cannot inherit a history pending-list flush.
+Live GIN settings and the global pending-list limit are unchanged.
+Batches select at most 32 rows using the queue index, then visit only that locked
+window in heap order. The 128 KB and 100 ms budgets span all tables in a call
+(one oversize row may progress); already-indexed rows are excluded. Short
+transactions are paced with 100 ms pauses. Startup checks for active foreground
+runs before migration and before every catch-up row, yielding while turns are
+running. An index build or promotion statement already in progress still finishes.
+Catch-up does not force checkpoints. Total WAL and live-write tails still require
+acceptance on disposable workers before default enablement.
 
 The table takes roughly the size of the searchable text once more, plus its
 trigram index; text from mirrored sessions (event rows) is kept twice, as
