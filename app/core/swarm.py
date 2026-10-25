@@ -215,12 +215,19 @@ def _append_authority(
 
 
 async def _drain(task: asyncio.Task) -> Any:
-    """Finish ``task`` even when the caller's cancellation repeats."""
+    """Finish ``task`` even when the caller is cancelled meanwhile.
+
+    A cancellation that arrived while waiting is re-raised once ``task`` is
+    done, so the caller still learns it was cancelled.
+    """
+    cancelled = False
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            continue
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
     return task.result()
 
 
@@ -266,9 +273,12 @@ async def _append_lease(
         fence, held = await asyncio.shield(acquiring)
     except asyncio.CancelledError:
         try:
-            _, claimed = await _drain(acquiring)
-        except Exception:
-            claimed = None  # the claim itself failed: nothing to release
+            await _drain(acquiring)
+        except BaseException:
+            pass  # cancelled again or the claim failed; this cancellation is re-raised
+        claimed = None
+        if not acquiring.cancelled() and acquiring.exception() is None:
+            _, claimed = acquiring.result()
         await release(claimed)
         raise
     try:

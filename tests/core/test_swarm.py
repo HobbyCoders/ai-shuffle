@@ -883,3 +883,31 @@ async def test_cancel_during_lease_claim_releases_the_claimed_run(
     turn_run = runs.claim_run(sid, settings.effective_instance_id, 60)
     assert turn_run is not None  # the session's next turn can claim at once
     assert (await swarm.snapshots(sid))[0]["status"] == "running"  # nothing landed
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_lease_release_still_releases_and_propagates(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    from app.core.task_registry import task_registry
+    from app.db import runs
+    sid = "orphan-release-cancelled"
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid)
+    task_registry.resume_task(sid, wids["a"])
+    monkeypatch.setattr(swarm, "_stop_item", AsyncMock())
+    entered, gate = threading.Event(), threading.Event()
+    original = runs.release_run
+    def slow_release(run_id: str, fence_token: int) -> bool:
+        entered.set()
+        assert gate.wait(10)
+        return original(run_id, fence_token)
+    monkeypatch.setattr(runs, "release_run", slow_release)
+    cancelling = asyncio.create_task(swarm.cancel(sid, key))
+    assert await asyncio.to_thread(entered.wait, 10)  # the cancelled snapshot landed
+    cancelling.cancel()
+    await asyncio.sleep(0)
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelling  # the caller learns it was cancelled
+    assert runs.get_active_run(sid) is None  # and the lease was still released
