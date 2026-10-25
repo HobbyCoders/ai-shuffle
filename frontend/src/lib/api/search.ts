@@ -1,6 +1,7 @@
 import { api } from './client';
 import { searchSessionsPaginated, type SessionSearchResult } from './sessions';
 import type { ViewType } from '$lib/stores/layout.svelte';
+import type { SearchItem as SettingsSearchItem, SettingsTarget } from '$lib/settings/types';
 
 export interface SearchItem {
  id: string;
@@ -38,6 +39,32 @@ export const terminalPage: SearchItem = {
  id: 'page:terminal', view: 'terminal', label: 'Terminal',
  description: 'Open a shell on this worker without a chat: sign in to a CLI or finish setup'
 };
+
+/** At most this many Settings rows in the palette; the Settings page shows the rest. */
+export const SETTINGS_RESULT_LIMIT = 5;
+
+/** The settings search module's query, over an index built once per palette opening. */
+export type SettingsQuery = (text: string, index: SettingsSearchItem[]) => SettingsSearchItem[];
+
+/**
+ * Settings hits as palette rows. The index is the Settings page's own (so it
+ * carries the same platform filtering: desktop-app rows only in the desktop
+ * app), and each row opens the exact setting through `open`.
+ */
+export function settingsResults(
+	text: string,
+	index: SettingsSearchItem[],
+	query: SettingsQuery,
+	open: (target: SettingsTarget) => void
+): SearchItem[] {
+	if (!text.trim() || !index.length) return [];
+	return query(text, index).slice(0, SETTINGS_RESULT_LIMIT).map(hit => ({
+		id: `setting:${hit.title}\u0000${hit.where}`,
+		label: hit.title,
+		description: hit.where,
+		action: () => open(hit.target)
+	}));
+}
 
 export function matches(item: SearchItem, query: string): boolean {
  const text = `${item.label} ${item.description ?? ''}`.toLowerCase();

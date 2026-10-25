@@ -23,6 +23,9 @@ const fx = vi.hoisted(() => ({
 		input: HTMLTextAreaElement | null;
 		onData: ((data: string) => void) | null;
 		keyHandler: ((event: KeyboardEvent) => boolean) | null;
+		selection: string;
+		onSelection: (() => void) | null;
+		addons: unknown[];
 	}[],
 	/** Every string sent over a socket's input channel, with its terminal. */
 	socketInput: [] as { id: string; data: string }[],
@@ -35,10 +38,10 @@ vi.mock('@xterm/xterm', () => ({
 		buffer = { active: { length: 0, getLine: () => null } };
 		record: (typeof fx.terms)[number];
 		constructor(options: Record<string, unknown>) {
-			this.record = { options, input: null, onData: null, keyHandler: null };
+			this.record = { options, input: null, onData: null, keyHandler: null, selection: '', onSelection: null, addons: [] };
 			fx.terms.push(this.record);
 		}
-		loadAddon() {}
+		loadAddon(addon: unknown) { this.record.addons.push(addon); }
 		open(host: HTMLElement) {
 			const input = document.createElement('textarea');
 			input.className = 'xterm-helper-textarea';
@@ -46,18 +49,24 @@ vi.mock('@xterm/xterm', () => ({
 			this.record.input = input;
 		}
 		onData(cb: (data: string) => void) { this.record.onData = cb; }
+		onSelectionChange(cb: () => void) { this.record.onSelection = cb; }
 		attachCustomKeyEventHandler(cb: (event: KeyboardEvent) => boolean) { this.record.keyHandler = cb; }
 		focus() { this.record.input?.focus(); }
 		write() {}
 		reset() {}
 		clear() {}
 		dispose() {}
-		hasSelection() { return false; }
-		getSelection() { return ''; }
+		hasSelection() { return !!this.record.selection; }
+		getSelection() { return this.record.selection; }
 		clearSelection() {}
 	},
 }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} } }));
+vi.mock('@xterm/addon-web-links', () => ({
+	WebLinksAddon: class {
+		constructor(public handler: (event: MouseEvent, uri: string) => void, public options: Record<string, unknown>) {}
+	},
+}));
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: class { findNext() { return false; } findPrevious() { return false; } clearDecorations() {} } }));
 vi.mock('$lib/terminal/connection', () => ({
 	TerminalConnection: class {
@@ -71,6 +80,8 @@ vi.mock('$lib/terminal/connection', () => ({
 }));
 
 import TerminalPanel from './TerminalPanel.svelte';
+import { get } from 'svelte/store';
+import { composerInsert } from '$lib/stores/composer-insert';
 import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
 import { terminals, WORKER_TERMINALS } from '$lib/stores/terminals.svelte';
@@ -406,6 +417,64 @@ describe('emulator options', () => {
 		await mount([info('t9')]);
 		await waitFor(() => expect(fx.terms).toHaveLength(1));
 		expect(fx.terms[0].options.logLevel).toBe('off');
+	});
+});
+
+describe('links in output', () => {
+	it('opens web addresses in a new tab and refuses other schemes', async () => {
+		const open = vi.fn();
+		vi.stubGlobal('open', open);
+		await mount([info('t9')]);
+		await waitFor(() => expect(fx.terms).toHaveLength(1));
+		const links = fx.terms[0].addons.find((addon) => typeof (addon as { handler?: unknown }).handler === 'function') as
+			{ handler: (event: MouseEvent, uri: string) => void } | undefined;
+		expect(links).toBeTruthy();
+		links!.handler(new MouseEvent('click'), 'http://localhost:5173/');
+		expect(open).toHaveBeenCalledWith('http://localhost:5173/', '_blank', 'noopener,noreferrer');
+		// OSC 8 hyperlinks take the same path, so a program cannot open a script URL.
+		const osc8 = fx.terms[0].options.linkHandler as { activate: (event: MouseEvent, text: string) => void; allowNonHttpProtocols: boolean };
+		expect(osc8.allowNonHttpProtocols).toBe(false);
+		osc8.activate(new MouseEvent('click'), 'javascript:alert(1)');
+		osc8.activate(new MouseEvent('click'), 'https://example.com/docs');
+		expect(open).toHaveBeenCalledTimes(2);
+		expect(open).toHaveBeenLastCalledWith('https://example.com/docs', '_blank', 'noopener,noreferrer');
+	});
+});
+
+describe('send selection to chat', () => {
+	afterEach(() => composerInsert.set(null));
+
+	it('is off until text is selected, then hands a fenced block to the composer without sending', async () => {
+		const view = await mount([info('t9')]);
+		await waitFor(() => expect(fx.terms).toHaveLength(1));
+		const button = view.getByRole('button', { name: 'Send selection to chat' }) as HTMLButtonElement;
+		expect(button.disabled).toBe(true);
+
+		fx.terms[0].selection = 'npm ERR! missing script: dev   \n';
+		fx.terms[0].onSelection?.();
+		await waitFor(() => expect(button.disabled).toBe(false));
+		await fireEvent.click(button);
+
+		expect(get(composerInsert)).toMatchObject({ sessionId: 's1', text: '```text\nnpm ERR! missing script: dev\n```' });
+		// Nothing typed into the shell, nothing pasted.
+		expect(fx.socketInput).toEqual([]);
+		expect(api.paste).not.toHaveBeenCalled();
+		expect(view.getByText('Selection added to your message. Nothing was sent.')).toBeTruthy();
+	});
+
+	it('is not offered in the phone layout, which has no touch selection', async () => {
+		api.list.mockResolvedValue({ terminals: [info('t9')], open: 1, running: 0, limit: 8, worker: targets.worker });
+		const view = render(TerminalPanel, { sessionId: 's1', mobile: true });
+		await waitFor(() => expect(view.getByRole('button', { name: 'Copy output' })).toBeTruthy());
+		expect(view.queryByRole('button', { name: 'Send selection to chat' })).toBeNull();
+	});
+
+	it('is not offered on the Terminal page, which has no chat', async () => {
+		api.targets.mockResolvedValue(targets);
+		api.list.mockResolvedValue({ terminals: [info('own', { session_id: null })], open: 1, running: 0, limit: 8, worker: targets.worker });
+		const view = render(TerminalPage);
+		await waitFor(() => expect(view.getByRole('button', { name: 'Copy output' })).toBeTruthy());
+		expect(view.queryByRole('button', { name: 'Send selection to chat' })).toBeNull();
 	});
 });
 

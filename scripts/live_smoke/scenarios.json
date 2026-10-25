@@ -798,6 +798,14 @@
           "past_bug": "#623: the access cookie correctly refused setup mutations, but disposable bootstrap left the web shell stuck at the setup wizard."
         },
         {
+          "id": "harness-basics.chat-table-terminal-shortcuts",
+          "check": "Table Copy menu, terminal links, Send selection to chat and Spotlight settings work against a real worker",
+          "kind": "browser",
+          "how": "In a code chat on a worker, ask the agent for a short markdown table that has one cell starting with =SUM(A1:A2) and one with a pipe character. When the reply settles, open the table's Copy menu with the keyboard and with a click, choose Copy as CSV and paste into a spreadsheet, then Copy as Markdown and paste into a text editor. Open the chat's Terminal panel, run a command that prints an https URL and a localhost URL, and click both. Drag-select two lines of output and press Send selection to chat. Repeat the terminal steps at 390px width. Press Ctrl+K on the chat page, type time zone and press Enter; then press Ctrl+K again on the Settings page.",
+          "pass_when": "The spreadsheet shows the formula cell as text, not a computed value, and the pasted Markdown table matches the reply, pipe included. Each URL opens once in a new browser tab with no confirm prompt. The selected lines appear in the composer as a fenced text block after any typed draft, and nothing is sent. At 390px the terminal header has no Send selection button. Ctrl+K on the chat page opens Spotlight with a Settings group; Enter lands on the Time zone row. On the Settings page Ctrl+K focuses Settings search instead of opening Spotlight.",
+          "past_bug": "New: the table Copy menu, terminal links, Send selection to chat and the Spotlight Settings group were checked only in a local fixture with a fake terminal stream, not against a real worker shell."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",

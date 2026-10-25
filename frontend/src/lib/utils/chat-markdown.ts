@@ -11,9 +11,10 @@
  *  2. Highlighting itself is memoised in `$lib/utils/shiki` on code + language,
  *     so the settled PREFIX re-renders are cache hits.
  */
-import { Marked, type Tokens } from 'marked';
+import { Marked, Renderer, type Tokens } from 'marked';
 import { highlightToInnerHtml, resolveShikiLang } from './shiki';
 import { escapeHtml } from './escape-html';
+import { registerTable } from './table-export';
 import { commandBlock, registerCommandBlock } from '$lib/terminal/commands';
 
 /** Parsed fence info string: ```ts title="src/a.ts" / ```ts:src/a.ts / ```ts src/a.ts */
@@ -125,6 +126,20 @@ const chatMarked = new Marked({
 	renderer: {
 		code(token: Tokens.Code): string {
 			return renderCodeBlock(token.text, token.lang, _highlightEnabled);
+		},
+		// Every table sits in a wrapper the message view decorates with a Copy
+		// menu. Settled tables also record their markdown source so "Copy as
+		// Markdown" keeps links and code; the streaming tail skips the registry.
+		table(this: Renderer, token: Tokens.Table): string {
+			const id = _highlightEnabled
+				? registerTable({
+						header: token.header.map((cell) => cell.text),
+						rows: token.rows.map((row) => row.map((cell) => cell.text)),
+						align: token.align
+					})
+				: '';
+			const inner = Renderer.prototype.table.call(this, token);
+			return `<div class="md-table"${id ? ` data-table-id="${id}"` : ''}>${inner}</div>\n`;
 		}
 	}
 });
