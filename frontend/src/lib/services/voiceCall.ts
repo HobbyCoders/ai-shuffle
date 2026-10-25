@@ -291,11 +291,26 @@ function listenForRealtimeDevices(epoch: number): void {
 	};
 }
 
-/** AudioContext + analyser RMS loop feeding `level` (orb animation). */
+/**
+ * One streamed-call meter frame into the store. Frames arrive every 80 ms, so
+ * this smooths lightly and skips imperceptible changes to spare re-renders.
+ */
+function applyStreamLevel(value: number, hearing: boolean): void {
+	voiceCallState.update((s) => {
+		const smoothed = s.level * 0.4 + value * 0.6;
+		const level = value === 0 ? 0 : Math.abs(smoothed - s.level) < 0.004 ? s.level : smoothed;
+		return level === s.level && hearing === s.userSpeaking ? s : { ...s, level, userSpeaking: hearing };
+	});
+}
+
+/** AudioContext + analyser RMS loop feeding `level` for WebRTC calls (orb animation). */
 function startLevelMonitor(stream: MediaStream): void {
 	stopLevelMonitor();
 	try {
 		audioContext = new AudioContext();
+		// Created several awaits after the tap: a context the browser starts
+		// suspended would leave the meter flat for the whole call.
+		if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {});
 		analyser = audioContext.createAnalyser();
 		analyser.fftSize = 256;
 		analyser.smoothingTimeConstant = 0.8;
@@ -850,7 +865,8 @@ export async function startCall(
 				micStream = next;
 				applyMicMuted(get(voiceCallState).micMuted);
 				previous?.getTracks().forEach(track => track.stop());
-				startLevelMonitor(next);
+				// The meter follows the stream's own capture, so it moves to the
+				// new track with it; no second AudioContext to keep running.
 				return next;
 			};
 			const open = (resume: boolean, signal: AbortSignal) => openVoiceAudioStream(sessionIdIn, micStream ?? acquired, {
@@ -863,6 +879,9 @@ export async function startCall(
 					patch(active ? { status: 'reconnecting', agentSpeaking: false } : { status: 'live' });
 				},
 				micHealth: ok => { if (myGeneration === generation) patch({ micProblem: !ok }); },
+				// Streamed engines have no client-side VAD events: the meter and
+				// "Hearing you…" come from the PCM the call sends.
+				level: (value, hearing) => { if (myGeneration === generation) applyStreamLevel(value, hearing); },
 				reacquireMic,
 				closed: (message, reason) => {
 					if (myGeneration !== generation) return;
@@ -932,7 +951,6 @@ export async function startCall(
 			if (myGeneration !== generation) { await stream.close(); return; }
 			audioStream = stream;
 			applyMicMuted(get(voiceCallState).micMuted);
-			startLevelMonitor(acquired);
 			patch({ status: 'live', startedAt: Date.now() });
 			return;
 		}

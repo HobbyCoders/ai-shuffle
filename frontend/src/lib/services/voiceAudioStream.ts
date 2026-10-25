@@ -17,6 +17,12 @@ interface Handlers {
  micHealth?(ok: boolean): void;
  /** A fresh microphone stream, when the current track ended or went silent. */
  reacquireMic?(refreshSignal?: AbortSignal): Promise<MediaStream>;
+ /**
+  * The caller's level (0–1) for every captured frame, and whether it is loud
+  * enough to pass the microphone gate (with a short hangover). Measured on the
+  * PCM this call sends, so the meter moves exactly when the provider hears.
+  */
+ level?(level: number, hearing: boolean): void;
 }
 /**
  * Why the stream ended without the client asking it to (#1671). The labels are
@@ -50,6 +56,26 @@ const GATE_PREROLL_BLOCKS = 2; // keep 20 ms before the first loud block (soft c
 const GATE_HANGOVER = 14400; // keep 600 ms after the last loud block (word endings, short pauses)
 import workletUrl from './voicePcm.worklet.js?url&no-inline';
 import playbackWorkletUrl from './voicePlayback.worklet.js?url&no-inline';
+
+/** Meter range: a frame at or below the floor reads 0, at or above the ceiling 1. */
+export const LEVEL_FLOOR_DB = -60;
+export const LEVEL_CEIL_DB = -12;
+/** How long the meter keeps "hearing you" after the last frame above the gate. */
+export const HEARING_HANGOVER_MS = 600;
+
+/**
+ * One captured frame's meter reading. Pure, so the scale can be tested
+ * without a browser. `voiced` uses the same dBFS threshold as the gate.
+ */
+export function micLevel(pcm: Int16Array, thresholdDb = DEFAULT_MIC_THRESHOLD_DB): { level: number; voiced: boolean } {
+ let sum = 0;
+ for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
+ const rms = pcm.length ? Math.sqrt(sum / pcm.length) : 0;
+ if (rms <= 0) return { level: 0, voiced: false };
+ const db = 20 * Math.log10(rms / 32768);
+ const level = Math.max(0, Math.min(1, (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)));
+ return { level, voiced: db >= thresholdDb };
+}
 
 /** Why the microphone is not reaching the call, or null when it is. */
 export type MicProblem = 'track-ended' | 'audio-suspended' | 'no-capture' | 'not-reaching-server';
@@ -247,11 +273,21 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   const silent = context.createGain(); silent.gain.value = 0;
   source.connect(capture); capture.connect(silent); silent.connect(context.destination);
   let gate = createInputGate(micThresholdDb);
+  let lastVoicedAt = -Infinity;
+  const reportLevel = (level: number, hearing: boolean) => {
+   try { handlers.level?.(level, hearing); } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }
+  };
   capture.port.onmessage = event => {
    // Dropping frames here is independent of MediaStreamTrack.enabled. Epochs
    // reject queued pre-mute frames even after a quick mute/unmute.
    if (socket?.readyState !== WebSocket.OPEN || stopped || micMuted || event.data.generation !== micGeneration) return;
    stats.captured++; lastCaptureAt = performance.now();
+   const input = new Int16Array(event.data.pcm);
+   // The meter reads this call's own capture graph: the one that is
+   // demonstrably running whenever the provider transcribes the caller.
+   const reading = micLevel(input, micThresholdDb);
+   if (reading.voiced) lastVoicedAt = lastCaptureAt;
+   reportLevel(reading.level, lastCaptureAt - lastVoicedAt < HEARING_HANGOVER_MS);
    // A stalled connection is caught by its close; a burst after a stall only
    // loses the microphone audio that could not be sent in time.
    if (socket.bufferedAmount > MAX_UPLOAD_BUFFER) {
@@ -260,7 +296,6 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
     return;
    }
    droppedUpload = 0;
-   const input = new Int16Array(event.data.pcm);
    const gated = gate(input);
    socket.send(gated === input ? event.data.pcm : gated.buffer);
    stats.sent++;
@@ -353,6 +388,9 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    muteInput: muted => {
     micMuted = muted; micGeneration++; gate = createInputGate(micThresholdDb);
     capture.port.postMessage({ type: 'mute', muted, generation: micGeneration });
+    // No frames arrive while muted, so the meter would freeze on its last reading.
+    lastVoicedAt = -Infinity;
+    reportLevel(0, false);
     // Unmuted audio needs a moment to flow again before the watchdog judges it.
     lastCaptureAt = performance.now(); graceUntil = lastCaptureAt + MIC_SILENT_MS;
     if (muted && !micOk) {
