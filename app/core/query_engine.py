@@ -1792,15 +1792,24 @@ async def _stream_to_websocket_impl(
     # inside the options builder, so without the same narrowing the callback
     # would happily approve a tool the options surface excluded — a real
     # divergence, not a redundancy.
-    from app.core.session_modes import runtime_session_mode
+    from app.core.session_modes import runtime_session_mode, turn_caller
     from app.core.session_orchestration import is_owner_session
 
     def _lane_blocking() -> tuple:
-        # Both read the session's principal: off the event loop.
-        lane = runtime_session_mode(session)
+        # Both read the session's principal: off the event loop. The turn's
+        # stamped caller decides first (#641).
+        lane = runtime_session_mode(session, caller=turn_caller(overrides))
         return lane, lane == "chat" and is_owner_session(session)
 
     session_mode, owner_coordinator = await asyncio.to_thread(_lane_blocking)
+    # The owner's no-project chat got its full tools from who sent this turn
+    # (#641): tell the live runtime, so a message from a caller that keeps the
+    # ceiling never steers into it (``SessionRuntime._steer_refusal``).
+    from app.core.session_runtime import get_live_runtime as _live_runtime
+    _runtime = _live_runtime(session_id) if session_id else None
+    if _runtime is not None:
+        _runtime.caller_gated_lane = session_mode == "code" and not (
+            (session or {}).get("project_id") or (session or {}).get("project_v2_id"))
     _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode, owner_session=owner_coordinator)
     from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = (overrides or {}).get("_assistant_proactive")

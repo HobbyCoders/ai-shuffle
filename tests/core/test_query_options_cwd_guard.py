@@ -14,6 +14,7 @@ build_options_from_profile makes one unavoidable DB call
 (get_security_instructions); we patch that single boundary.
 """
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -172,10 +173,19 @@ def test_v2_worktree_on_wrong_branch_names_the_branch_instead_of_missing():
     assert exc_info.value.branch_name == "feat/x"
 
 
-def test_orphan_owner_session_uses_confined_chat_cwd(tmp_path, monkeypatch):
-    """A stored chat stays confined; legacy code migration belongs to step 4."""
+@pytest.mark.parametrize("preview", [False, True])
+def test_no_project_session_cwd_follows_its_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preview: bool,
+) -> None:
+    """The owner's no-project chat runs in its own folder with a shell (#641);
+    a chat the preview cookie sent stays confined to the uploads folder."""
+    from app.core import session_orchestration as orch
+    from app.core.session_modes import chat_uploads_dir, owner_chat_dir
+
     ws = tmp_path / "ws"
     monkeypatch.setattr(qo.settings, "workspace_dir", ws)
+    principal = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"} if preview else None
+    monkeypatch.setattr(orch, "_principal", lambda sid: principal)
     session = {"id": "ses-1", "mode": "chat", "project_v2_id": None, "branch": None}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
@@ -189,13 +199,13 @@ def test_orphan_owner_session_uses_confined_chat_cwd(tmp_path, monkeypatch):
             profile=query_profile(), session_id="ses-1"
         )
 
-    from app.core.session_modes import chat_uploads_dir
-    assert str(opts.cwd) == str(chat_uploads_dir())
-    assert "Bash" not in (opts.aih_tool_allowlist or [])
+    assert str(opts.cwd) == str(chat_uploads_dir() if preview else owner_chat_dir())
+    from app.core.tool_access import tool_permitted
+    assert tool_permitted("Bash", opts.aih_tool_allowlist, opts.disallowed_tools) is not preview
 
 
-def test_orphan_owner_session_cannot_escape_with_profile_config_cwd(tmp_path):
-    """An agent-config cwd cannot lift a no-project owner's file ceiling."""
+def test_orphan_owner_session_cannot_escape_with_profile_config_cwd(tmp_path: Path) -> None:
+    """An agent-config cwd cannot move a no-project owner chat out of its folder."""
     cfg_dir = tmp_path / "cfgcwd"
     cfg_dir.mkdir()
     session = {"id": "ses-1", "mode": "chat", "project_v2_id": None, "branch": None}
@@ -211,8 +221,8 @@ def test_orphan_owner_session_cannot_escape_with_profile_config_cwd(tmp_path):
             profile=query_profile({"cwd": str(cfg_dir)}), session_id="ses-1"
         )
 
-    from app.core.session_modes import chat_uploads_dir
-    assert str(opts.cwd) == str(chat_uploads_dir())
+    from app.core.session_modes import owner_chat_dir
+    assert str(opts.cwd) == str(owner_chat_dir())
     assert str(opts.cwd) != str(cfg_dir)
 
 

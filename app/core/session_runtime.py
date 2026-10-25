@@ -790,6 +790,9 @@ class SessionRuntime:
         # Queued rows already logged as not steerable into this turn, so a
         # refusal is logged once per row rather than on every send and sweep.
         self._steer_refusals_logged: set = set()
+        # Set by ``query_engine`` when this turn is a projectless session on the
+        # code lane, whose full tools depend on who sent it (#641).
+        self.caller_gated_lane: bool = False
         # Set as ``_finalize`` starts: from then on nothing may be submitted into
         # this turn. The runtime stays registered as live until ``execute``'s
         # outer finally, so a send (or the start-window sweep) can still reach
@@ -2220,6 +2223,15 @@ class SessionRuntime:
             return "profile_id differs"
         live_overrides = self.turn.get("overrides") or {}
         row_overrides = row.get("overrides") or {}
+        # A message whose caller keeps the no-project ceiling (the preview
+        # cookie, or a caller nobody recorded) never joins a turn running with
+        # the owner's no-project tools: it runs as its own turn (#641).
+        from app.core.session_modes import CALLER_AUTHENTICATED, turn_caller
+        row_caller = turn_caller(row_overrides)
+        if (self.caller_gated_lane and row_caller is not None
+                and row_caller != CALLER_AUTHENTICATED
+                and row_caller != turn_caller(live_overrides)):
+            return "caller differs"
         for key in _STEER_BINDING_KEYS:
             if key in _STEER_INHERITED_WHEN_ABSENT and key not in row_overrides:
                 if live_overrides.get(key) is None:

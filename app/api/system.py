@@ -752,11 +752,18 @@ async def browse_filesystem(
             detail=f"Path is not a directory: {path}"
         )
 
+    from app.core.session_modes import OWNER_CHAT_DIRNAME
+    # The workspace's no-project folder (#641) is not a project to pick; adding
+    # it as one is refused (``projects.refuse_nested_repository``).
+    in_workspace_root = target == workspace_root
+
     entries = []
     try:
         for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
             # Skip hidden files/dirs (starting with .)
             if item.name.startswith('.'):
+                continue
+            if in_workspace_root and item.name == OWNER_CHAT_DIRNAME:
                 continue
             # Skip system directories
             if sys.platform == "win32" and item.name in ('$Recycle.Bin', 'System Volume Information', 'Recovery'):

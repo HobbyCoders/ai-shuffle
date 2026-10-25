@@ -166,7 +166,26 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
 def refuse_nested_repository(full_path: Path) -> None:
     """A project is one Git repository operated from its root: refuse a folder
     inside a repository and name the root to add instead. A repository root
-    and a folder in no repository are accepted."""
+    and a folder in no repository are accepted.
+
+    The workspace's no-project folder, where the owner's chats without a
+    project run (#641), is never a project either: refused, as is anything
+    inside it."""
+    from app.core.session_modes import owner_chat_dir
+
+    try:
+        resolved = full_path.resolve()
+        app_folder = owner_chat_dir()
+    except (OSError, RuntimeError):
+        resolved = app_folder = None
+    if resolved is not None and (resolved == app_folder or app_folder in resolved.parents):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{app_folder} is where chats without a project run, so it can't be a project. "
+                "Pick or create another folder."
+            ),
+        )
     root = enclosing_repo_root(full_path)
     if root:
         raise HTTPException(

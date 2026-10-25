@@ -56,6 +56,9 @@ from app.core.environment import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# ``working_dir_source`` of an owner no-project chat or its projectless worker (#641).
+OWNER_CHAT_SOURCE = "no-project folder"
+
 
 def computer_use_virtual_size(cfg: Any) -> tuple[int, int]:
     """The computer-use screenshot target, inside what reaches the model
@@ -222,6 +225,7 @@ from app.core.session_modes import (
     permission_mode_for_session_mode,
     runs_in_owner_chat_folder,
     runtime_session_mode,
+    turn_caller,
 )
 
 # Tool access. ``resolve_tool_access`` is the one seam both legs read; it lives
@@ -869,18 +873,20 @@ def build_options_from_profile(
         except Exception:
             session_row = None
 
-    if runtime_session_mode(session_row) == "chat":
+    # Who sent this turn (#641): a preview or unknown caller keeps the ceiling.
+    turn_caller_value = turn_caller(overrides)
+    if runtime_session_mode(session_row, caller=turn_caller_value) == "chat":
         # Do not resolve/materialize a stale project binding before choosing the
         # chat cwd. Even spawning a Chat session must not perform repository work.
         project = None
         working_dir = str(ensure_chat_uploads_dir())
         working_dir_source = "chat uploads"
-    elif runs_in_owner_chat_folder(session_row):
-        # #641: the owner's no-project chat is a normal session whose folder
-        # is the shared chat folder; its projectless Task workers share it.
+    elif runs_in_owner_chat_folder(session_row, caller=turn_caller_value):
+        # #641: the owner's no-project chat is a normal session in its own
+        # workspace folder; its projectless Task workers share it.
         project = None
         working_dir = str(owner_chat_cwd())
-        working_dir_source = "chat folder"
+        working_dir_source = OWNER_CHAT_SOURCE
     elif overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
@@ -996,14 +1002,14 @@ def build_options_from_profile(
             _binding_row = database.get_session(session_id)
         except Exception:  # noqa: BLE001 — a lookup failure falls back to config
             _binding_row = None
-    session_mode = runtime_session_mode(_binding_row)
+    session_mode = runtime_session_mode(_binding_row, caller=turn_caller_value)
     from app.core.session_orchestration import is_owner_session
     # A no-project chat that keeps the ceiling but is the owner's (a preview
     # cookie's or a watch investigation's): read-only coordination tools.
     owner_coordinator = session_mode == "chat" and is_owner_session(_binding_row)
     # The owner's own no-project chat: a normal (code-lane) session (#641)
     # that still carries its working record, as a coordinator does.
-    owner_chat = session_mode == "code" and owner_workspace_chat(_binding_row)
+    owner_chat = session_mode == "code" and owner_workspace_chat(_binding_row, caller=turn_caller_value)
 
     # Where and how this session runs (execution mode, a worktree's base
     # branch, the runtime placement). The adapter renders it into every
@@ -1420,11 +1426,12 @@ def build_options_from_profile(
     elif owner_chat:
         final_system_prompt = _append_system_block(final_system_prompt,
             "# No project\n"
-            "This chat has no project. Its working directory is the shared chat folder, which "
-            "also holds files attached to chats; the shell, file and code tools work across this "
-            "machine under the chat's permission mode, as in a project session. For work in a "
-            "registered project, use StartSession(project=...), or Task(project=...) for a "
-            "subagent in its own checkout. Subagents started without project= run in this folder.")
+            "This chat has no project. Its working directory is the workspace's no-project folder; "
+            "files attached to chats are in the workspace's chat-uploads folder. The shell, file "
+            "and code tools work across this machine under the chat's permission mode, as in a "
+            "project session. For work in a registered project, use StartSession(project=...), or "
+            "Task(project=...) for a subagent in its own checkout. Subagents started without "
+            "project= run in this folder.")
     from app.core.spending_limits import role_context as assistant_limits_context
     final_system_prompt = _append_system_block(
         final_system_prompt, assistant_limits_context(session_id),
@@ -1953,6 +1960,15 @@ def build_options_from_profile(
             merged_add_dirs.append(notes_dir)
     except Exception:
         logger.exception("Failed to register notes dir as an accessible directory")
+    if working_dir_source == OWNER_CHAT_SOURCE:
+        # #641: the owner's no-project chat runs in its own folder, but the
+        # files attached to it land in chat-uploads (referenced by absolute
+        # path). Add that folder so the delegated CLI reads them without an
+        # Ask prompt, as it reads its cwd. The native leg's Ask never asks for
+        # a read (fluid's on_write policy), so it needs nothing more.
+        uploads_dir = str(ensure_chat_uploads_dir())
+        if uploads_dir not in (str(d) for d in merged_add_dirs):
+            merged_add_dirs.append(uploads_dir)
     if session_mode == "chat":
         # Not for the chat lane. ``add_dirs`` widens the set of directories the
         # delegated CLI treats as "the working directory" for its read

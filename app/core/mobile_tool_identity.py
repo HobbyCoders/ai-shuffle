@@ -1,5 +1,6 @@
 """Trusted WS principals and live Android authority. No model-supplied identity."""
 import hashlib
+from typing import Any, Dict, Optional
 from app.db import mobile_tool_identity as store, pairing, mobile, mobile_hub
 from app.core import account_hub
 
@@ -23,7 +24,7 @@ class ControllerCredentialError(PermissionError):
 PREVIEW_PRINCIPAL_ID = 'preview'
 
 
-def preview_principal():
+def preview_principal() -> Dict[str, Any]:
     """The principal a preview-cookie request or socket acts as."""
     from app.core import owner_auth
     return principal('admin', PREVIEW_PRINCIPAL_ID,
@@ -121,16 +122,23 @@ def request_principal(request):
                 owner='account:' + account_id if account_id else 'paired:' + client['id'])
 
 
-def record_creator(session_id, request, *, conn=None):
+def request_is_preview(request: Any) -> bool:
+    """True when a REST request authenticated with the agent browser's preview cookie."""
+    token = getattr(getattr(request, 'state', None), 'auth_token', None)
+    return isinstance(token, str) and token.startswith('preview:')
+
+
+def record_creator(session_id: str, request: Any, *, conn: Any = None) -> Optional[Dict[str, Any]]:
     """Record the paired controller that created a chat over REST (#1877).
 
     The same record the chat socket writes for a chat it creates
     (``bind_session(..., new=True)``), so the creator keeps the chat's
     images, transcript and socket, on this worker and on mirrors, and other
-    account members do not. Nothing for the owner login or an API key.
-    Blocking.
+    account members do not. The preview cookie is recorded too, as the
+    socket records it, so the chat it made keeps the no-project ceiling on
+    every turn (#641). Nothing for the owner login or an API key. Blocking.
     """
-    value = request_principal(request)
+    value = request_principal(request) or (preview_principal() if request_is_preview(request) else None)
     if value:
         _bind_current(session_id, value, new=True, conn=conn)
     return value
