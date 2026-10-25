@@ -5,7 +5,9 @@ A provider usage limit (HTTP 429, "You've hit your session limit · resets
 policy sees ``api_error_status == 429`` on the settled turn and only posts the
 "usage limit reached" notice (``account_failover``). With the setting "Resume
 when the limit resets" on (one switch for every provider, :func:`get_settings`),
-this module also arranges one resume shortly after the reset:
+this module also arranges one resume shortly after the reset. The owner can
+instead arm just the last stopped turn with :func:`arm`, without changing that
+setting. Reset information is recorded even when the global switch is off:
 
 * **Reset time.** Structured readings first: the Claude windows the CLI
   reported (``usage_limits``: a ``rejected`` window is stored at 0% remaining
@@ -59,6 +61,7 @@ import logging
 import random
 import re
 import time
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -140,6 +143,17 @@ _HANDLED = frozenset({_STATUS_SCHEDULED, _STATUS_DEFERRED, _STATUS_RESUMED,
                       _STATUS_CANCELLED, _STATUS_NO_RESET})
 
 _rng = random.Random()
+# Only the execution owner schedules/fires. Serialize its HTTP arm/cancel and
+# settlement paths; the durable log and claimed wake protect restarts/reloads.
+_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+def _lock(session_id: str) -> asyncio.Lock:
+    lock = _locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[session_id] = lock
+    return lock
 
 
 # ─── Settings ───────────────────────────────────────────────────────────────
@@ -602,12 +616,14 @@ _CONTENT = {
     _STATUS_CANCELLED: "Automatic resume cancelled.",
     _STATUS_DROPPED: "Automatic resume dropped.",
     _STATUS_NO_RESET: "Stopped by a usage limit with no reset time, so it will not resume by itself.",
+    "available": "Stopped by a usage limit. Resume once at reset is available.",
 }
 
 
 async def _record(session_id: str, status: str, data: Dict[str, Any]) -> None:
     """Record one ``limit_resume`` row on a chat's log. Never raises."""
     content = data.pop("content", None) or _CONTENT.get(status, "")
+    data = {"armed": status in (_STATUS_SCHEDULED, _STATUS_DEFERRED), "resume_at": None, **data}
     try:
         from app.core.turn_recorder import record_drained_event
 
@@ -692,7 +708,8 @@ async def on_limit_stop(
     (``{"fire_at", "reset_at", "limit_key", ...}``) or None. Never raises.
     """
     try:
-        return await _on_limit_stop(session_id, turn, terminal, worker_owner, now)
+        async with _lock(session_id):
+            return await _on_limit_stop(session_id, turn, terminal, worker_owner, now)
     except Exception:  # noqa: BLE001 — a resume must never break settlement
         logger.warning("limit_resume: scheduling failed for %s", session_id, exc_info=True)
         return None
@@ -704,6 +721,8 @@ async def _on_limit_stop(
     terminal: Dict[str, Any],
     worker_owner: Optional[str],
     now: Optional[float],
+    *,
+    once: bool = False,
 ) -> Optional[Dict[str, Any]]:
     from app.core import wakeup_service
     from app.db import database
@@ -736,28 +755,32 @@ async def _on_limit_stop(
     if not provider_key:
         return None
     switches = await run_sync(get_settings)
-    if not switches["resume_on_reset"]:
-        return None
-
-    current = time.time() if now is None else now
+    current = (_epoch(turn.get("ended_at")) or time.time()) if now is None else now
     reset = await run_sync(lambda: find_reset(provider_key, _errors_text(terminal), now=current))
     note_sessions = [session_id] + ([worker_owner] if worker_owner else [])
     if reset is None:
         for sid in note_sessions:
             await _record(sid, _STATUS_NO_RESET, {
-                "provider": provider_key,
+                "provider": provider_key, "turn_id": turn.get("id"),
+                "reset_at": None, "reset_known": False, "armed": False, "resume_at": None,
                 **({"task_id": session_id} if sid != session_id else {}),
             })
         logger.info("limit_resume: %s stopped by a limit with no reset time", session_id)
         return None
 
     key = limit_key(provider_key, reset.at)
+    if not once and not switches["resume_on_reset"]:
+        await _record(session_id, "available", {
+            "provider": provider_key, "turn_id": turn.get("id"), "reset_at": reset.at,
+            "reset_known": True, "armed": False, "resume_at": None, "limit_key": key,
+        })
+        return None
     if key in await run_sync(handled_limit_keys, session_id):
         logger.info("limit_resume: %s already handled limit %s — not again", session_id, key)
         return None
 
     taken = await run_sync(_taken_fire_times, session_id)
-    fire_at = plan_fire_at(reset.at, now=current, taken=taken)
+    fire_at = plan_fire_at(reset.at, now=time.time() if once else current, taken=taken)
     compact = bool(switches["compact_before_resume"]) and leg in COMPACTING_LEGS
     meta = {
         "provider": provider_key,
@@ -770,6 +793,8 @@ async def _on_limit_stop(
         "compact": compact and not worker_owner,
         "owner": worker_owner,
         "pushbacks": 0,
+        "turn_id": turn.get("id"),
+        **({"once": True, "fence": await run_sync(_once_fence, session_id)} if once else {}),
     }
     row = await wakeup_service.schedule(
         session_id=session_id,
@@ -786,6 +811,7 @@ async def _on_limit_stop(
     data = {
         "provider": provider_key, "resume_at": float(row.get("fire_at") or fire_at),
         "reset_at": reset.at, "limit_key": key, "compact": meta["compact"],
+        "turn_id": turn.get("id"), "reset_known": True, "armed": True, "once": once,
     }
     await _record(session_id, _STATUS_SCHEDULED, dict(data))
     if worker_owner:
@@ -795,6 +821,137 @@ async def _on_limit_stop(
         session_id, provider_key, int(reset.at), reset.source, max(0.0, fire_at - current),
     )
     return {**data, "fire_at": data["resume_at"], "wakeup_id": row.get("id")}
+
+
+# ─── Owner opt-in for the last stopped turn ─────────────────────────────────
+
+
+def _last_decision(session_id: str) -> Dict[str, Any]:
+    from app.db.base import get_db, parse_jsonb
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT payload FROM session_events WHERE session_id=%s "
+                    "AND event_type='system.note' ORDER BY seq DESC LIMIT 500", (session_id,))
+        for row in cur.fetchall():
+            payload = parse_jsonb(row["payload"])
+            if isinstance(payload, dict) and payload.get("subtype") == SYSTEM_SUBTYPE:
+                data = payload.get("data") or {}
+                if (data.get("limit_key") and not data.get("task_id")
+                        and data.get("status") in _HANDLED | {_STATUS_DROPPED}):
+                    return data
+    return {}
+
+
+def _once_fence(session_id: str) -> Dict[str, Any]:
+    """Durable membership/ownership revision: settle/unsettle is not a reload."""
+    from app.db import database
+    from app.db.base import get_db
+
+    session = database.get_session(session_id) or {}
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT local_revision, local_revision_epoch FROM network_session_active "
+                    "WHERE session_id=%s", (session_id,))
+        membership = cur.fetchone()
+    return {"instance_id": session.get("instance_id"),
+            "owner_device_id": session.get("owner_device_id"),
+            "last_user_message_seq": session.get("last_user_message_seq"),
+            "last_user_message_epoch": session.get("last_user_message_epoch"),
+            "membership": dict(membership) if membership else None}
+
+
+async def _once_refused(session_id: str, session: Any, meta: Dict[str, Any]) -> Optional[str]:
+    from app.core import session_handoff
+    from app.db.async_database import run_sync
+
+    reason = await _refused(session_id, session)
+    if reason:
+        return reason
+    if session.get("is_active") is not None and not session["is_active"]:
+        return "settled"
+    if session_handoff.pending_for(session_id):
+        return "handoff"
+    last = await run_sync(_last_settled_turn, session_id)
+    if not last or last["id"] != meta.get("turn_id"):
+        return "newer_turn"
+    if "fence" in meta and meta["fence"] != await run_sync(_once_fence, session_id):
+        return "session_changed"
+    if meta.get("once"):
+        decision = await run_sync(_last_decision, session_id)
+        if (decision.get("limit_key") == meta.get("limit_key")
+                and decision.get("status") in (_STATUS_CANCELLED, _STATUS_DROPPED, _STATUS_RESUMED)):
+            return decision["status"]
+    return None
+
+
+async def state(session_id: str) -> Dict[str, Any]:
+    """Reloadable state, including the last limit stop even with auto-resume off."""
+    from app.core import account_failover
+    from app.core.turn_scheduler import _turn_terminal_payload
+    from app.db import database, turns
+    from app.db.async_database import run_sync
+
+    session = await run_sync(database.get_session, session_id)
+    current = await run_sync(pending, session_id)
+    if current and current.get("once") and await _once_refused(session_id, session, current):
+        current = None
+    last = await run_sync(_last_settled_turn, session_id)
+    stopped = None
+    if last:
+        terminal = await run_sync(_turn_terminal_payload, session_id, last["id"])
+        if account_failover.is_usage_limit_error(terminal):
+            turn = await run_sync(turns.get_turn, last["id"])
+            provider = await run_sync(lambda: session_provider_key(session, session_leg(session)))
+            reset = await run_sync(lambda: find_reset(
+                provider, _errors_text(terminal), now=_epoch(last.get("ended_at")) or time.time()))
+            reason = await _once_refused(session_id, session, {"turn_id": last["id"]})
+            if not reason and await run_sync(turns.session_has_unsettled_turns, session_id):
+                reason = "busy"
+            if not reason and session.get("parent_session_id"):
+                reason = "task_worker"
+            if not reason and not provider:
+                reason = "unsupported_provider"
+            if not reason and ((turn or {}).get("payload") or {}).get(PAYLOAD_KEY):
+                reason = "already_resumed"
+            if not reason and reset is None:
+                reason = "reset_unknown"
+            if not reason and limit_key(provider, reset.at) in await run_sync(handled_limit_keys, session_id):
+                reason = "already_handled"
+            stopped = {"turn_id": last["id"], "provider": provider,
+                       "reset_at": reset.at if reset else None, "reset_known": reset is not None,
+                       "can_arm": reason is None and current is None, "reason": reason}
+    return {"session_id": session_id, "pending": current,
+            "workers": await run_sync(paused_workers_of, session_id),
+            "limit_stopped": stopped, "armed": current is not None,
+            "resume_at": current["fire_at"] if current else None}
+
+
+async def arm(session_id: str, turn_id: str) -> Dict[str, Any]:
+    """Opt in once without changing settings. A stale UI cannot arm a newer stop."""
+    from app.core.turn_scheduler import _turn_terminal_payload
+    from app.db import turns
+    from app.db.async_database import run_sync
+
+    async with _lock(session_id):
+        snapshot = await state(session_id)
+        stopped = snapshot["limit_stopped"]
+        if not stopped or stopped["turn_id"] != turn_id:
+            raise ValueError("This is no longer the last usage-limit-stopped turn. Refresh the chat.")
+        if snapshot["armed"]:
+            return snapshot
+        if not stopped["can_arm"]:
+            reasons = {"reset_unknown": "Reset time unknown. Retry manually when the provider is available.",
+                       "already_handled": "This limit was already handled. Retry manually.",
+                       "already_resumed": "This turn already used its one resume. Retry manually."}
+            raise ValueError(reasons.get(stopped["reason"],
+                                        "This chat cannot resume: " + str(stopped["reason"])))
+        turn = await run_sync(turns.get_turn, turn_id)
+        terminal = await run_sync(_turn_terminal_payload, session_id, turn_id)
+        result = await _on_limit_stop(session_id, turn, terminal, None, None, once=True)
+        if not result:
+            raise ValueError("The resume could not be armed. Refresh the chat or retry manually.")
+        return await state(session_id)
 
 
 # ─── Holding automatic work while the limit is in force ────────────────────
@@ -882,7 +1039,8 @@ async def fire(row: Dict[str, Any]) -> Optional[str]:
     dropped, or handed back to the wake-up service's retry. Never raises.
     """
     try:
-        return await _fire(row)
+        async with _lock(row["session_id"]):
+            return await _fire(row)
     except Exception:  # noqa: BLE001
         logger.warning("limit_resume: firing %s failed", row.get("id"), exc_info=True)
         return None
@@ -898,7 +1056,8 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
     owner = meta.get("owner")
     note_sessions = [session_id] + ([owner] if owner else [])
     session = await run_sync(database.get_session, session_id)
-    refused = await _refused(session_id, session)
+    refused = (await _once_refused(session_id, session, meta) if meta.get("once")
+               else await _refused(session_id, session))
     if refused is None and owner:
         refused = await _refused(owner, await run_sync(database.get_session, owner))
     if refused is not None:
@@ -930,6 +1089,7 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
                 await _record(sid, _STATUS_DEFERRED, {
                     "provider": meta.get("provider"), "resume_at": float(again.get("fire_at") or fire_at),
                     "reset_at": blocked, "limit_key": meta.get("limit_key"),
+                    "turn_id": meta.get("turn_id"), "once": bool(meta.get("once")),
                     **({"task_id": session_id} if sid != session_id else {}),
                 })
             logger.info("limit_resume: %s still limited — moved to %s", session_id, int(fire_at))
@@ -1024,6 +1184,11 @@ def pending(session_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def cancel(session_id: str) -> bool:
+    async with _lock(session_id):
+        return await _cancel(session_id)
+
+
+async def _cancel(session_id: str) -> bool:
     """Cancel ``session_id``'s scheduled resume, or that of the paused worker
     with this id. Returns whether one was pending."""
     from app.core import wakeup_service
@@ -1032,9 +1197,17 @@ async def cancel(session_id: str) -> bool:
     current = await run_sync(pending, session_id)
     removed = await wakeup_service.cancel_session_wakeups_async(session_id, LIMIT_RESUME_SOURCE)
     if not removed:
-        return False
+        # The timer may have claimed its durable row and be waiting for our
+        # lock. Cancel that opt-in in the durable log before fire can proceed.
+        decision = await run_sync(_last_decision, session_id)
+        if not decision.get("once") or decision.get("status") not in (_STATUS_SCHEDULED, _STATUS_DEFERRED):
+            return False
+        current = decision
     owner = (current or {}).get("owner")
-    await _record(session_id, _STATUS_CANCELLED, {"limit_key": (current or {}).get("limit_key")})
+    await _record(session_id, _STATUS_CANCELLED, {
+        "limit_key": (current or {}).get("limit_key"), "turn_id": (current or {}).get("turn_id"),
+        "armed": False, "resume_at": None,
+    })
     if owner:
         await _record(owner, _STATUS_CANCELLED, {"limit_key": (current or {}).get("limit_key"),
                                                  "task_id": session_id})

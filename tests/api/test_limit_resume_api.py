@@ -78,6 +78,8 @@ def mock_api_user():
 
 @pytest.fixture
 def client(app):
+    from app.api.auth import require_admin
+    app.dependency_overrides[require_admin] = lambda: "owner-token"
     with TestClient(app) as test_client:
         yield test_client
 
@@ -153,10 +155,11 @@ def test_cache_state_reports_the_verdict(client, mock_database, mock_api_user, s
 def test_limit_resume_status_and_cancel(client, mock_database, mock_api_user, session_row):
     mock_database.get_session.return_value = session_row
     pending = {"fire_at": 1.0, "limit_key": "claude:1"}
-    with patch.object(limit_resume, "pending", return_value=pending), \
-            patch.object(limit_resume, "paused_workers_of", return_value=["w1"]):
+    snapshot = {"session_id": "s1", "pending": pending, "workers": ["w1"],
+                "limit_stopped": None, "armed": True, "resume_at": 1.0}
+    with patch.object(limit_resume, "state", AsyncMock(return_value=snapshot)):
         body = client.get("/api/v1/sessions/s1/limit-resume").json()
-    assert body == {"session_id": "s1", "pending": pending, "workers": ["w1"]}
+    assert body == snapshot
 
     cancel = AsyncMock(return_value=True)
     with patch.object(limit_resume, "cancel", cancel), \
@@ -167,3 +170,30 @@ def test_limit_resume_status_and_cancel(client, mock_database, mock_api_user, se
         assert r.json()["cancelled"] is True
         cancel.assert_awaited_with("w1")
         assert client.post("/api/v1/sessions/s1/limit-resume/cancel?task_id=other").status_code == 404
+
+
+def test_owner_can_arm_and_gets_reload_state(client, mock_database, session_row):
+    mock_database.get_session.return_value = session_row
+    snapshot = {"session_id": "s1", "armed": True, "resume_at": 123.0,
+                "pending": {"fire_at": 123.0}, "workers": [], "limit_stopped": None}
+    with patch.object(limit_resume, "arm", AsyncMock(return_value=snapshot)) as arm:
+        response = client.post("/api/v1/sessions/s1/limit-resume/arm", json={"turn_id": "t1"})
+    assert response.status_code == 200 and response.json() == snapshot
+    arm.assert_awaited_once_with("s1", "t1")
+
+
+def test_arm_refusal_is_clear_conflict(client, mock_database, session_row):
+    mock_database.get_session.return_value = session_row
+    with patch.object(limit_resume, "arm", AsyncMock(side_effect=ValueError("Reset time unknown. Retry manually."))):
+        response = client.post("/api/v1/sessions/s1/limit-resume/arm", json={"turn_id": "t1"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Reset time unknown. Retry manually."
+    assert client.post("/api/v1/sessions/s1/limit-resume/arm", json={}).status_code == 422
+
+
+@pytest.mark.parametrize("action", ["arm", "cancel"])
+def test_arm_and_cancel_require_owner(client, app, action):
+    from app.api.auth import require_admin
+    app.dependency_overrides.pop(require_admin)
+    response = client.post(f"/api/v1/sessions/s1/limit-resume/{action}", json={"turn_id": "t1"})
+    assert response.status_code == 403
