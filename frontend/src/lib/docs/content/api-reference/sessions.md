@@ -511,23 +511,45 @@ Whether a message sent now would read a large context with a cold provider cache
 
 ### GET /api/v1/sessions/{session_id}/limit-resume
 
-The chat's scheduled resume after a usage limit (`pending`, or `null`), and the ids of the background Task workers it waits on that a usage limit paused (`workers`).
+Returns the chat's limit-stop and scheduled-resume state, even with the global resume setting off. All times are Unix seconds. `limit_stopped` is `null` unless the last turn that ran stopped on a usage limit. An unknown reset is explicit: `reset_at: null`, `reset_known: false`, `can_arm: false`, `reason: "reset_unknown"`.
 
 **Auth:** Required
 
 ```json
 {
   "session_id": "sess_abc123",
-  "pending": {"fire_at": 1791173520.4, "reset_at": 1791173400.0, "provider": "claude", "limit_key": "claude:29852890", "compact": true},
-  "workers": []
+  "pending": null,
+  "workers": [],
+  "armed": false,
+  "resume_at": null,
+  "limit_stopped": {
+    "turn_id": "turn_abc123",
+    "provider": "claude",
+    "reset_at": 1791173400.0,
+    "reset_known": true,
+    "can_arm": true,
+    "reason": null
+  }
 }
 ```
 
+When armed, `pending` holds the existing wake metadata (`fire_at`, `reset_at`, `provider`, `limit_key`, `compact`, `wakeup_id`); `armed` is true and `resume_at` equals `pending.fire_at`. `workers` lists paused background Task workers. This state survives reload and worker restart.
+
+### POST /api/v1/sessions/{session_id}/limit-resume/arm
+
+**Auth:** Owner only. Call the worker that runs the chat.
+
+Send `{"turn_id": "turn_abc123"}` using the id from `limit_stopped`. Arms one continuation after that turn's reset without changing either global setting. Returns the same state as GET. Repeating the request returns the existing schedule without creating another wake. Reset lookup uses the stopped turn's end time, so clicking later does not age its provider reading out of the recency window. The actual wake includes the usual grace period, jitter and stagger; compaction and renewed-limit checks still apply.
+
+Returns `409` with a readable `detail` for an unknown reset, a stale turn, a previously handled limit, or a stopped, settled, archived, moved or busy chat. Manual retry remains available. A newer run, Stop, Settle, Archive or handoff invalidates the opt-in. Cancelling or consuming it does not allow another automatic continuation for the same limit.
+
+The event log emits `system` frames with subtype `limit_resume` (`system.note` in storage). With the global setting off, a known reset emits `data.status: "available"`; an unknown reset emits `"no_reset"`. Both include `turn_id`, `provider`, `reset_at`, `reset_known`, `armed: false` and `resume_at: null`. Scheduling emits `"scheduled"` with `armed: true` and `resume_at`; the existing deferred, resumed, cancelled and dropped statuses still apply. Refetch GET after those events to obtain the current action state.
+
 ### POST /api/v1/sessions/{session_id}/limit-resume/cancel
 
-Cancel the chat's scheduled resume. With `?task_id=<worker id>` it cancels the resume of that paused worker instead; the worker is then stopped. Returns `{"session_id": "...", "task_id": null, "cancelled": true}`, with `cancelled` `false` when nothing was scheduled. Returns `404` for a `task_id` that is not a paused worker of this chat.
+**Auth:** Required, with normal session access. Cancelling a per-chat one-shot arm additionally requires the owner. Stopping a paused worker with `task_id`, or cancelling a globally scheduled automatic resume, keeps normal authenticated access.
 
-**Auth:** Required
+Cancel the chat's scheduled resume. With `?task_id=<worker id>` it cancels the resume of that paused worker instead; the worker is then stopped. Returns `{"session_id": "...", "task_id": null, "cancelled": true}`, with `cancelled` `false` when nothing was scheduled. Returns `404` for a `task_id` that is not a paused worker of this chat.
 
 ### POST /api/v1/sessions/batch-delete
 

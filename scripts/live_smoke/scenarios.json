@@ -9,6 +9,28 @@
   },
   "suites": [
     {
+      "name": "limit-resume-once",
+      "intro": "Use disposable candidate chats and a configured provider only; never change a production worker's usage settings.",
+      "rows": [
+        {
+          "id": "limit-resume-once.composer-banner",
+          "check": "The composer banner follows a real limit stop through arm, reload and Cancel",
+          "kind": "owner",
+          "how": "On a disposable candidate with global resume off, drive a real provider turn to a usage-limit stop. In the web UI and the Android app, read the banner above the composer: it should say when the limit resets in local time, or that the reset time is unknown. Press Resume at reset, then reload the page and reopen the app; the banner should say when the chat resumes and offer Cancel. Press Cancel and reload again. Open the same chat as a non-owner user and check that it shows the times without buttons.",
+          "pass_when": "The banner text matches the worker's limit-resume state at every step, including after reloads. No Resume at reset button appears for an unknown reset, after Cancel, or for a non-owner. The global auto-resume setting is unchanged. Without a real provider limit this remains unverified; the PR's render checks used mocked state.",
+          "past_bug": "With global auto-resume off, the composer showed nothing about a usage-limit stop and offered no way to resume that chat at the reset."
+        },
+        {
+          "id": "limit-resume-once.owner-opt-in",
+          "check": "A limit-stopped chat can resume once with the global switch off",
+          "kind": "owner",
+          "how": "On a disposable candidate, leave global resume off and drive a real provider turn to a usage-limit stop. Read limit-resume state and its event: confirm the provider's credible reset time, or explicit unknown. Arm the known-reset turn twice, reload, and restart only the candidate. Confirm one durable wake at the same resume time. Let it fire and inspect compact-before-resume ordering and the single continuation. Repeat in separate chats with Cancel, Stop, Settle, Archive, handoff and a newer failed run before reset; none may continue. For a stop with no credible reset, arm must return a readable conflict while manual retry remains available.",
+          "pass_when": "The global setting stays off. Duplicate arm, reload and restart never create duplicate continuations; invalidated opt-ins never fire. Known and unknown reset states agree with the real provider's response. A limit hit by the continuation never arms another automatic attempt. Without a real provider limit and candidate restart this remains unverified.",
+          "past_bug": "With global auto-resume off, a usage-limit stop had neither a reset time nor a per-chat resume action."
+        }
+      ]
+    },
+    {
       "name": "git-task-review",
       "intro": "Disposable checkouts and paired candidate workers only.",
       "rows": [

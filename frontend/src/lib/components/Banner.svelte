@@ -34,7 +34,7 @@
 		title?: string;
 		dismissible?: boolean;
 		onDismiss?: () => void;
-		action?: { label: string; onClick: () => void };
+		action?: { label: string; onClick: () => void; disabled?: boolean };
 		/** A second, quieter action after `action`. */
 		secondaryAction?: { label: string; onClick: () => void };
 		icon?: boolean;
@@ -69,7 +69,7 @@
 		{/if}
 	</div>
 	{#if action}
-		<button type="button" class="banner-action" onclick={action.onClick}>{action.label}</button>
+		<button type="button" class="banner-action" onclick={action.onClick} disabled={action.disabled}>{action.label}</button>
 	{/if}
 	{#if secondaryAction}
 		<button type="button" class="banner-action secondary" onclick={secondaryAction.onClick}>{secondaryAction.label}</button>
@@ -163,8 +163,12 @@
 		cursor: pointer;
 		transition: opacity 0.15s ease;
 	}
-	.banner-action:hover {
+	.banner-action:hover:not(:disabled) {
 		opacity: 0.88;
+	}
+	.banner-action:disabled {
+		opacity: 0.6;
+		cursor: default;
 	}
 	.banner-action.secondary {
 		background: transparent;
@@ -200,6 +204,11 @@
 	@media (max-width: 639px) {
 		.banner-action {
 			min-height: 40px;
+		}
+		/* One action plus the X: let the text narrow so the X stays on the
+		   action's row instead of wrapping onto a row of its own. */
+		.banner:not(:has(.banner-action.secondary)) .banner-body {
+			flex-basis: 120px;
 		}
 	}
 	/* Finger-sized X on narrow and touch screens; the phone shell sets the

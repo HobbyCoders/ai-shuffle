@@ -41,8 +41,9 @@
 	import { git } from '$lib/stores/git.svelte';
 
 	import { api, getErrorMessage, type FileUploadResponse } from '$lib/api/client';
-	import { cancelLimitResume, getCacheState, type CacheState } from '$lib/api/limit-resume';
-	import { pausedChat, pausedLabel } from './limit-resume';
+	import { getCacheState, type CacheState } from '$lib/api/limit-resume';
+	import LimitResumeBanner from './LimitResumeBanner.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
@@ -171,23 +172,6 @@
 	// user's answer and goes out as composed.
 	let catalogHoldWaived = false;
 	const CATALOG_HOLD_MS = 10_000;
-
-	// A chat a usage limit paused, with its resume time (#1831). Cancel hides
-	// it at once; the backend's "cancelled" row then ends it for every view.
-	const paused = $derived($activeSession.sessionId ? pausedChat($activeSession.messages) : null);
-	const pauseKey = $derived(paused ? `${$activeSession.sessionId}:${paused.resumeAt}` : null);
-	let cancelledPause = $state<string | null>(null);
-	async function cancelPause() {
-		const sid = $activeSession.sessionId;
-		if (!sid || !pauseKey) return;
-		const key = pauseKey;
-		try {
-			await cancelLimitResume(sid);
-			cancelledPause = key;
-		} catch (e) {
-			notify(getErrorMessage(e, 'Could not cancel the resume.'), { severity: 'error' });
-		}
-	}
 
 	// Before a send into a large chat whose provider cache went cold: say what
 	// it costs and offer to compact first (#1831). The check is bounded so a
@@ -1417,9 +1401,13 @@
 			<Banner severity="warning" message={$activeSession.worktreeError} dismissible onDismiss={() => activeSession.clearWorktreeError()} />
 		{/if}
 
-		{#if paused && pauseKey !== cancelledPause}
-			<Banner severity="info" message={pausedLabel(paused.resumeAt)} action={{ label: 'Cancel', onClick: cancelPause }} />
-		{/if}
+		<!-- Usage limit: when it resets, "Resume at reset" once, and Cancel once armed (#1831). -->
+		<LimitResumeBanner
+			sessionId={$activeSession.sessionId}
+			messages={$activeSession.messages}
+			streaming={$activeSession.isStreaming}
+			canAct={$isAdmin}
+		/>
 
 		{#if coldNotice && coldNotice.sessionId === $activeSession.sessionId}
 			<Banner
