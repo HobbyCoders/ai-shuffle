@@ -27,7 +27,7 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
-	import { promptStash, type StashedPrompt } from '$lib/stores/session/prompt-stash';
+	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { restoreMessageDocument } from './tiptap/serialization';
@@ -459,21 +459,49 @@
 			else notify('Nothing to stash — type a prompt, then press Ctrl+S.', { severity: 'info' });
 			return;
 		}
-		const entry = promptStash.push(draft);
-		if (!entry) return;
+		const pushed = promptStash.push(draft);
+		if (!pushed) return;
+		// Only clear the composer once the browser has kept the stash; otherwise
+		// the composer is the only copy and a reload would lose it.
+		if (!pushed.durable) {
+			notifyStashFailed();
+			return;
+		}
 		setComposerDraft('');
 		recall.reset();
 		composerSuggestion.invalidate();
-		offerUndo('Prompt stashed', () => {
-			const back = promptStash.take(entry.id);
-			if (back) restoreEntry(back);
-		});
+		offerUndo('Prompt stashed', () => restoreStashed(pushed.entry.id));
 	}
 
-	/** Put a stashed prompt in the composer, stashing whatever is there first. */
-	function restoreEntry(entry: StashedPrompt) {
+	/** A live banner where the success banner would be, so the refusal is seen at once. */
+	function stashBannerError(message: string) {
+		notify.banner(message, { severity: 'error', persist: false, duration_ms: 8000 });
+	}
+
+	function notifyStashFailed() {
+		stashBannerError("Couldn't stash. Your draft is still here.");
+	}
+
+	/**
+	 * Put a stashed prompt in the composer. Whatever the composer holds takes
+	 * its place in the stash, and nothing changes if that save fails.
+	 */
+	function restoreStashed(id: string) {
+		const entry = promptStash.find(id);
+		if (!entry) return;
 		const current = getDraftJSON();
-		const swapped = hasComposerDraft(current) ? promptStash.push(current) : null;
+		const swapped = hasComposerDraft(current);
+		if (swapped) {
+			// One write that swaps the entry for the draft, so a full stash
+			// evicts nothing and a failed save changes nothing.
+			if (!promptStash.swap(id, current)?.durable) {
+				notifyStashFailed();
+				return;
+			}
+		} else {
+			// The entry is in hand; if its removal isn't saved it simply stays listed.
+			promptStash.take(id);
+		}
 		setComposerDraft(entry.draft);
 		recall.reset();
 		stashOpen = false;
@@ -481,14 +509,16 @@
 		if (swapped) notify('Your previous draft was stashed.', { severity: 'info' });
 	}
 
-	function restoreStashed(id: string) {
-		const entry = promptStash.take(id);
-		if (entry) restoreEntry(entry);
-	}
-
 	function deleteStashed(id: string) {
-		const entry = promptStash.take(id);
-		if (entry) offerUndo('Stashed prompt deleted', () => promptStash.putBack(entry));
+		const entry = promptStash.find(id);
+		if (!entry) return;
+		if (!promptStash.take(id)) {
+			stashBannerError("Couldn't delete the stashed prompt.");
+			return;
+		}
+		offerUndo('Stashed prompt deleted', () => {
+			if (!promptStash.putBack(entry)) stashBannerError("Couldn't put the stashed prompt back.");
+		});
 	}
 
 	// ── Large paste → text attachment ─────────────────────────────────────────

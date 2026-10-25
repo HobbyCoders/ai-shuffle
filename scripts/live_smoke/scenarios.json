@@ -1004,6 +1004,14 @@
           "past_bug": "#557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
         },
         {
+          "id": "harness-basics.rewind-file-restore-retired",
+          "check": "Rewind never offers file restore and old agents lose the retired flag",
+          "kind": "owner",
+          "how": "On a disposable candidate worker, store a disposable agent row with enable_file_checkpointing true the way an older build did, start a chat on it, send two prompts and open Rewind on the first. Then call the rewind execute endpoint for a second disposable chat with restore_files true. Edit and save the disposable agent, then read its stored config. Archive only the disposable chats and agent.",
+          "pass_when": "The rewind dialog shows only the confirm text and Cancel/Rewind, with no Chat & Code option. The API call rewinds the chat and its warning says file restore isn't supported, not that a checkpoint is missing. The saved agent row no longer carries enable_file_checkpointing and every other field is unchanged.",
+          "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
+        },
+        {
           "id": "harness-basics.swarm-restart-settle",
           "check": "A swarm cut off by an app restart settles and can be cancelled",
           "kind": "owner",

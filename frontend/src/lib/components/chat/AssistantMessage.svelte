@@ -32,7 +32,6 @@
 		sessionId?: string | null;
 		streaming?: boolean;
 		hasPartialMessages?: boolean;
-		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		metadata?: Record<string, unknown>;
 		onRewindComplete?: () => void;
 		/** Profile name to display in header (defaults to "Assistant") */
@@ -50,7 +49,6 @@
 		sessionId,
 		streaming = false,
 		hasPartialMessages = true,
-		fileCheckpointingEnabled = false,
 		metadata,
 		onRewindComplete,
 		profileName = 'Assistant',
@@ -736,7 +734,6 @@
 							onRead={handleRead}
 							{isReading}
 							{onRewindComplete}
-							{fileCheckpointingEnabled}
 						/>
 					</div>
 				{/if}

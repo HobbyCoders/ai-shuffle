@@ -497,6 +497,42 @@ class TestExecuteRewindEndpoint:
         )
 
     @pytest.mark.asyncio
+    async def test_rewind_with_file_restore_says_it_is_unsupported(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """A file-restore request still rewinds the chat, and both messages say
+        file restore isn't supported (not that a checkpoint is missing)."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None
+        }
+        mock_database.get_project.return_value = None
+        mock_settings.effective_workspace_dir = Path("/workspace")
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = MockRewindResult(
+            success=True,
+            message="Rewind successful",
+            chat_rewound=True,
+            messages_removed=2
+        )
+
+        response = await execute_rewind("session-1", RewindRequestV2(
+            target_uuid="uuid-1", restore_chat=True, restore_files=True, include_response=True
+        ))
+
+        assert response.success is True
+        assert response.chat_rewound is True
+        assert response.files_rewound is False
+        assert response.partial_success is True
+        assert response.warning == (
+            "Chat rewound successfully. File restore isn't supported, so files were not changed."
+        )
+        assert "not supported" in (response.error or "")
+        assert "no checkpoint exists" not in (response.warning or "")
+
+    @pytest.mark.asyncio
     async def test_rewind_broadcasts_event_on_success(self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings):
         """Should broadcast rewind event on success."""
         from app.api.commands import execute_rewind, RewindRequestV2

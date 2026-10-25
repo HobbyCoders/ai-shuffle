@@ -1095,7 +1095,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # Warning message for partial success
     warning = None
     if partial_success:
-        warning = "Chat rewound successfully. File restore unavailable - no checkpoint exists for this point."
+        warning = "Chat rewound successfully. File restore isn't supported, so files were not changed."
 
     # Honesty guard for fluid sessions running the DELEGATED (claude CLI) engine.
     # The CLI keeps its OWN conversation history and fluid cannot truncate it
