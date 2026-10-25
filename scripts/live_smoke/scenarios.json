@@ -780,6 +780,14 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
+          "id": "harness-basics.db-pressure-queued-task-stop",
+          "check": "A subagent Queued by database pressure shows Queued and stays stopped when stopped",
+          "kind": "owner",
+          "how": "On a disposable candidate only, hold database pressure past the admission sustain threshold, then have a chat dispatch two background subagents. Check the subagent cards and the running tasks list at desktop and phone widths. Stop one subagent from the running tasks list and open the other's transcript and press Stop. Release pressure.",
+          "pass_when": "Both cards and both list rows read Queued while waiting. Each stopped subagent reads Stopped, is not re-dispatched as a retry, and never reaches its provider after pressure clears; its queued turn is aborted (removed_from_queue).",
+          "past_bug": "#583 live run: the Queued summary was stored but never rendered, Stop on a queued worker session re-dispatched the brief, and Stop from the running tasks list left the queued turn to run after recovery."
+        },
+        {
           "id": "harness-basics.db-pressure-start-admission",
           "check": "Database pressure queues new starts without dropping running turns",
           "kind": "owner",

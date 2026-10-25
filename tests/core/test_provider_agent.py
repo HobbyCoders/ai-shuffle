@@ -15,6 +15,7 @@ so it is asserted against the real predicate rather than a mock.
 
 from tests.conftest import async_twin
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -1395,6 +1396,48 @@ class TestDispatchWorkerFailsClosed:
 
         assert not outcome.ok
         assert "no terminal turn event" in outcome.error
+
+    @pytest.mark.parametrize("stopped_by", ["queue_chip", "stop_latch"])
+    def test_a_start_cancelled_while_queued_is_a_stop_not_a_retryable_failure(
+        self,
+        dispatch_env: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        stopped_by: str,
+    ) -> None:
+        """#583: Stop, or removing the queue chip, on a worker still Queued under
+        database pressure is the user's decision. Reporting it as "no terminal
+        event" made task dispatch re-dispatch the same brief as a new worker."""
+        from app.core import task_dispatch
+        from app.core.task_registry import task_registry
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": None, "interrupted": False,
+                "terminal_found": False,
+            },
+        )
+        reason = "removed_from_queue" if stopped_by == "queue_chip" else "user_stop"
+        monkeypatch.setattr(
+            turns_db, "get_turn",
+            lambda tid: {"id": tid, "state": "aborted", "stop_reason": reason},
+        )
+        if stopped_by == "stop_latch":
+            monkeypatch.setattr(task_registry, "is_user_stopped", lambda sid: sid != "parent-1")
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert outcome.killed
+        assert "stopped before it started" in outcome.error
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["status"] == "killed"
+        assert record["summary"] == "Stopped by user"
+        used = {"start": 0, "rate": 0}
+        assert task_dispatch._retry_kind(
+            "killed", outcome.error, outcome.frames_forwarded, used, start_max=3, rate_max=3,
+        ) is None
 
 
 @pytest.mark.parametrize("verdict", [pa.WAIT_DEADLINE, pa.WAIT_NO_FIRST_FRAME, pa.WAIT_RATE_LIMITED])

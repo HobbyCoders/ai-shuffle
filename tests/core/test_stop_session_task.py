@@ -657,3 +657,33 @@ def test_stop_latches_running_swarm_workflows():
     finally:
         swarm.coordinators.pop("swarm-owner", None)
         loop.close()
+
+
+class TestStopReachesAQueuedWorkerStart:
+    """#583: a worker still Queued behind start admission has no runtime for the
+    interrupt to reach, so a per-task Stop must also abort its queued start."""
+
+    async def test_kill_aborts_the_workers_queued_start(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.core import provider_agent_supervisor as sup
+        from app.core import session_pool, turn_manager
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(turn_manager, "interrupt_async", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            turns_db, "get_queued_turns",
+            lambda sid: [{"id": "turn-q"}] if sid == "worker-1" else [],
+        )
+        removed = []
+        monkeypatch.setattr(
+            turn_manager, "remove_queued", lambda tid: removed.append(tid) or {"id": tid},
+        )
+        pool = MagicMock()
+        pool.remove_broken = AsyncMock(return_value=None)
+        monkeypatch.setattr(session_pool, "get_session_pool", lambda: pool)
+
+        outcome = await sup._kill_worker_session("worker-1", reason=USER_STOP_REASON)
+
+        assert removed == ["turn-q"]
+        assert outcome == "interrupted"

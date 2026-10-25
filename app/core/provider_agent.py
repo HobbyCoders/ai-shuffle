@@ -1898,6 +1898,30 @@ def _torn_down_error(reason: Optional[str], worker_session_id: str) -> str:
     return f"{head} Its partial transcript is in session {worker_session_id}."
 
 
+def _stopped_before_start(worker_session_id: str, turn_id: Optional[str]) -> bool:
+    """Whether a Stop or a removed queue chip cancelled this worker's start.
+
+    Blocking (a turns read): run off the loop. An unreadable row is not a stop,
+    so the fail-closed no-terminal-event verdict still applies.
+    """
+    from app.core.task_registry import task_registry
+
+    if task_registry.is_user_stopped(worker_session_id):
+        return True
+    if not turn_id:
+        return False
+    try:
+        from app.db import turns as turns_db
+
+        row = turns_db.get_turn(turn_id)
+    except Exception:  # noqa: BLE001 — unknown is not a stop
+        logger.debug("ProviderAgent: turns read failed for %s", worker_session_id, exc_info=True)
+        return False
+    return bool(row) and row.get("state") == "aborted" and (
+        row.get("stop_reason") == "removed_from_queue"
+    )
+
+
 def _no_terminal_event_error(worker_session_id: str, turn_id: Optional[str]) -> str:
     """The failure message for a worker that left NO terminal turn event.
 
@@ -2855,6 +2879,7 @@ async def dispatch_worker(
     #: The registry ``summary`` for a CLEAN completion — the report's first
     #: line, so a listing says what came back rather than which model ran.
     completion_summary: Optional[str] = None
+    stop_summary: Optional[str] = None  # a start cancelled while Queued (#583)
     #: Background work the worker left running; a checkout still in use by it
     #: is never reclaimed from under it.
     outstanding: List[Dict[str, Any]] = []
@@ -3155,6 +3180,25 @@ async def dispatch_worker(
                 usage=outcome["usage"],
                 frames_forwarded=feed.frames_forwarded,
             )
+        if not outcome.get("terminal_found") and await asyncio.to_thread(
+            _stopped_before_start, worker_session_id, worker_turn_id
+        ):
+            # Stop or a removed queue chip cancelled a start still Queued (#583):
+            # a deliberate stop, never a start failure to re-dispatch.
+            error = (
+                "The worker was stopped before it started. Its session is "
+                f"{worker_session_id}."
+            )
+            preview = error
+            status = "killed"
+            from app.core.task_registry import USER_STOP_SUMMARY
+
+            stop_summary = USER_STOP_SUMMARY
+            return WorkerOutcome(
+                ok=False, session_id=worker_session_id, error=error,
+                usage=outcome["usage"], frames_forwarded=feed.frames_forwarded,
+                killed=True,
+            )
         if not outcome.get("terminal_found"):
             # No terminal turn event at all — see _no_terminal_event_error. The
             # session went idle without ever recording an outcome, which is a
@@ -3383,10 +3427,10 @@ async def dispatch_worker(
             await emit_shielded(feed.completed(
                 status,
                 result_preview=preview,
-                summary=f"{provider_tag} · {model_tag}",
+                summary=stop_summary or f"{provider_tag} · {model_tag}",
                 usage=usage_seen,
             ))
-            terminal_summary = _failure_summary(
+            terminal_summary = stop_summary or _failure_summary(
                 status, preview, feed.frames_forwarded
             ) or completion_summary
             # A caller that is about to RE-DISPATCH this brief takes the chip
