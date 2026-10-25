@@ -113,6 +113,21 @@ describe('requesting a peer shell', () => {
 		expect(ui.getByRole('button', { name: 'Cancel the request to Peer' })).toBeTruthy();
 	});
 
+	it('keeps the peer row in step with the request: waiting, then approved', async () => {
+		const ui = await requested();
+		await ui.findByText('Waiting for approval on Peer');
+		const radio = () => ui.getByRole('radio', { name: /^Peer, Peer worker/ });
+		expect(radio().getAttribute('aria-label')).toBe('Peer, Peer worker, Waiting');
+		expect(document.getElementById(radio().getAttribute('aria-describedby')!)!.textContent)
+			.toBe('Waiting for approval on Peer. Compare the code below.');
+		api.peerAuthorization.mockResolvedValue(pending({ status: 'approved', expires_in: 600 }));
+		await peerTerminals.poll('peer');
+		const line = await ui.findByText(/Approved on Peer for one shell/);
+		expect(radio().getAttribute('aria-label')).toBe('Peer, Peer worker, Approved');
+		expect(ui.queryByText('Approve on Peer to open one shell.')).toBeNull();
+		expect(line.textContent).toBe('Approved on Peer for one shell · 10 min left');
+	});
+
 	it('opens once approved, on the peer, with no local folder or shell', async () => {
 		const onOpen = vi.fn().mockResolvedValue({ ok: true });
 		api.requestPeer.mockResolvedValue(pending());
