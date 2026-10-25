@@ -10,7 +10,8 @@
 	 *
 	 * Keyboard: Enter, Space or ArrowDown on the button opens the menu on its
 	 * first item (a pointer click opens it without moving focus); arrows, Home
-	 * and End move; Escape closes and returns focus; Tab closes.
+	 * and End move; Escape closes and returns focus, however the menu was
+	 * opened; Tab closes.
 	 */
 	import { tick } from 'svelte';
 	import { Copy, Check, ChevronDown, FileText, Sheet } from 'lucide-svelte';
@@ -75,8 +76,16 @@
 		}, status === 'error' ? 4000 : 1600);
 	}
 
+	function closeOnEscape(event: KeyboardEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		hide();
+	}
+
 	function onTriggerKeydown(event: KeyboardEvent) {
-		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+		// A pointer click opens the menu with focus left on the button.
+		if (event.key === 'Escape' && open) closeOnEscape(event);
+		else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
 			event.preventDefault();
 			void show(event.key === 'ArrowDown' ? 0 : -1);
 		}
@@ -91,9 +100,7 @@
 		else if (event.key === 'Home') next = 0;
 		else if (event.key === 'End') next = list.length - 1;
 		else if (event.key === 'Escape') {
-			event.preventDefault();
-			event.stopPropagation();
-			hide();
+			closeOnEscape(event);
 			return;
 		} else if (event.key === 'Tab') {
 			hide(false);
@@ -111,10 +118,16 @@
 		hide(false);
 	}
 
+	// Some browsers (Safari) do not focus a clicked button, so after a pointer
+	// open the key can arrive from anywhere on the page.
+	function onWindowKeydown(event: KeyboardEvent) {
+		if (open && event.key === 'Escape' && !event.defaultPrevented) closeOnEscape(event);
+	}
+
 	$effect(() => () => clearTimeout(timer));
 </script>
 
-<svelte:window onpointerdown={onWindowPointer} />
+<svelte:window onpointerdown={onWindowPointer} onkeydown={onWindowKeydown} />
 
 <button
 	bind:this={trigger}

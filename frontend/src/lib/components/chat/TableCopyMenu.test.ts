@@ -60,6 +60,26 @@ describe('TableCopyMenu', () => {
 		expect(document.activeElement).toBe(trigger);
 	});
 
+	it('closes on Escape after a pointer open, with focus still on the button', async () => {
+		render(TableCopyMenu, { props: { wrapper } });
+		const trigger = screen.getByRole('button', { name: 'Copy table' });
+		trigger.focus();
+		await fireEvent.click(trigger, { detail: 1 });
+		expect(screen.getByRole('menu')).toBeTruthy();
+		expect(document.activeElement).toBe(trigger);
+		await fireEvent.keyDown(trigger, { key: 'Escape' });
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(document.activeElement).toBe(trigger);
+	});
+
+	it('closes on Escape after a pointer open that left focus elsewhere', async () => {
+		render(TableCopyMenu, { props: { wrapper } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Copy table' }), { detail: 1 });
+		expect(screen.getByRole('menu')).toBeTruthy();
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(screen.queryByRole('menu')).toBeNull();
+	});
+
 	it('says so when the copy fails', async () => {
 		clip.copyText.mockRejectedValue(new Error('denied'));
 		render(TableCopyMenu, { props: { wrapper } });

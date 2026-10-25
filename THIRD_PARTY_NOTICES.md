@@ -408,6 +408,7 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | @vitest/utils | 4.1.11 | MIT | https://www.npmjs.com/package/@vitest/utils/v/4.1.11 |
 | @xterm/addon-fit | 0.11.0 | MIT | https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0 |
 | @xterm/addon-search | 0.16.0 | MIT | https://www.npmjs.com/package/@xterm/addon-search/v/0.16.0 |
+| @xterm/addon-web-links | 0.12.0 | MIT | https://www.npmjs.com/package/@xterm/addon-web-links/v/0.12.0 |
 | @xterm/xterm | 6.0.0 | MIT | https://www.npmjs.com/package/@xterm/xterm/v/6.0.0 |
 | acorn | 8.18.0 | MIT | https://www.npmjs.com/package/acorn/v/8.18.0 |
 | agent-base | 7.1.4 | MIT | https://www.npmjs.com/package/agent-base/v/7.1.4 |

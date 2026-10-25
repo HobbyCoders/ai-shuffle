@@ -17,7 +17,9 @@ A terminal is a real command line (bash or sh) on your worker. It opens in the f
 
 Each chat has its own tabs. Use **+** to open another terminal and choose its folder and shell. Closing the panel does not stop anything: the shells keep running and come back when you open the panel again.
 
-The panel has **Search**, **Copy output**, **Clear** and **Stop** (which sends Ctrl+C).
+The panel has **Search**, **Copy output**, **Clear** and **Stop** (which sends Ctrl+C). On a computer, a chat's terminal also has **Send selection to chat**: select some output and press it to add that text to your message as a code block. It is not sent, so you can add a question first.
+
+Web links in the output, starting with `http://` or `https://`, can be clicked and open in a new browser tab. The tab opens on the device you are using, so a `localhost` link from a worker on another machine points at your own device, not the worker.
 
 ## Commands from a reply
 
