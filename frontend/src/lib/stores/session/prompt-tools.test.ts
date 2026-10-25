@@ -96,6 +96,25 @@ describe('prompt stash', () => {
 		expect(get(stash)).toHaveLength(MAX_STASHED_PROMPTS);
 	});
 
+	it('swaps an entry for a draft without evicting another from a full stash', () => {
+		let t = 0;
+		const stash = createPromptStash(() => ++t);
+		stash.setOwner('user:a');
+		for (let i = 0; i < MAX_STASHED_PROMPTS; i++) stash.push(`p${i}`);
+		const restored = get(stash).find(e => e.preview === 'p10')!;
+		const swapped = stash.swap(restored.id, 'current draft');
+		expect(swapped?.durable).toBe(true);
+		const previews = get(stash).map(e => e.preview);
+		expect(previews).toHaveLength(MAX_STASHED_PROMPTS);
+		expect(previews[0]).toBe('current draft');
+		expect(previews).not.toContain('p10');
+		// The oldest entry survives: nothing was evicted to make room.
+		expect(previews).toContain('p0');
+		expect(JSON.parse(localStorage.getItem(stashStorageKey('user:a'))!)).toHaveLength(MAX_STASHED_PROMPTS);
+		expect(stash.swap('missing', 'x')).toBeNull();
+		expect(stash.swap(swapped!.entry.id, '')).toBeNull();
+	});
+
 	describe('when the browser refuses to save', () => {
 		afterEach(() => vi.restoreAllMocks());
 
@@ -123,6 +142,15 @@ describe('prompt stash', () => {
 			vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('disabled'); });
 			expect(stash.putBack(entry)).toBe(false);
 			expect(get(stash).map(e => e.preview)).toEqual(['one']);
+		});
+
+		it('leaves the list untouched when a swap is not saved', () => {
+			const stash = createPromptStash();
+			stash.setOwner('user:a');
+			const { entry } = stash.push('stashed')!;
+			vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('disabled'); });
+			expect(stash.swap(entry.id, 'draft')?.durable).toBe(false);
+			expect(get(stash).map(e => e.preview)).toEqual(['stashed']);
 		});
 	});
 

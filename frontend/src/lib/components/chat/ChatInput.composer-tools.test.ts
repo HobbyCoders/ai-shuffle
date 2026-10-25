@@ -6,7 +6,7 @@ import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerSuggestion } from '$lib/stores/session/composer-suggestion';
-import { promptStash } from '$lib/stores/session/prompt-stash';
+import { MAX_STASHED_PROMPTS, promptStash } from '$lib/stores/session/prompt-stash';
 import { liveBanners, notify } from '$lib/stores/notifications';
 import { LARGE_PASTE_BYTES } from './tiptap/large-paste';
 import '$lib/test-stubs/composer-dom';
@@ -176,6 +176,25 @@ describe('prompt stash', () => {
 		await tick();
 		expect(editor.textContent).toBe('signed out draft');
 		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
+	});
+
+	it('restoring over a draft with a full stash keeps every other entry', async () => {
+		const now = vi.spyOn(Date, 'now');
+		for (let i = 0; i < MAX_STASHED_PROMPTS; i++) {
+			now.mockReturnValue(1_000 + i);
+			promptStash.push(`idea ${i}`);
+		}
+		now.mockRestore();
+		activeSession.setDraft('current idea');
+		const { editor } = renderComposer();
+		await fireEvent.click(await screen.findByRole('button', { name: `Stashed prompts (${MAX_STASHED_PROMPTS})` }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore stashed prompt: idea 20' }));
+		await waitFor(() => expect(editor.textContent).toBe('idea 20'));
+		const previews = get(promptStash).map(e => e.preview);
+		expect(previews).toHaveLength(MAX_STASHED_PROMPTS);
+		expect(previews).toContain('current idea');
+		expect(previews).toContain('idea 0');
+		expect(previews).not.toContain('idea 20');
 	});
 
 	it('leaves both drafts in place when restoring cannot stash the current one', async () => {

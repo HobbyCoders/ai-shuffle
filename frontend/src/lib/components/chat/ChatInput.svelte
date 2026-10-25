@@ -483,20 +483,25 @@
 	}
 
 	/**
-	 * Put a stashed prompt in the composer. Whatever the composer holds is
-	 * stashed first, and nothing changes if that save fails.
+	 * Put a stashed prompt in the composer. Whatever the composer holds takes
+	 * its place in the stash, and nothing changes if that save fails.
 	 */
 	function restoreStashed(id: string) {
 		const entry = promptStash.find(id);
 		if (!entry) return;
 		const current = getDraftJSON();
 		const swapped = hasComposerDraft(current);
-		if (swapped && !promptStash.push(current)?.durable) {
-			notifyStashFailed();
-			return;
+		if (swapped) {
+			// One write that swaps the entry for the draft, so a full stash
+			// evicts nothing and a failed save changes nothing.
+			if (!promptStash.swap(id, current)?.durable) {
+				notifyStashFailed();
+				return;
+			}
+		} else {
+			// The entry is in hand; if its removal isn't saved it simply stays listed.
+			promptStash.take(id);
 		}
-		// The entry is in hand; if its removal isn't saved it simply stays listed.
-		promptStash.take(id);
 		setComposerDraft(entry.draft);
 		recall.reset();
 		stashOpen = false;

@@ -91,6 +91,15 @@ export function createPromptStash(now: () => number = () => Date.now()) {
 		entries.set(next);
 		return true;
 	};
+	const newEntry = (draft: string): StashedPrompt => {
+		const savedAt = now();
+		return {
+			id: `${savedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+			draft,
+			preview: draftPreview(draft),
+			savedAt
+		};
+	};
 	return {
 		subscribe: entries.subscribe,
 		/** Switch to the signed-in account's list (null when signed out). */
@@ -107,14 +116,19 @@ export function createPromptStash(now: () => number = () => Date.now()) {
 		 */
 		push(draft: string): StashPush | null {
 			if (!hasComposerDraft(draft)) return null;
-			const savedAt = now();
-			const entry: StashedPrompt = {
-				id: `${savedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-				draft,
-				preview: draftPreview(draft),
-				savedAt
-			};
+			const entry = newEntry(draft);
 			return { entry, durable: set([entry, ...current].slice(0, MAX_STASHED_PROMPTS)) };
+		},
+		/**
+		 * Restore-swap: remove entry `id` and stash `draft` in its place, in one
+		 * write. The list keeps its length, so a full stash evicts nothing. Null
+		 * when the entry is gone or the draft is empty; `durable` false means
+		 * the save failed and neither change happened.
+		 */
+		swap(id: string, draft: string): StashPush | null {
+			if (!hasComposerDraft(draft) || !current.some(e => e.id === id)) return null;
+			const entry = newEntry(draft);
+			return { entry, durable: set([entry, ...current.filter(e => e.id !== id)]) };
 		},
 		/** Look up an entry without removing it. */
 		find(id: string): StashedPrompt | null {
