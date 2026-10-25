@@ -8,7 +8,6 @@
 	import { chatFileUrl } from '$lib/utils/chat-files';
 	import {
 		HtmlPreviewSizer,
-		HTML_PREVIEW_ANSWER_MS,
 		HTML_PREVIEW_PROBE_MS,
 		forgetPreviewSize,
 		previewDigest,
@@ -31,7 +30,7 @@
 	// ── Fit to content ──
 	let sizer = new HtmlPreviewSizer(untrack(() => rememberedPreviewSize(sizeKey)) ?? {});
 	let height = $state(sizer.height);
-	let fixed = $state(sizer.mode === 'fixed');
+	let fixed = $state(sizer.scrollable);
 	let settled = $state(sizer.settled);
 	let answered = $state(false);
 	let probeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -43,15 +42,12 @@
 
 	function sync(action: HtmlPreviewSizerAction) {
 		height = sizer.height;
-		fixed = sizer.mode === 'fixed';
+		fixed = sizer.scrollable;
 		settled = sizer.settled;
 		if (settled && answered) shown = true;
 		if (action === 'probe') {
 			clearTimeout(probeTimer);
-			probeTimer = setTimeout(() => {
-				sync(sizer.probeExpired());
-				if (sizer.awaitingAnswer) probeTimer = setTimeout(() => sync(sizer.answerExpired()), HTML_PREVIEW_ANSWER_MS);
-			}, HTML_PREVIEW_PROBE_MS);
+			probeTimer = setTimeout(() => sync(sizer.probeExpired()), HTML_PREVIEW_PROBE_MS);
 		}
 		// Only a size the page has settled on: never a step of a run the sizer
 		// still suspects (a page shrinking or growing with its frame). A growth

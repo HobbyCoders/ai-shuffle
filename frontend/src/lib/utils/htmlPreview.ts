@@ -388,8 +388,6 @@ export const HTML_PREVIEW_PROBE_STEP = 96;
 /** How long a probe waits for the page to answer before calling it independent. */
 /** Generous: browsers throttle offscreen cross-origin frames, which answer late. */
 export const HTML_PREVIEW_PROBE_MS = 600;
-/** After a tall probe times out, how long its late answer is waited for before the page is trusted. */
-export const HTML_PREVIEW_ANSWER_MS = 4_000;
 const SUSPICION_STREAK = 3;
 /** Sub-pixel layout can put innerHeight a pixel or two off the frame height. */
 const STALE_TOLERANCE = 2;
@@ -423,9 +421,10 @@ export class HtmlPreviewSizer {
 	/** Started from a remembered pin: the first mismatch is probed at once. */
 	private suspect = false;
 	/**
-	 * A probe ran out of time and the frame was shown at the probe size: the
-	 * page's next report (a late answer) still decides it. Until then the
-	 * size is not worth remembering.
+	 * A tall probe ran out of time and the frame is shown at the probe size,
+	 * scrollable so none of the page is out of reach: the page's next report
+	 * (a late answer) still decides it. Until then the size is not worth
+	 * remembering.
 	 */
 	private awaiting = false;
 
@@ -455,6 +454,9 @@ export class HtmlPreviewSizer {
 	/** Settled and not in the middle of a suspicious run: a size worth remembering. */
 	get steady(): boolean { return this.mode === 'fixed' || (this.mode === 'fit' && this.streak === 0 && !this.awaiting); }
 
+	/** The frame scrolls inside: pinned, or held at a probe size awaiting a late answer. */
+	get scrollable(): boolean { return this.mode === 'fixed' || this.awaiting; }
+
 	/**
 	 * Apply a size report. `viewport` is the frame height the page measured
 	 * against (it can lag behind resizes); without it, the current height.
@@ -471,11 +473,12 @@ export class HtmlPreviewSizer {
 		const previous = this.previous;
 		this.previous = { height, viewport: measured };
 		if (this.mode === 'probing' || this.awaiting) {
+			const late = this.awaiting;
+			this.awaiting = false;
 			const moved = measured - this.probeBase.viewport;
 			if (moved > 0 && height - this.probeBase.height >= moved * 0.9) return this.pin();
-			if (!this.awaiting) this.threshold *= 2;
+			if (!late) this.threshold *= 2;
 			this.mode = 'fit';
-			this.awaiting = false;
 			this.streak = 0;
 			return this.fit(height);
 		}
@@ -507,13 +510,12 @@ export class HtmlPreviewSizer {
 	/**
 	 * The probe got no answer in time. A page sized by its content may not
 	 * report when only its frame grows: take it that its height does not
-	 * depend on the frame. A tall page is not taken on trust that quickly
-	 * (silence there is usually a throttled offscreen frame that answers
-	 * late): show the frame at the probe size rather than hold the skeleton,
-	 * and let the late answer decide as a probe answer would, or trust the
-	 * page once ANSWER_MS passes with none. Moving the frame now would make
-	 * that answer stale and let a page that follows its frame climb step by
-	 * step.
+	 * depend on the frame. A tall page is not taken on trust (silence there
+	 * is a frame the browser is not rendering, offscreen or in a background
+	 * tab, which answers late): show the frame at the probe size, scrollable
+	 * so nothing is cut off, and let the late answer decide as a probe answer
+	 * would. Moving the frame now would make that answer stale and let a page
+	 * that follows its frame climb step by step.
 	 */
 	probeExpired(): HtmlPreviewSizerAction {
 		if (this.mode !== 'probing') return 'none';
@@ -526,16 +528,6 @@ export class HtmlPreviewSizer {
 			return 'resize';
 		}
 		return this.fit(height);
-	}
-
-	/** Waiting on a timed-out tall probe's late answer (see probeExpired). */
-	get awaitingAnswer(): boolean { return this.awaiting; }
-
-	/** The late answer never came: trust the page's height rather than leave it cut off. */
-	answerExpired(): HtmlPreviewSizerAction {
-		if (!this.awaiting) return 'none';
-		this.awaiting = false;
-		return this.fit(this.probeBase.height);
 	}
 
 	/** The page never reported a size (its bootstrap could not run): show it scrollable. */

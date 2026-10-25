@@ -592,7 +592,7 @@ describe('HTML preview fit to content', () => {
 		expect(remembered.mode).toBe('fixed');
 	});
 
-	it('reaches the full height of a long report even when no probe is answered', () => {
+	it('reaches the full height of a long report even when every probe is answered late', () => {
 		for (const tall of [41_012, 97_144]) {
 			const s = sizer();
 			drive(s, () => tall, true);
@@ -635,21 +635,33 @@ describe('HTML preview fit to content', () => {
 		expect([probing.mode, probing.height, probing.steady]).toEqual(['fit', probeFrame, false]);
 		expect(probing.report(HTML_PREVIEW_MAX_HEIGHT + 500, probeFrame)).toBe('fixed');
 		expect(probing.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
-		// And when the late answer never comes, never a frame cut off at the ceiling either.
-		const silent = sizer({ height: 400 });
-		silent.report(HTML_PREVIEW_MAX_HEIGHT + 500, 400);
-		silent.probeExpired();
-		expect(silent.answerExpired()).toBe('fixed');
 	});
 
-	it('trusts a long report whose late answer never comes, rather than leave it cut off', () => {
+	it('holds a tall page at the probe size, scrollable, until its late answer decides', () => {
 		const s = sizer();
 		s.report(41_012, s.height);
+		const probeFrame = s.height;
 		expect(s.probeExpired()).toBe('resize');
-		expect([s.awaitingAnswer, s.steady]).toEqual([true, false]);
-		expect(s.answerExpired()).toBe('resize');
-		expect([s.mode, s.height, s.awaitingAnswer, s.steady]).toEqual(['fit', 41_012, false, true]);
-		expect(s.answerExpired()).toBe('none');
+		// Nothing out of reach while waiting, and nothing remembered.
+		expect([s.mode, s.height, s.scrollable, s.steady, s.settled]).toEqual(['fit', probeFrame, true, false, true]);
+		// A stale report (measured before the probe) changes nothing.
+		expect(s.report(41_012, HTML_PREVIEW_INITIAL_HEIGHT)).toBe('none');
+		expect(s.scrollable).toBe(true);
+		// The late answer: a long report fits its full height and stops scrolling.
+		expect(s.report(41_012, probeFrame)).toBe('resize');
+		expect([s.mode, s.height, s.scrollable, s.steady]).toEqual(['fit', 41_012, false, true]);
+	});
+
+	it('keeps a late-answer pin pinned', () => {
+		const s = sizer({ height: 11_840 });
+		expect(s.report(37 * 11_840, 11_840)).toBe('probe');
+		s.probeExpired();
+		expect(s.report(37 * s.height, s.height)).toBe('fixed');
+		expect([s.mode, s.height, s.scrollable, s.steady]).toEqual(['fixed', HTML_PREVIEW_FALLBACK_HEIGHT, true, true]);
+		// Nothing left waiting: later reports and timers change nothing.
+		expect(s.probeExpired()).toBe('none');
+		expect(s.report(1_000_000, HTML_PREVIEW_FALLBACK_HEIGHT)).toBe('none');
+		expect(s.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
 	});
 
 	it('re-measures a page pinned by an older build at its full height, not clipped', () => {
