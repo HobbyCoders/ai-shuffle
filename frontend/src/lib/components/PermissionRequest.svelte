@@ -766,8 +766,8 @@
 
 	.scope-option[data-option='profile']:has(input:checked) {
 		color: var(--warning);
-		border-color: color-mix(in oklch, var(--warning) 45%, var(--border));
-		background: color-mix(in oklch, var(--warning) 10%, var(--card));
+		border-color: color-mix(in oklab, var(--warning) 45%, var(--border));
+		background: color-mix(in oklab, var(--warning) 10%, var(--card));
 	}
 
 	.scope-option:has(input:focus-visible) {
@@ -787,7 +787,7 @@
 	}
 
 	.scope-picker[data-scope='profile'] .scope-hint {
-		color: color-mix(in oklch, var(--warning) 80%, var(--foreground));
+		color: color-mix(in oklab, var(--warning) 80%, var(--foreground));
 	}
 
 	/* "Always allow" keeps the primary look but gains a warning edge. */

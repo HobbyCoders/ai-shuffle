@@ -364,9 +364,9 @@
 	.scope-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 8px 0 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in oklch, var(--muted) 60%, var(--card)); }
 	.scope-chip { min-height: 40px; padding: 0 6px; border: 1px solid transparent; border-radius: calc(var(--radius) - 3px); background: transparent; color: var(--muted-foreground); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 	.scope-chip[aria-checked='true'] { background: var(--card); border-color: var(--border); color: var(--foreground); box-shadow: var(--shadow-s); }
-	.scope-chip[data-option='profile'][aria-checked='true'] { color: var(--warning); border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); background: color-mix(in oklch, var(--warning) 10%, var(--card)); }
+	.scope-chip[data-option='profile'][aria-checked='true'] { color: var(--warning); border-color: color-mix(in oklab, var(--warning) 45%, var(--border)); background: color-mix(in oklab, var(--warning) 10%, var(--card)); }
 	.scope-hint { margin: 4px 2px 6px; font-size: 12px; line-height: 1.4; color: var(--muted-foreground); }
-	.scope-hint.warn { color: color-mix(in oklch, var(--warning) 80%, var(--foreground)); }
+	.scope-hint.warn { color: color-mix(in oklab, var(--warning) 80%, var(--foreground)); }
 	.p-result { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 56px; font-size: 14px; font-weight: 600; }
 	.p-result.ok { color: var(--success, var(--primary)); }
 	.p-result.no { color: var(--destructive); }
