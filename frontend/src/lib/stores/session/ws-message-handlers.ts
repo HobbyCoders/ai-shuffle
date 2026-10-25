@@ -1246,6 +1246,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						: {}),
 					// A prompt the server will not let anyone defer (Switch model).
 					...(data.deferrable === false ? { deferrable: false } : {}),
+					// How long an answer may be kept. Absent: this request only.
+					...(Array.isArray(data.remember_scopes)
+						? { remember_scopes: (data.remember_scopes as unknown[]).filter((x): x is string => typeof x === 'string') }
+						: {}),
 				} as PermissionRequestType;
 
 				// The same prompt now arrives twice by design: once on the origin

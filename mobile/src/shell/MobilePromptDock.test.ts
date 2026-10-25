@@ -1,7 +1,8 @@
 /**
  * The docked prompts above the phone's composer (#1816): permission and
  * one-shot access approvals answered by sliding (right approves, left denies)
- * or by the tappable Deny / Approve; "Always do this"; questions as large
+ * or by the tappable Deny / Approve; how long the answer lasts (Once, This
+ * chat, Always) when the server offers it; questions as large
  * option buttons or a typed answer; "1 of N" cycling.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,7 +15,8 @@ afterEach(() => {
 	chatAccessSummary.set(null);
 });
 
-const bash = { request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'cd desktop && npm run dist:linux' } };
+const ALL_SCOPES = ['none', 'session', 'profile'];
+const bash = { request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'cd desktop && npm run dist:linux' }, remember_scopes: ALL_SCOPES };
 const edit = { request_id: 'p2', tool_name: 'Edit', tool_input: { file_path: 'docs/install/linux.md' } };
 const question = {
 	request_id: 'q1', tool_use_id: 'tu1',
@@ -48,7 +50,9 @@ describe('permission prompt', () => {
 		const dock = screen.getByRole('region', { name: 'Waiting on you' });
 		expect(within(dock).getByText('Bash')).toBeTruthy();
 		expect(dock.querySelector('.cmd')?.textContent).toContain('cd desktop && npm run dist:linux');
-		expect(within(dock).getByRole('checkbox', { name: 'Always do this' })).toBeTruthy();
+		const group = within(dock).getByRole('radiogroup', { name: 'Remember this answer' });
+		expect(within(group).getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Once', 'This chat', 'Always']);
+		expect(within(group).getByRole('radio', { name: 'Just this once' }).getAttribute('aria-checked')).toBe('true');
 	});
 
 	it('approves when the knob is slid right', async () => {
@@ -80,14 +84,51 @@ describe('permission prompt', () => {
 		expect(onPermission).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ decision: 'deny' }));
 	});
 
-	it('holds back a tap that lands as the prompt appears, then approves with Always', async () => {
+	it('holds back a tap that lands as the prompt appears, then approves for good with Always', async () => {
 		const { onPermission } = renderDock();
 		await fireEvent.click(screen.getByRole('button', { name: /Approve/ }));
 		expect(onPermission).not.toHaveBeenCalled();
 		await armed();
-		await fireEvent.click(screen.getByRole('checkbox', { name: 'Always do this' }));
-		await fireEvent.click(screen.getByRole('button', { name: /Approve/ }));
+		await fireEvent.click(screen.getByRole('radio', { name: 'Always for this agent' }));
+		// The buttons and the note say the answer is kept for good.
+		expect(screen.getByText(/Permanent\. Covers every Bash call this agent makes/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /Always allow/ }));
 		expect(onPermission).toHaveBeenCalledExactlyOnceWith({ request_id: 'p1', decision: 'allow', remember: 'profile' });
+	});
+
+	it('denies for the rest of the chat with This chat', async () => {
+		const { onPermission } = renderDock();
+		await armed();
+		await fireEvent.click(screen.getByRole('radio', { name: 'This chat until it goes idle' }));
+		expect(screen.getByText(/until it goes idle or the worker restarts/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: /Deny in this chat/ }));
+		expect(onPermission).toHaveBeenCalledExactlyOnceWith({ request_id: 'p1', decision: 'deny', remember: 'session' });
+	});
+
+	it('offers no choice when the server can only answer this request once', () => {
+		renderDock({ permissions: [{ ...bash, remember_scopes: ['none'] }] });
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+		cleanup();
+		// A frame with no capability list is treated the same way.
+		const { remember_scopes: _drop, ...plain } = bash;
+		renderDock({ permissions: [plain] });
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+	});
+
+	it('offers only the lifetimes the server lists', () => {
+		renderDock({ permissions: [{ ...bash, remember_scopes: ['none', 'session'] }] });
+		expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Once', 'This chat']);
+	});
+
+	it('starts the next request at Once', async () => {
+		const { onPermission } = renderDock({ permissions: [bash, { ...edit, remember_scopes: ALL_SCOPES }] });
+		await armed();
+		await fireEvent.click(screen.getByRole('radio', { name: 'Always for this agent' }));
+		await fireEvent.click(screen.getByRole('button', { name: '1 of 2. Show the next request' }));
+		expect(screen.getByRole('radio', { name: 'Just this once' }).getAttribute('aria-checked')).toBe('true');
+		await armed();
+		await fireEvent.click(screen.getByRole('button', { name: /Approve/ }));
+		expect(onPermission).toHaveBeenCalledExactlyOnceWith({ request_id: 'p2', decision: 'allow', remember: 'none' });
 	});
 
 	it('denies with the Deny button', async () => {
@@ -100,7 +141,7 @@ describe('permission prompt', () => {
 	it.each([false, true])('ModelSwitch is chat-scoped and never offers an always rule (relayed=%s)', async (relayed) => {
 		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'ServerWorker' } : undefined;
 		const { onPermission } = renderDock({ permissions: [{ ...bash, tool_name: 'ModelSwitch', provider_agent }] });
-		expect(screen.queryByRole('checkbox', { name: 'Always do this' })).toBeNull();
+		expect(screen.queryByRole('radiogroup')).toBeNull();
 		expect(screen.getByText(/A yes covers this model for this chat, including after app restarts/)).toBeTruthy();
 		await armed();
 		await fireEvent.click(screen.getByRole('button', { name: /Approve/ }));
@@ -128,9 +169,9 @@ describe('permission prompt', () => {
 		expect(within(dock).getByRole('button', { name: /Deny/ })).toBeTruthy();
 	});
 
-	it('offers no "Always" for a prompt relayed from another worker', () => {
+	it('offers no lasting answer for a prompt relayed from another worker', () => {
 		renderDock({ permissions: [{ ...bash, provider_agent: { remote_approval_id: 'r1', worker_name: 'ServerWorker' } }] });
-		expect(screen.queryByRole('checkbox', { name: 'Always do this' })).toBeNull();
+		expect(screen.queryByRole('radiogroup')).toBeNull();
 		expect(screen.getByText('From ServerWorker. Answer each time.')).toBeTruthy();
 	});
 

@@ -143,6 +143,46 @@ Legacy built-in restore endpoint. No built-in subagents ship. Ordinary agents, i
 
 **Auth:** Owner only
 
+## Saved approvals
+
+Rules saved when the owner answers a permission prompt with `remember: "profile"` ("Always for this agent"). Each one allows or denies a tool for every session on the agent, on every worker. A `tool_pattern` of `null` means the rule covers every call of the tool.
+
+### GET /api/v1/agents/{agent_id}/permission-rules
+
+List the agent's saved approvals, newest first.
+
+**Auth:** Owner only
+
+**Response:**
+```json
+[
+  {
+    "id": "rule-…",
+    "profile_id": "agent-id",
+    "tool_name": "Bash",
+    "tool_pattern": null,
+    "decision": "allow",
+    "created_at": "2026-10-25T14:00:00Z"
+  }
+]
+```
+
+`decision` is `allow` or `deny`.
+
+### DELETE /api/v1/agents/{agent_id}/permission-rules/{rule_id}
+
+Remove one saved approval. Returns `204` with no body. The removal reaches the other workers through network sync. A rule id that belongs to another agent, or no longer exists, returns `404` with `{"detail": "Permission rule not found"}`.
+
+**Auth:** Owner only
+
+### DELETE /api/v1/agents/{agent_id}/permission-rules
+
+Remove every saved approval for the agent. Returns `{"deleted_count": 2}`; a second call returns `{"deleted_count": 0}`.
+
+**Auth:** Owner only
+
+All three return `403` with `{"detail": "Owner access required"}` for anyone but the owner, and `404` with `{"detail": "Profile not found: <agent_id>"}` for an unknown agent.
+
 ## Agent Config Fields
 
 The top-level object has `id`, `name`, `description`, `avatar_color`, `is_builtin`, `is_modified`, `session_count`, `created_at`, `updated_at`, and a `config` object. `avatar_color` is `null` when no colour was chosen. The fields below live under `config`:

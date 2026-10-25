@@ -2,6 +2,14 @@
 	import { untrack } from 'svelte';
 	import './deck/cards/card-design-system.css';
 	import type { PermissionWorkerTag } from '$lib/api/client';
+	import {
+		availableScopes,
+		decisionLabels,
+		rememberFor,
+		scopeHint,
+		scopeLabel,
+		type RememberScope
+	} from './permission-scope';
 
 	export interface PermissionRequestData {
 		request_id: string;
@@ -21,6 +29,9 @@
 		/** False when the prompt cannot be deferred (Switch model). This card
 		 *  offers Approve and Deny only, so it never shows a Defer control. */
 		deferrable?: boolean;
+		/** How long an answer may be remembered (permission-scope.ts).
+		 *  Absent means this request only. */
+		remember_scopes?: string[] | null;
 	}
 
 	interface Props {
@@ -38,12 +49,12 @@
 
 	let showDetails = $state(false);
 	/**
-	 * "Always do this for this tool" — a single opt-in that applies to whichever
-	 * action button is pressed next (Approve → always allow, Deny → always deny).
-	 * It maps to the existing profile-scoped remember rule with NO input pattern,
-	 * so the saved rule matches every future call of this tool.
+	 * How long the answer lasts. It applies to whichever button is pressed
+	 * next (Approve or Deny) and is sent with no input pattern, so a kept
+	 * answer covers every later call of this tool. The choices on offer come
+	 * from the server (`remember_scopes`); "Just this once" is the default.
 	 */
-	let alwaysForTool = $state(false);
+	let scope = $state<RememberScope>('none');
 	// Slice D: collapse/expand state for long descriptions + reason/blocked details
 	let descriptionExpanded = $state(false);
 	let enrichmentDetailsExpanded = $state(false);
@@ -180,11 +191,10 @@
 		return result;
 	}
 
-	/** Remember scope for the decision about to be sent. The checkbox is a
-	 *  tool-wide "always" — profile-scoped and pattern-less. */
-	function currentRemember(): 'none' | 'profile' {
-		return alwaysForTool && !relayedFrom && request.tool_name !== 'ModelSwitch' ? 'profile' : 'none';
-	}
+	const scopes = $derived(availableScopes(request));
+	/** The lifetime that will actually be sent (falls back to once). */
+	const effectiveScope = $derived(rememberFor(scope, request));
+	const labels = $derived(decisionLabels(effectiveScope));
 
 	/** The worker a relayed prompt came from: a subagent running on another
 	 *  worker. Only allow-once or deny travels back there and a person decides
@@ -241,7 +251,7 @@
 		// Everything per-request starts over when the request changes, even if
 		// this component instance is reused for the next one.
 		untrack(() => {
-			alwaysForTool = false;
+			scope = 'none';
 			showDetails = false;
 			descriptionExpanded = false;
 			enrichmentDetailsExpanded = false;
@@ -279,7 +289,7 @@
 		onRespond?.({
 			request_id: request.request_id,
 			decision,
-			remember: currentRemember()
+			remember: rememberFor(scope, request)
 		});
 	}
 
@@ -564,31 +574,42 @@
 		{/if}
 	</div>
 
-	<!-- Remember Option — one checkbox that applies to whichever button is pressed.
-	     A relayed prompt has none: its answer applies to this request only. -->
-	<div class="px-4 py-3 border-t border-border/40 bg-card/30">
-		{#if request.tool_name === 'ModelSwitch'}
+	<!-- How long the answer lasts. It applies to whichever button is pressed.
+	     A relayed prompt, a model switch, and any request the server can only
+	     answer once offer no choice. -->
+	{#if request.tool_name === 'ModelSwitch'}
+		<div class="px-4 py-3 border-t border-border/40 bg-card/30">
 			<p>A yes covers this model for this chat, including after app restarts.</p>
-		{:else if relayedFrom}
+		</div>
+	{:else if relayedFrom}
+		<div class="px-4 py-3 border-t border-border/40 bg-card/30">
 			<p class="relayed-note" data-testid="relayed-note">
 				Asked by a subagent running on <strong>{relayedFrom}</strong>. Your answer applies
 				to this request only; the subagent asks again for each one.
 			</p>
-		{:else}
-		<label class="always-option {alwaysForTool ? 'selected' : ''}">
-			<input
-				type="checkbox"
-				bind:checked={alwaysForTool}
-				class="always-checkbox"
-				aria-describedby="always-hint-{request.request_id}"
-			/>
-			<span class="always-label">Always do this for {request.tool_name}</span>
-			<span id="always-hint-{request.request_id}" class="always-hint">
-				Remembers the next choice — Approve saves an always-allow rule, Deny saves an always-deny rule.
-			</span>
-		</label>
-		{/if}
-	</div>
+		</div>
+	{:else if scopes.length > 1}
+		<fieldset class="scope-picker px-4 pt-3 pb-3 border-t border-border/40 bg-card/30" data-scope={effectiveScope}>
+			<legend class="scope-legend">Remember this answer</legend>
+			<div class="scope-options" style="--scope-count: {scopes.length}">
+				{#each scopes as option (option)}
+					<label class="scope-option" data-option={option}>
+						<input
+							type="radio"
+							name="scope-{request.request_id}"
+							value={option}
+							bind:group={scope}
+							aria-describedby="scope-hint-{request.request_id}"
+						/>
+						<span>{scopeLabel(option)}</span>
+					</label>
+				{/each}
+			</div>
+			<p id="scope-hint-{request.request_id}" class="scope-hint" aria-live="polite">
+				{scopeHint(effectiveScope, request.tool_name)}
+			</p>
+		</fieldset>
+	{/if}
 
 	<!-- Action Buttons -->
 	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
@@ -600,7 +621,7 @@
 				disabled={answered}
 				class="deny-btn"
 			>
-				Deny
+				{labels.deny}
 			</button>
 
 			<!-- Approve Button -->
@@ -609,25 +630,26 @@
 				onclick={handleAllow}
 				disabled={answered}
 				class="allow-btn"
+				class:always={effectiveScope === 'profile'}
 			>
-				Approve
+				{labels.allow}
 			</button>
 		</div>
 
 		<!-- Tells screen-reader users when the shortcuts start to count. -->
 		<p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
-			{shortcutsArmed && !answered ? 'Press Enter to approve, Escape to deny' : ''}
+			{shortcutsArmed && !answered ? `Press Enter to ${labels.allow.toLowerCase()}, Escape to ${labels.deny.toLowerCase()}` : ''}
 		</p>
 
 		<!-- Keyboard Hints -->
 		<div class="mt-2 flex flex-wrap items-center justify-center gap-3 text-[10px] text-muted-foreground">
 			<span class="flex items-center gap-1">
 				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Enter</kbd>
-				<span>Approve</span>
+				<span>{labels.allow}</span>
 			</span>
 			<span class="flex items-center gap-1">
 				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Esc</kbd>
-				<span>Deny</span>
+				<span>{labels.deny}</span>
 			</span>
 		</div>
 	</div>
@@ -668,56 +690,109 @@
 		}
 	}
 
-	/* Remember Option — single "always for this tool" checkbox row. Mirrors the
-	   card convention used by the old remember rows: bordered surface, subtle
-	   tinted (never opaque) hover, 44px tap target on touch. */
-	.always-option {
+	/* How long the answer lasts: a segmented radio group. Each segment is a
+	   44px tap target; the kept choices tint the track so the press below
+	   reads as a lasting decision. */
+	.scope-picker {
+		margin: 0;
+		min-width: 0;
+		border-left: 0;
+		border-right: 0;
+		border-bottom: 0;
+	}
+
+	.scope-legend {
+		float: left;
+		width: 100%;
+		margin: 0 0 0.5rem;
+		padding: 0;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+
+	.scope-options {
+		clear: both;
 		display: grid;
-		grid-template-columns: 1rem 1fr;
-		grid-template-rows: auto auto;
-		gap: 0.25rem 0.75rem;
-		align-items: center;
-		min-height: 44px;
-		padding: 0.625rem 0.75rem;
+		grid-template-columns: repeat(var(--scope-count, 3), minmax(0, 1fr));
+		gap: 0.25rem;
+		padding: 0.25rem;
 		border-radius: var(--radius, 0.75rem);
 		border: 1px solid var(--border);
-		background: var(--card);
-		cursor: pointer;
-		transition: all 0.15s ease;
+		background: color-mix(in oklch, var(--muted) 45%, var(--card));
 	}
 
-	.always-option:hover {
-		border-color: var(--accent);
-		background: color-mix(in oklch, var(--accent) 8%, var(--card));
-	}
-
-	.always-option.selected {
-		border-color: var(--selection-ring);
-		background: color-mix(in oklab, var(--selection) 8%, var(--card));
-		box-shadow: var(--selection-shadow-subtle);
-	}
-
-	.always-option:focus-within {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.always-checkbox {
-		grid-row: 1;
-		grid-column: 1;
-		width: 1rem;
-		height: 1rem;
-		margin: 0;
-		accent-color: var(--primary);
-		cursor: pointer;
-	}
-
-	.always-label {
-		grid-row: 1;
-		grid-column: 2;
-		font-size: 0.875rem;
+	.scope-option {
+		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 44px;
+		padding: 0.375rem 0.5rem;
+		border-radius: calc(var(--radius, 0.75rem) - 0.25rem);
+		border: 1px solid transparent;
+		font-size: 0.8125rem;
 		font-weight: 500;
+		line-height: 1.25;
+		text-align: center;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	/* The radio stays in the accessibility tree and takes keyboard focus. */
+	.scope-option input {
+		position: absolute;
+		inset: 0;
+		margin: 0;
+		opacity: 0;
+		cursor: pointer;
+	}
+
+	.scope-option:hover {
 		color: var(--foreground);
+		background: color-mix(in oklch, var(--foreground) 5%, transparent);
+	}
+
+	.scope-option:has(input:checked) {
+		color: var(--foreground);
+		background: var(--card);
+		border-color: var(--border);
+		box-shadow: var(--shadow-s);
+	}
+
+	.scope-option[data-option='profile']:has(input:checked) {
+		color: var(--warning);
+		border-color: color-mix(in oklch, var(--warning) 45%, var(--border));
+		background: color-mix(in oklch, var(--warning) 10%, var(--card));
+	}
+
+	.scope-option:has(input:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.scope-option:active {
+		transform: scale(0.98);
+	}
+
+	.scope-hint {
+		margin: 0.5rem 0.125rem 0;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--muted-foreground);
+	}
+
+	.scope-picker[data-scope='profile'] .scope-hint {
+		color: color-mix(in oklch, var(--warning) 80%, var(--foreground));
+	}
+
+	/* "Always allow" keeps the primary look but gains a warning edge. */
+	.allow-btn.always {
+		box-shadow: var(--shadow-s), 0 0 0 1px color-mix(in oklch, var(--warning) 60%, transparent);
 	}
 
 	.relayed-note {
@@ -734,14 +809,6 @@
 	.relayed-note strong {
 		color: var(--foreground);
 		font-weight: 600;
-	}
-
-	.always-hint {
-		grid-row: 2;
-		grid-column: 2;
-		font-size: 0.6875rem;
-		line-height: 1.4;
-		color: var(--muted-foreground);
 	}
 
 	/* Action Buttons */
@@ -901,8 +968,19 @@
 		}
 	}
 
+	@media (prefers-reduced-motion: reduce) {
+		.scope-option {
+			transition: none;
+		}
+	}
+
 	/* Mobile optimizations */
 	@media (max-width: 639px) {
+		.scope-option {
+			font-size: 0.75rem;
+			padding: 0.375rem 0.25rem;
+		}
+
 		.permission-panel {
 			border-radius: 1.25rem 1.25rem 0 0;
 			border-bottom: none;

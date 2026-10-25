@@ -110,6 +110,14 @@ describe('permission queue frames', () => {
 		expect(h.state().pendingPermissions[1]).not.toHaveProperty('deferrable');
 	});
 
+	it('keeps remember_scopes on a live request and adds nothing when the frame has none', () => {
+		const h = harness();
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'scoped', tool_name: 'Bash', tool_input: { command: 'ls' }, remember_scopes: ['none', 'session', 'profile'] });
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'plain', tool_name: 'Bash', tool_input: { command: 'pwd' } });
+		expect(h.state().pendingPermissions[0].remember_scopes).toEqual(['none', 'session', 'profile']);
+		expect(h.state().pendingPermissions[1]).not.toHaveProperty('remember_scopes');
+	});
+
 	it('accepts the requeue reply, which names requeued_ids and no resolved_ids (backend requeue_deferred_permissions)', () => {
 		const h = harness({ pendingPermissions: [perm('a')], deferredPermissions: [perm('d')] });
 		// Regression: `resolved_ids` is absent on this frame; the handler used to

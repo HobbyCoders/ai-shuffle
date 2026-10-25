@@ -52,7 +52,7 @@ ws.send(JSON.stringify({
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |
 | `tool_result` | A tool call finished | `session_id`, `tool_use_id`, `name`, `output`, `is_error` |
-| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt); it is absent otherwise | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
+| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt); it is absent otherwise. `remember_scopes` lists the `remember` values this install accepts for the request | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total`, `remember_scopes` |
 | `user_question` | The agent asks the user a question | `session_id`, `request_id`, `tool_use_id`, `questions` |
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
@@ -60,7 +60,7 @@ ws.send(JSON.stringify({
 | `query_queued` | The `query` was queued behind a running turn (or handed to the device that runs the session) instead of starting now | `session_id` |
 | `session_not_found` | Reply to `load_session` for an unknown session (and, for an API key, for another principal's session) | `session_id` |
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
-| `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered. Deferring a request marked `deferrable: false` returns an `error` and leaves it waiting | `session_id`, `request_id`, `result` |
+| `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered. Deferring a request marked `deferrable: false` returns an `error` and leaves it waiting. An unknown `decision` returns `{"error": "Invalid permission decision"}`, an unknown `remember` returns `{"error": "Invalid remember scope"}`, and a `remember` the request does not accept returns `{"error": "Remember scope unavailable", "remember_scopes": [...]}`; each leaves the request waiting | `session_id`, `request_id`, `result` |
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
 | `queued_message_removal` | Reply to `remove_queued_message`. `verdict` is `withdrawn` (never delivered) or `already_delivered` (too late; keep the chip as sent). An unknown identity returns `not_found`, never a successful withdrawal. Legacy `outcome` remains `cancelled`, `already_delivered`, or `not_found` | `session_id`, `message_id`, `client_message_id`, `verdict`, `outcome` |
 | `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
@@ -115,7 +115,8 @@ When the agent wants to use a tool that requires approval:
 // { type: "permission_request", session_id: "sess_abc123", tool_name: "Bash", tool_input: { command: "rm -rf /tmp/old" }, request_id: "req_123" }
 
 // Client approves or denies via a "decision" of "allow" or "deny".
-// "remember" optionally persists the choice: "none", "session", or "profile" (the agent).
+// "remember" optionally keeps the choice: "none", "session", or "profile" (the agent).
+// Send only a value listed in the request's remember_scopes.
 // On an API key's connection "profile" is kept to the session, like "session".
 // "pattern" optionally narrows a remembered rule.
 ws.send(JSON.stringify({
@@ -126,6 +127,10 @@ ws.send(JSON.stringify({
   remember: 'none'
 }));
 ```
+
+`remember` sets how long the answer lasts. `"none"` (or leaving it out) answers this request only. `"session"` gives later calls of the tool in this session the same answer while the worker running the session holds it in memory: it ends when the session goes idle (the end of each `/query` background turn, or the session being unloaded) or the worker restarts. `"profile"` saves a permanent rule on the agent that applies in every session and syncs to every worker; the owner lists and removes these with the [saved approvals API](/docs/api-reference/agents#saved-approvals). Without a `pattern`, a remembered answer covers every call of the tool.
+
+Each `permission_request`, and each entry in `pending_permissions.pending` and `.deferred`, carries `remember_scopes`: `["none", "session", "profile"]` for a request running on this install, or `["none"]` when it can only be answered once (a request owned by another install that shares the database, a Switch model prompt, a prompt relayed from a subagent on another worker, or a request replayed from history). Treat a missing `remember_scopes` as `["none"]`.
 
 An agent-wide (`"profile"`) rule applies to every session on that agent, so only the owner can create one. An API key that sends `remember: "profile"` gets a rule for its own session only, the same as `"session"`. A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. A request marked `deferrable: false` cannot be deferred: the reply carries an `error` and the request stays open for an approve or deny. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
 

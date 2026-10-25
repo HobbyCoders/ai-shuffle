@@ -85,7 +85,13 @@ Subagents, Swarm tasks and chats an agent starts begin in the starting chat's cu
 
 - Choose **Approve** or **Deny**. On a keyboard, Enter approves and Escape denies.
 - A prompt nobody answers within 5 minutes is denied, and the agent carries on.
-- Tick **Always do this for** *tool* to save your answer for that agent in every chat. Only do this for tools you always want handled the same way.
+- Above the buttons, pick how long your answer lasts. It applies to Approve and to Deny, and covers every call of that tool, not only the one on screen:
+  - **Just this once** (the default): the agent asks again next time.
+  - **This chat until it goes idle**: later calls of the tool in this chat get the same answer until the chat goes idle or the worker restarts.
+  - **Always for this agent**: a permanent rule for that agent in every chat, on every worker. The buttons change to **Always allow** and **Always deny** so you can see what you are saving. Only do this for tools you always want handled the same way.
+- Some prompts can only be answered once and show no choice: a prompt relayed from a subagent on another worker, a model switch, and a prompt answered from an install that is not running the chat.
+
+**Saved approvals.** An agent's **Approvals** tab lists every rule saved with **Always for this agent**: the tool, what it covers (every call, or a pattern), Allow or Deny, and the day it was saved. **Remove** deletes one rule and **Remove all** deletes every rule for that agent. Both ask first and cannot be undone. A removed rule stops applying on your other workers once they sync, and the agent asks again. Only the owner sees this tab.
 
 **Tools that ask you themselves** do not also ask for a yes before they run: a private access request (its card is the approval), the one-shot approval for a command or write on access you granted, and the screen-control card. Listing or reading files and GET or HEAD requests on access you already granted ask nothing more. In Bypass, a command, write or other change on granted access still asks you in your own chat, because Bypass skips its one-shot approval. Outside Bypass, a saved Deny for one of these tools still denies; Bypass skips saved rules, as it does for every tool. A saved Always allow for screen control skips its card, as it does in other chats.
 

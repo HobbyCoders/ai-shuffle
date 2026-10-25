@@ -545,6 +545,11 @@ export interface PermissionRequest {
 	 *  answered yes or no only and the server refuses a defer for it. Absent
 	 *  means the prompt may be deferred. */
 	deferrable?: boolean;
+	/** The lifetimes an answer may be remembered for on the answering
+	 *  install: `none` (this request), `session` (this chat until it goes
+	 *  idle) and `profile` (a permanent agent rule). Absent means `none`
+	 *  only; see components/permission-scope.ts. */
+	remember_scopes?: string[] | null;
 }
 
 export interface PermissionWorkerTag {
