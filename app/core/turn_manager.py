@@ -158,6 +158,31 @@ VOICE_DELEGATION = "voice_delegation"
 # which may be older than what the user has since chosen).
 _BINDING_SOURCES = ("user", "queue", "api", "worktree", "connector")
 
+# Human turns of a chat that may have no project: each is stamped with who sent
+# it (``session_modes.CALLER_KEY``), which decides whether the owner's
+# no-project chat gets its full tools (#641). A worktree turn always has a
+# project; an API turn is an API key's.
+_CALLER_STAMPED_SOURCES = ("user", "queue")
+
+
+def _stamp_caller(source: str, overrides: Optional[Dict[str, Any]],
+                  caller: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``overrides`` with the turn's caller stamped, for a human source.
+
+    The stamp is only ever the ``caller`` the intake states: the chat socket,
+    the authenticated peer channel, or a held message re-sent with its own
+    stored stamp (``session_handoff``). A stamp riding in on ``overrides`` is
+    replaced, so no message body sets it. Without a known caller the turn is
+    :data:`session_modes.CALLER_UNKNOWN`, which keeps the no-project ceiling.
+    Other sources are returned unchanged.
+    """
+    if source not in _CALLER_STAMPED_SOURCES:
+        return overrides
+    from app.core.session_modes import CALLER_KEY, CALLER_UNKNOWN, CALLERS
+
+    stamp = caller if caller in CALLERS else CALLER_UNKNOWN
+    return {**(overrides or {}), CALLER_KEY: stamp}
+
 # Override key a composer sends beside ``context_window``: the chat's saved pin
 # as that client last saw it acknowledged (0 for none). A pick made on another
 # tab, device or worker is not pushed to every open client, so a client can
@@ -273,6 +298,7 @@ def _submit_blocking(
     instance_id: Optional[str] = None,
     window_pin: Optional[Dict[str, int]] = None,
     reactivated: dict[str, Any] | None = None,
+    caller: Optional[str] = None,
 ) -> str:
     """Every BLOCKING part of :func:`submit` (reactivation, run binding,
     wakeup supersede, enqueue) — and nothing else.
@@ -316,6 +342,8 @@ def _submit_blocking(
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
+    # Before the hold below, so a message held through a move keeps its caller.
+    overrides = _stamp_caller(source, overrides, caller)
     _reactivate_for_send(session_id, source, payload, reactivated)
     if command_id and (payload or {}).get("compact_first"):
         from app.db import turns as turns_db
@@ -471,6 +499,7 @@ def submit(
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     no_kick: bool = False,
+    caller: Optional[str] = None,
 ) -> str:
     """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
 
@@ -504,6 +533,7 @@ def submit(
             parent_turn_id=parent_turn_id,
             instance_id=instance_id,
             reactivated=reactivated,
+            caller=caller,
         )
     finally:
         if reactivated:
@@ -531,8 +561,14 @@ async def submit_async(
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     no_kick: bool = False,
+    caller: Optional[str] = None,
 ) -> str:
     """:func:`submit` for async callers — identical semantics, off the loop.
+
+    ``caller`` (both forms): who sent a ``user`` or ``queue`` turn, as
+    ``session_modes.caller_of`` names the authenticated principal. Omitted,
+    the turn is stamped unknown and the owner's no-project chat keeps its
+    ceiling for it (see :func:`_stamp_caller`).
 
     ONE thread hop covers the blocking DB work; the kick then fires HERE, on the
     caller's event loop, because the registered kick
@@ -578,6 +614,7 @@ async def submit_async(
             instance_id=instance_id,
             window_pin=window_pin,
             reactivated=reactivated,
+            caller=caller,
         )
     except Exception:
         if answered is not None:

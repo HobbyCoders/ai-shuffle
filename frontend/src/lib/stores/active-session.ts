@@ -927,8 +927,9 @@ function composerCheckoutDefaults(code: boolean, selectedProject = composerPrefe
 
 /**
  * The Access pick for an unbound compose whose project was just added or
- * cleared. Clearing the project clamps Accept Edits to Ask; adding one back
- * restores the remembered pick when the current value is only that clamp.
+ * cleared. Clearing the project only normalizes retired values to Ask (#641:
+ * Accept Edits is offered without a project too); adding one back restores
+ * the remembered pick when the current value is only that normalization.
  */
 function accessForCompose(mode: SessionMode, current: string | null): string | null {
 	if (mode === 'chat') return noProjectPermission(current);

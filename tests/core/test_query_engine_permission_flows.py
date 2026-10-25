@@ -305,7 +305,10 @@ async def test_tool_outside_the_allow_list_is_denied_without_prompting(tmp_path)
 
 
 async def test_chat_session_reads_only_its_uploads(tmp_path):
-    cb, broadcast, _ = await _callback(tmp_path, session_row={"mode": "chat"})
+    # An API key's no-project chat keeps the ceiling; the owner's own one is a
+    # normal session (#641, tests/core/test_owner_no_project_session.py).
+    cb, broadcast, _ = await _callback(
+        tmp_path, session_row={"mode": "chat", "api_user_id": "key-user"})
     outside = await cb("Read", {"file_path": "/etc/passwd"}, _ctx())
     assert not _allowed(outside)
     assert "only read files attached to the chat" in outside.message

@@ -865,19 +865,32 @@ async def test_no_project_task_resolves_registered_project_before_dispatch(agent
     assert seen["parent_session_id"] == "coordinator"
 
 
-async def test_no_project_code_task_must_name_a_project(agents, monkeypatch):
-    from app.core import provider_agent
+@pytest.mark.parametrize("caller", ["owner", "preview"])
+async def test_no_project_code_task_needs_a_project_only_under_the_ceiling(
+        agents, monkeypatch, caller):
+    """#641: the owner's own no-project chat dispatches a code-capable Task
+    without project=; a chat the preview cookie sends keeps the ceiling."""
+    from app.core import provider_agent, session_orchestration as orch
     from app.db import database
     database.create_session("coordinator", "root-agent", title="Coordinate", mode="chat", is_active=True)
+    if caller == "preview":
+        monkeypatch.setattr(orch, "_principal", lambda sid: {
+            "owner": "install-admin", "kind": "admin", "principal_id": "preview"})
     seen = []
 
     async def worker(**kwargs):
         seen.append(kwargs)
+        sid = kwargs.get("worker_session_id") or "w"
+        return WorkerOutcome(ok=True, session_id=sid, report="done")
 
     monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
     result = await td.dispatch_task_tool({"agent": "helper", "prompt": "Work"}, caller_session_id="coordinator")
-    assert not result["ok"] and "must name" in result["error"]
-    assert seen == []
+    if caller == "preview":
+        assert not result["ok"] and "must name" in result["error"]
+        assert seen == []
+    else:
+        assert result["ok"], result
+        assert len(seen) == 1 and seen[0].get("project_override") is None
 
 
 def test_root_routing_passes_root_as_parent(agents, monkeypatch):

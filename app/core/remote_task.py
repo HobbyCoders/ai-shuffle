@@ -459,9 +459,11 @@ async def dispatch_remote(
         except Exception:  # noqa: BLE001 — the refusal stands either way
             logger.warning("remote_task: could not release %s", state.branch, exc_info=True)
 
-    from app.core.session_modes import session_mode_of
-    chat_child = (session_mode_of(caller_row) == "chat"
-                  and not (caller_row.get("project_id") or caller_row.get("project_v2_id")))
+    from app.core.session_modes import runtime_session_mode
+    # A ceiling chat's child keeps the ceiling; the owner's own no-project
+    # chat runs as a normal session (#641), so its child does too.
+    chat_child = (not (caller_row.get("project_id") or caller_row.get("project_v2_id"))
+                  and await asyncio.to_thread(runtime_session_mode, caller_row) == "chat")
     if chat_child and _remote_task_version(worker) < TARGET_DEFAULT_VERSION:
         await release()
         return {"ok": False, "error": f"{name} cannot confine chat Tasks; {OLDER_PEER}."}

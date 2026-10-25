@@ -63,11 +63,11 @@ describe('mobile tool-access persistence', () => {
 		expect(screen.getByRole('button', { name: new RegExp(`^Tool access: ${label}`, 'i') })).toBeTruthy();
 	});
 
-	it('offers no Accept edits in the phone panel without a project', async () => {
+	it('offers Accept edits in the phone panel without a project too (#641)', async () => {
 		activeSession.clearProject();
 		const { access } = await openControls();
 		const names = access.getAllByRole('radio').map((r) => r.getAttribute('aria-label') ?? r.textContent ?? '');
-		expect(names.some((n) => /accept/i.test(n))).toBe(false);
+		expect(names.some((n) => /accept/i.test(n))).toBe(true);
 		expect(access.getByRole('radio', { name: 'Ask' })).toBeTruthy();
 		expect(access.getByRole('radio', { name: 'Bypass' })).toBeTruthy();
 	});

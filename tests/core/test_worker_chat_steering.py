@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core import provider_agent, session_runtime, turn_manager, turn_scheduler
+from app.core.session_modes import CALLER_AUTHENTICATED, CALLER_KEY, CALLER_UNKNOWN
 from app.db import database
 from app.db import turns as turns_db
 
@@ -106,12 +107,13 @@ def _running_worker(session_id, permission_mode="bypassPermissions"):
 def _send(session_id, prompt="please also check the tests", *, payload=None,
           profile_id=COMPOSER_PROFILE, overrides=COMPOSER_OVERRIDES):
     """The submit ``chat_ws_handler.handle_query`` makes for a send to a busy
-    session."""
+    session, stamped with the owner's caller as the socket stamps it (#641)."""
     with patch.object(turn_manager, "_kick"):
         turn_id = turn_manager.submit(
             session_id, "user", prompt=prompt, profile_id=profile_id,
             overrides=dict(overrides) if overrides else None,
             payload={"deferred_user_record": True, **(payload or {})},
+            caller=CALLER_AUTHENTICATED,
         )
     return turns_db.get_turn(turn_id)
 
@@ -257,7 +259,7 @@ async def test_an_ordinary_message_queued_in_an_ended_worker_chat_stays_ordinary
     second = _send("w1", "second remark")
 
     assert second["profile_id"] == COMPOSER_PROFILE
-    assert second["overrides"] == COMPOSER_OVERRIDES
+    assert second["overrides"] == {**COMPOSER_OVERRIDES, CALLER_KEY: CALLER_AUTHENTICATED}
     assert "worker_bound" not in second["payload"]
 
 
@@ -269,7 +271,7 @@ async def test_a_worker_chat_resumed_after_the_work_ended_is_an_ordinary_chat(mo
     row = _send("w1")
 
     assert row["profile_id"] == COMPOSER_PROFILE
-    assert row["overrides"] == COMPOSER_OVERRIDES
+    assert row["overrides"] == {**COMPOSER_OVERRIDES, CALLER_KEY: CALLER_AUTHENTICATED}
     assert "worker_bound" not in row["payload"]
 
 
@@ -284,7 +286,8 @@ async def test_a_main_chat_still_holds_a_message_that_asks_for_another_model(moc
                 overrides={"model": "opus", "permission_mode": "default"})
 
     assert row["profile_id"] == COMPOSER_PROFILE
-    assert row["overrides"] == {"model": "opus", "permission_mode": "default"}
+    assert row["overrides"] == {"model": "opus", "permission_mode": "default",
+                                CALLER_KEY: CALLER_AUTHENTICATED}
 
     adapter = _Adapter()
     with _pooled(adapter), caplog.at_level(logging.INFO, logger="app.core.session_runtime"):
@@ -428,5 +431,6 @@ async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(m
     assert out["ok"] is True, out
     assert normalize_workspace_project_ids(database.get_session("w-voice")["workspace_project_ids"]) == ["docs"]
     (row,) = [t for t in turns_db.get_queued_turns("w-voice") if t["source"] == "queue"]
-    assert row["overrides"] == {"model": "opus"}
+    # The voice bridge names no caller, so the queued turn fails closed (#641).
+    assert row["overrides"] == {"model": "opus", CALLER_KEY: CALLER_UNKNOWN}
     assert _folders_options_resolve("w-voice", turns_db.start_turn(row["id"])["overrides"]) == ["docs"]

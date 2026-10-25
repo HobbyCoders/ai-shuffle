@@ -429,19 +429,19 @@ describe('ControlsDock split controls', () => {
 		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
 	});
 
-	it('offers Ask and Bypass but not Accept Edits without a project, and keeps attach', async () => {
+	it('offers Ask, Accept Edits and Bypass without a project, and keeps attach', async () => {
 		setLane('chat');
 		const { container } = renderDock({ voiceActions });
 
-		// Without a project there is no checkout to edit, so Accept Edits has
-		// nothing to approve; Ask and Bypass stay (Auto needs a model with it).
+		// #641: a session without a project is a normal session, so it offers
+		// the same modes as a project session (Auto needs a model with it).
 		await fireEvent.click(screen.getByRole('button', { name: /^permission mode:/i }));
 		const menu = screen.getByRole('menu', { name: /tool access/i });
 		const items = [...menu.querySelectorAll('[role="menuitemradio"]')].map((el) => el.textContent ?? '');
-		expect(items).toHaveLength(2);
+		expect(items).toHaveLength(3);
 		expect(items.some((t) => /ask/i.test(t))).toBe(true);
 		expect(items.some((t) => /bypass/i.test(t))).toBe(true);
-		expect(items.some((t) => /accept/i.test(t))).toBe(false);
+		expect(items.some((t) => /accept/i.test(t))).toBe(true);
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		// Attach survives: chat uploads land in the workspace's shared
 		// chat-uploads dir, and the chat ceiling carries a Read scoped to it.
@@ -524,19 +524,20 @@ describe('ControlsDock split controls', () => {
 		await tick();
 		expect(get(activeSession).mode).toBe('chat');
 
-		// Accept Edits leaves the menu; the dock still opens one popover at a time.
-		expect(screen.queryByRole('menuitemradio', { name: /accept/i })).toBeNull();
+		// The menu keeps Accept Edits (#641); the dock still opens one popover at a time.
+		expect(screen.queryByRole('menuitemradio', { name: /accept/i })).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: /^effort:/i }));
 		expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull();
 		expect(screen.getByRole('dialog', { name: /reasoning effort/i })).toBeTruthy();
 	});
 
-	it('moves an Accept Edits pick to Ask when the project is cleared', async () => {
+	it('keeps an Accept Edits pick when the project is cleared (#641)', async () => {
 		await activeSession.setPermissionModeOverride('acceptEdits');
 		renderDock();
 		activeSession.clearProject();
 		await tick();
-		expect(get(activeSession).permissionModeOverride ?? 'default').not.toBe('acceptEdits');
-		expect(screen.getByRole('button', { name: /^permission mode:/i }).getAttribute('aria-label')).toMatch(/ask/i);
+		expect(get(activeSession).permissionModeOverride).toBe('acceptEdits');
+		const picker = screen.getByRole('button', { name: /^permission mode:/i });
+		expect(picker.getAttribute('aria-label')).toMatch(/accept/i);
 	});
 });

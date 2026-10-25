@@ -69,7 +69,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 | Field | Type | Description |
 |-------|------|-------------|
 | `model` | string | Model override (e.g. `sonnet`, or a custom model id) |
-| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `bypassPermissions`. `plan` is accepted and runs as `default`; a chat session always runs as `default`. See [Tool permissions](#tool-permissions) |
+| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `bypassPermissions`. `plan` is accepted and runs as `default`. See [Tool permissions](#tool-permissions) |
 | `system_prompt_append` | string | Text appended to the agent's system prompt |
 | `max_turns` | integer | Maximum conversation turns |
 | `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |

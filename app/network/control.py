@@ -294,7 +294,8 @@ def _unreachable_message(peer: str, me: str, failures: List[BaseException], rout
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
                       overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None,
-                      owner_send: bool = False, command_id: Optional[str] = None) -> Dict[str, Any]:
+                      owner_send: bool = False, command_id: Optional[str] = None,
+                      caller: Optional[str] = None) -> Dict[str, Any]:
     """Forward a turn to the session's owner device.
 
     ``owner_send`` states that this is the owner's own fresh message (the
@@ -305,6 +306,11 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
     ``command_id`` makes the send safe to repeat: an owner that already has a
     turn with this id for the session answers with it instead of queueing the
     message again. An owner older than that ignores the field.
+
+    ``caller`` is who sent the message, as this worker authenticated them
+    (``session_modes.caller_of``) or as a held message's stamp recorded it.
+    It travels apart from ``owner_send``: the owner stamps it on the turn,
+    and a send without one keeps the no-project ceiling there (#641).
     """
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
@@ -314,6 +320,8 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
         body["owner_send"] = True
     if command_id:
         body["command_id"] = command_id
+    if caller:
+        body["caller"] = caller
     blob_ids = (payload or {}).get("upload_blob_ids")
     if blob_ids:
         from app.network import git
@@ -721,6 +729,19 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         return await _submit_forwarded_turn(body, from_device, command_id)
 
 
+def _forwarded_caller(body: Dict[str, Any]) -> Optional[str]:
+    """The caller a forwarded turn states, when it is one this build knows.
+
+    Only the top-level field counts. It reaches this handler only over the
+    worker-authenticated peer channel (``/peer/control``), from the worker
+    that authenticated the sender; a stamp inside ``overrides`` is dropped
+    by :func:`_turn_overrides`, so no message body sets it (#641).
+    """
+    from app.core.session_modes import CALLERS
+    caller = body.get("caller")
+    return caller if isinstance(caller, str) and caller in CALLERS else None
+
+
 async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
                                  command_id: Optional[str]) -> Dict[str, Any]:
     from app.core import turn_manager
@@ -772,7 +793,11 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         # message or a sender that predates the statement runs in the
         # session's current mode.
         explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
-        payload=payload or None, command_id=command_id)
+        payload=payload or None, command_id=command_id,
+        # Who sent it, as the sending worker authenticated them or a held
+        # message recorded it (#641). A turn without one, or from a sender too
+        # old to say, is stamped unknown and keeps the no-project ceiling.
+        caller=_forwarded_caller(body))
     if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
         return {"turn_id": turn_id, "session_id": session_id,
                 "compact_turn_id": None, "held": True}

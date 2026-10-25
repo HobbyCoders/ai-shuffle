@@ -42,8 +42,8 @@ async def test_start_preserves_permission_without_assistant_scope(owner, project
     # started chats; it answers questions only and never widens permissions.
     assert away_mode.assistant_work(child)
     # The child starts in the starter's current mode (#486), also from a
-    # no-project chat; such a chat runs Accept Edits as Ask, so passes on Ask.
-    expected = "default" if not project and permission == "acceptEdits" else permission
+    # no-project chat, which runs Accept Edits like any other session (#641).
+    expected = permission
     assert database.get_session(child)["permission_mode"] == expected
     options, _ = query_options.build_options_from_profile(database.get_profile("agent"), session_id=child)
     assert options.permission_mode == expected
@@ -93,16 +93,16 @@ async def test_chat_coordinator_starts_children_in_its_own_mode(owner, case, per
         assert options.permission_mode == permission
 
 
-async def test_chat_coordinator_never_hands_on_a_mode_it_cannot_run(owner):
-    """An unbound chat whose agent says Accept Edits runs on Ask (a chat has
-    no Accept Edits), so a project child it starts runs on Ask too."""
+async def test_chat_coordinator_hands_on_the_mode_it_runs(owner):
+    """An unbound no-project chat whose agent says Accept Edits runs Accept
+    Edits (#641), so a project child it starts runs Accept Edits too."""
     _project(owner)
     chat("coord", mode="chat")
     database.update_profile("agent", config={"model": "sonnet", "permission_mode": "acceptEdits"})
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id='coord'")
     child = await _start("coord", "named", project="Project")
-    assert database.get_session(child)["permission_mode"] == "default"
+    assert database.get_session(child)["permission_mode"] == "acceptEdits"
 
 
 @pytest.mark.parametrize("fate", ["live", "deleted", "archived", "settled"])
@@ -239,20 +239,28 @@ def test_ordinary_turn_does_not_scan_other_principals(owner, monkeypatch):
     assert not any("SELECT * FROM sessions" in sql and "WHERE" not in sql for sql in queries)
 
 
-def test_legacy_projectless_code_row_gets_coordination_ceiling(owner: Path) -> None:
-    # #553: preserving the code ceiling here pinned the deferred migration bug.
+@pytest.mark.parametrize("preview", [False, True])
+def test_legacy_projectless_code_row_lane(
+    owner: Path, monkeypatch: pytest.MonkeyPatch, preview: bool,
+) -> None:
+    # #641: the owner's own legacy projectless row is a normal session; one
+    # the preview cookie sends still gets the coordination ceiling (#553).
     from app.core import query_options
     from app.core.session_modes import runtime_session_mode
     from app.core.tool_access import tool_permitted
 
+    if preview:
+        monkeypatch.setattr(orch, "_principal", lambda sid: {
+            "owner": "install-admin", "kind": "admin", "principal_id": "preview"})
     row, _ = chat("legacy")
-    assert runtime_session_mode(row) == "chat"
+    assert runtime_session_mode(row) == ("chat" if preview else "code")
     options, _ = query_options.build_options_from_profile(
         database.get_profile("agent"), session_id=row["id"],
     )
-    assert options.aih_owner_coordinator
+    assert bool(options.aih_owner_coordinator) is preview
     for tool in ("Bash", "Edit", "Write", "run_python"):
-        assert not tool_permitted(tool, options.aih_tool_allowlist, options.disallowed_tools)
+        permitted = tool_permitted(tool, options.aih_tool_allowlist, options.disallowed_tools)
+        assert permitted is not preview, tool
 
 
 async def test_project_starter_work_is_not_coordination_spending(owner):

@@ -450,6 +450,15 @@
           "past_bug": "#639: no-project chats hid the runner chip, so none could be moved to another worker."
         },
         {
+          "id": "two-worker-smoke.no-project-shell",
+          "check": "An owner no-project chat on a Windows worker runs a read-only disk-usage command",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "Pick the Windows worker in a new chat with no project, on Ask, and attach a small text file to the first message, asking the agent to quote its first line. Then ask what is using space on C:, with a read-only command only (for example Get-PSDrive C, or the size of a few top-level folders). Approve the command when it asks. Switch the chat to Bypass and ask for one more read-only listing. Ask a Task subagent with no project= to report its working directory. Archive the chat afterwards.",
+          "pass_when": "The chat runs the command itself through its shell instead of handing over a script to paste. Ask shows an approval before the command; Bypass runs the next one without asking. The attached file is quoted without an approval prompt. The chat and its subagent both report the workspace's no-project folder as their working directory (not chat-uploads), and the folder does not appear in the Add project folder picker. Nothing on the worker is changed or deleted.",
+          "past_bug": "#641: a no-project owner chat on Windows had no shell, offered a paste-in script, and its read-only investigator was refused with \"Code-capable subagents must name a registered project\"."
+        },
+        {
           "id": "two-worker-smoke.peer-terminal-acceptance",
           "check": "Owner-approved terminal on a peer worker, end to end",
           "kind": "owner",

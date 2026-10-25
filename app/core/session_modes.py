@@ -129,6 +129,13 @@ CHAT_MODE_TOOL_SURFACE: List[str] = [
 # guarantee the project lane's ``uploads/`` folder already gives.
 CHAT_UPLOADS_DIRNAME = "chat-uploads"
 
+# Where the owner's own no-project chats (and their projectless subagents) run,
+# under the workspace root (#641, owner decision). Not the uploads folder: that
+# stays the uploads folder and the restricted lane's cwd. The chats read
+# chat-uploads as an extra directory (``query_options``), and the folder can
+# never be registered as a project (``app.api.projects``).
+OWNER_CHAT_DIRNAME = "no-project"
+
 # Tools whose reads the path half of the ceiling has to gate. Only ``Read`` is
 # on ``CHAT_MODE_TOOL_SURFACE``, so in practice nothing else can reach the
 # callback anyway; the set exists so the gate is keyed on a name it recognises
@@ -183,26 +190,195 @@ def session_mode_of(session_row: Optional[Mapping[str, Any]]) -> str:
     return normalize_session_mode(session_row.get("mode"))
 
 
-def runtime_session_mode(row: Optional[Mapping[str, Any]]) -> str:
-    """Confine ordinary projectless legacy rows, including rows arriving from old peers.
+#: Session ids the watch manager gives the no-project chat a matching
+#: ``investigate`` watch runs in (``watch-<event id>``). Nobody is watching
+#: those turns, so they keep the chat ceiling (#641).
+WATCH_SESSION_PREFIX = "watch-"
 
-    Storage migration supplies the same mode to clients (and the attach-project
-    affordance). This fallback closes the window before migration/sync. It grants
-    no owner authority: orchestration still checks the authenticated principal.
-    API, delegated, automation and hidden rows retain their existing policy.
+_NOT_TOP_LEVEL_OWNER_KEYS: Tuple[str, ...] = (
+    "api_user_id", "is_worker", "parent_session_id", "automation_id", "hidden",
+)
+
+
+def _has_project(row: Mapping[str, Any]) -> bool:
+    return bool(row.get("project_id") or row.get("project_v2_id"))
+
+
+# ── Who sent a turn (#641) ───────────────────────────────────────────────────
+#
+# The lane of the owner's no-project chat follows the caller the server
+# authenticated, never the stored principal alone: a chat the owner's UI
+# created over REST has no principal record, and neither does one the preview
+# cookie continues. ``turn_manager`` stamps every human turn (``user`` and
+# ``queue``) with its caller under :data:`CALLER_KEY` in the turn's overrides,
+# from the principal the socket or request authenticated. A turn nobody
+# stamped (a wake, a background completion) runs as the latest stamped turn
+# of its chat did. Only :data:`CALLER_AUTHENTICATED` can lift the ceiling; a
+# missing caller on a human turn is :data:`CALLER_UNKNOWN`, which keeps it.
+CALLER_KEY = "_caller"
+CALLER_AUTHENTICATED = "authenticated"
+CALLER_PREVIEW = "preview"
+CALLER_UNKNOWN = "unknown"
+CALLERS: frozenset[str] = frozenset({CALLER_AUTHENTICATED, CALLER_PREVIEW, CALLER_UNKNOWN})
+
+
+def caller_of(principal: Optional[Mapping[str, Any]]) -> str:
+    """The :data:`CALLER_KEY` value for a turn sent by ``principal``.
+
+    The agent browser's preview cookie is :data:`CALLER_PREVIEW`; no principal
+    is :data:`CALLER_UNKNOWN`; any other authenticated principal is
+    :data:`CALLER_AUTHENTICATED` (the owner checks that follow still decide
+    whether its chat is the owner's).
+    """
+    from app.core.mobile_tool_identity import PREVIEW_PRINCIPAL_ID
+
+    if not principal:
+        return CALLER_UNKNOWN
+    if principal.get("kind") == "admin" and principal.get("principal_id") == PREVIEW_PRINCIPAL_ID:
+        return CALLER_PREVIEW
+    return CALLER_AUTHENTICATED
+
+
+def turn_caller(overrides: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The stamped caller of a turn's ``overrides``, or None when unstamped."""
+    value = (overrides or {}).get(CALLER_KEY) if isinstance(overrides, Mapping) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _chat_caller(session_id: str, caller: Optional[str]) -> Optional[str]:
+    """``caller`` when the turn being built carries one, else the chat's latest
+    stamped turn's (None for a chat with none, e.g. one from before #641)."""
+    if caller is not None or not session_id:
+        return caller
+    from app.db import turns as turns_db
+
+    return turns_db.latest_caller(session_id)
+
+
+def owner_workspace_chat(
+    row: Optional[Mapping[str, Any]], *, caller: Optional[str] = None,
+) -> bool:
+    """True for the owner's own no-project chat, which runs as a normal session (#641).
+
+    Such a chat gets a project chat's whole tool surface, governed by its
+    permission mode, in :func:`owner_chat_cwd`. Everything else without a
+    project keeps the chat ceiling: API-key and non-owner chats, chats the
+    agent browser's preview cookie sends (``mobile_tool_identity``'s preview
+    principal), watch investigations (:data:`WATCH_SESSION_PREFIX`),
+    automations, workers and hidden rows.
+
+    ``caller`` is the stamped caller of the turn being built (:func:`turn_caller`);
+    without one, the chat's latest stamped turn decides. Any caller but
+    :data:`CALLER_AUTHENTICATED` keeps the ceiling, so a turn the preview cookie
+    sent, or a human turn no caller was recorded for, never gets the shell.
+    Blocking (reads the principal and the turns).
+    """
+    if not row or _has_project(row) or session_mode_of(row) not in ("chat", "code"):
+        return False
+    if any(row.get(key) for key in _NOT_TOP_LEVEL_OWNER_KEYS):
+        return False
+    session_id = str(row.get("id") or "")
+    if session_id.startswith(WATCH_SESSION_PREFIX):
+        return False
+    try:
+        stamped = _chat_caller(session_id, caller)
+    except Exception:  # noqa: BLE001 — an unreadable caller grants nothing
+        return False
+    if stamped is not None and stamped != CALLER_AUTHENTICATED:
+        return False
+    from app.core.mobile_tool_identity import PREVIEW_PRINCIPAL_ID
+    from app.core import session_orchestration
+    from app.core.session_orchestration import is_owner_session
+
+    try:
+        # The same read ``is_owner_session`` makes, done once for both checks.
+        principal = session_orchestration._principal(session_id) if session_id else None
+    except Exception:  # noqa: BLE001 — an unreadable principal grants nothing
+        return False
+    if principal and principal.get("principal_id") == PREVIEW_PRINCIPAL_ID:
+        return False
+    return is_owner_session(row, principal=principal)
+
+
+def owner_chat_cwd() -> Path:
+    """The working directory of an owner no-project chat, created if missing.
+
+    ``<workspace>/no-project`` (:data:`OWNER_CHAT_DIRNAME`, owner decision,
+    #641). The shell and file tools reach the rest of the machine as a project
+    chat's do. The delegated CLI auto-approves reads only inside its cwd and
+    added directories (this folder and chat-uploads), so Ask still prompts
+    before reading other projects. Subagents started without ``project=`` run
+    here too.
+    """
+    target = owner_chat_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def owner_chat_dir() -> Path:
+    """Absolute, resolved path of :data:`OWNER_CHAT_DIRNAME` (not created).
+
+    Resolved like :func:`chat_uploads_dir`: the workspace root is resolved and
+    the name joined after, so replacing the folder with a link cannot redefine
+    the root.
+    """
+    from app.core.config import settings
+
+    return settings.effective_workspace_dir.resolve() / OWNER_CHAT_DIRNAME
+
+
+def runs_in_owner_chat_folder(
+    row: Optional[Mapping[str, Any]], *, caller: Optional[str] = None,
+) -> bool:
+    """Whether a session runs in :func:`owner_chat_cwd`: the owner's no-project
+    chat itself, or a Task worker it started without a project (workers share
+    the folder, as a non-Git project's share its main folder). A worker row
+    names its root chat as ``parent_session_id``. ``caller``: as for
+    :func:`owner_workspace_chat`. Blocking.
+    """
+    if not row or _has_project(row):
+        return False
+    if owner_workspace_chat(row, caller=caller):
+        return True
+    parent_id = row.get("parent_session_id")
+    if not parent_id or not row.get("is_worker") or session_mode_of(row) == "chat":
+        return False
+    from app.db import database
+
+    try:
+        parent = database.get_session(str(parent_id))
+    except Exception:  # noqa: BLE001 — an unreadable parent keeps the default cwd
+        return False
+    return owner_workspace_chat(parent)
+
+
+def runtime_session_mode(
+    row: Optional[Mapping[str, Any]], *, caller: Optional[str] = None,
+) -> str:
+    """The lane a session's tools are built for, which may differ from its stored mode.
+
+    * The owner's own no-project chat (:func:`owner_workspace_chat`) runs as
+      ``code``, whether it is stored as ``chat`` or as a legacy NULL row (#641).
+    * Any other projectless owner-labelled legacy row is confined to ``chat``,
+      including rows arriving from old peers (#553). Storage migration
+      supplies the stored mode to clients (and the attach-project affordance).
+    * API, delegated, automation and hidden rows retain their existing policy.
+
+    It grants no owner authority: orchestration still checks the authenticated
+    principal. ``caller``: as for :func:`owner_workspace_chat`.
     """
     mode = session_mode_of(row)
-    if row and mode == "code" and not any(
-        row.get(key) for key in (
-            "project_id", "project_v2_id", "api_user_id", "is_worker",
-            "parent_session_id", "automation_id", "hidden",
-        )
-    ):
-        from app.core.session_orchestration import is_owner_session
+    if not row or mode == "voice" or _has_project(row):
+        return mode
+    if mode == "chat":
+        return "code" if owner_workspace_chat(row, caller=caller) else "chat"
+    if any(row.get(key) for key in _NOT_TOP_LEVEL_OWNER_KEYS):
+        return mode
+    if owner_workspace_chat(row, caller=caller):
+        return "code"
+    from app.core.session_orchestration import is_owner_session
 
-        if is_owner_session(row):
-            return "chat"
-    return mode
+    return "chat" if is_owner_session(row) else mode
 
 
 def storage_session_mode(mode: Any) -> Optional[str]:
@@ -218,27 +394,21 @@ def storage_session_mode(mode: Any) -> Optional[str]:
     return normalized
 
 
-#: The permission modes a no-project (``chat``) session may run in: Ask, the
-#: classifier mode and Bypass (issue #371 step 4, owner decision). Accept
-#: Edits has nothing to approve there (no file-edit tool is on the ceiling) and
-#: the composer no longer offers it. Bypass and Auto only stop the prompts:
-#: the tool ceiling (allow list, deny rules, the delegated leg's PreToolUse
-#: policy) and the handle-confined reader still apply in every mode.
-CHAT_PERMISSION_MODES: frozenset[str] = frozenset({"default", "auto", "bypassPermissions"})
-
-
 def permission_mode_for_session_mode(permission_mode: Any, mode: Any) -> Any:
-    """Normalize retired settings and keep chat sessions to their offered modes.
+    """Normalize the retired ``plan`` mode, which runs as Ask everywhere.
 
-    ``plan`` is retired everywhere. A chat session keeps Ask, Auto and Bypass;
-    anything else (Accept Edits, an unknown value, no value) runs as Ask.
+    Every session, with or without a project, runs in the mode it was given
+    (#641: the owner's no-project chat is a normal session, Accept Edits
+    included). On a chat that keeps the ceiling, Bypass, Auto and Accept
+    Edits only stop prompts: the tool ceiling (allow list, deny rules, the
+    delegated leg's PreToolUse policy) and the handle-confined reader still
+    apply, and Accept Edits has no edit tool there to approve. ``mode`` is kept
+    so existing callers need no change.
     """
     # Old saved sessions and clients may still send the retired mode.
     if permission_mode == "plan":
         return "default"
-    if normalize_session_mode(mode) != "chat":
-        return permission_mode
-    return permission_mode if permission_mode in CHAT_PERMISSION_MODES else "default"
+    return permission_mode
 
 
 # The one tool every mode short of Bypass puts to a person: the computer-use

@@ -75,7 +75,7 @@ The permission mode decides when the agent asks you before using a tool. Pick it
 | Accept Edits | File edits run without asking. Everything else asks, as in Ask |
 | Bypass | Nothing asks. Use with care |
 
-A session without a project offers Ask, Auto and Bypass; Accept Edits needs a project. Attaching a project puts the session back on Ask.
+A session without a project offers the same modes, Accept Edits included, and they mean the same thing there. Attaching a project puts the session back on Ask.
 
 Subagents, Swarm tasks and chats an agent starts begin in the starting chat's current mode, so a chat in Bypass starts them in Bypass. Paid generation, spending limits and new private access still ask in every mode.
 

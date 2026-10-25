@@ -348,6 +348,17 @@ _SUBMIT_KEYS = ("prompt", "profile_id", "project_id", "worktree_id", "overrides"
 Released = Tuple[int, List[Dict[str, Any]]]
 
 
+def _held_caller(entry: Dict[str, Any]) -> Optional[str]:
+    """Who sent a held message: the stamp ``turn_manager`` put on it before it
+    was held (#641). Re-sent here or on the new worker, the message keeps its
+    caller, so the owner's own message keeps the owner's tools there and a
+    preview or unknown one stays restricted. None (stamped unknown) otherwise.
+    """
+    from app.core.session_modes import turn_caller
+
+    return turn_caller(entry.get("overrides"))
+
+
 def _submit_here(session_id: str, held: List[Dict[str, Any]]) -> Released:
     """Queue ``held`` here. Returns how many were sent and the ones refused."""
     from app.core import turn_manager
@@ -357,6 +368,7 @@ def _submit_here(session_id: str, held: List[Dict[str, Any]]) -> Released:
     for entry in held:
         try:
             turn_manager.submit(session_id, str(entry.get("source") or "user"), no_kick=True,
+                                caller=_held_caller(entry),
                                 **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
             sent += 1
         except Exception:  # noqa: BLE001 — one refused message must not stop the rest
@@ -740,7 +752,7 @@ async def _deliver_active(session_id: str, target_id: str, label: str,
                 source=str(entry.get("source") or "user"), profile_id=entry.get("profile_id"),
                 project_id=entry.get("project_id"), overrides=entry.get("overrides"),
                 payload=entry.get("payload"), owner_send=bool(entry.get("explicit_permission")),
-                command_id=_held_command_id(entry))
+                command_id=_held_command_id(entry), caller=_held_caller(entry))
         except control.ControlRefused as exc:
             reason = f" ({exc})" if str(exc) else ""
             break

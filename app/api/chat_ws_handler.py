@@ -1166,6 +1166,28 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "Session authorization denied"})
             return False
 
+    @property
+    def _caller(self) -> str:
+        """Who this socket's sends come from (``session_modes.caller_of``),
+        stamped on every turn it submits (#641)."""
+        from app.core.session_modes import caller_of
+        return caller_of(self.trusted_principal)
+
+    async def _may_send_elsewhere(self, session_id: Optional[str]) -> bool:
+        """Refuse a preview-cookie send that would run on another worker.
+
+        That worker cannot see this socket's principal; an older one would run
+        the message as the owner's. Fails closed with an error frame (#641).
+        """
+        from app.core.session_modes import CALLER_PREVIEW
+        if self._caller != CALLER_PREVIEW:
+            return True
+        await self.send_json({
+            "type": "error", "session_id": session_id,
+            "message": "The preview link can't send to a chat another worker runs.",
+        })
+        return False
+
     async def _restrict_profile(self, requested, default):
         """Apply an API user's assigned agents to a WS-supplied profile.
 
@@ -1442,6 +1464,8 @@ class ChatWebSocketHandler:
                     "type": "error",
                     "message": ATTACHMENTS_NEED_LOCAL_CHECKOUT,
                 })
+                return
+            if target_instance_id and not await self._may_send_elsewhere(None):
                 return
             if target_instance_id:
                 # Refuse BEFORE creating anything — a session pinned to a device
@@ -1767,6 +1791,8 @@ class ChatWebSocketHandler:
 
         # Worker network: the owner enqueues the turn itself; our mirror shows
         # it once the owner's events sync back.
+        if placed_remote and not await self._may_send_elsewhere(session_id):
+            return
         owner_device = await self._network_owner(session_id) if placed_remote else None
         if owner_device:
             from app.network import control
@@ -1777,7 +1803,7 @@ class ChatWebSocketHandler:
                 submitted = await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
-                    owner_send=True, command_id=client_message_id,
+                    owner_send=True, command_id=client_message_id, caller=self._caller,
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -1803,6 +1829,7 @@ class ChatWebSocketHandler:
             payload=payload or None,
             command_id=client_message_id,
             no_kick=placed_remote,
+            caller=self._caller,
         )
 
         if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
@@ -2686,6 +2713,8 @@ class ChatWebSocketHandler:
             payload["api_user_id"] = self.api_user_id
         if getattr(self, "user_id", None):
             payload["user_id"] = self.user_id
+        if placed_remote and not await self._may_send_elsewhere(session_id):
+            return
         owner_device = await self._network_owner(session_id) if placed_remote else None
         if owner_device:
             from app.network import control
@@ -2694,6 +2723,7 @@ class ChatWebSocketHandler:
                 await control.submit_turn(
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
                     project_id=project_id, payload=payload or None, owner_send=True,
+                    caller=self._caller,
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -2712,6 +2742,7 @@ class ChatWebSocketHandler:
             project_id=project_id,
             payload=payload or None,
             no_kick=placed_remote,
+            caller=self._caller,
         )
         if placed_remote:
             from app.core import turn_claim

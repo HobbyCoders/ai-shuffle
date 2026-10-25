@@ -47,8 +47,8 @@ def test_voice_permission_binding_wins_over_historical_turn(monkeypatch):
     ("bypassPermissions", {"chat": "bypassPermissions", "code": "bypassPermissions", "voice": "bypassPermissions"}),
     ("auto", {"chat": "auto", "code": "auto", "voice": "auto"}),
     ("default", {"chat": "default", "code": "default", "voice": "default"}),
-    # A no-project chat has no Accept Edits: it runs, and passes on, Ask.
-    ("acceptEdits", {"chat": "default", "code": "acceptEdits", "voice": "acceptEdits"}),
+    # #641: a no-project chat runs, and passes on, Accept Edits too.
+    ("acceptEdits", {"chat": "acceptEdits", "code": "acceptEdits", "voice": "acceptEdits"}),
 ])
 def test_caller_permission_fallback_without_live_pool(
     monkeypatch, source, session_mode, configured, expected,

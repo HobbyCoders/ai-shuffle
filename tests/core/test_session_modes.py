@@ -379,12 +379,18 @@ def test_chat_mode_keeps_its_offered_permission_modes(permission_mode):
     assert permission_mode_for_session_mode(permission_mode, "chat") == permission_mode
 
 
-@pytest.mark.parametrize("permission_mode", ["plan", "acceptEdits", "nonsense", None])
-def test_chat_mode_runs_anything_else_as_ask(permission_mode):
-    """Accept Edits is not offered without a project (nothing to edit), the
-    retired plan mode would deadlock the ceiling, and an unknown or missing
-    binding fails closed to Ask."""
-    assert permission_mode_for_session_mode(permission_mode, "chat") == "default"
+@pytest.mark.parametrize("mode", ["chat", None])
+def test_retired_plan_runs_as_ask_everywhere(mode):
+    """The retired plan mode would deadlock the ceiling; it runs as Ask."""
+    assert permission_mode_for_session_mode("plan", mode) == "default"
+
+
+@pytest.mark.parametrize("permission_mode", ["acceptEdits", "nonsense", None])
+def test_chat_mode_passes_other_values_through(permission_mode):
+    """#641: a no-project session runs the mode it was given, Accept Edits
+    included, as a project session does. Unknown and missing values reach the
+    same downstream handling as a project session's (Ask)."""
+    assert permission_mode_for_session_mode(permission_mode, "chat") == permission_mode
 
 
 def test_build_options_chat_mode_overrules_an_inherited_plan_mode():
@@ -401,9 +407,10 @@ def test_build_options_chat_mode_keeps_a_chosen_bypass():
     assert options.permission_mode == "bypassPermissions"
 
 
-def test_build_options_chat_mode_drops_accept_edits():
+def test_build_options_chat_mode_keeps_accept_edits():
+    # #641: Accept Edits is offered without a project too.
     options = _build_for_mode("chat", {"model": "opus"}, permission_mode="acceptEdits")
-    assert options.permission_mode == "default"
+    assert options.permission_mode == "acceptEdits"
 
 
 def test_build_options_code_mode_normalizes_retired_permission_binding():
