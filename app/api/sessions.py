@@ -31,7 +31,7 @@ from app.core.models import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import api_error_handler
 from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.git_owner import refuse_subagent_git
@@ -2081,9 +2081,24 @@ async def get_session_limit_resume(
     await require_session(request, session_id)
     from app.core import limit_resume
 
-    pending = await run_sync(limit_resume.pending, session_id)
-    workers = await run_sync(limit_resume.paused_workers_of, session_id)
-    return {"session_id": session_id, "pending": pending, "workers": workers}
+    return await limit_resume.state(session_id)
+
+
+@router.post("/{session_id}/limit-resume/arm")
+async def arm_session_limit_resume(
+    request: Request,
+    session_id: str,
+    turn_id: str = Body(..., embed=True),
+    token: str = Depends(require_admin),
+):
+    """Resume the last limit-stopped turn once, without changing global settings."""
+    await require_session(request, session_id)
+    from app.core import limit_resume
+
+    try:
+        return await limit_resume.arm(session_id, turn_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{session_id}/limit-resume/cancel")
@@ -2104,7 +2119,10 @@ async def cancel_session_limit_resume(
         if task_id not in await run_sync(limit_resume.paused_workers_of, session_id):
             raise HTTPException(status_code=404, detail="No paused worker with that id")
         target = task_id
-    cancelled = await limit_resume.cancel(target)
+    if task_id:
+        cancelled = await limit_resume.cancel(target)
+    else:
+        cancelled = await limit_resume.cancel(target, authorize_once=lambda: require_admin(request))
     return {"session_id": session_id, "task_id": task_id, "cancelled": cancelled}
 
 
