@@ -8,9 +8,11 @@ so patch there — the lazy-import-mock-freeze rule).
 """
 
 import asyncio
+import sqlite3
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2698,14 +2700,14 @@ async def _sweep_and_drain_kicks(timeout: float = 1.0) -> list:
 
 @pytest.mark.parametrize("failure", ["fence", "db_error"])
 async def test_lost_lease_stops_the_turn_and_the_sweep_never_starts_it_twice(
-    mock_db, monkeypatch, failure,
-):
+    mock_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
     sid = f"lease-loss-{failure}"
     turn = turns_db.enqueue_turn(sid, "user", prompt="hello")
     pump_calls = []
     pump_entered = asyncio.Event()
 
-    async def _generating_pump(**kwargs):
+    async def _generating_pump(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         # A provider turn that keeps generating until something stops it.
         pump_calls.append(kwargs)
         pump_entered.set()
@@ -2713,26 +2715,47 @@ async def test_lost_lease_stops_the_turn_and_the_sweep_never_starts_it_twice(
         yield {"type": "done", "metadata": {}}
 
     monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.02)
-    if failure == "db_error":
-        # Shrink the TTL so "renewals failed for a whole TTL" fits in test
-        # time. The lease row is backdated below either way.
-        monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.3)
     broken = asyncio.Event()
     renew_attempts = []
     real_renew = runs_db.renew_run
 
-    def _renew(*args, **kwargs):
+    def _renew(*args: Any, **kwargs: Any) -> bool:
         renew_attempts.append(args)
         if failure == "db_error" and broken.is_set():
             raise RuntimeError("database unreachable")
         return real_renew(*args, **kwargs)
+
+    # Reproduce a loaded runner: the first heartbeat takes longer than the
+    # failure-phase TTL, and startup cannot reach the provider until it ends.
+    first_renewal_finished = asyncio.Event()
+    healthy_renewal_finished = asyncio.Event()
+    real_run_lease = session_runtime.run_lease
+
+    async def _slow_first_renewal(fn: Callable[..., bool], *args: Any) -> bool:
+        if first_renewal_finished.is_set():
+            ok = await real_run_lease(fn, *args)
+            if ok and pump_entered.is_set() and not broken.is_set():
+                healthy_renewal_finished.set()
+            return ok
+        try:
+            await asyncio.sleep(0.4)
+            return await real_run_lease(fn, *args)
+        finally:
+            first_renewal_finished.set()
+
+    async def _wait_for_first_renewal(session_id: str) -> None:
+        await first_renewal_finished.wait()
 
     tasks = []
     with _runtime_env(pump=_generating_pump) as env, patch.object(
         runs_db, "renew_run", side_effect=_renew,
     ), patch(
         "app.core.query_session_lifecycle.interrupt_session", new=AsyncMock(),
-    ) as interrupt, _count_starts() as started:
+    ) as interrupt, _count_starts() as started, patch.object(
+        session_runtime, "run_lease", new=_slow_first_renewal,
+    ), patch.object(
+        session_runtime, "stop_idle_reader", new=_wait_for_first_renewal,
+    ):
         try:
             first = asyncio.create_task(session_runtime.execute(turn))
             tasks.append(first)
@@ -2740,6 +2763,13 @@ async def test_lost_lease_stops_the_turn_and_the_sweep_never_starts_it_twice(
             run_id = turns_db.get_turn(turn["id"])["run_id"]
             assert run_id is not None
 
+            if failure == "db_error":
+                # The slow first attempt is already older than the short TTL:
+                # wait for a fresh healthy beat before starting the outage.
+                await asyncio.wait_for(healthy_renewal_finished.wait(), 2.0)
+                # Only the failure phase needs a short TTL. Startup and the first
+                # healthy heartbeat must keep the production budget (#653).
+                monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.3)
             _break_lease(mock_db, run_id, failure)
             broken.set()
             seen = len(renew_attempts)
