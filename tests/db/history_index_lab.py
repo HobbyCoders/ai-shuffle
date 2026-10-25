@@ -1,12 +1,17 @@
 """Single-writer probes used only by the opt-in disposable hand-off lab."""
 from __future__ import annotations
 
+import json
+import os
 import statistics
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from psycopg2.extras import Json
+
 from app.db import base
 
 
@@ -76,3 +81,43 @@ class LiveInserts:
             stage: samples[i] for stage, samples in self.stages[name].items()
         }} for i in sorted(range(len(values)), key=values.__getitem__, reverse=True)[:5]]}
             for name, values in self.samples.items()}
+
+
+def wal_snapshot() -> dict[str, Any]:
+    """Cluster-wide diagnostics; only call on the opt-in disposable lab."""
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_stat_clear_snapshot()")
+        cur.execute("SELECT pg_current_wal_insert_lsn() AS lsn, wal_records, wal_fpi, "
+                    "wal_bytes, wal_buffers_full FROM pg_stat_wal")
+        result = dict(cur.fetchone())
+        cur.execute("SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time, "
+                    "checkpoint_sync_time, buffers_checkpoint FROM pg_stat_bgwriter")
+        result.update(cur.fetchone())
+        return result
+
+
+def wal_summary(start: dict[str, Any], phase: str) -> dict[str, Any]:
+    """Keep LSN totals and sampled counters distinct; optionally decode retained WAL."""
+    end = wal_snapshot()
+    result = {key: float(end[key] - value) for key, value in start.items() if key != "lsn"}
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_wal_lsn_diff(%s, %s) AS bytes", (end["lsn"], start["lsn"]))
+        result["lsn_bytes"] = int(cur.fetchone()["bytes"])
+    result.update(start_lsn=start["lsn"], end_lsn=end["lsn"])
+    # WAL retention and the output directory are explicitly supplied by the lab
+    # launcher, never inferred from a running worker's database configuration.
+    wal_dir = os.environ.get("HANDOFF_LAB_WAL_DIR")
+    artifacts = os.environ.get("HANDOFF_LAB_ARTIFACTS")
+    if wal_dir and artifacts:
+        decoded = subprocess.run(
+            ["pg_waldump", "--path", wal_dir, "--start", start["lsn"],
+             "--end", end["lsn"], "--stats=record"],
+            capture_output=True, text=True, check=True, timeout=120,
+        )
+        output = Path(artifacts)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / f"{phase}-waldump.txt").write_text(decoded.stdout, encoding="utf-8")
+        (output / f"{phase}-wal.json").write_text(json.dumps(result), encoding="utf-8")
+    return result

@@ -372,7 +372,10 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     from app.db import network, session_recall
     from app.db.schema_postgres import create_session_recall_text
 
-    data = snapshot(events=7823, nodes=1741, transcript=10768, messages=4000, width=3100)
+    divisor = int(os.environ.get("HANDOFF_LAB_DIVISOR", "1"))
+    assert divisor >= 1
+    data = snapshot(events=7823 // divisor, nodes=1741 // divisor,
+                    transcript=10768 // divisor, messages=4000 // divisor, width=3100)
     payload_bytes = len(json.dumps(data))
     timing = handoff._Timing("lab", chat)
     data["_timing"] = timing
@@ -383,6 +386,15 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     if os.environ.get("HANDOFF_LAB_DEFERRED") == "1":
         from tests.db.test_history_indexing_postgres import finish_migration
         finish_migration()
+        pending_kb = int(os.environ.get("HANDOFF_LAB_HISTORY_PENDING_KB", "4096"))
+        assert pending_kb in (1024, 2048, 4096)
+        from app.db.history_indexing import INDEXES
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            for name in INDEXES:
+                cur.execute("SELECT to_regclass(%s) AS name", (name + "_h2",))
+                if cur.fetchone()["name"]:
+                    cur.execute(f"ALTER INDEX {name}_h2 SET (gin_pending_list_limit={pending_kb})")
     # Reproduce a receiver that already mirrors the owner's event stream.
     from psycopg2.extras import Json
     with base.get_db() as conn:
@@ -396,7 +408,7 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     if os.environ.get("HANDOFF_LAB_DROP_DUPLICATE") == "1":
         with base.get_db() as conn:
             conn.cursor().execute("DROP INDEX idx_fluid_recall_text_trgm")
-    from tests.db.history_index_lab import LiveInserts
+    from tests.db.history_index_lab import LiveInserts, wal_snapshot, wal_summary
     idle_sampler = LiveInserts(offset=2_000_000)
     idle_sampler.start()
     try:
@@ -419,6 +431,7 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
         cur = conn.cursor()
         cur.execute("SELECT pg_current_wal_insert_lsn() AS lsn")
         lsn = cur.fetchone()["lsn"]
+    import_wal_start = wal_snapshot()
     sampler = LiveInserts()
     sampler.start()
     start = time.monotonic()
@@ -435,6 +448,12 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     with capsys.disabled():
         print("HANDOFF_LAB " + json.dumps({"rows": sum(len(v) for v in data["history"].values()),
             "bytes": payload_bytes, "seconds": elapsed, "wal_bytes": wal,
+            "lab_settings": {"divisor": divisor,
+                             "history_pending_kb": os.environ.get("HANDOFF_LAB_HISTORY_PENDING_KB"),
+                             "batch_rows": os.environ.get("HANDOFF_LAB_BATCH_ROWS"),
+                             "pause_seconds": os.environ.get("HANDOFF_LAB_PAUSE", "0.1"),
+                             "checkpoint": os.environ.get("HANDOFF_LAB_CHECKPOINT") == "1"},
+            "wal_diagnostics": wal_summary(import_wal_start, "import"),
             "live_latency_seconds": live_latency,
             "deferred": os.environ.get("HANDOFF_LAB_DEFERRED") == "1",
             "cold_receiver": os.environ.get("HANDOFF_LAB_COLD") == "1",
@@ -443,29 +462,45 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
             "duplicate_node_index": os.environ.get("HANDOFF_LAB_DROP_DUPLICATE") != "1"}, sort_keys=True))
     if os.environ.get("HANDOFF_LAB_DEFERRED") == "1":
         from app.db import history_indexing
+        if os.environ.get("HANDOFF_LAB_CHECKPOINT") == "1":
+            with base.get_db() as conn:
+                conn.cursor().execute("CHECKPOINT")
+        catchup_wal_start = wal_snapshot()
         catchup_sampler = LiveInserts(offset=1_000_000)
         catchup_sampler.start()
         catchup_start = time.monotonic()
         promoted = 0
+        complete = False
+        args = {}
+        if os.environ.get("HANDOFF_LAB_BATCH_ROWS"):
+            args["rows"] = int(os.environ["HANDOFF_LAB_BATCH_ROWS"])
         try:
-            while time.monotonic() - catchup_start < 1200:
-                n = history_indexing.promote_batch()
+            while time.monotonic() - catchup_start < 1800:
+                n = history_indexing.promote_batch(**args)
                 promoted += n
                 if not n:
+                    complete = True
                     break
-                time.sleep(0.05)
-            else:
-                pytest.fail("catch-up exceeded the lab time budget")
+                time.sleep(float(os.environ.get("HANDOFF_LAB_PAUSE", "0.1")))
         finally:
             catchup_latency = catchup_sampler.finish()
-        with base.get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), %s) AS bytes", (lsn,))
-            total_wal = int(cur.fetchone()["bytes"])
-        with capsys.disabled():
-            print("HANDOFF_CATCHUP_LAB " + json.dumps({"seconds": time.monotonic() - catchup_start,
-                  "promoted_rows": promoted, "total_import_and_catchup_wal": total_wal,
-                  "live_latency_seconds": catchup_latency}))
+            elapsed = time.monotonic() - catchup_start
+            with base.get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), %s) AS bytes",
+                            (lsn,))
+                total_wal = int(cur.fetchone()["bytes"])
+                pending = {}
+                for table in history_indexing.TABLES:
+                    cur.execute(f"SELECT count(*) AS n FROM {table} WHERE history_index_state=1")
+                    pending[table] = cur.fetchone()["n"]
+            with capsys.disabled():
+                print("HANDOFF_CATCHUP_LAB " + json.dumps({"seconds": elapsed,
+                      "complete": complete, "pending": pending, "batch_args": args,
+                      "promoted_rows": promoted, "total_import_and_catchup_wal": total_wal,
+                      "wal_diagnostics": wal_summary(catchup_wal_start, "catchup"),
+                      "live_latency_seconds": catchup_latency}))
+        assert complete, "catch-up exceeded the lab time budget"
     if os.environ.get("HANDOFF_LAB_DROP_DUPLICATE") == "1":
         with base.get_db() as conn:
             create_session_recall_text(conn.cursor())

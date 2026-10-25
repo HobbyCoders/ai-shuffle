@@ -186,10 +186,10 @@ def migrate() -> bool:
                 cur.execute("SELECT reloptions FROM pg_class WHERE oid=to_regclass(%s)",
                             (name + "_h2",))
                 options = cur.fetchone()["reloptions"] or []
-                wanted = {"fastupdate=on", "gin_pending_list_limit=1024"}
+                wanted = {"fastupdate=on", "gin_pending_list_limit=4096"}
                 if not wanted.issubset(options):
                     cur.execute(f"ALTER INDEX {name}_h2 SET "
-                                "(fastupdate=on, gin_pending_list_limit=1024)")
+                                "(fastupdate=on, gin_pending_list_limit=4096)")
                 continue
             if row and not partial:
                 tail = row["ddl"].split(" USING gin ", 1)[1]
@@ -215,7 +215,7 @@ def migrate() -> bool:
                     cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
                     where = f"({original_predicate}) AND " if sep else ""
                     if state == 2:
-                        options = " WITH (fastupdate=on, gin_pending_list_limit=1024)"
+                        options = " WITH (fastupdate=on, gin_pending_list_limit=4096)"
                     else:
                         options = " WITH " + original_options if has_options else ""
                     cur.execute(f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
@@ -237,7 +237,7 @@ def migrate() -> bool:
 
 
 def promote_batch(
-    *, rows: int = 8, byte_budget: int = 128_000, seconds: float = 0.1,
+    *, rows: int = 32, byte_budget: int = 128_000, seconds: float = 0.1,
     can_work: Callable[[], bool] = lambda: True,
 ) -> int:
     """Promote a bounded locked batch, atomically with its index updates.
@@ -264,9 +264,13 @@ def promote_batch(
             cur.execute("SET LOCAL lock_timeout = '250ms'")
             cur.execute("SELECT set_config(%s, '2', true)", (SETTING,))
             # An indexed queue, independent of table size or promotion progress.
-            cur.execute(f"SELECT {keys}, pg_column_size({payload}) AS bytes FROM {table} "
-                        f"WHERE {COLUMN} = 1 ORDER BY {keys} LIMIT %s FOR UPDATE SKIP LOCKED",
-                        (limit - count,))
+            # Keep the queue-index lookup bounded, then visit just that locked
+            # window in heap order. Ordering the whole queue by ctid would scan
+            # all remaining history on every call.
+            cur.execute(f"SELECT * FROM (SELECT {keys}, pg_column_size({payload}) AS bytes, "
+                        f"ctid AS history_tid FROM {table} WHERE {COLUMN} = 1 "
+                        f"ORDER BY {keys} LIMIT %s FOR UPDATE SKIP LOCKED) pending "
+                        "ORDER BY history_tid", (limit - count,))
             candidates = cur.fetchall()
             for row in candidates:
                 if not can_work() or (count and time.monotonic() >= deadline):
@@ -275,7 +279,7 @@ def promote_batch(
                 if used and used + size > byte_budget:
                     break
                 where = " AND ".join(f"{k.strip()} = %s" for k in keys.split(","))
-                cur.execute(f"UPDATE {table} SET {COLUMN} = 2 WHERE {where}",
+                cur.execute(f"UPDATE {table} SET {COLUMN} = 2 WHERE {where} AND {COLUMN} = 1",
                             tuple(row[k.strip()] for k in keys.split(",")))
                 used += size
                 count += 1
@@ -283,7 +287,7 @@ def promote_batch(
 
 
 def run_pass(
-    *, seconds: float = 5.0, pause: float = 0.05, can_work: Callable[[], bool] = lambda: True,
+    *, seconds: float = 5.0, pause: float = 0.1, can_work: Callable[[], bool] = lambda: True,
 ) -> bool:
     """Yield between batches when a foreground turn needs the worker's I/O."""
     with get_db() as conn:
