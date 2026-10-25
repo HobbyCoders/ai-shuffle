@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "29e522abd50176965ce365c6ccf126f2e9c0ad8a",
+  "revision": "6b1d4e960c1c74b8bf3317cb6be3454cff6dc561",
   "packages": {
     "telegram": {
       "module": "telegram",
@@ -31,7 +31,7 @@
       "module": "webhook_connector",
       "class": "WebhookConnector",
       "files": {
-        "webhook_connector.py": "bac9faf139773d525f1cfa7a2f2a6405858bfbeb94581d2ef207f84d40fb093b"
+        "webhook_connector.py": "8cd6f9779e287b3e5bdfc552bcdd2c727cf1cb4796aa37061cb41d0112eca440"
       }
     },
     "slack": {
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "d1abb2a9d3cdc814"
+  "release": "8a0b12f54a4bf490"
 }
