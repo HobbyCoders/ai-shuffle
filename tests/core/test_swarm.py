@@ -850,3 +850,36 @@ async def test_completion_of_ordinary_work_skips_swarm_reads(
         assert await swarm.record_worker_completion("plain-parent", worker) == []
     assert len(calls) == 1  # one gate read per session per process
     snapshots.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_lease_claim_releases_the_claimed_run(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    from app.core.config import settings
+    from app.core.task_registry import task_registry
+    from app.db import runs
+    sid = "orphan-claim-cancelled"
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid)
+    task_registry.resume_task(sid, wids["a"])
+    monkeypatch.setattr(swarm, "_stop_item", AsyncMock())
+    entered, gate = threading.Event(), threading.Event()
+    original = runs.claim_run
+    def slow_claim(session_id: str, runner_id: str, ttl_seconds: int) -> dict | None:
+        entered.set()
+        assert gate.wait(10)
+        return original(session_id, runner_id, ttl_seconds)  # commits after the cancel
+    monkeypatch.setattr(runs, "claim_run", slow_claim)
+    cancelling = asyncio.create_task(swarm.cancel(sid, key))
+    assert await asyncio.to_thread(entered.wait, 10)
+    cancelling.cancel()
+    await asyncio.sleep(0)
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelling
+    assert runs.get_active_run(sid) is None  # the claim was released, not abandoned
+    monkeypatch.setattr(runs, "claim_run", original)
+    turn_run = runs.claim_run(sid, settings.effective_instance_id, 60)
+    assert turn_run is not None  # the session's next turn can claim at once
+    assert (await swarm.snapshots(sid))[0]["status"] == "running"  # nothing landed

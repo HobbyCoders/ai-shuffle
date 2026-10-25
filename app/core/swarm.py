@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 from fluid.swarm import (
     RESULT_LIMIT, TERMINAL, SwarmCoordinator, current_launch, now, recover, validate,
 )
@@ -213,6 +214,16 @@ def _append_authority(
     return False, run["id"], run["fence_token"]
 
 
+async def _drain(task: asyncio.Task) -> Any:
+    """Finish ``task`` even when the caller's cancellation repeats."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
 @contextlib.asynccontextmanager
 async def _append_lease(
     session_id: str, run_id: str | None, fence_token: int | None,
@@ -242,12 +253,28 @@ async def _append_lease(
             return None, None
         return (claimed["id"], claimed["fence_token"]), claimed
 
-    fence, held = await asyncio.to_thread(acquire)
+    async def release(claimed: dict | None) -> None:
+        # Shielded: a cancelled caller must not leave the session claimed.
+        if claimed is not None:
+            await _drain(asyncio.create_task(asyncio.to_thread(
+                runs.release_run, claimed["id"], claimed["fence_token"])))
+
+    # The claim commits in its thread even when the caller is cancelled while
+    # it runs, so never abandon it: drain it and release what it claimed.
+    acquiring = asyncio.create_task(asyncio.to_thread(acquire))
+    try:
+        fence, held = await asyncio.shield(acquiring)
+    except asyncio.CancelledError:
+        try:
+            _, claimed = await _drain(acquiring)
+        except Exception:
+            claimed = None  # the claim itself failed: nothing to release
+        await release(claimed)
+        raise
     try:
         yield fence
     finally:
-        if held is not None:
-            await asyncio.to_thread(runs.release_run, held["id"], held["fence_token"])
+        await release(held)
 
 
 def _worker_id(task: dict) -> str | None:
