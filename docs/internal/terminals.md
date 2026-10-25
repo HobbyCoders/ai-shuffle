@@ -26,7 +26,9 @@ legs require authenticated HTTPS, with no plaintext fallback. Pending requests
 expire after two minutes; approved grants are single-use with a ten-minute
 maximum, and 30 seconds without relay activity closes the shell. Revocation,
 expiry, lost membership, either owner's sign-out, or process restart ends
-access. Audit records cover request, approval, refusal, open and close, never
+access. Audit records cover request, approval, refusal, open and close on the
+recipient (`app.network.terminal_relay`) and request, open, refused open and
+close on the source (`app.api.terminals`, `app.core.terminal_targets`), never
 input/output, credentials or lease tokens. This strict per-use approval on the
 recipient is intentional; any less restrictive policy needs an owner decision.
 
@@ -107,8 +109,13 @@ other than these owner API routes and out of logs/storage. It is not proof on B.
 Unreachable/insecure peers return 503 detail `{code,message}`; invalid/expired
 source authorizations return 403; missing peers 404; locally unavailable
 request targets 409 with the reason object. Existing terminal create failures
-retain `{detail,code}`. Real two-worker verification is still outstanding;
-in-process tests exercise real recipient HTTP owner checks and relay PTYs.
+retain `{detail,code}`. Real two-worker verification is still outstanding
+(live-smoke `two-worker-smoke.peer-terminal-acceptance`). In-process tests
+exercise real recipient HTTP owner checks and relay PTYs, including reconnect
+(`tests/api/test_peer_terminal_authorization.py`), and two harness workers with
+separate identities over the real signed `/peer/control/terminal` route
+(`tests/core/network/test_peer_terminal_control.py`): compatible, old and
+turned-off peers, forged leases, plaintext routes and unauthenticated callers.
 
 SSH targets require an active, writable machine grant for this chat (including
 grants approved from saved connections). They reuse the private-access SSH

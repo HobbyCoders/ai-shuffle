@@ -471,8 +471,10 @@
 	.tab-shell { flex-shrink: 0; }
 	/* One line, cut with an ellipsis (the full name is its title). It may
 	   shrink, so it never runs under the close button; the folder gives way first. */
-	.tab-host { flex: 0 1 auto; min-width: 0; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
+	.tab-host { flex: 0 1 auto; min-width: 0; max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
 		color: var(--primary); background: color-mix(in oklch, var(--primary) 13%, transparent); }
+	/* A shell on another worker: room for the worker's name next to the shell. */
+	.tab:has(.tab-host) { flex-basis: 232px; max-width: 232px; }
 	.tab-folder { flex-shrink: 100; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
 	.tab-close { position: absolute; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); cursor: pointer; opacity: 0; transition: opacity 0.12s; }
 	.tab:hover .tab-close, .tab.current .tab-close, .tab-close:focus-visible { opacity: 1; }
@@ -551,8 +553,9 @@
 		.tab { flex-basis: 96px; min-width: 76px; }
 		/* A shell on another worker: the worker matters more than the shell
 		   name here (the status bar still shows both), so the badge gets the room. */
-		.tab:has(.tab-host) { flex-basis: 128px; min-width: 112px; max-width: 128px; }
+		.tab:has(.tab-host) { flex-basis: 156px; min-width: 112px; max-width: 156px; }
 		.tab-select:has(.tab-host) .tab-shell { display: none; }
+		.tab-host { max-width: none; }
 	}
 
 	@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--success) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }

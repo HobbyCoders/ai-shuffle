@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { age, codeGroups, countdown, isPeerTarget, localWorkerId, openErrorMessage, peerChip, peerReason, selectable } from './peer';
+import { age, codeGroups, countdown, isPeerTarget, localWorkerId, openErrorMessage, peerChip, peerReason, peerRow, selectable } from './peer';
 import type { TerminalTarget } from '$lib/api/terminals';
 
 const row = (over: Partial<TerminalTarget>): TerminalTarget => ({ kind: 'worker', worker_id: 'b', name: 'B', available: false, ...over });
@@ -27,6 +27,16 @@ describe('peer target rules', () => {
 		expect(peerChip(row({ available: true, authorization_id: 'x' })).label).toBe('Approved');
 		expect(peerReason(row({ reason_code: 'peer_offline', reason: 'The peer worker is offline.' }))).toBe('The peer worker is offline.');
 		expect(peerReason(row({ reason_code: 'recipient_approval_required' }))).toBe('Approve on B to open one shell.');
+	});
+
+	it("shows the owner's live request on the row instead of the last target list", () => {
+		const approvable = row({ reason_code: 'recipient_approval_required' });
+		expect(peerRow(approvable)).toEqual({ chip: { label: 'Needs approval', tone: 'wait' }, reason: 'Approve on B to open one shell.' });
+		expect(peerRow(approvable, 'requesting').chip).toEqual({ label: 'Waiting', tone: 'wait' });
+		expect(peerRow(approvable, 'pending')).toEqual({ chip: { label: 'Waiting', tone: 'wait' }, reason: 'Waiting for approval on B. Compare the code below.' });
+		expect(peerRow(approvable, 'approved')).toEqual({ chip: { label: 'Approved', tone: 'ok' }, reason: 'Approved for one shell. Open it below.' });
+		// An ended request leaves the row to what the worker reports.
+		expect(peerRow(row({ reason_code: 'peer_offline', reason: 'Offline.' }), 'ended')).toEqual({ chip: { label: 'Offline', tone: 'off' }, reason: 'Offline.' });
 	});
 });
 

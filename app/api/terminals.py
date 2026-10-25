@@ -244,6 +244,8 @@ async def request_peer_terminal(body: PeerAuthorizationBody, request: Request,
         result = await _peer_call(body.worker_id, "request", lease)
         if result.get("status") == "unavailable":
             terminal_relay.forget(lease)
+        logger.info("peer terminal requested worker=%s status=%s by=%s", body.worker_id,
+                    result.get("status"), who)
         return _peer_authorization_response(result, body.worker_id, lease)
     except BaseException:
         terminal_relay.forget(lease)

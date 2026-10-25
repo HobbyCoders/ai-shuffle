@@ -4,7 +4,7 @@
 	import { Folder, TerminalSquare, ShieldCheck, LoaderCircle, TriangleAlert } from 'lucide-svelte';
 	import { cwdProblem, type ProbeState } from '$lib/terminal/gating';
 	import type { CreateTerminal, TerminalTarget } from '$lib/api/terminals';
-	import { APPROVAL_REQUIRED, PENDING_SECONDS, isPeerTarget, localWorkerId, openErrorMessage, peerChip, peerReason, selectable, type OpenResult } from '$lib/terminal/peer';
+	import { APPROVAL_REQUIRED, PENDING_SECONDS, isPeerTarget, localWorkerId, openErrorMessage, peerRow, selectable, type OpenResult } from '$lib/terminal/peer';
 	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
 	import PeerCode from './PeerCode.svelte';
 
@@ -160,8 +160,9 @@
 			<div class="targets">
 				{#each destinations as target, index (targetKey(target))}
 					{@const value = index === 0 ? '' : targetKey(target)}
-					{@const chip = index === 0 || target.kind === 'ssh' ? (target.available ? null : { label: 'Unavailable', tone: 'off' }) : peerChip(target)}
-					{@const reason = isPeerTarget(target, localId) ? peerReason(target) : null}
+					{@const row = isPeerTarget(target, localId) ? peerRow(target, peerTerminals.flow(target.worker_id)?.phase) : null}
+					{@const chip = row ? row.chip : target.available ? null : { label: 'Unavailable', tone: 'off' }}
+					{@const reason = row?.reason ?? null}
 					<label class="target" class:on={selected === value} class:off={!selectable(target)}>
 						<input type="radio" name="terminal-target" {value} checked={selected === value} disabled={!selectable(target)}
 							aria-label={[target.name, kindLabel(target, index), chip?.label].filter(Boolean).join(', ')}
@@ -197,7 +198,7 @@
 				{#if flow.unreachable}<p class="note warn">Can't reach {flow.name} right now. Still waiting…</p>{/if}
 			</div>
 		{:else if stage === 'approved'}
-			<p class="approved" role="status"><ShieldCheck size={15} aria-hidden="true" /><span>Approved on {peer.name} for one shell{#if flow?.phase === 'approved'} · <time>{Math.ceil(left(flow.expiresAt) / 60)} min</time> left{/if}</span></p>
+			<p class="approved" role="status"><ShieldCheck size={15} aria-hidden="true" /><span>Approved on {peer.name} for one shell{#if flow?.phase === 'approved'}{' · '}<span class="left"><time>{Math.ceil(left(flow.expiresAt) / 60)} min</time> left</span>{/if}</span></p>
 			<label class="field">
 				<span class="label">Folder</span>
 				<span class="input-wrap" class:invalid={!!folderError || !!remoteFolderError}>
@@ -316,8 +317,9 @@
 	.target.off .t-name { color: var(--muted-foreground); }
 	.target input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: inherit; }
 	.target:has(input:focus-visible) { outline: 2px solid var(--ring); outline-offset: 1px; }
-	.t-text { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-	.t-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12.5px var(--font-sans); color: var(--foreground); }
+	/* On a narrow row the kind drops under the name instead of cutting it short. */
+	.t-text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; min-width: 0; }
+	.t-name { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12.5px var(--font-sans); color: var(--foreground); }
 	.t-kind { flex-shrink: 0; font-size: 11px; color: var(--subtle-foreground); }
 	.t-reason { grid-column: 1 / -1; font-size: 11.5px; line-height: 1.4; color: var(--muted-foreground); }
 	.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
@@ -341,6 +343,7 @@
 	.approved { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: calc(var(--radius) - 4px);
 		font-size: 12px; color: var(--success); background: color-mix(in oklch, var(--success) 10%, transparent); }
 	.approved time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+	.approved .left { white-space: nowrap; }
 	.ghost.danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, var(--border-strong)); }
 	.ghost.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 10%, transparent); }
 	.ghost:disabled { opacity: 0.45; cursor: not-allowed; }

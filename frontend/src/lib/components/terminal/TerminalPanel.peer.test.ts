@@ -110,6 +110,20 @@ describe('a shell on a peer worker', () => {
 		expect(within(ended).getByText(/asks for approval again/)).toBeTruthy();
 	});
 
+	it('closes a peer shell through the same route as a local one, from the tab or the exited card', async () => {
+		api.close.mockResolvedValue({ closed: true });
+		const peerShell = { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner' };
+		const view = await mount(withPeer(), [info('t1', peerShell), info('t2', { ...peerShell, state: 'exited', exit_code: 0 })]);
+		expect(view.getAllByRole('tab').map((tab) => tab.getAttribute('title'))).toEqual(['Desk: /home/owner', 'Desk: /home/owner']);
+		await fireEvent.click(view.getByRole('button', { name: 'Close terminal 1' }));
+		await waitFor(() => expect(api.close).toHaveBeenCalledWith('t1'));
+		await waitFor(() => expect(view.getAllByRole('tab')).toHaveLength(1));
+		const ended = await view.findByRole('group', { name: 'Shell exited' });
+		await fireEvent.click(within(ended).getByRole('button', { name: /Close/ }));
+		await waitFor(() => expect(api.close).toHaveBeenCalledWith('t2'));
+		await waitFor(() => expect(view.queryAllByRole('tab')).toHaveLength(0));
+	});
+
 	it('offers no Restart for a worker shell while this worker is not yet identified', async () => {
 		const view = await mount({ ...base, targets: [] }, [info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, state: 'exited', exit_code: 0 })]);
 		const ended = await view.findByRole('group', { name: 'Shell exited' });

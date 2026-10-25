@@ -60,6 +60,19 @@ export function peerReason(target: TerminalTarget): string | null {
 	return target.reason || 'This worker is unavailable right now.';
 }
 
+/**
+ * Chip and reason for a peer row, given this owner's live request for it
+ * (`phase` of the source flow). While a request waits or holds an approval
+ * the row says what the card under the list says, not the last target list.
+ */
+export function peerRow(target: TerminalTarget, phase?: string | null): { chip: { label: string; tone: Tone }; reason: string | null } {
+	if (phase === 'requesting' || phase === 'pending') {
+		return { chip: { label: 'Waiting', tone: 'wait' }, reason: `Waiting for approval on ${target.name}. Compare the code below.` };
+	}
+	if (phase === 'approved') return { chip: { label: 'Approved', tone: 'ok' }, reason: 'Approved for one shell. Open it below.' };
+	return { chip: peerChip(target), reason: peerReason(target) };
+}
+
 /** "1:54" for a countdown; "0:00" once it runs out. */
 export function countdown(seconds: number): string {
 	const s = Math.max(0, Math.ceil(seconds));

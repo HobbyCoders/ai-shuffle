@@ -448,6 +448,15 @@
           "how": "Start a throwaway no-project chat on the first worker and send one message. At desktop width open its runner chip and pick the other worker, then move it back the same way. Repeat with a second throwaway no-project chat whose agent calls HandOffSession naming the other worker. Archive both chats afterwards.",
           "pass_when": "The saved chat shows its runner chip with the other worker listed, and no commit-and-push dialog appears. Each move succeeds: the target owns the chat, the full transcript is there, and the next message runs on the target in its own workspace folder. The HandOffSession outcome row does not mention a branch. Moving back restores ownership on the first worker.",
           "past_bug": "#639: no-project chats hid the runner chip, so none could be moved to another worker."
+        },
+        {
+          "id": "two-worker-smoke.peer-terminal-acceptance",
+          "check": "Owner-approved terminal on a peer worker, end to end",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On two paired workers that both reach each other over HTTPS, turn on network_peer_terminals in owner policy. On worker A open the Terminal panel, choose + > Target and check each peer row's reason (offline, older version, turned off on the peer, no HTTPS). Request approval for worker B, compare the six-character code with B's Terminal requests list, tick the match box and approve one shell on B while signed in there as the owner. Open it on A; run a command, resize the panel, reload the page and reconnect, then close the tab. Repeat with a revoke on B, a sign-out on B and a two-minute unapproved request. Attempt the routes with an API key and a preview link. Read both workers' app logs.",
+          "pass_when": "Output and resize reach B's real shell, and reload reconnects to the same shell with its recent output. Close, revoke, sign-out and expiry end the shell on both workers and reopening needs a new approval. Unusable peers show their reason and cannot be requested. API keys and preview links are refused. Both workers log request, open and close, with no lease, credential or terminal text. Record the tested revision on #196.",
+          "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
         }
       ]
     },
