@@ -180,35 +180,62 @@ def _locally_owned(session_id: str, key: str) -> bool:
     return key in getattr(live, "swarms", {})
 
 
-def _ownership_refused(
+def _append_authority(
     session_id: str, run_id: str | None, fence_token: int | None,
-) -> bool:
-    """True when another runner may be executing this session's workflows.
+) -> tuple[bool, str | None, int | None]:
+    """``(refused, run_id, fence_token)`` for appending to an orphaned workflow.
 
     With a lease (turn start) the proof is that lease. Without one (boot,
-    cancel) a live run claimed by a different runner, as after a remote
-    hand-off, means its coordinator may live there: leave it alone.
+    cancel, a worker's completion) a live run claimed by a different runner,
+    as after a remote hand-off, means its coordinator may live there: leave it
+    alone. A live run of this runner fences the append, so a claim that moves
+    the session elsewhere in the meantime makes the write fail, not land.
     """
     if run_id is not None:
-        return not _owns_recovery_lease(session_id, run_id, fence_token)
+        return not _owns_recovery_lease(session_id, run_id, fence_token), run_id, fence_token
     from app.core.config import settings
     from app.db.runs import get_active_run
 
     run = get_active_run(session_id)
-    return run is not None and run.get("runner_id") != settings.effective_instance_id
+    if run is None:
+        return False, None, None
+    if run.get("runner_id") != settings.effective_instance_id:
+        return True, None, None
+    return False, run["id"], run["fence_token"]
+
+
+def _worker_id(task: dict) -> str | None:
+    """The item's CURRENT worker: a retry rebinds it, ``task_id`` is the first spawn."""
+    worker_id = task.get("worker_session_id") or task.get("task_id")
+    return str(worker_id) if worker_id else None
 
 
 def _worker_outcome(session_id: str, task: dict) -> tuple[str, str]:
-    """``(running|completed|interrupted, result)`` from an item's worker task."""
-    from app.core.task_registry import task_registry
+    """``(running|completed|interrupted|unknown, result)`` for an item's worker.
 
-    task_id = task.get("task_id") or task.get("worker_session_id")
-    if not task_id:
+    ``unknown`` means the durable record could not be read: never evidence
+    that the worker stopped.
+    """
+    from app.core.task_registry import restored_status, task_registry
+    from app.db import background_tasks as background_tasks_db
+
+    worker_id = _worker_id(task)
+    if not worker_id:
         return "interrupted", ""
-    record = task_registry.get_task(session_id, str(task_id), durable=True) or {}
-    if record.get("status") == "running":
+    record = task_registry.get_task(session_id, worker_id)
+    if record is None:
+        try:
+            row = background_tasks_db.get_background_task(worker_id, session_id)
+        except Exception:
+            logger.debug("Swarm: worker outcome unreadable for %s", worker_id, exc_info=True)
+            return "unknown", ""
+        record = {} if row is None else dict(
+            status=restored_status(row.get("status"), row.get("reason")),
+            summary=row.get("summary"), report_path=row.get("report_path"))
+    status = record.get("status")
+    if status == "running":
         return "running", ""
-    if record.get("status") != "completed":
+    if status != "completed":
         return "interrupted", ""
     path = record.get("reportPath") or record.get("report_path")
     if path:
@@ -220,27 +247,32 @@ def _worker_outcome(session_id: str, task: dict) -> tuple[str, str]:
     return "completed", str(record.get("summary") or "")[:RESULT_LIMIT]
 
 
-def _reconcile_items(session_id: str, snapshot: dict) -> tuple[dict, list[dict]]:
+def _reconcile_items(
+    session_id: str, snapshot: dict, *, reopen: frozenset = frozenset(),
+) -> tuple[dict, list[dict], bool]:
     """A copy of an orphaned workflow carrying each worker's real outcome.
 
-    Completed workers become completed items with their report. Returns the
-    copy and the items whose worker is still running; the rest stay open for
-    the caller to settle.
+    Open items, plus terminal items whose status is in ``reopen``, take their
+    worker's outcome: completed workers become completed items with their
+    report. Returns the copy, the items whose worker is still running, and
+    whether any outcome was unreadable; the rest stay for the caller to settle.
     """
     snapshot = copy.deepcopy(snapshot)
     running = []
+    unknown = False
     for task in snapshot["tasks"]:
-        if task["status"] in TERMINAL or not (
-            task.get("task_id") or task.get("worker_session_id")
-        ):
+        if (task["status"] in TERMINAL and task["status"] not in reopen) or not _worker_id(task):
             continue
         state, result = _worker_outcome(session_id, task)
         if state == "running":
             running.append(task)
+        elif state == "unknown":
+            unknown = True
         elif state == "completed":
             task.update(status="completed", result=result, error=None,
-                        finished_at=task.get("finished_at") or now())
-    return snapshot, running
+                        finished_at=now() if task["status"] in TERMINAL
+                        else task.get("finished_at") or now())
+    return snapshot, running, unknown
 
 
 async def _proven_ended(session_id: str, keys: list[str]) -> set[str]:
@@ -251,17 +283,31 @@ async def _proven_ended(session_id: str, keys: list[str]) -> set[str]:
     return {frame["task_id"] for frame in frames}
 
 
-async def _open_orphan_candidates(session_id: str) -> list[dict]:
-    """Non-terminal snapshots no local coordinator owns, behind a cheap gate."""
+async def _killed_snapshots(session_id: str) -> list[dict]:
+    """Snapshots no local coordinator owns, behind a cheap killed-row gate."""
     from app.db.background_tasks import list_sessions_with_killed_swarms
 
     if not await asyncio.to_thread(list_sessions_with_killed_swarms, session_id):
         return []
     return [
         snapshot for snapshot in await snapshots(session_id)
-        if snapshot.get("status") not in TERMINAL_STATUSES
-        and not _locally_owned(session_id, snapshot["id"])
+        if not _locally_owned(session_id, snapshot["id"])
     ]
+
+
+async def _publish_owned(
+    session_id: str, rows: list[dict], run_id: str | None, fence_token: int | None,
+) -> list[dict]:
+    """Append ``rows`` unless ownership moved during the reads before it."""
+    refused, run_id, fence_token = await asyncio.to_thread(
+        _append_authority, session_id, run_id, fence_token,
+    )
+    if refused:
+        return []
+    rows = [s for s in rows if not _locally_owned(session_id, s["id"])]
+    for snapshot in rows:
+        await persist(snapshot, run_id=run_id, fence_token=fence_token)
+    return rows
 
 
 async def settle_orphans(
@@ -273,18 +319,25 @@ async def settle_orphans(
     Orphaned means: the latest snapshot is non-terminal, no coordinator here
     owns it, and this install recorded the workflow's own task as ended (a
     restart reap). Each item takes its worker's real outcome; a workflow with a
-    worker still running is left for a later pass. The aggregate is completed
-    only when every item completed, otherwise interrupted. Returns the
-    published snapshots. Reads (``snapshots``) never do this themselves.
+    worker still running, or one whose outcome cannot be read, is left for a
+    later pass. The aggregate is completed only when every item completed,
+    otherwise interrupted. Returns the published snapshots. Reads
+    (``snapshots``) never do this themselves.
     """
     if not session_id or session_id in _orphan_free:
         return []
     async with _locks.setdefault(session_id, asyncio.Lock()):
-        candidates = await _open_orphan_candidates(session_id)
+        candidates = [
+            s for s in await _killed_snapshots(session_id)
+            if s.get("status") not in TERMINAL_STATUSES
+        ]
         if not candidates:
             _orphan_free.add(session_id)
             return []
-        if await asyncio.to_thread(_ownership_refused, session_id, run_id, fence_token):
+        refused, _, _ = await asyncio.to_thread(
+            _append_authority, session_id, run_id, fence_token,
+        )
+        if refused:
             return []
         ended = await _proven_ended(session_id, [s["id"] for s in candidates])
         deferred = len(ended) < len(candidates)
@@ -292,8 +345,10 @@ async def settle_orphans(
         for snapshot in candidates:
             if snapshot["id"] not in ended:
                 continue
-            snapshot, running = await asyncio.to_thread(_reconcile_items, session_id, snapshot)
-            if running:
+            snapshot, running, unknown = await asyncio.to_thread(
+                _reconcile_items, session_id, snapshot,
+            )
+            if running or unknown:
                 deferred = True
                 continue
             if all(task["status"] == "completed" for task in snapshot["tasks"]):
@@ -302,13 +357,11 @@ async def settle_orphans(
                 snapshot = recover(snapshot)
             settled.append(snapshot)
         # Recheck after the evidence reads, before any durable write.
-        if settled and await asyncio.to_thread(
-            _ownership_refused, session_id, run_id, fence_token,
-        ):
-            return []
-        settled = [s for s in settled if not _locally_owned(session_id, s["id"])]
-        for snapshot in settled:
-            await persist(snapshot, run_id=run_id, fence_token=fence_token)
+        if settled:
+            published = await _publish_owned(session_id, settled, run_id, fence_token)
+            if len(published) < len(settled):
+                return published
+            settled = published
         if not deferred:
             _orphan_free.add(session_id)
         return settled
@@ -327,32 +380,103 @@ async def settle_orphans_at_boot(limit: int = 200) -> int:
     return count
 
 
-async def _cancel_orphan(session_id: str, key: str) -> dict | None:
-    """Cancel an orphaned workflow here; None when it may run elsewhere."""
+async def record_worker_completion(session_id: str, worker_id: str) -> list[dict]:
+    """Write a late worker completion back into its orphaned workflow.
+
+    Called from the parent's terminal-delivery producer when a worker reports
+    completion. A live coordinator records its own workers; here only a
+    workflow whose coordinator died with an earlier process is touched: an
+    open one is settled, and a restart-interrupted item of a settled one takes
+    the worker's result (the workflow becomes completed once every item is).
+    Returns the published snapshots; never raises.
+    """
+    if not session_id or not worker_id or worker_id.startswith("swarm_") or worker_id in workers:
+        return []
+    try:
+        # A completion can be what a deferred settlement was waiting for.
+        _orphan_free.discard(session_id)
+        published = await settle_orphans(session_id)
+        async with _locks.setdefault(session_id, asyncio.Lock()):
+            targets = [
+                s for s in await _killed_snapshots(session_id)
+                if s.get("status") == "interrupted" and any(
+                    t["status"] == "interrupted" and _worker_id(t) == worker_id
+                    for t in s["tasks"])
+            ]
+            if not targets:
+                return published
+            ended = await _proven_ended(session_id, [s["id"] for s in targets])
+            updated = []
+            for snapshot in targets:
+                if snapshot["id"] not in ended:
+                    continue
+                item = [t for t in snapshot["tasks"] if _worker_id(t) == worker_id]
+                result, _, _ = await asyncio.to_thread(
+                    _reconcile_items, session_id, dict(snapshot, tasks=item),
+                    reopen=frozenset({"interrupted"}),
+                )
+                if result["tasks"][0]["status"] != "completed":
+                    continue
+                rows = {t["id"]: t for t in result["tasks"]}
+                snapshot = copy.deepcopy(snapshot)
+                snapshot["tasks"] = [rows.get(t["id"], t) for t in snapshot["tasks"]]
+                if all(t["status"] == "completed" for t in snapshot["tasks"]):
+                    snapshot["status"] = "completed"
+                snapshot["updated_at"] = now()
+                updated.append(snapshot)
+            if updated:
+                published += await _publish_owned(session_id, updated, None, None)
+        return published
+    except Exception:
+        logger.warning("Swarm: worker write-back failed for %s/%s", session_id, worker_id,
+                       exc_info=True)
+        return []
+
+
+_UNREADABLE = "unreadable"
+
+
+async def _cancel_orphan(session_id: str, key: str) -> dict | str | None:
+    """Cancel an orphaned workflow here.
+
+    None when it may run elsewhere; ``_UNREADABLE`` when a worker's outcome
+    cannot be read yet, so nothing was stopped or written.
+    """
     async with _locks.setdefault(session_id, asyncio.Lock()):
         snapshot = next((s for s in await snapshots(session_id) if s["id"] == key), None)
         if snapshot is None:
             raise ValueError("Unknown swarm")
         if snapshot["status"] in TERMINAL_STATUSES:
             return snapshot
-        if _locally_owned(session_id, key) or await asyncio.to_thread(
-            _ownership_refused, session_id, None, None,
-        ) or key not in await _proven_ended(session_id, [key]):
+        if _locally_owned(session_id, key) or (await asyncio.to_thread(
+            _append_authority, session_id, None, None,
+        ))[0] or key not in await _proven_ended(session_id, [key]):
             return None
-        snapshot, running = await asyncio.to_thread(_reconcile_items, session_id, snapshot)
-        await asyncio.gather(*(
-            cancel_worker(str(task.get("task_id") or task["worker_session_id"]))
-            for task in running))
+        snapshot, running, unknown = await asyncio.to_thread(
+            _reconcile_items, session_id, snapshot,
+        )
+        if unknown:
+            return _UNREADABLE
+        # Recheck after the evidence and outcome reads, before stopping anyone;
+        # the final append is fenced to the run that authority came from.
+        refused, run_id, fence_token = await asyncio.to_thread(
+            _append_authority, session_id, None, None,
+        )
+        if refused or _locally_owned(session_id, key):
+            return None
+        await asyncio.gather(*(cancel_worker(_worker_id(task)) for task in running))
         stamp = now()
         for task in snapshot["tasks"]:
             if task["status"] not in TERMINAL:
                 task.update(status="cancelled", error="Swarm cancelled", finished_at=stamp)
         snapshot.update(status="cancelled", updated_at=stamp)
-        await persist(snapshot)
+        await persist(snapshot, run_id=run_id, fence_token=fence_token)
         return snapshot
 
 
-async def reconcile_owned_pending(session_id, run_id, fence_token):
+async def reconcile_owned_pending(
+    session_id: str, run_id: str, fence_token: int,
+) -> list[str]:
     """Repair pooled Swarm receipts only at the runtime's leased reader boundary.
 
     Connect and turn-end reconciliation still own general Task hygiene. Here we
@@ -368,7 +492,9 @@ async def reconcile_owned_pending(session_id, run_id, fence_token):
     return await _reconcile_pending_receipts(session_id, run_id, fence_token)
 
 
-async def _reconcile_pending_receipts(session_id, run_id, fence_token):
+async def _reconcile_pending_receipts(
+    session_id: str, run_id: str, fence_token: int,
+) -> list[str]:
     from app.core.pending_reconcile import (
         _pooled_adapter, engine_pending_task_ids, terminal_frames_for,
     )
@@ -512,6 +638,9 @@ async def cancel(session_id, key):
         if orphan is None:
             raise SwarmUnavailableError(
                 "Swarm cancellation is unavailable on this runner; contact the execution owner")
+        if orphan == _UNREADABLE:
+            raise SwarmUnavailableError(
+                "Couldn't read this swarm's workers right now; nothing was stopped. Try again.")
         return orphan
     return snapshot
 

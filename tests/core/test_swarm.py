@@ -1,5 +1,7 @@
 import asyncio
 import copy
+from pathlib import Path
+from typing import Any
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
@@ -430,15 +432,18 @@ async def test_recovery_keeps_durable_terminal_outcome(agents, monkeypatch, stat
     assert len(get_events("terminal", 0, 500)) == 1
 
 
-async def _start_blocked_swarm(agents, monkeypatch, sid, ids=("a", "b")):
+async def _start_blocked_swarm(
+    agents: Any, monkeypatch: pytest.MonkeyPatch, sid: str,
+    ids: tuple[str, ...] = ("a", "b"),
+) -> tuple[str, dict[str, str]]:
     """Start a real Swarm whose workers are mid-flight; returns (key, worker ids)."""
     from app.core import task_dispatch, provider_agent, turn_scheduler
     from app.core.task_registry import task_registry
     _mk_session(agents, sid, "root-agent")
     monkeypatch.setattr(task_dispatch, "_await_worker_registration", AsyncMock(return_value=True))
-    monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
+    monkeypatch.setattr(turn_scheduler, "_on_task_terminal_locked", AsyncMock())
     gate = asyncio.Event()
-    async def worker(**kwargs):
+    async def worker(**kwargs: Any) -> None:
         task_registry.start_task(sid, kwargs["worker_session_id"], "agent", "worker")
         await gate.wait()
     monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
@@ -455,7 +460,20 @@ async def _start_blocked_swarm(agents, monkeypatch, sid, ids=("a", "b")):
     return key, {item: rows[item]["worker_session_id"] for item in ids}
 
 
-async def _restart(sid):
+async def _retry(sid: str, first_worker: str, retry_worker: str) -> None:
+    """The dispatch producer's automatic retry: it rebinds the item to a new worker."""
+    from fluid.swarm import current_launch
+    from app.core.task_registry import task_registry
+    token = current_launch.set(swarm.workers[first_worker])
+    try:
+        await swarm.bind_worker(retry_worker, sid)
+    finally:
+        current_launch.reset(token)
+    task_registry.complete_task(sid, first_worker, "error", summary="provider failed to start")
+    task_registry.start_task(sid, retry_worker, "agent", "worker retry")
+
+
+async def _restart(sid: str, *, hydrate: bool = True) -> None:
     """What an unclean exit plus boot reconcile leaves: no coordinator, reaped rows."""
     from app.core import task_persistence
     from app.core.task_registry import task_registry
@@ -478,23 +496,36 @@ async def _restart(sid):
     task_registry._recent_terminal.pop(sid, None)
     task_registry._hydrated.discard(sid)
     assert mark_stale_background_tasks_killed()
-    await task_registry.ensure_hydrated(sid)
+    if hydrate:
+        await task_registry.ensure_hydrated(sid)
 
 
-async def _finish_resumed_worker(sid, worker_id, tmp_path):
-    """A worker continued after the restart (SendMessage) finishes with a report."""
-    from app.core import task_persistence
+async def _finish_resumed_worker(
+    sid: str, worker_id: str, tmp_path: Path, *, report_back: bool = False,
+) -> None:
+    """A worker continued after the restart (SendMessage) finishes with a report.
+
+    ``report_back`` also delivers its completion to the parent the way the
+    resume path does (``turn_scheduler.on_task_terminal``).
+    """
+    from app.core import task_persistence, turn_scheduler
     from app.core.task_registry import task_registry
     report = tmp_path / f"{worker_id}.md"
-    report.write_text("resumed worker report", encoding="utf-8")
+    report.write_text(f"report of {worker_id}", encoding="utf-8")
     task_registry.resume_task(sid, worker_id)
     task_registry.complete_task(sid, worker_id, "completed", summary="done",
                                 report_path=str(report), report_chars=21)
     await task_persistence.flush()
+    if report_back:
+        await turn_scheduler.on_task_terminal(sid, {
+            "task_id": worker_id, "tool_use_id": worker_id, "status": "completed",
+            "summary": "done", "agent_message_turn_id": f"turn-{worker_id}",
+            "report_path": str(report)})
 
 
 @pytest.mark.asyncio
-async def test_restart_orphan_settles_from_worker_outcomes(agents, monkeypatch, tmp_path):
+async def test_restart_orphan_settles_from_worker_outcomes(
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.core.config import settings
     from app.db import runs
     sid = "orphan-parent"
@@ -509,13 +540,13 @@ async def test_restart_orphan_settles_from_worker_outcomes(agents, monkeypatch, 
     assert snapshot["id"] == key and snapshot["status"] == "interrupted"
     rows = {t["id"]: t for t in snapshot["tasks"]}
     assert rows["a"]["status"] == "completed"
-    assert rows["a"]["result"] == "resumed worker report"
+    assert rows["a"]["result"] == f"report of {wids['a']}"
     assert rows["b"]["status"] == "interrupted"
 
 
 @pytest.mark.asyncio
 async def test_boot_settles_orphan_completed_when_every_worker_finished(
-        agents, monkeypatch, tmp_path):
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.core import startup_reconcile
     sid = "orphan-done"
     _, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
@@ -529,7 +560,94 @@ async def test_boot_settles_orphan_completed_when_every_worker_finished(
 
 
 @pytest.mark.asyncio
-async def test_orphan_with_a_running_worker_is_not_settled(agents, monkeypatch, tmp_path):
+async def test_boot_then_resumed_workers_write_back_and_complete(
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from app.core import startup_reconcile
+    sid = "orphan-late"
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid)
+    # Boot first: nothing is running yet, so the workflow settles interrupted.
+    assert await startup_reconcile._settle_orphaned_swarms() == 1
+    assert sid in swarm._orphan_free
+    assert (await swarm.snapshots(sid))[0]["status"] == "interrupted"
+    # Then each worker is continued with SendMessage and reports back.
+    await _finish_resumed_worker(sid, wids["a"], tmp_path, report_back=True)
+    snapshot = (await swarm.snapshots(sid))[0]
+    rows = {t["id"]: t for t in snapshot["tasks"]}
+    assert snapshot["status"] == "interrupted"
+    assert rows["a"]["status"] == "completed"
+    assert rows["a"]["result"] == f"report of {wids['a']}"
+    assert rows["b"]["status"] == "interrupted"
+    await _finish_resumed_worker(sid, wids["b"], tmp_path, report_back=True)
+    snapshot = (await swarm.snapshots(sid))[0]
+    assert snapshot["id"] == key and snapshot["status"] == "completed"
+    assert {t["status"] for t in snapshot["tasks"]} == {"completed"}
+
+
+@pytest.mark.asyncio
+async def test_restart_after_retry_reads_the_retry_worker(
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from app.core import task_persistence
+    from app.core.task_registry import task_registry
+    sid = "orphan-retry"
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _retry(sid, wids["a"], "retry-a")
+    await task_persistence.flush()
+    row = {t["id"]: t for t in (await swarm.snapshots(sid))[-1]["tasks"]}["a"]
+    assert row["task_id"] == wids["a"] and row["worker_session_id"] == "retry-a"
+    await _restart(sid)
+    task_registry.resume_task(sid, "retry-a")  # the retry is still working
+    stopped = []
+    async def stop(worker_id: str, reason: str) -> None:
+        stopped.append(worker_id)
+    monkeypatch.setattr(swarm, "_stop_item", stop)
+    assert await swarm.settle_orphans(sid) == []
+    snapshot = await swarm.cancel(sid, key)
+    assert stopped == ["retry-a"]
+    assert {t["id"]: t["status"] for t in snapshot["tasks"]} == {"a": "cancelled", "b": "cancelled"}
+    # And a retry that completed carries its own report.
+    sid2 = "orphan-retry-done"
+    _, wids2 = await _start_blocked_swarm(agents, monkeypatch, sid2)
+    await _retry(sid2, wids2["a"], "retry-a2")
+    await task_persistence.flush()
+    await _restart(sid2)
+    await _finish_resumed_worker(sid2, "retry-a2", tmp_path)
+    settled = await swarm.settle_orphans(sid2)
+    rows = {t["id"]: t for t in settled[0]["tasks"]}
+    assert rows["a"]["status"] == "completed" and rows["a"]["result"] == "report of retry-a2"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_worker_outcome_defers_settlement_and_cancel(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db import background_tasks
+    from app.db.session_events import get_events
+    sid = "orphan-unreadable"
+    key, _ = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid, hydrate=False)  # nothing in memory: the row is the only truth
+    original = background_tasks.get_background_task
+    def unreadable(task_id: str, session_id: str) -> dict | None:
+        if not task_id.startswith("swarm_"):
+            raise RuntimeError("database unavailable")
+        return original(task_id, session_id)
+    monkeypatch.setattr(background_tasks, "get_background_task", unreadable)
+    events = len(get_events(sid, 0, 500))
+    stop = AsyncMock()
+    monkeypatch.setattr(swarm, "_stop_item", stop)
+    assert await swarm.settle_orphans(sid) == []
+    assert sid not in swarm._orphan_free
+    with pytest.raises(swarm.SwarmUnavailableError, match="Try again"):
+        await swarm.cancel(sid, key)
+    stop.assert_not_awaited()
+    assert len(get_events(sid, 0, 500)) == events
+    assert (await swarm.snapshots(sid))[0]["status"] == "running"
+    monkeypatch.setattr(background_tasks, "get_background_task", original)
+    assert [s["status"] for s in await swarm.settle_orphans(sid)] == ["interrupted"]
+
+
+@pytest.mark.asyncio
+async def test_orphan_with_a_running_worker_is_not_settled(
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.core.task_registry import task_registry
     sid = "orphan-busy"
     _, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
@@ -545,7 +663,8 @@ async def test_orphan_with_a_running_worker_is_not_settled(agents, monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_live_coordinator_is_never_settled_and_cancels_normally(agents, monkeypatch):
+async def test_live_coordinator_is_never_settled_and_cancels_normally(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core import startup_reconcile
     from app.db.background_tasks import upsert_background_task
     sid = "orphan-live"
@@ -554,9 +673,10 @@ async def test_live_coordinator_is_never_settled_and_cancels_normally(agents, mo
     upsert_background_task(dict(task_id=key, session_id=sid, kind="agent", status="killed"))
     assert await swarm.settle_orphans(sid) == []
     assert await startup_reconcile._settle_orphaned_swarms() == 0
+    assert await swarm.record_worker_completion(sid, wids["a"]) == []
     assert (await swarm.snapshots(sid))[0]["status"] == "running"
     stopped = []
-    async def stop(worker_id, reason):
+    async def stop(worker_id: str, reason: str) -> None:
         stopped.append(worker_id)
         swarm.workers[worker_id].finish("cancelled", "stopped")
     monkeypatch.setattr(swarm, "_stop_item", stop)
@@ -569,7 +689,7 @@ async def test_live_coordinator_is_never_settled_and_cancels_normally(agents, mo
 
 @pytest.mark.asyncio
 async def test_cancel_orphan_returns_cancelled_snapshot_not_conflict(
-        agents, monkeypatch, tmp_path):
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.api import swarms
     from app.core.task_registry import task_registry
     sid = "orphan-cancel"
@@ -578,7 +698,7 @@ async def test_cancel_orphan_returns_cancelled_snapshot_not_conflict(
     await _finish_resumed_worker(sid, wids["a"], tmp_path)
     task_registry.resume_task(sid, wids["b"])  # still live: stopped individually
     stopped = []
-    async def stop(worker_id, reason):
+    async def stop(worker_id: str, reason: str) -> None:
         stopped.append((worker_id, reason))
     monkeypatch.setattr(swarm, "_stop_item", stop)
     monkeypatch.setattr(swarms, "owned_session", AsyncMock())
@@ -594,13 +714,39 @@ async def test_cancel_orphan_returns_cancelled_snapshot_not_conflict(
 
 
 @pytest.mark.asyncio
-async def test_orphan_owned_by_another_runner_is_left_alone(agents, monkeypatch):
+async def test_orphan_cancel_rechecks_ownership_after_its_reads(
+        agents: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.task_registry import task_registry
+    from app.db import runs
+    from app.db.session_events import get_events
+    sid = "orphan-claimed"
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
+    await _restart(sid)
+    task_registry.resume_task(sid, wids["a"])
+    original = swarm._reconcile_items
+    def claimed_meanwhile(*args: Any, **kwargs: Any) -> tuple[dict, list[dict], bool]:
+        runs.claim_run(sid, "other-runner", 60)  # another runner takes the session
+        return original(*args, **kwargs)
+    monkeypatch.setattr(swarm, "_reconcile_items", claimed_meanwhile)
+    stop = AsyncMock()
+    monkeypatch.setattr(swarm, "_stop_item", stop)
+    events = len(get_events(sid, 0, 500))
+    with pytest.raises(swarm.SwarmUnavailableError):
+        await swarm.cancel(sid, key)
+    stop.assert_not_awaited()
+    assert len(get_events(sid, 0, 500)) == events
+
+
+@pytest.mark.asyncio
+async def test_orphan_owned_by_another_runner_is_left_alone(
+        agents: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.db import runs
     sid = "orphan-remote"
-    key, _ = await _start_blocked_swarm(agents, monkeypatch, sid)
+    key, wids = await _start_blocked_swarm(agents, monkeypatch, sid)
     await _restart(sid)
     runs.claim_run(sid, "other-runner", 60)  # handed off: may run there
     assert await swarm.settle_orphans(sid) == []
+    await _finish_resumed_worker(sid, wids["a"], tmp_path, report_back=True)
     with pytest.raises(swarm.SwarmUnavailableError):
         await swarm.cancel(sid, key)
     assert (await swarm.snapshots(sid))[0]["status"] == "running"
