@@ -31,6 +31,29 @@
       ]
     },
     {
+      "name": "git-task-review",
+      "intro": "Disposable checkouts and paired candidate workers only.",
+      "rows": [
+        {
+          "id": "git-task-review.base-scope-owner-checkout",
+          "check": "Committed task work remains reviewable on the session's owning worker",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On paired disposable candidate workers, create different contents under the same project on each worker. In a throwaway session's branch checkout, commit an edit, a rename and a deletion, leaving a clean tree. Request changed-files with scope=base and session_id, then file-diff with scope base for each row, from both workers. Add staged, unstaged and untracked edits, including a file changed in both layers. Advance the default branch ref to include the task commit and repeat. Disconnect the owning candidate and retry; remove the session checkout on the disposable candidate and retry after reconnecting. Never alter production checkouts.",
+          "pass_when": "Clean committed changes remain listed with committed origin; later edits have uncommitted or both origin and bounded per-file diffs. Renames retain their original paths and deletions show removed lines. Responses name the selected base ref and merge-base SHA, and a moving base changes the next response. Requests from either worker read only the session checkout, never the viewer's different contents. Missing checkout and unreachable owner return clear errors without project-folder fallback.",
+          "past_bug": "The review panel showed no changes after the agent committed its task."
+        },
+        {
+          "id": "git-task-review.diff-line-ask-agent",
+          "check": "A diff line comment reaches the current chat once, with its anchor",
+          "kind": "owner",
+          "how": "In a throwaway session with committed and uncommitted edits, open the Changes side panel on desktop and on the Android app. In each review scope, drag or shift-click line numbers on desktop and tap two lines on the phone, write a comment and send it; once more, use Edit message to change the text first. Repeat while the agent is replying, and try a binary and a truncated file. Compare the chat transcript, the session checkout's git status and the PR's comments before and after.",
+          "pass_when": "Each send adds exactly one user message to the open chat, naming the file, old and new line range, review scope with base ref and merge base, a bounded excerpt and the comment (or the edited text). The checkout and the PR are unchanged. Binary and truncated diffs offer no selection.",
+          "past_bug": "Review feedback could only be retyped into the composer by hand, without file or line context."
+        }
+      ]
+    },
+    {
       "name": "durable-watches",
       "intro": "Disposable candidate workers and throwaway channels only; never publish credentials or private receipts.",
       "rows": [
@@ -110,6 +133,14 @@
           "how": "Use two disposable candidates named DesktopWorker and ServerWorker with network device IDs distinct from their installation IDs. From an owner chat on DesktopWorker create a schedule watch with ServerWorker available; inspect the named confirmation and executing row. Stop only the disposable creator and observe a server-side event/report. Bring it back, verify list/Pause/Stop through peer controls, set and clear the owner preference, and try an unavailable designated worker. Move a second watch with pending observations after all in-flight deliveries finish; interrupt once after destination import before acknowledgement, retry the same move, and compare cursor, event IDs, budget history and source fencing. Start the reverse move from the destination worker and verify that the original source receipt is complete and the returned watch executes once. Never restart production workers.",
           "pass_when": "Default chooses the server; explicit override and synced preference win, unavailable preference never silently falls back. Events continue with creator offline. Source is fenced before import, cursor/outbox IDs and cost history survive hand-over without duplicate reports, and synced display rows never execute. Remote active-creator turns and Telegram journal migration remain explicit follow-ups, not passing claims.",
           "past_bug": "#555: watches were pinned to the creating worker and had no default placement."
+        },
+        {
+          "id": "durable-watches.webhook-intake",
+          "check": "Remote authenticated webhooks preserve HTTP metadata and overlapping triggers",
+          "kind": "owner",
+          "how": "Use an isolated candidate worker and throwaway inbound webhook connector. From a non-loopback client with no Origin, send exact JSON bytes signed with the default hex HMAC, then X-Webhook-Token. Configure GitHub's X-Hub-Signature-256 with sha256= and hex, then a custom header with base64 and a prefix; deliver valid and invalid signatures for each. Include fake method/headers in the JSON, a real event header and private auth/cookie/token headers. Inspect the resulting webhook_received automation data. While a throwaway automation remains running, fire a second webhook, a manual trigger and a connector trigger. Read its runs API and open run history. With a daily cap of two, fire at least two overlapping triggers during the first run, then complete it and trigger a second real run. With output deduplication enabled, insert more than five overlapping fires between two identical responses. Clean up only disposable connectors, automations and sessions; retain no credentials or screenshots in the repository.",
+          "pass_when": "Valid requests pass CSRF and route authentication; invalid signatures fail with Invalid authentication. Trigger method is POST, body is unchanged and only documented real headers appear, never credentials or the configured signature header. Each overlapping trigger records one skipped_running row with its own data, visible in the API and run history; the first run keeps running, with no queued duplicate. Skipped and budget-rejected fires do not consume the daily run allowance or inflate total runs; the next real run is admitted below the cap, and skipped fires cannot hide a matching delivered response from deduplication. Existing default bare hex and sha256= senders still work.",
+          "past_bug": "The CSRF exemption used a nonexistent route; overlapping triggers vanished and JSON keys spoofed transport metadata."
         },
         {
           "id": "durable-watches.worker-availability",
@@ -812,6 +843,14 @@
           "past_bug": "#623: the access cookie correctly refused setup mutations, but disposable bootstrap left the web shell stuck at the setup wizard."
         },
         {
+          "id": "harness-basics.chat-table-terminal-shortcuts",
+          "check": "Table Copy menu, terminal links, Send selection to chat and Spotlight settings work against a real worker",
+          "kind": "browser",
+          "how": "In a code chat on a worker, ask the agent for a short markdown table that has one cell starting with =SUM(A1:A2) and one with a pipe character. When the reply settles, open the table's Copy menu with the keyboard and with a click, choose Copy as CSV and paste into a spreadsheet, then Copy as Markdown and paste into a text editor. Open the chat's Terminal panel, run a command that prints an https URL and a localhost URL, and click both. Drag-select two lines of output and press Send selection to chat. Repeat the terminal steps at 390px width. Press Ctrl+K on the chat page, type time zone and press Enter; then press Ctrl+K again on the Settings page.",
+          "pass_when": "The spreadsheet shows the formula cell as text, not a computed value, and the pasted Markdown table matches the reply, pipe included. Each URL opens once in a new browser tab with no confirm prompt. The selected lines appear in the composer as a fenced text block after any typed draft, and nothing is sent. At 390px the terminal header has no Send selection button. Ctrl+K on the chat page opens Spotlight with a Settings group; Enter lands on the Time zone row. On the Settings page Ctrl+K focuses Settings search instead of opening Spotlight.",
+          "past_bug": "New: the table Copy menu, terminal links, Send selection to chat and the Spotlight Settings group were checked only in a local fixture with a fake terminal stream, not against a real worker shell."
+        },
+        {
           "id": "harness-basics.cli-subagent-owner-pass",
           "check": "CLI bundled calls cannot spend the main chat approval",
           "kind": "owner",
@@ -954,6 +993,14 @@
           "past_bug": "#559: CLI identity plumbing must not change native approval scope."
         },
         {
+          "id": "harness-basics.native-plugin-mcp",
+          "check": "Enabled plugin MCP tools load once in native chats",
+          "kind": "owner",
+          "how": "On a disposable candidate, install a test plugin declaring a read-only MCP ping tool and enable it through the plugin UI. In a native-model code chat, discover and call ping, then repeat on a second turn. Disable the plugin and start a new chat; repeat with an unreviewed authored plugin. Re-enable the reviewed plugin and configure a host MCP server with the same server name but a distinct ping response. Finally open a delegated Claude chat with a Claude-installed plugin declaring the same tool and inspect its catalog. Archive the throwaway chats and remove only the test plugin and host config.",
+          "pass_when": "The enabled plugin's ping is discoverable and callable once per native catalog, and its catalog hash stays unchanged across turns. Disabled and unreviewed plugin tools are absent in new native chats. The host server wins a name collision. Delegated Claude retains its own plugin tool without a second copy from the native merge.",
+          "past_bug": "The shared MCP builder assumed NativeLoop discovered plugin servers, but neither layer connected them."
+        },
+        {
           "id": "harness-basics.neutral-owner-service-aliases",
           "check": "Neutral owner routes preserve installed-client aliases and stored history",
           "kind": "owner",
@@ -1008,6 +1055,14 @@
           "how": "On a disposable candidate worker with synthetic legacy account/spend rows, upgrade and inspect agent identities, avatars, owner introduction/memory and Usage limits. Rename an ordinary agent and change its avatar, lower the spending limit, then finish a bounded real coordination job including a remote child when available. Replay its accounting receipt after restart. Delete an ordinary disposable chat and try the retired home/research routes. Keep all receipts private; no screenshots are needed.",
           "pass_when": "Ordinary identity edits preserve all unrelated config, avatars and owner memory survive, and cumulative local/remote cost is charged once across restart/replay. No dedicated agent, protected home, home prompt or research runner appears. Retired routes remain unavailable; ordinary chat deletion succeeds. Owner-prefixed shared endpoints serve identities and limits, with identical owner-only legacy HTTP aliases for installed clients; neither prefix restores home/research routes.",
           "past_bug": "#557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
+        },
+        {
+          "id": "harness-basics.rewind-file-restore-retired",
+          "check": "Rewind never offers file restore and old agents lose the retired flag",
+          "kind": "owner",
+          "how": "On a disposable candidate worker, store a disposable agent row with enable_file_checkpointing true the way an older build did, start a chat on it, send two prompts and open Rewind on the first. Then call the rewind execute endpoint for a second disposable chat with restore_files true. Edit and save the disposable agent, then read its stored config. Archive only the disposable chats and agent.",
+          "pass_when": "The rewind dialog shows only the confirm text and Cancel/Rewind, with no Chat & Code option. The API call rewinds the chat and its warning says file restore isn't supported, not that a checkpoint is missing. The saved agent row no longer carries enable_file_checkpointing and every other field is unchanged.",
+          "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
         },
         {
           "id": "harness-basics.swarm-restart-settle",

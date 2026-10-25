@@ -206,6 +206,15 @@ class TestGetConnectorTypeInfo:
         }
         assert type_names == expected
 
+    def test_webhook_exposes_optional_signature_settings(self):
+        webhook = next(t for t in get_connector_type_info() if t["type"] == "webhook")
+        fields = {f["key"]: f for f in webhook["config_fields"]}
+        for key in ("signature_header", "signature_encoding", "signature_prefix"):
+            assert fields[key]["type"] == "text"
+            assert fields[key]["required"] is False
+        assert fields["signature_header"]["placeholder"] == "X-Webhook-Signature"
+        assert fields["signature_encoding"]["placeholder"] == "hex"
+
     def test_config_fields_have_key_and_label(self):
         types = get_connector_type_info()
         for t in types:

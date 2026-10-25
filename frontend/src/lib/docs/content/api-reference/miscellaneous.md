@@ -262,10 +262,16 @@ Delete a branch. Add `?force=true` to delete a branch that is not fully merged. 
 | `POST` | `/git/unstage` | Body: `{"files": ["src/app.py"]}` | Keeps the changes in the working tree |
 | `POST` | `/git/discard` | Body: `{"files": ["src/app.py"]}` | Reverts the files; untracked files are deleted. Optional `file_statuses` maps a file to `modified`, `staged` or `untracked`; otherwise it is read from git status |
 | `GET` | `/git/diff-stats` | Query: `include_unstaged` (default `true`) | Returns `additions`, `deletions`, `files_changed` |
-| `GET` | `/git/changed-files` | | Returns `files` (each with `file`, `status`, `category`, `additions`, `deletions`, `is_binary`), `total_additions`, `total_deletions` |
-| `POST` | `/git/file-diff` | Body: `{"file_path": "src/app.py", "staged": false}` | Returns `file`, `diff` (unified diff), `is_binary`, `truncated` |
+| `GET` | `/git/changed-files` | Query: `scope=working` (default) or `scope=base` | Returns `files` (each with `file`, `status`, `category`, `additions`, `deletions`, `is_binary`), `total_additions`, `total_deletions` |
+| `POST` | `/git/file-diff` | Body: `{"file_path": "src/app.py", "staged": false, "scope": "working"}` | Returns `file`, `diff` (unified diff), `is_binary`, `truncated` |
 
 Paths in the table are relative to `/api/v1/projects/{project_id}`.
+
+For task review, use `scope=base` on changed-files and `"scope": "base"` in the file-diff body, with `session_id` in the query for both. This scope reads only that session's checkout on its owning worker; it never substitutes the project folder or a caller-supplied legacy worktree. An unreachable owner returns `503`, a missing checkout returns `409`, and an omitted session returns `400`.
+
+Base scope compares the current checkout with the merge base of HEAD and the default branch, using the same default-branch discovery as Git status. It prefers `origin/<default>` over the local default branch. Both responses include `base_ref` and the full `merge_base` SHA used for that request. Refs are resolved on each request, so a later fetch or base-branch move is reflected without waiting for the status cache. No fetch is performed by these reads. Detached HEAD, no configured remote, missing default-branch refs and unrelated history return `409` with an explanation.
+
+The file list includes committed changes since the merge base, staged and unstaged changes, and untracked files. Each row has `category: "base"`, `change_origin: "committed"`, `"uncommitted"` or `"both"`, and `original_file` for a rename (otherwise omitted). These are review rows, not staging categories. File diffs show the combined merge-base-to-working-tree change; `staged` is ignored in base scope. A file touched in both layers remains listed even if its net diff is empty. If a committed deletion is recreated as an untracked file, the diff includes the deletion followed by the new-file patch. Binary files are marked instead of rendered, and text diffs retain the 50,000-character truncation limit. Outside base scope, the new metadata fields are omitted and existing response shapes and staging behavior are unchanged.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/pull \

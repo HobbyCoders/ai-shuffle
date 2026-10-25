@@ -34,6 +34,9 @@
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { registerSearchShortcut } from '$lib/services/search-shortcut';
+	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
+	import type { SettingsTarget } from '$lib/settings/types';
 	import { closeModalShortcut } from './close-modal-shortcut';
 	import { getTags, type Tag } from '$lib/api/client';
 
@@ -318,13 +321,10 @@
 
 		// Register keyboard shortcuts
 		shortcutRegistrations = [
-			registerShortcut({
-				id: 'spotlight',
-				description: 'Open spotlight search',
-				key: 'k',
-				cmdOrCtrl: true,
-				category: 'navigation',
-				action: () => { showSpotlight = !showSpotlight; }
+			// Ctrl+K: Spotlight, or Settings search while Settings is on screen.
+			registerSearchShortcut({
+				isSpotlightOpen: () => showSpotlight,
+				setSpotlightOpen: (open) => { showSpotlight = open; }
 			}),
 			registerShortcut({
 				id: 'new-chat',
@@ -439,6 +439,13 @@
 		showSpotlight = false;
 	}
 
+	/** A Settings hit: land on that setting's row (it scrolls into view and flashes). */
+	function handleSpotlightOpenSetting(target: SettingsTarget) {
+		showSpotlight = false;
+		if (settingsNav.mounted > 0 && $activeView?.type === 'settings') settingsNav.go(target);
+		else handleOpenFeature('settings', encodeTarget(target));
+	}
+
 	// ============================================
 	// Import Session Handlers
 	// ============================================
@@ -524,6 +531,7 @@
 		onOpenFeature={handleOpenFeature}
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
+		onOpenSetting={handleSpotlightOpenSetting}
 		onImportSession={() => { showSpotlight = false; showImportModal = true; }}
 		onManageTags={() => { showSpotlight = false; showTagManager = true; }}
 	/>

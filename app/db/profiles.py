@@ -42,11 +42,32 @@ def without_retired_prompt_keys(config: Any) -> Any:
     return {**config, "system_prompt": cleaned}
 
 
+#: Top-level ``config`` keys that are retired. ``enable_file_checkpointing``
+#: asked the Agent SDK to keep file checkpoints for rewind; nothing drives the
+#: SDK any more and the rewind endpoint refuses file restore for every session,
+#: so the flag only made the rewind dialog offer an option that always failed.
+#: Old rows (and rows from older peers) may still carry it: it is dropped on
+#: every read and write here, so a create or update that sends it is stored
+#: without it. Nothing else in the row changes.
+RETIRED_CONFIG_KEYS = ("enable_file_checkpointing",)
+
+
+def without_retired_config_keys(config: Any) -> Any:
+    """``config`` without retired top-level keys or retired ``system_prompt`` keys.
+
+    Returns the same object when there is nothing to drop, otherwise a shallow
+    copy; every other key is kept as it was.
+    """
+    if isinstance(config, dict) and any(k in config for k in RETIRED_CONFIG_KEYS):
+        config = {k: v for k, v in config.items() if k not in RETIRED_CONFIG_KEYS}
+    return without_retired_prompt_keys(config)
+
+
 def _decode_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """Parse a stored agent row's JSON columns in place."""
     config = row["config"]
     config = json.loads(config) if isinstance(config, str) else (config if config is not None else {})
-    row["config"] = without_retired_prompt_keys(config)
+    row["config"] = without_retired_config_keys(config)
     row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
     return row
 
@@ -128,7 +149,7 @@ def create_profile(
         cursor.execute(
             """INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, avatar_color, created_at, updated_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""" + on_conflict,
-            (profile_id, name, description, json.dumps(without_retired_prompt_keys(config)),
+            (profile_id, name, description, json.dumps(without_retired_config_keys(config)),
              is_builtin, json.dumps(mcp_tools or []),
              avatar_color, now, now)
         )
@@ -175,7 +196,7 @@ def update_profile(
         values.append(description)
     if config is not None:
         updates.append("config = %s")
-        values.append(json.dumps(without_retired_prompt_keys(config)))
+        values.append(json.dumps(without_retired_config_keys(config)))
 
     if mcp_tools is not None:
         updates.append("mcp_tools = %s")

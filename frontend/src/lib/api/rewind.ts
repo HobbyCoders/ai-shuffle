@@ -32,7 +32,6 @@ export interface RewindExecuteResponse {
  * @param targetUuid - UUID of the checkpoint to rewind to ('' when using targetOccurrence)
  * @param includeResponse - If true, keep Claude's response to the target message
  * @param targetRole - The role of the target message ("user" or "assistant")
- * @param restoreFiles - If true, also restore files to checkpoint state (requires file checkpointing enabled)
  * @param targetOccurrence - Fallback for uuid-less messages: 0-based occurrence
  *   of the target among the client's user prompts with IDENTICAL content.
  *   Only sent when targetUuid is empty/falsy. The backend resolves the target
@@ -46,7 +45,6 @@ export async function executeRewind(
 	targetUuid: string,
 	includeResponse: boolean = true,
 	targetRole: 'user' | 'assistant' = 'user',
-	restoreFiles: boolean = false,
 	targetOccurrence: number | null = null,
 	targetContent: string | null = null,
 	targetNotSentId: string | null = null
@@ -54,7 +52,8 @@ export async function executeRewind(
 	const payload: Record<string, unknown> = {
 		target_uuid: targetUuid,
 		restore_chat: true,
-		restore_files: restoreFiles,
+		// File restore isn't supported: the backend refuses it for every session.
+		restore_files: false,
 		include_response: includeResponse,
 		target_role: targetRole
 	};

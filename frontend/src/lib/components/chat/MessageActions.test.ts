@@ -25,7 +25,7 @@ describe('MessageActions gating', () => {
 		expect(dialog()!.textContent).toContain('Sent history is unchanged');
 		await fireEvent.click(screen.getByRole('button', {name:'Rewind'}));
 		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt, ['/uploads/proof.png']));
-		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', false, null, null, 'unsent-id');
+		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', null, null, 'unsent-id');
 	});
 	it('disables rewind for a steer with an explanation while preserving copy', async () => {
 		render(MessageActions, { ...base, rewindEligible: false, messageUuid: 'not-a-checkpoint' });
@@ -73,17 +73,19 @@ describe('MessageActions gating', () => {
 });
 
 describe('MessageActions rewind', () => {
-	it('rewinds a user message by uuid, restoring files when chosen, and returns its text to the composer', async () => {
-		rewind.mockResolvedValue({ success: true, warning: 'Files partly restored' });
+	it('rewinds a user message by uuid, chat only, and returns its text to the composer', async () => {
+		rewind.mockResolvedValue({ success: true, warning: 'Heads up' });
 		const onRewindComplete = vi.fn();
-		render(MessageActions, { ...base, messageUuid: 'u-1', fileCheckpointingEnabled: true, onRewindComplete });
+		render(MessageActions, { ...base, messageUuid: 'u-1', onRewindComplete });
 		await fireEvent.click(rewindButton()!);
 		expect(dialog()!.textContent).toContain('This will remove this message and all messages after it.');
 		expect(dialog()!.textContent).toContain('Fix the build');
-		await fireEvent.click(screen.getByRole('radio', { name: /Chat & Code/ }));
+		// File restore isn't supported, so the dialog offers no files option.
+		expect(screen.queryByRole('radio')).toBeNull();
+		expect(dialog()!.textContent).not.toContain('Chat & Code');
 		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith('Files partly restored', '**Fix** the `build`'));
-		expect(rewind).toHaveBeenCalledWith('s1', 'u-1', false, 'user', true);
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith('Heads up', '**Fix** the `build`'));
+		expect(rewind).toHaveBeenCalledWith('s1', 'u-1', false, 'user');
 		expect(dialog()).toBeNull();
 	});
 
@@ -94,7 +96,7 @@ describe('MessageActions rewind', () => {
 		await fireEvent.click(rewindButton()!);
 		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
 		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, '**Fix** the `build`'));
-		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', false, 1, '**Fix** the `build`');
+		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', 1, '**Fix** the `build`');
 	});
 
 	it('refuses to guess without a checkpoint id, shows server failures, and cancel closes the dialog', async () => {

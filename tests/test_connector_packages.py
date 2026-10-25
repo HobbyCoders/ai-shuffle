@@ -297,9 +297,16 @@ async def test_worker_delivers_actual_messages_triggers(local_package, monkeypat
         assert instance._process.pid
         assert instance.verify_inbound_request("{}", token="test-secret")
         assert not instance.verify_inbound_request("{}", token="wrong")
-        await instance.handle_webhook_payload({"event": "hello"})
+        payload = {"event": "hello", "method": "DELETE", "headers": {"x-github-event": "fake"}}
+        await instance.handle_webhook_payload(
+            payload, request_method="POST", headers={"x-github-event": "push"},
+        )
         assert incoming.await_args.args[0].connector_id == "stable-id"
         assert trigger.await_args.args[:2] == ("stable-id", "webhook_received")
+        data = trigger.await_args.args[2]
+        assert data["method"] == "POST"
+        assert data["headers"] == {"x-github-event": "push"}
+        assert data["body"] == payload
     finally:
         await instance.disconnect()
     assert instance._process.returncode == 0

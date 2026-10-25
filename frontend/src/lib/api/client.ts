@@ -483,7 +483,6 @@ export interface ProfileConfig {
 	effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';  // Reasoning depth — delegated CLI --effort / native provider effort param; chat can override per-turn
 	max_turns?: number;  // Per-turn model-call cap (native legs → fluid max_model_calls_per_turn)
 	include_partial_messages?: boolean;
-	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
 	enabled_agents?: string[];  // The agents this one may call under agent_invoke_mode 'custom'

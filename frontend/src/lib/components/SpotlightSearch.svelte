@@ -1,9 +1,10 @@
 <script lang="ts">
  import { tick, untrack } from 'svelte';
- import { Search, ArrowUpRight } from 'lucide-svelte';
+ import { Search, ArrowUpRight, SlidersHorizontal } from 'lucide-svelte';
  import type { Session } from '$lib/api/client';
  import type { ViewType } from '$lib/stores/layout.svelte';
- import { createSearchSources, searchPages, terminalPage, matches, type SearchGroup, type SearchItem } from '$lib/api/search';
+ import { createSearchSources, searchPages, terminalPage, matches, settingsResults, type SearchGroup, type SearchItem, type SettingsQuery } from '$lib/api/search';
+ import type { SearchItem as SettingsSearchItem, SettingsTarget } from '$lib/settings/types';
  import { terminals } from '$lib/stores/terminals.svelte';
  import { terminalAccess } from '$lib/terminal/gating';
  import { focusTrap } from '$lib/components/ui/focus-trap';
@@ -18,11 +19,13 @@
   onOpenFeature?: (view: ViewType, itemId?: string) => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
+  /** Open Settings at one setting's row (a Settings search hit). */
+  onOpenSetting?: (target: SettingsTarget) => void;
   onImportSession?: () => void;
   onManageTags?: () => void;
  }
  let { visible, currentProjectId, onClose, onSelectSession, onSelectAgent, onOpenFeature,
-  onNewChat, onOpenSettings, onImportSession, onManageTags }: Props = $props();
+  onNewChat, onOpenSettings, onOpenSetting, onImportSession, onManageTags }: Props = $props();
  let query = $state('');
  let selectedIndex = $state(0);
  let input = $state<HTMLInputElement>();
@@ -31,6 +34,10 @@
  let failures = $state<string[]>([]);
  let searching = $state(false);
  let sources = $state.raw(createSearchSources());
+ // The Settings page's own index, built once per opening (some rows come from
+ // live lists). Loaded on first use so the registry stays out of the startup bundle.
+ let settingsIndex = $state.raw<SettingsSearchItem[]>([]);
+ let settingsQuery = $state.raw<SettingsQuery | null>(null);
  const trimmed = $derived(query.trim());
  const actions = $derived<SearchItem[]>([
   { id: 'new', label: 'New conversation', action: onNewChat },
@@ -40,7 +47,11 @@
  ]);
  // The worker's terminal probe is the only gate for the Terminal page.
  const pages = $derived(terminalAccess(terminals.capability).kind === 'ready' ? [...searchPages, terminalPage] : searchPages);
+ // Settings rows come first: they are local and instant, so slower sources
+ // arriving later add rows below instead of moving the one Enter would open.
+ const settingsItems = $derived(onOpenSetting && settingsQuery ? settingsResults(trimmed, settingsIndex, settingsQuery, onOpenSetting) : []);
  const groups = $derived<SearchGroup[]>([
+  { id: 'settings', label: 'Settings', items: settingsItems },
   ...results,
   ...(trimmed && onOpenFeature ? [{ id: 'pages', label: 'App pages', items: pages.filter(item => matches(item, trimmed)) }] : []),
   { id: 'actions', label: 'Quick actions', items: actions.filter(item => !trimmed || matches(item, trimmed)) }
@@ -52,6 +63,12 @@
   // Untracked: the probe's answer must not reset the query.
   untrack(() => void terminals.ensureCapability());
   sources = createSearchSources(currentProjectId);
+  if (onOpenSetting) {
+   void import('$lib/settings/search').then(module => {
+    settingsIndex = module.buildIndex();
+    settingsQuery = module.query;
+   }).catch(() => { settingsIndex = []; });
+  }
   query = '';
   selectedIndex = 0;
   tick().then(() => input?.focus());
@@ -120,7 +137,7 @@
     <kbd class="text-xs text-muted-foreground">esc</kbd>
    </div>
    <div bind:this={list} class="max-h-[65vh] overflow-y-auto" aria-busy={searching}>
-    {#if !trimmed}<p class="px-4 py-3 text-sm text-muted-foreground">Find session messages, agents, MCP servers, plugins, notes and docs.</p>{/if}
+    {#if !trimmed}<p class="px-4 py-3 text-sm text-muted-foreground">Find settings, session messages, agents, MCP servers, plugins, notes and docs.</p>{/if}
     {#if searching}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Searching…</p>{/if}
     {#each groups as group, groupIndex (group.id)}
      <section aria-label={group.label}>
@@ -128,7 +145,7 @@
       {#each group.items as item, index (item.id)}
        {@const globalIndex = indexOf(groupIndex, index)}
        <button type="button" data-index={globalIndex} class="spotlight-item w-full px-4 py-2.5 flex items-start gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}" onmouseenter={() => selectedIndex = globalIndex} onclick={() => select(item)}>
-        <Search size={16} class="mt-1 text-muted-foreground shrink-0" />
+        {#if group.id === 'settings'}<SlidersHorizontal size={16} class="mt-1 text-muted-foreground shrink-0" />{:else}<Search size={16} class="mt-1 text-muted-foreground shrink-0" />{/if}
         <span class="flex-1 min-w-0">
          <span class="block text-sm text-foreground truncate">{item.label}</span>
          {#if item.description}<span class="block text-xs text-muted-foreground line-clamp-2 mt-0.5">{item.session ? item.description.replace(/<\/?b>/g, '').replace(/\*\*/g, '') : item.description}</span>{/if}

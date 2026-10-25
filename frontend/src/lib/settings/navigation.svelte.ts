@@ -153,6 +153,24 @@ export class SettingsNavigation {
 	depth = 0;
 	/** Mounted SettingsShell count; `openSettings` updates in place when > 0. */
 	mounted = 0;
+	/** On-screen SettingsShell count: while > 0, Ctrl+K focuses Settings search. */
+	private searchClaims = 0;
+
+	/** True while a Settings page on screen owns Ctrl+K (services/search-shortcut.ts). */
+	get searchClaimed(): boolean {
+		return this.searchClaims > 0;
+	}
+
+	/** A SettingsShell came on screen; call the returned function when it leaves. */
+	claimSearchShortcut(): () => void {
+		this.searchClaims += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.searchClaims -= 1;
+		};
+	}
 
 	constructor(restore = true) {
 		if (restore) this.restore();

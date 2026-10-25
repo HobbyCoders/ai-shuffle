@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AssistantMessage from './AssistantMessage.svelte';
 import HtmlPreview from './HtmlPreview.svelte';
 import { registerShortcut } from '$lib/services/keyboard';
-import { HTML_PREVIEW_FALLBACK_HEIGHT, HTML_PREVIEW_INITIAL_HEIGHT, HTML_PREVIEW_METHODS, loadHtmlPreview } from '$lib/utils/htmlPreview';
+import {
+	HTML_PREVIEW_FALLBACK_HEIGHT, HTML_PREVIEW_INITIAL_HEIGHT, HTML_PREVIEW_METHODS, HTML_PREVIEW_PROBE_MS, HTML_PREVIEW_PROBE_STEP,
+	HTML_PREVIEW_TALL_HEIGHT, loadHtmlPreview
+} from '$lib/utils/htmlPreview';
 import { sessionPanelKey, sidePanel } from '$lib/stores/side-panel.svelte';
 import { htmlArtifactPanel } from '$lib/stores/html-artifact-panel.svelte';
 import { writable } from 'svelte/store';
@@ -147,6 +150,42 @@ describe('HTML artifacts inline in the reply', () => {
 		send(frame, size(5000));
 		await tick();
 		expect(clipOf(view.container).style.height).toBe(`${HTML_PREVIEW_FALLBACK_HEIGHT}px`);
+	});
+
+	it('grows a long report to its full height, scrolling inside only while a late probe answer is pending', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		load.mockResolvedValue('<main>A long report</main>');
+		const view = render(HtmlPreview, { href: uniqueHref(), filename: 'report.html', sessionId: 'chat-1' });
+		await vi.waitFor(() => expect(frameOf(view.container)).not.toBeNull());
+		const frame = frameOf(view.container)!;
+		const figure = view.container.querySelector('figure')!;
+		const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+		const scrollMode = () => post.mock.calls.map(([data]) => (data as { params?: { scrollable?: boolean } }).params?.scrollable).filter((v) => v !== undefined).at(-1);
+		// Tall: probed with a bounded frame, still hidden.
+		send(frame, size(41_012));
+		await tick();
+		const probeFrame = HTML_PREVIEW_TALL_HEIGHT + HTML_PREVIEW_PROBE_STEP;
+		expect(clipOf(view.container).style.height).toBe(`${probeFrame}px`);
+		expect(view.getByRole('status', { name: 'Loading report.html' })).toBeTruthy();
+		// No answer in time (an offscreen frame): shown at the probe size, scrollable.
+		vi.advanceTimersByTime(HTML_PREVIEW_PROBE_MS);
+		await tick();
+		expect(view.queryByRole('status')).toBeNull();
+		expect(clipOf(view.container).style.height).toBe(`${probeFrame}px`);
+		expect(figure.classList.contains('fixed')).toBe(true);
+		await vi.waitFor(() => expect(scrollMode()).toBe(true));
+		// The late answer: its height did not follow the frame, so it gets all of it.
+		send(frame, size(41_012));
+		await tick();
+		expect(clipOf(view.container).style.height).toBe('41012px');
+		expect(figure.classList.contains('fixed')).toBe(false);
+		await vi.waitFor(() => expect(scrollMode()).toBe(false));
+		// A section opening later just grows it: no probe, no skeleton, no scrolling.
+		send(frame, size(41_812));
+		await tick();
+		expect(clipOf(view.container).style.height).toBe('41812px');
+		expect(view.queryByRole('status')).toBeNull();
+		expect(figure.classList.contains('fixed')).toBe(false);
 	});
 
 	it('measures a pinned page again after a revision at the same path or a reload', async () => {

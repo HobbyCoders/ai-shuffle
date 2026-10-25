@@ -407,12 +407,16 @@ def get_automation_run(run_id: str) -> Optional[AutomationRunRow]:
         return _parse_automation_run_row(row_to_dict(cursor.fetchone()))
 
 
-def get_automation_runs(automation_id: str, limit: int = 50, offset: int = 0) -> List[AutomationRunRow]:
-    """Get runs for an automation, most recent first."""
+def get_automation_runs(
+    automation_id: str, limit: int = 50, offset: int = 0, *, include_non_runs: bool = True,
+) -> List[AutomationRunRow]:
+    """Get history, optionally excluding rejected fires before pagination."""
+    non_run_filter = "" if include_non_runs else " AND status NOT IN ('skipped_running', 'budget_exceeded')"
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM automation_runs WHERE automation_id = %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            "SELECT * FROM automation_runs WHERE automation_id = %s"
+            + non_run_filter + " ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (automation_id, limit, offset)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -460,14 +464,15 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[AutomationRunRow]:
 
 
 def get_automation_daily_stats(automation_id: str) -> AutomationDailyStats:
-    """Get today's run count and cost for an automation."""
+    """Get today's admitted run count and cost, not rejected trigger attempts."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT COUNT(*) as run_count, COALESCE(SUM(cost_usd), 0) as total_cost
                FROM automation_runs
-               WHERE automation_id = %s AND created_at >= %s""",
+               WHERE automation_id = %s AND created_at >= %s
+                 AND status NOT IN ('skipped_running', 'budget_exceeded')""",
             (automation_id, today)
         )
         row = cursor.fetchone()
@@ -486,7 +491,8 @@ def get_automation_aggregate_stats(automation_id: str) -> Dict[str, Any]:
                 COALESCE(SUM(cost_usd), 0) as total_cost_usd,
                 AVG(CASE WHEN duration_ms > 0 THEN duration_ms END) as avg_duration_ms
             FROM automation_runs
-            WHERE automation_id = %s""",
+            WHERE automation_id = %s
+              AND status NOT IN ('skipped_running', 'budget_exceeded')""",
             (automation_id,)
         )
         row = cursor.fetchone()

@@ -11,6 +11,7 @@
 	import { Terminal } from '@xterm/xterm';
 	import { FitAddon } from '@xterm/addon-fit';
 	import { SearchAddon } from '@xterm/addon-search';
+	import { WebLinksAddon } from '@xterm/addon-web-links';
 	import '@xterm/xterm/css/xterm.css';
 	import { RotateCcw, X, RefreshCw } from 'lucide-svelte';
 	import { TerminalConnection } from '$lib/terminal/connection';
@@ -19,6 +20,7 @@
 	import { terminalTheme } from './theme';
 	import { exitDetail } from '$lib/terminal/gating';
 	import { localWorkerId } from '$lib/terminal/peer';
+	import { openTerminalLink, terminalLinkUrl } from '$lib/terminal/to-chat';
 
 	let {
 		id,
@@ -28,6 +30,7 @@
 		onCtrlUsed,
 		onPasteRequest,
 		mayFocus,
+		onSelectionChange,
 	}: {
 		id: string;
 		sessionId: string;
@@ -39,6 +42,8 @@
 		onPasteRequest: (text: string) => void;
 		/** Asked before this tab takes focus on becoming active. Absent means yes. */
 		mayFocus?: () => boolean;
+		/** Whether the owner has text selected in this tab now. */
+		onSelectionChange?: (hasSelection: boolean) => void;
 	} = $props();
 
 	let host: HTMLDivElement;
@@ -120,11 +125,23 @@
 			logLevel: 'off',
 			scrollback: 5000,
 			theme: terminalTheme(host),
+			// OSC 8 hyperlinks (gh, ls --hyperlink) open like plain URLs: web
+			// addresses only, in a new tab, without xterm's confirm() prompt.
+			linkHandler: {
+				activate: (_event, text) => void openTerminalLink(text),
+				allowNonHttpProtocols: false,
+			},
 		});
 		fit = new FitAddon();
 		search = new SearchAddon();
 		term.loadAddon(fit);
 		term.loadAddon(search);
+		// URLs in output are links: click opens a new tab. The tooltip says so.
+		term.loadAddon(new WebLinksAddon((_event, uri) => void openTerminalLink(uri), {
+			hover: (_event, text) => { if (terminalLinkUrl(text)) host.title = `Open ${text} in a new tab`; },
+			leave: () => { host.removeAttribute('title'); },
+		}));
+		term.onSelectionChange(() => onSelectionChange?.(!!term?.hasSelection()));
 		term.open(host);
 		term.onData((data) => send(withCtrl(data)));
 		term.attachCustomKeyEventHandler((event) => {
@@ -188,6 +205,8 @@
 	export function findNext(query: string): boolean { return !!query && !!search?.findNext(query); }
 	export function findPrevious(query: string): boolean { return !!query && !!search?.findPrevious(query); }
 	export function clearSearch() { search?.clearDecorations(); term?.clearSelection(); }
+	/** Only the selection ('' when nothing is selected). */
+	export function selectionText(): string { return term?.hasSelection() ? term.getSelection() : ''; }
 	/** The selection, or the whole buffer when nothing is selected. */
 	export function outputText(): string {
 		if (!term) return '';

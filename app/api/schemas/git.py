@@ -292,6 +292,8 @@ class FileChangeInfo(BaseModel):
     additions: int = 0
     deletions: int = 0
     is_binary: bool = False
+    change_origin: Optional[Literal["committed", "uncommitted", "both"]] = None
+    original_file: Optional[str] = None
 
 
 class ChangedFilesResponse(BaseModel):
@@ -299,12 +301,15 @@ class ChangedFilesResponse(BaseModel):
     files: List[FileChangeInfo]
     total_additions: int = 0
     total_deletions: int = 0
+    base_ref: Optional[str] = None
+    merge_base: Optional[str] = None
 
 
 class FileDiffRequest(BaseModel):
     """Request for per-file diff."""
     file_path: str = Field(..., min_length=1, max_length=1000)
     staged: bool = False
+    scope: Literal["working", "base"] = "working"
 
 
 class FileDiffResponse(BaseModel):
@@ -313,6 +318,8 @@ class FileDiffResponse(BaseModel):
     diff: str
     is_binary: bool = False
     truncated: bool = False
+    base_ref: Optional[str] = None
+    merge_base: Optional[str] = None
 
 
 class StageRequest(BaseModel):

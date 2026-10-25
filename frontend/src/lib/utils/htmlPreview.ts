@@ -363,7 +363,22 @@ export function hostContextMessage(theme: HtmlPreviewTheme, scrollable?: boolean
 // ── Fit to content ─────────────────────────────────────────────────────────
 
 export const HTML_PREVIEW_MIN_HEIGHT = 64;
-export const HTML_PREVIEW_MAX_HEIGHT = 12_000;
+/**
+ * A safety ceiling, not a design limit: an inline page grows to its full
+ * height so the reader never scrolls inside the transcript's scroll. Long
+ * reports run to tens of thousands of pixels (80k on a phone); browsers lay
+ * out elements up to roughly 17M px. Only past this does a page get the
+ * scrolling fallback.
+ */
+export const HTML_PREVIEW_MAX_HEIGHT = 1_000_000;
+/**
+ * Past this, a page taller than its frame is probed before the frame grows
+ * to it, and the probe frame grows at most to this (or twice the frame). A
+ * page made of viewport-height sections (a slide deck, a 100vh hero) grows
+ * with every fit; unchecked it would balloon the frame (and its own 100vh)
+ * toward the ceiling before being pinned.
+ */
+export const HTML_PREVIEW_TALL_HEIGHT = 12_000;
 /** Reserved while the page loads and measures, so the transcript does not jump. */
 export const HTML_PREVIEW_INITIAL_HEIGHT = 320;
 /** A page whose height follows its frame gets this, and scrolls inside. */
@@ -405,6 +420,13 @@ export class HtmlPreviewSizer {
 	private threshold = SUSPICION_STREAK;
 	/** Started from a remembered pin: the first mismatch is probed at once. */
 	private suspect = false;
+	/**
+	 * A tall probe ran out of time and the frame is shown at the probe size,
+	 * scrollable so none of the page is out of reach: the page's next report
+	 * (a late answer) still decides it. Until then the size is not worth
+	 * remembering.
+	 */
+	private awaiting = false;
 
 	/**
 	 * `height` reserves a remembered size and starts fitting from it. A
@@ -430,7 +452,10 @@ export class HtmlPreviewSizer {
 	get settled(): boolean { return this.mode === 'fit' || this.mode === 'fixed'; }
 
 	/** Settled and not in the middle of a suspicious run: a size worth remembering. */
-	get steady(): boolean { return this.mode === 'fixed' || (this.mode === 'fit' && this.streak === 0); }
+	get steady(): boolean { return this.mode === 'fixed' || (this.mode === 'fit' && this.streak === 0 && !this.awaiting); }
+
+	/** The frame scrolls inside: pinned, or held at a probe size awaiting a late answer. */
+	get scrollable(): boolean { return this.mode === 'fixed' || this.awaiting; }
 
 	/**
 	 * Apply a size report. `viewport` is the frame height the page measured
@@ -447,16 +472,18 @@ export class HtmlPreviewSizer {
 		if (Math.abs(measured - this.height) > STALE_TOLERANCE) return 'none';
 		const previous = this.previous;
 		this.previous = { height, viewport: measured };
-		if (this.mode === 'probing') {
+		if (this.mode === 'probing' || this.awaiting) {
+			const late = this.awaiting;
+			this.awaiting = false;
 			const moved = measured - this.probeBase.viewport;
 			if (moved > 0 && height - this.probeBase.height >= moved * 0.9) return this.pin();
+			if (!late) this.threshold *= 2;
 			this.mode = 'fit';
-			this.threshold *= 2;
 			this.streak = 0;
 			return this.fit(height);
 		}
 		if (this.mode === 'measuring') {
-			if (Math.abs(height - measured) <= 1 || (this.suspect && height !== measured)) return this.probe(height, measured);
+			if (Math.abs(height - measured) <= 1 || (this.suspect && height !== measured) || this.tallerThan(height, measured)) return this.probe(height, measured);
 			this.mode = 'fit';
 			return this.fit(height);
 		}
@@ -471,18 +498,36 @@ export class HtmlPreviewSizer {
 			&& Math.abs(height - previous.height - frameMoved) <= STALE_TOLERANCE;
 		this.streak = height > measured + 1 || tracks ? this.streak + 1 : 0;
 		if (Math.abs(height - this.height) <= 1) return 'none';
-		if (this.streak >= this.threshold) return this.probe(height, measured);
-		if (height > HTML_PREVIEW_MAX_HEIGHT) return this.pin();
+		// A tall page jumping far past its frame is what a viewport follower
+		// does on every fit; content that loads late or a section opening on
+		// a long report grows by much less and is simply fitted.
+		if (this.streak >= this.threshold || (this.tallerThan(height, measured) && height > measured * 1.5)) {
+			return this.probe(height, measured);
+		}
 		return this.fit(height);
 	}
 
-	/** The probe got no answer: the page's height does not depend on its frame. */
+	/**
+	 * The probe got no answer in time. A page sized by its content may not
+	 * report when only its frame grows: take it that its height does not
+	 * depend on the frame. A tall page is not taken on trust (silence there
+	 * is a frame the browser is not rendering, offscreen or in a background
+	 * tab, which answers late): show the frame at the probe size, scrollable
+	 * so nothing is cut off, and let the late answer decide as a probe answer
+	 * would. Moving the frame now would make that answer stale and let a page
+	 * that follows its frame climb step by step.
+	 */
 	probeExpired(): HtmlPreviewSizerAction {
 		if (this.mode !== 'probing') return 'none';
 		this.mode = 'fit';
 		this.threshold *= 2;
 		this.streak = 0;
-		return this.fit(this.probeBase.height);
+		const { height, viewport } = this.probeBase;
+		if (this.tallerThan(height, viewport)) {
+			this.awaiting = true;
+			return 'resize';
+		}
+		return this.fit(height);
 	}
 
 	/** The page never reported a size (its bootstrap could not run): show it scrollable. */
@@ -492,7 +537,15 @@ export class HtmlPreviewSizer {
 		return this.pin();
 	}
 
+	/** Tall and overflowing the frame it was measured in: check it does not follow the frame. */
+	private tallerThan(height: number, measured: number): boolean {
+		return height > HTML_PREVIEW_TALL_HEIGHT && height > measured + 1;
+	}
+
 	private fit(height: number): HtmlPreviewSizerAction {
+		// Past the ceiling a fitted frame would cut the page off with no way
+		// to reach the rest: scroll it inside instead.
+		if (height > HTML_PREVIEW_MAX_HEIGHT) return this.pin();
 		const next = clampHeight(height);
 		if (next === this.height) return 'none';
 		this.height = next;
@@ -503,7 +556,14 @@ export class HtmlPreviewSizer {
 		this.mode = 'probing';
 		this.suspect = false;
 		this.probeBase = { height, viewport };
-		this.height = clampHeight(Math.max(this.height, height) + HTML_PREVIEW_PROBE_STEP);
+		// A tall page is probed with a bounded step, not at its full height: a
+		// long report's height stays put whatever the step, while a page that
+		// follows its frame would otherwise get (and stretch its 100vh to) a
+		// frame as tall as it claims.
+		const target = this.tallerThan(height, viewport)
+			? Math.max(viewport, Math.min(height, Math.max(HTML_PREVIEW_TALL_HEIGHT, viewport * 2)))
+			: Math.max(this.height, height);
+		this.height = clampHeight(target + HTML_PREVIEW_PROBE_STEP);
 		return 'probe';
 	}
 

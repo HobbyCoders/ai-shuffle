@@ -712,16 +712,27 @@ export async function getWorktreeFiles(
 export interface FileChangeInfo {
     file: string;
     status: string;       // A=added, M=modified, D=deleted, R=renamed, ?=untracked, U=conflict
-    category: string;     // 'staged' | 'modified' | 'untracked' | 'conflict'
+    category: string;     // 'staged' | 'modified' | 'untracked' | 'conflict' | 'base'
     additions: number;
     deletions: number;
     is_binary: boolean;
+    /** Base scope only: whether the change is committed, uncommitted, or both. */
+    change_origin?: 'committed' | 'uncommitted' | 'both';
+    /** Base scope only: previous path of a renamed file. */
+    original_file?: string;
 }
+
+/** Review scope: the dirty working tree, or everything since the merge base. */
+export type GitReviewScope = 'working' | 'base';
 
 export interface ChangedFilesResponse {
     files: FileChangeInfo[];
     total_additions: number;
     total_deletions: number;
+    /** Base scope only: the ref the merge base was taken against. */
+    base_ref?: string;
+    /** Base scope only: full SHA of the merge base. */
+    merge_base?: string;
 }
 
 export interface FileDiffResponse {
@@ -729,6 +740,8 @@ export interface FileDiffResponse {
     diff: string;
     is_binary: boolean;
     truncated: boolean;
+    base_ref?: string;
+    merge_base?: string;
 }
 
 /**
@@ -770,6 +783,25 @@ function transformOperationResponse(raw: RawOperationResponse): OperationRespons
  */
 export async function getChangedFiles(projectId: string, worktreeId?: string, sessionId?: GitRequestScope): Promise<ChangedFilesResponse> {
     return api.get<ChangedFilesResponse>(`${BASE}/${projectId}/git/changed-files${scopeQs(worktreeId, sessionId)}`);
+}
+
+/**
+ * Files the session's task changed since its merge base with the default
+ * branch: committed, staged, unstaged and untracked work together. The server
+ * resolves the session's own checkout, so only the session id is sent.
+ */
+export async function getBaseChangedFiles(projectId: string, sessionId: string): Promise<ChangedFilesResponse> {
+    const qs = new URLSearchParams({ session_id: sessionId, scope: 'base' });
+    return api.get<ChangedFilesResponse>(`${BASE}/${projectId}/git/changed-files?${qs}`);
+}
+
+/** One file's diff against the session's merge base (see getBaseChangedFiles). */
+export async function getBaseFileDiff(projectId: string, filePath: string, sessionId: string): Promise<FileDiffResponse> {
+    const qs = new URLSearchParams({ session_id: sessionId });
+    return api.post<FileDiffResponse>(`${BASE}/${projectId}/git/file-diff?${qs}`, {
+        file_path: filePath,
+        scope: 'base',
+    });
 }
 
 /**
