@@ -195,6 +195,12 @@ def _remote_key(url):
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
+def is_git_checkout(cwd: str) -> bool:
+    """Whether ``cwd`` lies inside a Git working tree; a plain folder does not (#639)."""
+    result = _run(cwd, "rev-parse", "--is-inside-work-tree", timeout=30)
+    return not result.returncode and result.stdout.strip() == b"true"
+
+
 def remote_identity(cwd):
     if git(cwd, "rev-parse", "--is-inside-work-tree").strip() != b"true":
         raise ValueError("Resume here requires a Git repository with an origin remote.")
