@@ -53,7 +53,7 @@ _EXEMPT_PATHS = frozenset({
 
 # Prefixes that are exempt from CSRF checks.
 _EXEMPT_PREFIXES = (
-    "/api/v1/connectors/webhook/",  # Connector webhook callbacks
+    "/api/v1/connectors/hooks/",  # Authenticated inbound webhook callbacks
 )
 
 

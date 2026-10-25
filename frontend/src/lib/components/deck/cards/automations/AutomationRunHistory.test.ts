@@ -37,6 +37,12 @@ it('labels each run by the trigger key the backend writes', () => {
 	}
 });
 
+it('shows a skipped concurrent delivery without hiding its trigger', () => {
+	renderRuns([{ ...run('skip', { trigger: 'webhook' }), status: 'skipped_running' }]);
+	expect(screen.getByText('skipped_running')).toBeTruthy();
+	expect(screen.getByText('Webhook')).toBeTruthy();
+});
+
 it('falls back to a legacy source key, then to Manual', () => {
 	renderRuns([run('r1', { source: 'webhook' }), run('r2', null)]);
 	expect(screen.getByText('Webhook')).toBeTruthy();

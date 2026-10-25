@@ -6,8 +6,10 @@ import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerSuggestion } from '$lib/stores/session/composer-suggestion';
-import { promptStash } from '$lib/stores/session/prompt-stash';
+import { MAX_STASHED_PROMPTS, promptStash } from '$lib/stores/session/prompt-stash';
+import { liveBanners, notify } from '$lib/stores/notifications';
 import { LARGE_PASTE_BYTES } from './tiptap/large-paste';
+import { composerInsert, requestComposerInsert } from '$lib/stores/composer-insert';
 import '$lib/test-stubs/composer-dom';
 
 // The composer's keyboard tools: ArrowUp recall, the Ctrl/Cmd+S prompt stash,
@@ -63,7 +65,19 @@ beforeEach(async () => {
 afterEach(() => {
 	cleanup();
 	vi.restoreAllMocks();
+	for (const banner of get(liveBanners)) notify.dismissLive(banner.id);
 });
+
+/** Make the browser refuse localStorage writes (quota or disabled storage). */
+function refuseLocalStorage() {
+	const setItem = Storage.prototype.setItem;
+	vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+		if (this === localStorage) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+		setItem.call(this, key, value);
+	});
+}
+
+const bannerMessages = () => get(liveBanners).map(b => b.message);
 
 function renderComposer() {
 	const view = render(ChatInput);
@@ -141,6 +155,62 @@ describe('prompt stash', () => {
 		expect(get(promptStash).map(e => e.preview)).toEqual(['current idea']);
 	});
 
+	it('keeps the draft and says so when the browser refuses the stash', async () => {
+		activeSession.setDraft('do not lose me');
+		const { editor } = renderComposer();
+		await waitFor(() => expect(editor.textContent).toBe('do not lose me'));
+		refuseLocalStorage();
+		await fireEvent.keyDown(editor, { key: 's', ctrlKey: true });
+		await tick();
+		expect(editor.textContent).toBe('do not lose me');
+		expect(get(promptStash)).toEqual([]);
+		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
+		expect(bannerMessages()).not.toContain('Prompt stashed');
+	});
+
+	it('keeps the draft when no account is signed in to stash under', async () => {
+		promptStash.setOwner(null);
+		activeSession.setDraft('signed out draft');
+		const { editor } = renderComposer();
+		await waitFor(() => expect(editor.textContent).toBe('signed out draft'));
+		await fireEvent.keyDown(editor, { key: 's', ctrlKey: true });
+		await tick();
+		expect(editor.textContent).toBe('signed out draft');
+		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
+	});
+
+	it('restoring over a draft with a full stash keeps every other entry', async () => {
+		const now = vi.spyOn(Date, 'now');
+		for (let i = 0; i < MAX_STASHED_PROMPTS; i++) {
+			now.mockReturnValue(1_000 + i);
+			promptStash.push(`idea ${i}`);
+		}
+		now.mockRestore();
+		activeSession.setDraft('current idea');
+		const { editor } = renderComposer();
+		await fireEvent.click(await screen.findByRole('button', { name: `Stashed prompts (${MAX_STASHED_PROMPTS})` }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore stashed prompt: idea 20' }));
+		await waitFor(() => expect(editor.textContent).toBe('idea 20'));
+		const previews = get(promptStash).map(e => e.preview);
+		expect(previews).toHaveLength(MAX_STASHED_PROMPTS);
+		expect(previews).toContain('current idea');
+		expect(previews).toContain('idea 0');
+		expect(previews).not.toContain('idea 20');
+	});
+
+	it('leaves both drafts in place when restoring cannot stash the current one', async () => {
+		promptStash.push('older idea');
+		activeSession.setDraft('current idea');
+		const { editor } = renderComposer();
+		await fireEvent.click(await screen.findByRole('button', { name: 'Stashed prompts (1)' }));
+		refuseLocalStorage();
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore stashed prompt: older idea' }));
+		await tick();
+		expect(editor.textContent).toBe('current idea');
+		expect(get(promptStash).map(e => e.preview)).toEqual(['older idea']);
+		expect(bannerMessages()).toContain("Couldn't stash. Your draft is still here.");
+	});
+
 	it('leaves the browser Save shortcut alone outside the composer', async () => {
 		activeSession.setDraft('not stashed');
 		renderComposer();
@@ -159,6 +229,29 @@ describe('unsent prompts return to the composer', () => {
 		const text = editor.textContent ?? '';
 		expect(text.indexOf('unsent first')).toBeLessThan(text.indexOf('typed after'));
 		expect(activeSession.current.pendingRestorePrompt).toBeNull();
+	});
+});
+
+describe('terminal selection sent to chat', () => {
+	afterEach(() => composerInsert.set(null));
+
+	it('goes after what the user typed, as a fenced block, and is not sent', async () => {
+		activeSession.setDraft('why does this fail?');
+		const { editor } = renderComposer();
+		requestComposerInsert('tools', '```text\nnpm ERR! missing script: dev\n```');
+		await waitFor(() => expect(editor.textContent).toContain('npm ERR! missing script: dev'));
+		const paragraphs = Array.from(editor.querySelectorAll('p'), (p) => p.textContent);
+		expect(paragraphs).toEqual(['why does this fail?', '```text', 'npm ERR! missing script: dev', '```']);
+		expect(get(composerInsert)).toBeNull();
+		expect(activeSession.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it("waits for that chat's composer", async () => {
+		const { editor } = renderComposer();
+		requestComposerInsert('another-chat', '```text\nx\n```');
+		await tick();
+		expect(editor.textContent).toBe('');
+		expect(get(composerInsert)).toMatchObject({ sessionId: 'another-chat' });
 	});
 });
 

@@ -35,7 +35,6 @@
 		onRead?: () => void;
 		isReading?: boolean;
 		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
-		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
 	let {
@@ -53,8 +52,7 @@
 		onCopy,
 		onRead,
 		isReading = false,
-		onRewindComplete,
-		fileCheckpointingEnabled = false
+		onRewindComplete
 	}: Props = $props();
 
 	let copied = $state(false);
@@ -64,7 +62,6 @@
 	let showRewindDialog = $state(false);
 	let isRewinding = $state(false);
 	let rewindError = $state<string | null>(null);
-	let rewindMode = $state<'chat' | 'chat_and_files'>('chat');  // Selected rewind mode
 
 	/**
 	 * Portal action: moves the element to document.body so it escapes
@@ -138,7 +135,6 @@
 		if (!sessionId || !rewindEligible) return;
 		showRewindDialog = true;
 		rewindError = null;
-		rewindMode = 'chat';  // Reset to default mode
 	}
 
 	async function handleRewindConfirm() {
@@ -162,17 +158,15 @@
 		isRewinding = true;
 		rewindError = null;
 
-		const restoreFiles = rewindMode === 'chat_and_files';
-
 		try {
 			// For user messages: include_response=false removes this message and everything after.
 			// For assistant messages: keeps this message, removes everything after.
 			const includeResponse = messageRole === 'assistant';
 			const result = notSentMessageId
-				? await executeRewind(sessionId, '', false, 'user', false, null, null, notSentMessageId)
+				? await executeRewind(sessionId, '', false, 'user', null, null, notSentMessageId)
 				: useContent
-				? await executeRewind(sessionId, '', includeResponse, 'user', restoreFiles, userPromptOccurrence, messageContent)
-				: await executeRewind(sessionId, messageUuid!, includeResponse, messageRole, restoreFiles);
+				? await executeRewind(sessionId, '', includeResponse, 'user', userPromptOccurrence, messageContent)
+				: await executeRewind(sessionId, messageUuid!, includeResponse, messageRole);
 
 			if (result.success || result.chat_rewound) {
 				showRewindDialog = false;
@@ -435,37 +429,6 @@
 				</span>
 				<span class="ml-1">{getMessagePreview(messageContent)}</span>
 			</div>
-
-			<!-- Rewind Mode Selection (only if file checkpointing is enabled) -->
-			{#if fileCheckpointingEnabled && !notSentMessageId}
-				<div class="mb-4 space-y-2">
-					<p class="text-sm font-medium text-foreground">Rewind Options:</p>
-					<label class="flex items-center gap-2 cursor-pointer">
-						<input
-							type="radio"
-							name="rewind-mode"
-							value="chat"
-							checked={rewindMode === 'chat'}
-							onchange={() => rewindMode = 'chat'}
-							class="w-4 h-4 text-primary"
-						/>
-						<span class="text-sm text-foreground">Chat Only</span>
-						<span class="text-xs text-muted-foreground">- Remove messages only</span>
-					</label>
-					<label class="flex items-center gap-2 cursor-pointer">
-						<input
-							type="radio"
-							name="rewind-mode"
-							value="chat_and_files"
-							checked={rewindMode === 'chat_and_files'}
-							onchange={() => rewindMode = 'chat_and_files'}
-							class="w-4 h-4 text-primary"
-						/>
-						<span class="text-sm text-foreground">Chat & Code</span>
-						<span class="text-xs text-muted-foreground">- Also restore files to checkpoint</span>
-					</label>
-				</div>
-			{/if}
 
 			{#if rewindError}
 				<div class="bg-destructive/10 border border-destructive/30 text-destructive text-sm px-3 py-2 rounded-sm mb-4">

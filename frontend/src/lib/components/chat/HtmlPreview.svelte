@@ -30,17 +30,21 @@
 	// ── Fit to content ──
 	let sizer = new HtmlPreviewSizer(untrack(() => rememberedPreviewSize(sizeKey)) ?? {});
 	let height = $state(sizer.height);
-	let fixed = $state(sizer.mode === 'fixed');
+	let fixed = $state(sizer.scrollable);
 	let settled = $state(sizer.settled);
 	let answered = $state(false);
 	let probeTimer: ReturnType<typeof setTimeout> | undefined;
 	let giveUpTimer: ReturnType<typeof setTimeout> | undefined;
-	const revealed = $derived(settled && answered);
+	// Once shown, a document stays shown: a later probe (the page grew a lot
+	// at once) must not put the loading skeleton back over a page being read.
+	let shown = $state(false);
+	const revealed = $derived(shown || (settled && answered));
 
 	function sync(action: HtmlPreviewSizerAction) {
 		height = sizer.height;
-		fixed = sizer.mode === 'fixed';
+		fixed = sizer.scrollable;
 		settled = sizer.settled;
+		if (settled && answered) shown = true;
 		if (action === 'probe') {
 			clearTimeout(probeTimer);
 			probeTimer = setTimeout(() => sync(sizer.probeExpired()), HTML_PREVIEW_PROBE_MS);
@@ -83,6 +87,7 @@
 			// its way up to the pin.
 			sizer = new HtmlPreviewSizer(known ?? (sizer.mode === 'fixed' ? { fixed: true } : { reserve: sizer.height }));
 			answered = false;
+			shown = false;
 			sync('none');
 		});
 		return () => { clearTimeout(probeTimer); clearTimeout(giveUpTimer); };
@@ -106,7 +111,7 @@
 		clearTimeout(giveUpTimer);
 		// A page that never reports (its bootstrap could not run) still shows.
 		giveUpTimer = setTimeout(() => { answered = true; sync(sizer.giveUp()); }, 1500);
-		if (sizer.settled) answered = true;
+		if (sizer.settled) { answered = true; shown = true; }
 	}
 
 	// ── Views ──

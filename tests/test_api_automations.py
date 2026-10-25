@@ -500,6 +500,16 @@ class TestRunsAndStats:
         assert response.status_code == 200
         assert response.json() == []
 
+        from app.db import database
+        database.create_automation_run(
+            run_id="run-skipped", automation_id=aid, status="skipped_running",
+            trigger_data={"trigger": "webhook", "payload": {"delivery": 2}},
+        )
+        history = authenticated_client.get(f"/api/v1/automations/{aid}/runs")
+        assert history.status_code == 200
+        assert history.json()[0]["status"] == "skipped_running"
+        assert history.json()[0]["trigger_data"]["payload"] == {"delivery": 2}
+
     def test_stats_not_found(self, authenticated_client):
         response = authenticated_client.get("/api/v1/automations/nonexistent/stats")
         assert response.status_code == 404

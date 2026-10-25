@@ -147,3 +147,26 @@ describe('universal search', () => {
   expect(screen.queryByText('Terminal')).toBeNull();
  });
 });
+
+describe('settings in search', () => {
+ it('lists matching settings first and opens the exact row', async () => {
+  const onOpenSetting = vi.fn();
+  const p = { ...props(), onOpenSetting };
+  // The palette loads the settings index on open; warm the module cache.
+  await import('$lib/settings/search');
+  render(SpotlightSearch, { props: p });
+  await vi.waitFor(async () => { await search('time zone'); expect(screen.getByRole('region', { name: 'Settings' })).toBeTruthy(); }, { timeout: 5000 });
+  const first = screen.getByRole('region', { name: 'Settings' }).querySelector('button')!;
+  expect(first.textContent).toContain('Time zone');
+  // The first row overall, so Enter opens it.
+  expect(first.getAttribute('data-index')).toBe('0');
+  await fireEvent.keyDown(window, { key: 'Enter' });
+  expect(onOpenSetting).toHaveBeenCalledWith({ category: 'general', anchor: 'general.timezone' });
+  expect(p.onClose).toHaveBeenCalled();
+ });
+ it('leaves settings out when the page cannot open one', async () => {
+  render(SpotlightSearch, { props: props() });
+  await search('time zone');
+  expect(screen.queryByRole('region', { name: 'Settings' })).toBeNull();
+ });
+});

@@ -20,13 +20,12 @@
 		rewindEligible?: boolean;
 		streaming?: boolean;
 		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success
-		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		notSent?: boolean;
 		notSentMessageId?: string | null;
 		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false, midTurn = false, notSent = false, notSentMessageId = null }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, midTurn = false, notSent = false, notSentMessageId = null }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -71,7 +70,6 @@
 				{userPromptOccurrence}
 				{rewindEligible}
 				{onRewindComplete}
-				{fileCheckpointingEnabled}
 				visible={!streaming}
 			/>
 		</div>

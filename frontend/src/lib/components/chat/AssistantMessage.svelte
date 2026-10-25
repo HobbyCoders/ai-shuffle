@@ -3,7 +3,8 @@
 	/**
 	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
-	import { onDestroy, untrack } from 'svelte';
+	import { mount, onDestroy, unmount, untrack } from 'svelte';
+	import TableCopyMenu from './TableCopyMenu.svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
@@ -32,7 +33,6 @@
 		sessionId?: string | null;
 		streaming?: boolean;
 		hasPartialMessages?: boolean;
-		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		metadata?: Record<string, unknown>;
 		onRewindComplete?: () => void;
 		/** Profile name to display in header (defaults to "Assistant") */
@@ -50,7 +50,6 @@
 		sessionId,
 		streaming = false,
 		hasPartialMessages = true,
-		fileCheckpointingEnabled = false,
 		metadata,
 		onRewindComplete,
 		profileName = 'Assistant',
@@ -278,6 +277,26 @@
 			head.insertBefore(runButton('open', reason, target), copy);
 			head.insertBefore(runButton('paste', reason, target), copy);
 		}
+	});
+
+	// Tables in a settled reply get a small Copy menu (Markdown or CSV). The
+	// wrapper comes from chat-markdown.ts; the menu is mounted here, after
+	// sanitising, so the sanitiser never has to admit a button for it. A
+	// re-render replaces the wrappers, so the menus go with them.
+	$effect(() => {
+		void rendered;
+		const root = proseEl;
+		if (!root || streaming) return;
+		const menus = Array.from(root.querySelectorAll<HTMLElement>('.md-table'))
+			.filter((wrapper) => wrapper.querySelector(':scope > table'))
+			.map((wrapper) => {
+				wrapper.querySelectorAll(':scope > .md-table-bar').forEach((el) => el.remove());
+				const bar = document.createElement('div');
+				bar.className = 'md-table-bar';
+				wrapper.prepend(bar);
+				return mount(TableCopyMenu, { target: bar, props: { wrapper } });
+			});
+		return () => menus.forEach((menu) => void unmount(menu));
 	});
 
 	function span(className: string, text: string): HTMLSpanElement {
@@ -736,7 +755,6 @@
 							onRead={handleRead}
 							{isReading}
 							{onRewindComplete}
-							{fileCheckpointingEnabled}
 						/>
 					</div>
 				{/if}
@@ -894,6 +912,62 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.assistant-actions { transition: none; }
+	}
+
+	/* ── Tables: a quiet Copy menu above the right edge (TableCopyMenu) ── */
+	/* The wrapper scrolls sideways instead of the table, so the table keeps
+	   real table layout: the global prose rule splits thead and tbody into
+	   two separate tables whose columns do not line up. */
+	.abody :global(.md-table) {
+		margin: 0.5rem 0 1rem;
+		min-width: 0;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+	.abody :global(.md-table > table) {
+		display: table;
+		width: 100%;
+		margin-top: 0;
+		margin-bottom: 0;
+		overflow: visible;
+	}
+	.abody :global(.md-table > table > thead) {
+		display: table-header-group;
+	}
+	.abody :global(.md-table > table > tbody) {
+		display: table-row-group;
+	}
+	/* Break between words only: the prose's break-word let a cell shrink to
+	   one letter per line. */
+	.abody :global(.md-table :is(th, td)) {
+		overflow-wrap: normal;
+		word-break: normal;
+	}
+	.abody :global(.md-table) {
+		container-type: inline-size;
+	}
+	/* Narrow column (phone, split pane): columns take their natural width up
+	   to 20rem and the table scrolls sideways, instead of squeezing every
+	   column to its longest word. */
+	@container (max-width: 600px) {
+		.abody :global(.md-table > table) {
+			width: max-content;
+			min-width: 100%;
+		}
+		.abody :global(.md-table :is(th, td)) {
+			max-width: 20rem;
+		}
+	}
+	/* Stays put while a wide table scrolls under it. */
+	.abody :global(.md-table-bar) {
+		position: sticky;
+		left: 0;
+		display: flex;
+		justify-content: flex-end;
+		/* Room for the button's larger touch area, so it never makes the
+		   wrapper scroll. */
+		padding-right: 6px;
+		margin-bottom: 4px;
 	}
 
 	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */

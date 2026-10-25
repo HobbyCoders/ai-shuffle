@@ -14,9 +14,10 @@
 	 * - Deep links arrive as `initialItemId` (an encoded SettingsTarget from
 	 *   `openSettings`); the shell applies it and clears the layout's one-shot
 	 *   item id.
-	 * - Ctrl+K focuses search while Settings is mounted and on screen (it
-	 *   shadows Spotlight and gives it back on unmount); "/" does the same when
-	 *   focus is in Settings and not in a field.
+	 * - Ctrl+K focuses search while Settings is mounted and on screen (the
+	 *   shell claims the key from the app's single Ctrl+K owner and releases it
+	 *   on unmount); "/" does the same when focus is in Settings and not in a
+	 *   field.
 	 * - Stacked mode (phone app, or 600px or narrower) shows one pane at a time;
 	 *   each step pushes a history entry so Android Back pops one level.
 	 * - Read-only (unapproved device): banner on top, controls disabled.
@@ -25,7 +26,6 @@
 	import { page } from '$app/state';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { registerShortcut } from '$lib/services/keyboard';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
 	import { settingsNav, decodeTarget, type SettingsHistoryState } from '$lib/settings/navigation.svelte';
 	import { setSettingsAccess, settingsAccess } from '$lib/settings/access.svelte';
@@ -131,19 +131,11 @@
 		untrack(() => settingsNav.followHistory(state));
 	});
 
-	// Ctrl+K while Settings is on screen.
+	// Ctrl+K while Settings is on screen: the app's one Ctrl+K owner
+	// (services/search-shortcut.ts) focuses Settings search while this holds.
 	$effect(() => {
 		if (!active) return;
-		const reg = registerShortcut({
-			id: 'settings-search',
-			description: 'Search settings',
-			key: 'k',
-			cmdOrCtrl: true,
-			category: 'navigation',
-			allowInInput: true,
-			action: () => settingsNav.requestSearchFocus()
-		});
-		return () => reg.unregister();
+		return settingsNav.claimSearchShortcut();
 	});
 
 	function onkeydown(event: KeyboardEvent) {

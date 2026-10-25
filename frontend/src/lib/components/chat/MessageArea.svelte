@@ -306,7 +306,6 @@
 	// Current profile for message settings (uses current UI selection)
 	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
-	const fileCheckpointingEnabled = $derived(currentProfile?.config?.enable_file_checkpointing === true);
 
 	// Session profile for fallback display (legacy messages without profileId)
 	// Falls back to current profile for new sessions before first message is sent
@@ -2152,7 +2151,6 @@
 			notSent={!!message.metadata?.not_sent}
 			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
-			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}
 		/>
 	{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
@@ -2181,7 +2179,6 @@
 				sessionId={activeSessionId}
 				streaming={isStreamAnchor}
 				{hasPartialMessages}
-				{fileCheckpointingEnabled}
 				metadata={message.metadata}
 				onRewindComplete={handleRewindComplete}
 				profileName={getProfileName(message)}

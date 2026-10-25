@@ -246,6 +246,34 @@ def _store_working_dir(key, value: str, resolved_from_checkout: bool) -> None:
     )
 
 
+async def get_session_review_working_dir_async(
+    project_id: str,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    """Resolve only the session checkout; never use legacy/project fallbacks."""
+    if not session_id:
+        raise HTTPException(400, "Base review requires session_id")
+
+    def resolve():
+        from app.core.project_resolver import describe_checkout_mismatch, resolve_existing_cwd
+
+        session = database.get_session(session_id)
+        if not session:
+            raise HTTPException(404, "Session not found")
+        cwd = resolve_existing_cwd(session)
+        if not cwd:
+            mismatch = describe_checkout_mismatch(session)
+            if mismatch:
+                raise SessionCheckoutUnavailable(409, "Base review is unavailable: " + mismatch)
+            raise SessionCheckoutUnavailable(
+                409, "This session's checkout is not available on this worker.",
+            )
+        return cwd
+
+    return await asyncio.to_thread(resolve)
+
+
 async def get_working_dir_async(
     project_id: str,
     worktree_id: Optional[str] = None,

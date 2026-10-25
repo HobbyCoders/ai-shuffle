@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { tick } from 'svelte';
 
 const mocks = vi.hoisted(() => ({ pushState: vi.fn(), supportCaps: vi.fn() }));
@@ -31,7 +31,7 @@ import { page } from '$app/state';
 import { isAdmin } from '$lib/stores/auth.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
-import { registerShortcut } from '$lib/services/keyboard';
+import { registerSearchShortcut } from '$lib/services/search-shortcut';
 import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-context';
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
@@ -181,10 +181,16 @@ describe('SettingsShell search', () => {
 	});
 });
 
+/** The app shell's one Ctrl+K owner, with Spotlight faked. */
+function appSearchKey() {
+	const spotlight = vi.fn();
+	const reg = registerSearchShortcut({ isSpotlightOpen: () => false, setSpotlightOpen: spotlight });
+	return { spotlight, reg };
+}
+
 describe('SettingsShell Ctrl+K', () => {
 	it('takes Ctrl+K while mounted and gives it back to Spotlight on unmount', async () => {
-		const spotlight = vi.fn();
-		const reg = registerShortcut({ id: 'spotlight', description: 'Spotlight', key: 'k', cmdOrCtrl: true, category: 'navigation', action: spotlight });
+		const { spotlight, reg } = appSearchKey();
 		try {
 			const view = render(SettingsShell);
 			await tick();
@@ -194,15 +200,43 @@ describe('SettingsShell Ctrl+K', () => {
 
 			view.unmount();
 			await fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-			expect(spotlight).toHaveBeenCalledOnce();
+			expect(spotlight).toHaveBeenCalledExactlyOnceWith(true);
+		} finally {
+			reg.unregister();
+		}
+	});
+
+	it('focuses Settings search even when Settings mounted before the app registered Ctrl+K', async () => {
+		render(SettingsShell);
+		await tick();
+		const { spotlight, reg } = appSearchKey();
+		try {
+			await fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+			expect(spotlight).not.toHaveBeenCalled();
+			await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));
+		} finally {
+			reg.unregister();
+		}
+	});
+
+	it('works from a field on the Settings page', async () => {
+		const { spotlight, reg } = appSearchKey();
+		try {
+			render(SettingsShell);
+			await tick();
+			const field = document.body.appendChild(document.createElement('input'));
+			field.focus();
+			await fireEvent.keyDown(field, { key: 'k', ctrlKey: true });
+			expect(spotlight).not.toHaveBeenCalled();
+			await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));
+			field.remove();
 		} finally {
 			reg.unregister();
 		}
 	});
 
 	it('leaves Ctrl+K to Spotlight while the kept-alive panel is off screen', async () => {
-		const spotlight = vi.fn();
-		const reg = registerShortcut({ id: 'spotlight', description: 'Spotlight', key: 'k', cmdOrCtrl: true, category: 'navigation', action: spotlight });
+		const { spotlight, reg } = appSearchKey();
 		try {
 			render(SettingsShell, { context: new Map([[FEATURE_PANEL_CONTEXT, { active: false }]]) });
 			await tick();
@@ -353,6 +387,8 @@ describe('SettingsShell stacked mode', () => {
 	});
 
 	it('Ctrl+K returns to the index before focusing search', async () => {
+		const { reg } = appSearchKey();
+		onTestFinished(() => reg.unregister());
 		platform.set('mobile');
 		const go = vi.spyOn(history, 'go').mockImplementation(() => {});
 		const { container } = render(SettingsShell);

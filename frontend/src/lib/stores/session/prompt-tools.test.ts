@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { createPromptRecall, promptHistory } from './prompt-recall';
 import { createPromptStash, draftPreview, stashAge, stashStorageKey, MAX_STASHED_PROMPTS } from './prompt-stash';
@@ -73,7 +73,9 @@ describe('prompt stash', () => {
 		expect(stash.push('')).toBeNull();
 		expect(stash.push(JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] }))).toBeNull();
 		stash.setOwner(null);
-		stash.push('signed out');
+		// Signed out nothing can be kept, so the push says so and lists nothing.
+		expect(stash.push('signed out')?.durable).toBe(false);
+		expect(get(stash)).toEqual([]);
 		expect(localStorage.length).toBe(0);
 	});
 
@@ -82,13 +84,74 @@ describe('prompt stash', () => {
 		const stash = createPromptStash(() => ++t);
 		stash.setOwner('user:a');
 		const first = stash.push('one')!;
+		expect(first.durable).toBe(true);
 		stash.push('two');
-		const taken = stash.take(first.id)!;
+		const taken = stash.find(first.entry.id)!;
+		expect(stash.take(first.entry.id)).toBe(true);
+		expect(stash.take(first.entry.id)).toBe(false);
 		expect(get(stash).map(e => e.preview)).toEqual(['two']);
-		stash.putBack(taken);
+		expect(stash.putBack(taken)).toBe(true);
 		expect(get(stash).map(e => e.preview)).toEqual(['two', 'one']);
 		for (let i = 0; i < MAX_STASHED_PROMPTS + 5; i++) stash.push(`p${i}`);
 		expect(get(stash)).toHaveLength(MAX_STASHED_PROMPTS);
+	});
+
+	it('swaps an entry for a draft without evicting another from a full stash', () => {
+		let t = 0;
+		const stash = createPromptStash(() => ++t);
+		stash.setOwner('user:a');
+		for (let i = 0; i < MAX_STASHED_PROMPTS; i++) stash.push(`p${i}`);
+		const restored = get(stash).find(e => e.preview === 'p10')!;
+		const swapped = stash.swap(restored.id, 'current draft');
+		expect(swapped?.durable).toBe(true);
+		const previews = get(stash).map(e => e.preview);
+		expect(previews).toHaveLength(MAX_STASHED_PROMPTS);
+		expect(previews[0]).toBe('current draft');
+		expect(previews).not.toContain('p10');
+		// The oldest entry survives: nothing was evicted to make room.
+		expect(previews).toContain('p0');
+		expect(JSON.parse(localStorage.getItem(stashStorageKey('user:a'))!)).toHaveLength(MAX_STASHED_PROMPTS);
+		expect(stash.swap('missing', 'x')).toBeNull();
+		expect(stash.swap(swapped!.entry.id, '')).toBeNull();
+	});
+
+	describe('when the browser refuses to save', () => {
+		afterEach(() => vi.restoreAllMocks());
+
+		it('reports the push as not durable and leaves the list as it was', () => {
+			const stash = createPromptStash();
+			stash.setOwner('user:a');
+			stash.push('kept');
+			vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError'); });
+			const pushed = stash.push('lost?');
+			expect(pushed?.durable).toBe(false);
+			expect(get(stash).map(e => e.preview)).toEqual(['kept']);
+			expect(JSON.parse(localStorage.getItem(stashStorageKey('user:a'))!).map((e: { draft: string }) => e.draft)).toEqual(['kept']);
+		});
+
+		it('keeps a taken entry listed when its removal is not saved, and reports putBack', () => {
+			const stash = createPromptStash();
+			stash.setOwner('user:a');
+			const { entry } = stash.push('two')!;
+			stash.push('one');
+			vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('disabled'); });
+			expect(stash.take(entry.id)).toBe(false);
+			expect(get(stash).map(e => e.preview)).toEqual(['one', 'two']);
+			vi.restoreAllMocks();
+			expect(stash.take(entry.id)).toBe(true);
+			vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('disabled'); });
+			expect(stash.putBack(entry)).toBe(false);
+			expect(get(stash).map(e => e.preview)).toEqual(['one']);
+		});
+
+		it('leaves the list untouched when a swap is not saved', () => {
+			const stash = createPromptStash();
+			stash.setOwner('user:a');
+			const { entry } = stash.push('stashed')!;
+			vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('disabled'); });
+			expect(stash.swap(entry.id, 'draft')?.durable).toBe(false);
+			expect(get(stash).map(e => e.preview)).toEqual(['stashed']);
+		});
 	});
 
 	it('ignores a corrupt stored list', () => {

@@ -995,7 +995,10 @@ class TestInboundWebhook:
         response = owner.post(BASE + "/hooks/deploys", json={"message": "hi"}, headers={header: value})
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "message": "Webhook received and processing"}
-        hook.handle_webhook_payload.assert_awaited_once_with({"message": "hi"})
+        hook.handle_webhook_payload.assert_awaited_once_with(
+            {"message": "hi"}, request_method="POST",
+            headers={"user-agent": "testclient", "content-type": "application/json"},
+        )
 
     @pytest.mark.parametrize("prefix", ["", "sha256="])
     def test_hmac_signed_payload_is_dispatched(self, owner, fake_manager, prefix):
@@ -1005,7 +1008,10 @@ class TestInboundWebhook:
         response = owner.post(BASE + "/hooks/deploys", content=body, headers={
             "Content-Type": "application/json", "X-Webhook-Signature": signature})
         assert response.status_code == 200
-        hook.handle_webhook_payload.assert_awaited_once_with({"message": "signed"})
+        hook.handle_webhook_payload.assert_awaited_once_with(
+            {"message": "signed"}, request_method="POST",
+            headers={"user-agent": "testclient", "content-type": "application/json"},
+        )
 
     @pytest.mark.parametrize("config,headers", [
         ({"inbound_token": "hook-token"}, {"Authorization": "Bearer wrong"}),
@@ -1076,7 +1082,10 @@ class TestInboundWebhook:
         public = make_client(owner=False)
         response = public.post(f"{BASE}/hooks/{slug}", json={"n": 1}, headers={"Authorization": "Bearer hook-token"})
         assert response.status_code == 200, response.text
-        hook.handle_webhook_payload.assert_awaited_once_with({"n": 1})
+        hook.handle_webhook_payload.assert_awaited_once_with(
+            {"n": 1}, request_method="POST",
+            headers={"user-agent": "testclient", "content-type": "application/json"},
+        )
 
 
 # =============================================================================
