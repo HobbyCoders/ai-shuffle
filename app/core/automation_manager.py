@@ -640,13 +640,22 @@ class AutomationManager:
             if self._shutdown_begun():
                 logger.info(f"Automation {automation_id}: shutting down — run not started")
                 return
-            if automation_id in self._running:
-                logger.warning(f"Automation {automation_id} already running — skipping")
-                return
-            # Mark as running with a placeholder
-            self._running[automation_id] = asyncio.current_task()
+            already_running = automation_id in self._running
+            if not already_running:
+                # Mark as running with a placeholder
+                self._running[automation_id] = asyncio.current_task()
 
         run_id = f"run-{secrets.token_hex(4)}"
+        if already_running:
+            logger.warning(f"Automation {automation_id} already running — skipping")
+            await run_sync(
+                database.create_automation_run,
+                run_id=run_id,
+                automation_id=automation_id,
+                status="skipped_running",
+                trigger_data=trigger_data,
+            )
+            return
 
         try:
 

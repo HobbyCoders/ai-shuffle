@@ -269,7 +269,7 @@ export function runTriggerLabel(triggerData: Record<string, unknown> | null | un
 export interface AutomationRun {
 	id: string;
 	automation_id: string;
-	status: 'pending' | 'approved' | 'running' | 'completed' | 'failed' | 'cancelled' | 'budget_exceeded';
+	status: 'pending' | 'approved' | 'running' | 'completed' | 'failed' | 'cancelled' | 'budget_exceeded' | 'skipped_running';
 	trigger_data: Record<string, unknown> | null;
 	session_id: string | null;
 	prompt_rendered: string | null;

@@ -1,5 +1,6 @@
 """WebhookConnector — generic HTTP webhook with outbound and inbound support."""
 
+import base64
 import hashlib
 import hmac
 import json
@@ -42,12 +43,27 @@ def _generate_signature(payload: str, secret: str) -> str:
     ).hexdigest()
 
 
-def _verify_signature(payload: str, secret: str, signature: str) -> bool:
-    """Verify an HMAC-SHA256 signature from an incoming webhook."""
-    expected = _generate_signature(payload, secret)
-    # Strip optional "sha256=" prefix
-    sig = signature.removeprefix("sha256=")
-    return hmac.compare_digest(expected, sig)
+def _verify_signature(
+    payload: str | bytes, secret: str, signature: str,
+    encoding: str = "hex", prefix: str = "",
+) -> bool:
+    """Verify HMAC-SHA256 over the exact body, with legacy hex defaults."""
+    body = payload.encode("utf-8") if isinstance(payload, str) else payload
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    if encoding == "hex":
+        expected = digest.hex()
+    elif encoding == "base64":
+        expected = base64.b64encode(digest).decode("ascii")
+    else:
+        return False
+    if prefix:
+        if not signature.startswith(prefix):
+            return False
+        signature = signature[len(prefix):]
+    elif encoding == "hex":
+        # Existing senders may use either bare hex or sha256=<hex>.
+        signature = signature.removeprefix("sha256=")
+    return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8"))
 
 
 class WebhookConnector(BaseConnector):
@@ -73,6 +89,12 @@ class WebhookConnector(BaseConnector):
             e.g. "my-hook" → POST /api/v1/connectors/hooks/my-hook
         inbound_token (str, optional): Bearer token required for
             incoming requests (alternative to HMAC).
+        signature_header (str, optional): Incoming signature header name;
+            defaults to X-Webhook-Signature (read by the HTTP route).
+        signature_encoding (str, optional): Incoming digest encoding, hex
+            (default) or base64. Outbound signatures are unchanged.
+        signature_prefix (str, optional): Required incoming signature prefix.
+            When unset, hex accepts bare hex or the legacy sha256= prefix.
         prompt_template (str, optional): Template for wrapping the
             payload before sending to the AI.
     """
@@ -150,7 +172,7 @@ class WebhookConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def verify_inbound_request(
-        self, payload_body: str, token: Optional[str] = None,
+        self, payload_body: str | bytes, token: Optional[str] = None,
         signature: Optional[str] = None,
     ) -> bool:
         """Verify an incoming webhook request via token or HMAC."""
@@ -167,7 +189,11 @@ class WebhookConnector(BaseConnector):
 
         # HMAC auth
         if secret and signature:
-            return _verify_signature(payload_body, secret, signature)
+            return _verify_signature(
+                payload_body, secret, signature,
+                encoding=self.config.get("signature_encoding") or "hex",
+                prefix=self.config.get("signature_prefix") or "",
+            )
 
         # No credentials configured — refuse rather than accept unauthenticated
         # inbound requests. An inbound connector with neither a token nor a
@@ -182,8 +208,11 @@ class WebhookConnector(BaseConnector):
 
         return False
 
-    async def handle_webhook_payload(self, payload: Dict[str, Any]) -> None:
-        """Process an incoming webhook payload and route to the AI."""
+    async def handle_webhook_payload(
+        self, payload: Any, *, request_method: str = "POST",
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Process the JSON body with transport metadata supplied by the route."""
         prompt_template = self.config.get("prompt_template", "")
         payload_json = json.dumps(payload, indent=2, default=str)
 
@@ -217,8 +246,8 @@ class WebhookConnector(BaseConnector):
         await self._on_incoming_message(message)
 
         await self.emit_trigger("webhook_received", {
-            "method": payload.get("method", "POST"),
-            "headers": payload.get("headers", {}),
+            "method": request_method,
+            "headers": headers or {},
             "body": payload,
             "path": self.config.get("inbound_path", "webhook"),
         })

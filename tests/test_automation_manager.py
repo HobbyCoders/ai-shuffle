@@ -220,9 +220,51 @@ class TestExecuteConcurrency:
 
         await manager._execute("auto-conc", {"trigger": "manual"})
 
-        # Should not have created any run (blocked by concurrency check)
         runs = database.get_automation_runs("auto-conc")
-        assert len(runs) == 0
+        assert len(runs) == 1
+        assert runs[0]["status"] == "skipped_running"
+        assert runs[0]["trigger_data"] == {"trigger": "manual"}
+        assert "auto-conc" in manager._running  # The active run retains its latch.
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("trigger", ["webhook", "manual", "connector_trigger"])
+    async def test_overlapping_fires_are_recorded(self, manager, mock_db, runner, trigger):
+        tasks = _capture_tasks(manager)
+        _make_automation("auto-overlap", triggers=[
+            {"type": "webhook", "config": {}},
+            {"type": "connector_trigger", "config": {"connector_id": "c-1", "trigger_id": "webhook_received"}},
+        ])
+        release = asyncio.Event()
+        runner.gates = [release]
+
+        async def fire(delivery):
+            if trigger == "webhook":
+                result = await manager.trigger_webhook("auto-overlap", {"delivery": delivery})
+                assert result["status"] == "triggered"
+            elif trigger == "manual":
+                result = await manager.trigger_manual("auto-overlap")
+                assert result["status"] == "triggered"
+            else:
+                await manager.handle_connector_trigger("c-1", "webhook_received", {"delivery": delivery})
+
+        try:
+            await fire(1)
+            await _until(lambda: len(runner.calls) == 1)
+            await fire(2)
+            await tasks[1]
+            runs = _runs("auto-overlap")
+            assert len(runs) == 2
+            skipped = next(run for run in runs if run["status"] == "skipped_running")
+            assert skipped["trigger_data"]["trigger"] == trigger
+            if trigger == "webhook":
+                assert skipped["trigger_data"]["payload"] == {"delivery": 2}
+            elif trigger == "connector_trigger":
+                assert skipped["trigger_data"]["data"] == {"delivery": 2}
+            assert len(runner.calls) == 1
+            assert manager._running["auto-overlap"] is tasks[0]
+        finally:
+            release.set()
+            await _drain(tasks)
 
 
 # =============================================================================
@@ -2499,7 +2541,11 @@ class TestRunConcurrency:
 
         await manager._execute("auto-busy", {"trigger": "schedule"})  # next fire arrives
         assert len(runner.calls) == 1
-        assert len(_runs("auto-busy")) == 1
+        runs = _runs("auto-busy")
+        assert sorted(r["status"] for r in runs) == ["running", "skipped_running"]
+        skipped = next(r for r in runs if r["status"] == "skipped_running")
+        assert skipped["trigger_data"] == {"trigger": "schedule"}
+        assert manager._running["auto-busy"] is first
 
         gate.set()
         await first
@@ -2507,7 +2553,9 @@ class TestRunConcurrency:
 
         await manager._execute("auto-busy", {"trigger": "schedule"})
         assert len(runner.calls) == 2
-        assert sorted(r["status"] for r in _runs("auto-busy")) == ["completed", "completed"]
+        assert sorted(r["status"] for r in _runs("auto-busy")) == [
+            "completed", "completed", "skipped_running",
+        ]
 
     async def test_latch_released_after_a_failed_run(self, manager, mock_db, runner):
         runner.exc = RuntimeError("boom")
