@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "6b1d4e960c1c74b8bf3317cb6be3454cff6dc561",
+  "revision": "86c76d3a0546debbae8473e9db480283b6d85c60",
   "packages": {
     "telegram": {
       "module": "telegram",
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "8a0b12f54a4bf490"
+  "release": "3bb057b38c3aa994"
 }

@@ -8,6 +8,50 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.1.0
+
+Watches, peer terminals, one generation tool, review mode, and a large reliability pass across hand-offs, PostgreSQL and Windows.
+
+### Install and packaging
+
+- The Docker image no longer runs npm as root at startup, and agent tools can run in a required, fail-closed Docker isolation mode.
+- Updates reuse database snapshots and dependency-keyed runtimes, so most updates prepare faster.
+
+### Updates
+
+- The update screens show staging, what still blocks a restart, and the install outcome. Check for updates asks every worker, from the sidebar as well as Settings.
+- A stopped background task no longer blocks a restart as phantom running work.
+
+### Agents and providers
+
+- Watches: agents can watch email and messaging sources for you. The watch panel shows where each watch runs, your placement preference, and a Move button.
+- One generation tool for images, video and audio, with the price, a confirmation card and remembered picks. Unpriced jobs never run without the spending guard. SuperGrok accounts can generate images and video.
+- Voice: 25 ChatGPT voices, Grok Voice on a connected SuperGrok login, and GPT-Live-1.1 where available.
+- A Model tuning page sets effort, Fast, context and local-model tuning per model.
+- A chat stopped by a usage limit can resume once at the reset time.
+- Plugin MCP servers connect in native chats.
+
+### Sessions and interface
+
+- Review mode: review a session's changes against its base branch and send line comments to the agent.
+- Choose how long an approval lasts, and manage saved approvals in Settings.
+- New sessions start from the agent, with the project optional. Owner chats without a project can coordinate project work.
+- Settings are searchable from Spotlight. Tables have a copy menu; terminal links open, and terminal output can be sent to the chat.
+- Long inline HTML pages grow to full height instead of scrolling in a box. Queued subagents show as Queued.
+- Escape closes only the topmost popover or dialog. Approval and choice cards match the chat style.
+
+### Remote access and workers
+
+- Peer terminals: open a terminal on another worker after approving it on that worker. Opens are logged on both workers.
+- Chats without a project and non-Git project folders can move between workers.
+- Hand-offs, sync and turn ordering stay steady when the database is under pressure: new turns queue instead of failing, and PostgreSQL stalls are bounded.
+
+### Desktop app
+
+- Launcher 8: PostgreSQL start timeouts, a faster identity check, and safer restore points. New installs need the new installer; existing installs update in-app.
+- Many Windows-only fixes, including Git process clean-up and file-monitor settings.
+- The Phone panel opens when an agent uses the Android emulator.
+
 ## 1.0.2
 
 Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fixes for hand-offs, git, sync and the composer.
