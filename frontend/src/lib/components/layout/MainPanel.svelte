@@ -1107,7 +1107,8 @@
 					{:else if activeSidePanel.active === 'changes' && activeProject}
 						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" fallbackActions={panelActions}
 							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,
-								onClose: closeSidePanel, onViewDiff: () => {}, panelActions }} />
+								onClose: closeSidePanel, onViewDiff: () => {}, panelActions,
+								onAskAgent: (prompt: string) => activeSession.sendMessage(prompt) }} />
 					{/if}
 				{/key}
 				{/snippet}

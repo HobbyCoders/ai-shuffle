@@ -20,6 +20,14 @@
           "how": "On paired disposable candidate workers, create different contents under the same project on each worker. In a throwaway session's branch checkout, commit an edit, a rename and a deletion, leaving a clean tree. Request changed-files with scope=base and session_id, then file-diff with scope base for each row, from both workers. Add staged, unstaged and untracked edits, including a file changed in both layers. Advance the default branch ref to include the task commit and repeat. Disconnect the owning candidate and retry; remove the session checkout on the disposable candidate and retry after reconnecting. Never alter production checkouts.",
           "pass_when": "Clean committed changes remain listed with committed origin; later edits have uncommitted or both origin and bounded per-file diffs. Renames retain their original paths and deletions show removed lines. Responses name the selected base ref and merge-base SHA, and a moving base changes the next response. Requests from either worker read only the session checkout, never the viewer's different contents. Missing checkout and unreachable owner return clear errors without project-folder fallback.",
           "past_bug": "The review panel showed no changes after the agent committed its task."
+        },
+        {
+          "id": "git-task-review.diff-line-ask-agent",
+          "check": "A diff line comment reaches the current chat once, with its anchor",
+          "kind": "owner",
+          "how": "In a throwaway session with committed and uncommitted edits, open the Changes side panel on desktop and on the Android app. In each review scope, drag or shift-click line numbers on desktop and tap two lines on the phone, write a comment and send it; once more, use Edit message to change the text first. Repeat while the agent is replying, and try a binary and a truncated file. Compare the chat transcript, the session checkout's git status and the PR's comments before and after.",
+          "pass_when": "Each send adds exactly one user message to the open chat, naming the file, old and new line range, review scope with base ref and merge base, a bounded excerpt and the comment (or the edited text). The checkout and the PR are unchanged. Binary and truncated diffs offer no selection.",
+          "past_bug": "Review feedback could only be retyped into the composer by hand, without file or line context."
         }
       ]
     },

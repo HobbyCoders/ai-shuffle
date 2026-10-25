@@ -31,9 +31,11 @@
 		reviewMode?: boolean;
 		embedded?: boolean;
 		panelActions?: Snippet;
+		/** Sends a diff line comment to the current chat (review mode). */
+		onAskAgent?: (prompt: string) => Promise<boolean>;
 	}
 
-	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false, panelActions }: Props = $props();
+	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false, panelActions, onAskAgent }: Props = $props();
 
 	// ── Grouped file lists ──────────────────────────────────────────────
 	const conflicts = $derived(($changedFiles ?? []).filter(f => f.category === 'conflict'));
@@ -138,6 +140,8 @@
 	// ── Review mode: selected file + footer confirmation ────────────────
 	let reviewSelectedFile = $state<FileChangeInfo | null>(null);
 	let reviewActionInFlight = $state(false);
+	/** Stage/discard act on the working tree, so the footer hides for base review. */
+	let reviewScope = $state<'working' | 'base'>('working');
 
 	// Keep review ordering consistent with the classic status groups.
 	const flatFiles = $derived([...conflicts, ...staged, ...modified, ...untracked]);
@@ -681,11 +685,12 @@
 			<ReviewDiffPanel
 				{projectId} files={flatFiles} loading={$changedFilesLoading}
 				selected={reviewSelectedFile} onSelect={(file) => { reviewSelectedFile = file; }}
-				{onClose} {embedded} {panelActions}
+				{onClose} {embedded} {panelActions} {onAskAgent}
+				onScopeChange={(next) => { reviewScope = next; }}
 			/>
 
 			<!-- Accept / Decline footer -->
-			{#if reviewSelectedFile}
+			{#if reviewSelectedFile && reviewScope === 'working'}
 				<div class="review-footer">
 					<div class="review-footer-info">
 						<span class="review-footer-filename" title={reviewSelectedFile.file}>
