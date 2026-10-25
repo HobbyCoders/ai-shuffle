@@ -11,6 +11,7 @@ import type { ChatMessage, Task } from '$lib/stores/types';
 import { isSwarmActive, type SwarmSnapshot, type SwarmTask } from '$lib/utils/swarm';
 import { linkedTranscripts, transcriptForTask } from '$lib/utils/background-work';
 import { taskModel, type TaskModel } from '$lib/utils/task-model';
+import { isQueuedSummary } from '$lib/utils/subagent-status';
 import { transferTarget } from './watch-placement';
 
 export type RunFilter = 'all' | 'agents' | 'shell' | 'watches';
@@ -49,6 +50,8 @@ export interface TaskRow extends RowBase {
 	/** The model the subagent runs on, as the model pickers name it (#1827). */
 	model: TaskModel | null;
 	transcriptSessionId: string | null;
+	/** Its start still waits for database pressure to clear (#583). */
+	queued?: boolean;
 }
 
 export interface SwarmRow extends RowBase {
@@ -166,7 +169,8 @@ export function buildRows({ tasks, swarms, messages, stopping, stopped, defaultW
 			startedAt: time(task.startedAt),
 			endedAt: null,
 			state: stopping?.has(key) ? 'stopping' : 'running',
-			transcriptSessionId: transcriptForTask(task, linked)
+			transcriptSessionId: transcriptForTask(task, linked),
+			queued: isQueuedSummary(task.summary)
 		});
 	}
 

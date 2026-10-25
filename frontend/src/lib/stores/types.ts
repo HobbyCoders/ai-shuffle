@@ -135,6 +135,7 @@ export interface ChatMessage {
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
 	agentModel?: string; // The "<provider> · <model>" label the worker runs on, from task.updated (#1827)
 	agentStopNote?: string; // Who stopped a 'stopped' card, as the task registry recorded it ("Stopped by user")
+	agentQueued?: boolean; // A running card whose start still waits for database pressure to clear (#583)
 	agentReportTruncated?: boolean; // The card's `content` is a cut of the worker's report; the rest is in its transcript
 	agentLaunchToolUseId?: string; // The model's Task launch tool_use_id absorbed into this card (fluid-leg worker cards)
 	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number; input_tokens?: number; output_tokens?: number }; // Task progress stats

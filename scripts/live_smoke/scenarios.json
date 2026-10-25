@@ -457,6 +457,15 @@
           "how": "Pick the Windows worker in a new chat with no project, on Ask, and attach a small text file to the first message, asking the agent to quote its first line. Then ask what is using space on C:, with a read-only command only (for example Get-PSDrive C, or the size of a few top-level folders). Approve the command when it asks. Switch the chat to Bypass and ask for one more read-only listing. Ask a Task subagent with no project= to report its working directory. Archive the chat afterwards.",
           "pass_when": "The chat runs the command itself through its shell instead of handing over a script to paste. Ask shows an approval before the command; Bypass runs the next one without asking. The attached file is quoted without an approval prompt. The chat and its subagent both report the workspace's no-project folder as their working directory (not chat-uploads), and the folder does not appear in the Add project folder picker. Nothing on the worker is changed or deleted.",
           "past_bug": "#641: a no-project owner chat on Windows had no shell, offered a paste-in script, and its read-only investigator was refused with \"Code-capable subagents must name a registered project\"."
+        },
+        {
+          "id": "two-worker-smoke.peer-terminal-acceptance",
+          "check": "Owner-approved terminal on a peer worker, end to end",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On two paired workers that both reach each other over HTTPS, turn on network_peer_terminals in owner policy. On worker A open the Terminal panel, choose + > Target and check each peer row's reason (offline, older version, turned off on the peer, no HTTPS). Request approval for worker B, compare the six-character code with B's Terminal requests list, tick the match box and approve one shell on B while signed in there as the owner. Open it on A; run a command, resize the panel, reload the page and reconnect, then close the tab. Repeat with a revoke on B, a sign-out on B and a two-minute unapproved request. Attempt the routes with an API key and a preview link. Read both workers' app logs.",
+          "pass_when": "Output and resize reach B's real shell, and reload reconnects to the same shell with its recent output. Close, revoke, sign-out and expiry end the shell on both workers and reopening needs a new approval. Unusable peers show their reason and cannot be requested. API keys and preview links are refused. Both workers log request, open and close, with no lease, credential or terminal text. Record the tested revision on #196.",
+          "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
         }
       ]
     },
@@ -789,6 +798,14 @@
           "past_bug": "#559: the bundled MCP bridge dropped the subagent caller identity."
         },
         {
+          "id": "harness-basics.db-pressure-queued-task-stop",
+          "check": "A subagent Queued by database pressure shows Queued and stays stopped when stopped",
+          "kind": "owner",
+          "how": "On a disposable candidate only, hold database pressure past the admission sustain threshold, then have a chat dispatch two background subagents. Check the subagent cards and the running tasks list at desktop and phone widths. Stop one subagent from the running tasks list and open the other's transcript and press Stop. Release pressure.",
+          "pass_when": "Both cards and both list rows read Queued while waiting. Each stopped subagent reads Stopped, is not re-dispatched as a retry, and never reaches its provider after pressure clears; its queued turn is aborted (removed_from_queue).",
+          "past_bug": "#583 live run: the Queued summary was stored but never rendered, Stop on a queued worker session re-dispatched the brief, and Stop from the running tasks list left the queued turn to run after recovery."
+        },
+        {
           "id": "harness-basics.db-pressure-start-admission",
           "check": "Database pressure queues new starts without dropping running turns",
           "kind": "owner",
@@ -826,8 +843,16 @@
           "kind": "owner",
           "two_worker": true,
           "how": "Use only disposable candidate workers and synthetic history, never an installed worker or its database. On that disposable receiver run python -m app.maintenance.history_indexing --apply; without this opt-in confirm no history migration starts. Let its concurrent index migration finish, then move a large synthetic chat while another named throwaway chat appends messages and searches a unique live marker. Inspect per-table timings, WAL and single-row latency. Confirm moved text can still be viewed while its history_index_state is pending. Restart only the disposable receiver part-way through catch-up. After catch-up, recall and session-list search must find native, delegated and mirrored markers including punctuation, literal percent/underscore and Unicode. Also move a legacy away-mode chat whose reminder exists only in a user node; check inheritance before catch-up. Repeat the concurrent migration with about one million synthetic events and a live writer. Remove only these disposable resources.",
-          "pass_when": "Moves do not synchronously maintain history GIN indexes; live messages remain searchable and do not inherit a shared GIN pending-list backlog. Both live and caught-up history search plans use their separate partial indexes, history GIN pending lists are separate and bounded to 1 MiB, and live edits move back to state 0, pending work resumes after restart without missing or duplicate hits, and away-mode inheritance reads pending history. Migration uses concurrent builds, short lock acquisition, preserves source row counts and does not rewrite the event heap. Record actual time, WAL, corpus shape and live insert latency; an unrun worker path is not a pass.",
+          "pass_when": "Moves do not synchronously maintain history GIN indexes; live messages remain searchable and do not inherit a shared GIN pending-list backlog. Both live and caught-up history search plans use their separate partial indexes, history GIN pending lists are separate and bounded to 4 MiB, and live edits move back to state 0, pending work resumes after restart without missing or duplicate hits, and away-mode inheritance reads pending history. Migration uses concurrent builds, short lock acquisition, preserves source row counts and does not rewrite the event heap. Record actual time, WAL, corpus shape and live insert latency; an unrun worker path is not a pass.",
           "past_bug": "#295: bulk hand-off GIN maintenance stalled imports and live writes; a larger shared pending list moved the delay onto live chats."
+        },
+        {
+          "id": "harness-basics.deferred-history-wal-attribution",
+          "check": "Experimental catch-up tuning accounts for total WAL and live tails",
+          "kind": "owner",
+          "how": "On fresh disposable PostgreSQL clusters only, run the cold hand-off lab sequentially under the shared heavy-work lock, checking host load before each run. Compare identical ordinary/deferred corpus sizes and idle controls. Retain WAL for pg_waldump record/FPI summaries and collect pg_stat_wal/checkpoint deltas, pending row counts and correlated live execute/commit samples. Label smaller diagnostic corpora, batch/pacing, history-only pending-list and lab-only checkpoint trials separately. Restart between bounded promotions and search the producing import path afterward.",
+          "pass_when": "Every completed comparison accounts for import plus catch-up WAL, sample counts and remaining pending rows. Timeout diagnostics remain available and incomplete catch-up is never a pass. The queue lookup remains bounded before heap-local ordering; indexed rows are not rewritten. Reject throughput-only wins that worsen live tails, never change live-index pending lists, and keep activation explicit/off by default until full worker acceptance. SQL probes alone do not establish actual foreground-turn gating or two-worker acceptance.",
+          "past_bug": "#571: import-only WAL hid catch-up GIN record amplification and shared-load outliers; checkpoint or larger-batch throughput alone was not live-latency acceptance."
         },
         {
           "id": "harness-basics.generation-conversation-preferences",

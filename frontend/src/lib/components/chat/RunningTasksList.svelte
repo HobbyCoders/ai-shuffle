@@ -756,7 +756,7 @@
 				<span class="row-name" class:mono={row.kind === 'shell'} title={row.name}><span class="name-text">{row.name}</span>{#if row.model}<span class="model-chip" title="Model: {row.model.raw}">{row.model.label}</span>{/if}</span>
 			{/if}
 			<span class="row-meta">
-				<b class="meta-time">{row.state === 'stopped' ? 'Stopped' : elapsedOf(row)}</b>
+				<b class="meta-time">{row.state === 'stopped' ? 'Stopped' : row.type === 'task' && row.queued ? 'Queued' : elapsedOf(row)}</b>
 				<span class="meta-worker" title="Runs on {row.worker}">{row.worker}</span>
 			</span>
 			<span class="row-actions">

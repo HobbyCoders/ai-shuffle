@@ -31,7 +31,7 @@ def test_online_migration_and_restart_safe_import() -> None:
                     ("idx_session_recall_text_trgm_e_h2",))
         options = cur.fetchone()["reloptions"]
         assert "fastupdate=on" in options
-        assert "gin_pending_list_limit=1024" in options
+        assert "gin_pending_list_limit=4096" in options
         cur.execute("DELETE FROM session_events WHERE session_id='history-index-test'")
         cur.execute("DELETE FROM sessions WHERE id='history-index-test'")
         cur.execute("INSERT INTO sessions(id,title) VALUES ('history-index-test','History test')")
@@ -334,3 +334,67 @@ def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
         assert cur.fetchone()["state"] == (2 if opted_in else 0)
         cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
         assert cur.fetchone() == ({"value": "ready"} if opted_in else None)
+
+
+def test_promotion_visits_bounded_window_in_heap_order() -> None:
+    finish_migration()
+    sid = "history-heap-window"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "fluid_session_nodes"):
+            for key in ("z", "a", "m"):
+                cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) "
+                            "VALUES (%s,%s,0,%s)",
+                            (sid, key, Json({"role": "user", "content": []})))
+    calls = 0
+
+    def can_work() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls <= 2  # Table gate, first row, then foreground work arrives.
+
+    try:
+        assert hi.promote_batch(rows=3, can_work=can_work) == 1
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT node_id, history_index_state AS state FROM fluid_session_nodes "
+                        "WHERE session_id=%s ORDER BY node_id", (sid,))
+            assert [(r["node_id"], r["state"]) for r in cur.fetchall()] == [
+                ("a", 1), ("m", 1), ("z", 2),
+            ]
+            cur.execute("SELECT xmin::text AS version FROM fluid_session_nodes "
+                        "WHERE session_id=%s AND node_id='z'", (sid,))
+            version = cur.fetchone()["version"]
+        # A fresh invocation resumes the persistent queue, never rewriting z.
+        assert hi.promote_batch(rows=3) == 2
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT xmin::text AS version FROM fluid_session_nodes "
+                        "WHERE session_id=%s AND node_id='z'", (sid,))
+            assert cur.fetchone()["version"] == version
+    finally:
+        with base.get_db() as conn:
+            conn.cursor().execute("DELETE FROM fluid_session_nodes WHERE session_id=%s", (sid,))
+
+
+def test_history_budget_upgrade_never_changes_live_index_options() -> None:
+    finish_migration()
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT relname, reloptions FROM pg_class WHERE relname = ANY(%s)",
+                    (list(hi.INDEXES),))
+        before = cur.fetchall()
+        cur.execute("ALTER INDEX idx_session_recall_text_trgm_e_h2 "
+                    "SET (gin_pending_list_limit=1024)")
+    # A receiver already marked ready by the former version is upgraded in place.
+    assert hi.migrate()
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT reloptions FROM pg_class "
+                    "WHERE relname='idx_session_recall_text_trgm_e_h2'")
+        assert "gin_pending_list_limit=4096" in cur.fetchone()["reloptions"]
+        cur.execute("SELECT relname, reloptions FROM pg_class WHERE relname = ANY(%s)",
+                    (list(hi.INDEXES),))
+        assert sorted(cur.fetchall(), key=lambda row: row["relname"]) == sorted(
+            before, key=lambda row: row["relname"],
+        )

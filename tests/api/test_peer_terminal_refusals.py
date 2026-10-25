@@ -112,6 +112,12 @@ def _caller(c, label):
         return client(c, bearer=key)
     if label == "peer-worker-token":
         return client(c, bearer="peer-worker-" + os.urandom(16).hex())
+    if label in ("preview-cookie", "preview-cookie-with-owner"):
+        from app.core import preview_access
+
+        tc = client(c, cookie=c.owner) if label.endswith("owner") else client(c)
+        tc.cookies.set(preview_access.cookie_name(), preview_access.mint("agent-session"))
+        return tc
     raise AssertionError(label)
 
 
@@ -120,7 +126,8 @@ def _caller(c, label):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("label", ["anonymous-lan", "passwordless-loopback", "owner-cookie-on-remote-listener",
-                                   "member-paired-device", "api-key", "peer-worker-token"])
+                                   "member-paired-device", "api-key", "peer-worker-token",
+                                   "preview-cookie", "preview-cookie-with-owner"])
 def test_every_peer_route_refuses_callers_without_terminal_permission(wired, label):
     pending = _request(owner(wired.ctx))
     authorization_id, request_id = pending["authorization_id"], pending["request_id"]

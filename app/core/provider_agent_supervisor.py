@@ -302,6 +302,21 @@ async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cl
             worker_session_id, exc_info=True,
         )
 
+    try:
+        # A start still Queued behind start admission (#583) has no runtime for
+        # the interrupt to reach: abort it too, or it runs after the kill.
+        from app.core import turn_manager
+        from app.db import turns as turns_db
+
+        for queued in await asyncio.to_thread(turns_db.get_queued_turns, worker_session_id):
+            if await asyncio.to_thread(turn_manager.remove_queued, queued["id"]) is not None:
+                interrupted = True
+    except Exception:  # noqa: BLE001 — the pool eviction below still runs
+        logger.warning(
+            "ProviderAgent supervisor: aborting queued turns failed for worker %s",
+            worker_session_id, exc_info=True,
+        )
+
     evicted = False
     try:
         from app.core.session_pool import get_session_pool

@@ -87,9 +87,13 @@ signing out on either worker, removing a worker from the network or restarting
 either worker ends the shell. To open another, request a new approval.
 Restart is not offered for a shell on another worker.
 
+Both workers write each request, open and close to their app log. The log
+never includes what you type or what the shell prints.
+
 **What is refused.**
 
-- Anyone who cannot open a local terminal (see [Who can use terminals](#who-can-use-terminals)).
+- Anyone who cannot open a local terminal (see [Who can use terminals](#who-can-use-terminals)),
+  including API keys and agent preview links.
   The approval itself needs the owner signed in on the receiving worker; the
   first worker cannot approve on its behalf, and being a member of the network
   is not enough.

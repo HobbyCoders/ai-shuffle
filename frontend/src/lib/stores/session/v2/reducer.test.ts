@@ -1708,6 +1708,20 @@ describe('task.updated summaries', () => {
 		expect(taskFirst.messages.find((m) => m.type === 'subagent')?.agentModel).toBe('agent · opus');
 	});
 
+	it('the subagent card is Queued while its start waits for database pressure, then runs (#583)', () => {
+		const queued = fold([
+			ev('subagent.started', { task_id: 'q-1', description: 'Review', agent_name: 'Helper' }),
+			ev('task.updated', { task_id: 'q-1', state: 'running', summary: 'Queued', model: 'stub · m' }),
+		]);
+		expect(queued.messages.find((m) => m.type === 'subagent')?.agentQueued).toBe(true);
+		const started = fold([
+			ev('subagent.started', { task_id: 'q-1', description: 'Review', agent_name: 'Helper' }),
+			ev('task.updated', { task_id: 'q-1', state: 'running', summary: 'Queued' }),
+			ev('task.updated', { task_id: 'q-1', state: 'running', summary: 'Task · Helper' }),
+		]);
+		expect(started.messages.find((m) => m.type === 'subagent')?.agentQueued).toBe(false);
+	});
+
 	it('an unknown kind value falls back to agent', () => {
 		const s = fold([
 			ev('task.updated', { task_id: 'x-1', state: 'running', kind: 'workflow' }),
