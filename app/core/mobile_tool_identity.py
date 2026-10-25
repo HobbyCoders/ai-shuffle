@@ -15,6 +15,21 @@ class ControllerCredentialError(PermissionError):
     """A controller refusal with tool guidance, shortened for WebSocket closes."""
 
 
+#: ``principal_id`` of the install-admin principal the agent browser's
+#: session-scoped preview cookie acts as. The same owner and credential as the
+#: local listener, so everything the owner may see still works, but a chat it
+#: sends keeps the no-project ceiling instead of the owner's full surface
+#: (``session_modes.owner_workspace_chat``, #641).
+PREVIEW_PRINCIPAL_ID = 'preview'
+
+
+def preview_principal():
+    """The principal a preview-cookie request or socket acts as."""
+    from app.core import owner_auth
+    return principal('admin', PREVIEW_PRINCIPAL_ID,
+                     'local-transport:' + owner_auth.settings.effective_instance_id)
+
+
 def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
 

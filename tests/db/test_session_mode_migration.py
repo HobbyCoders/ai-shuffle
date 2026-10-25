@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from app.core.session_modes import runtime_session_mode
+from app.core.session_modes import owner_workspace_chat, runtime_session_mode
 from app.db import database
 from app.db.base import get_db
 from app.db.session_mode_migration import migrate
@@ -39,8 +39,10 @@ def test_upgrade_confines_only_ordinary_projectless_rows(mock_db: Any, mode: str
         assert migrate(cursor) == []
     for sid in rows:
         row = database.get_session(sid)
-        expected = "chat" if sid == "owner" else "code"
-        assert runtime_session_mode(row) == expected
+        # #641: the migrated owner row keeps the attach affordance (stored chat)
+        # and runs as the owner's normal no-project session; nothing else moves.
+        assert runtime_session_mode(row) == "code"
+        assert owner_workspace_chat(row) is (sid == "owner")
         assert row["mode"] == ("chat" if sid == "owner" else mode)
         assert database.get_session_messages(sid)[0]["content"] == "preserved history"
 
@@ -56,10 +58,15 @@ def test_upgrade_confines_only_ordinary_projectless_rows(mock_db: Any, mode: str
 
 
 @pytest.mark.parametrize("mode", [None, "code"])
-def test_runtime_fences_old_peer_before_next_upgrade(mock_db: Any, mode: str | None) -> None:
+def test_runtime_reads_old_peer_rows_before_next_upgrade(mock_db: Any, mode: str | None) -> None:
+    # The owner's own legacy row is a normal session (#641); an unattended
+    # one (a watch investigation) is still fenced before the next upgrade.
     row = database.create_session("old-peer-owner", "default", mode=mode)
     assert row["mode"] is None
-    assert runtime_session_mode(row) == "chat"
+    assert runtime_session_mode(row) == "code"
+    assert owner_workspace_chat(row) is True
+    watch = database.create_session("watch-old-peer-event", "default", mode=mode)
+    assert runtime_session_mode(watch) == "chat"
     assert runtime_session_mode(None) == "code"
 
 

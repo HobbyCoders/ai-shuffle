@@ -30,8 +30,7 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
                 owner_auth.same_origin(websocket)
             except Exception:
                 return False, None
-            websocket.state.mobile_tool_principal = identity.principal(
-                'admin', 'install', 'local-transport:' + owner_auth.settings.effective_instance_id)
+            websocket.state.mobile_tool_principal = identity.preview_principal()
             return True, None
     # Keep the legacy return contract; authority travels only on trusted state.
     websocket.state.mobile_tool_principal = None

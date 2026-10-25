@@ -12,6 +12,7 @@ from app.core import owner_services, turn_manager, watch_sources, watches
 from app.db import database, notifications, turns, watches as store
 from app.db.async_database import run_maintenance, run_sync
 from app.core import watch_values as values
+from app.core.session_modes import WATCH_SESSION_PREFIX
 from app.db.base import get_db
 from app.network.control import RunnerUnreachable
 
@@ -412,7 +413,8 @@ class WatchManager:
             sid = (
                 creator["id"]
                 if live
-                else "watch-" + event["id"] if route == "investigate" else None
+                # The prefix keeps the investigation on the chat ceiling.
+                else WATCH_SESSION_PREFIX + event["id"] if route == "investigate" else None
             )
             event = await run_sync(store.assign_route, event["id"], route, sid)
         if event["route"] == "alert":

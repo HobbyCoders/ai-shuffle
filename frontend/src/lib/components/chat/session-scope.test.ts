@@ -20,9 +20,9 @@ import type { Install } from '$lib/api/installs';
 const values = (opts: { hasProject: boolean; autoSupported: boolean }) => accessModes(opts).map((m) => m.value);
 
 describe('Access without a project', () => {
-	it('hides Accept Edits without a project and keeps Ask, Auto and Bypass', () => {
-		expect(values({ hasProject: false, autoSupported: true })).toEqual(['default', 'auto', 'bypassPermissions']);
-		expect(values({ hasProject: false, autoSupported: false })).toEqual(['default', 'bypassPermissions']);
+	it('offers the same modes without a project, Accept Edits included (#641)', () => {
+		expect(values({ hasProject: false, autoSupported: true })).toEqual(['default', 'auto', 'acceptEdits', 'bypassPermissions']);
+		expect(values({ hasProject: false, autoSupported: false })).toEqual(['default', 'acceptEdits', 'bypassPermissions']);
 	});
 
 	it('keeps every option, Accept Edits included, for a project session', () => {
@@ -37,7 +37,7 @@ describe('Access without a project', () => {
 	});
 
 	it.each([
-		['acceptEdits', false, 'default'],
+		['acceptEdits', false, 'acceptEdits'],
 		['acceptEdits', true, 'acceptEdits'],
 		['bypassPermissions', false, 'bypassPermissions'],
 		['auto', false, 'auto'],
@@ -56,7 +56,7 @@ describe('Access without a project', () => {
 		['default', 'default'],
 		['auto', 'auto'],
 		['bypassPermissions', 'bypassPermissions'],
-		['acceptEdits', 'default'],
+		['acceptEdits', 'acceptEdits'],
 		['plan', 'default'],
 	] as const)('starts a no-project session from a last pick of %s on %s', (last, expected) => {
 		expect(noProjectPermission(last)).toBe(expected);
@@ -153,6 +153,6 @@ describe('Attach a project', () => {
 	});
 
 	it('lists what appears after attaching', () => {
-		expect(ATTACH_GAINS).toEqual(['Git panel', 'Branch', 'Checkout', 'Terminal and file edits']);
+		expect(ATTACH_GAINS).toEqual(['Git panel', 'Branch', 'Checkout', 'Terminal in the checkout']);
 	});
 });

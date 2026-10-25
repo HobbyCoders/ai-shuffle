@@ -217,7 +217,10 @@ def _append_system_block(prompt: Any, block: Optional[str]) -> Any:
 from app.core.session_modes import (
     ensure_chat_uploads_dir,
     narrow_tool_access_for_mode,
+    owner_chat_cwd,
+    owner_workspace_chat,
     permission_mode_for_session_mode,
+    runs_in_owner_chat_folder,
     runtime_session_mode,
 )
 
@@ -872,6 +875,12 @@ def build_options_from_profile(
         project = None
         working_dir = str(ensure_chat_uploads_dir())
         working_dir_source = "chat uploads"
+    elif runs_in_owner_chat_folder(session_row):
+        # #641: the owner's no-project chat is a normal session whose folder
+        # is the shared chat folder; its projectless Task workers share it.
+        project = None
+        working_dir = str(owner_chat_cwd())
+        working_dir_source = "chat folder"
     elif overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
@@ -989,7 +998,12 @@ def build_options_from_profile(
             _binding_row = None
     session_mode = runtime_session_mode(_binding_row)
     from app.core.session_orchestration import is_owner_session
+    # A no-project chat that keeps the ceiling but is the owner's (a preview
+    # cookie's or a watch investigation's): read-only coordination tools.
     owner_coordinator = session_mode == "chat" and is_owner_session(_binding_row)
+    # The owner's own no-project chat: a normal (code-lane) session (#641)
+    # that still carries its working record, as a coordinator does.
+    owner_chat = session_mode == "code" and owner_workspace_chat(_binding_row)
 
     # Where and how this session runs (execution mode, a worktree's base
     # branch, the runtime placement). The adapter renders it into every
@@ -1135,7 +1149,7 @@ def build_options_from_profile(
         else:
             final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
 
-    if owner_coordinator and session_id:
+    if (owner_coordinator or owner_chat) and session_id:
         from app.core.working_record import summary as working_summary
         record_context = working_summary(session_id, owner_row=_binding_row)
         if isinstance(final_system_prompt, dict):
@@ -1403,6 +1417,14 @@ def build_options_from_profile(
             "or skill/plugin writes. App configuration writes require owner confirmation. "
             "Read, Glob and Grep are read-only inside registered project roots and chat attachments. "
             "The read-only broker resolves the current registered roots on this worker.")
+    elif owner_chat:
+        final_system_prompt = _append_system_block(final_system_prompt,
+            "# No project\n"
+            "This chat has no project. Its working directory is the shared chat folder, which "
+            "also holds files attached to chats; the shell, file and code tools work across this "
+            "machine under the chat's permission mode, as in a project session. For work in a "
+            "registered project, use StartSession(project=...), or Task(project=...) for a "
+            "subagent in its own checkout. Subagents started without project= run in this folder.")
     from app.core.spending_limits import role_context as assistant_limits_context
     final_system_prompt = _append_system_block(
         final_system_prompt, assistant_limits_context(session_id),

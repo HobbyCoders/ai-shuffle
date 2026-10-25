@@ -183,26 +183,110 @@ def session_mode_of(session_row: Optional[Mapping[str, Any]]) -> str:
     return normalize_session_mode(session_row.get("mode"))
 
 
-def runtime_session_mode(row: Optional[Mapping[str, Any]]) -> str:
-    """Confine ordinary projectless legacy rows, including rows arriving from old peers.
+#: Session ids the watch manager gives the no-project chat a matching
+#: ``investigate`` watch runs in (``watch-<event id>``). Nobody is watching
+#: those turns, so they keep the chat ceiling (#641).
+WATCH_SESSION_PREFIX = "watch-"
 
-    Storage migration supplies the same mode to clients (and the attach-project
-    affordance). This fallback closes the window before migration/sync. It grants
-    no owner authority: orchestration still checks the authenticated principal.
-    API, delegated, automation and hidden rows retain their existing policy.
+_NOT_TOP_LEVEL_OWNER_KEYS: Tuple[str, ...] = (
+    "api_user_id", "is_worker", "parent_session_id", "automation_id", "hidden",
+)
+
+
+def _has_project(row: Mapping[str, Any]) -> bool:
+    return bool(row.get("project_id") or row.get("project_v2_id"))
+
+
+def owner_workspace_chat(row: Optional[Mapping[str, Any]]) -> bool:
+    """True for the owner's own no-project chat, which runs as a normal session (#641).
+
+    Such a chat gets a project chat's whole tool surface, governed by its
+    permission mode, in :func:`owner_chat_cwd`. Everything else without a
+    project keeps the chat ceiling: API-key and non-owner chats, chats the
+    agent browser's preview cookie sends (``mobile_tool_identity``'s preview
+    principal), watch investigations (:data:`WATCH_SESSION_PREFIX`),
+    automations, workers and hidden rows. Blocking (reads the principal).
+    """
+    if not row or _has_project(row) or session_mode_of(row) not in ("chat", "code"):
+        return False
+    if any(row.get(key) for key in _NOT_TOP_LEVEL_OWNER_KEYS):
+        return False
+    session_id = str(row.get("id") or "")
+    if session_id.startswith(WATCH_SESSION_PREFIX):
+        return False
+    from app.core.mobile_tool_identity import PREVIEW_PRINCIPAL_ID
+    from app.core import session_orchestration
+    from app.core.session_orchestration import is_owner_session
+
+    try:
+        # The same read ``is_owner_session`` makes, done once for both checks.
+        principal = session_orchestration._principal(session_id) if session_id else None
+    except Exception:  # noqa: BLE001 — an unreadable principal grants nothing
+        return False
+    if principal and principal.get("principal_id") == PREVIEW_PRINCIPAL_ID:
+        return False
+    return is_owner_session(row, principal=principal)
+
+
+def owner_chat_cwd() -> Path:
+    """The working directory of an owner no-project chat, created if missing.
+
+    The one shared chat folder under the workspace (owner decision, #641), the
+    same folder a ceiling chat runs in. The shell and file tools reach the rest
+    of the machine as a project chat's do; the delegated CLI's in-cwd read
+    auto-approval covers only this folder, so Ask still prompts before reading
+    other projects. Subagents started without ``project=`` run here too.
+    """
+    return ensure_chat_uploads_dir()
+
+
+def runs_in_owner_chat_folder(row: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a session runs in :func:`owner_chat_cwd`: the owner's no-project
+    chat itself, or a Task worker it started without a project (workers share
+    the folder, as a non-Git project's share its main folder). A worker row
+    names its root chat as ``parent_session_id``. Blocking.
+    """
+    if not row or _has_project(row):
+        return False
+    if owner_workspace_chat(row):
+        return True
+    parent_id = row.get("parent_session_id")
+    if not parent_id or not row.get("is_worker") or session_mode_of(row) == "chat":
+        return False
+    from app.db import database
+
+    try:
+        parent = database.get_session(str(parent_id))
+    except Exception:  # noqa: BLE001 — an unreadable parent keeps the default cwd
+        return False
+    return owner_workspace_chat(parent)
+
+
+def runtime_session_mode(row: Optional[Mapping[str, Any]]) -> str:
+    """The lane a session's tools are built for, which may differ from its stored mode.
+
+    * The owner's own no-project chat (:func:`owner_workspace_chat`) runs as
+      ``code``, whether it is stored as ``chat`` or as a legacy NULL row (#641).
+    * Any other projectless owner-labelled legacy row is confined to ``chat``,
+      including rows arriving from old peers (#553). Storage migration
+      supplies the stored mode to clients (and the attach-project affordance).
+    * API, delegated, automation and hidden rows retain their existing policy.
+
+    It grants no owner authority: orchestration still checks the authenticated
+    principal.
     """
     mode = session_mode_of(row)
-    if row and mode == "code" and not any(
-        row.get(key) for key in (
-            "project_id", "project_v2_id", "api_user_id", "is_worker",
-            "parent_session_id", "automation_id", "hidden",
-        )
-    ):
-        from app.core.session_orchestration import is_owner_session
+    if not row or mode == "voice" or _has_project(row):
+        return mode
+    if mode == "chat":
+        return "code" if owner_workspace_chat(row) else "chat"
+    if any(row.get(key) for key in _NOT_TOP_LEVEL_OWNER_KEYS):
+        return mode
+    if owner_workspace_chat(row):
+        return "code"
+    from app.core.session_orchestration import is_owner_session
 
-        if is_owner_session(row):
-            return "chat"
-    return mode
+    return "chat" if is_owner_session(row) else mode
 
 
 def storage_session_mode(mode: Any) -> Optional[str]:
@@ -218,27 +302,21 @@ def storage_session_mode(mode: Any) -> Optional[str]:
     return normalized
 
 
-#: The permission modes a no-project (``chat``) session may run in: Ask, the
-#: classifier mode and Bypass (issue #371 step 4, owner decision). Accept
-#: Edits has nothing to approve there (no file-edit tool is on the ceiling) and
-#: the composer no longer offers it. Bypass and Auto only stop the prompts:
-#: the tool ceiling (allow list, deny rules, the delegated leg's PreToolUse
-#: policy) and the handle-confined reader still apply in every mode.
-CHAT_PERMISSION_MODES: frozenset[str] = frozenset({"default", "auto", "bypassPermissions"})
-
-
 def permission_mode_for_session_mode(permission_mode: Any, mode: Any) -> Any:
-    """Normalize retired settings and keep chat sessions to their offered modes.
+    """Normalize the retired ``plan`` mode, which runs as Ask everywhere.
 
-    ``plan`` is retired everywhere. A chat session keeps Ask, Auto and Bypass;
-    anything else (Accept Edits, an unknown value, no value) runs as Ask.
+    Every session, with or without a project, runs in the mode it was given
+    (#641: the owner's no-project chat is a normal session, Accept Edits
+    included). On a chat that keeps the ceiling, Bypass, Auto and Accept
+    Edits only stop prompts: the tool ceiling (allow list, deny rules, the
+    delegated leg's PreToolUse policy) and the handle-confined reader still
+    apply, and Accept Edits has no edit tool there to approve. ``mode`` is kept
+    so existing callers need no change.
     """
     # Old saved sessions and clients may still send the retired mode.
     if permission_mode == "plan":
         return "default"
-    if normalize_session_mode(mode) != "chat":
-        return permission_mode
-    return permission_mode if permission_mode in CHAT_PERMISSION_MODES else "default"
+    return permission_mode
 
 
 # The one tool every mode short of Bypass puts to a person: the computer-use

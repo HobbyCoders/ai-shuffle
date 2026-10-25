@@ -492,8 +492,9 @@ async def test_owner_project_runs_on_the_worker_with_the_checkout_and_reports_ba
         [turn] = agent_turns(new_id)
         assert turn["payload"]["orchestration_report_device"] == b.device_id
         assert not away_mode.is_away(new_id)
-        # A chat starter runs on Ask, so the body carries Ask, not its stored binding.
-        assert row["permission_mode"] == "default"
+        # A no-project starter passes on the mode it runs in, Accept Edits
+        # included (#641), as a project starter does.
+        assert row["permission_mode"] == "acceptEdits"
         # A remote start never gets Away's automatic question handling.
         assert turns.start_turn(turn["id"])
         session_events.append_events(new_id, [{"type": "message.user", "turn_id": turn["id"],
@@ -576,8 +577,14 @@ async def test_ordinary_owner_remote_start_reports_back(workers, monkeypatch, ki
 
 
 async def test_chat_remote_start_without_a_project_is_refused(workers, monkeypatch, kicks):
-    """Same rule as a code-capable Task: a chat must name the project."""
+    """Same rule as a code-capable Task: a ceiling chat (here one the preview
+    cookie sends) must name the project. The owner's own no-project chat is a
+    normal session and is not refused (#641)."""
     _a, b, served = network(workers, monkeypatch)
+    from app.core import mobile_tool_identity
+    monkeypatch.setattr(orch, "_principal", lambda sid: mobile_tool_identity.preview_principal())
+    # The preview cookie's credential is the local listener's, checked elsewhere.
+    monkeypatch.setattr(mobile_tool_identity, "validate", lambda value: None)
     with b.active():
         with get_db() as conn:
             conn.cursor().execute("UPDATE sessions SET mode='chat' WHERE id='caller'")

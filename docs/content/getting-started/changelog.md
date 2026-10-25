@@ -31,6 +31,7 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 
 ### Sessions and agents
 
+- Your chats without a project are normal sessions: shell, file edits, the Python kernel and code subagents, governed by the chat's permission mode (Accept Edits included). They run in the shared chat folder, and subagents no longer need a project. API-key, non-owner, agent-preview and unattended chats keep the read-only surface.
 - "Compact first" sends your draft after compaction and reactivates a settled chat. "Restore unsent draft" puts attachments back once, in place.
 - A question written in an agent's reply no longer marks a chat as waiting for you while it is still working.
 - Hand-offs keep a pending question answerable across the move, and a queued hand-off starts once the current work finishes.

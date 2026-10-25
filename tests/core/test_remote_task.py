@@ -780,10 +780,17 @@ def test_the_child_runs_at_the_ceiling(world, monkeypatch):
     assert turn_permission_mode(followup["overrides"], database.get_session(child_id)) == "acceptEdits"
 
 
+@pytest.mark.parametrize("caller", ["owner", "preview"])
 @pytest.mark.parametrize("mode", ["default", "auto", "bypassPermissions"])
-def test_a_chats_remote_child_starts_in_the_chats_mode(world, monkeypatch, mode):
+def test_a_chats_remote_child_starts_in_the_chats_mode(world, monkeypatch, mode, caller):
     """#486 (owner decision): a no-project chat's Task on another worker
-    starts there in the chat's current mode, binding and ceiling."""
+    starts there in the chat's current mode, binding and ceiling. #641: only a
+    ceiling chat (here, one the preview cookie sends) asks for the chat ceiling
+    there; the owner's own chat is a normal session and so is its child."""
+    if caller == "preview":
+        from app.core import session_orchestration as orch
+        monkeypatch.setattr(orch, "_principal", lambda sid: {
+            "owner": "install-admin", "kind": "admin", "principal_id": "preview"})
     target = {**UNRAID, "capabilities": {**UNRAID["capabilities"],
                                          "remote_task": remote_task.TARGET_DEFAULT_VERSION}}
     monkeypatch.setattr(runners, "directory", lambda: {"runners": [SELF, target]})
@@ -796,7 +803,8 @@ def test_a_chats_remote_child_starts_in_the_chats_mode(world, monkeypatch, mode)
         caller_session_id="chat-caller"))
     assert result["ok"] is True, result
     [(_, _, body)] = calls
-    assert body["permission_mode"] == mode and body["session_mode"] == "chat"
+    assert body["permission_mode"] == mode
+    assert body.get("session_mode") == ("chat" if caller == "preview" else None)
     assert result["permission_mode"] == mode
     row = database.get_session(result["worker_session_id"])
     assert (row["permission_mode"], row["permission_ceiling"]) == (mode, mode)

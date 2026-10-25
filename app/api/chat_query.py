@@ -18,7 +18,9 @@ def _request_query_principal(request: Request):
     if user:
         return identity.principal("api_user", user["id"], get_api_key(request))
     token = getattr(request.state, "auth_token", None)
-    if token == "local-owner" or (token or "").startswith("preview:"):
+    if (token or "").startswith("preview:"):
+        return identity.preview_principal()
+    if token == "local-owner":
         token = "local-transport:" + settings.effective_instance_id
     return identity.principal("admin", "install", token) if token else None
 

@@ -1835,7 +1835,11 @@ async def _dispatch_task_tool(
         caller_row = {**caller_row, "project_id": None, "project_v2_id": project_override,
                       "branch": None, "worktree_id": None, "worktree_branch": None, "worktree_path": None,
                       "_task_named_project": True, "_task_source_branch": args.get("branch")}
-    elif runtime_session_mode(caller_row) == "chat" and not (caller_row.get("project_id") or caller_row.get("project_v2_id")):
+    elif (not (caller_row.get("project_id") or caller_row.get("project_v2_id"))
+          and await asyncio.to_thread(runtime_session_mode, caller_row) == "chat"):
+        # The owner's own no-project chat runs as a normal session (#641), so
+        # its lane is code and its workers share its folder. Ceiling chats
+        # (API-key, preview, unattended) still need a project to code.
         from app.core.worker_checkout import _is_shared_surface
         if not _is_shared_surface(declared_tools):
             return {"ok": False, "error": "Code-capable subagents must name a registered project. Pass project= or start a session in that project instead."}

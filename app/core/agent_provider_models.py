@@ -854,7 +854,10 @@ def build_task_contract(
 
     properties["project"] = {
         "type": "string", "minLength": 1, "maxLength": 500,
-        "description": "Registered project name/id/path; needed to code from a no-project chat; gets its own checkout.",
+        "description": (
+            "Registered project name/id/path; the subagent gets its own checkout of it. "
+            "Omit to work where you are."
+        ),
     }
     properties["branch"] = {
         "type": "string", "description": "Target-only project's source branch (default: worker's default).",

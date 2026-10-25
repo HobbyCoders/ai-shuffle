@@ -372,6 +372,11 @@ async def test_options_builder_produces_trusted_context_for_native_only_grants(
     from tests.core.helpers import query_profile
 
     current = context(unattended=unattended, kind="video")
+    # A ceiling chat (one the preview cookie sends): the owner's own no-project
+    # chat is a normal session and has no chat-mode context (#641).
+    from app.core import session_orchestration
+    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: {
+        "owner": "install-admin", "kind": "admin", "principal_id": "preview"})
     monkeypatch.setattr(database, "get_session", Mock(return_value={
         "id": "session-a", "mode": "chat", "model": "opus",
     }))

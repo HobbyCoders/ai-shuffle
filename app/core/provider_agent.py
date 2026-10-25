@@ -699,12 +699,17 @@ def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     Pure read (``resolve_existing_cwd``) so inheriting a cwd can never clone or
     ``git worktree add`` behind the user's back. When it is ``None`` the worker
     still resolves its own cwd normally from the inherited project/worktree.
+    A worker of the owner's no-project chat runs in that chat's folder, as a
+    non-Git project's workers share its main folder (#641). Blocking.
     """
     if not parent_row:
         return None
     try:
         from app.core import project_resolver
+        from app.core.session_modes import owner_chat_cwd, owner_workspace_chat
 
+        if owner_workspace_chat(parent_row):
+            return str(owner_chat_cwd())
         return project_resolver.resolve_existing_cwd(dict(parent_row))
     except Exception:  # noqa: BLE001 — best-effort inheritance
         logger.debug("ProviderAgent: parent cwd resolution failed", exc_info=True)
@@ -2711,11 +2716,13 @@ async def dispatch_worker(
     # Permission inheritance: the worker runs at the CALLER's effective
     # permission level, so a bypassPermissions parent (e.g. a voice call on a
     # bypass profile) never has its workers stall on approval prompts.
+    worker_cwd = (worker_checkout.path if worker_checkout
+                  else await asyncio.to_thread(_parent_cwd, parent_row))
     overrides = worker_turn_overrides(
         provider_id=provider_id,
         model_id=model_id,
         effort=selected_effort,
-        cwd=worker_checkout.path if worker_checkout else _parent_cwd(parent_row),
+        cwd=worker_cwd,
         permission_mode=dispatch_mode,
         system_prompt_append=system_prompt_append,
         checkout=worker_checkout,

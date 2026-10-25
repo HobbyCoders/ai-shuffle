@@ -4,9 +4,9 @@
  * are the one place the composer, the agent card and the attach sheet read
  * that rule from, so they can never disagree.
  *
- * - Access: Ask / Auto / Bypass (+ Away) everywhere; Accept Edits only with a
- *   project, because a session without one has no file-edit tool to approve.
- *   The backend applies the same rule (`session_modes.CHAT_PERMISSION_MODES`).
+ * - Access: Ask / Auto / Accept Edits / Bypass (+ Away) everywhere. The
+ *   owner's session without a project is a normal session with the same tools
+ *   (#641), so it offers the same modes; the backend runs every mode it is given.
  * - Runs on: always on the desktop card; on the phone only when the session
  *   would run somewhere other than the worker the phone is connected to.
  * - Attach a project: one-way, only on an idle no-project session this worker
@@ -27,21 +27,18 @@ const AUTO: AccessMode = { value: 'auto', label: 'Auto', description: 'The provi
 const ACCEPT_EDITS: AccessMode = { value: 'acceptEdits', label: 'Accept Edits', description: 'File edits run without asking; every other tool asks' };
 const BYPASS: AccessMode = { value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' };
 
-/** The access modes the composer offers, in menu order. */
+/**
+ * The access modes the composer offers, in menu order. `hasProject` no longer
+ * changes the list (#641); callers still pass it.
+ */
 export function accessModes(opts: { hasProject: boolean; autoSupported: boolean }): AccessMode[] {
-	return [
-		ASK,
-		...(opts.autoSupported ? [AUTO] : []),
-		...(opts.hasProject ? [ACCEPT_EDITS] : []),
-		BYPASS
-	];
+	return [ASK, ...(opts.autoSupported ? [AUTO] : []), ACCEPT_EDITS, BYPASS];
 }
 
 /**
  * The mode the composer shows as selected. A stored value the menu does not
- * offer (Accept Edits without a project, Auto on a model without it, the
- * retired plan mode, nothing at all) reads as Ask, which is what the backend
- * runs it as.
+ * offer (Auto on a model without it, the retired plan mode, nothing at all)
+ * reads as Ask, which is what the backend runs it as.
  */
 export function effectiveAccessMode(
 	stored: string | null | undefined,
@@ -53,13 +50,15 @@ export function effectiveAccessMode(
 
 /**
  * The permission binding a new session without a project starts with, from
- * the owner's last pick. Ask, Auto and Bypass carry over; Accept Edits and
- * the retired plan mode become Ask. `null` (no pick yet) stays `null`, so
- * the agent's own mode decides, as it does for a project session.
+ * the owner's last pick. Ask, Auto, Accept Edits and Bypass carry over; the
+ * retired plan mode (or anything unknown) becomes Ask. `null` (no pick yet)
+ * stays `null`, so the agent's own mode decides, as it does for a project session.
  */
 export function noProjectPermission(mode: string | null | undefined): string | null {
 	if (mode == null) return null;
-	return mode === 'default' || mode === 'auto' || mode === 'bypassPermissions' ? mode : 'default';
+	return mode === 'default' || mode === 'auto' || mode === 'acceptEdits' || mode === 'bypassPermissions'
+		? mode
+		: 'default';
 }
 
 /**
@@ -134,11 +133,11 @@ export function attachWarning(agentName: string | null | undefined, projectName:
 	return {
 		title: 'One-way. Projects can’t be detached.',
 		body: project
-			? `${agent} keeps this conversation and gains ${project}’s checkout, git panel and file tools. To work without a project again, start a new session.`
-			: `${agent} keeps this conversation and gains the project’s checkout, git panel and file tools. To work without a project again, start a new session.`,
+			? `${agent} keeps this conversation and moves into ${project}’s checkout, with its git panel. To work without a project again, start a new session.`
+			: `${agent} keeps this conversation and moves into the project’s checkout, with its git panel. To work without a project again, start a new session.`,
 		access: ATTACH_ACCESS_NOTE
 	};
 }
 
 /** What appears once a project is attached, for the sheet's preview list. */
-export const ATTACH_GAINS: readonly string[] = ['Git panel', 'Branch', 'Checkout', 'Terminal and file edits'];
+export const ATTACH_GAINS: readonly string[] = ['Git panel', 'Branch', 'Checkout', 'Terminal in the checkout'];

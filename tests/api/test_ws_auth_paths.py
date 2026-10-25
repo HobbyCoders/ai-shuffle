@@ -49,6 +49,8 @@ async def test_local_listener_same_origin_is_admin(monkeypatch, no_local):
     assert await ws_auth.authenticate_websocket(socket, None) == (True, None)
     principal = socket.state.mobile_tool_principal
     assert principal["kind"] == "admin" and principal["owner"] == "install-admin"
+    # The owner's own listener: its no-project chats get the full surface (#641).
+    assert principal["principal_id"] != "preview"
 
 
 @pytest.mark.parametrize("origin", ["http://evil.example", "http://localhost:5173", "http://user@localhost", None])
@@ -74,7 +76,10 @@ async def test_preview_cookie_same_origin_is_admin(monkeypatch, no_local):
     monkeypatch.setattr(preview_access, "grant", lambda request: preview_access.Grant("s1", 9999999999))
     socket = _socket(cookies={preview_access.cookie_name(): "tok"})
     assert await ws_auth.authenticate_websocket(socket, None) == (True, None)
-    assert socket.state.mobile_tool_principal["kind"] == "admin"
+    principal = socket.state.mobile_tool_principal
+    assert principal["kind"] == "admin" and principal["owner"] == "install-admin"
+    # Marked, so a no-project chat it sends keeps the ceiling (#641).
+    assert principal["principal_id"] == "preview"
 
 
 async def test_preview_cookie_cross_origin_is_refused(monkeypatch, no_local):

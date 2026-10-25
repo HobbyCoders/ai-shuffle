@@ -1764,11 +1764,9 @@ async def _stream_to_websocket_impl(
     permission_mode = turn_permission_mode(permission_context, session, config, resume=resume)
     overrides = {**(overrides or {}), "permission_mode": permission_mode}
 
-    # A chat session is pinned to 'default' whatever that chain produced — its
-    # composer has no tool-access control to undo an inherited 'plan' (which the
-    # chat ceiling would deadlock) or an inherited bypass (which would switch off
-    # the very callback the ceiling leans on). Same coercion as
-    # build_options_from_profile, applied here because this build is independent.
+    # The retired 'plan' runs as 'default' on every session, with or without a
+    # project. Same coercion as build_options_from_profile, applied here
+    # because this build is independent.
     from app.core.session_modes import (
         narrow_tool_access_for_mode,
         permission_mode_for_session_mode,
@@ -1795,9 +1793,14 @@ async def _stream_to_websocket_impl(
     # would happily approve a tool the options surface excluded — a real
     # divergence, not a redundancy.
     from app.core.session_modes import runtime_session_mode
-    session_mode = runtime_session_mode(session)
     from app.core.session_orchestration import is_owner_session
-    owner_coordinator = session_mode == "chat" and is_owner_session(session)
+
+    def _lane_blocking() -> tuple:
+        # Both read the session's principal: off the event loop.
+        lane = runtime_session_mode(session)
+        return lane, lane == "chat" and is_owner_session(session)
+
+    session_mode, owner_coordinator = await asyncio.to_thread(_lane_blocking)
     _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode, owner_session=owner_coordinator)
     from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = (overrides or {}).get("_assistant_proactive")

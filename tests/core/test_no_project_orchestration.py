@@ -23,6 +23,15 @@ def owner(mock_db, monkeypatch):
     return chat("coordinator", mode="chat")[0]
 
 
+#: The principal the agent browser's preview cookie acts as. A no-project chat
+#: it sends is still an owner coordinator, but keeps the chat ceiling (#641).
+PREVIEW = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"}
+
+
+def as_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orch, "_principal", lambda sid: dict(PREVIEW))
+
+
 async def call(sender, action, **args):
     return await orch.make_handler(lambda: sender)(action, args, ToolCtx())
 
@@ -88,6 +97,7 @@ async def test_registered_project_reads_through_real_registry(
     from app.core.provider.harness_adapter import HarnessAdapter, _delegated_allowed
     from app.core import config, query_options
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "workspace")
+    as_preview(monkeypatch)
     project_path = tmp_path / "project"
     project_path.mkdir()
     source = project_path / "example.py"
@@ -204,13 +214,19 @@ async def test_existing_daily_setting_counts_coordinator_and_children_after_sett
     assert spending_limits.status()["spent_today_usd"] == pytest.approx(2.25)
 
 
-def test_runtime_ceiling_confines_legacy_projectless_rows(owner: dict[str, object]) -> None:
-    # #553: step four shipped without its promised migration; legacy owners
-    # must not retain a shell merely because their stored mode predates chat.
+def test_runtime_lane_of_legacy_projectless_rows(
+    owner: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #641: the owner's own projectless row is a normal session whatever its
+    # stored mode. #553 still confines the rows nobody is watching for the owner.
     from app.core.session_modes import runtime_session_mode
-    assert runtime_session_mode({**owner, "mode": None}) == "chat"
-    assert runtime_session_mode({**owner, "mode": "code"}) == "chat"
+    for mode in (None, "code", "chat"):
+        assert runtime_session_mode({**owner, "mode": mode}) == "code"
     assert runtime_session_mode({**owner, "mode": None, "project_v2_id": "project"}) == "code"
+    assert runtime_session_mode({**owner, "id": "watch-event", "mode": None}) == "chat"
+    as_preview(monkeypatch)
+    assert runtime_session_mode({**owner, "mode": None}) == "chat"
+    assert runtime_session_mode({**owner, "mode": "chat"}) == "chat"
 
 
 @pytest.mark.parametrize("mode", [None, "code", "chat"])
@@ -223,6 +239,8 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(
     from app.core.session_modes import CHAT_MODE_TOOL_SURFACE
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
+    # A preview-cookie chat: the owner's, but it keeps the ceiling (#641).
+    as_preview(monkeypatch)
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET mode=%s WHERE id=%s", (mode, owner["id"]))
     database.set_session_run_binding(owner["id"], model="sonnet", effort="high", permission_mode=permission)
@@ -230,8 +248,8 @@ def test_selected_agent_effort_and_runtime_ceiling_are_built_together(
     assert options.effort == "high"
     assert options.aih_profile_id == "agent"
     assert options.aih_owner_coordinator
-    # #553: NULL/code legacy owners now have the same ceiling as new chats.
-    assert options.permission_mode == ("default" if permission == "acceptEdits" else permission)
+    # Every mode runs as given; Accept Edits has no edit tool to approve here.
+    assert options.permission_mode == permission
     from app.core.session_modes import chat_uploads_dir
     assert str(chat_uploads_dir()) in options.aih_assistant_scope["roots"]
     assert "app-config" in options.mcp_servers

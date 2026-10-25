@@ -1378,11 +1378,13 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         remote = placement["remote"]
     else:
         remote = _remote_worker(data.get("worker")) if action == "start" else None
-        from app.core.session_modes import session_mode_of
-        if (remote is not None and session_mode_of(sender) == "chat"
-                and not (sender.get("project_id") or sender.get("project_v2_id"))):
+        from app.core.session_modes import runtime_session_mode
+        if (remote is not None
+                and not (sender.get("project_id") or sender.get("project_v2_id"))
+                and runtime_session_mode(sender) == "chat"):
             # The other worker would make a code session with a shell and no
-            # project; same rule as a code-capable Task from a chat.
+            # project; same rule as a code-capable Task from a ceiling chat.
+            # The owner's own no-project chat already is one (#641).
             raise ValueError("StartSession on another worker from a chat must name a registered project. "
                              "Pass project= too (or omit worker); nothing was started.")
     # Chats the owner's assistant starts report back to it and route their
