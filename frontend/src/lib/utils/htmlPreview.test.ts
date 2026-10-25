@@ -635,6 +635,11 @@ describe('HTML preview fit to content', () => {
 		expect([probing.mode, probing.height, probing.steady]).toEqual(['fit', probeFrame, false]);
 		expect(probing.report(HTML_PREVIEW_MAX_HEIGHT + 500, probeFrame)).toBe('fixed');
 		expect(probing.height).toBe(HTML_PREVIEW_FALLBACK_HEIGHT);
+		// With no answer at all, it waits at the probe size, scrollable: never cut off.
+		const silent = sizer({ height: 400 });
+		silent.report(HTML_PREVIEW_MAX_HEIGHT + 500, 400);
+		silent.probeExpired();
+		expect([silent.height < HTML_PREVIEW_MAX_HEIGHT, silent.scrollable]).toEqual([true, true]);
 	});
 
 	it('holds a tall page at the probe size, scrollable, until its late answer decides', () => {
