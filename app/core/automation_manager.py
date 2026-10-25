@@ -1698,7 +1698,7 @@ class AutomationManager:
             # --- Deduplicate identical responses within window ---
             dedup_window = output_config.get("deduplicate_window_seconds")
             if dedup_window and isinstance(dedup_window, (int, float)) and dedup_window > 0 and response:
-                recent = database.get_automation_runs(automation["id"], limit=5)
+                recent = database.get_automation_runs(automation["id"], limit=5, include_non_runs=False)
                 now = datetime.now(timezone.utc)
                 # Run rows store only the response tail, so compare tails.
                 stored_response = self._response_tail(response)

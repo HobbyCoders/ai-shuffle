@@ -84,7 +84,7 @@ In your GitHub repository's **Settings → Webhooks**, add your reachable AI Shu
 
 The `webhook_received` trigger contains `method` from the HTTP request, `body` with the complete JSON payload, and `path` with the connector's inbound slug. Its `headers` uses lowercase names and includes only `content-type`, `user-agent`, `x-request-id`, `x-github-event`, `x-github-delivery`, `x-gitlab-event`, `x-webhook-event` and `x-webhook-delivery-id`, when present. Authorization, cookies, token headers and the configured signature header are never included. A `headers` or `method` key inside the JSON stays inside `body`; it cannot replace transport metadata.
 
-If an automation is already running on this worker, another webhook, manual or connector trigger records a `skipped_running` entry in run history with its trigger data. It does not queue another run. A successful webhook response acknowledges receipt, not completion of an automation.
+If an automation is already running on this worker, another webhook, manual or connector trigger records a `skipped_running` entry in run history with its trigger data. It does not queue another run. `skipped_running` and `budget_exceeded` entries do not consume the daily run allowance, count as executed runs in statistics, or displace executed runs from output deduplication checks. A successful webhook response acknowledges receipt, not completion of an automation.
 
 ## Requests AI Shuffle sends
 
