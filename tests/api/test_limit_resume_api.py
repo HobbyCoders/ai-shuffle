@@ -165,7 +165,8 @@ def test_limit_resume_status_and_cancel(client, mock_database, mock_api_user, se
     with patch.object(limit_resume, "cancel", cancel), \
             patch.object(limit_resume, "paused_workers_of", return_value=["w1"]):
         assert client.post("/api/v1/sessions/s1/limit-resume/cancel").json()["cancelled"] is True
-        cancel.assert_awaited_with("s1")
+        assert cancel.await_args.args == ("s1",)
+        assert callable(cancel.await_args.kwargs["authorize_once"])
         r = client.post("/api/v1/sessions/s1/limit-resume/cancel?task_id=w1")
         assert r.json()["cancelled"] is True
         cancel.assert_awaited_with("w1")
@@ -191,9 +192,58 @@ def test_arm_refusal_is_clear_conflict(client, mock_database, session_row):
     assert client.post("/api/v1/sessions/s1/limit-resume/arm", json={}).status_code == 422
 
 
-@pytest.mark.parametrize("action", ["arm", "cancel"])
-def test_arm_and_cancel_require_owner(client, app, action):
+def test_arm_requires_owner(client, app):
     from app.api.auth import require_admin
     app.dependency_overrides.pop(require_admin)
-    response = client.post(f"/api/v1/sessions/s1/limit-resume/{action}", json={"turn_id": "t1"})
+    response = client.post("/api/v1/sessions/s1/limit-resume/arm", json={"turn_id": "t1"})
     assert response.status_code == 403
+
+
+def test_cancelling_once_requires_owner_before_removing_wake(client, mock_database, session_row):
+    mock_database.get_session.return_value = session_row
+    with patch.object(limit_resume, "pending", return_value={"once": True}), \
+            patch("app.core.wakeup_service.cancel_session_wakeups_async", AsyncMock()) as remove:
+        response = client.post("/api/v1/sessions/s1/limit-resume/cancel")
+    assert response.status_code == 403
+    remove.assert_not_awaited()
+
+
+def test_owner_can_cancel_once(client, mock_database, session_row):
+    mock_database.get_session.return_value = session_row
+    with patch.object(limit_resume, "pending", return_value={"once": True}), \
+            patch("app.api.sessions.require_admin", return_value="owner-token") as owner, \
+            patch("app.core.wakeup_service.cancel_session_wakeups_async", AsyncMock(return_value=1)), \
+            patch.object(limit_resume, "_record", AsyncMock()):
+        response = client.post("/api/v1/sessions/s1/limit-resume/cancel")
+    assert response.status_code == 200 and response.json()["cancelled"] is True
+    owner.assert_called_once()
+
+
+@pytest.mark.parametrize("owns_chat", [True, False])
+def test_non_owner_can_stop_only_its_own_paused_worker(
+    client, mock_database, mock_api_user, session_row, owns_chat,
+):
+    mock_api_user.return_value = {"id": "api-1"}
+    mock_database.get_session.return_value = {**session_row, "api_user_id": "api-1" if owns_chat else "api-2"}
+    with patch.object(limit_resume, "paused_workers_of", return_value=["w1"]), \
+            patch.object(limit_resume, "cancel", AsyncMock(return_value=True)) as cancel, \
+            patch("app.api.sessions.require_admin", side_effect=AssertionError("Not an owner operation")):
+        response = client.post("/api/v1/sessions/s1/limit-resume/cancel?task_id=w1")
+        if owns_chat:
+            assert response.status_code == 200 and response.json()["cancelled"] is True
+            cancel.assert_awaited_once_with("w1")
+            assert client.post("/api/v1/sessions/s1/limit-resume/cancel?task_id=other").status_code == 404
+        else:
+            assert response.status_code == 403
+            cancel.assert_not_awaited()
+
+
+def test_non_owner_can_cancel_global_automatic_resume(client, mock_database, mock_api_user, session_row):
+    mock_api_user.return_value = {"id": "api-1"}
+    mock_database.get_session.return_value = {**session_row, "api_user_id": "api-1"}
+    with patch.object(limit_resume, "pending", return_value={"once": False}), \
+            patch("app.api.sessions.require_admin", side_effect=AssertionError("Not an owner operation")), \
+            patch("app.core.wakeup_service.cancel_session_wakeups_async", AsyncMock(return_value=1)), \
+            patch.object(limit_resume, "_record", AsyncMock()):
+        response = client.post("/api/v1/sessions/s1/limit-resume/cancel")
+    assert response.status_code == 200 and response.json()["cancelled"] is True
