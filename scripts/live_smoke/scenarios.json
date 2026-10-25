@@ -13,6 +13,14 @@
       "intro": "Use disposable candidate chats and a configured provider only; never change a production worker's usage settings.",
       "rows": [
         {
+          "id": "limit-resume-once.composer-banner",
+          "check": "The composer banner follows a real limit stop through arm, reload and Cancel",
+          "kind": "owner",
+          "how": "On a disposable candidate with global resume off, drive a real provider turn to a usage-limit stop. In the web UI and the Android app, read the banner above the composer: it should say when the limit resets in local time, or that the reset time is unknown. Press Resume at reset, then reload the page and reopen the app; the banner should say when the chat resumes and offer Cancel. Press Cancel and reload again. Open the same chat as a non-owner user and check that it shows the times without buttons.",
+          "pass_when": "The banner text matches the worker's limit-resume state at every step, including after reloads. No Resume at reset button appears for an unknown reset, after Cancel, or for a non-owner. The global auto-resume setting is unchanged. Without a real provider limit this remains unverified; the PR's render checks used mocked state.",
+          "past_bug": "With global auto-resume off, the composer showed nothing about a usage-limit stop and offered no way to resume that chat at the reset."
+        },
+        {
           "id": "limit-resume-once.owner-opt-in",
           "check": "A limit-stopped chat can resume once with the global switch off",
           "kind": "owner",

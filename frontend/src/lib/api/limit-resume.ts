@@ -36,6 +36,38 @@ export function cancelLimitResume(sessionId: string, taskId?: string | null): Pr
 	return api.post(`/sessions/${encodeURIComponent(sessionId)}/limit-resume/cancel${query}`);
 }
 
+/** The chat's last turn, when a usage limit stopped it. Times are epoch seconds. */
+export interface LimitStopped {
+	turn_id: string;
+	provider: string | null;
+	reset_at: number | null;
+	reset_known: boolean;
+	/** True when "Resume at reset" may arm this stop now. */
+	can_arm: boolean;
+	/** Why it cannot arm: `reset_unknown`, `already_handled`, `busy`, ... */
+	reason: string | null;
+}
+
+/** A chat's limit-resume state. The worker's answer is authoritative after a reload. */
+export interface SessionLimitResume {
+	session_id: string;
+	pending: Record<string, unknown> | null;
+	workers?: unknown;
+	/** Absent on workers that predate the one-shot resume. */
+	limit_stopped?: LimitStopped | null;
+	armed?: boolean;
+	resume_at?: number | null;
+}
+
+export function getSessionLimitResume(sessionId: string): Promise<SessionLimitResume> {
+	return api.get(`/sessions/${encodeURIComponent(sessionId)}/limit-resume`, { cache: 'no-store' });
+}
+
+/** Resume this chat's limit-stopped turn once at the reset. Global switches stay as they are. */
+export function armLimitResume(sessionId: string, turnId: string): Promise<SessionLimitResume> {
+	return api.post(`/sessions/${encodeURIComponent(sessionId)}/limit-resume/arm`, { turn_id: turnId });
+}
+
 /** Compact now, optionally queueing the normal chat query as the next turn.
  * The queued message still runs on the original context if compaction fails.
  */
