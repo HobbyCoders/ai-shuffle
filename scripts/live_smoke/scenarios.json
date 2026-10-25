@@ -9,6 +9,21 @@
   },
   "suites": [
     {
+      "name": "git-task-review",
+      "intro": "Disposable checkouts and paired candidate workers only.",
+      "rows": [
+        {
+          "id": "git-task-review.base-scope-owner-checkout",
+          "check": "Committed task work remains reviewable on the session's owning worker",
+          "kind": "owner",
+          "two_worker": true,
+          "how": "On paired disposable candidate workers, create different contents under the same project on each worker. In a throwaway session's branch checkout, commit an edit, a rename and a deletion, leaving a clean tree. Request changed-files with scope=base and session_id, then file-diff with scope base for each row, from both workers. Add staged, unstaged and untracked edits, including a file changed in both layers. Advance the default branch ref to include the task commit and repeat. Disconnect the owning candidate and retry; remove the session checkout on the disposable candidate and retry after reconnecting. Never alter production checkouts.",
+          "pass_when": "Clean committed changes remain listed with committed origin; later edits have uncommitted or both origin and bounded per-file diffs. Renames retain their original paths and deletions show removed lines. Responses name the selected base ref and merge-base SHA, and a moving base changes the next response. Requests from either worker read only the session checkout, never the viewer's different contents. Missing checkout and unreachable owner return clear errors without project-folder fallback.",
+          "past_bug": "The review panel showed no changes after the agent committed its task."
+        }
+      ]
+    },
+    {
       "name": "durable-watches",
       "intro": "Disposable candidate workers and throwaway channels only; never publish credentials or private receipts.",
       "rows": [

@@ -10,6 +10,7 @@ import os
 import subprocess
 from typing import Any, Dict, List, Tuple
 
+from app.core.git_base_diff import GitBaseDiffMixin
 from app.core.git_cache import (
     _git_cache,
     checkout_key,
@@ -50,7 +51,7 @@ def _parse_numstat_z(output: str) -> List[Tuple[str, int, int, bool]]:
     return rows
 
 
-class GitDiffMixin:
+class GitDiffMixin(GitBaseDiffMixin):
     """Mixin providing diff operations for GitService."""
 
     def get_diff_stats(
