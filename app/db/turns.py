@@ -1536,6 +1536,32 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
     return latest
 
 
+def latest_caller(session_id: str) -> Optional[str]:
+    """The caller stamped on the session's most recent stamped turn, or None.
+
+    ``turn_manager`` stamps each human turn's overrides with who sent it
+    (``session_modes.CALLER_KEY``); a turn nobody sent (a wake, a background
+    completion) runs as the latest one that was. Includes a queued or steered
+    row: the newest message decides, which never lifts a ceiling it set.
+    """
+    from app.core.session_modes import CALLER_KEY
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # A text match narrows the scan; the key itself is read below.
+        cursor.execute(
+            "SELECT overrides FROM turns WHERE session_id=%s AND CAST(overrides AS TEXT) LIKE %s "
+            "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 5",
+            (session_id, f'%"{CALLER_KEY}"%'),
+        )
+        rows = cursor.fetchall()
+    for row in rows:
+        value = (_parse_json(row["overrides"]) or {}).get(CALLER_KEY)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
     """The session's most recent turn that ran (or will run), or ``None``.
 

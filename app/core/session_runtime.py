@@ -2220,6 +2220,14 @@ class SessionRuntime:
             return "profile_id differs"
         live_overrides = self.turn.get("overrides") or {}
         row_overrides = row.get("overrides") or {}
+        # A message whose caller keeps the no-project ceiling (the preview
+        # cookie, or a caller nobody recorded) never joins a turn that may be
+        # running with the owner's full tools: it runs as its own turn (#641).
+        from app.core.session_modes import CALLER_AUTHENTICATED, turn_caller
+        row_caller = turn_caller(row_overrides)
+        if (row_caller is not None and row_caller != CALLER_AUTHENTICATED
+                and row_caller != turn_caller(live_overrides)):
+            return "caller differs"
         for key in _STEER_BINDING_KEYS:
             if key in _STEER_INHERITED_WHEN_ABSENT and key not in row_overrides:
                 if live_overrides.get(key) is None:

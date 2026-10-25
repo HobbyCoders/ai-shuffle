@@ -1792,12 +1792,13 @@ async def _stream_to_websocket_impl(
     # inside the options builder, so without the same narrowing the callback
     # would happily approve a tool the options surface excluded — a real
     # divergence, not a redundancy.
-    from app.core.session_modes import runtime_session_mode
+    from app.core.session_modes import runtime_session_mode, turn_caller
     from app.core.session_orchestration import is_owner_session
 
     def _lane_blocking() -> tuple:
-        # Both read the session's principal: off the event loop.
-        lane = runtime_session_mode(session)
+        # Both read the session's principal: off the event loop. The turn's
+        # stamped caller decides first (#641).
+        lane = runtime_session_mode(session, caller=turn_caller(overrides))
         return lane, lane == "chat" and is_owner_session(session)
 
     session_mode, owner_coordinator = await asyncio.to_thread(_lane_blocking)

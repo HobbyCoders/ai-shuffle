@@ -2,6 +2,7 @@
 import asyncio
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -297,7 +298,8 @@ def test_no_project_owner_task_uses_named_project_checkout(repo, worker_runtime,
     assert worker_runtime[0]["overrides"]["cwd"] == child["worktree_path"]
 
 
-def test_ceiling_chat_coding_worker_without_project_is_refused(repo, worker_runtime, monkeypatch):
+def test_ceiling_chat_coding_worker_without_project_is_refused(
+        repo: Any, worker_runtime: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     # A no-project chat the agent browser's preview cookie sends keeps the
     # ceiling (#641), so a code-capable worker still needs a project.
     from app.core import session_orchestration as orch
@@ -310,17 +312,18 @@ def test_ceiling_chat_coding_worker_without_project_is_refused(repo, worker_runt
     assert database.get_session("no-project-worker") is None
 
 
-def test_owner_no_project_coding_worker_runs_in_the_chat_folder(repo, monkeypatch, tmp_path):
+def test_owner_no_project_coding_worker_runs_in_the_no_project_folder(
+        repo: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # #641: the owner's own no-project chat is a normal session; its coding
-    # worker omits project= and shares the chat folder (the non-Git rule).
+    # worker omits project= and shares the no-project folder (the non-Git rule).
     from app.core import config, turn_manager, turn_scheduler
     from app.core import session_orchestration as orch
-    from app.core.session_modes import chat_uploads_dir
+    from app.core.session_modes import owner_chat_dir
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "workspace")
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
     submitted = []
 
-    async def submit(sid, source, **kwargs):
+    async def submit(sid: str, source: str, **kwargs: Any) -> str:
         submitted.append({"session_id": sid, **kwargs})
         return "test-turn"
 
@@ -337,7 +340,7 @@ def test_owner_no_project_coding_worker_runs_in_the_chat_folder(repo, monkeypatc
     worker = database.get_session("no-project-worker")
     assert worker["mode"] is None
     assert not (worker["project_id"] or worker["project_v2_id"] or worker["worktree_path"])
-    assert [launch["overrides"]["cwd"] for launch in submitted] == [str(chat_uploads_dir())]
+    assert [launch["overrides"]["cwd"] for launch in submitted] == [str(owner_chat_dir())]
 
 
 async def test_no_project_start_session_has_own_git_panel_binding(repo, monkeypatch):
