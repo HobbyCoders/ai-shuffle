@@ -31,7 +31,8 @@
 		sessionId: string | null;
 		messages: readonly ChatMessage[];
 		streaming?: boolean;
-		/** Arm and Cancel are owner-only on the worker. */
+		/** Arming, and cancelling a one-shot arm, are owner-only on the worker.
+		 *  Anyone with the chat may cancel a resume the global switch scheduled. */
 		canAct?: boolean;
 	} = $props();
 
@@ -139,7 +140,7 @@
 	<Banner
 		severity="info"
 		message={banner.message}
-		action={canAct ? { label: busy ? 'Cancelling…' : 'Cancel', onClick: cancel, disabled: busy } : undefined}
+		action={canAct || !banner.once ? { label: busy ? 'Cancelling…' : 'Cancel', onClick: cancel, disabled: busy } : undefined}
 	/>
 {:else if banner?.kind === 'stopped' && banner.key !== dismissed}
 	<Banner

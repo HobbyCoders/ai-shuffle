@@ -22,7 +22,7 @@ const STOPPED: SessionLimitResume = {
 	limit_stopped: { turn_id: 't1', provider: 'claude', reset_at: RESET, reset_known: true, can_arm: true, reason: null }
 };
 const ARMED: SessionLimitResume = {
-	...STOPPED, armed: true, resume_at: RESET + 30, pending: { fire_at: RESET + 30 },
+	...STOPPED, armed: true, resume_at: RESET + 30, pending: { fire_at: RESET + 30, once: true },
 	limit_stopped: { ...STOPPED.limit_stopped!, can_arm: false }
 };
 
@@ -82,6 +82,13 @@ describe('LimitResumeBanner', () => {
 		render(LimitResumeBanner, { sessionId: 's1', messages: [], canAct: false });
 		expect(await screen.findByText(/Resumes at/)).toBeTruthy();
 		expect(screen.queryByRole('button')).toBeNull();
+	});
+
+	it('lets a non-owner cancel a resume the global switch scheduled', async () => {
+		mocks.get.mockResolvedValue({ ...ARMED, pending: { fire_at: RESET + 30 } });
+		render(LimitResumeBanner, { sessionId: 's1', messages: [], canAct: false });
+		await fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+		expect(mocks.cancel).toHaveBeenCalledWith('s1');
 	});
 
 	it('can be dismissed while unarmed', async () => {

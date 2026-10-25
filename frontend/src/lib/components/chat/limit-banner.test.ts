@@ -56,6 +56,15 @@ describe('limitBanner', () => {
 		expect(b?.message).toMatch(/^Usage limit reached\. Resumes at \S/);
 	});
 
+	it('marks a one-shot arm, which only the owner may cancel', () => {
+		const at = RESET + 120;
+		const once = state({ armed: true, resume_at: at, pending: { fire_at: at, once: true } });
+		const global = state({ armed: true, resume_at: at, pending: { fire_at: at } });
+		expect(limitBanner(once, null, NOW)).toMatchObject({ kind: 'armed', once: true });
+		expect(limitBanner(global, null, NOW)).toMatchObject({ kind: 'armed', once: false });
+		expect(limitBanner(null, { resumeAt: at }, NOW)).toMatchObject({ kind: 'armed', once: false });
+	});
+
 	it('reads the armed time from pending on a worker without the new fields', () => {
 		const at = RESET + 60;
 		const old: SessionLimitResume = { session_id: 's1', pending: { fire_at: at }, workers: [] };

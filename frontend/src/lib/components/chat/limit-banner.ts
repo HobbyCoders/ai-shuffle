@@ -14,7 +14,7 @@ import { resumeTime, type Paused } from './limit-resume';
 const SHOWN_REASONS = new Set([null, 'reset_unknown', 'already_handled', 'already_resumed', 'unsupported_provider']);
 
 export type LimitBanner =
-	| { kind: 'armed'; resumeAt: number; message: string }
+	| { kind: 'armed'; resumeAt: number; message: string; /** A one-shot arm: only the owner may cancel it. */ once: boolean }
 	| { kind: 'stopped'; key: string; turnId: string; resetAt: number | null; canArm: boolean; message: string };
 
 /**
@@ -29,11 +29,11 @@ export function limitBanner(
 	clock: Date = new Date(now * 1000)
 ): LimitBanner | null {
 	if (!state) {
-		return transcript ? armed(transcript.resumeAt, clock) : null;
+		return transcript ? armed(transcript.resumeAt, clock, false) : null;
 	}
 	const resumeAt = typeof state.resume_at === 'number' ? state.resume_at : pendingFireAt(state.pending);
 	const isArmed = state.armed ?? state.pending != null;
-	if (isArmed && resumeAt !== null) return armed(resumeAt, clock);
+	if (isArmed && resumeAt !== null) return armed(resumeAt, clock, state.pending?.once === true);
 
 	const stop = state.limit_stopped;
 	if (!stop || !SHOWN_REASONS.has(stop.reason)) return null;
@@ -52,8 +52,8 @@ export function limitBanner(
 		message: `Usage limit reached. Resets at ${resumeTime(resetAt, clock)}` };
 }
 
-function armed(resumeAt: number, clock: Date): LimitBanner {
-	return { kind: 'armed', resumeAt, message: `Usage limit reached. Resumes at ${resumeTime(resumeAt, clock)}` };
+function armed(resumeAt: number, clock: Date, once: boolean): LimitBanner {
+	return { kind: 'armed', resumeAt, once, message: `Usage limit reached. Resumes at ${resumeTime(resumeAt, clock)}` };
 }
 
 function pendingFireAt(pending: SessionLimitResume['pending']): number | null {
