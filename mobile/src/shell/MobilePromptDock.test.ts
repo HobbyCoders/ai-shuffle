@@ -115,6 +115,27 @@ describe('permission prompt', () => {
 		expect(screen.queryByRole('radiogroup')).toBeNull();
 	});
 
+	it('a live card starts one-shot until the pending refresh lists its scopes', async () => {
+		const { remember_scopes: _drop, ...live } = bash;
+		const view = renderDock({ permissions: [live] });
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+		await view.rerender({ permissions: [bash] });
+		expect(screen.getByRole('radiogroup', { name: 'Remember this answer' })).toBeTruthy();
+	});
+
+	it('shows a refused answer plainly and takes another answer', async () => {
+		const view = renderDock();
+		const { onPermission } = view;
+		await armed();
+		await fireEvent.click(screen.getByRole('radio', { name: 'Always for this agent' }));
+		await fireEvent.click(screen.getByRole('button', { name: /Always allow/ }));
+		await view.rerender({ permissions: [{ ...bash, remember_scopes: ['none', 'session'], answer_error: 'Pick again.' }] });
+		expect((await screen.findByRole('alert')).textContent).toBe('Pick again.');
+		await fireEvent.click(screen.getByRole('button', { name: /Approve/ }));
+		expect(onPermission).toHaveBeenLastCalledWith({ request_id: 'p1', decision: 'allow', remember: 'none' });
+		expect(onPermission).toHaveBeenCalledTimes(2);
+	});
+
 	it('offers only the lifetimes the server lists', () => {
 		renderDock({ permissions: [{ ...bash, remember_scopes: ['none', 'session'] }] });
 		expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Once', 'This chat']);

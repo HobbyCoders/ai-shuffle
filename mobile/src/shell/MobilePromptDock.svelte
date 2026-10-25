@@ -94,6 +94,13 @@
 		return () => clearTimeout(timer);
 	});
 
+	// A refused permission answer leaves the request waiting with a reason
+	// (the store swaps in a new request object): take answers again at once.
+	const currentPermission = $derived(current?.kind === 'permission' ? current.request : null);
+	$effect(() => {
+		if (currentPermission?.answer_error) untrack(() => { answered = false; flash = null; });
+	});
+
 	$effect(() => {
 		if (!answered) return;
 		const retry = setTimeout(() => (answered = false), RETRY_MS);
@@ -200,6 +207,7 @@
 				{@const request = current.request}
 				{@const command = preview(request)}
 				{@const labels = decisionLabels(rememberFor(scope, request))}
+				{#if request.answer_error && !answered}<p class="p-error" role="alert">{request.answer_error}</p>{/if}
 				<div class="p-head">
 					<Terminal size={17} class="t-ico" aria-hidden="true" />
 					<strong>{request.display_name?.trim() || request.tool_name}</strong>
@@ -365,6 +373,7 @@
 	.scope-chip { min-height: 40px; padding: 0 6px; border: 1px solid transparent; border-radius: calc(var(--radius) - 3px); background: transparent; color: var(--muted-foreground); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 	.scope-chip[aria-checked='true'] { background: var(--card); border-color: var(--border); color: var(--foreground); box-shadow: var(--shadow-s); }
 	.scope-chip[data-option='profile'][aria-checked='true'] { color: var(--warning); border-color: color-mix(in oklab, var(--warning) 45%, var(--border)); background: color-mix(in oklab, var(--warning) 10%, var(--card)); }
+	.p-error { margin: 6px 2px 0; padding: 6px 10px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border)); border-radius: calc(var(--radius) - 2px); background: color-mix(in oklab, var(--destructive) 8%, var(--card)); font-size: 12.5px; line-height: 1.4; }
 	.scope-hint { margin: 4px 2px 6px; font-size: 12px; line-height: 1.4; color: var(--muted-foreground); }
 	.scope-hint.warn { color: color-mix(in oklab, var(--warning) 80%, var(--foreground)); }
 	.p-result { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 56px; font-size: 14px; font-weight: 600; }

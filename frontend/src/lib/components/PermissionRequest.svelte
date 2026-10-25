@@ -29,9 +29,11 @@
 		/** False when the prompt cannot be deferred (Switch model). This card
 		 *  offers Approve and Deny only, so it never shows a Defer control. */
 		deferrable?: boolean;
-		/** How long an answer may be remembered (permission-scope.ts).
-		 *  Absent means this request only. */
+		/** How long an answer may be remembered (permission-scope.ts), from
+		 *  the pending-permissions projection. Absent means this request only. */
 		remember_scopes?: string[] | null;
+		/** Why the server refused the last answer and left this one waiting. */
+		answer_error?: string;
 	}
 
 	interface Props {
@@ -269,6 +271,11 @@
 			clearTimeout(pointerTimer);
 			clearTimeout(shortcutTimer);
 		};
+	});
+
+	// A refused answer (the request stays waiting): take answers again at once.
+	$effect(() => {
+		if (request.answer_error) untrack(() => (answered = false));
 	});
 
 	$effect(() => {
@@ -613,6 +620,9 @@
 
 	<!-- Action Buttons -->
 	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
+		{#if request.answer_error && !answered}
+			<p class="answer-error" role="alert">{request.answer_error}</p>
+		{/if}
 		<div class="flex gap-2 flex-wrap sm:flex-nowrap">
 			<!-- Deny Button -->
 			<button
@@ -809,6 +819,17 @@
 	.relayed-note strong {
 		color: var(--foreground);
 		font-weight: 600;
+	}
+
+	.answer-error {
+		margin: 0 0 0.625rem;
+		padding: 0.5rem 0.75rem;
+		border-radius: var(--radius, 0.75rem);
+		border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
+		background: color-mix(in oklab, var(--destructive) 8%, var(--card));
+		color: var(--foreground);
+		font-size: 0.75rem;
+		line-height: 1.45;
 	}
 
 	/* Action Buttons */

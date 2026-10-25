@@ -287,6 +287,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (!patched || needsReload) scheduleSessionsReload();
 	}
 
+	/**
+	 * The plain reason for an answer the server refused but left waiting, or
+	 * null when the ack closes the card (answered, or already gone).
+	 */
+	function answerRefusal(result: Record<string, unknown>): string | null {
+		const error = typeof result.error === 'string' ? result.error : '';
+		if (!error || error === 'Request not found') return null;
+		if (error === 'Remember scope unavailable') {
+			return "This answer can't be saved for an agent here. Choose how long it lasts again.";
+		}
+		return error;
+	}
+
 	/** One get_pending_permissions per burst of new permission cards. */
 	let rememberScopesQueued = false;
 	function requestRememberScopes(): void {
@@ -1310,6 +1323,24 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const responseSessionId = data.session_id as string | undefined;
 				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
+				// An answer the server refused but left waiting (say a kept answer
+				// it cannot save here) keeps its card, with the reason and any
+				// fresher remember_scopes, so it can be answered again.
+				const result = (data.result && typeof data.result === 'object' ? data.result : {}) as Record<string, unknown>;
+				const refusal = data.type === 'permission_response_ack' ? answerRefusal(result) : null;
+				if (refusal) {
+					update(s => ({
+						...s,
+						pendingPermissions: s.pendingPermissions.map(p => p.request_id !== requestId ? p : {
+							...p,
+							answer_error: refusal,
+							...(Array.isArray(result.remember_scopes)
+								? { remember_scopes: (result.remember_scopes as unknown[]).filter((x): x is string => typeof x === 'string') }
+								: {}),
+						}),
+					}));
+					break;
+				}
 				update(s => ({
 					...s,
 					pendingPermissions: s.pendingPermissions.filter(p => p.request_id !== requestId),

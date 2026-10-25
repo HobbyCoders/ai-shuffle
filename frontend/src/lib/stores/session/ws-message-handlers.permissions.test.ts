@@ -136,6 +136,22 @@ describe('permission queue frames', () => {
 		]);
 	});
 
+	it('keeps a card whose answer was refused, with the reason and fresher scopes', () => {
+		const h = harness({ pendingPermissions: [{ ...perm('a'), remember_scopes: ['none', 'session', 'profile'] }, perm('b')] });
+		h.handleMessage({
+			type: 'permission_response_ack', session_id: 'current', request_id: 'a',
+			result: { error: 'Remember scope unavailable', remember_scopes: ['none', 'session'] },
+		});
+		const a = h.state().pendingPermissions.find((p) => p.request_id === 'a')!;
+		expect(a.remember_scopes).toEqual(['none', 'session']);
+		expect(a.answer_error).toMatch(/can't be saved for an agent here/);
+
+		// Answered, or already gone: the card closes as before.
+		h.handleMessage({ type: 'permission_response_ack', session_id: 'current', request_id: 'b', result: { error: 'Request not found' } });
+		h.handleMessage({ type: 'permission_response_ack', session_id: 'current', request_id: 'a', result: { resolved: true, auto_resolved_count: 0, auto_resolved_ids: [] } });
+		expect(h.pendingIds()).toEqual([]);
+	});
+
 	it('ignores remember_scopes on a live frame (only the pending projection carries it)', () => {
 		const h = harness();
 		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'x', tool_name: 'Bash', tool_input: { command: 'ls' }, remember_scopes: ['none', 'session', 'profile'] });

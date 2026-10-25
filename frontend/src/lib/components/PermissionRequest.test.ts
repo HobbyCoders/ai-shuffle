@@ -139,6 +139,41 @@ describe('PermissionRequest — approve/deny + how long the answer lasts', () =>
 		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
 	});
 
+	it('a live card starts one-shot and offers the choice once the pending refresh lists it', async () => {
+		const onRespond = vi.fn();
+		const { remember_scopes: _none, ...live } = makeRequest();
+		const view = renderArmedForClicks({ request: live, onRespond });
+		expect(screen.queryByRole('radio')).toBeNull();
+
+		// The same request again, now with the projection's advice.
+		await view.rerender({ request: { ...live, remember_scopes: ['none', 'session', 'profile'] }, onRespond });
+		await fireEvent.click(radio('Always for this agent'));
+		// Still armed: the refresh is not a new request.
+		await fireEvent.click(screen.getByRole('button', { name: 'Always allow' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ request_id: 'req-1', decision: 'allow', remember: 'profile' });
+	});
+
+	it('shows a refused answer plainly and takes another answer', async () => {
+		const onRespond = vi.fn();
+		const view = renderArmedForClicks({ request: makeRequest(), onRespond });
+		await fireEvent.click(radio('Always for this agent'));
+		const allow = screen.getByRole('button', { name: 'Always allow' }) as HTMLButtonElement;
+		await fireEvent.click(allow);
+		expect(allow.disabled).toBe(true);
+
+		await view.rerender({
+			request: makeRequest({ remember_scopes: ['none', 'session'], answer_error: "This answer can't be saved for an agent here. Choose how long it lasts again." }),
+			onRespond
+		});
+		expect(screen.getByRole('alert').textContent).toContain("can't be saved for an agent here");
+		// Always is no longer offered; the answer falls back to once.
+		expect(screen.queryByRole('radio', { name: 'Always for this agent' })).toBeNull();
+		const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+		expect(approve.disabled).toBe(false);
+		await fireEvent.click(approve);
+		expect(onRespond.mock.calls[1][0]).toMatchObject({ decision: 'allow', remember: 'none' });
+	});
+
 	it('offers only the lifetimes the server lists', () => {
 		render(PermissionRequest, { props: { request: makeRequest({ remember_scopes: ['none', 'session'] }) } });
 		expect(screen.getAllByRole('radio').map((r) => (r as HTMLInputElement).value)).toEqual(['none', 'session']);
