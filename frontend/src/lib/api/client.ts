@@ -544,6 +544,14 @@ export interface PermissionRequest {
 	 *  answered yes or no only and the server refuses a defer for it. Absent
 	 *  means the prompt may be deferred. */
 	deferrable?: boolean;
+	/** Advice on how long an answer may be kept: `none` (this request),
+	 *  `session` (this chat until it goes idle) and `profile` (a permanent
+	 *  agent rule). Only get_pending_permissions entries carry it; absent
+	 *  means `none` only. See components/permission-scope.ts. */
+	remember_scopes?: string[] | null;
+	/** Client-side: why the server refused the last answer and left the
+	 *  request waiting (permission_response_ack with an error). */
+	answer_error?: string;
 }
 
 export interface PermissionWorkerTag {

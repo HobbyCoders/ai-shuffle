@@ -162,6 +162,37 @@ class PermissionHandler:
     def __init__(self):
         # In-memory session rules (cleared when session ends)
         self._session_rules: Dict[str, List[PermissionRule]] = {}
+        # Only this handler's live callbacks can install runner-local rules.
+        self._active_requests: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _one_shot_only(payload: dict[str, Any]) -> bool:
+        """Prompts requiring an individual decision, regardless of client version."""
+        from app.core.model_override import PROMPT_TOOL
+
+        return bool(
+            payload.get("tool_name") == PROMPT_TOOL
+            or (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
+            or payload.get("safety_check")
+            or (payload.get("skip_saved_rules") and payload.get("assistant_confirm") is None)
+        )
+
+    def remember_scopes(self, session_id: str | None, payload: dict[str, Any]) -> list[str]:
+        """Conservative UI advice, not authority to reject remembered answers.
+
+        A peer or a released owner-confirm card may still stamp a session hint
+        for the executing runner. Session memory ends on teardown/eviction,
+        restart and each /query background turn's completion.
+        """
+        if (
+            self._one_shot_only(payload)
+            or (session_id, payload.get("request_id")) not in self._active_requests
+        ):
+            return ["none"]
+        scopes = ["none", "session"]
+        if payload.get("profile_id"):
+            scopes.append("profile")
+        return scopes
 
     async def request_permission(
         self,
@@ -222,26 +253,31 @@ class PermissionHandler:
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
         """
-        return await self._request_permission_v2(
-            request_id=request_id,
-            session_id=session_id,
-            profile_id=profile_id,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            broadcast_func=broadcast_func,
-            tool_use_id=tool_use_id,
-            agent_id=agent_id,
-            title=title,
-            display_name=display_name,
-            description=description,
-            decision_reason=decision_reason,
-            blocked_path=blocked_path,
-            provider_agent=provider_agent,
-            mode_managed=mode_managed,
-            skip_saved_rules=skip_saved_rules,
-            assistant_confirm=assistant_confirm,
-            safety_check=safety_check,
-        )
+        key = (session_id, request_id)
+        self._active_requests.add(key)
+        try:
+            return await self._request_permission_v2(
+                request_id=request_id,
+                session_id=session_id,
+                profile_id=profile_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                broadcast_func=broadcast_func,
+                tool_use_id=tool_use_id,
+                agent_id=agent_id,
+                title=title,
+                display_name=display_name,
+                description=description,
+                decision_reason=decision_reason,
+                blocked_path=blocked_path,
+                provider_agent=provider_agent,
+                mode_managed=mode_managed,
+                skip_saved_rules=skip_saved_rules,
+                assistant_confirm=assistant_confirm,
+                safety_check=safety_check,
+            )
+        finally:
+            self._active_requests.discard(key)
 
     # ------------------------------------------------------------------
     # pending_interactions-backed permission flow
@@ -337,6 +373,7 @@ class PermissionHandler:
             "tool_input": payload.get("tool_input"),
             "created_at": created_at,
             "state": state,
+            "remember_scopes": self.remember_scopes(row.get("session_id"), payload),
         }
         for key in (
             "tool_use_id",
@@ -394,7 +431,8 @@ class PermissionHandler:
         rule = None if skip_saved_rules else self._check_rules(
             session_id, profile_id, tool_name, tool_input
         )
-        if rule:
+        # Safety checks still honour a saved refusal, but never a saved grant.
+        if rule and (not safety_check or rule.decision == PermissionDecision.DENY):
             logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
             if rule.decision == PermissionDecision.ALLOW:
                 return PermissionResultAllow(updated_input=tool_input)
@@ -433,6 +471,10 @@ class PermissionHandler:
             payload["mode_managed"] = True
         if safety_check:
             payload["safety_check"] = True
+        if skip_saved_rules and assistant_confirm is None:
+            # Owner-confirm calls bypass prior rules but keep the remembered-
+            # answer contract, including cards released while another turn runs.
+            payload["skip_saved_rules"] = True
         ttl_seconds = PERMISSION_TTL_SECONDS
         if assistant_confirm is not None:
             from app.core.owner_confirm import TTL_SECONDS as ttl_seconds
@@ -560,13 +602,10 @@ class PermissionHandler:
             return PermissionResultDeny(message="Request cancelled")
 
         answer = result_row.get("answer") or {}
-        # A ``remember: "session"`` answered on ANY install stamps
-        # remember/pattern onto the shared row; replay it into THIS runner's local
-        # session rules (BEFORE returning the decision) so identical follow-up
-        # requests short-circuit via _check_rules. Idempotent, and a no-op unless
-        # a pattern rode along (profile-remember is DB-shared, needs no replay).
-        if answer.get("remember") == "session" and answer.get("pattern"):
-            payload_row = result_row.get("payload") or {}
+        # Replay both patterned and tool-wide session rules on the executing
+        # runner before the next call. Profile rules are already DB-backed.
+        payload_row = result_row.get("payload") or {}
+        if answer.get("remember") == "session" and not self._one_shot_only(payload_row):
             self._add_session_rule_idempotent(
                 session_id,
                 payload_row.get("tool_name", ""),
@@ -610,12 +649,21 @@ class PermissionHandler:
         if row is None:
             return {"error": "Request not found"}
         payload = row.get("payload") or {}
-        from app.core.model_override import PROMPT_TOOL
-        if payload.get("tool_name") == PROMPT_TOOL:
-            # A model switch answer covers one chat and one model, never a
-            # tool-wide rule; an older client's "Always" must not answer the
-            # chat's other open switch prompts for different models.
+        if decision not in ("allow", "deny", "defer"):
+            return {"error": "Invalid permission decision"}
+        if self._one_shot_only(payload):
+            # These prompts always need their own explicit decision. An older
+            # client's "Always" must neither save a rule nor answer other prompts.
             remember, pattern = None, None
+        if decision != "defer" and remember not in (None, "none", "session", "profile"):
+            return {"error": "Invalid remember scope"}
+        if decision != "defer" and remember == "profile" and not payload.get("profile_id"):
+            # Refuse before consuming the interaction: a null/empty agent would
+            # otherwise fail the permission_rules FK after the answer committed.
+            return {
+                "error": "Remember scope unavailable",
+                "remember_scopes": self.remember_scopes(session_id, payload),
+            }
         if decision == "defer" and not is_deferrable(payload.get("tool_name")):
             # Nobody would wait for the re-shown prompt's answer. Leave the
             # row pending so the owner can still approve or deny it.
@@ -694,9 +742,9 @@ class PermissionHandler:
                 decision=PermissionDecision(decision),
             )
             if remember == "session":
-                # Session rules are executing-runner-local; a
-                # rule created on a peer install does not reach the owner.
-                self._session_rules.setdefault(session_id, []).append(rule)
+                self._add_session_rule_idempotent(
+                    session_id, rule.tool_name, rule.tool_pattern, decision,
+                )
             else:
                 # Awaited, not fire-and-forget: the rule must be durable before
                 # the next permission check consults it.
@@ -780,6 +828,10 @@ class PermissionHandler:
         emits: List[tuple] = []
         for r in self._v2_pending_permissions(session_id):
             payload = r.get("payload") or {}
+            # Safety checks, remote proxies and model switches require their
+            # own explicit answer even when an ordinary sibling is remembered.
+            if self._one_shot_only(payload):
+                continue
             if not rule.matches(payload.get("tool_name", ""), payload.get("tool_input") or {}):
                 continue
             if rule.decision == PermissionDecision.ALLOW:

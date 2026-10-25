@@ -1,7 +1,8 @@
 /**
  * Behavior tests for the simplified permission prompt: it shows WHAT is being
- * requested and offers exactly two actions (Approve / Deny) plus one
- * "always for this tool" checkbox that applies to whichever button is pressed.
+ * requested and offers exactly two actions (Approve / Deny) plus a choice of
+ * how long the answer lasts (once, this chat until idle, always for this
+ * agent) that applies to whichever button is pressed.
  * Defer was removed from the UI entirely (the backend still supports it).
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
@@ -14,6 +15,7 @@ function makeRequest(over: Partial<PermissionRequestData> = {}): PermissionReque
 		request_id: 'req-1',
 		tool_name: 'Bash',
 		tool_input: { command: 'git status' },
+		remember_scopes: ['none', 'session', 'profile'],
 		...over
 	};
 }
@@ -31,7 +33,9 @@ function renderArmedForClicks(props: { request: PermissionRequestData; onRespond
 	return view;
 }
 
-describe('PermissionRequest — approve/deny + always-remember', () => {
+const radio = (name: string) => screen.getByRole('radio', { name }) as HTMLInputElement;
+
+describe('PermissionRequest — approve/deny + how long the answer lasts', () => {
 	it('shows the tool name and the requested details', () => {
 		render(PermissionRequest, { props: { request: makeRequest() } });
 
@@ -48,7 +52,7 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		expect(screen.queryByText(/defer/i)).toBeNull();
 	});
 
-	it('approves without remembering when the checkbox is unchecked', async () => {
+	it('approves without remembering by default (Just this once)', async () => {
 		const onRespond = vi.fn();
 		renderArmedForClicks({ request: makeRequest(), onRespond });
 
@@ -64,7 +68,7 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		expect(onRespond.mock.calls[0][0].pattern).toBeUndefined();
 	});
 
-	it('denies without remembering when the checkbox is unchecked', async () => {
+	it('denies without remembering by default', async () => {
 		const onRespond = vi.fn();
 		renderArmedForClicks({ request: makeRequest(), onRespond });
 
@@ -76,40 +80,111 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		});
 	});
 
-	it('checkbox + Approve remembers an always-allow for the tool', async () => {
+	it('offers the three lifetimes, Just this once picked', () => {
+		render(PermissionRequest, { props: { request: makeRequest() } });
+
+		expect(screen.getByRole('group', { name: 'Remember this answer' })).toBeTruthy();
+		expect(screen.getAllByRole('radio').map((r) => (r as HTMLInputElement).value)).toEqual(['none', 'session', 'profile']);
+		expect(radio('Just this once').checked).toBe(true);
+		expect(screen.getByText(/Applies to this request only/)).toBeTruthy();
+	});
+
+	it('Always for this agent + Approve saves a permanent tool-wide allow, and says so first', async () => {
 		const onRespond = vi.fn();
 		renderArmedForClicks({ request: makeRequest(), onRespond });
 
-		const checkbox = screen.getByRole('checkbox') as HTMLInputElement;
-		expect(checkbox.checked).toBe(false);
-		await fireEvent.click(checkbox);
-		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		await fireEvent.click(radio('Always for this agent'));
+		expect(screen.getByText(/Permanent\. Covers every Bash call this agent makes, in every chat, on every worker/)).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Always allow' }));
 
-		expect(onRespond.mock.calls[0][0]).toMatchObject({
-			decision: 'allow',
-			remember: 'profile'
-		});
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'profile' });
 		expect(onRespond.mock.calls[0][0].pattern).toBeUndefined();
 	});
 
-	it('checkbox + Deny remembers an always-deny for the tool', async () => {
+	it('Always for this agent + Deny saves a permanent deny', async () => {
 		const onRespond = vi.fn();
 		renderArmedForClicks({ request: makeRequest(), onRespond });
 
-		await fireEvent.click(screen.getByRole('checkbox'));
-		await fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+		await fireEvent.click(radio('Always for this agent'));
+		await fireEvent.click(screen.getByRole('button', { name: 'Always deny' }));
 
-		expect(onRespond.mock.calls[0][0]).toMatchObject({
-			decision: 'deny',
-			remember: 'profile'
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'deny', remember: 'profile' });
+	});
+
+	it.each([
+		['allow', 'Allow in this chat'],
+		['deny', 'Deny in this chat']
+	])('This chat sends a session %s and says when it ends', async (decision, button) => {
+		const onRespond = vi.fn();
+		renderArmedForClicks({ request: makeRequest(), onRespond });
+
+		await fireEvent.click(radio('This chat until it goes idle'));
+		expect(screen.getByText(/Covers every Bash call in this chat until it goes idle or the worker restarts/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: button }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision, remember: 'session' });
+	});
+
+	it.each([
+		['the server allows only one-shot answers', ['none']],
+		['the frame carries no capability list', undefined],
+		['the list is empty', []]
+	])('hides the choice and answers once when %s', async (_why, scopes) => {
+		const onRespond = vi.fn();
+		renderArmedForClicks({ request: makeRequest({ remember_scopes: scopes as string[] | undefined }), onRespond });
+
+		expect(screen.queryByRole('radio')).toBeNull();
+		expect(screen.queryByText(/Remember this answer/)).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
+	});
+
+	it('a live card starts one-shot and offers the choice once the pending refresh lists it', async () => {
+		const onRespond = vi.fn();
+		const { remember_scopes: _none, ...live } = makeRequest();
+		const view = renderArmedForClicks({ request: live, onRespond });
+		expect(screen.queryByRole('radio')).toBeNull();
+
+		// The same request again, now with the projection's advice.
+		await view.rerender({ request: { ...live, remember_scopes: ['none', 'session', 'profile'] }, onRespond });
+		await fireEvent.click(radio('Always for this agent'));
+		// Still armed: the refresh is not a new request.
+		await fireEvent.click(screen.getByRole('button', { name: 'Always allow' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ request_id: 'req-1', decision: 'allow', remember: 'profile' });
+	});
+
+	it('shows a refused answer plainly and takes another answer', async () => {
+		const onRespond = vi.fn();
+		const view = renderArmedForClicks({ request: makeRequest(), onRespond });
+		await fireEvent.click(radio('Always for this agent'));
+		const allow = screen.getByRole('button', { name: 'Always allow' }) as HTMLButtonElement;
+		await fireEvent.click(allow);
+		expect(allow.disabled).toBe(true);
+
+		await view.rerender({
+			request: makeRequest({ remember_scopes: ['none', 'session'], answer_error: "This answer can't be saved for an agent here. Choose how long it lasts again." }),
+			onRespond
 		});
+		expect(screen.getByRole('alert').textContent).toContain("can't be saved for an agent here");
+		// Always is no longer offered; the answer falls back to once.
+		expect(screen.queryByRole('radio', { name: 'Always for this agent' })).toBeNull();
+		const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+		expect(approve.disabled).toBe(false);
+		await fireEvent.click(approve);
+		expect(onRespond.mock.calls[1][0]).toMatchObject({ decision: 'allow', remember: 'none' });
+	});
+
+	it('offers only the lifetimes the server lists', () => {
+		render(PermissionRequest, { props: { request: makeRequest({ remember_scopes: ['none', 'session'] }) } });
+		expect(screen.getAllByRole('radio').map((r) => (r as HTMLInputElement).value)).toEqual(['none', 'session']);
+		expect(screen.queryByRole('radio', { name: 'Always for this agent' })).toBeNull();
 	});
 
 	it.each([false, true])('ModelSwitch is chat-scoped and never offers an always rule (relayed=%s)', async (relayed) => {
 		const onRespond = vi.fn();
 		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'ServerWorker' } : undefined;
 		renderArmedForClicks({ request: makeRequest({ tool_name: 'ModelSwitch', provider_agent }), onRespond });
-		expect(screen.queryByRole('checkbox')).toBeNull();
+		expect(screen.queryByRole('radio')).toBeNull();
 		expect(screen.getByText(/A yes covers this model for this chat, including after app restarts/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
 		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
@@ -125,10 +200,11 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		if (relayed) expect(screen.getByText('DesktopWorker subagent')).toBeTruthy();
 	});
 
-	it('labels the checkbox with the tool it applies to', () => {
+	it('names the tool the kept answer covers', async () => {
 		render(PermissionRequest, { props: { request: makeRequest({ tool_name: 'WebFetch', tool_input: { url: 'https://example.com' } }) } });
 
-		expect(screen.getByLabelText(/Always do this for WebFetch/i)).toBeTruthy();
+		await fireEvent.click(radio('Always for this agent'));
+		expect(screen.getByText(/Covers every WebFetch call this agent makes/)).toBeTruthy();
 	});
 
 	it('ignores a click within 300 ms of the request appearing', async () => {
@@ -167,19 +243,20 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		expect(onRespond.mock.calls.map(([r]) => r.request_id)).toEqual(['req-1', 'req-2']);
 	});
 
-	it('the "always" box and expanded details reset when the request changes', async () => {
+	it('the lifetime choice and expanded details reset when the request changes', async () => {
 		const onRespond = vi.fn();
 		const view = renderArmedForClicks({ request: makeRequest(), onRespond });
 
-		await fireEvent.click(screen.getByRole('checkbox'));
+		await fireEvent.click(radio('Always for this agent'));
 		await fireEvent.click(screen.getByRole('button', { name: 'Show details' }));
-		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+		expect(radio('Always for this agent').checked).toBe(true);
 
 		await view.rerender({
 			request: makeRequest({ request_id: 'req-2', tool_name: 'Write', tool_input: { file_path: '/tmp/x' } }),
 			onRespond
 		});
-		expect((screen.getByLabelText(/Always do this for Write/) as HTMLInputElement).checked).toBe(false);
+		expect(radio('Always for this agent').checked).toBe(false);
+		expect(radio('Just this once').checked).toBe(true);
 		expect(screen.getByRole('button', { name: 'Show details' })).toBeTruthy();
 
 		vi.advanceTimersByTime(300);
@@ -518,13 +595,13 @@ describe('PermissionRequest — relayed prompt from a subagent on another worker
 		},
 	});
 
-	it('names the worker and hides the always option', () => {
+	it('names the worker and hides the lifetime choice', () => {
 		render(PermissionRequest, { props: { request: relayed() } });
 
 		expect(screen.getByText('DesktopWorker subagent')).toBeTruthy();
 		expect(screen.getByTestId('relayed-note').textContent).toMatch(/subagent running on DesktopWorker.*this request only/s);
-		expect(screen.queryByRole('checkbox')).toBeNull();
-		expect(screen.queryByText(/Always do this/)).toBeNull();
+		expect(screen.queryByRole('radio')).toBeNull();
+		expect(screen.queryByText(/Always for this agent/)).toBeNull();
 	});
 
 	it('answers once, never with a remembered rule', async () => {
@@ -535,12 +612,12 @@ describe('PermissionRequest — relayed prompt from a subagent on another worker
 		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
 	});
 
-	it('keeps the always option on a local subagent prompt', () => {
+	it('keeps the lifetime choice on a local subagent prompt', () => {
 		render(PermissionRequest, { props: { request: makeRequest({
 			provider_agent: { worker_session_id: 'child-2', label: 'Task worker' },
 		}) } });
 
 		expect(screen.getByText('Permission')).toBeTruthy();
-		expect(screen.getByLabelText(/Always do this for Bash/)).toBeTruthy();
+		expect(radio('Always for this agent')).toBeTruthy();
 	});
 });

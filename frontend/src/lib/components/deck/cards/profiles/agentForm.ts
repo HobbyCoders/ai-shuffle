@@ -89,6 +89,7 @@ export const AGENT_TABS = [
 	{ id: 'profile', label: 'Profile' },
 	{ id: 'prompt', label: 'Instructions' },
 	{ id: 'tools', label: 'Tools' },
+	{ id: 'approvals', label: 'Approvals' },
 	{ id: 'subagents', label: 'Subagents' },
 	{ id: 'models', label: 'Models' },
 	{ id: 'advanced', label: 'Advanced' }

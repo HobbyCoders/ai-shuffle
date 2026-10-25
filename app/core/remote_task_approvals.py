@@ -19,10 +19,10 @@ worker, so the prompt travels over the signed control channel:
   from the dispatching worker, only once, and only while the tool call still
   waits. Anything else (a replay, a late answer, another worker) is refused.
 
-What travels back is allow-once or deny. "Always allow" choices, saved rules,
-the permission mode and private-access grants never travel: the proxy prompt
-ignores the parent's saved rules (a person always decides), and a rule the
-owner saves while answering stays on the parent.
+What travels back is allow-once or deny. Saved rules, the permission mode and
+private-access grants never travel: the proxy prompt ignores the parent's
+saved rules (a person always decides). It exposes one-shot answers only;
+legacy remember flags are ignored rather than saving a rule on the parent.
 
 Every failure denies, never allows: no answer within the prompt's time limit
 (the parent's own TTL plus :data:`GRACE_SECONDS` for the trip), an

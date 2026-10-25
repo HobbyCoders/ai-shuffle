@@ -8,6 +8,7 @@
 //   ?colors=0                the agent API without avatar_color
 //   ?empty=1                 built-ins only
 //   ?loading=1               /agents never answers
+//   ?rules=error|slow        saved approvals: fail to load / never answer
 import { mount } from 'svelte';
 import '@fontsource-variable/inter';
 import '../src/app.css';
@@ -129,6 +130,17 @@ localStorage.setItem(
 	})
 );
 
+// Saved approvals (permission rules) per agent, newest first.
+const rule = (id: string, profile_id: string, tool_name: string, decision: 'allow' | 'deny', tool_pattern: string | null, age: number) =>
+	({ id, profile_id, tool_name, tool_pattern, decision, created_at: ago(age) });
+let rules: Record<string, any[]> = {
+	'release-captain': [
+		rule('rule-1', 'release-captain', 'Bash', 'allow', null, 2 * 3_600_000),
+		rule('rule-2', 'release-captain', 'WebFetch', 'deny', 'https://registry.example.com/*', 3 * day),
+		rule('rule-3', 'release-captain', 'mcp__github__create_release', 'allow', null, 12 * day)
+	]
+};
+
 const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const realFetch = window.fetch.bind(window);
@@ -157,6 +169,26 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (one && method === 'DELETE') {
 		agents = agents.filter((a) => a.id !== one[1]);
 		return json({});
+	}
+	const ruleList = path.match(/^\/agents\/([^/]+)\/permission-rules$/);
+	if (ruleList) {
+		const id = decodeURIComponent(ruleList[1]);
+		if (params.get('rules') === 'slow') return new Promise<Response>(() => {});
+		if (params.get('rules') === 'error') return json({ detail: 'Could not reach the database. Try again in a moment.' }, 503);
+		if (method === 'DELETE') {
+			const deleted_count = (rules[id] ?? []).length;
+			rules = { ...rules, [id]: [] };
+			return json({ deleted_count });
+		}
+		return json(rules[id] ?? []);
+	}
+	const ruleOne = path.match(/^\/agents\/([^/]+)\/permission-rules\/([^/]+)$/);
+	if (ruleOne && method === 'DELETE') {
+		const id = decodeURIComponent(ruleOne[1]);
+		const before = rules[id] ?? [];
+		if (!before.some((r) => r.id === ruleOne[2])) return json({ detail: 'Permission rule not found' }, 404);
+		rules = { ...rules, [id]: before.filter((r) => r.id !== ruleOne[2]) };
+		return new Response(null, { status: 204 });
 	}
 	const restore = path.match(/^\/agents\/([^/]+)\/restore$/);
 	if (restore) {

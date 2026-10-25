@@ -195,6 +195,34 @@ describe('detail', () => {
 		expect(tab('Profile').getAttribute('aria-selected')).toBe('true');
 	});
 
+	it('lists the agent\'s saved approvals on the Approvals tab', async () => {
+		const get = mocks.get.getMockImplementation()!;
+		mocks.get.mockImplementation(async (path: string) =>
+			path === '/agents/agent/permission-rules'
+				? [{ id: 'rule-1', profile_id: 'agent', tool_name: 'Bash', tool_pattern: null, decision: 'deny', created_at: '2026-10-20T10:00:00Z' }]
+				: get(path)
+		);
+		render(ProfileCard);
+		await heading('Researcher');
+		await fireEvent.click(tab('Approvals'));
+		const saved = await screen.findByRole('list', { name: 'Saved approvals' });
+		expect(within(saved).getByText('Bash')).toBeTruthy();
+		expect(within(saved).getByText('Every call')).toBeTruthy();
+		expect(within(saved).getByText('Deny')).toBeTruthy();
+	});
+
+	it('hides the Approvals tab from anyone but the owner', async () => {
+		const { isAdmin } = await import('$lib/stores/auth.svelte');
+		(isAdmin as unknown as { set: (v: boolean) => void }).set(false);
+		try {
+			render(ProfileCard);
+			await heading('Researcher');
+			expect(screen.queryByRole('tab', { name: /^Approvals/ })).toBeNull();
+		} finally {
+			(isAdmin as unknown as { set: (v: boolean) => void }).set(true);
+		}
+	});
+
 	it('shows Duplicate, Export and Delete for your agent, Restore for a modified built-in, and no menu', async () => {
 		render(ProfileCard);
 		await heading('Researcher');

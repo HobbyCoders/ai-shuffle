@@ -130,7 +130,7 @@ activeSession.setDraft('');
 
 // What waits on the owner. The permission is the mockup's Bash prompt.
 const permissions = promptKind === 'none' ? [] : [
-	{ request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'cd desktop && npm run dist:linux' } }
+	{ request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'cd desktop && npm run dist:linux' }, remember_scopes: ['none', 'session', 'profile'] }
 ];
 const questions = promptKind === 'question' || promptKind === 'all' ? [{
 	request_id: 'q1', tool_use_id: 'tu1',

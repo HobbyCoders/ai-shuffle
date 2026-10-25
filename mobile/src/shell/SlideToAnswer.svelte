@@ -14,13 +14,14 @@
 
 	interface Props {
 		approveLabel?: string;
+		denyLabel?: string;
 		disabled?: boolean;
 		armed?: boolean;
 		onApprove: () => void;
 		onDeny: () => void;
 	}
 
-	let { approveLabel = 'Approve', disabled = false, armed = true, onApprove, onDeny }: Props = $props();
+	let { approveLabel = 'Approve', denyLabel = 'Deny', disabled = false, armed = true, onApprove, onDeny }: Props = $props();
 
 	let railRef = $state<HTMLElement | null>(null);
 	let knobRef = $state<HTMLElement | null>(null);
@@ -93,14 +94,14 @@
 	class:arm-deny={verdict === 'deny'}
 	class:disabled
 	role="group"
-	aria-label={`Slide right to ${approveLabel.toLowerCase()}, left to deny`}
+	aria-label={`Slide right to ${approveLabel.toLowerCase()}, left to ${denyLabel.toLowerCase()}`}
 	data-no-drawer-swipe
 	style:--fr={Math.max(0, fraction)}
 	style:--fl={Math.max(0, -fraction)}
 >
 	<span class="fill l" aria-hidden="true"></span>
 	<span class="fill r" aria-hidden="true"></span>
-	<button type="button" class="rail-end deny" {disabled} onclick={() => tap('deny')}><X size={16} aria-hidden="true" />Deny</button>
+	<button type="button" class="rail-end deny" {disabled} onclick={() => tap('deny')}><X size={16} aria-hidden="true" />{denyLabel}</button>
 	<button type="button" class="rail-end approve" {disabled} onclick={() => tap('approve')}>{approveLabel}<Check size={16} aria-hidden="true" /></button>
 	<div
 		bind:this={knobRef}
@@ -108,7 +109,7 @@
 		class:dragging
 		role="slider"
 		tabindex={disabled ? -1 : 0}
-		aria-label={`Slide right to ${approveLabel.toLowerCase()}, left to deny`}
+		aria-label={`Slide right to ${approveLabel.toLowerCase()}, left to ${denyLabel.toLowerCase()}`}
 		aria-valuemin={-1}
 		aria-valuemax={1}
 		aria-valuenow={Number(fraction.toFixed(2))}

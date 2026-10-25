@@ -141,8 +141,9 @@ describe('PermissionQueue keyboard shortcuts across queued requests', () => {
 });
 
 describe('PermissionQueue gives each request a fresh prompt', () => {
-	const bash = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
-	const write = { request_id: 'req-2', tool_name: 'Write', tool_input: { file_path: '/etc/x', content: 'y' } };
+	const remember_scopes = ['none', 'session', 'profile'];
+	const bash = { request_id: 'req-1', tool_name: 'Bash', tool_input: { command: 'ls' }, remember_scopes };
+	const write = { request_id: 'req-2', tool_name: 'Write', tool_input: { file_path: '/etc/x', content: 'y' }, remember_scopes };
 
 	async function renderQueue() {
 		const onRespond = vi.fn();
@@ -159,17 +160,18 @@ describe('PermissionQueue gives each request a fresh prompt', () => {
 	const calls = (fn: ReturnType<typeof vi.fn>) =>
 		fn.mock.calls.map(([r]) => [r.request_id, r.decision, r.remember]);
 
-	it('"Always do this for Bash" does not stay ticked for the next request', async () => {
+	it('"Always for this agent" does not stay picked for the next request', async () => {
 		vi.useFakeTimers();
 		const onRespond = await renderQueue();
 		vi.advanceTimersByTime(300);
 
-		await fireEvent.click(screen.getByLabelText(/Always do this for Bash/));
-		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		await fireEvent.click(screen.getByRole('radio', { name: 'Always for this agent' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Always allow' }));
 		await settle();
 
-		const box = screen.getByLabelText(/Always do this for Write/) as HTMLInputElement;
-		expect(box.checked).toBe(false);
+		expect(screen.getByText(/Write/, { selector: 'p' })).toBeTruthy();
+		expect((screen.getByRole('radio', { name: 'Always for this agent' }) as HTMLInputElement).checked).toBe(false);
+		expect((screen.getByRole('radio', { name: 'Just this once' }) as HTMLInputElement).checked).toBe(true);
 		vi.advanceTimersByTime(300);
 		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
 		expect(calls(onRespond)).toEqual([

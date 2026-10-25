@@ -129,7 +129,7 @@
 			<ToolUseMessage name="Bash" input={{ command: 'npm run check', description: 'Type-check the frontend' }} result="svelte-check found 0 errors" status="complete" />
 			<ToolUseMessage name="Read" input={{ file_path: 'frontend/src/app.css' }} status="running" />
 			<div class="gap"></div>
-			<PermissionRequest request={{ request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'git push origin fix/attach-sheet' } }} />
+			<PermissionRequest request={{ request_id: 'p1', tool_name: 'Bash', tool_input: { command: 'git push origin fix/attach-sheet' }, remember_scopes: ['none', 'session', 'profile'] }} />
 			<div class="gap"></div>
 			<QuestionTray requests={[question]} onRespond={() => {}} />
 		</section>

@@ -27,6 +27,7 @@
 	import AgentSubagentsTab from './AgentSubagentsTab.svelte';
 	import AgentModelsTab from './AgentModelsTab.svelte';
 	import AgentAdvancedTab from './AgentAdvancedTab.svelte';
+	import AgentApprovalsTab from './AgentApprovalsTab.svelte';
 	import type { ToolSelectionMode } from './toolSurface';
 	import {
 		AGENT_TABS,
@@ -167,8 +168,9 @@
 	]);
 
 	// None: no count on the Subagents tab (the header fact says "None").
+	// Approvals (saved permission rules) is owner only.
 	const tabs = $derived(
-		AGENT_TABS.map((t) =>
+		AGENT_TABS.filter((t) => t.id !== 'approvals' || isAdmin).map((t) =>
 			t.id === 'subagents' ? { ...t, count: form.agent_invoke_mode === 'none' ? undefined : others.length } : { ...t }
 		)
 	);
@@ -336,6 +338,8 @@
 					{onToggleGroup}
 					onRefresh={onRefreshTools}
 				/>
+			{:else if current === 'approvals' && isAdmin}
+				<AgentApprovalsTab profileId={editingProfile?.id ?? null} />
 			{:else if current === 'subagents'}
 				<AgentSubagentsTab
 					agents={others}

@@ -7,7 +7,8 @@
 	 *
 	 * Permission and one-shot access approvals are answered by sliding the
 	 * knob right (approve) or left (deny), or by tapping Deny / Approve, with
-	 * "Always do this" beside them. An access request that needs private
+	 * a choice of how long the answer lasts above them (Once, This chat,
+	 * Always) when the server offers one. An access request that needs private
 	 * inputs opens the header's access panel (a bottom sheet) through Review. A question shows
 	 * its options as large buttons plus "Type an answer"; a multi-part or
 	 * multi-select question falls back to the shared question form. Several
@@ -22,6 +23,14 @@
 	import { notify } from '$lib/stores/notifications';
 	import type { PromptDockProps } from '$lib/components/chat/composer-shell';
 	import SlideToAnswer from './SlideToAnswer.svelte';
+	import {
+		availableScopes,
+		decisionLabels,
+		rememberFor,
+		scopeHint,
+		scopeLabel,
+		type RememberScope
+	} from '$lib/components/permission-scope';
 
 	let { sessionId, permissions, questions, working = false, connected = true, onPermission, onQuestion }: PromptDockProps = $props();
 
@@ -59,12 +68,13 @@
 		shownId = queue[(queue.indexOf(current) + 1) % queue.length].id;
 	}
 
-	// ── Per-item state: arming, answered-once, "always", typed answer ─────
+	// ── Per-item state: arming, answered-once, answer lifetime, typed answer ─────
 	const ARM_MS = 300;
 	const RETRY_MS = 5000;
 	let armed = $state(false);
 	let answered = $state(false);
-	let always = $state(false);
+	/** How long a permission answer lasts (permission-scope.ts). */
+	let scope = $state<RememberScope>('none');
 	let typing = $state(false);
 	let typed = $state('');
 	let flash = $state<{ ok: boolean; text: string } | null>(null);
@@ -75,13 +85,20 @@
 		untrack(() => {
 			armed = false;
 			answered = false;
-			always = false;
+			scope = 'none';
 			typing = false;
 			typed = '';
 		});
 		if (!id) return;
 		const timer = setTimeout(() => (armed = true), ARM_MS);
 		return () => clearTimeout(timer);
+	});
+
+	// A refused permission answer leaves the request waiting with a reason
+	// (the store swaps in a new request object): take answers again at once.
+	const currentPermission = $derived(current?.kind === 'permission' ? current.request : null);
+	$effect(() => {
+		if (currentPermission?.answer_error) untrack(() => { answered = false; flash = null; });
 	});
 
 	$effect(() => {
@@ -128,7 +145,7 @@
 		onPermission({
 			request_id: request.request_id,
 			decision,
-			remember: always && !relayedFrom(request) && request.tool_name !== 'ModelSwitch' ? 'profile' : 'none'
+			remember: rememberFor(scope, request)
 		});
 		showResult(decision === 'allow', decision === 'allow' ? 'Approved' : 'Denied');
 	}
@@ -189,6 +206,8 @@
 			{:else if current.kind === 'permission'}
 				{@const request = current.request}
 				{@const command = preview(request)}
+				{@const labels = decisionLabels(rememberFor(scope, request))}
+				{#if request.answer_error && !answered}<p class="p-error" role="alert">{request.answer_error}</p>{/if}
 				<div class="p-head">
 					<Terminal size={17} class="t-ico" aria-hidden="true" />
 					<strong>{request.display_name?.trim() || request.tool_name}</strong>
@@ -205,12 +224,24 @@
 					<p class="p-note">A yes covers this model for this chat, including after app restarts.</p>
 				{:else if relayedFrom(request)}
 					<p class="p-note">From {relayedFrom(request)}. Answer each time.</p>
-				{:else}
-					<button type="button" class="check-row" role="checkbox" aria-checked={always} onclick={() => (always = !always)}>
-						<span class="box" aria-hidden="true"><Check size={14} /></span>Always do this
-					</button>
+				{:else if availableScopes(request).length > 1}
+					{@const kept = rememberFor(scope, request)}
+					<div class="scope-row" role="radiogroup" aria-label="Remember this answer" data-scope={kept}>
+						{#each availableScopes(request) as option (option)}
+							<button
+								type="button"
+								role="radio"
+								class="scope-chip"
+								data-option={option}
+								aria-checked={kept === option}
+								aria-label={scopeLabel(option)}
+								onclick={() => (scope = option)}
+							>{scopeLabel(option, true)}</button>
+						{/each}
+					</div>
+					{#if kept !== 'none'}<p class="scope-hint" class:warn={kept === 'profile'}>{scopeHint(kept, request.tool_name)}</p>{/if}
 				{/if}
-				<SlideToAnswer approveLabel="Approve" disabled={answered} {armed}
+				<SlideToAnswer approveLabel={labels.allow} denyLabel={labels.deny} disabled={answered} {armed}
 					onApprove={() => answerPermission(request, 'allow')}
 					onDeny={() => answerPermission(request, 'deny')} />
 			{:else if current.kind === 'access'}
@@ -337,10 +368,14 @@
 	.p-body { margin: 4px 2px 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 	.q-text { font-weight: 550; }
 	.p-note { margin: 6px 2px 0; font-size: 12.5px; color: var(--muted-foreground); }
-	.check-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0 2px; border: 0; background: transparent; color: var(--foreground); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
-	.box { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border: 1.5px solid var(--border-strong); border-radius: 6px; color: var(--primary-foreground); }
-	.check-row[aria-checked='true'] .box { background: var(--primary); border-color: var(--primary); }
-	.check-row:not([aria-checked='true']) .box :global(svg) { visibility: hidden; }
+	/* How long the answer lasts: three chips, one 44px row. */
+	.scope-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 8px 0 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in oklch, var(--muted) 60%, var(--card)); }
+	.scope-chip { min-height: 40px; padding: 0 6px; border: 1px solid transparent; border-radius: calc(var(--radius) - 3px); background: transparent; color: var(--muted-foreground); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+	.scope-chip[aria-checked='true'] { background: var(--card); border-color: var(--border); color: var(--foreground); box-shadow: var(--shadow-s); }
+	.scope-chip[data-option='profile'][aria-checked='true'] { color: var(--warning); border-color: color-mix(in oklab, var(--warning) 45%, var(--border)); background: color-mix(in oklab, var(--warning) 10%, var(--card)); }
+	.p-error { margin: 6px 2px 0; padding: 6px 10px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border)); border-radius: calc(var(--radius) - 2px); background: color-mix(in oklab, var(--destructive) 8%, var(--card)); font-size: 12.5px; line-height: 1.4; }
+	.scope-hint { margin: 4px 2px 6px; font-size: 12px; line-height: 1.4; color: var(--muted-foreground); }
+	.scope-hint.warn { color: color-mix(in oklab, var(--warning) 80%, var(--foreground)); }
 	.p-result { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 56px; font-size: 14px; font-weight: 600; }
 	.p-result.ok { color: var(--success, var(--primary)); }
 	.p-result.no { color: var(--destructive); }
@@ -385,11 +420,12 @@
 	.q-send { display: grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: var(--radius); background: var(--primary); color: var(--primary-foreground); cursor: pointer; }
 	.q-send:disabled { background: var(--muted); color: var(--subtle-foreground); cursor: default; }
 	.q-form { margin-top: 6px; }
-	.count:focus-visible, .check-row:focus-visible, .review-btn:focus-visible, .q-opt:focus-visible, .q-send:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.count:focus-visible, .scope-chip:focus-visible, .review-btn:focus-visible, .q-opt:focus-visible, .q-send:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* Typing with the keyboard up: keep the decision, drop to one line of context. */
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .cmd,
-	:global(.input-slot:has(.ProseMirror-focused)) .prompt .check-row,
+	:global(.input-slot:has(.ProseMirror-focused)) .prompt .scope-row,
+	:global(.input-slot:has(.ProseMirror-focused)) .prompt .scope-hint,
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .p-note,
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .q-opts { display: none; }
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .inline-cmd { display: block; }
