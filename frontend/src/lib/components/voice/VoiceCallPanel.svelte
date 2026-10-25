@@ -121,6 +121,14 @@
 	// Orb scale follows the mic level; muted or idle sits still. While the
 	// agent talks the orb breathes on its own (CSS) instead of following the mic.
 	const orbScale = $derived(live && !call.micMuted ? 1 + Math.min(call.level, 1) * 0.55 : 1);
+	// The waveform is the caller's meter between the agent's turns: every
+	// engine reports `level`, so it moves whenever the microphone hears you
+	// (dim below the call's gate, accent once it passes). The agent's own turn
+	// keeps its CSS animation.
+	const micLevel = $derived(live && !call.micMuted && !call.agentSpeaking ? Math.max(0, Math.min(call.level, 1)) : 0);
+	const hearing = $derived(live && !call.micMuted && call.userSpeaking);
+	/** Centre-weighted bar heights, so a steady level still reads as a voice shape. */
+	const BAR_WEIGHTS = [0.5, 0.8, 1, 0.75, 0.45];
 	const workingLabel = $derived(
 		activeTasks === 1 ? '1 agent working' : activeTasks > 1 ? `${activeTasks} agents working` : ''
 	);
@@ -129,13 +137,13 @@
 <div class="voice-dock-wrapper" class:compact data-testid="voice-call-dock">
 	{#if mine && call.error}<p class="vp-msg err" role="alert">{call.error}</p>{/if}
 	{#if mine && call.notice}<p class="vp-msg warn">{call.notice}</p>{/if}
-	<div class="voice-ring" class:live class:speaking={live && call.agentSpeaking} class:hearing={live && call.userSpeaking} data-testid="voice-ring" title={`${engineLabel} · ${modeLabel}`}>
+	<div class="voice-ring" class:live class:speaking={live && call.agentSpeaking} class:hearing data-testid="voice-ring" title={`${engineLabel} · ${modeLabel}`}>
 		<h3 class="sr-only">{engineLabel}</h3>
 		<p class="sr-only">{modeLabel}</p>
 		<div class="ring-track" aria-hidden="true"></div>
 		<div class="ring-halo" aria-hidden="true" style={`--mic-scale: ${orbScale};`}></div>
 		<div class="ring-center" aria-hidden="true">
-			<div class="waveform">{#each [0, 1, 2, 3, 4] as bar}<i style={`--bar: ${bar};`}></i>{/each}</div>
+			<div class="waveform" class:metering={micLevel > 0.02} data-testid="voice-waveform" style={`--level: ${micLevel.toFixed(3)};`}>{#each BAR_WEIGHTS as weight, bar}<i style={`--bar: ${bar}; --w: ${weight};`}></i>{/each}</div>
 			{#if elapsed}<span class="vp-elapsed">{elapsed}</span>{/if}
 		</div>
 		<div class="vp-controls" role="group" aria-label="Voice call controls">
@@ -169,10 +177,14 @@
 	.hearing:not(.speaking) .ring-halo { opacity: .35; border-color: var(--primary); transform: scale(calc(1 + (var(--mic-scale) - 1) * .2)); }
 	.ring-center { position: absolute; inset: 27px 35px 55px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; }
 	.waveform { display: flex; align-items: center; justify-content: center; gap: 4px; height: 25px; color: var(--muted-foreground); }
-	.waveform i { width: 3px; height: 5px; border-radius: 6px; background: currentColor; }
+	/* Bars grow from 5px to 23px with the caller's level (the ring's own height budget). */
+	.waveform i { width: 3px; height: calc(5px + var(--level, 0) * 18px * var(--w, 1)); border-radius: 6px; background: currentColor; transition: height 90ms ease-out; }
+	.waveform { transition: color 160ms; }
+	.waveform.metering { color: color-mix(in oklab, var(--primary) 45%, var(--muted-foreground)); }
 	.speaking .waveform { color: var(--primary); }
 	.speaking .waveform i { animation: wave 700ms ease-in-out infinite alternate; animation-delay: calc(var(--bar) * -130ms); }
-	.hearing:not(.speaking) .waveform i { height: 10px; }
+	.hearing:not(.speaking) .waveform { color: var(--primary); }
+	.hearing:not(.speaking) .waveform i { height: max(8px, calc(5px + var(--level, 0) * 18px * var(--w, 1))); }
 	.vp-elapsed { font: 10px var(--font-mono, monospace); color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
 	.vp-btn { position: absolute; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--border); border-radius: 50%; background: var(--background); color: var(--foreground); cursor: pointer; box-shadow: 0 2px 8px #00000012; }
 	.vp-btn.mic { left: 1px; bottom: 19px; }
@@ -190,6 +202,6 @@
 	.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 	@keyframes breathe { 50% { transform: scale(1.045); opacity: .45; } }
 	@keyframes wave { to { height: 23px; } }
-	@media (prefers-reduced-motion: reduce) { .speaking .ring-halo, .speaking .waveform i { animation: none; } .speaking .waveform i { height: 16px; } .ring-halo { transition: none; } }
+	@media (prefers-reduced-motion: reduce) { .speaking .ring-halo, .speaking .waveform i { animation: none; } .speaking .waveform i { height: 16px; } .ring-halo, .waveform i { transition: none; } }
 	@media (max-height: 600px) { .voice-dock-wrapper { padding-block: 0; } .voice-ring { height: 124px; } .ring-track, .ring-halo { inset: 4px 24px 20px; } .ring-center { top: 15px; } }
 </style>

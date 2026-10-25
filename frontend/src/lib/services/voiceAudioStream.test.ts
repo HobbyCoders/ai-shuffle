@@ -7,7 +7,7 @@ vi.mock('$lib/api/runtime', () => ({
   return 'ws://localhost' + path + (query ? '?' + query : '');
  },
 }));
-import { CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micProblem, openVoiceAudioStream } from './voiceAudioStream';
+import { CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micLevel, micProblem, openVoiceAudioStream } from './voiceAudioStream';
 
 const nodes: any[] = [];
 const contexts: any[] = [];
@@ -494,6 +494,82 @@ describe('microphone watchdog', () => {
   expect(reports[0]).toMatchObject({ type: 'client_stats', stats: {
    captured: 1, sent: 1, underruns: 2, depth_ms: 140, max_depth_ms: 300, target_ms: 200, muted: false, context: 'running', rate: 48000, track: 'live',
   } });
+  await stream.close();
+ });
+});
+
+// Phone report: the call transcribed the caller while its waveform stayed flat.
+// A streamed call's meter must come from the PCM it actually sends, and
+// "hearing" must be the gate's own decision about what reaches the provider.
+describe('caller meter', () => {
+ const frameOf = (pcm: Int16Array) => ({ data: { pcm: pcm.buffer, generation: 0 } });
+ const frame = (value: number) => frameOf(new Int16Array(1920).fill(value));
+ /** Silence with one 10 ms gate block just above the -42 dBFS gate (about -38 dBFS). */
+ const shortBlock = () => { const pcm = new Int16Array(1920); pcm.fill(400, 960, 1200); return pcm; };
+ const meterHandlers = () => ({ ...handlers(), level: vi.fn<(level: number, hearing: boolean) => void>() });
+ const open = async (callbacks: ReturnType<typeof meterHandlers>) =>
+  openVoiceAudioStream('s', { getAudioTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream, callbacks, new AbortController().signal, DEFAULT_MIC_THRESHOLD_DB);
+
+ it('reads a frame on a -60..-12 dBFS scale from its whole-frame RMS', () => {
+  expect(micLevel(new Int16Array(1920))).toBe(0);
+  expect(micLevel(new Int16Array(1920).fill(3000))).toBeCloseTo(0.817, 2); // about -20.8 dBFS
+  expect(micLevel(new Int16Array(1920).fill(100))).toBeCloseTo(0.202, 2); // about -50.3 dBFS
+  expect(micLevel(new Int16Array(1920).fill(32767))).toBe(1);
+ });
+
+ it('reports the gate letting a short loud block through as heard, even when the frame average is below the gate', () => {
+  const gate = createInputGate(DEFAULT_MIC_THRESHOLD_DB);
+  const sent = gate(shortBlock());
+  expect(sent.some(sample => sample !== 0)).toBe(true); // the provider receives it
+  expect(gate.passed).toBe(true);
+  // The whole frame averages about -47 dBFS, under the -42 dBFS gate.
+  expect(micLevel(shortBlock())).toBeLessThan((DEFAULT_MIC_THRESHOLD_DB - -60) / 48);
+  expect(createInputGate(DEFAULT_MIC_THRESHOLD_DB)(new Int16Array(1920).fill(100)).every(s => s === 0)).toBe(true);
+ });
+
+ it('says "hearing" exactly while the gate sends audio, including its hangover', async () => {
+  const callbacks = meterHandlers();
+  const stream = await open(callbacks);
+  capture().port.onmessage(frameOf(shortBlock()));
+  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.265, 2), true); // about -47.3 dBFS over the frame
+  const sent = new Int16Array(sockets[0].send.mock.calls.at(-1)[0]);
+  expect(sent.some(sample => sample !== 0)).toBe(true);
+  // Room noise after it stays open for the gate's 600 ms hangover, then closes.
+  let frames = 0;
+  for (; frames < 20; frames++) {
+   capture().port.onmessage(frame(100));
+   const heard = callbacks.level.mock.lastCall![1];
+   const passed = new Int16Array(sockets[0].send.mock.calls.at(-1)[0]).some(sample => sample !== 0);
+   expect(heard).toBe(passed);
+   if (!heard) break;
+  }
+  // 600 ms from the loud block (mid-frame): its frame tail plus 8 more frames.
+  expect(frames).toBe(8);
+  stream.muteInput(true);
+  expect(callbacks.level).toHaveBeenLastCalledWith(0, false);
+  const calls = callbacks.level.mock.calls.length;
+  capture().port.onmessage(frame(3000)); // a queued pre-mute frame
+  expect(callbacks.level).toHaveBeenCalledTimes(calls);
+  await stream.close();
+ });
+
+ it('does not count audio dropped behind a stalled upload as heard', async () => {
+  vi.spyOn(console, 'info').mockImplementation(() => {});
+  const callbacks = meterHandlers();
+  const stream = await open(callbacks);
+  sockets[0].bufferedAmount = MAX_UPLOAD_BUFFER + 1;
+  capture().port.onmessage(frame(3000));
+  expect(callbacks.level).toHaveBeenLastCalledWith(expect.closeTo(0.817, 2), false);
+  await stream.close();
+ });
+
+ it('never lets a failing meter handler stop the microphone upload', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const callbacks = { ...handlers(), level: vi.fn(() => { throw new Error('render failed'); }) };
+  const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
+  const speech = frame(3000);
+  capture().port.onmessage(speech);
+  expect(sockets[0].send).toHaveBeenCalledWith(speech.data.pcm);
   await stream.close();
  });
 });
