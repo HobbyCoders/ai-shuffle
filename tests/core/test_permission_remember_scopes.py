@@ -336,3 +336,38 @@ async def test_safety_prompt_bypasses_preexisting_saved_rules(skip: bool, safety
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_decision", ["allow", "deny"])
+@pytest.mark.parametrize("skip_saved_rules", [False, True])
+async def test_safety_check_honours_saved_deny_but_not_allow(
+    saved_decision: str, skip_saved_rules: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    handler = PermissionHandler()
+    handler._add_session_rule_idempotent("scope-session", "Bash", None, saved_decision)
+    if saved_decision == "deny" and not skip_saved_rules:
+        broadcast = AsyncMock()
+        result = await handler.request_permission(
+            "scope-request", "scope-session", "default", "Bash", {"command": "echo ok"},
+            broadcast, safety_check=True,
+        )
+        assert result.behavior == "deny"
+        assert result.message == "Denied by saved rule"
+        broadcast.assert_not_awaited()
+        assert handler.get_queue_count("scope-session") == 0
+        return
+
+    task, _ = await start_prompt(
+        handler, safety_check=True, skip_saved_rules=skip_saved_rules,
+    )
+    try:
+        assert handler.get_queue_count("scope-session") == 1
+        await handler.respond("scope-request", "scope-session", "deny")
+        assert (await task).behavior == "deny"
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

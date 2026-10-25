@@ -428,10 +428,11 @@ class PermissionHandler:
 
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
-        rule = None if skip_saved_rules or safety_check else self._check_rules(
+        rule = None if skip_saved_rules else self._check_rules(
             session_id, profile_id, tool_name, tool_input
         )
-        if rule:
+        # Safety checks still honour a saved refusal, but never a saved grant.
+        if rule and (not safety_check or rule.decision == PermissionDecision.DENY):
             logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
             if rule.decision == PermissionDecision.ALLOW:
                 return PermissionResultAllow(updated_input=tool_input)
