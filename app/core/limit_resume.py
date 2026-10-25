@@ -64,7 +64,7 @@ import time
 import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -755,6 +755,10 @@ async def _on_limit_stop(
     if not provider_key:
         return None
     switches = await run_sync(get_settings)
+    if not switches["resume_on_reset"] and (worker_owner or session.get("parent_session_id")):
+        # Workers cannot opt in themselves. With global resume off, leave their
+        # ordinary failure/report path alone instead of advertising an arm.
+        return None
     current = (_epoch(turn.get("ended_at")) or time.time()) if now is None else now
     reset = await run_sync(lambda: find_reset(provider_key, _errors_text(terminal), now=current))
     note_sessions = [session_id] + ([worker_owner] if worker_owner else [])
@@ -1183,26 +1187,31 @@ def pending(session_id: str) -> Optional[Dict[str, Any]]:
     return {**meta_of(row), "fire_at": float(row.get("fire_at") or 0.0), "wakeup_id": row.get("id")}
 
 
-async def cancel(session_id: str) -> bool:
+async def cancel(session_id: str, *, authorize_once: Optional[Callable[[], None]] = None) -> bool:
     async with _lock(session_id):
-        return await _cancel(session_id)
+        return await _cancel(session_id, authorize_once=authorize_once)
 
 
-async def _cancel(session_id: str) -> bool:
+async def _cancel(session_id: str, *, authorize_once: Optional[Callable[[], None]] = None) -> bool:
     """Cancel ``session_id``'s scheduled resume, or that of the paused worker
     with this id. Returns whether one was pending."""
     from app.core import wakeup_service
     from app.db.async_database import run_sync
 
     current = await run_sync(pending, session_id)
-    removed = await wakeup_service.cancel_session_wakeups_async(session_id, LIMIT_RESUME_SOURCE)
-    if not removed:
+    if current is None:
         # The timer may have claimed its durable row and be waiting for our
         # lock. Cancel that opt-in in the durable log before fire can proceed.
         decision = await run_sync(_last_decision, session_id)
-        if not decision.get("once") or decision.get("status") not in (_STATUS_SCHEDULED, _STATUS_DEFERRED):
-            return False
-        current = decision
+        if decision.get("once") and decision.get("status") in (_STATUS_SCHEDULED, _STATUS_DEFERRED):
+            current = decision
+    # Authorize while holding the same lock as arm/fire, before removing any
+    # wake. Ordinary automatic resumes and paused workers keep their old auth.
+    if (current or {}).get("once") and authorize_once is not None:
+        authorize_once()
+    removed = await wakeup_service.cancel_session_wakeups_async(session_id, LIMIT_RESUME_SOURCE)
+    if not removed and not (current or {}).get("once"):
+        return False
     owner = (current or {}).get("owner")
     await _record(session_id, _STATUS_CANCELLED, {
         "limit_key": (current or {}).get("limit_key"), "turn_id": (current or {}).get("turn_id"),
