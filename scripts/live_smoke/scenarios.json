@@ -940,6 +940,14 @@
           "past_bug": "#559: CLI identity plumbing must not change native approval scope."
         },
         {
+          "id": "harness-basics.native-plugin-mcp",
+          "check": "Enabled plugin MCP tools load once in native chats",
+          "kind": "owner",
+          "how": "On a disposable candidate, install a test plugin declaring a read-only MCP ping tool and enable it through the plugin UI. In a native-model code chat, discover and call ping, then repeat on a second turn. Disable the plugin and start a new chat; repeat with an unreviewed authored plugin. Re-enable the reviewed plugin and configure a host MCP server with the same server name but a distinct ping response. Finally open a delegated Claude chat with a Claude-installed plugin declaring the same tool and inspect its catalog. Archive the throwaway chats and remove only the test plugin and host config.",
+          "pass_when": "The enabled plugin's ping is discoverable and callable once per native catalog, and its catalog hash stays unchanged across turns. Disabled and unreviewed plugin tools are absent in new native chats. The host server wins a name collision. Delegated Claude retains its own plugin tool without a second copy from the native merge.",
+          "past_bug": "The shared MCP builder assumed NativeLoop discovered plugin servers, but neither layer connected them."
+        },
+        {
           "id": "harness-basics.neutral-owner-service-aliases",
           "check": "Neutral owner routes preserve installed-client aliases and stored history",
           "kind": "owner",
