@@ -19,7 +19,9 @@ def version_name(release_tag=""):
         if git("rev-parse", "HEAD") != git("rev-parse", f"refs/tags/{release_tag}^{{commit}}"):
             raise ValueError("Release tag does not match the checked-out commit")
         return release_tag[1:]
-    description = git("describe", "--tags", "--match", "v[0-9]*", "--long", "HEAD")
+    # First parents only: merged-in history (such as the imported archive)
+    # must not add its commits to the dev distance.
+    description = git("describe", "--first-parent", "--tags", "--match", "v[0-9]*", "--long", "HEAD")
     match = re.fullmatch(f"({RELEASE})-([0-9]+)-g([0-9a-f]+)", description)
     if not match:
         raise ValueError("No valid release version in checkout history; fetch release tags")

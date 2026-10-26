@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "imports": [
+    {
+      "head": "05e394e92a150d06309da338c7d967682ae473fc",
+      "roots": [
+        "2a647413f01c215768fd84f586b7ddb630adfb65",
+        "ca6bdc4938288f795ca5a0b9e4f6538195242248",
+        "e162747bcbd5bcb5a048d66de7516cf189243dbd"
+      ]
+    }
+  ]
+}

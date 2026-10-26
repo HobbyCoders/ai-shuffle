@@ -35,6 +35,21 @@ class VersionNameTests(unittest.TestCase):
         self.assertRegex(result.stdout.strip(), r"^0\.8\.17-dev\.1\+g[0-9a-f]+$")
         self.assertNotEqual(self.resolve("--release-tag", "v0.8.17").returncode, 0)
 
+    def test_merged_unrelated_history_adds_one_dev_step(self):
+        self.git("tag", "v0.8.17")
+        commit = ("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty")
+        self.git(*commit, "-m", "next")
+        before = self.resolve().stdout.strip()
+        branch = self.git("symbolic-ref", "--short", "HEAD")
+        self.git("checkout", "-q", "--orphan", "archive")
+        for number in range(5):
+            self.git(*commit, "-m", f"archived {number}")
+        self.git("checkout", "-q", branch)
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "merge", "-q", "-s", "ours", "--allow-unrelated-histories", "--no-edit", "archive")
+        self.assertRegex(before, r"^0\.8\.17-dev\.1\+g[0-9a-f]+$")
+        self.assertRegex(self.resolve().stdout.strip(), r"^0\.8\.17-dev\.2\+g[0-9a-f]+$")
+
     def test_missing_history_or_invalid_tag_fails_instead_of_using_stale_default(self):
         self.assertNotEqual(self.resolve().returncode, 0)
         self.assertNotEqual(self.resolve("--release-tag", "v0.8.17\nINJECT=value").returncode, 0)

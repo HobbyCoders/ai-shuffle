@@ -32,6 +32,22 @@ sequence from the last shipped archive image, and the record's desktop maximum
 and archive repository ID set the source signing floor and let the archive's
 historical installer rows count toward it. The offset is committed data, read
 from the target revision, never a GitHub variable or environment override.
+The immutability check and the sequence (offset plus first-parent count) follow
+first parents only.
+
+The scrubbed archive history is joined to main as a second parent (an
+`-s ours` merge whose tree equals main's). That merge counts as one first-parent
+commit, so it moves the sequence by exactly one. The public root is the root
+reached through first parents. Any other root must be listed in
+`release/imported-history.json`, which pins the reviewed archive head and its
+three roots, and no other root may carry the cutover record. Every ancestor
+must either descend from the public root or belong to the pinned head's
+history. Raw private history shares a root commit with the archive, so a root
+list alone is not enough: an accidental merge of private history still refuses.
+The import record is immutable once committed. A new import changes the guard,
+not just a data file. Dev display versions (`android/ci/resolve-version-name.py`)
+count first parents since the last tag, so the import adds one step, not the
+archive's commit count.
 
 Nothing reads the archive itself. Every signed nightly and stable pointer is
 on public main's first-parent history, so update reach and nightly selection

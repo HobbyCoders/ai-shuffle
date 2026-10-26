@@ -116,6 +116,141 @@ def test_legacy_unrelated_roots_do_not_break_zero_offset_but_public_imports_fail
         c.container_sequence(t.new)
 
 
+def archive(tmp_path, name="archive", touch_epoch_files=True):
+    """A scrubbed archive with two roots; one archive commit touches the epoch files."""
+    root = tmp_path / name; initialize(root)
+    first = commit(root, "app.py", f"{name} 1")
+    branch = git(root, "symbolic-ref", "--short", "HEAD")
+    git(root, "checkout", "-q", "--orphan", "vendored")
+    git(root, "rm", "-rqf", ".")
+    second = commit(root, "vendor/lib.py", f"{name} vendored")
+    git(root, "checkout", "-q", branch)
+    git(root, "merge", "-q", "--allow-unrelated-histories", "--no-edit", "vendored")
+    if touch_epoch_files:
+        commit(root, c.OFFSET, "777\n")
+        commit(root, c.MAPPING, "{}")
+    commit(root, "app.py", f"{name} 2")
+    return SimpleNamespace(root=root, head=git(root, "rev-parse", "HEAD"), roots=sorted([first, second]))
+
+
+def allow(root, *imports):
+    record = {"format": 1, "imports": [{"head": a.head, "roots": a.roots} for a in imports]}
+    return commit(root, c.IMPORTS, json.dumps(record, indent=2))
+
+
+def import_history(root, source):
+    """The import PR: an ours-merge that keeps the public tree and adds the archive as second parent."""
+    git(root, "fetch", "-q", str(source), "HEAD")
+    git(root, "merge", "-q", "-s", "ours", "--allow-unrelated-histories", "--no-edit", "FETCH_HEAD")
+    return git(root, "rev-parse", "HEAD")
+
+
+def test_single_root_with_an_allowlist_still_works(transition, tmp_path):
+    t = transition
+    allowed = allow(t.new, archive(tmp_path))
+    assert c.mapping(t.new) == (t.initial, t.record)
+    assert c.container_sequence(t.new, allowed) == 1002
+
+
+def test_pinned_import_adds_one_to_the_sequence_and_ignores_archive_epoch_files(transition, tmp_path):
+    t, a = transition, archive(tmp_path)
+    before = allow(t.new, a)
+    merged = import_history(t.new, a.root)
+    assert git(t.new, "rev-parse", f"{merged}^{{tree}}") == git(t.new, "rev-parse", f"{before}^{{tree}}")
+    assert len(git(t.new, "rev-list", "--max-parents=0", merged).splitlines()) == 3
+    # The archive's own OFFSET/MAPPING commits are off the first-parent chain.
+    assert git(t.new, "log", "--full-history", "--format=%H", f"{t.initial}..{merged}", "--", c.OFFSET, c.MAPPING)
+    assert c.mapping(t.new, merged) == (t.initial, t.record)
+    assert c.container_sequence(t.new, merged) == c.container_sequence(t.new, before) + 1 == 1003
+    assert c.container_sequence(t.new, commit(t.new, "docs-note", "after import")) == 1004
+
+
+def test_unlisted_extra_root_refuses(transition, tmp_path):
+    t = transition
+    allow(t.new, archive(tmp_path))
+    import_history(t.new, archive(tmp_path, "other").root)
+    with pytest.raises(ValueError, match="private ancestors are forbidden"):
+        c.container_sequence(t.new)
+
+
+def test_unpinned_history_sharing_an_allowlisted_root_refuses(transition, tmp_path):
+    # Raw private history can share a root commit with the scrubbed import.
+    t, a = transition, archive(tmp_path)
+    allow(t.new, a)
+    raw = tmp_path / "raw"
+    subprocess.run(["git", "clone", "-q", str(a.root), str(raw)], check=True)
+    git(raw, "config", "user.name", "Cutover fixture"); git(raw, "config", "user.email", "fixture@example.invalid")
+    commit(raw, "secret.txt", "unscrubbed")
+    import_history(t.new, raw)
+    with pytest.raises(ValueError, match="outside the public root"):
+        c.container_sequence(t.new)
+
+
+def test_extra_root_carrying_the_mapping_refuses(transition, tmp_path):
+    t = transition
+    rogue = tmp_path / "rogue"; initialize(rogue)
+    commit(rogue, c.MAPPING, json.dumps(t.record))
+    rogue_archive = SimpleNamespace(head=git(rogue, "rev-parse", "HEAD"), roots=[git(rogue, "rev-parse", "HEAD")])
+    allow(t.new, rogue_archive)
+    import_history(t.new, rogue)
+    with pytest.raises(ValueError, match="Only the public root may carry the cutover mapping"):
+        c.container_sequence(t.new)
+
+
+def test_offset_change_on_the_first_parent_chain_still_refuses_after_an_import(transition, tmp_path):
+    t, a = transition, archive(tmp_path)
+    allow(t.new, a)
+    import_history(t.new, a.root)
+    commit(t.new, c.OFFSET, "1001")
+    commit(t.new, c.OFFSET, "1000\n")
+    with pytest.raises(ValueError, match="immutable"):
+        c.container_sequence(t.new)
+
+
+def test_merge_that_changes_the_offset_refuses(transition):
+    t = transition
+    main = git(t.new, "symbolic-ref", "--short", "HEAD")
+    git(t.new, "checkout", "-q", "-b", "side")
+    commit(t.new, c.OFFSET, "1001")
+    git(t.new, "checkout", "-q", main)
+    git(t.new, "merge", "-q", "--no-ff", "--no-edit", "side")
+    commit(t.new, c.OFFSET, "1000\n")  # restoring the content cannot hide either change
+    with pytest.raises(ValueError, match="immutable"):
+        c.container_sequence(t.new)
+
+
+def test_import_record_is_immutable_and_validated(transition, tmp_path):
+    t, a = transition, archive(tmp_path)
+    allow(t.new, a)
+    import_history(t.new, a.root)
+    allow(t.new, a, archive(tmp_path, "later"))
+    with pytest.raises(ValueError, match="immutable once committed"):
+        c.container_sequence(t.new)
+    fresh = tmp_path / "fresh"
+    subprocess.run(["git", "clone", "-q", str(t.new), str(fresh)], check=True)
+    git(fresh, "reset", "-q", "--hard", t.initial)
+    git(fresh, "config", "user.name", "Cutover fixture"); git(fresh, "config", "user.email", "fixture@example.invalid")
+    commit(fresh, c.IMPORTS, json.dumps({"format": 1, "imports": [{"head": "HEAD", "roots": []}]}))
+    with pytest.raises(ValueError, match="Invalid imported history entry"):
+        c.container_sequence(fresh)
+
+
+def test_pinned_roots_must_match_the_pinned_head(transition, tmp_path):
+    t, a = transition, archive(tmp_path)
+    allow(t.new, SimpleNamespace(head=a.head, roots=a.roots + ["0" * 40]))
+    import_history(t.new, a.root)
+    with pytest.raises(ValueError, match="do not match the pinned head"):
+        c.container_sequence(t.new)
+
+
+def test_committed_import_record_pins_the_archive():
+    record = json.loads((ROOT / c.IMPORTS).read_text())
+    assert record == {"format": 1, "imports": [{
+        "head": "05e394e92a150d06309da338c7d967682ae473fc",
+        "roots": ["2a647413f01c215768fd84f586b7ddb630adfb65", "ca6bdc4938288f795ca5a0b9e4f6538195242248",
+                  "e162747bcbd5bcb5a048d66de7516cf189243dbd"]}]}
+
+
 def test_reused_image_requires_exact_revision_tree_sequence_and_contract(transition):
     t=transition
     record=image_record(t.initial,1001)|{"source_tree":git(t.new,"rev-parse","HEAD^{tree}")}
