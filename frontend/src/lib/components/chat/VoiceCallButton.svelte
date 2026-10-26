@@ -8,6 +8,7 @@
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { isVoiceEnabled } from '$lib/api/voice';
 	import { confirmCallReplacement, startCallForSession, voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
+	import { reportCallStartFailure } from '$lib/services/voiceCallOutcome';
 	import { callBusyReason, explainBlockedCall, freshCallReason, prefersTouch } from './call-gate';
 
 	interface Props {
@@ -62,8 +63,8 @@
 		}
 		if (startingVoice) return;
 		startingVoice = true;
+		let sessionId = $activeSession.sessionId;
 		try {
-			let sessionId = $activeSession.sessionId;
 			if (!sessionId) {
 				// Settle a call running elsewhere before anything is created, so
 				// declining leaves no new session behind.
@@ -73,6 +74,12 @@
 				if (!sessionId) return;
 			}
 			await startCallForSession(sessionId, { attach: !legacyVoice });
+		} catch (e) {
+			// A start the call controller refused outright (another call came up
+			// meanwhile) would otherwise be an unhandled rejection with no reason
+			// on screen.
+			console.error('[voice] call start failed:', e);
+			reportCallStartFailure(e, sessionId);
 		} finally {
 			startingVoice = false;
 		}

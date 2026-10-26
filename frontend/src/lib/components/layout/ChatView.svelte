@@ -34,7 +34,7 @@
 	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
-	import { createCallOutcomeReporter } from '$lib/services/voiceCallOutcome';
+	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
@@ -178,9 +178,9 @@
 
 	// A call that ends by itself (failed start, transport error, the VW5 length
 	// cap) unmounts the controls that were showing the reason: say why on the
-	// page (see createCallOutcomeReporter).
-	const reportCallOutcome = createCallOutcomeReporter();
-	$effect(() => reportCallOutcome($voiceCallState));
+	// page. One watcher for the whole page, so remounting this view never
+	// re-reports the last ending (see watchCallOutcomes).
+	watchCallOutcomes(voiceCallState);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
