@@ -34,6 +34,7 @@
 	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
+	import { createCallOutcomeReporter } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
@@ -175,23 +176,11 @@
 	// above the composer, so it replaces the modal and the question tray.
 	const PromptDock = composerShell().PromptDock;
 
-	// A call that ends by itself (transport error, or the VW5 length cap) unmounts
-	// the dock that was showing the reason, so surface it as a toast instead —
-	// otherwise the call would just silently vanish and the composer reappear.
-	// Keyed on the message so the same terminal state can't re-toast on unrelated
-	// store churn (level updates, caption appends).
-	let lastVoiceOutcome: string | null = null;
-	$effect(() => {
-		const call = $voiceCallState;
-		const message =
-			call.status === 'error' ? call.error : call.status === 'ended' ? call.notice : null;
-		const key = message ? `${call.status}:${call.sessionId}:${message}` : null;
-		if (key === lastVoiceOutcome) return;
-		lastVoiceOutcome = key;
-		if (!message) return;
-		if (call.status === 'error') notify.error(message);
-		else notify.warning(message);
-	});
+	// A call that ends by itself (failed start, transport error, the VW5 length
+	// cap) unmounts the controls that were showing the reason: say why on the
+	// page (see createCallOutcomeReporter).
+	const reportCallOutcome = createCallOutcomeReporter();
+	$effect(() => reportCallOutcome($voiceCallState));
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
