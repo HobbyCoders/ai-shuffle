@@ -34,10 +34,13 @@
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
 	import { ChevronDown, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
+	import { menuHost } from '$lib/components/ui/menu-host';
 
 	function keepInViewport(node: HTMLElement) {
 		const reposition = () => {
 			node.style.translate = '';
+			// Hosted in a page (menuHost): it fills that page, nothing to clamp.
+			if (runnerMenuHost) return;
 			const rect = node.getBoundingClientRect();
 			const shift = rect.left < 12 ? 12 - rect.left : Math.min(0, window.innerWidth - 12 - rect.right);
 			node.style.translate = `${shift}px 0`;
@@ -62,9 +65,11 @@
 		between?: Snippet;
 		/** The new-session agent card owns "Runs on" (#371 step 4); hide the runner chip here. */
 		hideRunner?: boolean;
+		/** Show the open runner menu inside this element (the phone sheet's "Runs on" page). */
+		runnerMenuHost?: HTMLElement | null;
 	}
 
-	let { sheetMode = false, between, hideRunner = false }: Props = $props();
+	let { sheetMode = false, between, hideRunner = false, runnerMenuHost = null }: Props = $props();
 
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
@@ -73,6 +78,8 @@
 	// dropdown above; its own container ref so outside-click closes it independently).
 	let showModeDropdown = $state(false);
 	let modeDropdownRef = $state<HTMLDivElement | null>(null);
+	/** The open runner menu; it may sit in a host page outside modeDropdownRef. */
+	let modeMenuRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
 	let forgetConfirm = $state<string | null>(null);
 	let forgetting = $state<string | null>(null);
@@ -392,7 +399,7 @@
 		if (showBranchDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
 			showBranchDropdown = false;
 		}
-		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node)) {
+		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node) && !modeMenuRef?.contains(e.target as Node)) {
 			showModeDropdown = false;
 		}
 	}
@@ -452,7 +459,7 @@
 				<!-- One flat list of workers, the same rows the active session's
 				     runner menu shows: this worker first, then every peer. Picking
 				     a peer stamps the new session with that runner's ownership. -->
-				<div use:keepInViewport class="mode-dropdown branch-dropdown" role="menu" aria-label="Runner selection">
+				<div use:keepInViewport use:menuHost={runnerMenuHost} bind:this={modeMenuRef} class="mode-dropdown branch-dropdown" role="menu" aria-label="Runner selection">
 					<WorkerMenuList
 						items={runnerRows}
 						role="menuitemradio"

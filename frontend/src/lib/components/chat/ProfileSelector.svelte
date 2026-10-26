@@ -15,6 +15,7 @@
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
+	import { menuHost } from '$lib/components/ui/menu-host';
 
 	interface Props {
 		sheetMode?: boolean;
@@ -23,9 +24,11 @@
 		 * name in the display face with a chevron; the same menu opens below it.
 		 */
 		variant?: 'chip' | 'card';
+		/** Show the open menu inside this element (the phone sheet's Agent page). */
+		menuHost?: HTMLElement | null;
 	}
 
-	let { sheetMode = false, variant = 'chip' }: Props = $props();
+	let { sheetMode = false, variant = 'chip', menuHost: menuHostEl = null }: Props = $props();
 
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
 	// The card's menu floats to <body> (floatingMenu): the agent card is its own
@@ -155,6 +158,7 @@
 			aria-label="Agent selection"
 			bind:this={dropdownRef}
 			use:floatingMenu={{ anchor: cardNameRef, enabled: floating }}
+			use:menuHost={menuHostEl}
 		>
 			<GroupedSelector
 				bind:this={groupedSelector}
@@ -165,6 +169,7 @@
 				addLabel="Create agent"
 				onAdd={createAgent}
 				emptyMessage="No agents yet — create one to start chatting"
+				showDescriptions={!!menuHostEl}
 			/>
 		</div>
 	{/if}

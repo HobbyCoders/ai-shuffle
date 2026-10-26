@@ -129,6 +129,20 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('RunningTasksList grouping and counts', () => {
+	it('renders the list as a page for a host that draws its own title and Back', () => {
+		setTasks([task('a', { subject: 'Fix login' })]);
+		const onClose = vi.fn();
+		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'page', onClose });
+		// No modal of its own: no dialog, scrim, heading or close button.
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(container.querySelector('.rt-page')).not.toBeNull();
+		expect(screen.queryByRole('heading', { name: 'Running tasks' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Close running tasks' })).toBeNull();
+		expect(screen.getByText('1 running · 1 agent')).toBeTruthy();
+		expect(screen.getByRole('searchbox', { name: 'Search tasks' })).toBeTruthy();
+		expect(rowOf('Fix login')).toBeTruthy();
+	});
+
 	it('renders nothing inline when nothing runs', () => {
 		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
 		expect(screen.queryByTestId('tasks-toggle')).toBeNull();

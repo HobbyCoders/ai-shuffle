@@ -52,6 +52,7 @@
 		type QueuedMoveBusy
 	} from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
+	import { menuHost } from '$lib/components/ui/menu-host';
 	import { GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
@@ -63,9 +64,14 @@
 		 * worktree only. The agent card above owns the agent and "Runs on".
 		 */
 		strip?: boolean;
+		/**
+		 * The phone sheet's pages: the Agent and "Runs on" menus open inside
+		 * these elements instead of under their rows (see menuHost).
+		 */
+		menuHosts?: { agent?: HTMLElement | null; runner?: HTMLElement | null };
 	}
 
-	let { sheetMode = false, strip = false }: Props = $props();
+	let { sheetMode = false, strip = false, menuHosts }: Props = $props();
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ??
@@ -171,6 +177,8 @@
 
 	const showRunnerMenu = $derived($openHeaderDropdown === 'runner');
 	let runnerMenuRef = $state<HTMLDivElement | null>(null);
+	/** The open move menu; it may sit in a host page outside runnerMenuRef. */
+	let runnerDropdownRef = $state<HTMLDivElement | null>(null);
 	// Live presence (shared store, refreshed while the menu is open), so a
 	// worker that goes offline while the menu is open turns red and disabled.
 	const runnerInstalls = $derived($workerInstalls ?? []);
@@ -458,7 +466,8 @@
 	}
 
 	function handleRunnerClickOutside(e: MouseEvent) {
-		if (showRunnerMenu && runnerMenuRef && !runnerMenuRef.contains(e.target as Node)) {
+		const target = e.target as Node;
+		if (showRunnerMenu && runnerMenuRef && !runnerMenuRef.contains(target) && !runnerDropdownRef?.contains(target)) {
 			closeDropdown('runner');
 		}
 	}
@@ -499,7 +508,7 @@
 
 <div class="context-pill-bar" class:sheet-mode={sheetMode} class:strip role="toolbar" aria-label={strip ? 'Project' : 'Session context'}>
 	{#if !strip}
-	<ProfileSelector {sheetMode} />
+	<ProfileSelector {sheetMode} menuHost={menuHosts?.agent} />
 	{/if}
 	<!-- A no-project chat has no repository or execution controls, but a saved
 	     one still shows its runner so it can move to another worker (#639). -->
@@ -510,7 +519,7 @@
 
 	{#if isEmptyState}
 		{#if $activeSession.project || $activeSession.projectV2Id}
-			<ExecutionModeBar {sheetMode} hideRunner={strip}>
+			<ExecutionModeBar {sheetMode} hideRunner={strip} runnerMenuHost={menuHosts?.runner}>
 				{#snippet between()}
 					{@render repoChip()}
 					{#if showEmptyStateBranch}
@@ -581,7 +590,7 @@
 				{/if}
 				<span class="sr-only" aria-live="polite">{runnerBusy?.label ?? runnerDone?.label ?? ''}</span>
 				{#if showRunnerMenu}
-					<div class="runner-dropdown" role="menu" aria-label="Move this session">
+					<div class="runner-dropdown" role="menu" aria-label="Move this session" bind:this={runnerDropdownRef} use:menuHost={menuHosts?.runner}>
 						{#if busyChoice}
 							<div class="runner-busy">
 								<strong>{busyChoice.busy.running ? 'This chat is running' : 'Background work is running'}</strong>

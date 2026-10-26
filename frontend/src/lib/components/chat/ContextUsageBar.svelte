@@ -127,6 +127,15 @@
 		 * its drag grip here. The desktop popover passes nothing.
 		 */
 		grip?: Snippet;
+		/** Tokens in context, formatted ("24k"), for a caller that shows it elsewhere. */
+		usedTokens?: string;
+		/** The context window, formatted ("200k"); null when it is unknown. */
+		windowTokens?: string | null;
+		/**
+		 * Render the details in place, always open and with no ring button:
+		 * the phone's Chat controls shows them as a page of its own.
+		 */
+		inline?: boolean;
 	}
 
 	let {
@@ -135,7 +144,10 @@
 		showPercent = false,
 		percent = $bindable(0),
 		overLimit = $bindable(false),
-		unknownWindowUsed = $bindable(null)
+		unknownWindowUsed = $bindable(null),
+		usedTokens = $bindable(''),
+		windowTokens = $bindable(null),
+		inline = false
 	}: Props = $props();
 
 	/** Where a model's context length is set, for the unknown-window hint. */
@@ -185,6 +197,8 @@
 
 	// ── Popover open/close (click + tap-away) ─────────────────────────────
 	let open = $state(false);
+	/** The details are on screen: the popover is open, or they render inline. */
+	const shown = $derived(open || inline);
 	let wrapperRef = $state<HTMLDivElement | null>(null);
 	let popoverEl = $state<HTMLDivElement | null>(null);
 	let popShift = $state(0);
@@ -299,6 +313,8 @@
 		windowKnown ? `${usedText} / ${formatTokenCount(displayBreakdown.contextMax)}` : `${usedText} used`
 	);
 	$effect(() => { unknownWindowUsed = windowKnown ? null : usedText; });
+	$effect(() => { usedTokens = usedText; });
+	$effect(() => { windowTokens = windowKnown ? formatTokenCount(displayBreakdown.contextMax) : null; });
 	const nextWindowText = $derived(
 		contextWindow.nextWindow != null ? `${formatTokenCount(contextWindow.nextWindow)} from the next turn` : null
 	);
@@ -363,7 +379,7 @@
 	// synchronously on session change so no stale cross-session breakdown flashes.
 	let prevRefresh: BreakdownRefreshState = { open: false, sessionId: null, isStreaming: false };
 	$effect(() => {
-		const next: BreakdownRefreshState = { open, sessionId, isStreaming };
+		const next: BreakdownRefreshState = { open: shown, sessionId, isStreaming };
 		const action = decideBreakdownRefresh(prevRefresh, next);
 		prevRefresh = next;
 
@@ -430,7 +446,7 @@
 	let now: number = $state(Date.now());
 	$effect(() => {
 		now = Date.now();
-		if (!open) return;
+		if (!shown) return;
 		const interval = setInterval(() => {
 			now = Date.now();
 		}, 1000);
@@ -1077,7 +1093,8 @@
 	{/if}
 {/snippet}
 
-<div class="usage-context-wrapper" bind:this={wrapperRef}>
+<div class="usage-context-wrapper" class:inline bind:this={wrapperRef}>
+	{#if !inline}
 	<button
 		type="button"
 		class="usage-indicator"
@@ -1109,10 +1126,11 @@
 		</svg>
 		{#if showPercent}<span class="usage-percent" aria-hidden="true">{!windowKnown ? usedText : displayBreakdown.overLimit ? 'Over' : `${Math.round(contextPercent)}%`}</span>{/if}
 	</button>
+	{/if}
 
-	{#if open}
-		<div class="usage-popover" bind:this={popoverEl} style:transform="translateX({popShift}px)" role="dialog" aria-label="Context and usage">
-			{#if grip}{@render grip()}{/if}
+	{#if shown}
+		<div class="usage-popover" class:inline bind:this={popoverEl} style:transform={inline ? undefined : `translateX(${popShift}px)`} role={inline ? 'region' : 'dialog'} aria-label="Context and usage">
+			{#if grip && !inline}{@render grip()}{/if}
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">
 				<button
@@ -1315,6 +1333,22 @@
 		border: 1px solid var(--glass-border, var(--border));
 		border-radius: calc(var(--radius, 0.75rem) * 0.66);
 		box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+	}
+	/* In place (a page of the phone's Chat controls): the host owns the
+	   surface, the scrolling and the width. */
+	.usage-context-wrapper.inline { display: block; }
+	.usage-popover.inline {
+		position: static;
+		width: auto;
+		min-width: 0;
+		max-width: none;
+		max-height: none;
+		overflow: visible;
+		padding: 0;
+		background: transparent;
+		border: 0;
+		border-radius: 0;
+		box-shadow: none;
 	}
 
 	/* ===== Context section ===== */

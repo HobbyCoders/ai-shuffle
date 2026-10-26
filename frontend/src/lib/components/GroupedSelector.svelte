@@ -13,6 +13,7 @@
 	interface Item {
 		id: string;
 		name: string;
+		description?: string | null;
 	}
 
 	interface Props {
@@ -28,6 +29,8 @@
 		itemIcon?: any;
 		/** Optional groups rendered after the primary items. */
 		extraGroups?: { name: string; items: Item[] }[];
+		/** One line of each item's description under its name (a full-page list). */
+		showDescriptions?: boolean;
 	}
 
 	let {
@@ -40,7 +43,8 @@
 		onAdd,
 		emptyMessage = 'No items available',
 		itemIcon,
-		extraGroups = []
+		extraGroups = [],
+		showDescriptions = false
 	}: Props = $props();
 
 	// Current view state
@@ -134,6 +138,14 @@
 	}
 </script>
 
+{#snippet itemLabel(item: Item)}
+	{#if showDescriptions && item.description?.trim()}
+		<span class="item-copy"><span class="item-name">{item.name}</span><span class="item-desc">{item.description.trim()}</span></span>
+	{:else}
+		<span class="item-name">{item.name}</span>
+	{/if}
+{/snippet}
+
 <div
 	class="grouped-selector"
 	style:height={containerHeight != null ? `${containerHeight}px` : 'auto'}
@@ -164,7 +176,7 @@
 							{@const ItemIcon = itemIcon}
 							<ItemIcon size={16} strokeWidth={1.5} />
 						{/if}
-						<span class="item-name">{item.name}</span>
+						{@render itemLabel(item)}
 						{#if selectedId === item.id}
 							<Check size={16} strokeWidth={2} class="check-icon" />
 						{/if}
@@ -204,7 +216,7 @@
 								{@const ItemIcon = itemIcon}
 								<ItemIcon size={16} strokeWidth={1.5} />
 							{/if}
-							<span class="item-name">{item.name}</span>
+							{@render itemLabel(item)}
 							{#if selectedId === item.id}
 								<Check size={16} strokeWidth={2} class="check-icon" />
 							{/if}
@@ -268,7 +280,7 @@
 						{@const ItemIcon = itemIcon}
 						<ItemIcon size={16} strokeWidth={1.5} />
 					{/if}
-					<span class="item-name">{item.name}</span>
+					{@render itemLabel(item)}
 					{#if selectedId === item.id}
 						<Check size={16} strokeWidth={2} class="check-icon" />
 					{/if}
@@ -395,6 +407,22 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.item-copy {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+
+	.item-desc {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.8em;
+		color: var(--muted-foreground);
 	}
 
 	.menu-item :global(.check-icon) {

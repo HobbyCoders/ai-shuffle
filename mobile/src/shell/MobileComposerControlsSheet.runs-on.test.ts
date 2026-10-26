@@ -1,8 +1,9 @@
 /**
  * "Runs on" in the phone's Chat controls (#1816) moves this chat with the
  * busy rule from #1819: an idle chat moves now; a running or parked one
- * queues "Move when this turn ends", which can be cancelled. The tile is the
- * shared ContextPillBar selector, so the rule is the one the desktop uses.
+ * queues "Move when this turn ends", which can be cancelled. The row is the
+ * shared ContextPillBar selector, so the rule is the one the desktop uses;
+ * its menu opens as the sheet's own "Runs on" page.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
@@ -89,10 +90,15 @@ async function openRunsOn(busy: { running: boolean; tasks: string[] }) {
 	render(MobileComposerControlsSheet, { props: props() });
 	const panel = document.querySelector<HTMLElement>('.mcp')!;
 	const tile = await within(panel).findByRole('button', { name: /^Runner:/ });
-	// The tile reads as "Runs on" over the worker, a label the panel draws.
+	// The row reads "Runs on" beside the worker, a label the panel draws.
 	expect(panel.querySelector('.mcp-setup .ctx-chip.runner')).toBe(tile);
 	await fireEvent.click(tile);
-	await fireEvent.click(await within(panel).findByRole('menuitemradio', { name: 'ServerWorker' }));
+	// The move menu opens as the sheet's "Runs on" page, not under the row.
+	const runsOn = panel.querySelector<HTMLElement>('[data-page="runner"]')!;
+	const worker = await within(runsOn).findByRole('menuitemradio', { name: 'ServerWorker' });
+	await waitFor(() => expect(panel.getAttribute('aria-label')).toBe('Runs on'));
+	expect(runsOn.classList.contains('active')).toBe(true);
+	await fireEvent.click(worker);
 	return panel;
 }
 
@@ -113,6 +119,8 @@ describe('Runs on in Chat controls', () => {
 		await fireEvent.click(within(panel).getByRole('menuitem', { name: 'Move when this turn ends' }));
 		expect(queueMove).toHaveBeenCalledExactlyOnceWith('chat-1', 'unraid', false);
 		expect(moveSession).not.toHaveBeenCalled();
+		// Queuing closed the menu: the sheet slid back to its main list.
+		await waitFor(() => expect(panel.getAttribute('aria-label')).toBe('Chat controls'));
 		const tile = panel.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
 		await waitFor(() => expect(tile.textContent).toContain('Moving to ServerWorker after this turn'));
 		expect(tile.disabled).toBe(true);
@@ -148,24 +156,45 @@ describe('Context and usage row', () => {
 		listInstallsMock.mockResolvedValue({ installs: [] });
 		render(MobileComposerControlsSheet, { props: props() });
 	}
-	const shown = () => document.querySelector('.mcp .usage-row .pct')?.textContent;
+	const usageRow = () => document.querySelector<HTMLElement>('.mcp [data-page="main"] .mcp-row:has(.mcp-ring)')!;
+	const shown = () => usageRow()?.querySelector('.mcp-val')?.textContent?.trim();
+	const tokens = () => usageRow()?.querySelector('.mcp-lbl small')?.textContent;
 
 	it('reads the shared meter\'s percent', async () => {
 		renderPanel();
 		await waitFor(() => expect(shown()).toBe('42%'));
+		expect(tokens()).toBe('84k of 200k tokens');
+	});
+
+	it('opens the usage details as a page inside the sheet, and Back returns', async () => {
+		const onUsageOpenChange = vi.fn();
+		session.store.set({ sessionId: 'chat-1', mode: 'chat', messages: [], activeTasks: [] });
+		appSessions.store.set([]);
+		listInstallsMock.mockResolvedValue({ installs: [] });
+		render(MobileComposerControlsSheet, { props: { ...props(), onUsageOpenChange } });
+		const panel = document.querySelector<HTMLElement>('.mcp')!;
+		await fireEvent.click(usageRow());
+		expect(panel.getAttribute('aria-label')).toBe('Context and usage');
+		expect(within(panel).getByTestId('usage-inline')).toBeTruthy();
+		// The panel stays open: no separate usage sheet, and the dock polls limits meanwhile.
+		expect(onUsageOpenChange).toHaveBeenLastCalledWith(true);
+		await fireEvent.click(within(panel).getByRole('button', { name: 'Back to chat controls' }));
+		expect(panel.getAttribute('aria-label')).toBe('Chat controls');
+		expect(onUsageOpenChange).toHaveBeenLastCalledWith(false);
 	});
 
 	it('says over the limit rather than a capped percent', async () => {
 		(globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit = true;
 		renderPanel();
-		await waitFor(() => expect(shown()).toBe('Over limit'));
+		await waitFor(() => expect(shown()).toBe('Over'));
 	});
 
 	it('shows tokens used and no ring fill when the context window is unknown (#2274)', async () => {
 		(globalThis as { __usageStubUnknownUsed?: string }).__usageStubUnknownUsed = '12.3k';
 		renderPanel();
-		await waitFor(() => expect(shown()).toBe('12.3k used'));
-		const ring = document.querySelector('.mcp .usage-row .usage-ring');
+		await waitFor(() => expect(tokens()).toBe('12.3k tokens used'));
+		expect(shown()).toBe('—');
+		const ring = usageRow().querySelector('.mcp-ring');
 		expect(ring?.classList.contains('unknown')).toBe(true);
 		expect(ring?.querySelector('.ring-progress')).toBeNull();
 	});
