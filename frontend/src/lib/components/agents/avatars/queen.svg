@@ -1,10 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
-  <path class="mark" d="M18 53V27q0-9 9-9h16q9 0 9 9v26h-4V31q-7-1-13-7-6 6-13 7v22Z"/>
-  <path class="ring" d="M24 17q2-5 6-6l5-6 5 6q4 1 6 6Z"/>
-  <circle class="mark" cx="35" cy="12" r="2"/>
-  <path class="eyes" d="M27 38q3 2 5 0m6 0q2 2 5 0"/>
-  <path class="smile" d="M31 47q4 3 8 0"/>
+  <ellipse class="shade" cx="32" cy="59.5" rx="16" ry="2.6"/>
+  <circle class="shape" cx="32" cy="38" r="16"/>
+  <path class="deep" d="M15 40c0-14 7-21 17-21s17 7 17 21v14h-5V38q-7-1-12-8-5 7-12 8v16h-5Z"/>
+  <path class="gold" d="M21.5 21q2-6 5.5-7l5-7.5 5 7.5q3.5 1 5.5 7Z"/>
+  <circle class="jewel" cx="32" cy="15" r="2.4"/>
+  <path class="stroke-ink" d="M24 41.5q2.5 2.2 5 0m6 0q2.5 2.2 5 0"/>
+  <path class="jewel" d="M29 47.5q3 2.6 6 0-3 1-6 0Z"/>
+  <ellipse class="blush" cx="23.5" cy="45" rx="2.8" ry="1.8"/>
+  <ellipse class="blush" cx="40.5" cy="45" rx="2.8" ry="1.8"/>
+  <ellipse class="shine" cx="20.5" cy="28" rx="3.6" ry="1.5" transform="rotate(-50 20.5 28)"/>
 </svg>

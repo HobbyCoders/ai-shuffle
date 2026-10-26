@@ -36,14 +36,29 @@
  aria-hidden="true">{@html drawings[known]}</span>
 
 <style>
- /* Mixed in oklab, not oklch: the light theme's background is oklch(0.995 0 0),
-    whose hue 0 would swing every tint toward pink/beige in a hue blend. */
- .agent-avatar { --c:var(--av, var(--primary)); display:inline-flex; flex:none; align-items:center; justify-content:center; color:var(--c); background:color-mix(in oklab,var(--c) 9%,var(--background)); border:1px solid color-mix(in oklab,var(--c) 22%,var(--border)); border-radius:28%; overflow:hidden; }
- .agent-avatar.neutral { border-style:dashed; background:color-mix(in oklab,var(--c) 8%,var(--background)); }
- .agent-avatar :global(svg) { width:86%; height:86%; }
- .agent-avatar :global(.shape) { fill:color-mix(in oklab,var(--c) 26%,var(--background)); stroke:currentColor; stroke-width:2; stroke-linejoin:round; }
- .agent-avatar :global(.eyes) { stroke:var(--foreground); stroke-width:4; stroke-linecap:round; }
- .agent-avatar :global(.smile) { stroke:var(--foreground); stroke-width:2; stroke-linecap:round; }
- .agent-avatar :global(.ring) { fill:var(--background); stroke:currentColor; stroke-width:2; }
- .agent-avatar :global(.mark) { fill:currentColor; stroke:currentColor; stroke-width:1.5; stroke-linejoin:round; }
+ /* Clay style: solid characters in the agent colour on a round badge. Shading
+    is layered translucent shapes, never gradients (the files hold shapes only).
+    Mixed in oklab, not oklch: the light theme's background is oklch(0.995 0 0),
+    whose hue 0 would swing every tint toward pink/beige in a hue blend. Face
+    details use fixed ink and white so they read on the solid body in both themes. */
+ .agent-avatar { --c:var(--av, var(--primary)); --body:var(--c); display:inline-flex; flex:none; align-items:center; justify-content:center; color:var(--c); background:color-mix(in oklab,var(--c) 17%,var(--background)); border-radius:50%; overflow:hidden; }
+ /* Light-theme accents are darker; lift the body so the ink face stays readable. */
+ :global(.light) .agent-avatar { --body:color-mix(in oklab,var(--c) 75%,#fff); }
+ .agent-avatar.neutral { background:color-mix(in oklab,var(--c) 10%,var(--background)); outline:1px dashed color-mix(in oklab,var(--c) 55%,transparent); outline-offset:-1px; }
+ .agent-avatar.neutral :global(svg) { filter:saturate(0); }
+ .agent-avatar :global(svg) { width:90%; height:90%; }
+ .agent-avatar :global(.shape) { fill:var(--body); }
+ .agent-avatar :global(.shape.pale), .agent-avatar :global(.tint) { fill:color-mix(in oklab,var(--c) 42%,#fff); }
+ .agent-avatar :global(.deep) { fill:color-mix(in oklab,var(--c) 68%,#000); }
+ .agent-avatar :global(.ink) { fill:#16181d; }
+ .agent-avatar :global(.white) { fill:#fff; }
+ .agent-avatar :global(.shine) { fill:#fff; opacity:.5; }
+ .agent-avatar :global(.shade) { fill:#000; opacity:.14; }
+ .agent-avatar :global(.blush) { fill:oklch(0.72 0.16 12); opacity:.5; }
+ .agent-avatar :global(.gold) { fill:oklch(0.83 0.15 85); }
+ .agent-avatar :global(.jewel) { fill:oklch(0.62 0.2 22); }
+ .agent-avatar :global(.leaf) { fill:oklch(0.74 0.17 145); }
+ .agent-avatar :global(.stroke-ink) { stroke:#16181d; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; }
+ .agent-avatar :global(.stroke-deep) { stroke:color-mix(in oklab,var(--c) 68%,#000); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+ .agent-avatar :global(.stroke-tint) { stroke:color-mix(in oklab,var(--c) 42%,#fff); stroke-width:3.5; stroke-linecap:round; }
 </style>

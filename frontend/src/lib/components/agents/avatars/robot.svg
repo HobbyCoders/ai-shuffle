@@ -1,14 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <path d="M35 17v-6" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-  <circle class="ring" cx="35" cy="7.5" r="4"/>
-  <circle class="mark" cx="35" cy="7.5" r="1"/>
-  <rect class="mark" x="12.5" y="33" width="5" height="12" rx="2"/>
-  <rect class="mark" x="52.5" y="33" width="5" height="12" rx="2"/>
-  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
-  <rect class="ring" x="22" y="26" width="26" height="19" rx="6.5"/>
-  <circle class="eyes" cx="30" cy="35.5" r="1.6"/>
-  <circle class="eyes" cx="40" cy="35.5" r="1.6"/>
-  <path class="smile" d="M29 53h12M33 51v4m4-4v4"/>
+  <ellipse class="shade" cx="32" cy="58" rx="17" ry="2.6"/>
+  <rect class="deep" x="30.5" y="10" width="3" height="11" rx="1.5"/>
+  <circle class="shape" cx="32" cy="9" r="4.5"/>
+  <circle class="shine" cx="30.5" cy="7.5" r="1.4"/>
+  <rect class="deep" x="8" y="30" width="7" height="12" rx="3.5"/>
+  <rect class="deep" x="49" y="30" width="7" height="12" rx="3.5"/>
+  <rect class="shape" x="13" y="19" width="38" height="34" rx="12"/>
+  <path class="shade" d="M13 40v1a12 12 0 0 0 12 12h14a12 12 0 0 0 12-12v-1q-19 8-38 0Z"/>
+  <rect class="ink" x="19" y="26" width="26" height="17" rx="8.5"/>
+  <ellipse class="tint" cx="26" cy="34.5" rx="3" ry="3.6"/>
+  <ellipse class="tint" cx="38" cy="34.5" rx="3" ry="3.6"/>
+  <rect class="deep" x="26" y="47" width="12" height="2.4" rx="1.2"/>
+  <ellipse class="shine" cx="21" cy="22.5" rx="5" ry="1.8"/>
 </svg>

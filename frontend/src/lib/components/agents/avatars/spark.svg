@@ -1,12 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
-  <circle class="eyes" cx="29" cy="37" r="1.6"/>
-  <circle class="eyes" cx="41" cy="37" r="1.6"/>
-  <circle cx="23.5" cy="45" r="2.6" fill="currentColor" fill-opacity=".45"/>
-  <circle cx="46.5" cy="45" r="2.6" fill="currentColor" fill-opacity=".45"/>
-  <path class="smile" d="M30 46q5 5 10 0"/>
-  <path class="mark" d="M51 3Q51 14 62 14Q51 14 51 25Q51 14 40 14Q51 14 51 3Z"/>
-  <path class="mark" d="M17 52Q17 57 22 57Q17 57 17 62Q17 57 12 57Q17 57 17 52Z"/>
+  <ellipse class="shade" cx="32" cy="59" rx="12" ry="2.6"/>
+  <path class="shape" d="M32 5c3 15 9 23 25 28-16 5-22 13-25 28-3-15-9-23-25-28 16-5 22-13 25-28Z"/>
+  <path class="shade" d="M12 35q14 4 20 26 6-22 20-26-10 2-20 2t-20-2Z"/>
+  <ellipse class="ink" cx="28" cy="31" rx="2.1" ry="2.7"/>
+  <ellipse class="ink" cx="36" cy="31" rx="2.1" ry="2.7"/>
+  <circle class="white" cx="29" cy="29.8" r="1"/>
+  <circle class="white" cx="37" cy="29.8" r="1"/>
+  <path class="stroke-ink" d="M29.4 38.5q2.6 2.8 5.2 0"/>
+  <ellipse class="blush" cx="24.5" cy="36" rx="2.2" ry="1.4"/>
+  <ellipse class="blush" cx="39.5" cy="36" rx="2.2" ry="1.4"/>
+  <ellipse class="shine" cx="30" cy="17" rx="1.2" ry="4"/>
+  <path class="gold" d="M54 7q0 5 5 5-5 0-5 5 0-5-5-5 5 0 5-5Z"/>
+  <path class="gold" d="M11 48.5q0 3.5 3.5 3.5-3.5 0-3.5 3.5 0-3.5-3.5-3.5 3.5 0 3.5-3.5Z"/>
 </svg>

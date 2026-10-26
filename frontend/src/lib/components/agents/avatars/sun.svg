@@ -1,11 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <path d="M35 2.5v6M8 39H2.5m59.5 0h-5M14 13l4 4m35-4-4 4M14 62l3-3m36 3-3-3" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
-  <circle class="eyes" cx="29" cy="37" r="1.6"/>
-  <circle class="eyes" cx="41" cy="37" r="1.6"/>
-  <circle cx="23.5" cy="44" r="2.6" fill="currentColor" fill-opacity=".45"/>
-  <circle cx="46.5" cy="44" r="2.6" fill="currentColor" fill-opacity=".45"/>
-  <path class="ring" d="M28 45h14q0 7-7 7t-7-7Z"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(0 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(45 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(90 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(135 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(180 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(225 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(270 32 33)"/>
+  <rect class="gold" x="29.5" y="4" width="5" height="10" rx="2.5" transform="rotate(315 32 33)"/>
+  <circle class="shape" cx="32" cy="33" r="16"/>
+  <path class="shade" d="M16 35a16 16 0 0 0 32 0q-16 8-32 0Z"/>
+  <ellipse class="ink" cx="26" cy="31" rx="2.6" ry="3.2"/>
+  <ellipse class="ink" cx="38" cy="31" rx="2.6" ry="3.2"/>
+  <circle class="white" cx="27" cy="29.8" r="1"/>
+  <circle class="white" cx="39" cy="29.8" r="1"/>
+  <path class="ink" d="M27 37.5h10q0 6-5 6t-5-6Z"/>
+  <ellipse class="blush" cx="21" cy="37" rx="2.8" ry="1.8"/>
+  <ellipse class="blush" cx="43" cy="37" rx="2.8" ry="1.8"/>
+  <ellipse class="shine" cx="24" cy="22.5" rx="4.5" ry="1.7" transform="rotate(-35 24 22.5)"/>
 </svg>

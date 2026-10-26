@@ -1,15 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <path class="shape" d="M22 21Q16 11 6 12q6 4 6 11Z"/>
-  <path class="shape" d="M48 21q6-10 16-9-6 4-6 11Z"/>
-  <path class="shape" d="M26 19q2-13 9-15 7 2 9 15Z"/>
-  <circle class="mark" cx="9" cy="23" r="2.8"/>
-  <circle class="mark" cx="61" cy="23" r="2.8"/>
-  <circle class="mark" cx="35" cy="4.5" r="2.8"/>
-  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
-  <path class="mark" fill-opacity=".45" stroke-opacity="0" d="M23.5 34l5.5-6 5.5 6-5.5 6Zm12 0 5.5-6 5.5 6-5.5 6Z"/>
-  <circle class="eyes" cx="29" cy="34" r="1.6"/>
-  <circle class="eyes" cx="41" cy="34" r="1.6"/>
-  <path class="ring" d="M25 45q10 4 20 0-2 10-10 10t-10-10Z"/>
+  <ellipse class="shade" cx="32" cy="60" rx="15" ry="2.6"/>
+  <path class="deep" d="M22 27Q15 15 5 16q6 4 7 13Z"/>
+  <path class="deep" d="M42 27q7-12 17-11-6 4-7 13Z"/>
+  <path class="tint" d="M24 26q2-15 8-19 6 4 8 19Z"/>
+  <circle class="gold" cx="6.5" cy="27" r="3.2"/>
+  <circle class="gold" cx="57.5" cy="27" r="3.2"/>
+  <circle class="gold" cx="32" cy="6.5" r="3.2"/>
+  <circle class="shape" cx="32" cy="41" r="16"/>
+  <path class="shade" d="M16 43a16 16 0 0 0 32 0q-16 8-32 0Z"/>
+  <path class="gold" d="M16.5 30q15.5-8 31 0v4q-15.5-7-31 0Z"/>
+  <path class="tint" d="M21 39l5-6 5 6-5 6Zm12 0 5-6 5 6-5 6Z"/>
+  <ellipse class="ink" cx="26" cy="39" rx="2.2" ry="2.8"/>
+  <ellipse class="ink" cx="38" cy="39" rx="2.2" ry="2.8"/>
+  <circle class="white" cx="27" cy="37.8" r="1"/>
+  <circle class="white" cx="39" cy="37.8" r="1"/>
+  <path class="ink" d="M24.5 46.5q7.5 3.5 15 0-1.5 8-7.5 8t-7.5-8Z"/>
+  <path class="white" d="M27 48.4q5 1.5 10 0l-.4 2q-4.6 1-9.2 0Z"/>
 </svg>
