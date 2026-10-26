@@ -1,11 +1,10 @@
-"""Mutate real release workflow inputs/steps; the cutover verifier must reject them."""
+"""Mutate real release workflow inputs/steps; the wiring verifier must reject them."""
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from scripts.release import cutover_check, promote_image
+from scripts.release import promote_image, release_wiring
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -33,7 +32,7 @@ def test_release_notes_and_publisher_use_the_documented_public_image():
     "callee_input", "callee_output", "job_output", "reuse_if", "reuse_digest", "reuse_source", "reuse_command",
     "build_if", "build_push", "build_load", "push_if", "push_command", "verify_if", "output_digest", "source_tag",
     "step_order", "windows_policy_missing", "windows_policy_bypass", "windows_policy_ungated", "windows_skip_unchecked"])
-def test_workflow_preflight_rejects_broken_release_delivery(tmp_path, monkeypatch, mutation):
+def test_workflow_preflight_rejects_broken_release_delivery(tmp_path, mutation):
     release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     docker = yaml.load((ROOT / ".github/workflows/docker-publish.yml").read_text(), Loader=yaml.BaseLoader)
     jobs = release["jobs"]
@@ -76,14 +75,8 @@ def test_workflow_preflight_rejects_broken_release_delivery(tmp_path, monkeypatc
     destination.mkdir(parents=True)
     (destination / "release.yml").write_text(yaml.safe_dump(release))
     (destination / "docker-publish.yml").write_text(yaml.safe_dump(docker))
-    monkeypatch.setattr(cutover_check.cutover, "git", lambda *_: "")
-    monkeypatch.setattr(cutover_check.cutover, "api", lambda *_: {})
-    monkeypatch.setattr(cutover_check.cutover, "container_sequence", lambda *_: 1)
-    monkeypatch.setattr(cutover_check, "attest", lambda *_: {})
-    monkeypatch.setattr(cutover_check, "verify_catalog", lambda *_, **kw: None)
-    monkeypatch.setattr(cutover_check, "verify_merged_pr", lambda *_: None)
-    args = SimpleNamespace(old_repo=cutover_check.cutover.OLD_REPO, new_repo=cutover_check.cutover.NEW_REPO,
-                           private_export="a"*40, public_root="b"*40, private_checkout=tmp_path)
-    checks = cutover_check.checks(tmp_path, args)
-    result = next(r for r in checks if r["check"] == "guarded image reuse and promotion")
-    assert result["passed"] is (mutation is None), result
+    if mutation is None:
+        assert release_wiring.verify(tmp_path)
+    else:
+        with pytest.raises(ValueError):
+            release_wiring.verify(tmp_path)

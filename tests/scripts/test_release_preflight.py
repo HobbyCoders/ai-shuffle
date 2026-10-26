@@ -72,6 +72,18 @@ def test_catalog_rejects_missing_revision(repo):
         checks.verify_catalog(root)
 
 
+def test_catalog_rejects_a_pin_off_this_history(repo):
+    root, git, catalog = repo
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    git("checkout", "-q", "--orphan", "elsewhere")
+    git("commit", "-qm", "Unrelated history with the same bytes")
+    catalog["revision"] = git("rev-parse", "HEAD")
+    git("checkout", "-q", branch)
+    write_catalog(root, catalog)
+    with pytest.raises(ValueError, match="pin a commit on this checkout's history"):
+        checks.verify_catalog(root)
+
+
 def test_catalog_change_requires_new_install_identity(repo):
     root, _, catalog = repo
     catalog["dependencies"] = {"default": ["example==1"]}

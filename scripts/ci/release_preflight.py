@@ -2,7 +2,7 @@
 
 Without --tag, check the candidate source tree. --tag also requires a matching
 checkout on main; --github checks the protected branch and merged PR.
---remote-catalog reads the private pinned sources using the existing gh login.
+--remote-catalog reads the pinned sources from GitHub using the existing gh login.
 """
 from __future__ import annotations
 
@@ -44,13 +44,11 @@ def verify_catalog(root: Path, remote: bool = False) -> None:
     release = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
     if catalog["release"] != release:
         raise ValueError(f"Connector release identity is stale; expected {release}")
-    # No private ancestor fetches: the first release PR repins to the public
-    # root (the identical export cannot contain its own commit hash).
-    initial = git(root, "rev-list", "--max-parents=0", "HEAD").splitlines()
-    if len(initial) == 1 and git(root, "ls-tree", initial[0], "--", "release/public-cutover.json"):
-        if revision not in git(root, "rev-list", "HEAD").splitlines():
-            raise ValueError("Public releases require catalog repinning to public root S (or a later public commit) in a merged public PR")
     git(root, "cat-file", "-e", f"{revision}^{{commit}}")
+    # The pin must be this history's own commit (never an unmerged branch or
+    # a commit from another history), so every release can read its bytes.
+    if subprocess.run(["git", "merge-base", "--is-ancestor", revision, "HEAD"], cwd=root).returncode:
+        raise ValueError("Connector catalog must pin a commit on this checkout's history")
     for spec in catalog["packages"].values():
         for filename, digest in spec["files"].items():
             if Path(filename).name != filename:

@@ -113,17 +113,7 @@ def load_update_reach():
     return reach
 
 
-def load_cutover():
-    import importlib.util
-
-    path = Path(__file__).with_name("public_cutover.py")
-    spec = importlib.util.spec_from_file_location("publication_cutover", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def update_reach_readiness(revision, *, api=None, base=None, root=None, repository=REPOSITORY, bridge=True):
+def update_reach_readiness(revision, *, api=None, base=None, root=None, repository=REPOSITORY):
     """Strict backstop before local/full-suite is posted, independent of PR draft state.
 
     Inspect each first-parent main change since the *published* edge pointer.
@@ -152,25 +142,17 @@ def update_reach_readiness(revision, *, api=None, base=None, root=None, reposito
                         return False, warning + ("no verified cached publication and incomplete Git history; "
                                                  "run `git fetch --unshallow origin` and retry attestation.")
                     base = git("rev-list", "--first-parent", revision).splitlines()[-1]
-                    if bridge and git("ls-tree", base, "--", "release/public-cutover.json"):
-                        raise ValueError("Configured cutover requires a verified signed envelope")
+                    if git("ls-tree", base, "--", "release/public-cutover.json"):
+                        # The public root continues archived publications, so it
+                        # is not a bootstrap: only a signed pointer is a baseline.
+                        return False, warning + ("no verified cached publication; the public root is not "
+                                                 "a bootstrap baseline. Retry when the signed edge manifest "
+                                                 "is reachable.")
                     warning += ("no verified cached publication; checking all first-parent changes "
                                 "since repository bootstrap. Local tags are not publication evidence.\n")
         # Refuse unknown/non-ancestor pointers instead of silently checking an empty range.
         if base not in git("rev-list", "--first-parent", revision).splitlines():
-            if not bridge:
-                return False, "Update reach refused: published edge is not on this main history; fetch origin/main."
-            envelope = edge_cache_path().read_bytes()
-            if verify_edge_manifest(envelope) != base:
-                raise ValueError("Cutover requires the exact reverified signed publication")
-            cutover = load_cutover()
-            try:
-                base, _ = cutover.verify_bridge(
-                    root or reach.ROOT, revision, base, envelope, walk=update_reach_readiness)
-            except cutover.PrivateCheckoutRequired:
-                return False, ("Update reach refused: set AI_SHUFFLE_PRIVATE_CHECKOUT to a complete, "
-                               "non-shallow clone of HobbyCoders/ai-shuffle-private "
-                               "(see docs/ci/release-channels.md).")
+            return False, "Update reach refused: published edge is not on this main history; fetch origin/main."
 
         commits = git("rev-list", "--first-parent", "--reverse", f"{base}..{revision}").splitlines()
         released = reach.released_launcher(git, reader)
@@ -342,20 +324,10 @@ def main_history(api, *, root=None):
         text=True, cwd=root, timeout=20).splitlines()
 
 
-def unpublished_history(history, published, *, root=None):
+def unpublished_history(history, published):
     if published in history:
         return history[:history.index(published)]
-    # The only permitted unrelated-history baseline is the frozen signed public
-    # cutover. Its owner's success already certifies the private exact-tree/reach
-    # bridge; a public runner must not need credentials for the archived repo.
-    import hashlib
-    initial, record = load_cutover().mapping(root or Path.cwd(), history[0])
-    envelope = edge_cache_path().read_bytes()
-    if (record and initial == history[-1] and published == record["published_revision"]
-            and verify_edge_manifest(envelope) == published
-            and hashlib.sha256(envelope).hexdigest() == record["envelope_sha256"]):
-        return history
-    raise ValueError("Published revision is not on main or the frozen cutover baseline")
+    raise ValueError("Published revision is not on protected main's first-parent history")
 
 
 def newest_attested(api, history, *, metadata=None):
@@ -380,7 +352,7 @@ def publication_readiness(api, revision, *, published=None, root=None, metadata=
         history = main_history(api, root=root)
         if revision not in history:
             return False, "Revision is not on protected main's first-parent history"
-        candidates = unpublished_history(history, published, root=root)
+        candidates = unpublished_history(history, published)
         if revision not in candidates:
             return False, "Revision is already published or older than the published revision"
         newest, status = newest_attested(api, candidates, metadata=metadata)
@@ -476,7 +448,7 @@ def main(argv=None):
             raise ValueError("Triggering hosted main-suite run could not be verified")
     published = published_edge_revision()
     if args.select:
-        revision, _ = newest_attested(api, unpublished_history(main_history(api, root=args.source_root), published, root=args.source_root), metadata=metadata)
+        revision, _ = newest_attested(api, unpublished_history(main_history(api, root=args.source_root), published), metadata=metadata)
     ready, reason = (publication_readiness(api, revision, published=published, root=args.source_root, metadata=metadata) if revision else
                      (False, f"{MAIN_SUITE_REFUSAL}. {COMMAND}"))
     result = {"ready": ready, "revision": revision or "", "published": published, "reason": reason}
