@@ -1173,7 +1173,6 @@ def test_a_started_staged_attest_survives_main_moving(base_repo, monkeypatch, ca
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
     monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: None)
     monkeypatch.setattr(local_ci, "resolve_base", lambda public_only=False: "public/main")
-    monkeypatch.setattr(local_ci, "use_private_checkout", lambda: None)
     reach = []
     monkeypatch.setattr(local_ci, "attest_update_reach", reach.append)
 
@@ -1239,89 +1238,20 @@ def test_checks_never_inherit_the_pushing_repository_from_git(monkeypatch, tmp_p
 
 @pytest.mark.parametrize("argv", [["full", "--attest"], ["full", "--step", "--attest"]])
 def test_attest_refusal_comes_before_any_status_or_suite(monkeypatch, argv):
-    """Update reach (and its private-archive bridge) fails in seconds, not after the run."""
+    """Update reach fails in seconds, not after the run."""
     order = []
     monkeypatch.setattr(local_ci, "git", lambda *a: "head")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
     monkeypatch.setattr(local_ci, "resolve_base", lambda **kw: "public/main")
     monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: order.append("fetch"))
-    monkeypatch.setattr(local_ci, "use_private_checkout", lambda: order.append("private"))
 
     def refuse(revision):
         order.append("reach")
-        raise local_ci.Failure("Update reach refused: set AI_SHUFFLE_PRIVATE_CHECKOUT ...")
+        raise local_ci.Failure("Update reach refused: published edge is not on this main history ...")
     monkeypatch.setattr(local_ci, "attest_update_reach", refuse)
     monkeypatch.setattr(local_ci, "python_preflight", lambda python: order.append("python"))
     monkeypatch.setattr(local_ci, "attest", lambda state, *a: order.append(state))
     monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: order.append("security"))
     monkeypatch.setattr(local_ci, "run_suites", lambda *a: order.append("suites"))
     assert local_ci.main(argv) == 1
-    assert order == ["python", "fetch", "private", "reach"]
-
-
-def _private_remote(git):
-    git("remote", "set-url", "origin", "https://github.com/HobbyCoders/ai-shuffle-private.git")
-
-
-def _no_fetch(monkeypatch, fetched):
-    real = local_ci.git
-
-    def git(*args):
-        if args[0] == "fetch":
-            fetched.append(args)
-            raise subprocess.CalledProcessError(1, "git fetch")
-        return real(*args)
-    monkeypatch.setattr(local_ci, "git", git)
-
-
-def test_private_checkout_is_detected_from_this_clones_archive_remote(base_repo, monkeypatch, capsys):
-    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
-    _private_remote(base_repo)
-    fetched = []
-    _no_fetch(monkeypatch, fetched)
-    local_ci.use_private_checkout()
-    common = (local_ci.ROOT / ".git").resolve()
-    assert os.environ["AI_SHUFFLE_PRIVATE_CHECKOUT"] == str(common)
-    assert fetched == [("fetch", "-q", "--no-tags", "--", "origin", "+refs/heads/main:refs/remotes/origin/main")]
-    out = capsys.readouterr().out
-    assert "AI_SHUFFLE_PRIVATE_CHECKOUT is unset; using this clone's HobbyCoders/ai-shuffle-private remote 'origin'" in out
-    assert "could not refresh origin/main" in out
-
-
-def test_private_checkout_from_a_worktree_is_the_shared_git_directory(base_repo, monkeypatch, tmp_path):
-    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
-    _private_remote(base_repo)
-    base_repo("commit", "--allow-empty", "-qm", "root")
-    worktree = tmp_path / "wt"
-    base_repo("worktree", "add", "-q", "--detach", str(worktree))
-    monkeypatch.setattr(local_ci, "ROOT", worktree)
-    _no_fetch(monkeypatch, [])
-    local_ci.use_private_checkout()
-    assert os.environ["AI_SHUFFLE_PRIVATE_CHECKOUT"] == str((tmp_path / ".git").resolve())
-
-
-def test_explicit_private_checkout_wins(base_repo, monkeypatch):
-    monkeypatch.setenv("AI_SHUFFLE_PRIVATE_CHECKOUT", "/elsewhere/private")
-    _private_remote(base_repo)
-    local_ci.use_private_checkout()
-    assert os.environ["AI_SHUFFLE_PRIVATE_CHECKOUT"] == "/elsewhere/private"
-
-
-def test_no_archive_remote_leaves_the_variable_unset(base_repo, monkeypatch):
-    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
-    local_ci.use_private_checkout()  # origin is example/archive, public is the public repo
-    assert "AI_SHUFFLE_PRIVATE_CHECKOUT" not in os.environ
-
-
-def test_shallow_clone_is_not_used_as_the_private_checkout(base_repo, monkeypatch, tmp_path, capsys):
-    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
-    for n in range(2):
-        base_repo("commit", "--allow-empty", "-qm", f"c{n}")
-    shallow = tmp_path / "shallow"
-    subprocess.run(["git", "clone", "-q", "--depth=1", (tmp_path).as_uri(), str(shallow)], check=True,
-                   env=local_ci.child_env())
-    monkeypatch.setattr(local_ci, "ROOT", shallow)
-    local_ci.git("remote", "set-url", "origin", "https://github.com/HobbyCoders/ai-shuffle-private.git")
-    local_ci.use_private_checkout()
-    assert "AI_SHUFFLE_PRIVATE_CHECKOUT" not in os.environ
-    assert "this clone is shallow" in capsys.readouterr().out
+    assert order == ["python", "fetch", "reach"]

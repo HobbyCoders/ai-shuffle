@@ -1,4 +1,4 @@
-"""Adversarial external-boundary tests for cutover release tools."""
+"""Adversarial external-boundary tests for release tools."""
 import hashlib
 import json
 import subprocess
@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from scripts.release import attach_linux, promote_image, push_candidate, verify_image, cutover_check, prepare_cutover
-from scripts.ci import public_cutover as c
+from scripts.release import attach_linux, promote_image, push_candidate, verify_image, release_wiring
 
 ROOT=Path(__file__).resolve().parents[2]
 DIGEST="sha256:"+"a"*64
@@ -116,89 +115,15 @@ def test_reuse_copies_provenance_without_running_candidate(tmp_path,monkeypatch)
     assert calls[-1]==["docker","rm","container-id"]
 
 
-@pytest.mark.parametrize("identity,protected,head,expected", [(7,True,"a"*40,True),(None,True,"a"*40,False),(42,True,"a"*40,False),(7,False,"a"*40,False),(7,True,"b"*40,False)])
-def test_cutover_requires_distinct_identity_and_exact_protected_main(tmp_path,monkeypatch,identity,protected,head,expected):
-    monkeypatch.setattr(cutover_check.cutover,"git",lambda root,*args:"" if args[0]=="status" else "a"*40)
-    monkeypatch.setattr(cutover_check.cutover,"mapping",lambda *_:("root",{"old_repository_id":42}))
-    def api(repo,route=""):
-        if not route:return {"full_name":c.NEW_REPO,"private":False,"id":identity}
-        if route=="branches/main":return {"protected":protected,"commit":{"sha":head}}
-        if route=="actions/permissions":return {"enabled":False}
-        return {"total_count":0}
-    monkeypatch.setattr(cutover_check.cutover,"api",api)
-    monkeypatch.setattr(cutover_check,"attest",lambda *_:{"ok":True})
-    monkeypatch.setattr(cutover_check.cutover,"container_sequence",lambda *_:1001)
-    monkeypatch.setattr(cutover_check,"verify_catalog",lambda *_,**kw:None)
-    monkeypatch.setattr(cutover_check,"verify_merged_pr",lambda *_:None)
-    args=SimpleNamespace(old_repo=c.OLD_REPO,new_repo=c.NEW_REPO,private_export="a"*40,public_root="b"*40,private_checkout=tmp_path)
-    result=cutover_check.checks(ROOT,args)
-    assert next(row for row in result if row["check"]=="repository identities")["passed"] is expected
-    if expected:assert all(row["passed"] for row in result)
-
-
-@pytest.mark.parametrize("blocked", [None, "old", "cloud", "public", "public-running", "running", "missing"])
-def test_cutover_checks_global_freeze_on_all_repositories(tmp_path,monkeypatch,blocked):
-    root=ROOT
-    def api(repo,route=""):
-        if route=="actions/permissions":
-            if blocked=="missing":return {}
-            enabled=(blocked=="old" and repo==c.OLD_REPO) or (blocked=="cloud" and repo.endswith("hobbycoders-cloud")) or (blocked=="public" and repo==c.NEW_REPO)
-            return {"enabled":enabled}
-        if route.startswith("actions/runs?"):
-            outstanding = (blocked=="running" and "in_progress" in route) or (blocked=="public-running" and repo==c.NEW_REPO and "status=pending" in route)
-            return {"total_count":1 if outstanding else 0}
-        return {}
-    monkeypatch.setattr(cutover_check.cutover,"api",api)
-    monkeypatch.setattr(cutover_check,"attest",lambda *_:{})
-    monkeypatch.setattr(cutover_check,"verify_catalog",lambda *_,**kw:None)
-    monkeypatch.setattr(cutover_check,"verify_merged_pr",lambda *_:None)
-    args=SimpleNamespace(old_repo=c.OLD_REPO,new_repo=c.NEW_REPO,private_export="a"*40,public_root="b"*40,private_checkout=tmp_path)
-    checks=cutover_check.checks(root,args)
-    result=next(row for row in checks if row["check"]=="all publishers frozen/drained")
-    assert result["passed"] is (blocked is None)
-    workflow=next(row for row in checks if row["check"]=="guarded image reuse and promotion")
-    assert workflow["passed"],workflow
-
-
-def test_cutover_check_reports_missing_android_pr_without_authorizing(tmp_path,monkeypatch):
+def test_release_wiring_reports_missing_android_caller(tmp_path):
     source=yaml.load((ROOT/".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     del source["jobs"]["android-apk"]
     path=tmp_path/".github/workflows/release.yml";path.parent.mkdir(parents=True);path.write_text(yaml.safe_dump(source))
-    monkeypatch.setattr(cutover_check.cutover,"git",lambda *_:"")
-    monkeypatch.setattr(cutover_check.cutover,"api",lambda *_: {})
-    monkeypatch.setattr(cutover_check,"attest",lambda *_: {})
-    monkeypatch.setattr(cutover_check.cutover,"container_sequence",lambda *_: 1)
-    monkeypatch.setattr(cutover_check,"verify_catalog",lambda *_,**kw:None)
-    monkeypatch.setattr(cutover_check,"verify_merged_pr",lambda *_:None)
-    args=SimpleNamespace(old_repo=c.OLD_REPO,new_repo=c.NEW_REPO,private_export="a"*40,public_root="b"*40,private_checkout=tmp_path)
-    results=cutover_check.checks(tmp_path,args)
-    stage=next(r for r in results if r["check"]=="guarded image reuse and promotion")
-    assert not stage["passed"] and "android-apk" in stage["reason"]
-    assert any(not row["passed"] for row in results)
+    with pytest.raises(ValueError,match="android-apk"):release_wiring.verify(tmp_path)
 
 
-def test_prepare_produces_frozen_mapping_and_refuses_low_inventory(tmp_path,monkeypatch):
-    import base64
-    mapping_path=tmp_path/c.MAPPING
-    envelope=json.dumps({"payload":base64.b64encode(json.dumps({"sequence":5000,"container":{"sequence":50}}).encode()).decode(),"signature":"fixture"}).encode()
-    cache=tmp_path/"envelope";cache.write_bytes(envelope)
-    monkeypatch.setattr(c,"git",lambda *_:"")
-    monkeypatch.setattr(c,"mapping",lambda *_:("root",None))
-    monkeypatch.setattr(c,"api",lambda repo,route="": {"private":True,"full_name":c.NEW_REPO,"id":42} if not route else {"merged_at":None,"base":{"ref":"main"}})
-    monkeypatch.setattr(prepare_cutover.gate,"published_edge_revision",lambda :"a"*40)
-    monkeypatch.setattr(prepare_cutover.gate,"edge_cache_path",lambda :cache)
-    monkeypatch.setattr(prepare_cutover.gate,"verify_edge_manifest",lambda _:"a"*40)
-    with pytest.raises(ValueError,match="Desktop inventory"):prepare_cutover.prepare(tmp_path,9,60,4999)
-    with pytest.raises(ValueError,match="Inventory maximum"):prepare_cutover.prepare(tmp_path,9,49,6000)
-    assert not mapping_path.exists()
-    record=prepare_cutover.prepare(tmp_path,9,60,6000)
-    assert json.loads(mapping_path.read_text())==record
-    assert record["envelope_sha256"]==hashlib.sha256(envelope).hexdigest()
-    assert record["maximum_shipped_sequence"]==60
-    assert record["maximum_desktop_sequence"]==6000
-    assert (tmp_path/c.OFFSET).read_text()=="60\n"
-    assert "private_export" not in record and "public_root" not in record
-    with pytest.raises(FileExistsError):prepare_cutover.prepare(tmp_path,9,60,6000)
+def test_release_wiring_accepts_the_real_workflows():
+    assert "digest reuse" in release_wiring.verify(ROOT)
 
 
 @pytest.mark.parametrize("desktop", ["success", "skipped", "failure", "cancelled"])

@@ -672,38 +672,36 @@ def cutover_history(tmp_path, signed_feed):
     return root, git("rev-parse", "HEAD")
 
 
-@pytest.mark.parametrize("checkout", ["unset", "missing", "shallow"])
-def test_cutover_private_checkout_setup_has_fixed_hint(cutover_history, tmp_path, monkeypatch, checkout):
-    root, head = cutover_history
-    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
-    if checkout != "unset":
-        private = tmp_path / "private"
-        if checkout == "shallow":
-            subprocess.run(["git", "clone", "--depth=1", root.as_uri(), str(private)],
-                           check=True, capture_output=True)
-        monkeypatch.setenv("AI_SHUFFLE_PRIVATE_CHECKOUT", str(private))
-    ready, reason = gate.update_reach_readiness(head, root=root)
-    assert not ready
-    assert reason == ("Update reach refused: set AI_SHUFFLE_PRIVATE_CHECKOUT to a complete, "
-                      "non-shallow clone of HobbyCoders/ai-shuffle-private "
-                      "(see docs/ci/release-channels.md).")
-    assert str(tmp_path) not in reason
+def _never_asked(endpoint):
+    raise AssertionError("an off-history pointer must be refused before any GitHub lookup")
 
 
-@pytest.mark.parametrize("error", [ValueError("sensitive response body"),
-                                   subprocess.CalledProcessError(1, "sensitive command", output="secret"),
-                                   FileNotFoundError("sensitive path")])
-def test_other_cutover_errors_keep_generic_refusal(cutover_history, monkeypatch, error):
+def test_archived_publication_pointer_is_refused_without_a_private_checkout(cutover_history, monkeypatch):
+    """A signed pointer outside public main (the archive's last publication) only refuses."""
     root, head = cutover_history
-    cutover = gate.load_cutover()
-    def fail(*args, **kwargs):
-        raise error
-    monkeypatch.setattr(cutover, "verify_bridge", fail)
-    monkeypatch.setattr(gate, "load_cutover", lambda: cutover)
-    ready, reason = gate.update_reach_readiness(head, root=root)
+    monkeypatch.setattr(gate, "published_edge_revision", REAL_PUBLISHED_EDGE_REVISION)
+    ready, reason = gate.update_reach_readiness(head, root=root, api=_never_asked)
     assert not ready
-    assert reason == ("Update reach refused: could not verify published edge/merged PR evidence "
-                      f"({type(error).__name__}).")
+    assert reason == "Update reach refused: published edge is not on this main history; fetch origin/main."
+
+
+def test_cold_cache_public_root_is_not_a_bootstrap_baseline(cutover_history, signed_feed, monkeypatch):
+    root, head = cutover_history
+    monkeypatch.setattr(gate, "published_edge_revision", REAL_PUBLISHED_EDGE_REVISION)
+    signed_feed[1]["offline"] = True
+    ready, reason = gate.update_reach_readiness(head, root=root, api=_never_asked)
+    assert not ready
+    assert "the public root is not a bootstrap baseline" in reason
+
+
+def test_selection_refuses_the_frozen_cutover_publication(cutover_history, signed_feed, isolated_edge_cache):
+    """Even the exact signed envelope the record froze is no longer a publication baseline."""
+    _, head = cutover_history
+    isolated_edge_cache.parent.mkdir(parents=True)
+    isolated_edge_cache.write_bytes(signed_feed[1]["raw"])
+    with pytest.raises(ValueError, match="not on protected main"):
+        gate.unpublished_history([head], OTHER)
+    assert gate.unpublished_history([head, OTHER], OTHER) == [head]
 
 
 @pytest.mark.parametrize("signed_channel", ["edge", "nightly"])
@@ -890,33 +888,3 @@ def test_outage_still_requires_labels(reach_history, signed_feed, monkeypatch, a
     assert ready is accepted
     if not accepted:
         assert "PR #42" in reason and "update-reach:windows-launcher" in reason
-
-
-def test_detected_private_archive_remote_satisfies_the_cutover_checkout(cutover_history, monkeypatch, capsys):
-    """local_ci.py --attest in a shared checkout (origin = the archive) needs no variable."""
-    import functools
-
-    root, head = cutover_history
-    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/HobbyCoders/ai-shuffle-private.git"],
-                   cwd=root, check=True)
-    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
-    import local_ci
-    monkeypatch.setattr(local_ci, "ROOT", root)
-    real_git = local_ci.git
-    monkeypatch.setattr(local_ci, "git", lambda *a: "" if a[0] == "fetch" else real_git(*a))
-    local_ci.use_private_checkout()
-    assert "using this clone's HobbyCoders/ai-shuffle-private remote 'origin'" in capsys.readouterr().out
-
-    cutover = gate.load_cutover()
-    asked = []
-    def offline(repository, route=""):
-        asked.append(repository)
-        raise ValueError("offline")
-    monkeypatch.setattr(cutover, "verify_bridge", functools.partial(cutover.verify_bridge, github=offline))
-    monkeypatch.setattr(gate, "load_cutover", lambda: cutover)
-    ready, reason = gate.update_reach_readiness(head, root=root)
-    # Past the private-checkout requirement: the bridge went on to ask GitHub
-    # for the archive's identity (offline here), so the refusal is generic.
-    assert not ready and "AI_SHUFFLE_PRIVATE_CHECKOUT" not in reason
-    assert asked == ["HobbyCoders/ai-shuffle-private"]

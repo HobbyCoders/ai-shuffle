@@ -2,7 +2,7 @@
 export async function releaseRepository(token, env = process.env) {
  if (!token) throw Error('Release repository credentials are missing');
  const repository = env.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle';
- if (!['HobbyCoders/ai-shuffle', 'HobbyCoders/ai-shuffle-private'].includes(repository)) throw Error('Unapproved release repository');
+ if (repository !== 'HobbyCoders/ai-shuffle') throw Error('Unapproved release repository');
  const response = await fetch(`https://api.github.com/repos/${repository}`, {
   headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'AI-Shuffle-Publisher' },
   redirect: 'manual', signal: AbortSignal.timeout(20000),

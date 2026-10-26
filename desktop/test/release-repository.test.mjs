@@ -11,6 +11,8 @@ test('publication repository identity is pinned, never redirected or guessed',as
  await assert.rejects(releaseRepository('fixture',{}),/must pin/);
  await assert.rejects(releaseRepository('fixture',{RELEASE_GITHUB_REPO_ID:'7'}),/must pin/);
  await assert.rejects(releaseRepository('fixture',{...env,RELEASE_GITHUB_REPO:'attacker/repo'}),/Unapproved/);
+ // The archived private repository no longer publishes anything.
+ await assert.rejects(releaseRepository('fixture',{...env,RELEASE_GITHUB_REPO:'HobbyCoders/ai-shuffle-private'}),/Unapproved/);
  await assert.rejects(releaseRepository('',env),/credentials/);
  globalThis.fetch=async()=>new Response(null,{status:301,headers:{Location:'https://example.com'}});
  await assert.rejects(releaseRepository('fixture',env),/metadata unavailable/);

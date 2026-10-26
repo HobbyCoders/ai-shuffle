@@ -39,10 +39,6 @@ from typing import Callable, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "HobbyCoders/ai-shuffle"
-# The archive the public history was cut from. --attest walks its history for
-# the public-root bridge (scripts/ci/public_cutover.py).
-PRIVATE_REPOSITORY = "HobbyCoders/ai-shuffle-private"
-PRIVATE_CHECKOUT_ENV = "AI_SHUFFLE_PRIVATE_CHECKOUT"
 GITHUB_URL = r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)"
 SECURITY_GATE_VERSION = 2
 # Edge publication waits for this commit status on the exact main revision
@@ -996,36 +992,6 @@ def attest_update_reach(revision: str) -> None:
     print(reason)
 
 
-def use_private_checkout() -> None:
-    """Point the public-history bridge at the archive this clone already holds.
-
-    Only when AI_SHUFFLE_PRIVATE_CHECKOUT is unset. A shared checkout often has
-    the archive as a remote (origin) beside the public repository; its common
-    Git directory is then a complete private clone, unless it is shallow.
-    Nothing is imported into a public-only clone: without such a remote this
-    does nothing and the bridge explains the variable.
-    """
-    if os.environ.get(PRIVATE_CHECKOUT_ENV, "").strip():
-        return
-    remote = github_remote(PRIVATE_REPOSITORY)
-    if remote is None:
-        return
-    if git("rev-parse", "--is-shallow-repository") != "false":
-        print(f"Not using remote '{remote}' ({PRIVATE_REPOSITORY}) for {PRIVATE_CHECKOUT_ENV}: "
-              "this clone is shallow.")
-        return
-    common = Path(git("rev-parse", "--git-common-dir"))
-    common = (common if common.is_absolute() else ROOT / common).resolve()
-    try:
-        # The bridge checks the archive's current main; refresh it, best effort.
-        git("fetch", "-q", "--no-tags", "--", remote, f"+refs/heads/main:refs/remotes/{remote}/main")
-    except subprocess.CalledProcessError:
-        print(f"Warning: could not refresh {remote}/main; using the archive history already fetched.")
-    os.environ[PRIVATE_CHECKOUT_ENV] = str(common)
-    print(f"{PRIVATE_CHECKOUT_ENV} is unset; using this clone's {PRIVATE_REPOSITORY} remote "
-          f"'{remote}' ({common}).")
-
-
 def on_first_parent_history(revision: str, ref: str) -> bool:
     """Whether ``revision`` is on ``ref``'s first-parent history (a merged main revision)."""
     try:
@@ -1051,7 +1017,6 @@ def attest_preflight(revision: str, resumed: bool = False) -> None:
     if moved_on:
         print(f"Main moved to {tip[:9]} after this staged run started; finishing {revision[:9]}, "
               "which is still on public main's history.")
-    use_private_checkout()
     attest_update_reach(revision)
 
 
@@ -1066,7 +1031,7 @@ def cmd_check(args) -> int:
     python_preflight(python)
     if args.attest:
         # Seconds, not after a long run: public main, a clean tree and update
-        # reach (with its private-archive bridge) before any status or suite.
+        # reach before any status or suite.
         resumed = False
         if getattr(args, "step", False) and not getattr(args, "restart", False):
             import local_ci_stages

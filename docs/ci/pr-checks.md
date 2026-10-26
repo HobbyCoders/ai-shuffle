@@ -102,11 +102,9 @@ container image coverage but does not replace owner-controlled stable release
 requirements. Container PostgreSQL pressure tests remain included as already
 configured by CI Backend (the local run reports these as opt-in).
 
-No ordinary stage needs private source or owner-machine material. One historical
-exception remains unchanged: the initial public-root update-reach bridge needs
-a complete private archive locally. Hosted reach refuses if that bridge is still
-needed. Once the signed nightly pointer is in public history, all ordinary reach
-checks use public Git history, signed manifests and merged-PR metadata.
+No stage needs private source or owner-machine material. Update reach uses
+public Git history, signed manifests and merged-PR metadata only; a signed
+pointer that is not on public main refuses.
 
 After a successful main run, `desktop-source.yml` starts via `workflow_run` and
 re-verifies canonical repository, main/push-or-dispatch identity, root workflow
@@ -528,12 +526,9 @@ final stage write the full pass and post one success naming the tree (including
 the same coverage. If main advances mid-run, update to it and
 start over; old receipts cannot authorize the new revision.
 
-The update-reach check walks the private archive's history across the public
-root (see [release-channels.md](release-channels.md)). When
-`AI_SHUFFLE_PRIVATE_CHECKOUT` is unset and this clone has a remote for
-`HobbyCoders/ai-shuffle-private` (a shared checkout where `origin` is the
-archive), `--attest` uses this clone's own Git directory for it, says so, and
-refreshes that remote's `main`. A shallow clone is never used.
+The update-reach check needs only this clone's public history (see
+[release-channels.md](release-channels.md)); no private checkout or archive
+remote is used.
 
 The last lines of each run list what this machine did not cover:
 
@@ -729,7 +724,7 @@ pending or failed evidence leaves the existing nightly unchanged.
 The gate rechecks eligibility before signing and writing; the publisher also
 atomically checks the database pointer and enforces increasing signed sequences.
 An older revision cannot become a newer update merely by finishing later. See
-[release channels](release-channels.md) for the selection and cutover rules.
+[release channels](release-channels.md) for the selection rules.
 `local_ci.py` warns when main has moved when it posts pending/success/failure,
 and explains that only an eligible ancestor may ship at the next scheduled run.
 This does not block bare `gh pr merge`, start publication, or waive update-reach.

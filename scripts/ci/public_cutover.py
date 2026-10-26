@@ -1,14 +1,13 @@
-"""Fail-closed, one-epoch public-root bridge. Never imports private Git objects.
+"""The frozen public-root record and the container sequence it anchors.
 
-The record lives at release/public-cutover.json in the public root. The owner
-sets AI_SHUFFLE_PRIVATE_CHECKOUT to a separate complete private checkout for
-local attestation. Public publishers need only the resulting exact-main status.
+The public history starts at one root commit carrying release/public-cutover.json
+and release/container-sequence-offset. Publishers read them to continue the
+container sequence and desktop signing floor from the archived history; both
+files are immutable for this history epoch. Nothing here reads the archive.
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,30 +15,13 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 MAPPING = "release/public-cutover.json"
 OFFSET = "release/container-sequence-offset"
+# Names the frozen record carries; only validated, never contacted.
 OLD_REPO = "HobbyCoders/ai-shuffle-private"
 NEW_REPO = "HobbyCoders/ai-shuffle"
 
 
-class PrivateCheckoutRequired(ValueError):
-    """The cutover bridge needs a separate, complete private checkout."""
-
-
 def git(root, *args):
     return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
-
-
-def api(repository, route=""):
-    return json.loads(subprocess.check_output(
-        ["gh", "api", f"repos/{repository}" + (f"/{route}" if route else "")], text=True, timeout=30))
-
-
-def public_root(root, revision="HEAD"):
-    if git(root, "rev-parse", "--is-shallow-repository") != "false":
-        raise ValueError("Complete history required")
-    roots = git(root, "rev-list", "--max-parents=0", revision).splitlines()
-    if len(roots) != 1:
-        raise ValueError("Expected exactly one root")
-    return roots[0]
 
 
 def mapping(root, revision="HEAD"):
@@ -92,45 +74,3 @@ def container_sequence(root, revision="HEAD"):
     if not 0 < sequence < 2**53:
         raise ValueError("Container sequence outside the safe integer range")
     return sequence
-
-
-def verify_bridge(root, revision, published, envelope, *, private_root=None, github=api, walk=None):
-    """Verify identity, signed baseline, complete exact tree and each old PR's reach."""
-    initial, record = mapping(root, revision)
-    if record is None:
-        raise ValueError("No configured public-root transition")
-    if published != record["published_revision"] or hashlib.sha256(envelope).hexdigest() != record["envelope_sha256"]:
-        raise ValueError("Published envelope does not match the frozen cutover baseline")
-    # Caller verifies the signature with the current trust key before calling.
-    private_root = Path(private_root or os.environ.get("AI_SHUFFLE_PRIVATE_CHECKOUT", ""))
-    if (not private_root.is_absolute() or private_root.resolve() == Path(root).resolve()
-            or not private_root.is_dir()):
-        raise PrivateCheckoutRequired("A separate AI_SHUFFLE_PRIVATE_CHECKOUT is required")
-    if git(private_root, "rev-parse", "--is-shallow-repository") != "false":
-        raise PrivateCheckoutRequired("Complete private history required")
-    identity = github(OLD_REPO, "")
-    if identity.get("id") != record["old_repository_id"] or identity.get("full_name") != OLD_REPO or identity.get("private") is not True:
-        raise ValueError("Private repository identity mismatch")
-    branch = github(OLD_REPO, "branches/main")
-    pr = github(OLD_REPO, f"pulls/{record['export_pr']}")
-    if (not branch.get("protected") or not pr.get("merged_at")
-            or pr.get("base", {}).get("ref") != "main"
-            or pr.get("base", {}).get("repo", {}).get("id") != record["old_repository_id"]):
-        raise ValueError("Export must be a merged PR on protected private main")
-    export = pr.get("merge_commit_sha", "")
-    if not re.fullmatch(r"[0-9a-f]{40}", export):
-        raise ValueError("Invalid export SHA")
-    if export not in git(private_root, "rev-list", "--first-parent", branch["commit"]["sha"]).splitlines():
-        raise ValueError("Export is not on private main")
-    if published not in git(private_root, "rev-list", "--first-parent", export).splitlines():
-        raise ValueError("Frozen publication is not on the export first-parent history")
-    if git(private_root, "rev-parse", f"{export}^{{tree}}") != git(root, "rev-parse", f"{initial}^{{tree}}"):
-        raise ValueError("Private export and public root must have the identical complete Git tree")
-    container_sequence(root, revision)
-    if walk is None:
-        raise ValueError("Strict private update-reach walker is required")
-    accepted, reason = walk(export, base=published, root=private_root,
-                            repository=OLD_REPO, api=lambda route: github(OLD_REPO, route), bridge=False)
-    if not accepted:
-        raise ValueError(reason)
-    return initial, export

@@ -23,42 +23,25 @@ source publication workflow runs on a pull request.
 
 ## Fresh public history and publication identity
 
-The public root must have the complete tree of the merged private export. The
-bridge only verifies that transition for local update-reach attestation; it does
-not bypass archive exact-tree verification, signatures, protected-main status,
-merged-PR evidence or owner acceptance labels. It never fetches private objects
-into the public checkout. The local attester needs a complete private
-checkout (`AI_SHUFFLE_PRIVATE_CHECKOUT` or the helpers' `--private-checkout`).
-When the variable is unset, `scripts/local_ci.py full --attest` uses the
-attesting clone itself if it already has a non-shallow remote for the archive.
+The public history starts at a single root commit, cut from the archived
+private repository. That root carries `release/public-cutover.json` and
+`release/container-sequence-offset`, and both stay immutable for the whole
+public history epoch (`scripts/ci/public_cutover.py` refuses a changed or
+reverted copy). Publishers still read them: the offset continues the container
+sequence from the last shipped archive image, and the record's desktop maximum
+and archive repository ID set the source signing floor and let the archive's
+historical installer rows count toward it. The offset is committed data, read
+from the target revision, never a GitHub variable or environment override.
 
-After freezing/draining publishers and inventorying the maximum container
-sequence across all distributed/withdrawn sources and images, open the final
-private export PR. On its clean branch run:
-
-```sh
-python scripts/release/prepare_cutover.py --export-pr "$EXPORT_PR" --last-shipped "$MAX_SHIPPED" --last-desktop-sequence "$MAX_DESKTOP_SEQUENCE"
-```
-
-Review/commit `release/public-cutover.json` and `release/container-sequence-offset`
-in that PR. The mapping pins the private numeric repository identity, export PR,
-signed old publication envelope hash/revision and inventory maxima. The desktop
-maximum covers all signed source sequences and installer-bundled commit-time
-baselines, including withdrawn/historical deliveries. Do not
-publish this export from old history. Copy its exact complete tree to the single
-public root; retain the signed envelope privately. The offset is committed data,
-read from the target revision, never a GitHub variable or environment override.
-It is immutable with the mapping for the entire public history epoch.
-
-On the first public release PR, run `python scripts/release/repin_catalog.py
---public-root "$S"`; commit and merge it before a stable tag. The initial root
-itself is not eligible for stable. Use `bridge_attestation.py --private-export
-"$E" --public-root "$S" --private-checkout "$PRIVATE" --out "$RECEIPT"` for an
-audit receipt; `--verify "$RECEIPT"` repeats the live evidence checks, rather than
-trusting the receipt as an authorization. Run `cutover_check.py` with those E/S
-and checkout arguments plus `--old-repo HobbyCoders/ai-shuffle-private --new-repo
-HobbyCoders/ai-shuffle`. Failures are stop points, not bypass switches. The normal
-full-suite exact-main attestation remains required after this read-only check.
+Nothing reads the archive itself. Every signed nightly and stable pointer is
+on public main's first-parent history, so update reach and nightly selection
+use only public Git history, signed manifests and merged-PR metadata. A
+published pointer that is not on public main refuses (fetch `origin/main`); it
+is never bridged. The one-time cutover helpers (export preparation, catalog
+repin, bridge attestation and the cutover preflight) have been removed; the
+release workflow wiring check they carried is
+`python scripts/release/release_wiring.py`. A connector catalog pin must be a
+commit on the release's own history.
 
 Every publisher now requires `RELEASE_GITHUB_REPO_ID` (the current publication
 repository's numeric GitHub ID); `RELEASE_GITHUB_REPO` defaults to
@@ -228,9 +211,6 @@ requires an owner-authored local full-suite status or verified hosted main-suite
 success on the exact protected-main revision, using the same read-only gate. It rechecks main after the image pull and reads the nightly alias
 back. Missing/stale/failed evidence refuses promotion; this lane never moves
 `latest`, major or minor aliases, and mixed nightly/stable requests are rejected.
-The pre-canary cutover check requires Actions disabled and all runs drained in
-**all three** repositories: old private app, new public app and cloud. Enable the
-public candidate publisher only after that checkpoint as the runbook describes.
 
 The **nightly** source update runs automatically after `main-suite` completes
 successfully on protected `main`, as well as once a day at **06:00 UTC** and by
@@ -295,15 +275,12 @@ exact revision, not the control tree. The publisher compares the
 verified feed to the actual database lane and atomically compares-and-swaps that
 lane on insert, in addition to requiring a signed sequence above every prior
 sequence. A stale feed or losing concurrent writer refuses rather than moving
-backwards. Only the frozen, verified public-root cutover may bridge histories.
+backwards. A published revision that is not on public main refuses selection.
 Selection scans at most 100 unpublished main commits; without a pass in that
 window it fails closed and needs a fresh tip full-suite pass. See
 [the hosted parity inventory](pr-checks.md#hosted-main-suite) for the exact local
 to hosted mapping. No test job receives signing secrets or a private checkout.
-The initial frozen cross-history update-reach bridge still needs the private
-archive locally; hosted checks refuse rather than omit it if that transition
-has not yet been completed. Once the signed pointer is on public history, the
-normal strict signed-pointer/merged-PR reach walk uses public material only.
+The strict signed-pointer/merged-PR reach walk uses public material only.
 
 Stable releases still require an owner-created release tag. Existing workers
 stay on their selected channel: publication never switches, installs or restarts
