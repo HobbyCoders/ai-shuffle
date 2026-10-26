@@ -40,16 +40,15 @@
     is layered translucent shapes, never gradients (the files hold shapes only).
     Mixed in oklab, not oklch: the light theme's background is oklch(0.995 0 0),
     whose hue 0 would swing every tint toward pink/beige in a hue blend. Face
-    details use fixed ink and white so they read on the solid body in both themes. */
- .agent-avatar { --c:var(--av, var(--primary)); --body:var(--c); display:inline-flex; flex:none; align-items:center; justify-content:center; color:var(--c); background:color-mix(in oklab,var(--c) 17%,var(--background)); border-radius:50%; overflow:hidden; }
- /* Light-theme accents are darker; lift the body so the ink face stays readable. */
- :global(.light) .agent-avatar { --body:color-mix(in oklab,var(--c) 75%,#fff); }
+    details use fixed ink and white, so the body keeps a lightness floor: dark
+    accents (light themes, Vercel's black primary) would otherwise swallow the face. */
+ .agent-avatar { --c:var(--av, var(--primary)); --body:oklch(from var(--c) max(l, 0.72) c h); display:inline-flex; flex:none; align-items:center; justify-content:center; color:var(--c); background:color-mix(in oklab,var(--c) 17%,var(--background)); border-radius:50%; overflow:hidden; }
  .agent-avatar.neutral { background:color-mix(in oklab,var(--c) 10%,var(--background)); outline:1px dashed color-mix(in oklab,var(--c) 55%,transparent); outline-offset:-1px; }
  .agent-avatar.neutral :global(svg) { filter:saturate(0); }
  .agent-avatar :global(svg) { width:90%; height:90%; }
  .agent-avatar :global(.shape) { fill:var(--body); }
- .agent-avatar :global(.shape.pale), .agent-avatar :global(.tint) { fill:color-mix(in oklab,var(--c) 42%,#fff); }
- .agent-avatar :global(.deep) { fill:color-mix(in oklab,var(--c) 68%,#000); }
+ .agent-avatar :global(.shape.pale), .agent-avatar :global(.tint) { fill:color-mix(in oklab,var(--body) 42%,#fff); }
+ .agent-avatar :global(.deep) { fill:color-mix(in oklab,var(--body) 68%,#000); }
  .agent-avatar :global(.ink) { fill:#16181d; }
  .agent-avatar :global(.white) { fill:#fff; }
  .agent-avatar :global(.shine) { fill:#fff; opacity:.5; }
@@ -59,6 +58,6 @@
  .agent-avatar :global(.jewel) { fill:oklch(0.62 0.2 22); }
  .agent-avatar :global(.leaf) { fill:oklch(0.74 0.17 145); }
  .agent-avatar :global(.stroke-ink) { stroke:#16181d; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; }
- .agent-avatar :global(.stroke-deep) { stroke:color-mix(in oklab,var(--c) 68%,#000); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
- .agent-avatar :global(.stroke-tint) { stroke:color-mix(in oklab,var(--c) 42%,#fff); stroke-width:3.5; stroke-linecap:round; }
+ .agent-avatar :global(.stroke-deep) { stroke:color-mix(in oklab,var(--body) 68%,#000); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+ .agent-avatar :global(.stroke-tint) { stroke:color-mix(in oklab,var(--body) 42%,#fff); stroke-width:3.5; stroke-linecap:round; }
 </style>

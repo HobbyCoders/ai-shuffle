@@ -12,5 +12,5 @@
   <ellipse class="blush" cx="19" cy="41" rx="2.8" ry="1.8"/>
   <ellipse class="blush" cx="45" cy="41" rx="2.8" ry="1.8"/>
   <path class="shine" d="M16.5 29.5h3l-3 10Z"/>
-  <path class="gold" d="M55 3q0 6 6 6-6 0-6 6 0-6-6-6 6 0 6-6Z"/>
+  <path class="gold" d="M53 5q0 5 5 5-5 0-5 5 0-5-5-5 5 0 5-5Z"/>
 </svg>
