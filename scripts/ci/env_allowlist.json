@@ -1186,6 +1186,18 @@
     "target_pr": 2,
     "base_settings": true
   },
+  "FLUID_LEARNER_DAILY_CALLS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Daily model-call budget of the continual learner",
+    "target_pr": 2,
+    "base_settings": true
+  },
+  "FLUID_LEARNER_RESERVED_CALLS": {
+    "kind": "internal",
+    "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Daily learner calls kept for memory consolidation",
+    "target_pr": 2,
+    "base_settings": true
+  },
   "FLUID_MAX_CALLS": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Maximum model calls within one native turn",

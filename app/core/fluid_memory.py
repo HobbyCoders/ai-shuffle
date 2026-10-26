@@ -257,6 +257,18 @@ def journal_diagnostics() -> dict:
 HEALTH_INTERVAL_SECONDS = 3600
 
 
+def configure_learner() -> tuple[int, int]:
+    """Apply the learner's daily call budget (``fluid_learner_daily_calls``,
+    ``fluid_learner_reserved_calls``) to every synthesizer this process
+    builds. Unset keeps fluid's defaults. Returns the effective budget."""
+    from fluid.codemode.continual import configure_learner_budget
+
+    from app.core.config import settings
+    return configure_learner_budget(
+        settings.fluid_learner_daily_calls, settings.fluid_learner_reserved_calls,
+    )
+
+
 def _learning_enabled() -> bool:
     from app.core.config import settings
     return bool(settings.fluid_continual)

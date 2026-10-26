@@ -68,3 +68,27 @@ def test_memory_health_api_returns_the_owner_view(authenticated_client, monkeypa
     assert first["state"] == "attention" and first["label"] == "Learning"
     assert {"id", "label", "state", "reason", "detail"} <= set(first)
     assert isinstance(body["repairs"], list) and body["checked_at"]
+
+
+def test_learner_budget_setting_reaches_every_synthesizer(monkeypatch):
+    from fluid.codemode.continual import (
+        Synthesizer,
+        configure_learner_budget,
+        learner_budget,
+    )
+
+    monkeypatch.setattr(settings, "fluid_learner_daily_calls", 200)
+    monkeypatch.setattr(settings, "fluid_learner_reserved_calls", None)
+    try:
+        assert fluid_memory.configure_learner() == (200, 2)
+        store = fluid_memory.store_for_owner("local")
+        assert Synthesizer(None, "gpt-test", store)._budget() == (200, 2)
+        monkeypatch.setattr(settings, "fluid_learner_daily_calls", 5000)
+        monkeypatch.setattr(settings, "fluid_learner_reserved_calls", 0)
+        assert fluid_memory.configure_learner() == (1000, 0), "clamped"
+        monkeypatch.setattr(settings, "fluid_learner_daily_calls", None)
+        monkeypatch.setattr(settings, "fluid_learner_reserved_calls", None)
+        assert fluid_memory.configure_learner() == (48, 2), "unset keeps fluid's default"
+    finally:
+        configure_learner_budget(None, None)
+    assert learner_budget() == (48, 2)

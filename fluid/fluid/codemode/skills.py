@@ -30,6 +30,11 @@ Alongside the skills the store keeps:
   that were not recorded or were dropped unsynthesized (quota, busy lock,
   backlog overflow), so coverage loss outlives the process that saw it.
   Never content. Rewritten at most once per warning window per process.
+  Backlog drops are also counted per journal kind (``dropped_by_kind``).
+- ``journal.jsonl.lease`` — while a synthesis pass waits for its model, the
+  line range it read and how far a reap has moved it since (positions only),
+  so the reap leaves that slice alone and the pass advances the cursor to
+  the right line. Removed when the pass ends; ignored after 30 minutes.
 - ``.workflow-loss.json`` — a fixed-size, monotone hash filter of sessions
   whose journal evidence was trimmed; prevents learning from partial tails
   that happen to start at a later user request. No session content or IDs.
@@ -126,14 +131,17 @@ def _journal_window_count(path: str, kind: str, interval: float) -> int:
         return emit
 
 
-def _journal_event(event: str, count: int = 1, journal: str | None = None) -> None:
+def _journal_event(
+    event: str, count: int = 1, journal: str | None = None,
+    by_kind: dict[str, int] | None = None,
+) -> None:
     global _JOURNAL_SATURATED_AT
     with _JOURNAL_METRICS_LOCK:
         _JOURNAL_METRICS[event] += count
         if event in ("skipped_quota", "explicit_quota_failures"):
             _JOURNAL_SATURATED_AT = time.monotonic()
         if journal is not None and event in JOURNAL_LOSS_EVENTS:
-            _note_unpersisted_loss(journal, event, count)
+            _note_unpersisted_loss(journal, event, count, by_kind)
 
 
 # ─── persisted journal loss history ──────────────────────────────────────────
@@ -151,16 +159,35 @@ JOURNAL_LOSS_EVENTS = (
     "skipped_quota", "skipped_busy", "explicit_quota_failures", "explicit_busy_failures",
     "dropped_unsynthesized",
 )
+# ``dropped_by_kind`` splits ``dropped_unsynthesized`` by journal kind, over
+# this fixed key set (anything else counts as "other"), so the record keeps
+# its fixed shape. The value reap keeps the user/assistant/friction share for
+# last; a drop there is the loss worth naming (see memory_health).
+JOURNAL_LOSS_KINDS = ("cell", "tool", "user", "assistant", "friction", "other")
+JOURNAL_HIGH_VALUE_KINDS = ("user", "assistant", "friction")
 _JOURNAL_LOSS_LIMIT = 512
-# journal backoff key -> {event: count, "first_at", "last_at", "last_quota_at"}
+# journal backoff key -> {event: count, "dropped_by_kind": {kind: count},
+# "first_at", "last_at", "last_quota_at"}
 _JOURNAL_UNPERSISTED: OrderedDict[str, dict] = OrderedDict()
 
 
-def _note_unpersisted_loss(journal: str, event: str, count: int) -> None:
+def journal_loss_kind(kind: object) -> str:
+    """The ``dropped_by_kind`` key for a journal entry's ``kind``."""
+    return kind if isinstance(kind, str) and kind in JOURNAL_LOSS_KINDS else "other"
+
+
+def _note_unpersisted_loss(
+    journal: str, event: str, count: int, by_kind: dict[str, int] | None = None,
+) -> None:
     # Called with _JOURNAL_METRICS_LOCK held.
     now = time.time()
     pending = _JOURNAL_UNPERSISTED.pop(journal, None) or {"first_at": now}
     pending[event] = pending.get(event, 0) + count
+    if by_kind:
+        kinds = pending.setdefault("dropped_by_kind", {})
+        for kind, n in by_kind.items():
+            key = journal_loss_kind(kind)
+            kinds[key] = kinds.get(key, 0) + int(n)
     pending["last_at"] = now
     if event in ("skipped_quota", "explicit_quota_failures"):
         pending["last_quota_at"] = now
@@ -217,6 +244,18 @@ def _merge_loss(record: dict, pending: dict) -> dict:
         value = record.get(name, 0)
         base = value if type(value) is int and value >= 0 else 0
         merged[name] = base + pending.get(name, 0)
+    # Records from builds before the split have no dropped_by_kind: their
+    # drops stay in the total only.
+    kinds: dict[str, int] = {}
+    for source in (record.get("dropped_by_kind"), pending.get("dropped_by_kind")):
+        if not isinstance(source, dict):
+            continue
+        for kind in JOURNAL_LOSS_KINDS:
+            value = source.get(kind, 0)
+            if type(value) is int and value > 0:
+                kinds[kind] = kinds.get(kind, 0) + value
+    if kinds:
+        merged["dropped_by_kind"] = kinds
     for name, pick in (("first_at", min), ("last_at", max), ("last_quota_at", max)):
         values = [
             v for v in (record.get(name), pending.get(name))
@@ -355,12 +394,17 @@ JOURNAL_MAX_BYTES = 1_048_576  # append refuses lines that would cross this
 # refused every new one, and the store went deaf.
 JOURNAL_REAP_FRACTION = 0.5
 # Backlog ceiling: when the file is past this fraction of JOURNAL_MAX_BYTES
-# and the consumed prefix is already gone, the oldest UNSYNTHESIZED lines are
-# dropped down to the reap target (explicit kinds excepted). Inference is
-# allowed to be lossy; a store that refuses every new line because synthesis
-# keeps failing is not. A failed pass never advances the cursor, so after a
-# run of failures nothing is consumed and nothing is reapable.
+# and the consumed prefix is already gone, UNSYNTHESIZED lines are dropped
+# down to the reap target (explicit kinds excepted), lowest value first (see
+# journal_drop_tier). Inference is allowed to be lossy; a store that refuses
+# every new line because synthesis keeps failing or cannot keep up is not. A
+# failed pass never advances the cursor, so after a run of failures nothing
+# is consumed and nothing is reapable.
 JOURNAL_OVERFLOW_FRACTION = 0.9
+# How long a pass's read lease (see SkillStore.begin_synth_read) protects
+# its slice from the backlog reap. A pass is bounded far below this; a lease
+# a crashed process left behind stops counting after it.
+SYNTH_LEASE_TTL = 30 * 60.0
 # Journal kinds a person (or the model on their behalf) wrote on purpose. An
 # append that cannot land one of these raises instead of logging, so the
 # caller can surface the loss instead of reporting "recorded".
@@ -376,6 +420,33 @@ MAX_LOG_ENTRIES = 500
 MAX_LOG_BYTES = 262_144  # only look at a log once it grows past this
 
 DEFAULT_SKILLS_ROOT = Path.home() / ".fluid" / "skills"
+
+
+def journal_drop_tier(entry: object) -> int:
+    """Where an unread journal entry stands in the backlog reap: 0 goes
+    first, 2 last (oldest first within a tier).
+
+    0. what the learner would consume without showing it anyway: successful
+       read-only cells and tool calls (``continual.low_value_entry``);
+    1. other successful cells and tool calls;
+    2. everything else: failed cells and calls, friction, user and assistant
+       prose (where corrections and preferences are), unknown kinds and
+       unparseable lines (a dropped malformed line saturates the workflow
+       completeness filter, see workflow_loss).
+    """
+    if not isinstance(entry, dict):
+        return 2
+    kind = entry.get("kind", "cell")
+    if kind not in ("cell", "tool") or entry.get("error"):
+        return 2
+    calls = entry.get("calls")
+    if isinstance(calls, list) and any(isinstance(c, dict) and c.get("ok") is False for c in calls):
+        return 2
+    from fluid.codemode.continual import low_value_entry
+    try:
+        return 0 if low_value_entry(entry) else 1
+    except Exception:  # noqa: BLE001 — an odd entry is kept, not misfiled as low value
+        return 1
 
 
 def trim_jsonl(path: Path, keep: int) -> int:
@@ -1131,10 +1202,10 @@ class SkillStore:
     def reap_journal(self) -> int:
         """Drop consumed journal lines past the retention tail or byte target.
 
-        Only lines *behind* the synthesis cursor are droppable — nothing the
-        synthesizer has yet to read is ever removed (a slice the daily
-        budget could not pay for stays until a pass consumes it). Beyond
-        that, two rules decide how much of the consumed prefix survives:
+        Normally only lines *behind* the synthesis cursor are droppable —
+        nothing the synthesizer has yet to read is removed (a slice the
+        daily budget could not pay for stays until a pass consumes it), the
+        backlog overflow below excepted. Beyond that, two rules decide how much of the consumed prefix survives:
         the line tail (``JOURNAL_KEEP_ENTRIES`` recent lines stay), and the
         byte target — while the file is over ``JOURNAL_REAP_FRACTION`` of
         ``JOURNAL_MAX_BYTES``, consumed lines go oldest-first regardless of
@@ -1146,16 +1217,28 @@ class SkillStore:
         Backlog overflow: when the file is past
         ``JOURNAL_OVERFLOW_FRACTION`` of the cap and dropping every
         droppable consumed line would not bring it back under that line,
-        synthesis is not consuming the journal (a failing provider, a spent
-        budget). The oldest unsynthesized lines then go too, down to the
-        reap target, except explicit kinds, with a warning naming the count.
-        Dropping old evidence is lossy; refusing all new evidence forever,
-        which is what happened before, is worse.
+        synthesis is not consuming the journal fast enough (a failing
+        provider, a spent budget, more intake than the budget reads).
+        Unsynthesized lines then go too, down to the reap target, lowest
+        value first (:func:`journal_drop_tier`, oldest first within a tier),
+        never explicit kinds and never the slice a running pass is reading
+        (its read lease, see :meth:`begin_synth_read`), with a warning naming
+        the count. Every dropped line is recorded in ``.workflow-loss.json``
+        first, so its session's episode stays marked incomplete. Dropping
+        evidence is lossy; refusing all new evidence forever, which is what
+        happened before, is worse.
 
-        The cursor is rebased by the number of removed lines that were behind
-        it, so ``journal_entries(start=synth_cursor())`` keeps meaning the
-        same slice. Returns the number of lines dropped; every failure path
-        returns 0 and leaves the journal untouched.
+        Positions: ``meta.synth_cursor`` is a line position in the retained
+        journal, the first line no pass has read. Drops at or past it (the
+        backlog) leave it unchanged: the lines after a dropped one move up,
+        and the first unread line that survives is still at the cursor.
+        Drops behind it (the consumed prefix) move it back by their number,
+        so ``journal_entries(start=synth_cursor())`` keeps meaning the same
+        slice. A pass's lease is moved the same way and records how far, so
+        the pass can translate the line positions it read before the reap
+        (see :meth:`commit_synth_cursor`). Returns the number of lines
+        dropped; every failure path returns 0 and leaves the journal
+        untouched.
 
         The read-and-replace runs under the journal lock so a cooperating
         appender in another process waits instead of writing into the file
@@ -1191,9 +1274,12 @@ class SkillStore:
                 drop = max(drop, _lines_to_free(
                     self._journal_path, consumed, size - target,
                 ))
+            lease = self._read_synth_lease()
             backlog: list[int] = []
+            backlog_kinds: dict[str, int] = {}
             if size > JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
-                backlog = self._backlog_to_drop(drop, size, target)
+                protect = range(lease["start"], lease["end"]) if lease else range(0)
+                backlog, backlog_kinds = self._backlog_to_drop(drop, size, target, protect)
             removed = set(range(drop)) | set(backlog)
             if removed:
                 from fluid.codemode.workflow_loss import record_loss
@@ -1215,6 +1301,8 @@ class SkillStore:
             if not removed or not ok:
                 return 0
             behind = sum(1 for i in removed if i < cursor)
+            if lease:
+                self._shift_synth_lease(lease, sum(1 for i in removed if i < lease["start"]))
             meta = self._load_meta()
             meta["synth_cursor"] = max(0, int(meta.get("synth_cursor", 0)) - behind)
             self._save_meta(meta)
@@ -1224,54 +1312,171 @@ class SkillStore:
             if backlog:
                 _journal_event(
                     "dropped_unsynthesized", len(backlog), journal=self._journal_backoff_key,
+                    by_kind=backlog_kinds,
                 )
                 _persist_journal_loss(self._journal_backoff_key)
                 _log.warning(
                     "Memory journal backlog overflow: dropped %d unsynthesized "
-                    "entries (oldest first) from %s; synthesis has not been "
-                    "consuming the journal, see .synthesis-log.jsonl beside it "
-                    "(store=%s)", len(backlog), self._journal_path,
-                    self.store_id() or "new",
+                    "entries (lowest value first: %s) from %s; synthesis has not "
+                    "been keeping up with the journal, see .synthesis-log.jsonl "
+                    "beside it (store=%s)", len(backlog),
+                    ", ".join(f"{k} {n}" for k, n in sorted(backlog_kinds.items())),
+                    self._journal_path, self.store_id() or "new",
                 )
             return len(removed)
 
     def _backlog_to_drop(
-        self, drop: int, size: int, target: int,
-    ) -> list[int]:
-        """Line indices of unsynthesized entries to drop on overflow.
+        self, drop: int, size: int, target: int, protect: range = range(0),
+    ) -> tuple[list[int], dict[str, int]]:
+        """Line indices of unsynthesized entries to drop on overflow, and
+        their count per ``journal_loss.json`` kind.
 
         Only called when the file is past the overflow line. Counts the bytes
         the consumed-prefix drop already frees; when that is not enough to
-        get under the overflow line, returns the oldest lines at or past
-        ``drop`` (skipping explicit kinds) until the file would be under
-        ``target``. Returns [] when the consumed drop suffices.
+        get under the overflow line, picks lines at or past ``drop`` until
+        the file would be under ``target``: tier by tier
+        (:func:`journal_drop_tier`), oldest first within a tier, skipping
+        explicit kinds and the ``protect`` range (a running pass's slice).
+        Returns ``([], {})`` when the consumed drop suffices.
         """
         sizes: list[int] = []
-        explicit: set[int] = set()
+        candidates: list[tuple[int, int, str]] = []  # (tier, index, loss kind)
         try:
             with self._journal_path.open("rb") as fh:
                 for i, raw in enumerate(fh):
                     sizes.append(len(raw))
-                    if i >= drop:
-                        try:
-                            if json.loads(raw).get("kind") in JOURNAL_EXPLICIT_KINDS:
-                                explicit.add(i)
-                        except (ValueError, AttributeError):
-                            pass
+                    if i < drop or i in protect:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except ValueError:
+                        entry = None
+                    kind = entry.get("kind", "cell") if isinstance(entry, dict) else None
+                    if kind in JOURNAL_EXPLICIT_KINDS:
+                        continue
+                    candidates.append((journal_drop_tier(entry), i, journal_loss_kind(kind)))
         except OSError:
-            return []
+            return [], {}
         remaining = size - sum(sizes[:drop])
         if remaining <= JOURNAL_MAX_BYTES * JOURNAL_OVERFLOW_FRACTION:
-            return []
+            return [], {}
         out: list[int] = []
-        for i in range(drop, len(sizes)):
+        kinds: dict[str, int] = {}
+        for _, i, kind in sorted(candidates):
             if remaining <= target:
                 break
-            if i in explicit:
-                continue
             out.append(i)
+            kinds[kind] = kinds.get(kind, 0) + 1
             remaining -= sizes[i]
-        return out
+        return sorted(out), kinds
+
+    # ─── read lease: a running pass's slice ───────────────────────────────
+    #
+    # A pass reads its slice by line position, waits for the model, then
+    # advances the cursor to the position it reached. A reap in between (an
+    # append at the cap runs one, in this process or another) removes lines
+    # and moves every later position. The lease, a small file beside the
+    # journal written under the journal lock, names the slice: the reap
+    # never drops a line inside it, and moves it back by the number of lines
+    # it dropped before it, adding that to ``shift``. The slice's lines all
+    # move together, so position ``p`` read before the reap is ``p - shift``
+    # after it. Without the lease the pass advanced the cursor past lines it
+    # never read.
+
+    @property
+    def _lease_path(self) -> Path:
+        return self._journal_path.with_name(self._journal_path.name + ".lease")
+
+    def _read_synth_lease(self) -> dict | None:
+        try:
+            doc = json.loads(self._lease_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(doc, dict):
+            return None
+        fields = [doc.get(k) for k in ("start", "end", "shift")]
+        at = doc.get("at")
+        if (not all(type(v) is int and v >= 0 for v in fields) or fields[0] > fields[1]
+                or type(at) not in (int, float) or not isinstance(doc.get("token"), str)):
+            return None
+        if not 0 <= time.time() - at < SYNTH_LEASE_TTL:
+            return None  # left behind by a pass that crashed
+        return doc
+
+    def _write_synth_lease(self, lease: dict) -> None:
+        atomic_write_text(self._lease_path, json.dumps(lease, sort_keys=True))
+
+    def _shift_synth_lease(self, lease: dict, by: int) -> None:
+        if by <= 0:
+            return
+        moved = {**lease, "start": max(0, lease["start"] - by),
+                 "end": max(0, lease["end"] - by), "shift": lease["shift"] + by}
+        try:
+            self._write_synth_lease(moved)
+        except OSError:
+            # Unknown shift: drop the lease, so the pass keeps its cursor
+            # where it was and rereads the slice (see commit_synth_cursor).
+            _discard(self._lease_path)
+
+    def begin_synth_read(
+        self, limit: int | None,
+    ) -> tuple[str | None, int, list[tuple[int, dict]], int]:
+        """Read the unsynthesized slice and lease it, in one step under the
+        journal lock so no reap lands between the cursor, the slice and the
+        lease. Returns ``(token, cursor, indexed, reached)``: the lease
+        token for :meth:`commit_synth_cursor` / :meth:`end_synth_read`, and
+        :meth:`journal_slice_indexed` from the cursor. The token is None
+        when no lease could be written; the pass then advances the cursor
+        as older builds did."""
+        import uuid
+        with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT) as held:
+            cursor = self.synth_cursor()
+            indexed, reached = self.journal_slice_indexed(cursor, limit)
+            if not held:
+                return None, cursor, indexed, reached
+            token = uuid.uuid4().hex
+            try:
+                self._write_synth_lease({
+                    "token": token, "start": max(0, cursor), "end": max(0, cursor, reached),
+                    "shift": 0, "at": time.time(),
+                })
+            except OSError:
+                return None, cursor, indexed, reached
+        return token, cursor, indexed, reached
+
+    def commit_synth_cursor(self, token: str | None, reached: int) -> int:
+        """Advance the cursor to line position ``reached`` as the pass read
+        it, translated over any reap since :meth:`begin_synth_read`, and end
+        the lease. Returns the cursor written.
+
+        A lease that is gone (expired, or a reap could not move it) leaves
+        the cursor where the store has it, so the slice is read again rather
+        than lines being skipped. Without a token (no lease was written)
+        ``reached`` is used as is."""
+        # A lock not won within the wait: go ahead unlocked, as
+        # set_synth_cursor always has.
+        with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT):
+            lease = self._read_synth_lease() if token else None
+            ours = lease is not None and lease.get("token") == token
+            if token and not ours:
+                cursor = self.synth_cursor()
+            else:
+                cursor = int(reached) - (lease["shift"] if lease else 0)
+            cursor = max(0, min(cursor, self.journal_count()))
+            self.set_synth_cursor(cursor)
+            if ours:
+                _discard(self._lease_path)
+        return cursor
+
+    def end_synth_read(self, token: str | None) -> None:
+        """End the lease without moving the cursor (a failed or abandoned
+        pass). No-op when the lease is not ``token``'s."""
+        if not token:
+            return
+        with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT):
+            lease = self._read_synth_lease()
+            if lease is not None and lease.get("token") == token:
+                _discard(self._lease_path)
 
     def reap(self) -> dict[str, int]:
         """Bound every append-only file the store owns. Never raises.
