@@ -39,9 +39,14 @@ Set `start` to the oldest launcher that can still start the release, not to
 `version`. A release that needs new launcher behaviour *before* its first
 healthy start must either do that work itself, as the late restore point does
 for launcher 3, or raise `start` and accept that older installs need an
-installer. Current value: 3. Launcher 3 (0.9.6 and 1.0.0; 1.0.1 ships launcher 4) starts these builds
-through the late restore point; older ones cannot verify them (the
-signing-key bridge).
+installer. Current value: 4 (owner decision, 1.1.0). Installs from a 0.9.6 or
+1.0.0 installer (launcher 3) that never swapped to launcher 4, and every Linux
+install from those installers (Linux never swaps), are told to install the
+latest installer instead of being offered an in-app update. Releases are no
+longer accepted against a 0.9.6 installer. Updaters older than the start floor
+(stable 1.0.2 and earlier) do not read `desktop.start`, so a launcher-3 install
+still on such an updater can download 1.1.0 once and start it through the late
+restore point, which stays in place for that case.
 
 - `launcher.json` is packed into `app.asar`.
 - `scripts/stamp-desktop-build.mjs` stamps `launcher: <version>` into the
@@ -65,10 +70,11 @@ after a failed first start). The launcher closure gained them in 1.0.0 without
 a version bump, so the 0.9.6 launcher (no restore points) and the 1.0.x
 launchers (restore points) both report 3. Minimum 4 makes every version-3
 launcher swap to this one after the update's first healthy start; from the
-next update on, the launcher makes the restore point again. Run the acceptance
-run below against a 0.9.6 installer and a 1.0.x installer before release.
+next update on, the launcher makes the restore point again. Before a release,
+run the acceptance run below against the oldest installer whose launcher meets
+`start` (the newest stable installer is enough while `start` is 4).
 
-Current version is **8**, with **minimum 4** and **start 3** unchanged. It starts
+Current version is **8**, with **minimum 4** and **start 4** (raised from 3 for 1.1.0). It starts
 the managed PostgreSQL server with `statement_timeout=30s`, `lock_timeout=5s` and
 `idle_in_transaction_session_timeout=30s` (#591), and its Windows process-identity
 probe no longer compiles a helper with `Add-Type` (#597). It keeps launcher 7's

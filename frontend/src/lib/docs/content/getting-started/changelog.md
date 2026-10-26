@@ -16,6 +16,7 @@ Watches, peer terminals, one generation tool, review mode, and a large reliabili
 
 - The personal assistant is gone. Updating deletes its conversation and the hidden helper tasks under it, so copy anything you want to keep from it before you update. Its behaviours now work in every chat: calling while the agent works, answering approvals by voice, the background-work strip, and auto-answers for chats another of your chats started.
 - The spending cap, the per-job time limit and the Usage limits switches (resume and compact) moved to **Settings → Usage**.
+- Installed on Linux with a 0.9.6 or 1.0.0 installer? After this update, run the latest installer from hobbycoders.com to keep getting updates. On Windows, do the same only if the app says a newer installer is needed. Installs from 1.0.1 or later need nothing.
 
 ### Install and packaging
 

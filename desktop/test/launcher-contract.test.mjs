@@ -20,10 +20,10 @@ test('#1821 D5: desktop/launcher.json holds a launcher version and a minimum no 
 });
 
 test('#97: this source states the oldest launcher that can start it', () => {
- // Launcher 3 (0.9.6, 1.0.x) starts it through the update's own late restore point;
- // launchers before the signing-key bridge cannot verify it.
+ // Owner decision (1.1.0): launcher 3 (0.9.6 and 1.0.0 installers) is no longer
+ // offered in-app updates; those installs are told to install the latest installer.
  const { version, start } = readLauncher(readFileSync(launcherJson, 'utf8'));
- assert.equal(start, 3);
+ assert.equal(start, 4);
  assert(start <= version);
 });
 
