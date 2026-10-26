@@ -158,7 +158,7 @@ describe('the model list', () => {
 		expect(names).toEqual([
 			'GPT-6.1 Sol Effort High 2 routes',
 			// The tile letter of a gateway without a brand mark comes first.
-			'H Qwen3 Coder No adjustable settings',
+			'S Qwen3 Coder No adjustable settings',
 			'Mystery Effort not known yet',
 			'Opus Effort Auto (High)'
 		]);
