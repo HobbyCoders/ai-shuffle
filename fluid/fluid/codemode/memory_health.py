@@ -25,8 +25,11 @@ from pathlib import Path
 from fluid.codemode import facts
 from fluid.codemode.continual import MIN_NEW_ENTRIES
 from fluid.codemode.skills import (
+    JOURNAL_HIGH_VALUE_KINDS,
     JOURNAL_LOSS_FILE,
+    JOURNAL_LOSS_KINDS,
     MAX_MEMORIES,
+    SkillStore,
     atomic_write_text,
     read_journal_loss,
 )
@@ -43,7 +46,8 @@ MIN_PASSES_TO_JUDGE = 4
 # Coverage: journal entries the overflow reap dropped unread, as a share of
 # what the learner took in over COVERAGE_WINDOW (read, filtered as low value,
 # or dropped). journal_loss.json holds a running total only, so each run
-# keeps a few (time, total) samples in the health state to measure growth.
+# keeps a few (time, total) samples in the health state to measure growth,
+# and beside them (time, {kind: total}) samples of its dropped_by_kind split.
 COVERAGE_WINDOW = 3 * DAY
 DROPPED_SHARE = 0.1
 LOSS_SAMPLE_EVERY = 3 * 3600.0
@@ -292,6 +296,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     plans = _snapshot_plans(store, [e for e in live if not e.get("conflicted")])
     learner = _learner_signal(store, now, learning_enabled, previous)
     samples = learner.pop("samples", previous.get("journal_loss_samples") or [])
+    kind_samples = learner.pop("kind_samples", previous.get("journal_loss_kind_samples") or [])
     signals = [
         learner,
         _usage_signal(live, plans, now),
@@ -313,6 +318,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
         "protected_ids": protected_ids,
         "lost_protected": lost,
         "journal_loss_samples": samples,
+        "journal_loss_kind_samples": kind_samples,
     }
 
 
@@ -345,6 +351,41 @@ def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | N
     return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped
 
 
+def _kind_samples(
+    store: SkillStore, now: float, previous: dict,
+) -> tuple[list, dict[str, int] | None]:
+    """``(kind_samples, dropped_by_kind_in_window)``, kept like
+    :func:`_loss_samples` keeps totals: ``[at, {kind: dropped}]`` from
+    ``journal_loss.json``'s ``dropped_by_kind``. The window value is None
+    with no earlier sample; a store upgraded from a build without the split
+    starts counting from its first one."""
+    record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
+    split = record.get("dropped_by_kind") or {}
+    current = {k: int(split.get(k) or 0) for k in JOURNAL_LOSS_KINDS}
+    kept = []
+    for sample in previous.get("journal_loss_kind_samples") or []:
+        if (isinstance(sample, list) and len(sample) == 2 and isinstance(sample[0], (int, float))
+                and isinstance(sample[1], dict) and sample[0] <= now):
+            counts = {k: sample[1].get(k, 0) for k in JOURNAL_LOSS_KINDS}
+            kept.append([
+                float(sample[0]),
+                {k: v for k, v in counts.items() if type(v) is int and v > 0},
+            ])
+    kept.sort(key=lambda s: s[0])
+    window = None
+    if kept:
+        older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
+        base = (older[-1] if older else kept[0])[1]
+        # A count below the baseline means the record was reset: count from zero.
+        reset = any(current[k] < base.get(k, 0) for k in JOURNAL_LOSS_KINDS)
+        window = {k: current[k] - (0 if reset else base.get(k, 0)) for k in JOURNAL_LOSS_KINDS}
+        window = {k: v for k, v in window.items() if v}
+    if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
+        kept.append([now, {k: v for k, v in current.items() if v}])
+    start = max((i for i, s in enumerate(kept) if s[0] <= now - COVERAGE_WINDOW), default=0)
+    return kept[start:][-LOSS_SAMPLES_KEPT:], window
+
+
 def _coverage(store, now, previous) -> dict:
     """What the learner took in over COVERAGE_WINDOW, from the pass log and
     the journal loss record."""
@@ -363,9 +404,12 @@ def _coverage(store, now, previous) -> dict:
         pass
     budget_days = len({d for d in days if 0 <= today - d < round(COVERAGE_WINDOW / DAY)})
     samples, total, dropped = _loss_samples(store, now, previous)
+    kind_samples, by_kind = _kind_samples(store, now, previous)
     return {"read_3d": read, "filtered_3d": filtered, "dropped_3d": dropped,
+            "dropped_3d_by_kind": by_kind,
             "dropped_total": total, "budget_skips_3d": len(skipped),
-            "budget_spent_days_3d": budget_days, "samples": samples}
+            "budget_spent_days_3d": budget_days, "samples": samples,
+            "kind_samples": kind_samples}
 
 
 def _learner_signal(store, now, learning_enabled, previous=None) -> dict:
@@ -374,6 +418,7 @@ def _learner_signal(store, now, learning_enabled, previous=None) -> dict:
     coverage = _coverage(store, now, previous or {})
     signal = _learner_outcome(store, now, coverage)
     signal["samples"] = coverage["samples"]
+    signal["kind_samples"] = coverage["kind_samples"]
     return signal
 
 
@@ -392,7 +437,7 @@ def _learner_outcome(store, now, coverage) -> dict:
     passes, failed = len(outcomes), sum(outcomes)
     detail = {"recent_user_entries": recent_user, "pending_entries": pending,
               "passes_7d": passes, "failed_passes_7d": failed,
-              **{k: v for k, v in coverage.items() if k != "samples"}}
+              **{k: v for k, v in coverage.items() if k not in ("samples", "kind_samples")}}
     budget_days = coverage["budget_spent_days_3d"]
     # Said on every outcome below: a spent budget is why entries wait or drop.
     budget_note = (
@@ -402,10 +447,19 @@ def _learner_outcome(store, now, coverage) -> dict:
     dropped = coverage["dropped_3d"]
     taken_in = coverage["read_3d"] + coverage["filtered_3d"] + (dropped or 0)
     if dropped and dropped >= MIN_NEW_ENTRIES and dropped >= DROPPED_SHARE * taken_in:
+        # The reap keeps conversation and friction for last, so a drop there
+        # is the loss to name.
+        by_kind = coverage["dropped_3d_by_kind"] or {}
+        high = sum(by_kind.get(k, 0) for k in JOURNAL_HIGH_VALUE_KINDS)
+        high_note = (
+            f" {high} user/assistant/friction"
+            f" {'entry' if high == 1 else 'entries'} dropped unread."
+            if high else ""
+        )
         return _signal(
             "learner", True,
             f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
-            f"last 3 days; {dropped} were dropped unread." + budget_note, **detail)
+            f"last 3 days; {dropped} were dropped unread." + high_note + budget_note, **detail)
     if recent_user < ACTIVE_MIN_USER_ENTRIES and not passes:
         return _signal("learner", False, "Too little recent activity to judge." + budget_note, **detail)
     if not passes and pending >= MIN_NEW_ENTRIES:

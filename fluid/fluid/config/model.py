@@ -440,6 +440,10 @@ class HarnessConfig:
     # A native provider name whose client runs synthesis passes. Unset, the
     # session's own provider does; the delegated ``claude`` leg has none.
     continual_provider: str | None = None
+    # The learner's daily call budget per store. None keeps the default for
+    # how the learner's provider bills a pass (continual.learner_budget);
+    # values are clamped, and the consolidation reserve and pacing follow it.
+    learner_daily_calls: int | None = None
     # Retention budget for the harness-evolution commit gate (HCL's B): how
     # many anchor regressions a proposed harness-state change may cause and
     # still commit. 0 = strict stability; the shipped default follows HCL's
@@ -516,6 +520,7 @@ class HarnessConfig:
             continual=bool(d.get("continual", False)),
             continual_model=d.get("continual_model"),
             continual_provider=d.get("continual_provider") or None,
+            learner_daily_calls=_optional_int(d.get("learner_daily_calls")),
             anchor_budget=max(0, int(d.get("anchor_budget", 1))),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             setting_sources=_setting_sources_from(d.get("setting_sources")),
@@ -564,6 +569,7 @@ class HarnessConfig:
             "continual": self.continual,
             "continual_model": self.continual_model,
             "continual_provider": self.continual_provider,
+            "learner_daily_calls": self.learner_daily_calls,
             "anchor_budget": self.anchor_budget,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,

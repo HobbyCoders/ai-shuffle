@@ -459,14 +459,18 @@ class FactStore:
             after = self._prepare()
             return max(0, before - len(after["entries"]) - len(after["archived"]))
 
-    def claim_inference_call(self, reserve=0):
-        """Claim one of the day's inference calls, leaving ``reserve`` unclaimed."""
+    def claim_inference_call(self, reserve=0, limit: int | None = None):
+        """Claim one of the day's inference calls, leaving ``reserve`` unclaimed.
+
+        ``limit`` is the day's cap (the learner's configured budget); None
+        is MAX_INFERENCE_CALLS_PER_DAY."""
         with file_transaction(self.lock):
             doc = self._prepare()
             day = int(time.time() // 86400)
             budget = doc.get("inference_budget", {})
             calls = budget.get("calls", 0) if budget.get("day") == day else 0
-            share = MAX_INFERENCE_CALLS_PER_DAY - max(0, reserve)
+            cap = MAX_INFERENCE_CALLS_PER_DAY if limit is None else int(limit)
+            share = cap - max(0, reserve)
             if calls >= share:
                 if self._note_budget_spent(doc, day):
                     self._write(doc)

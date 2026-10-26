@@ -276,6 +276,8 @@ async def test_a_finished_reply_runs_a_learner_pass_on_the_owners_subscription(m
         assert synthesizer._project == project_key_for(str(tmp_path))
         assert synthesizer._session_model == "opus" and synthesizer._on_change is not None
         assert run.adapter.engine.bus is run.adapter._continual_bus
+        # A subscription row's passes get the subscription default budget.
+        assert synthesizer._budget() == (200, 8, "subscription_default")
         # The client waits for a pass: nothing was built at connect.
         assert learner.built == []
         await run.turn("Remember we always run npm test before deploying")
@@ -302,8 +304,10 @@ async def test_a_spent_daily_budget_stops_delegated_passes_too(monkeypatch, tmp_
     _offer_subscription(monkeypatch)
     store = _store()
     _seed_backlog(store)
-    # Other sessions on this store spent the day's synthesis share.
-    while store._facts.claim_inference_call(reserve=continual_mod.CONSOLIDATE_RESERVED_CALLS):
+    # Other sessions on this store spent the day's synthesis share, at the
+    # subscription learner's own (larger) daily budget.
+    budget = continual_mod.learner_budget(None, "subscription")
+    while store._facts.claim_inference_call(reserve=budget.reserved, limit=budget.daily):
         pass
     run = Run(tmp_path, [[{"op": "text", "text": "Done."}, {"op": "result"}]])
     async with run:
@@ -398,3 +402,30 @@ async def test_the_learner_client_is_closed_with_the_session(monkeypatch, tmp_pa
         assert learner is not None
         await learner._ensure()
     assert closed == [True] and run.adapter._learner_provider is None
+
+
+def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
+    from types import SimpleNamespace
+
+    store = _store()
+    session = SessionOptions(model="opus", cwd=".", extra={})
+    api_row = SessionOptions(model="claude", extra={
+        "provider_id": "row-key", "provider_type": "anthropic", "provider_auth_mode": "api_key",
+    })
+    owner = SimpleNamespace(_announce_continual=None)
+    synth, _ = ha.HarnessAdapter._learner_synthesizer(
+        owner, FakeInference(_reply("NO_CHANGES")), "claude", store, None, session, "s",
+        session_model="opus", context_window=None, binding=api_row)
+    assert synth._budget() == (48, 2, "metered_default")
+    # A row given by id only is looked up for its shape.
+    monkeypatch.setattr(ha, "_lookup_provider_row_shape", lambda pid: ("grok", "grok", None))
+    synth, _ = ha.HarnessAdapter._learner_synthesizer(
+        owner, FakeInference(_reply("NO_CHANGES")), "grok-x", store, None,
+        SessionOptions(model="grok-x", cwd=".", extra={"provider_id": "row-grok"}), "s",
+        session_model="grok-x", context_window=None)
+    assert synth._budget().source == "subscription_default"
+    # No provider row at all (a local or unknown provider): metered.
+    synth, _ = ha.HarnessAdapter._learner_synthesizer(
+        owner, FakeInference(_reply("NO_CHANGES")), "m", store, None, session, "s",
+        session_model="m", context_window=None)
+    assert synth._budget().source == "metered_default"

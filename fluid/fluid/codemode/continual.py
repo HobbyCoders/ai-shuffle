@@ -31,7 +31,7 @@ import re
 import time
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from fluid.codemode.facts import MAX_INFERENCE_CALLS_PER_DAY
 from fluid.codemode.skills import (
@@ -438,12 +438,14 @@ CONSOLIDATE_INTERVAL_DAYS = 2.0
 CONSOLIDATE_MIN_MEMORIES = 8
 # Daily inference calls synthesis leaves for consolidation. Synthesis can
 # otherwise spend the whole facts.MAX_INFERENCE_CALLS_PER_DAY budget, and a
-# store whose learner is always out of budget is never curated.
+# store whose learner is always out of budget is never curated. Both are
+# defaults; see learner_budget for the configured ones.
 CONSOLIDATE_RESERVED_CALLS = 2
 # Synthesis calls are spread over the UTC day instead of spent as soon as
 # entries arrive: by a given time of day a store may have made
 # PACE_BURST_CALLS plus its share of the day's calls so far, and a pass
-# starts at least MIN_PASS_INTERVAL after the previous call. A pass makes one
+# starts at least MIN_PASS_INTERVAL after the previous call (less with a
+# bigger configured budget, see min_pass_interval). A pass makes one
 # call per project in its slice, back to back, and never more than the day's
 # remaining calls (see _fit_calls). Before this, a busy worker spent all 48
 # calls by 00:04-03:55 UTC and its learner read nothing for the rest of the
@@ -470,11 +472,90 @@ READ_ONLY_TOOLS = frozenset({
 })
 
 
-def paced_call_allowance(now: float) -> int:
+# The daily call budget follows how the learner's provider bills a pass: a
+# flat-rate subscription (ChatGPT/Codex, SuperGrok) gets
+# SUBSCRIPTION_DAILY_CALLS, anything metered or unknown keeps
+# facts.MAX_INFERENCE_CALLS_PER_DAY (48), so nobody gets a surprise bill. An
+# explicit setting (the app's owner policy, read at pass time, or fluid's
+# learner_daily_calls) overrides either, clamped to these bounds. The
+# consolidation reserve and the pacing scale with the effective budget. The
+# decision is per learner, from the provider its passes use: one store can be
+# served by both kinds, and each pass claims against its own limit.
+SUBSCRIPTION_DAILY_CALLS = 200
+LEARNER_DAILY_CALLS_MIN = 4
+LEARNER_DAILY_CALLS_MAX = 1000
+LEARNER_RESERVED_CALLS_MAX = 10
+# MIN_PASS_INTERVAL belongs to the default budget's synthesis share; a bigger
+# budget shortens it in proportion, never below this.
+MIN_PASS_INTERVAL_FLOOR = 60.0
+# How long a learner reuses its resolved budget between passes (due() runs
+# on every journaled cell); every pass resolves it afresh.
+BUDGET_REFRESH_SECONDS = 60.0
+BILLING_SUBSCRIPTION = "subscription"
+BILLING_METERED = "metered"
+
+
+class LearnerBudget(NamedTuple):
+    """A learner's effective daily budget and where it came from:
+    ``setting``, ``subscription_default`` or ``metered_default``."""
+
+    daily: int
+    reserved: int
+    source: str
+
+    def record(self) -> dict[str, Any]:
+        return {"daily": self.daily, "reserved": self.reserved, "source": self.source}
+
+
+def _bounded(value: Any, low: int, high: int) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(low, min(high, number))
+
+
+def consolidation_reserve(daily: int) -> int:
+    """Calls of ``daily`` kept for consolidation: CONSOLIDATE_RESERVED_CALLS
+    at the default budget, in proportion otherwise (at least 1, at most
+    LEARNER_RESERVED_CALLS_MAX, never more than half the day)."""
+    share = round(daily * CONSOLIDATE_RESERVED_CALLS / max(1, MAX_INFERENCE_CALLS_PER_DAY))
+    return min(daily // 2, max(1, min(LEARNER_RESERVED_CALLS_MAX, share)))
+
+
+def learner_budget(setting: Any = None, billing: str | None = None) -> LearnerBudget:
+    """The effective budget for an explicit ``setting`` (calls a day; None,
+    0 or a non-number means automatic) and the pass's ``billing``."""
+    daily = None if setting in (0, "0") else _bounded(setting, LEARNER_DAILY_CALLS_MIN,
+                                                      LEARNER_DAILY_CALLS_MAX)
+    if daily is not None:
+        source = "setting"
+    elif billing == BILLING_SUBSCRIPTION:
+        daily, source = SUBSCRIPTION_DAILY_CALLS, "subscription_default"
+    else:
+        daily, source = MAX_INFERENCE_CALLS_PER_DAY, "metered_default"
+    return LearnerBudget(daily, consolidation_reserve(daily), source)
+
+
+def paced_call_allowance(now: float, budget: LearnerBudget | None = None) -> int:
     """Synthesis calls a store may have made by ``now`` in its UTC day."""
-    budget = MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS
+    budget = budget or learner_budget()
+    share = budget.daily - budget.reserved
     elapsed = (now % 86400) / 86400
-    return min(budget, PACE_BURST_CALLS + int(budget * elapsed))
+    return min(share, PACE_BURST_CALLS + int(share * elapsed))
+
+
+def min_pass_interval(budget: LearnerBudget | None = None) -> float:
+    """Seconds a pass waits after the previous call: MIN_PASS_INTERVAL at
+    the default budget or below, shorter in proportion above it."""
+    budget = budget or learner_budget()
+    default_share = MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS
+    share = max(1, budget.daily - budget.reserved)
+    if share <= default_share:
+        return MIN_PASS_INTERVAL
+    return max(MIN_PASS_INTERVAL_FLOOR, MIN_PASS_INTERVAL * default_share / share)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -570,8 +651,19 @@ class Synthesizer:
         guidance_snapshot: dict[str, str] | None = None,
         context_window: int | None = None,
         workflow_cwd: str | None = None,
+        daily_calls: int | Callable[[], Any] | None = None,
+        billing: str | Callable[[], str | None] | None = None,
     ) -> None:
         self._workflow_cwd = workflow_cwd
+        # The daily call budget this learner spends (see learner_budget):
+        # ``daily_calls`` is the explicit setting, a number or a callable
+        # read at pass time (None or 0: automatic); ``billing`` says how this
+        # learner's provider bills a pass ("subscription", "metered"; None is
+        # unknown, treated as metered), also a value or a callable.
+        self._daily_calls = daily_calls
+        self._billing = billing
+        self._resolved_budget: LearnerBudget | None = None
+        self._budget_at = float("-inf")
         self._provider = provider
         self._model = model
         self._store = store
@@ -602,6 +694,11 @@ class Synthesizer:
         # Until the day rolls over ``due()`` is False, so a kick per cell
         # does not append hundreds of identical budget rows to the pass log.
         self._budget_spent_day: int | None = None
+        # The budget in force when the day was found spent, and whether the
+        # latch was checked against the budget as last resolved (see
+        # _budget_raised).
+        self._latched_budget: LearnerBudget | None = None
+        self._latch_checked = False
         # The last completion's stop reason, for the pass log.
         self.last_stop_reason: str | None = None
         # A pass is one model call plus verification kernels; bound it so a
@@ -683,9 +780,11 @@ class Synthesizer:
 
     def due(self, *, closing: bool = False) -> bool:
         if self._budget_spent_day is not None:
-            if int(time.time() // 86400) == self._budget_spent_day:
+            if (int(time.time() // 86400) == self._budget_spent_day
+                    and not self._budget_raised()):
                 return False
             self._budget_spent_day = None
+            self._latch_checked = False
         try:
             backoff = self._store.learner_backoff(self._model)
         except Exception:
@@ -729,6 +828,73 @@ class Synthesizer:
             return True
         return signal
 
+    def _budget(self, *, refresh: bool = False) -> LearnerBudget:
+        """This learner's effective budget. Resolved afresh for every pass
+        (``refresh``) and otherwise at most every BUDGET_REFRESH_SECONDS, so
+        a changed setting applies without a restart and ``due()`` (run per
+        journaled cell) does not read it each time. Never raises: a setting
+        or billing that cannot be read counts as unset or unknown."""
+        now = time.time()
+        if (refresh or self._resolved_budget is None
+                or now < self._budget_at
+                or now - self._budget_at >= BUDGET_REFRESH_SECONDS):
+            setting = self._resolve(self._daily_calls)
+            billing = self._resolve(self._billing)
+            self._resolved_budget = learner_budget(
+                setting, billing if isinstance(billing, str) else None,
+            )
+            self._budget_at = now
+        return self._resolved_budget
+
+    def _latch_spent_day(self) -> None:
+        """A claim was refused: wait quietly until the UTC day rolls over
+        or the budget is raised (see due())."""
+        self._budget_spent_day = int(time.time() // 86400)
+        self._latched_budget = self._resolved_budget
+        self._latch_checked = False
+
+    def _budget_raised(self) -> bool:
+        """Whether a budget found spent today has room again: the setting
+        was raised (or the pass's billing changed) since, and the store's
+        calls today are under the new cap. Re-checked only when the budget
+        is re-resolved (at most every BUDGET_REFRESH_SECONDS), so a latched
+        ``due()`` stays cheap."""
+        resolved_at = self._budget_at
+        effective = self._budget()
+        if self._budget_at == resolved_at and self._latch_checked:
+            return False
+        self._latch_checked = True
+        latched = self._latched_budget
+        if latched is not None and effective.daily - effective.reserved <= (
+                latched.daily - latched.reserved):
+            return False
+        try:
+            spent = self._store._facts.inference_budget()
+        except Exception:  # noqa: BLE001 — unreadable: keep waiting, the claim decides
+            return False
+        calls = int(spent.get("calls") or 0) if spent.get("day") == self._budget_spent_day else 0
+        # The cap the next claim is checked against: the metered default
+        # claims against the fact store's own (see _claim_limit).
+        from fluid.codemode import facts as facts_mod
+        cap = self._claim_limit() or facts_mod.MAX_INFERENCE_CALLS_PER_DAY
+        return calls < cap - effective.reserved
+
+    @staticmethod
+    def _resolve(value: Any) -> Any:
+        if not callable(value):
+            return value
+        try:
+            return value()
+        except Exception:  # noqa: BLE001 — unreadable is unset, never a failed pass
+            _log.debug("learner budget input unreadable", exc_info=True)
+            return None
+
+    def _claim_limit(self) -> int | None:
+        """The daily cap to claim against; None lets the fact store use its
+        built-in one (the metered default is that cap)."""
+        budget = self._budget()
+        return None if budget.source == "metered_default" else budget.daily
+
     def _paced(self, now: float | None = None) -> bool:
         """True when the day's spread of calls leaves room for a pass now
         (see PACE_BURST_CALLS). A pass held back here leaves no log row."""
@@ -740,11 +906,12 @@ class Synthesizer:
         if budget.get("day") != int(now // 86400):
             return True
         calls = int(budget.get("calls") or 0)
-        if calls >= MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS:
+        effective = self._budget()
+        if calls >= effective.daily - effective.reserved:
             return False  # spent: every session's learner waits for the next day quietly
-        if now - float(budget.get("last_at") or 0.0) < MIN_PASS_INTERVAL:
+        if now - float(budget.get("last_at") or 0.0) < min_pass_interval(effective):
             return False
-        if calls < paced_call_allowance(now):
+        if calls < paced_call_allowance(now, effective):
             return True
         # Ahead of the pace, but the backlog is heading for the overflow
         # reap: a later call spent now beats entries dropped unread.
@@ -814,7 +981,7 @@ class Synthesizer:
         except InferenceBudgetExhausted as exc:
             # The slice stays unconsumed (cursor untouched, journal lines
             # retained by reap) and is retried once the UTC day rolls over.
-            self._budget_spent_day = int(time.time() // 86400)
+            self._latch_spent_day()
             self.last_error = f"{type(exc).__name__}: {exc}"
             # No call was made, so this is not a silent pass.
             self._log_pass("synthesis", [], error=self.last_error, ran=False)
@@ -832,7 +999,7 @@ class Synthesizer:
                     self._consolidate_locked(), timeout=self._pass_timeout
                 )
             except InferenceBudgetExhausted as exc:
-                self._budget_spent_day = int(time.time() // 86400)
+                self._latch_spent_day()
                 self._log_pass(
                     "consolidation", [], error=f"{type(exc).__name__}: {exc}", ran=False,
                 )
@@ -898,6 +1065,7 @@ class Synthesizer:
         """
         self.last_pass_failed = False
         self.last_pass_skipped = False
+        self._budget(refresh=True)  # a changed setting applies from this pass on
         with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
             if not held:
                 self.last_pass_skipped = True
@@ -928,22 +1096,34 @@ class Synthesizer:
         )
 
     async def _run_locked(self) -> list[str]:
-        cursor = self._store.synth_cursor()
         forgotten_before = self._store._facts.snapshot().get("forgotten_before", 0)
-        indexed, reached = self._store.journal_slice_indexed(cursor, self._max_entries)
+        # The slice is leased while the pass waits for the model: a reap in
+        # that time leaves it alone and reports how far it moved, so the
+        # cursor lands on the line this pass reached, not on a position that
+        # now holds a line it never read (see SkillStore.begin_synth_read).
+        lease, cursor, indexed, reached = self._store.begin_synth_read(self._max_entries)
+        try:
+            return await self._run_slice(lease, forgotten_before, cursor, indexed, reached)
+        finally:
+            self._store.end_synth_read(lease)
+
+    async def _run_slice(
+        self, lease: str | None, forgotten_before: float, cursor: int,
+        indexed: list[tuple[int, dict]], reached: int,
+    ) -> list[str]:
         slice_end = reached
         indexed = [(n, e) for n, e in indexed if e.get("ts", 0) > forgotten_before]
         if not indexed:
             if reached > cursor:
                 # Only malformed lines in the slice: step past them, or every
                 # later pass would stop at the same corrupt line.
-                self._store.set_synth_cursor(reached)
+                self._store.commit_synth_cursor(lease, reached)
             return []
         # Low-value entries are consumed unshown, so neither the prompt nor
         # the day's calls are spent on them.
         shown = [(n, e) for n, e in indexed if not low_value_entry(e)]
         if not shown:
-            self._store.set_synth_cursor(min(reached, self._store.journal_count()))
+            self._store.commit_synth_cursor(lease, reached)
             self._log_pass("synthesis", [], consumed=0, filtered=len(indexed), ran=False)
             try:
                 self._store.reap_journal()
@@ -1021,16 +1201,17 @@ class Synthesizer:
         entries = [e for _, e in fitted]
         filtered = sum(1 for n, _ in indexed if n <= reached) - len(fitted)
         if self._store._facts.snapshot().get("forgotten_before", 0) <= forgotten_before:
-            # Clamped: a cursor past the end would make pending negative and
-            # stop the learner until the journal caught up.
-            self._store.set_synth_cursor(min(reached, self._store.journal_count()))
+            # Translated over any reap during the call, and clamped: a cursor
+            # past the end would make pending negative and stop the learner
+            # until the journal caught up.
+            self._store.commit_synth_cursor(lease, reached)
         # Otherwise a user Forget landed while the pass ran: its purge already
         # rebased the cursor over a rewritten journal, so ``reached`` no
         # longer indexes the same lines and the cursor is left alone. The
         # pass itself still succeeded and is logged below.
         retry = None
         if isinstance(stop, InferenceBudgetExhausted):
-            self._budget_spent_day = int(time.time() // 86400)
+            self._latch_spent_day()
             self.last_error = f"{type(stop).__name__}: {stop}"
         elif stop is not None:
             self.last_error = str(stop)
@@ -1069,7 +1250,8 @@ class Synthesizer:
         except Exception:  # noqa: BLE001 — the claim still enforces the cap
             return None
         calls = int(budget.get("calls") or 0) if budget.get("day") == int(time.time() // 86400) else 0
-        return MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS - calls
+        effective = self._budget()
+        return effective.daily - effective.reserved - calls
 
     def _fit_calls(self, fitted: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
         """The prefix of ``fitted`` whose projects the day's remaining calls
@@ -1124,6 +1306,10 @@ class Synthesizer:
         """
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
         record["model"] = self._model
+        if self._resolved_budget is not None:
+            # Which daily budget applied, and why (setting, or the default
+            # for how the pass's provider bills it).
+            record["budget"] = self._resolved_budget.record()
         store = self._store_label()
         # Replicas merge memories.json but each keeps its own log; the id
         # says which learner wrote a row once logs are compared.
@@ -1644,8 +1830,10 @@ Never claim a workflow is installed because it was proposed."""
         # Synthesis leaves CONSOLIDATE_RESERVED_CALLS of the day's budget
         # for curation; consolidation itself may spend them.
         if reserve is None:
-            reserve = 0 if system is _CONSOLIDATE_SYSTEM else CONSOLIDATE_RESERVED_CALLS
-        if not self._store._facts.claim_inference_call(reserve=reserve):
+            reserve = 0 if system is _CONSOLIDATE_SYSTEM else self._budget().reserved
+        limit = self._claim_limit()
+        claim = {"reserve": reserve} if limit is None else {"reserve": reserve, "limit": limit}
+        if not self._store._facts.claim_inference_call(**claim):
             raise InferenceBudgetExhausted(
                 "Daily inference-model budget reached; explicit memory saves remain available"
             )

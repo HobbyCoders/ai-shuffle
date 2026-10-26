@@ -2583,8 +2583,15 @@ class HarnessAdapter(ProviderAdapter):
         self, provider: Any, model: str, skills: Any, memory_project: Optional[str],
         options: SessionOptions, fluid_session_id: Optional[str], *,
         session_model: Optional[str], context_window: Optional[int],
+        binding: Optional[SessionOptions] = None,
     ) -> tuple:
         """``(Synthesizer, EventBus)``: the memory learner, for either leg.
+
+        ``binding`` is the provider row the learner's passes run on when it
+        is not the session's own (a delegated session's learner target). Its
+        shape decides the daily budget's default: flat-rate subscription rows
+        get more calls than metered ones; the owner's ``learner_daily_calls``
+        policy overrides either and is read at pass time.
 
         The bus is materialized here rather than defaulted by the engine, for
         the same reason fluid's loader does it: the learner's ContinualUpdate
@@ -2619,6 +2626,12 @@ class HarnessAdapter(ProviderAdapter):
             # announce what the pass changed.
             await self._announce_continual(list(changes))
 
+        from app.core.fluid_memory import learner_billing, learner_daily_calls
+
+        bound = binding or options
+        shape = (bound.extra.get("provider_type"), bound.extra.get("provider_auth_mode"))
+        if not any(shape) and bound.extra.get("provider_id"):
+            shape = _lookup_provider_row_shape(str(bound.extra["provider_id"]))[:2]
         synthesizer = Synthesizer(
             provider,
             model,
@@ -2629,6 +2642,8 @@ class HarnessAdapter(ProviderAdapter):
             session_model=session_model,
             guidance_snapshot=_session_guidance_snapshot(session_model),
             context_window=context_window,
+            daily_calls=learner_daily_calls,
+            billing=learner_billing(*shape),
         )
         return synthesizer, engine_bus
 
@@ -2667,7 +2682,7 @@ class HarnessAdapter(ProviderAdapter):
                 synthesizer, engine_bus = self._learner_synthesizer(
                     provider, target.model, skills, memory_project, options,
                     fluid_session_id, session_model=options.model,
-                    context_window=target.context_window,
+                    context_window=target.context_window, binding=target.options,
                 )
             else:
                 logger.debug(

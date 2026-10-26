@@ -68,3 +68,36 @@ def test_memory_health_api_returns_the_owner_view(authenticated_client, monkeypa
     assert first["state"] == "attention" and first["label"] == "Learning"
     assert {"id", "label", "state", "reason", "detail"} <= set(first)
     assert isinstance(body["repairs"], list) and body["checked_at"]
+
+
+
+def test_learner_budget_is_a_persisted_owner_setting_read_at_pass_time():
+    from fluid.codemode.continual import Synthesizer
+
+    from app.core import owner_settings
+
+    assert fluid_memory.learner_daily_calls() == 0, "automatic by default"
+    store = fluid_memory.store_for_owner("local")
+    synth = Synthesizer(None, "gpt-test", store, daily_calls=fluid_memory.learner_daily_calls,
+                        billing=fluid_memory.learner_billing("chatgpt", "chatgpt"))
+    assert synth._budget(refresh=True) == (200, 8, "subscription_default")
+    owner_settings.write({"learner_daily_calls": 96})
+    assert owner_settings.read().learner_daily_calls == 96
+    assert synth._budget(refresh=True) == (96, 4, "setting"), "no restart, no new learner"
+    with pytest.raises(ValueError):
+        owner_settings.write({"learner_daily_calls": 5000})
+    owner_settings.write({"learner_daily_calls": 0})
+    assert synth._budget(refresh=True).source == "subscription_default"
+
+
+@pytest.mark.parametrize("shape,billing", [
+    (("chatgpt", "chatgpt"), "subscription"),
+    (("openai", "chatgpt"), "subscription"),
+    (("grok", None), "subscription"),
+    (("openai", "api_key"), "metered"),
+    (("anthropic", "api_key"), "metered"),
+    (("openrouter", None), "metered"),
+    ((None, None), None),
+])
+def test_learner_billing_follows_the_subscription_rows(shape, billing):
+    assert fluid_memory.learner_billing(*shape) == billing

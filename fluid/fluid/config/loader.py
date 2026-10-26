@@ -54,6 +54,9 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # session's own provider is used; the delegated ``claude`` leg has no
     # native client, so without this it journals but never synthesizes.
     "continual_provider": None,
+    # The learner's daily call budget (None: the default for how its
+    # provider bills a pass, see continual.learner_budget).
+    "learner_daily_calls": None,
     "anchor_budget": 1,
     "cwd": ".",
     "max_tokens": None,
@@ -813,6 +816,7 @@ def _wire_continual(
             session_model=model,
             guidance_snapshot=guidance_snapshot or None,
             context_window=config.context_window if not config.continual_model else None,
+            daily_calls=config.learner_daily_calls,
         )
         if bus is not None:
             learner.append(synthesizer)
