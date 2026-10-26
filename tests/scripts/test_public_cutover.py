@@ -219,6 +219,35 @@ def test_merge_that_changes_the_offset_refuses(transition):
         c.container_sequence(t.new)
 
 
+def merge_side_change(root, path, text):
+    """Change ``path`` on a side branch and merge it with --no-ff, adding no first-parent commit of its own."""
+    main = git(root, "symbolic-ref", "--short", "HEAD")
+    git(root, "checkout", "-q", "-b", "side")
+    commit(root, path, text)
+    git(root, "checkout", "-q", main)
+    git(root, "merge", "-q", "--no-ff", "--no-edit", "side")
+    return git(root, "rev-parse", "HEAD")
+
+
+def test_merge_that_changes_the_mapping_refuses(transition):
+    # Only the merge carries the change to the first-parent chain; nothing
+    # else reads the tip's mapping (the record is read from the public root).
+    t = transition
+    merge_side_change(t.new, c.MAPPING, json.dumps(t.record | {"export_pr": 10}))
+    with pytest.raises(ValueError, match="immutable for this history epoch"):
+        c.container_sequence(t.new)
+
+
+def test_merge_that_changes_the_import_record_refuses(transition, tmp_path):
+    t, a = transition, archive(tmp_path)
+    allow(t.new, a)
+    later = archive(tmp_path, "later")
+    record = {"format": 1, "imports": [{"head": x.head, "roots": x.roots} for x in (a, later)]}
+    merge_side_change(t.new, c.IMPORTS, json.dumps(record, indent=2))
+    with pytest.raises(ValueError, match="immutable once committed"):
+        c.container_sequence(t.new)
+
+
 def test_import_record_is_immutable_and_validated(transition, tmp_path):
     t, a = transition, archive(tmp_path)
     allow(t.new, a)
