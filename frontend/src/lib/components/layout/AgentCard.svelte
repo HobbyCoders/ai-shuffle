@@ -110,7 +110,6 @@
 	}
 	.ac-top { display: flex; align-items: center; gap: 16px; }
 	.ac-avatar { flex: none; display: grid; place-items: center; }
-	.ac-avatar :global(.agent-avatar) { border-radius: 30%; }
 	.ac-id { flex: 1; min-width: 0; }
 	.ac-line {
 		display: flex;

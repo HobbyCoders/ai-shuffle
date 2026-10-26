@@ -1,12 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <path class="mark" d="M16 25q2-13 19-14 13 0 18 8l7-3-4 9Z"/>
-  <path d="M56 16q2-8 7-11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-  <rect class="shape" x="17" y="17" width="36" height="44" rx="10"/>
-  <path class="mark" stroke-opacity="0" d="M17 25h36v4H17Z"/>
-  <circle class="eyes" cx="29" cy="37" r="1.6"/>
-  <circle class="eyes" cx="41" cy="37" r="1.6"/>
-  <path class="smile" d="M30 46q5 3 10-1"/>
-  <path class="smile" d="M26 32l4.5-1m9 1 4.5-1"/>
+  <ellipse class="shade" cx="32" cy="59" rx="16" ry="2.6"/>
+  <rect class="shape" x="15" y="22" width="34" height="34" rx="13"/>
+  <path class="shade" d="M15 43q17 8 34 0a13 13 0 0 1-13 13h-8a13 13 0 0 1-13-13Z"/>
+  <path class="gold" d="M48 23q2-10 8.5-14-1 8.5-6.5 15Z"/>
+  <path class="deep" d="M13 31q0-17 19-18 15 0 20 10l7-1-5 9Z"/>
+  <rect class="gold" x="14" y="27" width="37" height="4" rx="1.5"/>
+  <path class="stroke-ink" d="M22.5 34.5l5-1m9 1 5-1"/>
+  <ellipse class="ink" cx="26" cy="39.5" rx="2.6" ry="3.2"/>
+  <ellipse class="ink" cx="38" cy="39.5" rx="2.6" ry="3.2"/>
+  <circle class="white" cx="27" cy="38.3" r="1"/>
+  <circle class="white" cx="39" cy="38.3" r="1"/>
+  <path class="stroke-ink" d="M28.5 47.5q4 2.5 7.5-1.2"/>
+  <ellipse class="blush" cx="20.5" cy="45" rx="2.8" ry="1.8"/>
+  <ellipse class="blush" cx="43.5" cy="45" rx="2.8" ry="1.8"/>
 </svg>

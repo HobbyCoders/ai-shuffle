@@ -1,10 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect x="7" y="9" width="34" height="44" rx="8" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-opacity=".5" stroke-width="2" transform="rotate(-12 24 31)"/>
-  <circle cx="13.5" cy="17.5" r="2.6" stroke="currentColor" stroke-width="1.6" transform="rotate(-12 24 31)"/>
-  <path class="shape" d="M17 52V37a7.5 7.5 0 0 1 7-7.5 11 11 0 0 1 20.5-2.5 9 9 0 0 1 8.5 9v16a9 9 0 0 1-9 9H26a9 9 0 0 1-9-9Z"/>
-  <circle class="eyes" cx="29" cy="40" r="1.6"/>
-  <circle class="eyes" cx="41" cy="40" r="1.6"/>
-  <path class="smile" d="M31 48q4 3 8 0"/>
-  <path class="mark" d="M58 40q-3 4-3 6a3 3 0 0 0 6 0q0-2-3-6Z"/>
-  <path class="mark" fill-opacity=".5" stroke-opacity=".5" d="M60 52q-2 3-2 4.4a2 2 0 0 0 4 0q0-1.4-2-4.4Z"/>
+  <path class="tint" d="M22 54.5q-2 3-2 4.4a2 2 0 0 0 4 0q0-1.4-2-4.4Z"/>
+  <path class="tint" d="M42 56q-1.6 2.4-1.6 3.5a1.6 1.6 0 0 0 3.2 0q0-1.1-1.6-3.5Z"/>
+  <path class="shape" d="M15 52A9 9 0 0 1 15 34A12 12 0 0 1 38 24A10 10 0 0 1 50 34A9 9 0 0 1 50 52Z"/>
+  <path class="shade" d="M6.4 46a9 9 0 0 0 8.6 6h35a9 9 0 0 0 8.6-6q-26.1 7-52.2 0Z"/>
+  <ellipse class="ink" cx="26" cy="38" rx="2.6" ry="3.2"/>
+  <ellipse class="ink" cx="38" cy="38" rx="2.6" ry="3.2"/>
+  <circle class="white" cx="27" cy="36.8" r="1"/>
+  <circle class="white" cx="39" cy="36.8" r="1"/>
+  <path class="stroke-ink" d="M28.5 44q3.5 2.8 7 0"/>
+  <ellipse class="blush" cx="20" cy="43" rx="2.8" ry="1.8"/>
+  <ellipse class="blush" cx="44" cy="43" rx="2.8" ry="1.8"/>
+  <ellipse class="shine" cx="24" cy="26.5" rx="4.5" ry="1.7" transform="rotate(-30 24 26.5)"/>
 </svg>
