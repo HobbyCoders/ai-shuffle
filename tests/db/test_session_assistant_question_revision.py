@@ -75,6 +75,16 @@ def chat():
     return "question"
 
 
+@pytest.mark.timeout(2)
+def test_append_events_projects_adversarial_prose_without_stalling(chat):
+    prose = "Which?" + " " * 100000 + "\n" + "1.    item\n" * 200
+    session_events.append_events(chat, [event("message.user", content="Start"),
+                                      event(content=prose + "closing prose.")])
+    assert row()["last_assistant_question_seq"] is None
+    session_events.append_events(chat, [event(content=prose)])
+    assert row()["last_assistant_question_seq"] == 3
+
+
 def test_unsent_message_does_not_answer_question_or_advance_user_revision(chat):
     session_events.append_events(chat, [event("message.user", content="Start"), event(content="Which?")])
     before = row()
