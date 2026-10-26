@@ -485,11 +485,6 @@ class Settings(BaseSettings):
     #     sessions"), where this picks the model when that row lists it.
     #   - fluid_skills_dir: where saved skills + the episodic journal live.
     #     None = <data_dir>/fluid/skills (never fluid's ~/.fluid default).
-    #   - fluid_learner_daily_calls / fluid_learner_reserved_calls: the
-    #     learner's model calls per UTC day per store, and how many of them
-    #     stay free for consolidation. None = fluid's 48 and 2; values are
-    #     clamped to 4-1000 and 0-10 (at most half the day). Applied at startup
-    #     (app.core.fluid_memory.configure_learner); pacing follows the budget.
     # PR 2: migrate this area-owned legacy behaviour field.
     fluid_code_mode: bool = True
     # AI Shuffle's Claude Code mod on the delegated Claude leg (Claude Code
@@ -504,8 +499,6 @@ class Settings(BaseSettings):
     fluid_memory_enabled: bool = True
     # PR 2: migrate this area-owned legacy behaviour field.
     fluid_continual_model: Optional[str] = None
-    fluid_learner_daily_calls: Optional[int] = None
-    fluid_learner_reserved_calls: Optional[int] = None
     fluid_skills_dir: Optional[str] = None
     # OS-level sandbox (bubblewrap) for the code-mode kernel child. ``auto``
     # uses it when bwrap is installed and its one-off self-test passes (else

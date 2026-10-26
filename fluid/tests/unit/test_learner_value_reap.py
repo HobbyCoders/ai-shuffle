@@ -18,7 +18,7 @@ from fluid.codemode import SkillStore, Synthesizer, memory_health
 from fluid.codemode import continual as continual_mod
 from fluid.codemode import skills as skills_mod
 from fluid.codemode.continual import (
-    configure_learner_budget,
+    LearnerBudget,
     learner_budget,
     min_pass_interval,
     paced_call_allowance,
@@ -37,17 +37,11 @@ from .test_learner_coverage import (
     _busy_store,
     edit_cell,
     read_cell,
+    rows,
     set_budget,
 )
 
 PAD = "p" * 300
-
-
-@pytest.fixture(autouse=True)
-def _default_budget():
-    configure_learner_budget(None, None)
-    yield
-    configure_learner_budget(None, None)
 
 
 def _mark(entry: dict, mark: str) -> dict:
@@ -350,62 +344,110 @@ def test_health_without_high_value_loss_or_kind_history(tmp_path):
     assert second["signals"][0]["detail"]["dropped_3d_by_kind"] == {}
 
 
-# ─── the configurable budget ────────────────────────────────────────────────
+# ─── the daily budget: billing-aware default, setting overrides ─────────────
 
-def test_budget_defaults_and_bounds():
-    assert learner_budget() == (48, 2)
-    assert configure_learner_budget(200, None) == (200, 2)
-    assert learner_budget() == (200, 2)
-    assert learner_budget(96, 4) == (96, 4), "a learner's own value wins"
-    assert configure_learner_budget(0, -3) == (continual_mod.LEARNER_DAILY_CALLS_MIN, 0)
-    assert configure_learner_budget(10**6, 99) == (continual_mod.LEARNER_DAILY_CALLS_MAX,
-                                                   continual_mod.LEARNER_RESERVED_CALLS_MAX)
-    assert configure_learner_budget(6, 5) == (6, 3), "the reserve takes at most half"
-    assert configure_learner_budget("lots", True) == (48, 2)
-    assert configure_learner_budget(None, None) == (48, 2)
+SUB = LearnerBudget(200, 8, "subscription_default")
+METERED = LearnerBudget(48, 2, "metered_default")
 
 
-def test_pacing_follows_the_configured_budget():
+def test_budget_follows_billing_and_the_setting_wins():
+    assert learner_budget(None, "subscription") == SUB
+    assert learner_budget(None, "metered") == METERED
+    assert learner_budget(None, None) == METERED, "unknown billing is never a surprise bill"
+    assert learner_budget(0, "subscription") == SUB, "0 is automatic"
+    assert learner_budget(96, "subscription") == (96, 4, "setting")
+    assert learner_budget(96, "metered") == (96, 4, "setting")
+    assert learner_budget(1, None) == (continual_mod.LEARNER_DAILY_CALLS_MIN, 1, "setting")
+    assert learner_budget(10**6, None) == (continual_mod.LEARNER_DAILY_CALLS_MAX,
+                                           continual_mod.LEARNER_RESERVED_CALLS_MAX, "setting")
+    assert learner_budget("lots", "metered") == METERED
+
+
+def test_pacing_follows_the_effective_budget():
     day = 1792022400.0  # 00:00 UTC
-    assert paced_call_allowance(day + 12 * 3600, 200, 2) == continual_mod.PACE_BURST_CALLS + 99
-    assert paced_call_allowance(day + DAY - 1, 200, 2) == 198
+    assert paced_call_allowance(day + 12 * 3600, SUB) == continual_mod.PACE_BURST_CALLS + 96
+    assert paced_call_allowance(day + DAY - 1, SUB) == 192
     assert paced_call_allowance(day + 12 * 3600) == continual_mod.PACE_BURST_CALLS + 23
-    assert min_pass_interval() == continual_mod.MIN_PASS_INTERVAL
-    assert min_pass_interval(12, 2) == continual_mod.MIN_PASS_INTERVAL
-    assert min_pass_interval(200, 2) == pytest.approx(continual_mod.MIN_PASS_INTERVAL * 46 / 198)
-    assert min_pass_interval(1000, 10) == continual_mod.MIN_PASS_INTERVAL_FLOOR
+    assert min_pass_interval() == min_pass_interval(METERED) == continual_mod.MIN_PASS_INTERVAL
+    assert min_pass_interval(learner_budget(12)) == continual_mod.MIN_PASS_INTERVAL
+    assert min_pass_interval(SUB) == pytest.approx(continual_mod.MIN_PASS_INTERVAL * 46 / 192)
+    assert min_pass_interval(learner_budget(1000)) == continual_mod.MIN_PASS_INTERVAL_FLOOR
 
 
-def test_a_bigger_budget_keeps_a_busy_learner_due(tmp_path, monkeypatch):
+def test_a_subscription_learner_stays_due_where_a_metered_one_is_spent(tmp_path, monkeypatch):
     monkeypatch.setattr(continual_mod, "time", SimpleNamespace(time=lambda: MIDDAY))
     store = SkillStore(tmp_path)
     for i in range(30):
         store.journal_append(edit_cell(i))
     set_budget(store, day=int(MIDDAY // DAY), calls=60, last_at=MIDDAY - 300)
-    assert not Synthesizer(NoChanges(), "gpt-test", store).due(), "48 a day is spent"
-    synth = Synthesizer(NoChanges(), "gpt-test", store, daily_calls=200)
-    assert synth.due(), "60 of 200, 5 minutes after the last call"
+    metered = Synthesizer(NoChanges(), "gpt-test", store, billing="metered")
+    subscription = Synthesizer(NoChanges(), "gpt-test", store, billing="subscription")
+    assert metered._budget() == METERED and not metered.due(), "48 a day is spent"
+    assert subscription._budget() == SUB and subscription.due(), "60 of 200, 5 minutes later"
     set_budget(store, day=int(MIDDAY // DAY), calls=60, last_at=MIDDAY - 120)
-    assert not synth.due(), "still paced: the interval shrinks with the budget, not to zero"
-    configure_learner_budget(200)
-    set_budget(store, day=int(MIDDAY // DAY), calls=60, last_at=MIDDAY - 300)
-    assert Synthesizer(NoChanges(), "gpt-test", store).due(), "the process default applies"
+    assert not subscription.due(), "still paced: the gap shrinks with the budget, not to zero"
 
 
-async def test_claims_use_the_configured_cap(tmp_path):
+async def test_the_setting_overrides_and_applies_from_the_next_pass(tmp_path):
     store = SkillStore(tmp_path)
-    today = int(time.time() // DAY)
-    set_budget(store, day=today, calls=48, last_at=time.time() - 3600)
-    assert not store._facts.claim_inference_call(reserve=2)
-    assert store._facts.claim_inference_call(reserve=2, limit=200)
-    assert store._facts.inference_budget()["calls"] == 49
-    seen = []
-    store._facts.claim_inference_call = lambda **kw: seen.append(kw) or True
+    setting = [0]
+    synth = Synthesizer(NoChanges(), "gpt-test", store, min_new_entries=1,
+                        daily_calls=lambda: setting[0], billing="subscription")
+    store.journal_append(edit_cell(1))
+    await synth._run_safe()
+    assert rows(store)[-1]["budget"] == {"daily": 200, "reserved": 8, "source": "subscription_default"}
+    setting[0] = 96  # the owner changes it; no restart, no new learner
+    store.journal_append(edit_cell(2))
+    await synth._run_safe()
+    assert rows(store)[-1]["budget"] == {"daily": 96, "reserved": 4, "source": "setting"}
+    # An unreadable setting is unset, never a failed pass.
+    synth._daily_calls = lambda: 1 / 0
+    store.journal_append(edit_cell(3))
+    await synth._run_safe()
+    assert rows(store)[-1]["budget"]["source"] == "subscription_default"
+    assert "error" not in rows(store)[-1]
+
+
+async def test_mixed_providers_on_one_store_decide_per_pass(tmp_path):
+    store = SkillStore(tmp_path)
     for i in range(3):
         store.journal_append(edit_cell(i))
-    await Synthesizer(NoChanges(), "gpt-test", store, min_new_entries=1)._run_safe()
-    await Synthesizer(NoChanges(), "gpt-test", store, min_new_entries=1, daily_calls=96)._complete("x")
-    assert seen == [{"reserve": 2}, {"reserve": 2, "limit": 96}]
+    set_budget(store, day=int(time.time() // DAY), calls=48, last_at=time.time() - 3600)
+    metered_model, subscription_model = NoChanges(), NoChanges()
+    await Synthesizer(metered_model, "gpt-test", store, min_new_entries=1,
+                      billing="metered")._run_safe()
+    assert metered_model.prompts == [], "a metered pass stops at 48"
+    assert rows(store)[-1]["budget"]["source"] == "metered_default"
+    assert rows(store)[-1]["ran"] is False
+    await Synthesizer(subscription_model, "gpt-test", store, min_new_entries=1,
+                      billing="subscription")._run_safe()
+    assert len(subscription_model.prompts) == 1, "the same store, a subscription pass runs"
+    assert rows(store)[-1]["budget"]["source"] == "subscription_default"
+    assert store._facts.inference_budget()["calls"] == 49
+
+
+async def test_the_daily_claim_never_exceeds_the_effective_limit(tmp_path):
+    store = SkillStore(tmp_path)
+    claimed = 0
+    while store._facts.claim_inference_call(reserve=SUB.reserved, limit=SUB.daily):
+        claimed += 1
+    assert claimed == SUB.daily - SUB.reserved
+    while store._facts.claim_inference_call(reserve=0, limit=SUB.daily):  # consolidation
+        claimed += 1
+    assert claimed == SUB.daily
+    assert not store._facts.claim_inference_call(reserve=0, limit=SUB.daily)
+    store.journal_append(edit_cell(1))
+    model = NoChanges()
+    synth = Synthesizer(model, "gpt-test", store, min_new_entries=1, billing="subscription")
+    await synth._run_safe()
+    assert model.prompts == [] and store._facts.inference_budget()["calls"] == SUB.daily
+    # The metered default claims against the fact store's own cap (48).
+    seen = []
+    store._facts.claim_inference_call = lambda **kw: seen.append(kw) or True
+    await Synthesizer(NoChanges(), "gpt-test", store, billing="metered")._complete("x")
+    await Synthesizer(NoChanges(), "gpt-test", store, billing="subscription")._complete("x")
+    await Synthesizer(NoChanges(), "gpt-test", store, daily_calls=96)._complete("x")
+    assert seen == [{"reserve": 2}, {"reserve": 8, "limit": 200}, {"reserve": 4, "limit": 96}]
 
 
 def test_the_loader_passes_the_configured_budget(tmp_path):
@@ -414,8 +456,8 @@ def test_the_loader_passes_the_configured_budget(tmp_path):
 
     config = HarnessConfig.from_dict({
         "skills_dir": str(tmp_path), "continual": True, "setting_sources": [],
-        "learner_daily_calls": 150, "learner_reserved_calls": 0,
+        "learner_daily_calls": 150,
     })
     _, synth = _wire_continual(config, ctx=SimpleNamespace(extra={}), bus=None,
                                session_id="s", model="gpt-test", client=NoChanges())
-    assert synth._budget() == (150, 0)
+    assert synth._budget() == (150, 6, "setting")

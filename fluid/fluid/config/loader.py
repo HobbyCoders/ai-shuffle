@@ -54,9 +54,9 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # session's own provider is used; the delegated ``claude`` leg has no
     # native client, so without this it journals but never synthesizes.
     "continual_provider": None,
-    # The learner's daily call budget (None: 48, 2 of them for consolidation).
+    # The learner's daily call budget (None: the default for how its
+    # provider bills a pass, see continual.learner_budget).
     "learner_daily_calls": None,
-    "learner_reserved_calls": None,
     "anchor_budget": 1,
     "cwd": ".",
     "max_tokens": None,
@@ -430,13 +430,6 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["continual_model"] = env["FLUID_CONTINUAL_MODEL"]
     if "FLUID_CONTINUAL_PROVIDER" in env:
         out["continual_provider"] = env["FLUID_CONTINUAL_PROVIDER"]
-    for name, key in (("FLUID_LEARNER_DAILY_CALLS", "learner_daily_calls"),
-                      ("FLUID_LEARNER_RESERVED_CALLS", "learner_reserved_calls")):
-        if name in env:
-            try:
-                out[key] = int(env[name])
-            except ValueError:
-                pass
     if "FLUID_ANCHOR_BUDGET" in env:
         try:
             out["anchor_budget"] = int(env["FLUID_ANCHOR_BUDGET"])
@@ -824,7 +817,6 @@ def _wire_continual(
             guidance_snapshot=guidance_snapshot or None,
             context_window=config.context_window if not config.continual_model else None,
             daily_calls=config.learner_daily_calls,
-            reserved_calls=config.learner_reserved_calls,
         )
         if bus is not None:
             learner.append(synthesizer)

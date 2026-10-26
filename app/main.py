@@ -237,14 +237,6 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
-    # The memory learner's daily call budget, before any session builds one.
-    try:
-        from app.core.fluid_memory import configure_learner
-        daily_calls, reserved_calls = configure_learner()
-        logger.info("Memory learner budget: %d calls a day, %d kept for consolidation",
-                    daily_calls, reserved_calls)
-    except Exception:
-        logger.exception("Could not apply the memory learner budget (non-fatal)")
     # OWNER_PASSWORD seeds the owner password on first boot only; it is taken
     # out of the environment either way so agents never inherit it.
     from app.core import owner_auth

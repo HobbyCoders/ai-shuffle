@@ -150,7 +150,6 @@ def _non_default_config_dict() -> dict:
         "continual_model": "cm",
         "continual_provider": "p1",
         "learner_daily_calls": 96,
-        "learner_reserved_calls": 3,
         "anchor_budget": 3,
         "instruction_files": {
             "enabled": False, "global": False, "project": False, "skills": False,

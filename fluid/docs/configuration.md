@@ -54,8 +54,7 @@ the start directory sits under it.
 | `continual` | `false` | Journal the session and synthesize reusable skills in the background. Under `code_mode` the journal records executed cells; without it, a per-tool-call journal is kept, so plain JSON sessions learn too. `--continual` turns this and `code_mode` on together. |
 | `continual_model` | none | Pin skill synthesis to one model id regardless of the session's model. |
 | `continual_provider` | none | A native provider name whose client runs the synthesis passes. Unset, the session's provider does. The `claude` provider has no native client, so without this it keeps the journal and serves Recall and Remember but never synthesizes. |
-| `learner_daily_calls` | none (48) | Model calls the background learner may make per UTC day, per store. Clamped to 4–1,000; pacing spreads them over the day and shortens the gap between passes in proportion above 48. |
-| `learner_reserved_calls` | none (2) | Calls of that budget kept for memory consolidation. Clamped to 0–10 and to at most half the budget. |
+| `learner_daily_calls` | none (automatic) | Model calls the background learner may make per UTC day, per store. Unset, a host that says the learner's provider bills a flat-rate subscription gets 200 and everything else 48 (`continual.learner_budget`). Clamped to 4–1,000; the calls kept for consolidation (2 of 48) and the pacing (the gap between passes shortens in proportion above 48) follow the budget. |
 | `anchor_budget` | `1` | Retention budget for the harness-evolution commit gate (`fluid evolve propose`): anchor regressions a proposed change may cause and still commit. `0` = strict stability. |
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
@@ -676,8 +675,6 @@ Config overrides, applied as layer 6 (`env_overrides` in the loader):
 | `FLUID_CONTINUAL` | `continual` |
 | `FLUID_CONTINUAL_MODEL` | `continual_model` |
 | `FLUID_CONTINUAL_PROVIDER` | `continual_provider` |
-| `FLUID_LEARNER_DAILY_CALLS` | `learner_daily_calls` (ignored if not an integer) |
-| `FLUID_LEARNER_RESERVED_CALLS` | `learner_reserved_calls` (ignored if not an integer) |
 | `FLUID_ANCHOR_BUDGET` | `anchor_budget` (ignored if not an integer) |
 | `FLUID_MAX_TOKENS` | `max_tokens` (ignored if not an integer) |
 | `FLUID_MAX_CALLS` | `max_model_calls` (ignored if not an integer) |

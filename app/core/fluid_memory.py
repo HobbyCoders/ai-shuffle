@@ -257,16 +257,24 @@ def journal_diagnostics() -> dict:
 HEALTH_INTERVAL_SECONDS = 3600
 
 
-def configure_learner() -> tuple[int, int]:
-    """Apply the learner's daily call budget (``fluid_learner_daily_calls``,
-    ``fluid_learner_reserved_calls``) to every synthesizer this process
-    builds. Unset keeps fluid's defaults. Returns the effective budget."""
-    from fluid.codemode.continual import configure_learner_budget
+def learner_daily_calls() -> int:
+    """The owner's learner budget setting (owner policy
+    ``learner_daily_calls``; 0 is automatic). Every learner reads it at pass
+    time, so a change applies from the next pass without a restart."""
+    from app.core import owner_settings
+    return owner_settings.learner_daily_calls()
 
-    from app.core.config import settings
-    return configure_learner_budget(
-        settings.fluid_learner_daily_calls, settings.fluid_learner_reserved_calls,
-    )
+
+def learner_billing(provider_type: str | None, auth_mode: str | None) -> str | None:
+    """How a learner pass on a provider row of this shape is billed:
+    ``"subscription"`` for a flat-rate sign-in (ChatGPT, SuperGrok: the rows
+    ``credential_gate.subscription_provider_model`` picks), ``"metered"`` for
+    any other row, None when the pass has no row (unknown, so metered)."""
+    if not provider_type and not auth_mode:
+        return None
+    from app.core.model_registry import _is_subscription_row
+    row = {"provider_type": provider_type, "auth_mode": auth_mode}
+    return "subscription" if _is_subscription_row(row) else "metered"
 
 
 def _learning_enabled() -> bool:

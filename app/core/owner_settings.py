@@ -18,6 +18,10 @@ class OwnerPolicy(BaseModel):
     # grant on the recipient is still required for every remote terminal.
     network_peer_terminals: bool = False
     session_expire_days: int = Field(default=30, ge=0)
+    # The memory learner's model calls per UTC day, per store. 0 is automatic:
+    # 200 when a pass runs on a flat-rate subscription row (ChatGPT, SuperGrok),
+    # 48 on an API-key, metered or unknown provider. Read at pass time.
+    learner_daily_calls: int = Field(default=0, ge=0, le=1000)
 
 
 def _read(name: str):
@@ -46,6 +50,10 @@ def require_token_binding() -> bool:
 
 def session_expire_days() -> int:
     return _read("session_expire_days")
+
+
+def learner_daily_calls() -> int:
+    return _read("learner_daily_calls")
 
 
 def read() -> OwnerPolicy:
