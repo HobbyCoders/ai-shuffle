@@ -297,7 +297,7 @@
 		id: number;
 		x: number;
 		y: number;
-		kind: 'pending' | 'open' | 'close' | 'step' | 'none';
+		kind: 'pending' | 'open' | 'close' | 'usage' | 'step' | 'none';
 		cell: string | null;
 		height: number;
 		offset: number;
@@ -317,6 +317,9 @@
 
 	function startBarDrag(event: PointerEvent) {
 		if (event.button !== 0 || open || drag) return;
+		// The usage sheet lives inside the bar's DOM: pulling its content up must
+		// not open Chat controls underneath it.
+		if ((event.target as Element | null)?.closest?.('.usage-popover')) return;
 		const cell = (event.target as Element | null)?.closest<HTMLElement>('[data-cell]')?.dataset.cell ?? null;
 		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell, height: 0, offset: 0, tracker: new VelocityTracker(), el: event.currentTarget as Element };
 		suppressClick = false;
@@ -328,6 +331,64 @@
 		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'head', height: panelHeight(), offset: 0, tracker: new VelocityTracker(), el: event.currentTarget as Element };
 	}
 
+	// The usage sheet (the shared ContextUsageBar details, restyled below as a
+	// bottom sheet) closes the same way: drag its grip down. Only the grip
+	// starts the drag, as only the panel's header does, so its content scrolls.
+	/** Sheet offset (px) while a finger holds its grip or it slides away; null at rest. */
+	let usageDragOffset = $state<number | null>(null);
+	let usageDragHeight = $state(0);
+	/** A finger is on the grip: follow it with no easing. */
+	let usageHeld = $state(false);
+	/** Released past the threshold: sliding out before the details close. */
+	let usageClosing = false;
+	let usageCloseTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function usageSheetHeight(from: Element | null): number {
+		return from?.closest<HTMLElement>('.usage-popover')?.offsetHeight || Math.round(window.innerHeight * 0.6);
+	}
+
+	function startUsageDrag(event: PointerEvent) {
+		// Setting `drag` first also keeps the bar's own pull-up from starting.
+		if (event.button !== 0 || drag || usageClosing) return;
+		const el = event.currentTarget as Element;
+		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'usage-grip', height: usageSheetHeight(el), offset: 0, tracker: new VelocityTracker(), el };
+	}
+
+	function dismissUsage(height: number) {
+		const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		if (reduce) {
+			usageDragOffset = null;
+			usageBar?.closeDetails();
+			return;
+		}
+		// Finish the slide the finger started, then close through the bar's own path.
+		usageClosing = true;
+		usageDragOffset = height + 40;
+		clearTimeout(usageCloseTimer);
+		usageCloseTimer = setTimeout(() => {
+			usageBar?.closeDetails();
+			usageDragOffset = null;
+			usageClosing = false;
+		}, 240);
+	}
+
+	$effect(() => () => clearTimeout(usageCloseTimer));
+
+	function handleUsageOpenChange(next: boolean) {
+		// A fresh open always starts at rest, even inside a closing slide.
+		if (next) {
+			clearTimeout(usageCloseTimer);
+			usageClosing = false;
+			usageDragOffset = null;
+		}
+		onUsageOpenChange?.(next);
+	}
+
+	/** The scrim fades as the sheet is pulled away, as the panel's does. */
+	const usageFade = $derived(
+		usageDragOffset !== null && usageDragHeight > 0 ? Math.max(0, Math.min(1, 1 - usageDragOffset / usageDragHeight)) : null
+	);
+
 	function handlePointerMove(event: PointerEvent) {
 		const d = drag;
 		if (!d || event.pointerId !== d.id) return;
@@ -338,6 +399,9 @@
 			if (!axis) return;
 			if (d.cell === 'head') {
 				d.kind = axis === 'vertical' ? 'close' : 'none';
+			} else if (d.cell === 'usage-grip') {
+				// Not 'usage': that is the quick bar's ring cell, which pulls the panel up.
+				d.kind = axis === 'vertical' ? 'usage' : 'none';
 			} else if (axis === 'vertical') {
 				d.kind = dy < 0 ? 'open' : 'none';
 			} else if (d.cell === 'effort' && !effortLocked) {
@@ -373,6 +437,12 @@
 			dragOffset = d.offset;
 			dragHeight = d.height;
 			d.tracker.add(event.clientY, event.timeStamp || performance.now());
+		} else if (d.kind === 'usage') {
+			d.offset = dy < 0 ? dy * 0.15 : dy;
+			usageHeld = true;
+			usageDragHeight = d.height;
+			usageDragOffset = d.offset;
+			d.tracker.add(event.clientY, event.timeStamp || performance.now());
 		} else if (d.kind === 'step') {
 			const next = d.cell === 'effort'
 				? stepValue(effortValues, effortShown, dx)
@@ -397,6 +467,10 @@
 			const shut = !cancelled && settlesClosed(d.offset, d.height, d.tracker.velocity());
 			dragOffset = null;
 			if (shut) closePanel();
+		} else if (d.kind === 'usage') {
+			usageHeld = false;
+			if (!cancelled && settlesClosed(d.offset, d.height, d.tracker.velocity())) dismissUsage(d.height);
+			else usageDragOffset = null; // springs back through the sheet's transition
 		} else if (d.kind === 'step') {
 			const chosen = preview;
 			preview = null;
@@ -581,8 +655,21 @@
 			</button>
 		{/if}
 
-		<div class="qcell usage" data-cell="usage">
-			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} onOpenChange={onUsageOpenChange} showPercent />
+		<div
+			class="qcell usage"
+			class:held={usageHeld}
+			class:moved={usageDragOffset !== null}
+			data-cell="usage"
+			style:--usage-drag={usageDragOffset !== null ? `${usageDragOffset}px` : undefined}
+			style:--usage-fade={usageFade ?? undefined}
+		>
+			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} onOpenChange={handleUsageOpenChange} showPercent>
+				{#snippet grip()}
+					<!-- Pointer-only: Escape and a tap outside close the sheet for everyone. -->
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div class="usage-grip" aria-hidden="true" onpointerdown={startUsageDrag}><span></span></div>
+				{/snippet}
+			</ContextUsageBar>
 		</div>
 
 		<button
@@ -962,13 +1049,51 @@
 		min-width: 0;
 		max-width: none;
 		max-height: calc(var(--app-viewport-height, 100dvh) - 120px);
-		padding: 16px;
+		/* No top padding: the grip strip is the sheet's top edge. */
+		padding: 0 16px 16px;
 		border-radius: calc(var(--radius) * 2);
 		transform: none !important;
+		/* The drag offset, separate from the desktop popover's own transform. */
+		translate: 0 var(--usage-drag, 0px);
 		box-shadow: var(--shadow-l), 0 0 0 100vmax var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent));
+		transition: translate 0.3s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.3s ease;
 		animation: mcc-sheet 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 	@keyframes mcc-sheet { from { translate: 0 calc(100% + 40px); } }
+	.qcell.usage.moved :global(.usage-popover) {
+		box-shadow: var(--shadow-l), 0 0 0 100vmax color-mix(in oklch, var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent)) calc(var(--usage-fade, 1) * 100%), transparent);
+	}
+	/* Transition only: changing `animation` here would replay the open slide on release. */
+	.qcell.usage.held :global(.usage-popover) { transition: none; }
+	/* The grip: the quick bar's own handle, on a strip that stays put while the
+	   details scroll beneath it. Only this strip starts the drag-down. */
+	.usage-grip {
+		position: sticky;
+		top: 0;
+		z-index: 1;
+		flex-shrink: 0;
+		/* A 32px touch strip; the negative margin cancels the sheet's row gap. */
+		height: 32px;
+		margin: 0 -16px -10px;
+		background: inherit;
+		border-radius: calc(var(--radius) * 2) calc(var(--radius) * 2) 0 0;
+		touch-action: none;
+		cursor: grab;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.usage-grip span {
+		position: absolute;
+		top: 10px;
+		left: 50%;
+		width: 32px;
+		height: 4px;
+		margin-left: -16px;
+		border-radius: 2px;
+		background: var(--border-strong);
+		transition: background 0.2s, width 0.2s, margin 0.2s;
+	}
+	.usage-grip:hover span, .qcell.usage.held .usage-grip span { width: 44px; margin-left: -22px; background: var(--muted-foreground); }
+	.qcell.usage.held .usage-grip { cursor: grabbing; }
 
 	/* ── Compact picker over the bar ─────────────────────────────────── */
 	.qpick {
@@ -1234,7 +1359,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.qpick, .qcell.usage :global(.usage-popover) { animation: none; }
-		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .bar-fill, .tile { transition: none; }
+		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .usage-grip span, .bar-fill, .tile, .qcell.usage :global(.usage-popover) { transition: none; }
 		:global(.mcc-spin) { animation: none; }
 	}
 </style>
