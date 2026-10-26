@@ -27,8 +27,13 @@ jobs:
       - name: Image provenance for application updates
         id: source
         run: |
-          echo "sequence=$(python3 scripts/release/sequence_offset.py show)" >> "$GITHUB_OUTPUT"
-          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          # Assign first so a failing command stops the step instead of
+          # passing an empty APPLICATION_SEQUENCE to the build.
+          sequence=$(python3 scripts/release/sequence_offset.py show)
+          tree=$(git rev-parse HEAD^{tree})
+          [[ "$sequence" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid container sequence '$sequence'"; exit 1; }
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Unreadable source tree"; exit 1; }
+          { echo "sequence=$sequence"; echo "tree=$tree"; } >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build candidate image

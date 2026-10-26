@@ -122,10 +122,15 @@ jobs:
         id: source
         working-directory: ${{ inputs.release_tag && 'release-source' || '.' }}
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-          echo "sequence=$(python3 "$GITHUB_WORKSPACE/scripts/release/sequence_offset.py" show --revision HEAD)" >> "$GITHUB_OUTPUT"
+          # Assign first so a failing command stops the step (an
+          # echo "x=$(...)" swallows the exit status and records an empty value).
+          sha=$(git rev-parse HEAD)
+          tree=$(git rev-parse HEAD^{tree})
+          short_sha=$(git rev-parse --short=7 HEAD)
+          sequence=$(python3 "$GITHUB_WORKSPACE/scripts/release/sequence_offset.py" show --revision HEAD)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$tree" =~ ^[0-9a-f]{40}$ && "$short_sha" =~ ^[0-9a-f]{7,}$ ]] || { echo "::error::Unreadable image source revision"; exit 1; }
+          [[ "$sequence" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid container sequence '$sequence'"; exit 1; }
+          { echo "sha=$sha"; echo "tree=$tree"; echo "short_sha=$short_sha"; echo "sequence=$sequence"; } >> "$GITHUB_OUTPUT"
           # The release tag is the version source: "0.8.18" on a tag,
           # "0.8.18-dev.N+g<sha>" on main. Empty (tags not fetched) falls back
           # to the checked-in app.__version__.
