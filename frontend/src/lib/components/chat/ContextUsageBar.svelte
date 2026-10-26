@@ -122,10 +122,16 @@
 		 * unknown and so no percentage exists; null when the window is known.
 		 */
 		unknownWindowUsed?: string | null;
+		/**
+		 * Rendered first inside the open details: the phone's bottom sheet puts
+		 * its drag grip here. The desktop popover passes nothing.
+		 */
+		grip?: Snippet;
 	}
 
 	let {
 		onOpenChange,
+		grip,
 		showPercent = false,
 		percent = $bindable(0),
 		overLimit = $bindable(false),
@@ -248,6 +254,11 @@
 	/** Open the details from another control (the phone's controls panel). */
 	export function openDetails() {
 		if (!open) setOpen(true);
+	}
+
+	/** Close the details from another control (the phone sheet's drag-down). */
+	export function closeDetails() {
+		if (open) setOpen(false);
 	}
 
 	// ── SDK/persisted breakdown = the single display source for the context section ─
@@ -1101,6 +1112,7 @@
 
 	{#if open}
 		<div class="usage-popover" bind:this={popoverEl} style:transform="translateX({popShift}px)" role="dialog" aria-label="Context and usage">
+			{#if grip}{@render grip()}{/if}
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">
 				<button

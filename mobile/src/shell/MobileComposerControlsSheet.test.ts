@@ -7,7 +7,7 @@
  * back before closing) are pinned again here against the new layout.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import '$lib/test-stubs/composer-dom';
@@ -218,6 +218,103 @@ describe('Chat controls panel', () => {
 		Object.defineProperty(panel(), 'offsetHeight', { configurable: true, value: 700 });
 		await drag(document.querySelector('.mcp-head')!, 0, 400, { x: 200, y: 120 });
 		expect(onOpenChange).toHaveBeenLastCalledWith(false);
+	});
+
+	describe('the usage sheet grip', () => {
+		const sheet = () => document.querySelector<HTMLElement>('.usage-popover');
+		const grip = () => document.querySelector<HTMLElement>('.usage-grip')!;
+		const usageCell = () => document.querySelector<HTMLElement>('.qcell.usage')!;
+
+		async function openUsageSheet(onUsageOpenChange = vi.fn(), onOpenChange = vi.fn()) {
+			render(MobileComposerControlsSheet, { props: props({ onUsageOpenChange, onOpenChange }) });
+			await fireEvent.click(within(bar()).getByRole('button', { name: /^Context and usage/ }));
+			expect(sheet()).not.toBeNull();
+			return onUsageOpenChange;
+		}
+
+		/** A drag on the grip with controlled timing, so the release speed is known. */
+		async function gripDrag(dy: number, msPerStep: number, onHold?: () => void) {
+			const from = { x: 180, y: 300 };
+			let at = 1000;
+			await fireEvent.pointerDown(grip(), { pointerId: 9, button: 0, clientX: from.x, clientY: from.y });
+			for (let i = 1; i <= 4; i++) {
+				at += msPerStep;
+				const move = createEvent.pointerMove(window, { pointerId: 9, clientX: from.x, clientY: from.y + (dy * i) / 4 });
+				Object.defineProperty(move, 'timeStamp', { value: at });
+				await fireEvent(window, move);
+			}
+			onHold?.();
+			await fireEvent.pointerUp(window, { pointerId: 9, clientX: from.x, clientY: from.y + dy });
+		}
+
+		it('shows an aria-hidden grip at the top of the sheet', async () => {
+			await openUsageSheet();
+			expect(sheet()!.firstElementChild).toBe(grip());
+			expect(grip().getAttribute('aria-hidden')).toBe('true');
+		});
+
+		it('follows the finger and closes through the bar on a long drag down', async () => {
+			const onUsageOpenChange = await openUsageSheet();
+			onUsageOpenChange.mockClear();
+			await gripDrag(300, 120, () => {
+				expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('300px');
+				expect(usageCell().classList.contains('held')).toBe(true);
+			});
+			await waitFor(() => expect(sheet()).toBeNull());
+			expect(onUsageOpenChange).toHaveBeenLastCalledWith(false);
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('');
+		});
+
+		it('closes on a quick downward flick even when it is short', async () => {
+			const onUsageOpenChange = await openUsageSheet();
+			await gripDrag(60, 4);
+			await waitFor(() => expect(sheet()).toBeNull());
+			expect(onUsageOpenChange).toHaveBeenLastCalledWith(false);
+		});
+
+		it('springs back on a short slow drag, and barely moves when pulled up', async () => {
+			const onUsageOpenChange = await openUsageSheet();
+			onUsageOpenChange.mockClear();
+			await gripDrag(40, 120);
+			expect(sheet()).not.toBeNull();
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('');
+			await gripDrag(-200, 120, () => {
+				expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('-30px');
+			});
+			await new Promise((r) => setTimeout(r, 300));
+			expect(sheet()).not.toBeNull();
+			expect(onUsageOpenChange).not.toHaveBeenCalled();
+		});
+
+		it('keeps the drag from reaching the bar, the document or the chat as a click', async () => {
+			const onOpenChange = vi.fn();
+			const onUsageOpenChange = await openUsageSheet(vi.fn(), onOpenChange);
+			const outside = vi.fn();
+			document.addEventListener('click', outside);
+			try {
+				await gripDrag(40, 120);
+				await fireEvent.click(grip());
+				expect(outside).not.toHaveBeenCalled();
+				expect(sheet()).not.toBeNull();
+				// An upward drag on the grip never starts the bar's pull-up.
+				await gripDrag(-300, 120);
+				expect(onOpenChange).not.toHaveBeenCalled();
+				expect(onUsageOpenChange).toHaveBeenCalledTimes(1);
+			} finally {
+				document.removeEventListener('click', outside);
+			}
+		});
+
+		it('still closes on a tap outside and on Escape', async () => {
+			const onUsageOpenChange = await openUsageSheet();
+			await fireEvent.click(document.body);
+			expect(sheet()).toBeNull();
+			expect(onUsageOpenChange).toHaveBeenLastCalledWith(false);
+			await fireEvent.click(within(bar()).getByRole('button', { name: /^Context and usage/ }));
+			expect(sheet()).not.toBeNull();
+			await fireEvent.keyDown(document, { key: 'Escape' });
+			expect(sheet()).toBeNull();
+		});
 	});
 
 	it('holds labels, values and controls with no description paragraphs', () => {

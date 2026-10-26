@@ -425,6 +425,20 @@ describe('ContextUsageBar — pill', () => {
 		expect(pill.getAttribute('aria-label')).toMatch(/\d+%/);
 	});
 
+	it('opens the desktop popover with no grip, and closeDetails() closes it through onOpenChange', async () => {
+		const onOpenChange = vi.fn();
+		const { container, component } = render(ContextUsageBar, { props: { onOpenChange } });
+		await openPopover(container);
+		const popover = container.querySelector('.usage-popover')!;
+		expect(popover).not.toBeNull();
+		// Nothing is rendered ahead of the context section unless a caller asks.
+		expect(popover.firstElementChild?.classList.contains('ctx-section')).toBe(true);
+		(component as unknown as { closeDetails(): void }).closeDetails();
+		await tick();
+		expect(container.querySelector('.usage-popover')).toBeNull();
+		expect(onOpenChange).toHaveBeenLastCalledWith(false);
+	});
+
 	it('renders the pill even when no usage windows are known', () => {
 		const { container } = render(ContextUsageBar);
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
