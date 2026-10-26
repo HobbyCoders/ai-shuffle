@@ -305,6 +305,39 @@ describe('Chat controls panel', () => {
 			}
 		});
 
+		it('springs back without closing when the pointer is cancelled mid-drag', async () => {
+			const onUsageOpenChange = await openUsageSheet();
+			onUsageOpenChange.mockClear();
+			await fireEvent.pointerDown(grip(), { pointerId: 11, button: 0, clientX: 180, clientY: 300 });
+			for (let i = 1; i <= 4; i++) await fireEvent.pointerMove(window, { pointerId: 11, clientX: 180, clientY: 300 + i * 80 });
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('320px');
+			await fireEvent.pointerCancel(window, { pointerId: 11, clientX: 180, clientY: 620 });
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('');
+			expect(usageCell().classList.contains('held')).toBe(false);
+			await new Promise((r) => setTimeout(r, 300));
+			expect(sheet()).not.toBeNull();
+			expect(onUsageOpenChange).not.toHaveBeenCalled();
+		});
+
+		it('drops a pending close when the sheet unmounts mid-slide', async () => {
+			const onUsageOpenChange = vi.fn();
+			const view = render(MobileComposerControlsSheet, { props: props({ onUsageOpenChange }) });
+			await fireEvent.click(within(bar()).getByRole('button', { name: /^Context and usage/ }));
+			onUsageOpenChange.mockClear();
+			await gripDrag(300, 120);
+			view.unmount();
+			await new Promise((r) => setTimeout(r, 320));
+			expect(onUsageOpenChange).not.toHaveBeenCalled();
+		});
+
+		it('does not open Chat controls when the sheet content is pulled up', async () => {
+			const onOpenChange = vi.fn();
+			await openUsageSheet(vi.fn(), onOpenChange);
+			await drag(sheet()!.querySelector('.ctx-section')!, 0, -400, { x: 180, y: 600 });
+			expect(onOpenChange).not.toHaveBeenCalled();
+			expect(sheet()).not.toBeNull();
+		});
+
 		it('still closes on a tap outside and on Escape', async () => {
 			const onUsageOpenChange = await openUsageSheet();
 			await fireEvent.click(document.body);

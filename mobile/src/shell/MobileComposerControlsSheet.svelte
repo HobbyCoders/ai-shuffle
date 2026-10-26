@@ -317,6 +317,9 @@
 
 	function startBarDrag(event: PointerEvent) {
 		if (event.button !== 0 || open || drag) return;
+		// The usage sheet lives inside the bar's DOM: pulling its content up must
+		// not open Chat controls underneath it.
+		if ((event.target as Element | null)?.closest?.('.usage-popover')) return;
 		const cell = (event.target as Element | null)?.closest<HTMLElement>('[data-cell]')?.dataset.cell ?? null;
 		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell, height: 0, offset: 0, tracker: new VelocityTracker(), el: event.currentTarget as Element };
 		suppressClick = false;
@@ -1059,7 +1062,8 @@
 	.qcell.usage.moved :global(.usage-popover) {
 		box-shadow: var(--shadow-l), 0 0 0 100vmax color-mix(in oklch, var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent)) calc(var(--usage-fade, 1) * 100%), transparent);
 	}
-	.qcell.usage.held :global(.usage-popover) { transition: none; animation: none; }
+	/* Transition only: changing `animation` here would replay the open slide on release. */
+	.qcell.usage.held :global(.usage-popover) { transition: none; }
 	/* The grip: the quick bar's own handle, on a strip that stays put while the
 	   details scroll beneath it. Only this strip starts the drag-down. */
 	.usage-grip {
@@ -1067,8 +1071,9 @@
 		top: 0;
 		z-index: 1;
 		flex-shrink: 0;
-		height: 22px;
-		margin: 0 -16px -4px;
+		/* A 32px touch strip; the negative margin cancels the sheet's row gap. */
+		height: 32px;
+		margin: 0 -16px -10px;
 		background: inherit;
 		border-radius: calc(var(--radius) * 2) calc(var(--radius) * 2) 0 0;
 		touch-action: none;
@@ -1077,7 +1082,7 @@
 	}
 	.usage-grip span {
 		position: absolute;
-		top: 8px;
+		top: 10px;
 		left: 50%;
 		width: 32px;
 		height: 4px;
