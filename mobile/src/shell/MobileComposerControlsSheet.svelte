@@ -351,7 +351,7 @@
 		// Setting `drag` first also keeps the bar's own pull-up from starting.
 		if (event.button !== 0 || drag || usageClosing) return;
 		const el = event.currentTarget as Element;
-		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'usage', height: usageSheetHeight(el), offset: 0, tracker: new VelocityTracker(), el };
+		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'usage-grip', height: usageSheetHeight(el), offset: 0, tracker: new VelocityTracker(), el };
 	}
 
 	function dismissUsage(height: number) {
@@ -399,7 +399,8 @@
 			if (!axis) return;
 			if (d.cell === 'head') {
 				d.kind = axis === 'vertical' ? 'close' : 'none';
-			} else if (d.cell === 'usage') {
+			} else if (d.cell === 'usage-grip') {
+				// Not 'usage': that is the quick bar's ring cell, which pulls the panel up.
 				d.kind = axis === 'vertical' ? 'usage' : 'none';
 			} else if (axis === 'vertical') {
 				d.kind = dy < 0 ? 'open' : 'none';

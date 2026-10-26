@@ -319,15 +319,27 @@ describe('Chat controls panel', () => {
 			expect(onUsageOpenChange).not.toHaveBeenCalled();
 		});
 
-		it('drops a pending close when the sheet unmounts mid-slide', async () => {
-			const onUsageOpenChange = vi.fn();
-			const view = render(MobileComposerControlsSheet, { props: props({ onUsageOpenChange }) });
+		it('clears the pending close when the sheet unmounts mid-slide', async () => {
+			const view = render(MobileComposerControlsSheet, { props: props() });
 			await fireEvent.click(within(bar()).getByRole('button', { name: /^Context and usage/ }));
-			onUsageOpenChange.mockClear();
+			const setSpy = vi.spyOn(globalThis, 'setTimeout');
+			const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
 			await gripDrag(300, 120);
+			// The slide-out's timer: the one the release scheduled for its 240ms.
+			const call = setSpy.mock.calls.findIndex(([, ms]) => ms === 240);
+			expect(call).toBeGreaterThanOrEqual(0);
+			const timer = setSpy.mock.results[call].value;
+			clearSpy.mockClear();
 			view.unmount();
-			await new Promise((r) => setTimeout(r, 320));
-			expect(onUsageOpenChange).not.toHaveBeenCalled();
+			expect(clearSpy).toHaveBeenCalledWith(timer);
+		});
+
+		it('still pulls Chat controls up from the usage ring on the bar', async () => {
+			const onOpenChange = vi.fn();
+			render(MobileComposerControlsSheet, { props: props({ onOpenChange }) });
+			await drag(within(bar()).getByRole('button', { name: /^Context and usage/ }), 0, -400);
+			expect(onOpenChange).toHaveBeenLastCalledWith(true);
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('');
 		});
 
 		it('does not open Chat controls when the sheet content is pulled up', async () => {
@@ -335,6 +347,13 @@ describe('Chat controls panel', () => {
 			await openUsageSheet(vi.fn(), onOpenChange);
 			await drag(sheet()!.querySelector('.ctx-section')!, 0, -400, { x: 180, y: 600 });
 			expect(onOpenChange).not.toHaveBeenCalled();
+			expect(sheet()).not.toBeNull();
+		});
+
+		it('does not move the sheet when its content is dragged down', async () => {
+			await openUsageSheet();
+			await drag(sheet()!.querySelector('.ctx-section')!, 0, 300, { x: 180, y: 600 });
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('');
 			expect(sheet()).not.toBeNull();
 		});
 
